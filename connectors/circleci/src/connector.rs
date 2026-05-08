@@ -310,16 +310,19 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["project_slug"],
+                "additionalProperties": false,
                 "properties": {
-                    "project_slug": { "type": "string", "description": "Project slug (e.g., gh/org/repo)" },
+                    "project_slug": { "type": "string", "description": "Project slug such as gh/org/repo or circleci/<org-id>/<project-id>" },
                     "page_token": { "type": "string", "description": "Pagination token" }
                 }
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["items"],
+                "additionalProperties": false,
                 "properties": {
                     "items": { "type": "array" },
-                    "next_page_token": { "type": "string" }
+                    "next_page_token": { "type": ["string", "null"] }
                 }
             }),
             capability: CapabilityId::from_static(CAP_PIPELINES_READ),
@@ -344,16 +347,18 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["pipeline_id"],
+                "additionalProperties": false,
                 "properties": {
                     "pipeline_id": { "type": "string", "description": "Pipeline UUID" }
                 }
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["id", "state", "number"],
                 "properties": {
                     "id": { "type": "string" },
                     "state": { "type": "string" },
-                    "number": { "type": "integer" }
+                    "number": { "type": "integer", "minimum": 0 }
                 }
             }),
             capability: CapabilityId::from_static(CAP_PIPELINES_READ),
@@ -376,19 +381,21 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["project_slug"],
+                "additionalProperties": false,
                 "properties": {
-                    "project_slug": { "type": "string", "description": "Project slug (e.g., gh/org/repo)" },
-                    "branch": { "type": "string", "description": "Branch to run on" },
-                    "tag": { "type": "string", "description": "Tag to run on" },
-                    "parameters": { "type": "object", "description": "Pipeline parameters" }
+                    "project_slug": { "type": "string", "description": "Project slug such as gh/org/repo or circleci/<org-id>/<project-id>" },
+                    "branch": { "type": "string", "description": "Branch to run" },
+                    "tag": { "type": "string", "description": "Tag to run" },
+                    "parameters": { "type": "object", "description": "Pipeline parameters accepted by the target project config" }
                 }
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["id", "state", "number"],
                 "properties": {
                     "id": { "type": "string" },
                     "state": { "type": "string" },
-                    "number": { "type": "integer" }
+                    "number": { "type": "integer", "minimum": 0 }
                 }
             }),
             capability: CapabilityId::from_static(CAP_PIPELINES_WRITE),
@@ -414,6 +421,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["pipeline_id"],
+                "additionalProperties": false,
                 "properties": {
                     "pipeline_id": { "type": "string", "description": "Pipeline UUID" },
                     "page_token": { "type": "string", "description": "Pagination token" }
@@ -421,9 +429,11 @@ pub fn operations_info() -> Vec<OperationInfo> {
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["items"],
+                "additionalProperties": false,
                 "properties": {
                     "items": { "type": "array" },
-                    "next_page_token": { "type": "string" }
+                    "next_page_token": { "type": ["string", "null"] }
                 }
             }),
             capability: CapabilityId::from_static(CAP_WORKFLOWS_READ),
@@ -446,12 +456,14 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["workflow_id"],
+                "additionalProperties": false,
                 "properties": {
                     "workflow_id": { "type": "string", "description": "Workflow UUID" }
                 }
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["id", "name", "status"],
                 "properties": {
                     "id": { "type": "string" },
                     "name": { "type": "string" },
@@ -478,12 +490,15 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["workflow_id"],
+                "additionalProperties": false,
                 "properties": {
-                    "workflow_id": { "type": "string", "description": "Workflow UUID to cancel" }
+                    "workflow_id": { "type": "string", "description": "Workflow UUID" }
                 }
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["message"],
+                "additionalProperties": false,
                 "properties": {
                     "message": { "type": "string" }
                 }
@@ -508,13 +523,16 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["workflow_id"],
+                "additionalProperties": false,
                 "properties": {
-                    "workflow_id": { "type": "string", "description": "Workflow UUID to rerun" },
-                    "from_failed": { "type": "boolean", "description": "Only rerun from failed jobs", "default": false }
+                    "workflow_id": { "type": "string", "description": "Workflow UUID" },
+                    "from_failed": { "type": "boolean", "description": "Only rerun failed jobs", "default": false }
                 }
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["message"],
+                "additionalProperties": false,
                 "properties": {
                     "message": { "type": "string" }
                 }
@@ -539,6 +557,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["workflow_id"],
+                "additionalProperties": false,
                 "properties": {
                     "workflow_id": { "type": "string", "description": "Workflow UUID" },
                     "page_token": { "type": "string", "description": "Pagination token" }
@@ -546,9 +565,11 @@ pub fn operations_info() -> Vec<OperationInfo> {
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["items"],
+                "additionalProperties": false,
                 "properties": {
                     "items": { "type": "array" },
-                    "next_page_token": { "type": "string" }
+                    "next_page_token": { "type": ["string", "null"] }
                 }
             }),
             capability: CapabilityId::from_static(CAP_JOBS_READ),
@@ -571,13 +592,15 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["project_slug", "job_number"],
+                "additionalProperties": false,
                 "properties": {
-                    "project_slug": { "type": "string", "description": "Project slug (e.g., gh/org/repo)" },
-                    "job_number": { "type": "integer", "description": "Job number" }
+                    "project_slug": { "type": "string", "description": "Project slug such as gh/org/repo or circleci/<org-id>/<project-id>" },
+                    "job_number": { "type": "integer", "minimum": 0, "description": "CircleCI job number" }
                 }
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["id", "name", "status"],
                 "properties": {
                     "id": { "type": "string" },
                     "name": { "type": "string" },
@@ -603,15 +626,18 @@ pub fn operations_info() -> Vec<OperationInfo> {
             description: Some("Returns projects the authenticated user follows".into()),
             input_schema: json!({
                 "type": "object",
+                "additionalProperties": false,
                 "properties": {
                     "page_token": { "type": "string", "description": "Pagination token" }
                 }
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["items"],
+                "additionalProperties": false,
                 "properties": {
                     "items": { "type": "array" },
-                    "next_page_token": { "type": "string" }
+                    "next_page_token": { "type": ["string", "null"] }
                 }
             }),
             capability: CapabilityId::from_static(CAP_PROJECTS_READ),
@@ -631,11 +657,13 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_HEALTH),
             summary: "Check CircleCI API health".into(),
             description: Some("Validates CircleCI API reachability and auth".into()),
-            input_schema: json!({ "type": "object" }),
+            input_schema: json!({ "type": "object", "additionalProperties": false }),
             output_schema: json!({
                 "type": "object",
+                "required": ["status"],
+                "additionalProperties": false,
                 "properties": {
-                    "status": { "type": "string" }
+                    "status": { "type": "string", "enum": ["ok"] }
                 }
             }),
             capability: CapabilityId::from_static(CAP_PROJECTS_READ),
@@ -1186,6 +1214,89 @@ mod tests {
         }
     }
 
+    const EXPECTED_MANIFEST_SCHEMA_OPS: &[&str] = &[
+        OP_PROJECTS_LIST,
+        OP_PIPELINES_LIST,
+        OP_PIPELINES_GET,
+        OP_PIPELINES_TRIGGER,
+        OP_WORKFLOWS_LIST,
+        OP_WORKFLOWS_GET,
+        OP_WORKFLOWS_CANCEL,
+        OP_WORKFLOWS_RERUN,
+        OP_JOBS_LIST,
+        OP_JOBS_GET,
+        OP_HEALTH,
+    ];
+
+    fn circleci_manifest() -> Result<toml::Value, String> {
+        toml::from_str(MANIFEST_TOML)
+            .map_err(|err| format!("CircleCI manifest TOML should parse: {err}"))
+    }
+
+    fn manifest_operations(
+        manifest: &toml::Value,
+    ) -> Result<&toml::map::Map<String, toml::Value>, String> {
+        manifest
+            .get("provides")
+            .and_then(|provides| provides.get("operations"))
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| "manifest should declare operation tables".to_owned())
+    }
+
+    fn operation_schema(
+        manifest: &toml::Value,
+        operation_id: &str,
+        field: &str,
+    ) -> Result<serde_json::Value, String> {
+        let schema = manifest_operations(manifest)?
+            .get(operation_id)
+            .and_then(toml::Value::as_table)
+            .and_then(|operation| operation.get(field))
+            .ok_or_else(|| format!("{operation_id} should declare {field}"))?;
+        if schema.as_table().is_none_or(toml::map::Map::is_empty) {
+            return Err(format!(
+                "{operation_id}.{field} should be a non-empty schema table"
+            ));
+        }
+        serde_json::to_value(schema)
+            .map_err(|err| format!("{operation_id}.{field} should convert to JSON: {err}"))
+    }
+
+    fn validator_for(schema: &serde_json::Value) -> Result<jsonschema::Validator, String> {
+        jsonschema::Validator::new(schema)
+            .map_err(|err| format!("manifest operation schema should compile: {err}"))
+    }
+
+    fn assert_schema_accepts(
+        schema: &serde_json::Value,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        let errors = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "schema should accept {payload}; errors: {errors:?}"
+            ))
+        }
+    }
+
+    fn assert_schema_rejects(
+        schema: &serde_json::Value,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        if validator.iter_errors(payload).next().is_some() {
+            Ok(())
+        } else {
+            Err(format!("schema should reject {payload}"))
+        }
+    }
+
     #[fcp_async_core::runtime::test]
     async fn test_handshake() {
         let mut connector = CircleCiConnector::new();
@@ -1406,6 +1517,206 @@ mod tests {
         assert!(ops.contains(&OP_JOBS_GET));
         assert!(ops.contains(&OP_PROJECTS_LIST));
         assert!(ops.contains(&OP_HEALTH));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn manifest_operation_schemas_compile_and_validate_core_payloads() -> Result<(), String> {
+        let manifest = circleci_manifest()?;
+        let operations = manifest_operations(&manifest)?;
+        let operation_catalog = operations_info();
+
+        for operation_id in EXPECTED_MANIFEST_SCHEMA_OPS {
+            assert!(
+                operations.contains_key(*operation_id),
+                "manifest should declare operation {operation_id}"
+            );
+            let operation = operation_catalog
+                .iter()
+                .find(|operation| operation.id.as_str() == *operation_id)
+                .ok_or_else(|| format!("operation catalog should declare {operation_id}"))?;
+            for field in ["input_schema", "output_schema"] {
+                let schema = operation_schema(&manifest, operation_id, field)?;
+                let _validator = validator_for(&schema)?;
+            }
+            assert_eq!(
+                operation.input_schema,
+                operation_schema(&manifest, operation_id, "input_schema")?,
+                "{operation_id} input schema should match manifest"
+            );
+            assert_eq!(
+                operation.output_schema,
+                operation_schema(&manifest, operation_id, "output_schema")?,
+                "{operation_id} output schema should match manifest"
+            );
+        }
+
+        for operation in operation_catalog {
+            let _input_validator = validator_for(&operation.input_schema)?;
+            let _output_validator = validator_for(&operation.output_schema)?;
+        }
+
+        let projects_input = operation_schema(&manifest, OP_PROJECTS_LIST, "input_schema")?;
+        assert_schema_accepts(&projects_input, &json!({}))?;
+        assert_schema_accepts(&projects_input, &json!({"page_token": "next"}))?;
+        assert_schema_rejects(&projects_input, &json!({"page_token": 4}))?;
+        assert_schema_rejects(&projects_input, &json!({"extra": true}))?;
+
+        for operation_id in [OP_PIPELINES_LIST, OP_PIPELINES_TRIGGER] {
+            let input = operation_schema(&manifest, operation_id, "input_schema")?;
+            assert_schema_accepts(&input, &json!({"project_slug": "gh/org/repo"}))?;
+            assert_schema_rejects(&input, &json!({}))?;
+            assert_schema_rejects(&input, &json!({"project_slug": 4}))?;
+            assert_schema_rejects(
+                &input,
+                &json!({"project_slug": "gh/org/repo", "extra": true}),
+            )?;
+        }
+
+        let pipelines_list_input = operation_schema(&manifest, OP_PIPELINES_LIST, "input_schema")?;
+        assert_schema_accepts(
+            &pipelines_list_input,
+            &json!({"project_slug": "gh/org/repo", "page_token": "next"}),
+        )?;
+
+        let trigger_input = operation_schema(&manifest, OP_PIPELINES_TRIGGER, "input_schema")?;
+        assert_schema_accepts(
+            &trigger_input,
+            &json!({
+                "project_slug": "gh/org/repo",
+                "branch": "main",
+                "parameters": {"deploy": true}
+            }),
+        )?;
+        assert_schema_rejects(
+            &trigger_input,
+            &json!({"project_slug": "gh/org/repo", "parameters": ["bad"]}),
+        )?;
+
+        for operation_id in [OP_PIPELINES_GET, OP_WORKFLOWS_LIST] {
+            let input = operation_schema(&manifest, operation_id, "input_schema")?;
+            assert_schema_accepts(&input, &json!({"pipeline_id": "pipeline-1"}))?;
+            assert_schema_rejects(&input, &json!({}))?;
+            assert_schema_rejects(&input, &json!({"pipeline_id": 4}))?;
+            assert_schema_rejects(&input, &json!({"pipeline_id": "pipeline-1", "extra": true}))?;
+        }
+
+        let workflows_list_input = operation_schema(&manifest, OP_WORKFLOWS_LIST, "input_schema")?;
+        assert_schema_accepts(
+            &workflows_list_input,
+            &json!({"pipeline_id": "pipeline-1", "page_token": "next"}),
+        )?;
+
+        for operation_id in [
+            OP_WORKFLOWS_GET,
+            OP_WORKFLOWS_CANCEL,
+            OP_WORKFLOWS_RERUN,
+            OP_JOBS_LIST,
+        ] {
+            let input = operation_schema(&manifest, operation_id, "input_schema")?;
+            assert_schema_accepts(&input, &json!({"workflow_id": "workflow-1"}))?;
+            assert_schema_rejects(&input, &json!({}))?;
+            assert_schema_rejects(&input, &json!({"workflow_id": 4}))?;
+            assert_schema_rejects(&input, &json!({"workflow_id": "workflow-1", "extra": true}))?;
+        }
+
+        let rerun_input = operation_schema(&manifest, OP_WORKFLOWS_RERUN, "input_schema")?;
+        assert_schema_accepts(
+            &rerun_input,
+            &json!({"workflow_id": "workflow-1", "from_failed": true}),
+        )?;
+        assert_schema_rejects(
+            &rerun_input,
+            &json!({"workflow_id": "workflow-1", "from_failed": "yes"}),
+        )?;
+
+        let jobs_list_input = operation_schema(&manifest, OP_JOBS_LIST, "input_schema")?;
+        assert_schema_accepts(
+            &jobs_list_input,
+            &json!({"workflow_id": "workflow-1", "page_token": "next"}),
+        )?;
+
+        let jobs_get_input = operation_schema(&manifest, OP_JOBS_GET, "input_schema")?;
+        assert_schema_accepts(
+            &jobs_get_input,
+            &json!({"project_slug": "gh/org/repo", "job_number": 0}),
+        )?;
+        assert_schema_rejects(&jobs_get_input, &json!({"project_slug": "gh/org/repo"}))?;
+        assert_schema_rejects(
+            &jobs_get_input,
+            &json!({"project_slug": "gh/org/repo", "job_number": -1}),
+        )?;
+        assert_schema_rejects(
+            &jobs_get_input,
+            &json!({"project_slug": "gh/org/repo", "job_number": 1.5}),
+        )?;
+        assert_schema_rejects(
+            &jobs_get_input,
+            &json!({"project_slug": "gh/org/repo", "job_number": 1, "extra": true}),
+        )?;
+
+        let health_input = operation_schema(&manifest, OP_HEALTH, "input_schema")?;
+        assert_schema_accepts(&health_input, &json!({}))?;
+        assert_schema_rejects(&health_input, &json!({"extra": true}))?;
+
+        for operation_id in [
+            OP_PROJECTS_LIST,
+            OP_PIPELINES_LIST,
+            OP_WORKFLOWS_LIST,
+            OP_JOBS_LIST,
+        ] {
+            let output = operation_schema(&manifest, operation_id, "output_schema")?;
+            assert_schema_accepts(&output, &json!({"items": []}))?;
+            assert_schema_accepts(&output, &json!({"items": [], "next_page_token": null}))?;
+            assert_schema_accepts(&output, &json!({"items": [], "next_page_token": "next"}))?;
+            assert_schema_rejects(&output, &json!({}))?;
+            assert_schema_rejects(&output, &json!({"items": [], "next_page_token": 7}))?;
+            assert_schema_rejects(&output, &json!({"items": [], "extra": true}))?;
+        }
+
+        for operation_id in [OP_PIPELINES_GET, OP_PIPELINES_TRIGGER] {
+            let output = operation_schema(&manifest, operation_id, "output_schema")?;
+            assert_schema_accepts(
+                &output,
+                &json!({"id": "pipeline-1", "state": "created", "number": 1}),
+            )?;
+            assert_schema_rejects(&output, &json!({"id": "pipeline-1", "state": "created"}))?;
+            assert_schema_rejects(
+                &output,
+                &json!({"id": "pipeline-1", "state": "created", "number": -1}),
+            )?;
+        }
+
+        let workflow_output = operation_schema(&manifest, OP_WORKFLOWS_GET, "output_schema")?;
+        assert_schema_accepts(
+            &workflow_output,
+            &json!({"id": "workflow-1", "name": "build", "status": "success"}),
+        )?;
+        assert_schema_rejects(
+            &workflow_output,
+            &json!({"id": "workflow-1", "name": "build"}),
+        )?;
+
+        let job_output = operation_schema(&manifest, OP_JOBS_GET, "output_schema")?;
+        assert_schema_accepts(
+            &job_output,
+            &json!({"id": "job-1", "name": "test", "status": "success"}),
+        )?;
+        assert_schema_rejects(&job_output, &json!({"id": "job-1", "name": "test"}))?;
+
+        for operation_id in [OP_WORKFLOWS_CANCEL, OP_WORKFLOWS_RERUN] {
+            let output = operation_schema(&manifest, operation_id, "output_schema")?;
+            assert_schema_accepts(&output, &json!({"message": "ok"}))?;
+            assert_schema_rejects(&output, &json!({}))?;
+            assert_schema_rejects(&output, &json!({"message": "ok", "extra": true}))?;
+        }
+
+        let health_output = operation_schema(&manifest, OP_HEALTH, "output_schema")?;
+        assert_schema_accepts(&health_output, &json!({"status": "ok"}))?;
+        assert_schema_rejects(&health_output, &json!({"status": "degraded"}))?;
+        assert_schema_rejects(&health_output, &json!({"status": "ok", "extra": true}))?;
+
+        Ok(())
     }
 
     #[fcp_async_core::runtime::test]

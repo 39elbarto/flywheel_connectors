@@ -13,7 +13,7 @@ use fcp_prelude::{
     UnsubscribeRequest,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -424,6 +424,311 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
     Ok(capability)
 }
 
+fn nonblank_string_schema() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 1,
+        "pattern": "\\S"
+    })
+}
+
+fn model_id_schema() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 1,
+        "allOf": [
+            { "pattern": "\\S" },
+            { "pattern": "^[^/\\\\]+$" }
+        ]
+    })
+}
+
+fn json_value_schema() -> Value {
+    json!({
+        "type": ["object", "array", "string", "number", "boolean", "null"]
+    })
+}
+
+fn object_value_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true
+    })
+}
+
+fn message_array_schema() -> Value {
+    json!({
+        "type": "array",
+        "minItems": 1,
+        "items": {
+            "type": "object",
+            "additionalProperties": true
+        }
+    })
+}
+
+fn optional_string_array_schema() -> Value {
+    json!({
+        "type": "array",
+        "items": nonblank_string_schema()
+    })
+}
+
+fn header_value_string_schema() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[^\\r\\n]+$"
+    })
+}
+
+fn converse_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["model_id", "messages"],
+        "additionalProperties": false,
+        "properties": {
+            "model_id": model_id_schema(),
+            "messages": message_array_schema(),
+            "system": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                }
+            },
+            "inference_config": object_value_schema(),
+            "additional_model_request_fields": object_value_schema(),
+            "additional_model_response_field_paths": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^/"
+                }
+            },
+            "guardrail_config": object_value_schema(),
+            "performance_config": object_value_schema(),
+            "prompt_variables": object_value_schema(),
+            "request_metadata": object_value_schema(),
+            "tool_config": object_value_schema()
+        }
+    })
+}
+
+fn invoke_model_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["model_id"],
+        "additionalProperties": false,
+        "anyOf": [
+            { "required": ["body"] },
+            { "required": ["model_family"] }
+        ],
+        "allOf": [
+            {
+                "if": {
+                    "properties": {
+                        "model_family": { "const": "anthropic_claude" }
+                    },
+                    "required": ["model_family"]
+                },
+                "then": { "required": ["messages"] }
+            },
+            {
+                "if": {
+                    "properties": {
+                        "model_family": {
+                            "enum": ["meta_llama", "amazon_titan", "cohere_command", "mistral"]
+                        }
+                    },
+                    "required": ["model_family"]
+                },
+                "then": { "required": ["prompt"] }
+            }
+        ],
+        "properties": {
+            "model_id": model_id_schema(),
+            "body": json_value_schema(),
+            "model_family": {
+                "type": "string",
+                "enum": [
+                    "anthropic_claude",
+                    "meta_llama",
+                    "amazon_titan",
+                    "cohere_command",
+                    "mistral"
+                ]
+            },
+            "prompt": nonblank_string_schema(),
+            "messages": message_array_schema(),
+            "system": json_value_schema(),
+            "max_tokens": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": i64::from(u32::MAX)
+            },
+            "temperature": {
+                "type": "number",
+                "minimum": 0
+            },
+            "top_p": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+            },
+            "accept": header_value_string_schema(),
+            "content_type": header_value_string_schema(),
+            "trace": header_value_string_schema(),
+            "guardrail_identifier": nonblank_string_schema(),
+            "guardrail_version": nonblank_string_schema(),
+            "performance_config_latency": nonblank_string_schema(),
+            "service_tier": nonblank_string_schema()
+        }
+    })
+}
+
+fn list_models_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "by_customization_type": nonblank_string_schema(),
+            "by_inference_type": nonblank_string_schema(),
+            "by_output_modality": nonblank_string_schema(),
+            "by_provider": nonblank_string_schema()
+        }
+    })
+}
+
+fn empty_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "maxProperties": 0
+    })
+}
+
+fn provider_json_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true
+    })
+}
+
+fn stream_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["events", "chunk_count", "total_payload_bytes"],
+        "additionalProperties": false,
+        "properties": {
+            "events": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["headers", "payload_bytes"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "event_type": { "type": ["string", "null"] },
+                        "headers": {
+                            "type": "object",
+                            "additionalProperties": true
+                        },
+                        "payload_bytes": {
+                            "type": "integer",
+                            "minimum": 0
+                        },
+                        "payload_json": json_value_schema(),
+                        "payload_utf8": { "type": "string" }
+                    }
+                }
+            },
+            "chunk_count": {
+                "type": "integer",
+                "minimum": 0
+            },
+            "total_payload_bytes": {
+                "type": "integer",
+                "minimum": 0
+            }
+        }
+    })
+}
+
+fn models_list_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["modelSummaries"],
+        "additionalProperties": false,
+        "properties": {
+            "modelSummaries": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": [
+                        "modelArn",
+                        "modelId",
+                        "modelName",
+                        "providerName",
+                        "inputModalities",
+                        "outputModalities",
+                        "responseStreamingSupported",
+                        "customizationsSupported",
+                        "inferenceTypesSupported"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                        "modelArn": { "type": ["string", "null"] },
+                        "modelId": nonblank_string_schema(),
+                        "modelName": { "type": ["string", "null"] },
+                        "providerName": { "type": ["string", "null"] },
+                        "inputModalities": optional_string_array_schema(),
+                        "outputModalities": optional_string_array_schema(),
+                        "responseStreamingSupported": { "type": ["boolean", "null"] },
+                        "customizationsSupported": optional_string_array_schema(),
+                        "inferenceTypesSupported": optional_string_array_schema()
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn health_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["control_plane_reachable", "model_count"],
+        "additionalProperties": false,
+        "properties": {
+            "control_plane_reachable": { "type": "boolean" },
+            "model_count": {
+                "type": "integer",
+                "minimum": 0
+            }
+        }
+    })
+}
+
+fn input_schema_for(operation_id: &str) -> Value {
+    match operation_id {
+        OP_CONVERSE | OP_CONVERSE_STREAM => converse_input_schema(),
+        OP_INVOKE_MODEL | OP_INVOKE_MODEL_STREAM => invoke_model_input_schema(),
+        OP_MODELS_LIST => list_models_input_schema(),
+        OP_HEALTH => empty_input_schema(),
+        _ => empty_input_schema(),
+    }
+}
+
+fn output_schema_for(operation_id: &str) -> Value {
+    match operation_id {
+        OP_CONVERSE | OP_INVOKE_MODEL => provider_json_output_schema(),
+        OP_CONVERSE_STREAM | OP_INVOKE_MODEL_STREAM => stream_output_schema(),
+        OP_MODELS_LIST => models_list_output_schema(),
+        OP_HEALTH => health_output_schema(),
+        _ => provider_json_output_schema(),
+    }
+}
+
 fn operation_info(
     id: &'static str,
     summary: &'static str,
@@ -466,8 +771,8 @@ fn operations_info() -> Vec<OperationInfo> {
             OP_CONVERSE,
             "Invoke Bedrock Converse",
             CAP_CHAT,
-            json!({"type":"object","required":["model_id","messages"]}),
-            json!({"type":"object"}),
+            input_schema_for(OP_CONVERSE),
+            output_schema_for(OP_CONVERSE),
             SafetyTier::Risky,
             IdempotencyClass::BestEffort,
         ),
@@ -475,8 +780,8 @@ fn operations_info() -> Vec<OperationInfo> {
             OP_CONVERSE_STREAM,
             "Invoke Bedrock ConverseStream",
             CAP_CHAT,
-            json!({"type":"object","required":["model_id","messages"]}),
-            json!({"type":"object"}),
+            input_schema_for(OP_CONVERSE_STREAM),
+            output_schema_for(OP_CONVERSE_STREAM),
             SafetyTier::Risky,
             IdempotencyClass::BestEffort,
         ),
@@ -484,8 +789,8 @@ fn operations_info() -> Vec<OperationInfo> {
             OP_INVOKE_MODEL,
             "Invoke legacy Bedrock InvokeModel",
             CAP_CHAT,
-            json!({"type":"object","required":["model_id"]}),
-            json!({"type":"object"}),
+            input_schema_for(OP_INVOKE_MODEL),
+            output_schema_for(OP_INVOKE_MODEL),
             SafetyTier::Risky,
             IdempotencyClass::BestEffort,
         ),
@@ -493,8 +798,8 @@ fn operations_info() -> Vec<OperationInfo> {
             OP_INVOKE_MODEL_STREAM,
             "Invoke legacy Bedrock InvokeModelWithResponseStream",
             CAP_CHAT,
-            json!({"type":"object","required":["model_id"]}),
-            json!({"type":"object"}),
+            input_schema_for(OP_INVOKE_MODEL_STREAM),
+            output_schema_for(OP_INVOKE_MODEL_STREAM),
             SafetyTier::Risky,
             IdempotencyClass::BestEffort,
         ),
@@ -502,8 +807,8 @@ fn operations_info() -> Vec<OperationInfo> {
             OP_MODELS_LIST,
             "List Bedrock foundation models",
             CAP_MODELS_READ,
-            json!({"type":"object"}),
-            json!({"type":"object"}),
+            input_schema_for(OP_MODELS_LIST),
+            output_schema_for(OP_MODELS_LIST),
             SafetyTier::Safe,
             IdempotencyClass::None,
         ),
@@ -511,8 +816,8 @@ fn operations_info() -> Vec<OperationInfo> {
             OP_HEALTH,
             "Check Bedrock connector health",
             CAP_MODELS_READ,
-            json!({"type":"object"}),
-            json!({"type":"object"}),
+            input_schema_for(OP_HEALTH),
+            output_schema_for(OP_HEALTH),
             SafetyTier::Safe,
             IdempotencyClass::None,
         ),
@@ -860,6 +1165,140 @@ fn serialize_error(error: serde_json::Error) -> FcpError {
 mod tests {
     use super::*;
 
+    const EXPECTED_MANIFEST_SCHEMA_OPS: &[(&str, &str)] = &[
+        (OP_CONVERSE, "aws_bedrock.converse"),
+        (OP_CONVERSE_STREAM, "aws_bedrock.converse_stream"),
+        (OP_INVOKE_MODEL, "aws_bedrock.invoke_model"),
+        (OP_INVOKE_MODEL_STREAM, "aws_bedrock.invoke_model_stream"),
+        (OP_MODELS_LIST, "aws_bedrock.models.list"),
+        (OP_HEALTH, "aws_bedrock.health"),
+    ];
+
+    fn bedrock_manifest() -> Result<toml::Value, String> {
+        toml::from_str(MANIFEST_TOML)
+            .map_err(|err| format!("AWS Bedrock manifest TOML should parse: {err}"))
+    }
+
+    fn manifest_operations(
+        manifest: &toml::Value,
+    ) -> Result<&toml::map::Map<String, toml::Value>, String> {
+        manifest
+            .get("provides")
+            .and_then(|provides| provides.get("operations"))
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| "manifest should declare operation tables".to_owned())
+    }
+
+    fn operation_schema(
+        manifest: &toml::Value,
+        operation_key: &str,
+        field: &str,
+    ) -> Result<Value, String> {
+        let schema = manifest_operations(manifest)?
+            .get(operation_key)
+            .and_then(toml::Value::as_table)
+            .and_then(|operation| operation.get(field))
+            .ok_or_else(|| format!("{operation_key} should declare {field}"))?;
+        if schema.as_table().is_none_or(toml::map::Map::is_empty) {
+            return Err(format!(
+                "{operation_key}.{field} should be a non-empty schema table"
+            ));
+        }
+        serde_json::to_value(schema)
+            .map_err(|err| format!("{operation_key}.{field} should convert to JSON: {err}"))
+    }
+
+    fn validator_for(schema: &Value) -> Result<jsonschema::Validator, String> {
+        jsonschema::Validator::new(schema)
+            .map_err(|err| format!("manifest operation schema should compile: {err}"))
+    }
+
+    fn assert_schema_accepts(schema: &Value, payload: &Value) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        let errors = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "schema should accept {payload}; errors: {errors:?}"
+            ))
+        }
+    }
+
+    fn assert_schema_rejects(schema: &Value, payload: &Value) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        if validator.iter_errors(payload).next().is_some() {
+            Ok(())
+        } else {
+            Err(format!("schema should reject {payload}"))
+        }
+    }
+
+    fn sample_provider_json_output() -> Value {
+        json!({
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "text": "hello" }]
+                }
+            },
+            "usage": {
+                "inputTokens": 1,
+                "outputTokens": 1
+            }
+        })
+    }
+
+    fn sample_stream_output() -> Value {
+        json!({
+            "events": [
+                {
+                    "event_type": "contentBlockDelta",
+                    "headers": {
+                        ":event-type": {
+                            "type": "string",
+                            "value": "contentBlockDelta"
+                        }
+                    },
+                    "payload_bytes": 42,
+                    "payload_json": {
+                        "delta": { "text": "hello" }
+                    }
+                }
+            ],
+            "chunk_count": 1,
+            "total_payload_bytes": 42
+        })
+    }
+
+    fn sample_models_list_output() -> Value {
+        json!({
+            "modelSummaries": [
+                {
+                    "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-text-express-v1",
+                    "modelId": "amazon.titan-text-express-v1",
+                    "modelName": "Titan Text Express",
+                    "providerName": "Amazon",
+                    "inputModalities": ["TEXT"],
+                    "outputModalities": ["TEXT"],
+                    "responseStreamingSupported": true,
+                    "customizationsSupported": [],
+                    "inferenceTypesSupported": ["ON_DEMAND"]
+                }
+            ]
+        })
+    }
+
+    fn sample_health_output() -> Value {
+        json!({
+            "control_plane_reachable": true,
+            "model_count": 1
+        })
+    }
+
     #[test]
     fn region_validation_rejects_injection() {
         assert!(validate_region("us-east-1").is_ok());
@@ -883,5 +1322,197 @@ mod tests {
         assert!(ids.contains(&OP_INVOKE_MODEL_STREAM));
         assert!(ids.contains(&OP_MODELS_LIST));
         assert!(ids.contains(&OP_HEALTH));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn manifest_operation_schemas_compile_and_validate_core_payloads() -> Result<(), String> {
+        let manifest = bedrock_manifest()?;
+        let operations = manifest_operations(&manifest)?;
+        let operation_catalog = BedrockConnector::new().introspect().operations;
+
+        assert_eq!(
+            operations.len(),
+            EXPECTED_MANIFEST_SCHEMA_OPS.len(),
+            "manifest should declare only the expected operations"
+        );
+        assert_eq!(
+            operation_catalog.len(),
+            EXPECTED_MANIFEST_SCHEMA_OPS.len(),
+            "runtime operation catalog should declare only the expected operations"
+        );
+
+        for (operation_id, manifest_key) in EXPECTED_MANIFEST_SCHEMA_OPS {
+            assert!(
+                operations.contains_key(*manifest_key),
+                "manifest should declare operation {manifest_key}"
+            );
+            let operation = operation_catalog
+                .iter()
+                .find(|operation| operation.id.as_str() == *operation_id)
+                .ok_or_else(|| format!("operation catalog should declare {operation_id}"))?;
+            for field in ["input_schema", "output_schema"] {
+                let schema = operation_schema(&manifest, manifest_key, field)?;
+                let _validator = validator_for(&schema)?;
+            }
+            assert_eq!(
+                operation.input_schema,
+                operation_schema(&manifest, manifest_key, "input_schema")?,
+                "{operation_id} input schema should match manifest"
+            );
+            assert_eq!(
+                operation.output_schema,
+                operation_schema(&manifest, manifest_key, "output_schema")?,
+                "{operation_id} output schema should match manifest"
+            );
+        }
+
+        for operation in operation_catalog {
+            let _input_validator = validator_for(&operation.input_schema)?;
+            let _output_validator = validator_for(&operation.output_schema)?;
+        }
+
+        let converse_input = operation_schema(&manifest, OP_CONVERSE, "input_schema")?;
+        assert_schema_accepts(
+            &converse_input,
+            &json!({
+                "model_id": "anthropic.claude-3-sonnet-20240229-v1:0",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{ "text": "hello" }]
+                    }
+                ],
+                "inference_config": { "maxTokens": 64 },
+                "additional_model_response_field_paths": ["/stop_sequence"]
+            }),
+        )?;
+        assert_schema_rejects(
+            &converse_input,
+            &json!({
+                "model_id": "anthropic.claude-3-sonnet-20240229-v1:0"
+            }),
+        )?;
+        assert_schema_rejects(
+            &converse_input,
+            &json!({
+                "model_id": "anthropic/claude",
+                "messages": [{ "role": "user", "content": [{ "text": "hello" }] }]
+            }),
+        )?;
+        assert_schema_rejects(
+            &converse_input,
+            &json!({
+                "model_id": "anthropic.claude-3-sonnet-20240229-v1:0",
+                "messages": [{ "role": "user", "content": [{ "text": "hello" }] }],
+                "extra": true
+            }),
+        )?;
+
+        let converse_stream_input =
+            operation_schema(&manifest, OP_CONVERSE_STREAM, "input_schema")?;
+        assert_eq!(converse_stream_input, converse_input);
+
+        let invoke_model_input = operation_schema(&manifest, OP_INVOKE_MODEL, "input_schema")?;
+        assert_schema_accepts(
+            &invoke_model_input,
+            &json!({
+                "model_id": "amazon.titan-text-express-v1",
+                "body": { "inputText": "hello" },
+                "accept": "application/json",
+                "content_type": "application/json"
+            }),
+        )?;
+        assert_schema_accepts(
+            &invoke_model_input,
+            &json!({
+                "model_id": "anthropic.claude-3-sonnet-20240229-v1:0",
+                "model_family": "anthropic_claude",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{ "type": "text", "text": "hello" }]
+                    }
+                ],
+                "max_tokens": 128,
+                "temperature": 0.2,
+                "top_p": 0.9
+            }),
+        )?;
+        assert_schema_accepts(
+            &invoke_model_input,
+            &json!({
+                "model_id": "mistral.mistral-7b-instruct-v0:2",
+                "model_family": "mistral",
+                "prompt": "hello",
+                "max_tokens": 64
+            }),
+        )?;
+        assert_schema_rejects(
+            &invoke_model_input,
+            &json!({ "model_id": "amazon.titan-text-express-v1" }),
+        )?;
+        assert_schema_rejects(
+            &invoke_model_input,
+            &json!({
+                "model_id": "anthropic.claude-3-sonnet-20240229-v1:0",
+                "model_family": "anthropic_claude"
+            }),
+        )?;
+        assert_schema_rejects(
+            &invoke_model_input,
+            &json!({
+                "model_id": "mistral.mistral-7b-instruct-v0:2",
+                "model_family": "mistral",
+                "prompt": "hello",
+                "top_p": 1.5
+            }),
+        )?;
+
+        let invoke_model_stream_input =
+            operation_schema(&manifest, OP_INVOKE_MODEL_STREAM, "input_schema")?;
+        assert_eq!(invoke_model_stream_input, invoke_model_input);
+
+        let models_list_input = operation_schema(&manifest, OP_MODELS_LIST, "input_schema")?;
+        assert_schema_accepts(
+            &models_list_input,
+            &json!({
+                "by_provider": "Amazon",
+                "by_inference_type": "ON_DEMAND"
+            }),
+        )?;
+        assert_schema_accepts(&models_list_input, &json!({}))?;
+        assert_schema_rejects(&models_list_input, &json!({ "provider": "Amazon" }))?;
+
+        let health_input = operation_schema(&manifest, OP_HEALTH, "input_schema")?;
+        assert_schema_accepts(&health_input, &json!({}))?;
+        assert_schema_rejects(&health_input, &json!({ "probe": true }))?;
+
+        assert_schema_accepts(
+            &operation_schema(&manifest, OP_CONVERSE, "output_schema")?,
+            &sample_provider_json_output(),
+        )?;
+        assert_schema_accepts(
+            &operation_schema(&manifest, OP_INVOKE_MODEL, "output_schema")?,
+            &sample_provider_json_output(),
+        )?;
+        assert_schema_accepts(
+            &operation_schema(&manifest, OP_CONVERSE_STREAM, "output_schema")?,
+            &sample_stream_output(),
+        )?;
+        assert_schema_accepts(
+            &operation_schema(&manifest, OP_INVOKE_MODEL_STREAM, "output_schema")?,
+            &sample_stream_output(),
+        )?;
+        assert_schema_accepts(
+            &operation_schema(&manifest, OP_MODELS_LIST, "output_schema")?,
+            &sample_models_list_output(),
+        )?;
+        assert_schema_accepts(
+            &operation_schema(&manifest, OP_HEALTH, "output_schema")?,
+            &sample_health_output(),
+        )?;
+
+        Ok(())
     }
 }

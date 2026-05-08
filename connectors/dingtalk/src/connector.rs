@@ -41,6 +41,286 @@ const DINGTALK_STREAM_POLICY_MODEL: &str = "host_forwarded_stream_frame_supervis
 const MAX_STREAM_MEDIA_FIELD_LEN: usize = 2_048;
 const MAX_REPLY_CONTENT_LEN: usize = 20_000;
 
+fn send_text_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["to", "content"],
+        "additionalProperties": false,
+        "properties": {
+            "to": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "content": { "type": "string", "minLength": 1, "pattern": "\\S" }
+        }
+    })
+}
+
+fn send_link_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["to", "title", "text", "message_url"],
+        "additionalProperties": false,
+        "properties": {
+            "to": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "title": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "text": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "message_url": { "type": "string", "minLength": 1, "format": "uri" },
+            "pic_url": { "type": "string", "minLength": 1, "format": "uri" }
+        }
+    })
+}
+
+fn send_file_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["to", "media_id", "file_name", "file_type"],
+        "additionalProperties": false,
+        "properties": {
+            "to": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "media_id": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "file_name": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "file_type": { "type": "string", "minLength": 1, "pattern": "\\S" }
+        }
+    })
+}
+
+fn upload_media_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["media_type", "file_name", "content_base64"],
+        "additionalProperties": false,
+        "properties": {
+            "media_type": { "type": "string", "enum": ["image", "voice", "video", "file"] },
+            "file_name": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "mime_type": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "content_base64": { "type": "string", "minLength": 1, "contentEncoding": "base64" }
+        }
+    })
+}
+
+fn normalize_event_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["event"],
+        "additionalProperties": false,
+        "properties": {
+            "event": {
+                "type": "object",
+                "description": "Raw DingTalk robot callback JSON payload",
+                "additionalProperties": true
+            }
+        }
+    })
+}
+
+fn stream_ingest_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["event"],
+        "additionalProperties": false,
+        "properties": {
+            "event": {
+                "type": "object",
+                "description": "Raw DingTalk Stream Mode ChatbotMessage payload",
+                "additionalProperties": true
+            },
+            "is_in_at_list": { "type": "boolean" },
+            "isInAtList": { "type": "boolean" },
+            "session_webhook": { "type": "string", "minLength": 1, "format": "uri" },
+            "sessionWebhook": { "type": "string", "minLength": 1, "format": "uri" },
+            "session_webhook_expired_time_ms": { "type": "integer", "minimum": 0 },
+            "sessionWebhookExpiredTime": { "type": "integer", "minimum": 0 }
+        }
+    })
+}
+
+fn stream_reply_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["chat_id", "content"],
+        "additionalProperties": false,
+        "properties": {
+            "chat_id": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "content": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "session_webhook": { "type": "string", "minLength": 1, "format": "uri" },
+            "reply_to": { "type": "string", "minLength": 1 }
+        }
+    })
+}
+
+fn empty_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false
+    })
+}
+
+fn dingtalk_send_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            "processQueryKey": { "type": "string" },
+            "messageId": { "type": "string" },
+            "errcode": { "type": "integer" },
+            "errmsg": { "type": "string" }
+        }
+    })
+}
+
+fn upload_media_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            "media_id": { "type": "string" },
+            "mediaId": { "type": "string" },
+            "errcode": { "type": "integer" },
+            "errmsg": { "type": "string" }
+        }
+    })
+}
+
+fn normalized_event_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": [
+            "event_type",
+            "message_id",
+            "conversation_id",
+            "conversation_type",
+            "sender_id",
+            "sender_name",
+            "text",
+            "timestamp_ms",
+            "at_bot",
+            "raw"
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "event_type": { "type": "string", "enum": ["message"] },
+            "message_id": { "type": ["string", "null"] },
+            "conversation_id": { "type": ["string", "null"] },
+            "conversation_type": { "type": "string", "enum": ["private", "group", "unknown"] },
+            "sender_id": { "type": ["string", "null"] },
+            "sender_name": { "type": ["string", "null"] },
+            "text": { "type": ["string", "null"] },
+            "timestamp_ms": { "type": ["integer", "null"], "minimum": 0 },
+            "at_bot": { "type": "boolean" },
+            "raw": { "type": "object", "additionalProperties": true }
+        }
+    })
+}
+
+fn stream_state_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": [
+            "seen_messages",
+            "cached_session_webhooks",
+            "accepted_events",
+            "rejected_events",
+            "duplicate_events"
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "seen_messages": { "type": "integer", "minimum": 0 },
+            "cached_session_webhooks": { "type": "integer", "minimum": 0 },
+            "accepted_events": { "type": "integer", "minimum": 0 },
+            "rejected_events": { "type": "integer", "minimum": 0 },
+            "duplicate_events": { "type": "integer", "minimum": 0 }
+        }
+    })
+}
+
+fn stream_ingest_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["stream", "delivery", "policy", "state", "normalized", "event"],
+        "additionalProperties": false,
+        "properties": {
+            "stream": { "type": "object", "additionalProperties": true },
+            "delivery": { "type": "object", "additionalProperties": true },
+            "policy": { "type": "object", "additionalProperties": true },
+            "state": stream_state_output_schema(),
+            "normalized": {
+                "anyOf": [
+                    { "type": "object", "additionalProperties": true },
+                    { "type": "null" }
+                ]
+            },
+            "event": {
+                "anyOf": [
+                    { "type": "object", "additionalProperties": true },
+                    { "type": "null" }
+                ]
+            }
+        }
+    })
+}
+
+fn stream_reply_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "chat_id_hash",
+            "session_webhook_hash",
+            "session_webhook_source",
+            "reply_to_hash",
+            "response",
+            "redaction_status"
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "status": { "type": "string", "enum": ["sent"] },
+            "chat_id_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{16}$" },
+            "session_webhook_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{16}$" },
+            "session_webhook_source": { "type": "string", "enum": ["request", "cache"] },
+            "reply_to_hash": { "type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{16}$" },
+            "response": { "type": "object", "additionalProperties": true },
+            "redaction_status": { "type": "string" }
+        }
+    })
+}
+
+fn health_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "base_url",
+            "media_base_url",
+            "client_id",
+            "stream_policy_model",
+            "stream_mode_enabled",
+            "stream_state",
+            "manifest_hash"
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "status": { "type": "string", "enum": ["ok"] },
+            "base_url": { "type": "string", "format": "uri" },
+            "media_base_url": { "type": "string", "format": "uri" },
+            "client_id": { "type": "string" },
+            "stream_policy_model": { "type": "string", "enum": [DINGTALK_STREAM_POLICY_MODEL] },
+            "stream_mode_enabled": { "type": "boolean" },
+            "stream_state": stream_state_output_schema(),
+            "manifest_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+        }
+    })
+}
+
+fn output_schema_for(operation_id: &str) -> Value {
+    match operation_id {
+        OP_SEND_TEXT | OP_SEND_LINK | OP_SEND_FILE => dingtalk_send_output_schema(),
+        OP_UPLOAD_MEDIA => upload_media_output_schema(),
+        OP_NORMALIZE_EVENT => normalized_event_output_schema(),
+        OP_STREAM_INGEST => stream_ingest_output_schema(),
+        OP_STREAM_REPLY => stream_reply_output_schema(),
+        OP_HEALTH => health_output_schema(),
+        _ => json!({ "type": "object" }),
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────
 // Doctor types (V3 requirement)
 // ─────────────────────────────────────────────────────────────────
@@ -191,7 +471,7 @@ impl DingTalkConnector {
         DoctorResult::from_checks(checks)
     }
 
-    // 14 OperationInfo entries built inline; splitting is churn-only — each
+    // 8 OperationInfo entries built inline; splitting is churn-only — each
     // arm carries its own input_schema literal and reads top-to-bottom.
     #[allow(clippy::too_many_lines)]
     fn operations() -> Vec<OperationInfo> {
@@ -203,14 +483,7 @@ impl DingTalkConnector {
                 RiskLevel::Medium,
                 SafetyTier::Risky,
                 IdempotencyClass::None,
-                json!({
-                    "type": "object",
-                    "required": ["to", "content"],
-                    "properties": {
-                        "to": { "type": "string" },
-                        "content": { "type": "string" }
-                    }
-                }),
+                send_text_input_schema(),
                 "Use for proactive DingTalk messages to `user:<userid>`, `chat:<openConversationId>`, or a bare userid.",
             ),
             operation(
@@ -220,17 +493,7 @@ impl DingTalkConnector {
                 RiskLevel::Medium,
                 SafetyTier::Risky,
                 IdempotencyClass::None,
-                json!({
-                    "type": "object",
-                    "required": ["to", "title", "text", "message_url"],
-                    "properties": {
-                        "to": { "type": "string" },
-                        "title": { "type": "string" },
-                        "text": { "type": "string" },
-                        "message_url": { "type": "string" },
-                        "pic_url": { "type": "string" }
-                    }
-                }),
+                send_link_input_schema(),
                 "Use when the chat should receive a link-style card rather than raw markdown.",
             ),
             operation(
@@ -240,16 +503,7 @@ impl DingTalkConnector {
                 RiskLevel::Medium,
                 SafetyTier::Risky,
                 IdempotencyClass::None,
-                json!({
-                    "type": "object",
-                    "required": ["to", "media_id", "file_name", "file_type"],
-                    "properties": {
-                        "to": { "type": "string" },
-                        "media_id": { "type": "string" },
-                        "file_name": { "type": "string" },
-                        "file_type": { "type": "string" }
-                    }
-                }),
+                send_file_input_schema(),
                 "Use after `dingtalk.media.upload` when DingTalk requires a media_id-backed file send.",
             ),
             operation(
@@ -259,16 +513,7 @@ impl DingTalkConnector {
                 RiskLevel::Medium,
                 SafetyTier::Risky,
                 IdempotencyClass::BestEffort,
-                json!({
-                    "type": "object",
-                    "required": ["media_type", "file_name", "content_base64"],
-                    "properties": {
-                        "media_type": { "type": "string", "enum": ["image", "voice", "video", "file"] },
-                        "file_name": { "type": "string" },
-                        "mime_type": { "type": "string" },
-                        "content_base64": { "type": "string" }
-                    }
-                }),
+                upload_media_input_schema(),
                 "Use when you need a DingTalk media_id before sending files or rich media.",
             ),
             operation(
@@ -278,16 +523,7 @@ impl DingTalkConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({
-                    "type": "object",
-                    "required": ["event"],
-                    "properties": {
-                        "event": {
-                            "type": "object",
-                            "description": "Raw DingTalk robot callback JSON payload"
-                        }
-                    }
-                }),
+                normalize_event_input_schema(),
                 "Use to normalize an inbound DingTalk robot callback event for downstream processing.",
             ),
             operation(
@@ -297,19 +533,7 @@ impl DingTalkConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({
-                    "type": "object",
-                    "required": ["event"],
-                    "properties": {
-                        "event": {
-                            "type": "object",
-                            "description": "Raw DingTalk Stream Mode ChatbotMessage payload"
-                        },
-                        "is_in_at_list": { "type": "boolean" },
-                        "session_webhook": { "type": "string" },
-                        "session_webhook_expired_time_ms": { "type": "integer" }
-                    }
-                }),
+                stream_ingest_input_schema(),
                 "Use when the host's DingTalk Stream Mode bridge forwards one signed SDK frame into FCP for policy, dedupe, and EventEnvelope construction.",
             ),
             operation(
@@ -319,16 +543,7 @@ impl DingTalkConnector {
                 RiskLevel::Medium,
                 SafetyTier::Risky,
                 IdempotencyClass::None,
-                json!({
-                    "type": "object",
-                    "required": ["chat_id", "content"],
-                    "properties": {
-                        "chat_id": { "type": "string" },
-                        "content": { "type": "string" },
-                        "session_webhook": { "type": "string" },
-                        "reply_to": { "type": "string" }
-                    }
-                }),
+                stream_reply_input_schema(),
                 "Use only after an accepted stream ingest cached a valid DingTalk session_webhook for the conversation, or when the host forwards a fresh webhook explicitly.",
             ),
             operation(
@@ -338,7 +553,7 @@ impl DingTalkConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({ "type": "object" }),
+                empty_input_schema(),
                 "Use as a bounded preflight check before higher-risk send operations.",
             ),
         ]
@@ -1455,7 +1670,7 @@ fn operation(
         summary: summary.into(),
         description: Some(summary.into()),
         input_schema,
-        output_schema: json!({ "type": "object" }),
+        output_schema: output_schema_for(id),
         capability: CapabilityId::from_static(capability),
         risk_level,
         safety_tier,
@@ -1484,6 +1699,155 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{body_partial_json, method, path, query_param},
     };
+
+    const EXPECTED_MANIFEST_SCHEMA_OPS: &[(&str, &str)] = &[
+        (OP_SEND_TEXT, "messages_send_text"),
+        (OP_SEND_LINK, "messages_send_link"),
+        (OP_SEND_FILE, "messages_send_file"),
+        (OP_UPLOAD_MEDIA, "media_upload"),
+        (OP_NORMALIZE_EVENT, "events_normalize"),
+        (OP_STREAM_INGEST, "stream_ingest_message"),
+        (OP_STREAM_REPLY, "stream_reply"),
+        (OP_HEALTH, "health"),
+    ];
+
+    fn dingtalk_manifest() -> Result<toml::Value, String> {
+        toml::from_str(MANIFEST_TOML)
+            .map_err(|err| format!("DingTalk manifest TOML should parse: {err}"))
+    }
+
+    fn manifest_operations(
+        manifest: &toml::Value,
+    ) -> Result<&toml::map::Map<String, toml::Value>, String> {
+        manifest
+            .get("provides")
+            .and_then(|provides| provides.get("operations"))
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| "manifest should declare operation tables".to_owned())
+    }
+
+    fn operation_schema(
+        manifest: &toml::Value,
+        operation_key: &str,
+        field: &str,
+    ) -> Result<Value, String> {
+        let schema = manifest_operations(manifest)?
+            .get(operation_key)
+            .and_then(toml::Value::as_table)
+            .and_then(|operation| operation.get(field))
+            .ok_or_else(|| format!("{operation_key} should declare {field}"))?;
+        if schema.as_table().is_none_or(toml::map::Map::is_empty) {
+            return Err(format!(
+                "{operation_key}.{field} should be a non-empty schema table"
+            ));
+        }
+        serde_json::to_value(schema)
+            .map_err(|err| format!("{operation_key}.{field} should convert to JSON: {err}"))
+    }
+
+    fn validator_for(schema: &Value) -> Result<jsonschema::Validator, String> {
+        jsonschema::Validator::new(schema)
+            .map_err(|err| format!("manifest operation schema should compile: {err}"))
+    }
+
+    fn assert_schema_accepts(schema: &Value, payload: &Value) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        let errors = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "schema should accept {payload}; errors: {errors:?}"
+            ))
+        }
+    }
+
+    fn assert_schema_rejects(schema: &Value, payload: &Value) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        if validator.iter_errors(payload).next().is_some() {
+            Ok(())
+        } else {
+            Err(format!("schema should reject {payload}"))
+        }
+    }
+
+    fn sample_callback_event() -> Value {
+        json!({
+            "msgType": "text",
+            "text": { "content": "@opsbot deploy status?" },
+            "senderId": "user-001",
+            "senderNick": "Alice",
+            "senderStaffId": "staff-001",
+            "conversationId": "conv-123",
+            "conversationType": "2",
+            "conversationTitle": "Dev Team",
+            "atUsers": [{ "dingtalkId": "bot-999", "staffId": "staff-bot" }],
+            "chatbotUserId": "bot-999",
+            "createAt": 1_700_000_000_000_i64,
+            "msgId": "msg-abc"
+        })
+    }
+
+    fn sample_normalized_output() -> Value {
+        json!({
+            "event_type": "message",
+            "message_id": "msg-abc",
+            "conversation_id": "conv-123",
+            "conversation_type": "group",
+            "sender_id": "user-001",
+            "sender_name": "Alice",
+            "text": "@opsbot deploy status?",
+            "timestamp_ms": 1_700_000_000_000_i64,
+            "at_bot": true,
+            "raw": sample_callback_event()
+        })
+    }
+
+    fn sample_stream_state() -> Value {
+        json!({
+            "seen_messages": 1,
+            "cached_session_webhooks": 1,
+            "accepted_events": 1,
+            "rejected_events": 0,
+            "duplicate_events": 0
+        })
+    }
+
+    fn sample_stream_ingest_output() -> Value {
+        json!({
+            "stream": {
+                "model": DINGTALK_STREAM_POLICY_MODEL,
+                "transport_boundary": "host_forwarded_stream_frame",
+                "connector_owned_websocket": false,
+                "supervised_state": true
+            },
+            "delivery": {
+                "id": "sha256:0123456789abcdef",
+                "message_key_hash": "sha256:0123456789abcdef",
+                "sender_hash": "sha256:1111111111111111",
+                "sender_staff_hash": "sha256:2222222222222222",
+                "conversation_hash": "sha256:3333333333333333",
+                "session_webhook_hash": "sha256:4444444444444444",
+                "session_webhook_cached": true,
+                "duplicate": false
+            },
+            "policy": {
+                "model": DINGTALK_STREAM_POLICY_MODEL,
+                "decision": "accepted",
+                "reason": "accepted",
+                "redaction_status": "policy_and_delivery_metadata_hashed"
+            },
+            "state": sample_stream_state(),
+            "normalized": sample_normalized_output(),
+            "event": {
+                "id": "evt-1",
+                "topic": "dingtalk.message"
+            }
+        })
+    }
 
     async fn configured_connector(server: &MockServer) -> DingTalkConnector {
         let mut connector = DingTalkConnector::new();
@@ -1783,6 +2147,302 @@ mod tests {
         assert_eq!(ops[5].id.as_str(), OP_STREAM_INGEST);
         assert_eq!(ops[6].id.as_str(), OP_STREAM_REPLY);
         assert_eq!(ops[7].id.as_str(), OP_HEALTH);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn manifest_operation_schemas_compile_and_validate_core_payloads() -> Result<(), String> {
+        let manifest = dingtalk_manifest()?;
+        let operations = manifest_operations(&manifest)?;
+        let operation_catalog = DingTalkConnector::operations();
+
+        for (operation_id, manifest_key) in EXPECTED_MANIFEST_SCHEMA_OPS {
+            assert!(
+                operations.contains_key(*manifest_key),
+                "manifest should declare operation {manifest_key}"
+            );
+            let operation = operation_catalog
+                .iter()
+                .find(|operation| operation.id.as_str() == *operation_id)
+                .ok_or_else(|| format!("operation catalog should declare {operation_id}"))?;
+            for field in ["input_schema", "output_schema"] {
+                let schema = operation_schema(&manifest, manifest_key, field)?;
+                let _validator = validator_for(&schema)?;
+            }
+            assert_eq!(
+                operation.input_schema,
+                operation_schema(&manifest, manifest_key, "input_schema")?,
+                "{operation_id} input schema should match manifest"
+            );
+            assert_eq!(
+                operation.output_schema,
+                operation_schema(&manifest, manifest_key, "output_schema")?,
+                "{operation_id} output schema should match manifest"
+            );
+        }
+
+        for operation in operation_catalog {
+            let _input_validator = validator_for(&operation.input_schema)?;
+            let _output_validator = validator_for(&operation.output_schema)?;
+        }
+
+        let send_text_input = operation_schema(&manifest, "messages_send_text", "input_schema")?;
+        assert_schema_accepts(
+            &send_text_input,
+            &json!({"to": "user:user-1", "content": "hello"}),
+        )?;
+        assert_schema_rejects(&send_text_input, &json!({"to": "user:user-1"}))?;
+        assert_schema_rejects(
+            &send_text_input,
+            &json!({"to": "user:user-1", "content": "hello", "extra": true}),
+        )?;
+        assert_schema_rejects(
+            &send_text_input,
+            &json!({"to": "user:user-1", "content": "   "}),
+        )?;
+
+        let send_link_input = operation_schema(&manifest, "messages_send_link", "input_schema")?;
+        assert_schema_accepts(
+            &send_link_input,
+            &json!({
+                "to": "chat:conv-1",
+                "title": "Runbook",
+                "text": "Deployment notes",
+                "message_url": "https://example.com/runbook",
+                "pic_url": "https://example.com/preview.png"
+            }),
+        )?;
+        assert_schema_rejects(
+            &send_link_input,
+            &json!({
+                "to": "chat:conv-1",
+                "title": "Runbook",
+                "text": "Deployment notes"
+            }),
+        )?;
+        assert_schema_rejects(
+            &send_link_input,
+            &json!({
+                "to": "chat:conv-1",
+                "title": "Runbook",
+                "text": "Deployment notes",
+                "message_url": "https://example.com/runbook",
+                "unexpected": true
+            }),
+        )?;
+
+        let send_file_input = operation_schema(&manifest, "messages_send_file", "input_schema")?;
+        assert_schema_accepts(
+            &send_file_input,
+            &json!({
+                "to": "chat:conv-1",
+                "media_id": "MEDIA123",
+                "file_name": "report.pdf",
+                "file_type": "pdf"
+            }),
+        )?;
+        assert_schema_rejects(
+            &send_file_input,
+            &json!({"to": "chat:conv-1", "media_id": "MEDIA123", "file_name": "report.pdf"}),
+        )?;
+
+        let upload_input = operation_schema(&manifest, "media_upload", "input_schema")?;
+        assert_schema_accepts(
+            &upload_input,
+            &json!({
+                "media_type": "image",
+                "file_name": "image.png",
+                "mime_type": "image/png",
+                "content_base64": BASE64.encode(b"png")
+            }),
+        )?;
+        assert_schema_rejects(
+            &upload_input,
+            &json!({
+                "media_type": "audio",
+                "file_name": "voice.amr",
+                "content_base64": BASE64.encode(b"voice")
+            }),
+        )?;
+        assert_schema_rejects(
+            &upload_input,
+            &json!({
+                "media_type": "image",
+                "file_name": "image.png",
+                "content_base64": BASE64.encode(b"png"),
+                "extra": true
+            }),
+        )?;
+
+        let normalize_input = operation_schema(&manifest, "events_normalize", "input_schema")?;
+        assert_schema_accepts(&normalize_input, &json!({"event": sample_callback_event()}))?;
+        assert_schema_rejects(&normalize_input, &json!({}))?;
+        assert_schema_rejects(&normalize_input, &json!({"event": []}))?;
+        assert_schema_rejects(
+            &normalize_input,
+            &json!({"event": sample_callback_event(), "extra": true}),
+        )?;
+
+        let stream_input = operation_schema(&manifest, "stream_ingest_message", "input_schema")?;
+        assert_schema_accepts(
+            &stream_input,
+            &json!({
+                "event": sample_callback_event(),
+                "isInAtList": true,
+                "sessionWebhook": "https://api.dingtalk.com/session/webhook",
+                "sessionWebhookExpiredTime": 1_900_000_000_000_i64
+            }),
+        )?;
+        assert_schema_rejects(&stream_input, &json!({"event": null}))?;
+        assert_schema_rejects(
+            &stream_input,
+            &json!({"event": sample_callback_event(), "extra": true}),
+        )?;
+
+        let reply_input = operation_schema(&manifest, "stream_reply", "input_schema")?;
+        assert_schema_accepts(
+            &reply_input,
+            &json!({
+                "chat_id": "conv-123",
+                "content": "ack",
+                "session_webhook": "https://api.dingtalk.com/session/webhook",
+                "reply_to": "msg-abc"
+            }),
+        )?;
+        assert_schema_rejects(&reply_input, &json!({"chat_id": "conv-123"}))?;
+        assert_schema_rejects(
+            &reply_input,
+            &json!({"chat_id": "conv-123", "content": "ack", "extra": true}),
+        )?;
+
+        let health_input = operation_schema(&manifest, "health", "input_schema")?;
+        assert_schema_accepts(&health_input, &json!({}))?;
+        assert_schema_rejects(&health_input, &json!({"unexpected": true}))?;
+
+        for operation_key in [
+            "messages_send_text",
+            "messages_send_link",
+            "messages_send_file",
+        ] {
+            let output = operation_schema(&manifest, operation_key, "output_schema")?;
+            assert_schema_accepts(&output, &json!({"processQueryKey": "send-1"}))?;
+            assert_schema_rejects(&output, &json!(["send-1"]))?;
+        }
+
+        let upload_output = operation_schema(&manifest, "media_upload", "output_schema")?;
+        assert_schema_accepts(
+            &upload_output,
+            &json!({"errcode": 0, "media_id": "MEDIA123"}),
+        )?;
+        assert_schema_rejects(&upload_output, &json!(["MEDIA123"]))?;
+
+        let normalize_output = operation_schema(&manifest, "events_normalize", "output_schema")?;
+        assert_schema_accepts(&normalize_output, &sample_normalized_output())?;
+        assert_schema_rejects(
+            &normalize_output,
+            &json!({
+                "event_type": "message",
+                "conversation_type": "group",
+                "at_bot": true
+            }),
+        )?;
+        assert_schema_rejects(
+            &normalize_output,
+            &json!({
+                "event_type": "message",
+                "message_id": "msg-abc",
+                "conversation_id": "conv-123",
+                "conversation_type": "group",
+                "sender_id": "user-001",
+                "sender_name": "Alice",
+                "text": "@opsbot deploy status?",
+                "timestamp_ms": 1_700_000_000_000_i64,
+                "at_bot": true,
+                "raw": sample_callback_event(),
+                "extra": true
+            }),
+        )?;
+
+        let stream_output = operation_schema(&manifest, "stream_ingest_message", "output_schema")?;
+        assert_schema_accepts(&stream_output, &sample_stream_ingest_output())?;
+        assert_schema_rejects(
+            &stream_output,
+            &json!({
+                "stream": {},
+                "delivery": {},
+                "policy": {},
+                "state": sample_stream_state(),
+                "normalized": null
+            }),
+        )?;
+        assert_schema_rejects(
+            &stream_output,
+            &json!({
+                "stream": {},
+                "delivery": {},
+                "policy": {},
+                "state": sample_stream_state(),
+                "normalized": null,
+                "event": null,
+                "extra": true
+            }),
+        )?;
+
+        let reply_output = operation_schema(&manifest, "stream_reply", "output_schema")?;
+        assert_schema_accepts(
+            &reply_output,
+            &json!({
+                "status": "sent",
+                "chat_id_hash": "sha256:0123456789abcdef",
+                "session_webhook_hash": "sha256:1111111111111111",
+                "session_webhook_source": "request",
+                "reply_to_hash": null,
+                "response": { "errcode": 0 },
+                "redaction_status": "chat_and_webhook_metadata_hashed"
+            }),
+        )?;
+        assert_schema_rejects(
+            &reply_output,
+            &json!({
+                "status": "sent",
+                "chat_id_hash": "sha256:0123456789abcdef",
+                "session_webhook_hash": "sha256:1111111111111111",
+                "session_webhook_source": "manual",
+                "reply_to_hash": null,
+                "response": { "errcode": 0 },
+                "redaction_status": "chat_and_webhook_metadata_hashed"
+            }),
+        )?;
+
+        let health_output = operation_schema(&manifest, "health", "output_schema")?;
+        assert_schema_accepts(
+            &health_output,
+            &json!({
+                "status": "ok",
+                "base_url": "https://api.dingtalk.com",
+                "media_base_url": "https://oapi.dingtalk.com",
+                "client_id": "ding-app",
+                "stream_policy_model": DINGTALK_STREAM_POLICY_MODEL,
+                "stream_mode_enabled": true,
+                "stream_state": sample_stream_state(),
+                "manifest_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            }),
+        )?;
+        assert_schema_rejects(
+            &health_output,
+            &json!({
+                "status": "ok",
+                "base_url": "https://api.dingtalk.com",
+                "media_base_url": "https://oapi.dingtalk.com",
+                "client_id": "ding-app",
+                "stream_policy_model": DINGTALK_STREAM_POLICY_MODEL,
+                "stream_mode_enabled": true,
+                "stream_state": sample_stream_state(),
+                "manifest_hash": "sha256:short"
+            }),
+        )?;
+
+        Ok(())
     }
 
     #[test]

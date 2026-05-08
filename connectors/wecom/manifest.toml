@@ -39,6 +39,8 @@ capability = "wecom.messages.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
+input_schema = { type = "object", required = ["content"], anyOf = [{ required = ["touser"] }, { required = ["toparty"] }, { required = ["totag"] }], additionalProperties = false, properties = { content = { type = "string", minLength = 1, pattern = "\\S" }, touser = { type = "string", minLength = 1, pattern = "\\S" }, toparty = { type = "string", minLength = 1, pattern = "\\S" }, totag = { type = "string", minLength = 1, pattern = "\\S" }, safe = { anyOf = [{ type = "boolean" }, { type = "integer", enum = [0, 1] }] }, enable_duplicate_check = { anyOf = [{ type = "boolean" }, { type = "integer", enum = [0, 1] }] }, duplicate_check_interval = { type = "integer", minimum = 0, maximum = 4294967295 } } }
+output_schema = { type = "object", additionalProperties = true, properties = { errcode = { type = "integer" }, errmsg = { type = "string" }, msgid = { type = "string" }, invaliduser = { type = "string" }, invalidparty = { type = "string" }, invalidtag = { type = "string" }, response_code = { type = "string" } } }
 
 [provides.operations.messages_send_markdown]
 summary = "Send a WeCom markdown message"
@@ -46,6 +48,8 @@ capability = "wecom.messages.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
+input_schema = { type = "object", required = ["content"], anyOf = [{ required = ["touser"] }, { required = ["toparty"] }, { required = ["totag"] }], additionalProperties = false, properties = { content = { type = "string", minLength = 1, pattern = "\\S" }, touser = { type = "string", minLength = 1, pattern = "\\S" }, toparty = { type = "string", minLength = 1, pattern = "\\S" }, totag = { type = "string", minLength = 1, pattern = "\\S" }, enable_duplicate_check = { anyOf = [{ type = "boolean" }, { type = "integer", enum = [0, 1] }] }, duplicate_check_interval = { type = "integer", minimum = 0, maximum = 4294967295 } } }
+output_schema = { type = "object", additionalProperties = true, properties = { errcode = { type = "integer" }, errmsg = { type = "string" }, msgid = { type = "string" }, invaliduser = { type = "string" }, invalidparty = { type = "string" }, invalidtag = { type = "string" }, response_code = { type = "string" } } }
 
 [provides.operations.messages_send_image]
 summary = "Send a WeCom image message"
@@ -53,6 +57,8 @@ capability = "wecom.messages.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
+input_schema = { type = "object", required = ["media_id"], anyOf = [{ required = ["touser"] }, { required = ["toparty"] }, { required = ["totag"] }], additionalProperties = false, properties = { media_id = { type = "string", minLength = 1, pattern = "\\S" }, touser = { type = "string", minLength = 1, pattern = "\\S" }, toparty = { type = "string", minLength = 1, pattern = "\\S" }, totag = { type = "string", minLength = 1, pattern = "\\S" }, safe = { anyOf = [{ type = "boolean" }, { type = "integer", enum = [0, 1] }] }, enable_duplicate_check = { anyOf = [{ type = "boolean" }, { type = "integer", enum = [0, 1] }] }, duplicate_check_interval = { type = "integer", minimum = 0, maximum = 4294967295 } } }
+output_schema = { type = "object", additionalProperties = true, properties = { errcode = { type = "integer" }, errmsg = { type = "string" }, msgid = { type = "string" }, invaliduser = { type = "string" }, invalidparty = { type = "string" }, invalidtag = { type = "string" }, response_code = { type = "string" } } }
 
 [provides.operations.messages_send_file]
 summary = "Send a WeCom file message"
@@ -60,6 +66,8 @@ capability = "wecom.messages.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
+input_schema = { type = "object", required = ["media_id"], anyOf = [{ required = ["touser"] }, { required = ["toparty"] }, { required = ["totag"] }], additionalProperties = false, properties = { media_id = { type = "string", minLength = 1, pattern = "\\S" }, touser = { type = "string", minLength = 1, pattern = "\\S" }, toparty = { type = "string", minLength = 1, pattern = "\\S" }, totag = { type = "string", minLength = 1, pattern = "\\S" }, safe = { anyOf = [{ type = "boolean" }, { type = "integer", enum = [0, 1] }] }, enable_duplicate_check = { anyOf = [{ type = "boolean" }, { type = "integer", enum = [0, 1] }] }, duplicate_check_interval = { type = "integer", minimum = 0, maximum = 4294967295 } } }
+output_schema = { type = "object", additionalProperties = true, properties = { errcode = { type = "integer" }, errmsg = { type = "string" }, msgid = { type = "string" }, invaliduser = { type = "string" }, invalidparty = { type = "string" }, invalidtag = { type = "string" }, response_code = { type = "string" } } }
 
 [provides.operations.media_upload]
 summary = "Upload temporary media to WeCom"
@@ -67,6 +75,8 @@ capability = "wecom.media.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
+input_schema = { type = "object", required = ["media_type", "file_name", "content_base64"], additionalProperties = false, properties = { media_type = { type = "string", enum = ["image", "voice", "video", "file"] }, file_name = { type = "string", minLength = 1, pattern = "\\S" }, mime_type = { type = "string", minLength = 1, pattern = "\\S" }, content_base64 = { type = "string", minLength = 1, contentEncoding = "base64" } } }
+output_schema = { type = "object", additionalProperties = true, properties = { errcode = { type = "integer" }, errmsg = { type = "string" }, type = { type = "string" }, media_id = { type = "string" }, created_at = { type = "integer", minimum = 0 } } }
 
 [provides.operations.media_download]
 summary = "Download media bytes for a WeCom media_id"
@@ -74,6 +84,8 @@ capability = "wecom.media.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+input_schema = { type = "object", required = ["media_id"], additionalProperties = false, properties = { media_id = { type = "string", minLength = 1, pattern = "\\S" } } }
+output_schema = { type = "object", required = ["media_id", "content_length", "content_base64", "sha256"], additionalProperties = false, properties = { media_id = { type = "string", minLength = 1 }, file_name = { type = ["string", "null"], minLength = 1 }, mime_type = { type = ["string", "null"], minLength = 1 }, content_length = { type = "integer", minimum = 0 }, content_base64 = { type = "string", contentEncoding = "base64" }, sha256 = { type = "string", pattern = "^[0-9a-f]{64}$" } } }
 
 [provides.operations.users_get]
 summary = "Fetch a WeCom user profile"
@@ -81,6 +93,8 @@ capability = "wecom.users.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+input_schema = { type = "object", required = ["userid"], additionalProperties = false, properties = { userid = { type = "string", minLength = 1, pattern = "\\S" } } }
+output_schema = { type = "object", additionalProperties = true, properties = { errcode = { type = "integer" }, errmsg = { type = "string" }, userid = { type = "string" }, name = { type = "string" }, alias = { type = "string" }, mobile = { type = "string" }, email = { type = "string" }, gender = { type = "string" }, department = { type = "array", items = { type = "integer" } }, position = { type = "string" }, avatar = { type = "string" }, status = { type = "integer" }, enable = { type = "integer" } } }
 
 [provides.operations.departments_list]
 summary = "List WeCom departments"
@@ -88,6 +102,8 @@ capability = "wecom.departments.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+input_schema = { type = "object", additionalProperties = false, properties = { id = { type = "integer" } } }
+output_schema = { type = "object", additionalProperties = true, properties = { errcode = { type = "integer" }, errmsg = { type = "string" }, department = { type = "array", items = { type = "object", additionalProperties = true } } } }
 
 [provides.operations.callback_verify_url]
 summary = "Verify a host-forwarded WeCom callback URL challenge"
@@ -95,6 +111,8 @@ capability = "wecom.events.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+input_schema = { type = "object", required = ["msg_signature", "timestamp", "nonce", "echostr"], additionalProperties = false, properties = { msg_signature = { type = "string", minLength = 1, pattern = "\\S" }, timestamp = { type = "string", minLength = 1, pattern = "\\S" }, nonce = { type = "string", minLength = 1, pattern = "\\S" }, echostr = { type = "string", minLength = 1, pattern = "\\S" } } }
+output_schema = { type = "object", required = ["verified", "transport", "receive_id", "challenge", "http_response"], additionalProperties = false, properties = { verified = { type = "boolean" }, transport = { type = "string", enum = ["callback_http_get"] }, receive_id = { type = "string", minLength = 1 }, challenge = { type = "string" }, http_response = { type = "object", required = ["status", "content_type", "body"], additionalProperties = false, properties = { status = { type = "integer", minimum = 100, maximum = 599 }, content_type = { type = "string" }, body = { type = "string" } } } } }
 
 [provides.operations.callback_ingest_event]
 summary = "Verify, decrypt, replay-check, policy-gate, and normalize one host-forwarded WeCom callback event"
@@ -102,6 +120,8 @@ capability = "wecom.events.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+input_schema = { type = "object", required = ["msg_signature", "timestamp", "nonce"], anyOf = [{ required = ["body"] }, { required = ["body_xml"] }], additionalProperties = false, properties = { msg_signature = { type = "string", minLength = 1, pattern = "\\S" }, timestamp = { type = "string", minLength = 1, pattern = "\\S" }, nonce = { type = "string", minLength = 1, pattern = "\\S" }, body = { type = "string", minLength = 1, description = "Raw XML body from the WeCom HTTP POST callback" }, body_xml = { type = "string", minLength = 1, description = "Alias for body when the host already labels the payload as XML" } } }
+output_schema = { type = "object", required = ["delivery", "callback", "policy", "event"], additionalProperties = false, properties = { delivery = { type = "object", required = ["id", "transport", "verified", "msg_signature_hash", "timestamp", "timestamp_skew_secs", "nonce_hash", "nonce_key_hash", "receive_id_hash", "replay"], additionalProperties = false, properties = { id = { type = "string", minLength = 1 }, transport = { type = "string", enum = ["callback_http"] }, verified = { type = "boolean" }, msg_signature_hash = { type = "string", pattern = "^sha256:[0-9a-f]{16}$" }, timestamp = { type = "string" }, timestamp_skew_secs = { type = "integer", minimum = 0 }, nonce_hash = { type = "string", pattern = "^sha256:[0-9a-f]{16}$" }, nonce_key_hash = { type = "string", pattern = "^sha256:[0-9a-f]{16}$" }, message_key_hash = { type = ["string", "null"], pattern = "^sha256:[0-9a-f]{16}$" }, receive_id_hash = { type = "string", pattern = "^sha256:[0-9a-f]{16}$" }, replay = { type = "boolean" } } }, callback = { type = "object", required = ["outer", "message", "plaintext_xml"], additionalProperties = false, properties = { outer = { type = ["object", "null"], additionalProperties = { type = "string" } }, message = { type = ["object", "null"], additionalProperties = { type = "string" } }, plaintext_xml = { type = ["string", "null"] } } }, policy = { type = "object", required = ["model", "decision", "reason", "sender_user_hash", "external_user_hash", "room_hash", "persisted_replay_state", "redaction_status"], additionalProperties = false, properties = { model = { type = "string", enum = ["host_forwarded_callback_replay_and_policy"] }, decision = { type = "string", enum = ["accepted", "rejected", "duplicate"] }, reason = { type = "string" }, sender_user_hash = { type = ["string", "null"], pattern = "^sha256:[0-9a-f]{16}$" }, external_user_hash = { type = ["string", "null"], pattern = "^sha256:[0-9a-f]{16}$" }, room_hash = { type = ["string", "null"], pattern = "^sha256:[0-9a-f]{16}$" }, persisted_replay_state = { type = "boolean" }, redaction_status = { type = "string" } } }, event = { anyOf = [{ type = "object", additionalProperties = true }, { type = "null" }] } } }
 
 [provides.operations.health]
 summary = "Verify WeCom credentials and token issuance"
@@ -109,6 +129,8 @@ capability = "wecom.health.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+input_schema = { type = "object", additionalProperties = false }
+output_schema = { type = "object", required = ["status", "token_issuance_probe", "details"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, token_issuance_probe = { type = "string", enum = ["GET /cgi-bin/gettoken"] }, details = { type = "object", additionalProperties = true } } }
 
 [sandbox]
 profile = "strict"

@@ -30,6 +30,87 @@ const OP_NEXT: &str = "sonos.next";
 const OP_PREVIOUS: &str = "sonos.previous";
 const OP_SET_VOLUME: &str = "sonos.set_volume";
 
+fn empty_input_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false
+    })
+}
+
+fn health_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["status", "device_url", "manifest_hash"],
+        "additionalProperties": false,
+        "properties": {
+            "status": { "type": "string", "enum": ["ok"] },
+            "device_url": { "type": "string", "format": "uri" },
+            "manifest_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+        }
+    })
+}
+
+fn status_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["transport_state", "transport_status", "volume"],
+        "additionalProperties": false,
+        "properties": {
+            "transport_state": { "type": ["string", "null"] },
+            "transport_status": { "type": ["string", "null"] },
+            "volume": { "type": ["integer", "null"], "minimum": 0, "maximum": 100 }
+        }
+    })
+}
+
+fn action_output_schema(action: &'static str) -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["status", "action"],
+        "additionalProperties": false,
+        "properties": {
+            "status": { "type": "string", "enum": ["ok"] },
+            "action": { "type": "string", "enum": [action] }
+        }
+    })
+}
+
+fn set_volume_input_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["volume"],
+        "additionalProperties": false,
+        "properties": {
+            "volume": { "type": "integer", "minimum": 0, "maximum": 100 }
+        }
+    })
+}
+
+fn set_volume_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["status", "volume"],
+        "additionalProperties": false,
+        "properties": {
+            "status": { "type": "string", "enum": ["ok"] },
+            "volume": { "type": "integer", "minimum": 0, "maximum": 100 }
+        }
+    })
+}
+
+fn output_schema_for(operation: &str) -> serde_json::Value {
+    match operation {
+        OP_HEALTH => health_output_schema(),
+        OP_GET_STATUS => status_output_schema(),
+        OP_PLAY => action_output_schema("play"),
+        OP_PAUSE => action_output_schema("pause"),
+        OP_NEXT => action_output_schema("next"),
+        OP_PREVIOUS => action_output_schema("previous"),
+        OP_SET_VOLUME => set_volume_output_schema(),
+        _ => empty_input_schema(),
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorCheck {
     name: String,
@@ -118,8 +199,8 @@ impl SonosConnector {
                 id: OperationId::from_static(OP_HEALTH),
                 summary: "Report Sonos device health".into(),
                 description: Some("Fetch speaker identity details.".into()),
-                input_schema: json!({ "type": "object" }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: empty_input_schema(),
+                output_schema: output_schema_for(OP_HEALTH),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
@@ -142,8 +223,8 @@ impl SonosConnector {
                 id: OperationId::from_static(OP_GET_STATUS),
                 summary: "Get Sonos transport and volume status".into(),
                 description: Some("Fetch playback state and volume.".into()),
-                input_schema: json!({ "type": "object" }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: empty_input_schema(),
+                output_schema: output_schema_for(OP_GET_STATUS),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
@@ -166,8 +247,8 @@ impl SonosConnector {
                 id: OperationId::from_static(OP_PLAY),
                 summary: "Play or resume playback".into(),
                 description: Some("Send the Sonos Play action.".into()),
-                input_schema: json!({ "type": "object" }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: empty_input_schema(),
+                output_schema: output_schema_for(OP_PLAY),
                 capability: CapabilityId::from_static(CAP_WRITE),
                 risk_level: RiskLevel::Medium,
                 safety_tier: SafetyTier::Risky,
@@ -188,8 +269,8 @@ impl SonosConnector {
                 id: OperationId::from_static(OP_PAUSE),
                 summary: "Pause playback".into(),
                 description: Some("Send the Sonos Pause action.".into()),
-                input_schema: json!({ "type": "object" }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: empty_input_schema(),
+                output_schema: output_schema_for(OP_PAUSE),
                 capability: CapabilityId::from_static(CAP_WRITE),
                 risk_level: RiskLevel::Medium,
                 safety_tier: SafetyTier::Risky,
@@ -210,8 +291,8 @@ impl SonosConnector {
                 id: OperationId::from_static(OP_NEXT),
                 summary: "Skip to next track".into(),
                 description: Some("Send the Sonos Next action.".into()),
-                input_schema: json!({ "type": "object" }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: empty_input_schema(),
+                output_schema: output_schema_for(OP_NEXT),
                 capability: CapabilityId::from_static(CAP_WRITE),
                 risk_level: RiskLevel::Medium,
                 safety_tier: SafetyTier::Risky,
@@ -232,8 +313,8 @@ impl SonosConnector {
                 id: OperationId::from_static(OP_PREVIOUS),
                 summary: "Go to previous track".into(),
                 description: Some("Send the Sonos Previous action.".into()),
-                input_schema: json!({ "type": "object" }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: empty_input_schema(),
+                output_schema: output_schema_for(OP_PREVIOUS),
                 capability: CapabilityId::from_static(CAP_WRITE),
                 risk_level: RiskLevel::Medium,
                 safety_tier: SafetyTier::Risky,
@@ -254,14 +335,8 @@ impl SonosConnector {
                 id: OperationId::from_static(OP_SET_VOLUME),
                 summary: "Set Sonos volume".into(),
                 description: Some("Set the Sonos master volume.".into()),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["volume"],
-                    "properties": {
-                        "volume": { "type": "integer" }
-                    }
-                }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: set_volume_input_schema(),
+                output_schema: output_schema_for(OP_SET_VOLUME),
                 capability: CapabilityId::from_static(CAP_WRITE),
                 risk_level: RiskLevel::Medium,
                 safety_tier: SafetyTier::Risky,
@@ -561,6 +636,16 @@ mod tests {
 
     use super::*;
 
+    const EXPECTED_MANIFEST_SCHEMA_OPS: [(&str, &str); 7] = [
+        (OP_HEALTH, "health"),
+        (OP_GET_STATUS, "get_status"),
+        (OP_PLAY, "play"),
+        (OP_PAUSE, "pause"),
+        (OP_NEXT, "next"),
+        (OP_PREVIOUS, "previous"),
+        (OP_SET_VOLUME, "set_volume"),
+    ];
+
     fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
         HandshakeRequest {
             protocol_version: "2.0.0".into(),
@@ -625,6 +710,75 @@ mod tests {
         }
     }
 
+    fn sonos_manifest() -> Result<toml::Value, String> {
+        toml::from_str(MANIFEST_TOML)
+            .map_err(|err| format!("Sonos manifest TOML should parse: {err}"))
+    }
+
+    fn manifest_operations(
+        manifest: &toml::Value,
+    ) -> Result<&toml::map::Map<String, toml::Value>, String> {
+        manifest
+            .get("provides")
+            .and_then(|provides| provides.get("operations"))
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| "manifest should declare operation tables".to_owned())
+    }
+
+    fn operation_schema(
+        manifest: &toml::Value,
+        operation_key: &str,
+        field: &str,
+    ) -> Result<serde_json::Value, String> {
+        let schema = manifest_operations(manifest)?
+            .get(operation_key)
+            .and_then(toml::Value::as_table)
+            .and_then(|operation| operation.get(field))
+            .ok_or_else(|| format!("{operation_key} should declare {field}"))?;
+        if schema.as_table().is_none_or(toml::map::Map::is_empty) {
+            return Err(format!(
+                "{operation_key}.{field} should be a non-empty schema table"
+            ));
+        }
+        serde_json::to_value(schema)
+            .map_err(|err| format!("{operation_key}.{field} should convert to JSON: {err}"))
+    }
+
+    fn validator_for(schema: &serde_json::Value) -> Result<jsonschema::Validator, String> {
+        jsonschema::Validator::new(schema)
+            .map_err(|err| format!("manifest operation schema should compile: {err}"))
+    }
+
+    fn assert_schema_accepts(
+        schema: &serde_json::Value,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        let errors = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "schema should accept {payload}; errors: {errors:?}"
+            ))
+        }
+    }
+
+    fn assert_schema_rejects(
+        schema: &serde_json::Value,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        if validator.iter_errors(payload).next().is_some() {
+            Ok(())
+        } else {
+            Err(format!("schema should reject {payload}"))
+        }
+    }
+
     #[test]
     fn operations_catalog_contains_transport_and_volume_entries() {
         let operations = SonosConnector::operations_info();
@@ -639,6 +793,154 @@ mod tests {
                 .iter()
                 .any(|operation| operation.id.as_str() == OP_SET_VOLUME)
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn manifest_operation_schemas_compile_and_validate_core_payloads() -> Result<(), String> {
+        let manifest = sonos_manifest()?;
+        let operations = manifest_operations(&manifest)?;
+        let operation_catalog = SonosConnector::operations_info();
+
+        for (operation_id, manifest_key) in EXPECTED_MANIFEST_SCHEMA_OPS {
+            assert!(
+                operations.contains_key(manifest_key),
+                "manifest should declare operation {manifest_key}"
+            );
+            let operation = operation_catalog
+                .iter()
+                .find(|operation| operation.id.as_str() == operation_id)
+                .ok_or_else(|| format!("operation catalog should declare {operation_id}"))?;
+            for field in ["input_schema", "output_schema"] {
+                let schema = operation_schema(&manifest, manifest_key, field)?;
+                let _validator = validator_for(&schema)?;
+            }
+            assert_eq!(
+                operation.input_schema,
+                operation_schema(&manifest, manifest_key, "input_schema")?,
+                "{operation_id} input schema should match manifest"
+            );
+            assert_eq!(
+                operation.output_schema,
+                operation_schema(&manifest, manifest_key, "output_schema")?,
+                "{operation_id} output schema should match manifest"
+            );
+        }
+
+        for operation in operation_catalog {
+            let _input_validator = validator_for(&operation.input_schema)?;
+            let _output_validator = validator_for(&operation.output_schema)?;
+        }
+
+        for operation_key in ["health", "get_status", "play", "pause", "next", "previous"] {
+            let input = operation_schema(&manifest, operation_key, "input_schema")?;
+            assert_schema_accepts(&input, &json!({}))?;
+            assert_schema_rejects(&input, &json!({"unexpected": true}))?;
+        }
+
+        let health_output = operation_schema(&manifest, "health", "output_schema")?;
+        assert_schema_accepts(
+            &health_output,
+            &json!({
+                "status": "ok",
+                "device_url": "http://speaker.local:1400",
+                "manifest_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            }),
+        )?;
+        assert_schema_rejects(
+            &health_output,
+            &json!({
+                "status": "ok",
+                "device_url": null,
+                "manifest_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            }),
+        )?;
+        assert_schema_rejects(
+            &health_output,
+            &json!({
+                "status": "ok",
+                "device_url": "http://speaker.local:1400",
+                "manifest_hash": "sha256:short"
+            }),
+        )?;
+        assert_schema_rejects(
+            &health_output,
+            &json!({
+                "status": "ok",
+                "device_url": "http://speaker.local:1400",
+                "manifest_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "extra": true
+            }),
+        )?;
+
+        let status_output = operation_schema(&manifest, "get_status", "output_schema")?;
+        assert_schema_accepts(
+            &status_output,
+            &json!({
+                "transport_state": "PLAYING",
+                "transport_status": "OK",
+                "volume": 18
+            }),
+        )?;
+        assert_schema_accepts(
+            &status_output,
+            &json!({
+                "transport_state": null,
+                "transport_status": null,
+                "volume": null
+            }),
+        )?;
+        assert_schema_rejects(
+            &status_output,
+            &json!({
+                "transport_state": "PLAYING",
+                "transport_status": "OK",
+                "volume": 101
+            }),
+        )?;
+        assert_schema_rejects(
+            &status_output,
+            &json!({
+                "transport_state": "PLAYING",
+                "transport_status": "OK",
+                "volume": 18,
+                "extra": true
+            }),
+        )?;
+
+        for (operation_key, action) in [
+            ("play", "play"),
+            ("pause", "pause"),
+            ("next", "next"),
+            ("previous", "previous"),
+        ] {
+            let output = operation_schema(&manifest, operation_key, "output_schema")?;
+            assert_schema_accepts(&output, &json!({"status": "ok", "action": action}))?;
+            assert_schema_rejects(&output, &json!({"status": "ok", "action": "other"}))?;
+            assert_schema_rejects(
+                &output,
+                &json!({"status": "ok", "action": action, "extra": true}),
+            )?;
+        }
+
+        let volume_input = operation_schema(&manifest, "set_volume", "input_schema")?;
+        assert_schema_accepts(&volume_input, &json!({"volume": 0}))?;
+        assert_schema_accepts(&volume_input, &json!({"volume": 100}))?;
+        assert_schema_rejects(&volume_input, &json!({}))?;
+        assert_schema_rejects(&volume_input, &json!({"volume": -1}))?;
+        assert_schema_rejects(&volume_input, &json!({"volume": 101}))?;
+        assert_schema_rejects(&volume_input, &json!({"volume": 18.5}))?;
+        assert_schema_rejects(&volume_input, &json!({"volume": 18, "extra": true}))?;
+
+        let volume_output = operation_schema(&manifest, "set_volume", "output_schema")?;
+        assert_schema_accepts(&volume_output, &json!({"status": "ok", "volume": 18}))?;
+        assert_schema_rejects(&volume_output, &json!({"status": "ok", "volume": 101}))?;
+        assert_schema_rejects(
+            &volume_output,
+            &json!({"status": "ok", "volume": 18, "extra": true}),
+        )?;
+
+        Ok(())
     }
 
     #[fcp_async_core::runtime::test]

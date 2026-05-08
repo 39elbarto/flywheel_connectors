@@ -32,6 +32,8 @@ capability = "hue.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+input_schema = { type = "object", additionalProperties = false }
+output_schema = { type = "object", required = ["status", "bridge_url", "manifest_hash", "transport", "allow_insecure_ssl", "app_key_configured"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, bridge_url = { type = "string", format = "uri" }, manifest_hash = { type = "string", pattern = "^sha256:[0-9a-f]{64}$" }, transport = { type = "string", enum = ["http-loopback", "https"] }, allow_insecure_ssl = { type = "boolean" }, app_key_configured = { type = "boolean" } } }
 
 [provides.operations.health.ai_hints]
 when_to_use = "When you need to confirm the Hue bridge connector is configured"
@@ -42,6 +44,8 @@ capability = "hue.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+input_schema = { type = "object", additionalProperties = false }
+output_schema = { type = "object", additionalProperties = true, properties = { data = { type = "array", items = { type = "object", additionalProperties = true } }, errors = { type = "array", items = { type = "object", additionalProperties = true } }, body = { type = "string" } } }
 
 [provides.operations.list_lights.ai_hints]
 when_to_use = "When you need the current bridge light inventory before issuing control operations"
@@ -52,6 +56,8 @@ capability = "hue.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+input_schema = { type = "object", additionalProperties = false }
+output_schema = { type = "object", additionalProperties = true, properties = { data = { type = "array", items = { type = "object", additionalProperties = true } }, errors = { type = "array", items = { type = "object", additionalProperties = true } }, body = { type = "string" } } }
 
 [provides.operations.list_scenes.ai_hints]
 when_to_use = "When you want to inspect available scenes before recall"
@@ -62,6 +68,8 @@ capability = "hue.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
+input_schema = { type = "object", required = ["light_id", "on"], additionalProperties = false, properties = { light_id = { type = "string", minLength = 1, pattern = "\\S" }, on = { type = "boolean" }, brightness = { type = "number", minimum = 0, maximum = 100 } } }
+output_schema = { type = "object", additionalProperties = true, properties = { data = { type = "array", items = { type = "object", additionalProperties = true } }, errors = { type = "array", items = { type = "object", additionalProperties = true } }, body = { type = "string" } } }
 
 [provides.operations.set_light_state.ai_hints]
 when_to_use = "When you want to change a specific Hue light's power state or brightness"
@@ -72,6 +80,8 @@ capability = "hue.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
+input_schema = { type = "object", required = ["scene_id"], additionalProperties = false, properties = { scene_id = { type = "string", minLength = 1, pattern = "\\S" } } }
+output_schema = { type = "object", additionalProperties = true, properties = { data = { type = "array", items = { type = "object", additionalProperties = true } }, errors = { type = "array", items = { type = "object", additionalProperties = true } }, body = { type = "string" } } }
 
 [provides.operations.recall_scene.ai_hints]
 when_to_use = "When you want the Hue bridge to activate a scene"

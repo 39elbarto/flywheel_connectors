@@ -49,5 +49,7 @@ uuid.workspace = true
 chrono.workspace = true
 ciborium.workspace = true
 fcp-crypto.workspace = true
+jsonschema.workspace = true
 sha1 = "0.10"
+toml.workspace = true
 wiremock.workspace = true

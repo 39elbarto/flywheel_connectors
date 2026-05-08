@@ -30,6 +30,8 @@ capability = "sonos.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+input_schema = { type = "object", additionalProperties = false }
+output_schema = { type = "object", required = ["status", "device_url", "manifest_hash"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, device_url = { type = "string", format = "uri" }, manifest_hash = { type = "string", pattern = "^sha256:[0-9a-f]{64}$" } } }
 
 [provides.operations.health.ai_hints]
 when_to_use = "Use this before playback control when you need to confirm the configured Sonos device endpoint is reachable and identifies as the expected speaker."
@@ -43,6 +45,8 @@ capability = "sonos.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+input_schema = { type = "object", additionalProperties = false }
+output_schema = { type = "object", required = ["transport_state", "transport_status", "volume"], additionalProperties = false, properties = { transport_state = { type = ["string", "null"] }, transport_status = { type = ["string", "null"] }, volume = { type = ["integer", "null"], minimum = 0, maximum = 100 } } }
 
 [provides.operations.get_status.ai_hints]
 when_to_use = "Use this when you need the current transport state and volume before deciding whether to play, pause, skip, or change loudness."
@@ -56,6 +60,8 @@ capability = "sonos.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
+input_schema = { type = "object", additionalProperties = false }
+output_schema = { type = "object", required = ["status", "action"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, action = { type = "string", enum = ["play"] } } }
 
 [provides.operations.play.ai_hints]
 when_to_use = "Use this to resume playback on the configured Sonos device after confirming the target room and queue state."
@@ -69,6 +75,8 @@ capability = "sonos.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
+input_schema = { type = "object", additionalProperties = false }
+output_schema = { type = "object", required = ["status", "action"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, action = { type = "string", enum = ["pause"] } } }
 
 [provides.operations.pause.ai_hints]
 when_to_use = "Use this to pause the currently configured Sonos device after verifying playback is active or the user explicitly asked to stop audio."
@@ -82,6 +90,8 @@ capability = "sonos.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
+input_schema = { type = "object", additionalProperties = false }
+output_schema = { type = "object", required = ["status", "action"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, action = { type = "string", enum = ["next"] } } }
 
 [provides.operations.next.ai_hints]
 when_to_use = "Use this when the user asks to skip forward in the active Sonos queue on the configured device."
@@ -95,6 +105,8 @@ capability = "sonos.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
+input_schema = { type = "object", additionalProperties = false }
+output_schema = { type = "object", required = ["status", "action"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, action = { type = "string", enum = ["previous"] } } }
 
 [provides.operations.previous.ai_hints]
 when_to_use = "Use this when the user asks to return to the previous item in the active Sonos queue."
@@ -108,6 +120,8 @@ capability = "sonos.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
+input_schema = { type = "object", required = ["volume"], additionalProperties = false, properties = { volume = { type = "integer", minimum = 0, maximum = 100 } } }
+output_schema = { type = "object", required = ["status", "volume"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, volume = { type = "integer", minimum = 0, maximum = 100 } } }
 
 [provides.operations.set_volume.ai_hints]
 when_to_use = "Use this to set an explicit 0-100 volume level on the configured Sonos device when the user gives a target loudness."

@@ -13,7 +13,7 @@ use fcp_prelude::{
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_sdk::prelude::*;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::client::GooglePlacesClient;
@@ -25,6 +25,208 @@ const OP_SEARCH_TEXT: &str = "google_places.search_text";
 const OP_AUTOCOMPLETE: &str = "google_places.autocomplete";
 const OP_GET_PLACE: &str = "google_places.get_place";
 const OP_HEALTH: &str = "google_places.health";
+
+fn nonblank_string_schema() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 1,
+        "pattern": "\\S"
+    })
+}
+
+fn unsigned_integer_schema() -> Value {
+    json!({
+        "type": "integer",
+        "minimum": 0,
+        "maximum": i64::from(u32::MAX)
+    })
+}
+
+fn localized_text_schema() -> Value {
+    json!({
+        "type": ["object", "null"],
+        "additionalProperties": true,
+        "properties": {
+            "text": { "type": ["string", "null"] },
+            "languageCode": { "type": ["string", "null"] }
+        }
+    })
+}
+
+fn suggestion_text_schema() -> Value {
+    json!({
+        "type": ["object", "null"],
+        "additionalProperties": true,
+        "properties": {
+            "text": { "type": ["string", "null"] }
+        }
+    })
+}
+
+fn place_record_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            "id": { "type": ["string", "null"] },
+            "name": { "type": ["string", "null"] },
+            "displayName": localized_text_schema(),
+            "formattedAddress": { "type": ["string", "null"] },
+            "types": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "googleMapsUri": { "type": ["string", "null"], "format": "uri" }
+        }
+    })
+}
+
+fn place_prediction_schema() -> Value {
+    json!({
+        "type": ["object", "null"],
+        "additionalProperties": true,
+        "properties": {
+            "place": { "type": ["string", "null"] },
+            "placeId": { "type": ["string", "null"] },
+            "text": suggestion_text_schema()
+        }
+    })
+}
+
+fn query_prediction_schema() -> Value {
+    json!({
+        "type": ["object", "null"],
+        "additionalProperties": true,
+        "properties": {
+            "text": suggestion_text_schema()
+        }
+    })
+}
+
+fn search_text_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["query"],
+        "additionalProperties": false,
+        "properties": {
+            "query": nonblank_string_schema(),
+            "max_result_count": unsigned_integer_schema(),
+            "open_now": { "type": "boolean" },
+            "field_mask": nonblank_string_schema()
+        }
+    })
+}
+
+fn autocomplete_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["input"],
+        "additionalProperties": false,
+        "properties": {
+            "input": nonblank_string_schema(),
+            "session_token": nonblank_string_schema(),
+            "field_mask": nonblank_string_schema()
+        }
+    })
+}
+
+fn get_place_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["place"],
+        "additionalProperties": false,
+        "properties": {
+            "place": nonblank_string_schema(),
+            "language_code": nonblank_string_schema(),
+            "field_mask": nonblank_string_schema()
+        }
+    })
+}
+
+fn empty_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "maxProperties": 0
+    })
+}
+
+fn search_text_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["places"],
+        "additionalProperties": true,
+        "properties": {
+            "places": {
+                "type": "array",
+                "items": place_record_schema()
+            }
+        }
+    })
+}
+
+fn autocomplete_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["suggestions"],
+        "additionalProperties": true,
+        "properties": {
+            "suggestions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                        "placePrediction": place_prediction_schema(),
+                        "queryPrediction": query_prediction_schema()
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn health_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["status", "base_url", "manifest_hash", "field_masks"],
+        "additionalProperties": false,
+        "properties": {
+            "status": { "type": "string", "enum": ["ok"] },
+            "base_url": { "type": "string", "format": "uri" },
+            "manifest_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "field_masks": {
+                "type": "object",
+                "required": ["search_text", "autocomplete", "place_details"],
+                "additionalProperties": false,
+                "properties": {
+                    "search_text": nonblank_string_schema(),
+                    "autocomplete": nonblank_string_schema(),
+                    "place_details": nonblank_string_schema()
+                }
+            }
+        }
+    })
+}
+
+fn input_schema_for(operation_id: &str) -> Value {
+    match operation_id {
+        OP_SEARCH_TEXT => search_text_input_schema(),
+        OP_AUTOCOMPLETE => autocomplete_input_schema(),
+        OP_GET_PLACE => get_place_input_schema(),
+        _ => empty_input_schema(),
+    }
+}
+
+fn output_schema_for(operation_id: &str) -> Value {
+    match operation_id {
+        OP_SEARCH_TEXT => search_text_output_schema(),
+        OP_AUTOCOMPLETE => autocomplete_output_schema(),
+        OP_GET_PLACE => place_record_schema(),
+        OP_HEALTH => health_output_schema(),
+        _ => json!({ "type": "object", "additionalProperties": true }),
+    }
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorCheck {
@@ -122,17 +324,8 @@ impl GooglePlacesConnector {
                 id: OperationId::from_static(OP_SEARCH_TEXT),
                 summary: "Search places by text query".into(),
                 description: Some("Call Google Places text search.".into()),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["query"],
-                    "properties": {
-                        "query": { "type": "string" },
-                        "max_result_count": { "type": "integer" },
-                        "open_now": { "type": "boolean" },
-                        "field_mask": { "type": "string" }
-                    }
-                }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: input_schema_for(OP_SEARCH_TEXT),
+                output_schema: output_schema_for(OP_SEARCH_TEXT),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
@@ -154,16 +347,8 @@ impl GooglePlacesConnector {
                 id: OperationId::from_static(OP_AUTOCOMPLETE),
                 summary: "Autocomplete place predictions".into(),
                 description: Some("Call Google Places autocomplete.".into()),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["input"],
-                    "properties": {
-                        "input": { "type": "string" },
-                        "session_token": { "type": "string" },
-                        "field_mask": { "type": "string" }
-                    }
-                }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: input_schema_for(OP_AUTOCOMPLETE),
+                output_schema: output_schema_for(OP_AUTOCOMPLETE),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
@@ -181,16 +366,8 @@ impl GooglePlacesConnector {
                 id: OperationId::from_static(OP_GET_PLACE),
                 summary: "Get one place resource".into(),
                 description: Some("Fetch structured details for a place resource name.".into()),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["place"],
-                    "properties": {
-                        "place": { "type": "string" },
-                        "language_code": { "type": "string" },
-                        "field_mask": { "type": "string" }
-                    }
-                }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: input_schema_for(OP_GET_PLACE),
+                output_schema: output_schema_for(OP_GET_PLACE),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
@@ -210,8 +387,8 @@ impl GooglePlacesConnector {
                 id: OperationId::from_static(OP_HEALTH),
                 summary: "Report connector health details".into(),
                 description: Some("Return connector configuration and upstream target details.".into()),
-                input_schema: json!({ "type": "object" }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: input_schema_for(OP_HEALTH),
+                output_schema: output_schema_for(OP_HEALTH),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
@@ -505,6 +682,141 @@ mod tests {
 
     use super::*;
 
+    const EXPECTED_MANIFEST_SCHEMA_OPS: &[(&str, &str)] = &[
+        (OP_SEARCH_TEXT, "search_text"),
+        (OP_AUTOCOMPLETE, "autocomplete"),
+        (OP_GET_PLACE, "get_place"),
+        (OP_HEALTH, "health"),
+    ];
+
+    fn places_manifest() -> Result<toml::Value, String> {
+        toml::from_str(MANIFEST_TOML)
+            .map_err(|err| format!("Google Places manifest TOML should parse: {err}"))
+    }
+
+    fn manifest_operations(
+        manifest: &toml::Value,
+    ) -> Result<&toml::map::Map<String, toml::Value>, String> {
+        manifest
+            .get("provides")
+            .and_then(|provides| provides.get("operations"))
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| "manifest should declare operation tables".to_owned())
+    }
+
+    fn operation_schema(
+        manifest: &toml::Value,
+        operation_key: &str,
+        field: &str,
+    ) -> Result<Value, String> {
+        let schema = manifest_operations(manifest)?
+            .get(operation_key)
+            .and_then(toml::Value::as_table)
+            .and_then(|operation| operation.get(field))
+            .ok_or_else(|| format!("{operation_key} should declare {field}"))?;
+        if schema.as_table().is_none_or(toml::map::Map::is_empty) {
+            return Err(format!(
+                "{operation_key}.{field} should be a non-empty schema table"
+            ));
+        }
+        serde_json::to_value(schema)
+            .map_err(|err| format!("{operation_key}.{field} should convert to JSON: {err}"))
+    }
+
+    fn validator_for(schema: &Value) -> Result<jsonschema::Validator, String> {
+        jsonschema::Validator::new(schema)
+            .map_err(|err| format!("manifest operation schema should compile: {err}"))
+    }
+
+    fn assert_schema_accepts(schema: &Value, payload: &Value) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        let errors = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "schema should accept {payload}; errors: {errors:?}"
+            ))
+        }
+    }
+
+    fn assert_schema_rejects(schema: &Value, payload: &Value) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        if validator.iter_errors(payload).next().is_some() {
+            Ok(())
+        } else {
+            Err(format!("schema should reject {payload}"))
+        }
+    }
+
+    fn sample_search_text_output() -> Value {
+        json!({
+            "places": [
+                {
+                    "id": "abc123",
+                    "name": "places/abc123",
+                    "displayName": {
+                        "text": "Coffee Shop",
+                        "languageCode": "en"
+                    },
+                    "formattedAddress": "123 Main St",
+                    "types": ["cafe", "food"],
+                    "googleMapsUri": "https://maps.google.com/?cid=123"
+                }
+            ],
+            "contextualContents": [{ "rank": 1 }]
+        })
+    }
+
+    fn sample_autocomplete_output() -> Value {
+        json!({
+            "suggestions": [
+                {
+                    "placePrediction": {
+                        "place": "places/abc123",
+                        "placeId": "abc123",
+                        "text": { "text": "Coffee Shop" }
+                    }
+                },
+                {
+                    "queryPrediction": {
+                        "text": { "text": "coffee near me" }
+                    }
+                }
+            ]
+        })
+    }
+
+    fn sample_get_place_output() -> Value {
+        json!({
+            "id": "abc123",
+            "name": "places/abc123",
+            "displayName": {
+                "text": "Coffee Shop",
+                "languageCode": "en"
+            },
+            "formattedAddress": "123 Main St",
+            "types": ["cafe"],
+            "googleMapsUri": "https://maps.google.com/?cid=123"
+        })
+    }
+
+    fn sample_health_output() -> Value {
+        json!({
+            "status": "ok",
+            "base_url": "https://places.googleapis.com",
+            "manifest_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "field_masks": {
+                "search_text": "places.id,places.name",
+                "autocomplete": "suggestions.placePrediction.place",
+                "place_details": "id,name"
+            }
+        })
+    }
+
     fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
         HandshakeRequest {
             protocol_version: "2.0.0".into(),
@@ -601,5 +913,120 @@ mod tests {
                 .iter()
                 .any(|operation| operation.id.as_str() == OP_GET_PLACE)
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn manifest_operation_schemas_compile_and_validate_core_payloads() -> Result<(), String> {
+        let manifest = places_manifest()?;
+        let operations = manifest_operations(&manifest)?;
+        let operation_catalog = GooglePlacesConnector::new().introspect().operations;
+
+        assert_eq!(
+            operations.len(),
+            EXPECTED_MANIFEST_SCHEMA_OPS.len(),
+            "manifest should declare only the expected operations"
+        );
+        assert_eq!(
+            operation_catalog.len(),
+            EXPECTED_MANIFEST_SCHEMA_OPS.len(),
+            "runtime operation catalog should declare only the expected operations"
+        );
+
+        for (operation_id, manifest_key) in EXPECTED_MANIFEST_SCHEMA_OPS {
+            assert!(
+                operations.contains_key(*manifest_key),
+                "manifest should declare operation {manifest_key}"
+            );
+            let operation = operation_catalog
+                .iter()
+                .find(|operation| operation.id.as_str() == *operation_id)
+                .ok_or_else(|| format!("operation catalog should declare {operation_id}"))?;
+            for field in ["input_schema", "output_schema"] {
+                let schema = operation_schema(&manifest, manifest_key, field)?;
+                let _validator = validator_for(&schema)?;
+            }
+            assert_eq!(
+                operation.input_schema,
+                operation_schema(&manifest, manifest_key, "input_schema")?,
+                "{operation_id} input schema should match manifest"
+            );
+            assert_eq!(
+                operation.output_schema,
+                operation_schema(&manifest, manifest_key, "output_schema")?,
+                "{operation_id} output schema should match manifest"
+            );
+        }
+
+        let search_input = operation_schema(&manifest, "search_text", "input_schema")?;
+        assert_schema_accepts(
+            &search_input,
+            &json!({
+                "query": "coffee near Bryant Park",
+                "max_result_count": 5,
+                "open_now": true,
+                "field_mask": "places.id,places.displayName"
+            }),
+        )?;
+        assert_schema_rejects(&search_input, &json!({ "query": "   " }))?;
+        assert_schema_rejects(
+            &search_input,
+            &json!({
+                "query": "coffee",
+                "unexpected": true
+            }),
+        )?;
+
+        let autocomplete_input = operation_schema(&manifest, "autocomplete", "input_schema")?;
+        assert_schema_accepts(
+            &autocomplete_input,
+            &json!({
+                "input": "sushi soho london",
+                "session_token": "session-123",
+                "field_mask": "suggestions.placePrediction.place"
+            }),
+        )?;
+        assert_schema_rejects(&autocomplete_input, &json!({ "input": "" }))?;
+        assert_schema_rejects(
+            &autocomplete_input,
+            &json!({
+                "input": "sushi",
+                "extra": "ignored-by-serde-but-not-by-schema"
+            }),
+        )?;
+
+        let get_place_input = operation_schema(&manifest, "get_place", "input_schema")?;
+        assert_schema_accepts(
+            &get_place_input,
+            &json!({
+                "place": "places/ChIJN1t_tDeuEmsRUsoyG83frY4",
+                "language_code": "en",
+                "field_mask": "id,name,displayName"
+            }),
+        )?;
+        assert_schema_rejects(&get_place_input, &json!({ "place": " " }))?;
+
+        let health_input = operation_schema(&manifest, "health", "input_schema")?;
+        assert_schema_accepts(&health_input, &json!({}))?;
+        assert_schema_rejects(&health_input, &json!({ "probe": true }))?;
+
+        assert_schema_accepts(
+            &operation_schema(&manifest, "search_text", "output_schema")?,
+            &sample_search_text_output(),
+        )?;
+        assert_schema_accepts(
+            &operation_schema(&manifest, "autocomplete", "output_schema")?,
+            &sample_autocomplete_output(),
+        )?;
+        assert_schema_accepts(
+            &operation_schema(&manifest, "get_place", "output_schema")?,
+            &sample_get_place_output(),
+        )?;
+        assert_schema_accepts(
+            &operation_schema(&manifest, "health", "output_schema")?,
+            &sample_health_output(),
+        )?;
+
+        Ok(())
     }
 }

@@ -27,6 +27,325 @@ use crate::types::{
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
+fn empty_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false
+    })
+}
+
+fn nonblank_string_schema() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 1,
+        "pattern": "\\S"
+    })
+}
+
+fn target_id_schema() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^[^/\\\\]+$",
+        "not": {
+            "pattern": "\\.\\.|%2[fFeE]|%5[cC]"
+        }
+    })
+}
+
+fn send_message_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            "id": { "type": "string" },
+            "timestamp": { "type": "string" }
+        }
+    })
+}
+
+fn channel_send_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["channel_id", "content"],
+        "additionalProperties": false,
+        "properties": {
+            "channel_id": target_id_schema(),
+            "content": nonblank_string_schema(),
+            "msg_id": { "type": "string" }
+        }
+    })
+}
+
+fn group_send_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["group_openid", "content"],
+        "additionalProperties": false,
+        "properties": {
+            "group_openid": target_id_schema(),
+            "content": nonblank_string_schema(),
+            "msg_id": { "type": "string" }
+        }
+    })
+}
+
+fn c2c_send_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["openid", "content"],
+        "additionalProperties": false,
+        "properties": {
+            "openid": target_id_schema(),
+            "content": nonblank_string_schema(),
+            "msg_id": { "type": "string" }
+        }
+    })
+}
+
+fn gateway_event_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["op"],
+        "additionalProperties": false,
+        "properties": {
+            "op": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+            },
+            "s": {
+                "type": ["integer", "null"],
+                "minimum": 0
+            },
+            "t": {
+                "type": ["string", "null"],
+                "maxLength": 64,
+                "pattern": "^[A-Z0-9_]+$"
+            },
+            "d": {
+                "type": ["object", "null"],
+                "additionalProperties": true
+            },
+            "id": {
+                "type": ["string", "null"],
+                "maxLength": 256
+            }
+        }
+    })
+}
+
+fn gateway_event_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["event"],
+        "additionalProperties": false,
+        "properties": {
+            "event": gateway_event_schema()
+        }
+    })
+}
+
+fn normalized_event_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": [
+            "event_type",
+            "message_id",
+            "channel_id",
+            "guild_id",
+            "group_id",
+            "sender_id",
+            "sender_name",
+            "text",
+            "timestamp",
+            "is_reply",
+            "reply_to",
+            "has_attachments",
+            "routing",
+            "raw"
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "event_type": { "type": "string" },
+            "message_id": { "type": ["string", "null"] },
+            "channel_id": { "type": ["string", "null"] },
+            "guild_id": { "type": ["string", "null"] },
+            "group_id": { "type": ["string", "null"] },
+            "sender_id": { "type": ["string", "null"] },
+            "sender_name": { "type": ["string", "null"] },
+            "text": { "type": ["string", "null"] },
+            "timestamp": { "type": ["string", "null"] },
+            "is_reply": { "type": "boolean" },
+            "reply_to": { "type": ["string", "null"] },
+            "has_attachments": { "type": "boolean" },
+            "routing": {
+                "type": "string",
+                "enum": ["channel", "group", "c2c"]
+            },
+            "raw": {
+                "type": ["object", "null"],
+                "additionalProperties": true
+            }
+        }
+    })
+}
+
+fn inbound_policy_decision_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": [
+            "allowed",
+            "reason_code",
+            "routing",
+            "sender_id",
+            "target_id",
+            "mentioned_bot"
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "allowed": { "type": "boolean" },
+            "reason_code": { "type": "string" },
+            "routing": {
+                "type": "string",
+                "enum": ["channel", "group", "c2c"]
+            },
+            "sender_id": { "type": ["string", "null"] },
+            "target_id": { "type": ["string", "null"] },
+            "mentioned_bot": { "type": "boolean" }
+        }
+    })
+}
+
+fn gateway_runtime_snapshot_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": [
+            "enabled",
+            "session_id",
+            "last_sequence",
+            "heartbeat_interval_ms",
+            "heartbeat_sent_count",
+            "heartbeat_ack_count",
+            "reconnect_attempts",
+            "max_reconnect_attempts",
+            "reconnect_backoff_ms",
+            "queue_depth",
+            "max_queue_depth",
+            "dedupe_size",
+            "dedupe_window_size",
+            "accepted_events",
+            "dropped_events",
+            "duplicate_events",
+            "stale_sequence_events"
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "enabled": { "type": "boolean" },
+            "session_id": { "type": ["string", "null"] },
+            "last_sequence": { "type": "integer", "minimum": 0 },
+            "heartbeat_interval_ms": { "type": "integer", "minimum": 0 },
+            "heartbeat_sent_count": { "type": "integer", "minimum": 0 },
+            "heartbeat_ack_count": { "type": "integer", "minimum": 0 },
+            "reconnect_attempts": { "type": "integer", "minimum": 0 },
+            "max_reconnect_attempts": { "type": "integer", "minimum": 0 },
+            "reconnect_backoff_ms": { "type": "integer", "minimum": 0 },
+            "queue_depth": { "type": "integer", "minimum": 0 },
+            "max_queue_depth": { "type": "integer", "minimum": 0 },
+            "dedupe_size": { "type": "integer", "minimum": 0 },
+            "dedupe_window_size": { "type": "integer", "minimum": 0 },
+            "accepted_events": { "type": "integer", "minimum": 0 },
+            "dropped_events": { "type": "integer", "minimum": 0 },
+            "duplicate_events": { "type": "integer", "minimum": 0 },
+            "stale_sequence_events": { "type": "integer", "minimum": 0 }
+        }
+    })
+}
+
+fn gateway_projection_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": [
+            "accepted",
+            "topic",
+            "reason_code",
+            "sequence",
+            "event_id",
+            "normalized",
+            "policy",
+            "runtime"
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "accepted": { "type": "boolean" },
+            "topic": {
+                "type": "string",
+                "enum": [EVENT_QQ_MESSAGE_AUTHORIZED, EVENT_QQ_EVENT_DROPPED]
+            },
+            "reason_code": { "type": "string" },
+            "sequence": { "type": ["integer", "null"], "minimum": 0 },
+            "event_id": { "type": ["string", "null"] },
+            "normalized": {
+                "anyOf": [
+                    normalized_event_schema(),
+                    { "type": "null" }
+                ]
+            },
+            "policy": {
+                "anyOf": [
+                    inbound_policy_decision_schema(),
+                    { "type": "null" }
+                ]
+            },
+            "runtime": gateway_runtime_snapshot_schema()
+        }
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn output_schema_for(operation_id: &str) -> Value {
+    match operation_id {
+        OP_SEND_CHANNEL | OP_SEND_GROUP | OP_SEND_C2C => send_message_output_schema(),
+        OP_GET_GATEWAY => json!({
+            "type": "object",
+            "required": ["url"],
+            "additionalProperties": true,
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "format": "uri"
+                }
+            }
+        }),
+        OP_HEALTH => json!({
+            "type": "object",
+            "required": ["status", "base_url", "gateway", "manifest_hash"],
+            "additionalProperties": false,
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["ok"]
+                },
+                "base_url": {
+                    "type": "string",
+                    "format": "uri"
+                },
+                "gateway": {
+                    "type": ["string", "null"],
+                    "format": "uri"
+                },
+                "manifest_hash": {
+                    "type": "string",
+                    "pattern": "^sha256:[0-9a-f]{64}$"
+                }
+            }
+        }),
+        OP_EVENTS_NORMALIZE => normalized_event_schema(),
+        OP_GATEWAY_PROJECT_EVENT => gateway_projection_schema(),
+        _ => json!({ "type": "object" }),
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────
 // Doctor types (V3 requirement)
 // ─────────────────────────────────────────────────────────────────
@@ -143,15 +462,7 @@ impl QqConnector {
                 RiskLevel::Medium,
                 SafetyTier::Risky,
                 IdempotencyClass::None,
-                json!({
-                    "type": "object",
-                    "required": ["channel_id", "content"],
-                    "properties": {
-                        "channel_id": { "type": "string" },
-                        "content": { "type": "string" },
-                        "msg_id": { "type": "string" }
-                    }
-                }),
+                channel_send_input_schema(),
                 "Use for QQ channel deliveries when you already know the target channel_id.",
             ),
             operation(
@@ -161,15 +472,7 @@ impl QqConnector {
                 RiskLevel::Medium,
                 SafetyTier::Risky,
                 IdempotencyClass::None,
-                json!({
-                    "type": "object",
-                    "required": ["group_openid", "content"],
-                    "properties": {
-                        "group_openid": { "type": "string" },
-                        "content": { "type": "string" },
-                        "msg_id": { "type": "string" }
-                    }
-                }),
+                group_send_input_schema(),
                 "Use for QQ group deliveries to a known group_openid target.",
             ),
             operation(
@@ -179,15 +482,7 @@ impl QqConnector {
                 RiskLevel::Medium,
                 SafetyTier::Risky,
                 IdempotencyClass::None,
-                json!({
-                    "type": "object",
-                    "required": ["openid", "content"],
-                    "properties": {
-                        "openid": { "type": "string" },
-                        "content": { "type": "string" },
-                        "msg_id": { "type": "string" }
-                    }
-                }),
+                c2c_send_input_schema(),
                 "Use for one-to-one QQ bot messages directed at a specific openid.",
             ),
             operation(
@@ -197,7 +492,7 @@ impl QqConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({ "type": "object" }),
+                empty_input_schema(),
                 "Use when a higher-level runtime needs the official QQ gateway URL for event intake.",
             ),
             operation(
@@ -207,7 +502,7 @@ impl QqConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({ "type": "object" }),
+                empty_input_schema(),
                 "Use before higher-risk send operations when you need a bounded auth and connectivity check.",
             ),
             operation(
@@ -217,24 +512,7 @@ impl QqConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({
-                    "type": "object",
-                    "required": ["event"],
-                    "properties": {
-                        "event": {
-                            "type": "object",
-                            "description": "Raw QQ gateway event payload",
-                            "required": ["op"],
-                            "properties": {
-                                "op": { "type": "integer" },
-                                "s": { "type": "integer" },
-                                "t": { "type": "string" },
-                                "d": { "type": "object" },
-                                "id": { "type": "string" }
-                            }
-                        }
-                    }
-                }),
+                gateway_event_input_schema(),
                 "Use to normalize raw QQ Bot WebSocket gateway events into structured events with routing classification (channel/group/c2c), quote context, and attachment detection.",
             ),
             operation(
@@ -244,24 +522,7 @@ impl QqConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({
-                    "type": "object",
-                    "required": ["event"],
-                    "properties": {
-                        "event": {
-                            "type": "object",
-                            "description": "Raw QQ gateway event payload",
-                            "required": ["op"],
-                            "properties": {
-                                "op": { "type": "integer" },
-                                "s": { "type": "integer" },
-                                "t": { "type": "string" },
-                                "d": { "type": "object" },
-                                "id": { "type": "string" }
-                            }
-                        }
-                    }
-                }),
+                gateway_event_input_schema(),
                 "Use when a host-owned QQ WebSocket loop needs connector-side sequence, duplicate, and inbound-policy projection before agent-visible event fanout.",
             ),
         ]
@@ -723,7 +984,7 @@ fn operation(
         summary: summary.into(),
         description: Some(summary.into()),
         input_schema,
-        output_schema: json!({ "type": "object" }),
+        output_schema: output_schema_for(id),
         capability: CapabilityId::from_static(capability),
         risk_level,
         safety_tier,
@@ -794,6 +1055,158 @@ mod tests {
         )
     }
 
+    const EXPECTED_MANIFEST_SCHEMA_OPS: &[(&str, &str)] = &[
+        (OP_SEND_CHANNEL, "messages_send_channel"),
+        (OP_SEND_GROUP, "messages_send_group"),
+        (OP_SEND_C2C, "messages_send_c2c"),
+        (OP_GET_GATEWAY, "gateway_get"),
+        (OP_EVENTS_NORMALIZE, "events_normalize"),
+        (OP_GATEWAY_PROJECT_EVENT, "gateway_project_event"),
+        (OP_HEALTH, "health"),
+    ];
+
+    fn qq_manifest() -> Result<toml::Value, String> {
+        toml::from_str(MANIFEST_TOML).map_err(|err| format!("QQ manifest TOML should parse: {err}"))
+    }
+
+    fn manifest_operations(
+        manifest: &toml::Value,
+    ) -> Result<&toml::map::Map<String, toml::Value>, String> {
+        manifest
+            .get("provides")
+            .and_then(|provides| provides.get("operations"))
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| "manifest should declare operation tables".to_owned())
+    }
+
+    fn operation_schema(
+        manifest: &toml::Value,
+        operation_key: &str,
+        field: &str,
+    ) -> Result<serde_json::Value, String> {
+        let schema = manifest_operations(manifest)?
+            .get(operation_key)
+            .and_then(toml::Value::as_table)
+            .and_then(|operation| operation.get(field))
+            .ok_or_else(|| format!("{operation_key} should declare {field}"))?;
+        if schema.as_table().is_none_or(toml::map::Map::is_empty) {
+            return Err(format!(
+                "{operation_key}.{field} should be a non-empty schema table"
+            ));
+        }
+        serde_json::to_value(schema)
+            .map_err(|err| format!("{operation_key}.{field} should convert to JSON: {err}"))
+    }
+
+    fn validator_for(schema: &serde_json::Value) -> Result<jsonschema::Validator, String> {
+        jsonschema::Validator::new(schema)
+            .map_err(|err| format!("manifest operation schema should compile: {err}"))
+    }
+
+    fn assert_schema_accepts(
+        schema: &serde_json::Value,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        let errors = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "schema should accept {payload}; errors: {errors:?}"
+            ))
+        }
+    }
+
+    fn assert_schema_rejects(
+        schema: &serde_json::Value,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        if validator.iter_errors(payload).next().is_some() {
+            Ok(())
+        } else {
+            Err(format!("schema should reject {payload}"))
+        }
+    }
+
+    fn sample_gateway_event() -> Value {
+        json!({
+            "op": 0,
+            "s": 1,
+            "t": "GROUP_AT_MESSAGE_CREATE",
+            "id": "evt-1",
+            "d": {
+                "id": "msg-1",
+                "content": "bot-openid deploy status?",
+                "group_openid": "group-1",
+                "group_member_openid": "member-1",
+                "author": {
+                    "id": "member-1",
+                    "username": "Alice"
+                }
+            }
+        })
+    }
+
+    fn sample_normalized_event() -> Value {
+        json!({
+            "event_type": "GROUP_AT_MESSAGE_CREATE",
+            "message_id": "msg-1",
+            "channel_id": null,
+            "guild_id": null,
+            "group_id": "group-1",
+            "sender_id": "member-1",
+            "sender_name": "Alice",
+            "text": "bot-openid deploy status?",
+            "timestamp": null,
+            "is_reply": false,
+            "reply_to": null,
+            "has_attachments": false,
+            "routing": "group",
+            "raw": {
+                "id": "msg-1",
+                "content": "bot-openid deploy status?"
+            }
+        })
+    }
+
+    fn sample_runtime_snapshot() -> Value {
+        json!({
+            "enabled": true,
+            "session_id": "session-1",
+            "last_sequence": 1,
+            "heartbeat_interval_ms": 45_000,
+            "heartbeat_sent_count": 0,
+            "heartbeat_ack_count": 0,
+            "reconnect_attempts": 0,
+            "max_reconnect_attempts": 5,
+            "reconnect_backoff_ms": 1_000,
+            "queue_depth": 1,
+            "max_queue_depth": 128,
+            "dedupe_size": 1,
+            "dedupe_window_size": 1_024,
+            "accepted_events": 1,
+            "dropped_events": 0,
+            "duplicate_events": 0,
+            "stale_sequence_events": 0
+        })
+    }
+
+    fn sample_policy_decision() -> Value {
+        json!({
+            "allowed": true,
+            "reason_code": "group_allowed",
+            "routing": "group",
+            "sender_id": "member-1",
+            "target_id": "group-1",
+            "mentioned_bot": true
+        })
+    }
+
     async fn ready_connector(signing_key: &Ed25519SigningKey) -> QqConnector {
         let instance_id = InstanceId::new();
         let mut connector = QqConnector::new();
@@ -853,6 +1266,173 @@ mod tests {
         assert!(ids.contains(&"qq.health"));
         assert!(ids.contains(&"qq.events.normalize"));
         assert!(ids.contains(&"qq.gateway.project_event"));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn manifest_operation_schemas_compile_and_validate_core_payloads() -> Result<(), String> {
+        let manifest = qq_manifest()?;
+        let operations = manifest_operations(&manifest)?;
+        let operation_catalog = QqConnector::operations();
+
+        for (operation_id, manifest_key) in EXPECTED_MANIFEST_SCHEMA_OPS {
+            assert!(
+                operations.contains_key(*manifest_key),
+                "manifest should declare operation {manifest_key}"
+            );
+            let operation = operation_catalog
+                .iter()
+                .find(|operation| operation.id.as_str() == *operation_id)
+                .ok_or_else(|| format!("operation catalog should declare {operation_id}"))?;
+            for field in ["input_schema", "output_schema"] {
+                let schema = operation_schema(&manifest, manifest_key, field)?;
+                let _validator = validator_for(&schema)?;
+            }
+            assert_eq!(
+                operation.input_schema,
+                operation_schema(&manifest, manifest_key, "input_schema")?,
+                "{operation_id} input schema should match manifest"
+            );
+            assert_eq!(
+                operation.output_schema,
+                operation_schema(&manifest, manifest_key, "output_schema")?,
+                "{operation_id} output schema should match manifest"
+            );
+        }
+
+        for operation in operation_catalog {
+            let _input_validator = validator_for(&operation.input_schema)?;
+            let _output_validator = validator_for(&operation.output_schema)?;
+        }
+
+        let channel_input = operation_schema(&manifest, "messages_send_channel", "input_schema")?;
+        assert_schema_accepts(
+            &channel_input,
+            &json!({"channel_id": "channel-1", "content": "hello", "msg_id": ""}),
+        )?;
+        assert_schema_rejects(&channel_input, &json!({"channel_id": "channel-1"}))?;
+        assert_schema_rejects(
+            &channel_input,
+            &json!({"channel_id": "../admin", "content": "hello"}),
+        )?;
+        assert_schema_rejects(
+            &channel_input,
+            &json!({"channel_id": "channel-1", "content": "hello", "extra": true}),
+        )?;
+
+        let group_input = operation_schema(&manifest, "messages_send_group", "input_schema")?;
+        assert_schema_accepts(
+            &group_input,
+            &json!({"group_openid": "group-1", "content": "hello"}),
+        )?;
+        assert_schema_rejects(
+            &group_input,
+            &json!({"group_openid": "group/1", "content": "hello"}),
+        )?;
+
+        let c2c_input = operation_schema(&manifest, "messages_send_c2c", "input_schema")?;
+        assert_schema_accepts(&c2c_input, &json!({"openid": "user-1", "content": "hello"}))?;
+        assert_schema_rejects(&c2c_input, &json!({"openid": "user-1", "content": "   "}))?;
+
+        for operation_key in ["gateway_get", "health"] {
+            let input = operation_schema(&manifest, operation_key, "input_schema")?;
+            assert_schema_accepts(&input, &json!({}))?;
+            assert_schema_rejects(&input, &json!({"unexpected": true}))?;
+        }
+
+        for operation_key in ["events_normalize", "gateway_project_event"] {
+            let input = operation_schema(&manifest, operation_key, "input_schema")?;
+            assert_schema_accepts(&input, &json!({"event": sample_gateway_event()}))?;
+            assert_schema_rejects(&input, &json!({}))?;
+            assert_schema_rejects(&input, &json!({"event": {"op": 300}}))?;
+            assert_schema_rejects(&input, &json!({"event": {"op": 0, "t": "lowercase_event"}}))?;
+            assert_schema_rejects(&input, &json!({"event": {"op": 0}, "unexpected": true}))?;
+        }
+
+        for operation_key in [
+            "messages_send_channel",
+            "messages_send_group",
+            "messages_send_c2c",
+        ] {
+            let output = operation_schema(&manifest, operation_key, "output_schema")?;
+            assert_schema_accepts(
+                &output,
+                &json!({"id": "msg-1", "timestamp": "2026-04-27T19:00:00Z"}),
+            )?;
+            assert_schema_rejects(&output, &json!([{"id": "msg-1"}]))?;
+        }
+
+        let gateway_output = operation_schema(&manifest, "gateway_get", "output_schema")?;
+        assert_schema_accepts(&gateway_output, &json!({"url": "wss://gateway.qq.com"}))?;
+        assert_schema_rejects(&gateway_output, &json!({}))?;
+
+        let health_output = operation_schema(&manifest, "health", "output_schema")?;
+        assert_schema_accepts(
+            &health_output,
+            &json!({
+                "status": "ok",
+                "base_url": "https://api.sgroup.qq.com",
+                "gateway": "wss://gateway.qq.com",
+                "manifest_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            }),
+        )?;
+        assert_schema_rejects(
+            &health_output,
+            &json!({
+                "status": "ok",
+                "base_url": "https://api.sgroup.qq.com",
+                "gateway": "wss://gateway.qq.com",
+                "manifest_hash": "sha256:short"
+            }),
+        )?;
+
+        let normalize_output = operation_schema(&manifest, "events_normalize", "output_schema")?;
+        assert_schema_accepts(&normalize_output, &sample_normalized_event())?;
+        assert_schema_rejects(&normalize_output, &json!({"routing": "group"}))?;
+
+        let projection_output =
+            operation_schema(&manifest, "gateway_project_event", "output_schema")?;
+        assert_schema_accepts(
+            &projection_output,
+            &json!({
+                "accepted": true,
+                "topic": EVENT_QQ_MESSAGE_AUTHORIZED,
+                "reason_code": "accepted",
+                "sequence": 1,
+                "event_id": "evt-1",
+                "normalized": sample_normalized_event(),
+                "policy": sample_policy_decision(),
+                "runtime": sample_runtime_snapshot()
+            }),
+        )?;
+        assert_schema_accepts(
+            &projection_output,
+            &json!({
+                "accepted": false,
+                "topic": EVENT_QQ_EVENT_DROPPED,
+                "reason_code": "heartbeat_ack",
+                "sequence": null,
+                "event_id": null,
+                "normalized": null,
+                "policy": null,
+                "runtime": sample_runtime_snapshot()
+            }),
+        )?;
+        assert_schema_rejects(
+            &projection_output,
+            &json!({
+                "accepted": false,
+                "topic": "qq.unsupported",
+                "reason_code": "heartbeat_ack",
+                "sequence": null,
+                "event_id": null,
+                "normalized": null,
+                "policy": null,
+                "runtime": sample_runtime_snapshot()
+            }),
+        )?;
+
+        Ok(())
     }
 
     #[test]

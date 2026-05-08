@@ -38,8 +38,71 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "best_effort"
-input_schema = { type = "object", required = ["model_id", "messages"] }
-output_schema = { type = "object" }
+
+[provides.operations."aws_bedrock.converse".input_schema]
+type = "object"
+required = ["model_id", "messages"]
+additionalProperties = false
+
+[provides.operations."aws_bedrock.converse".input_schema.properties.model_id]
+type = "string"
+minLength = 1
+allOf = [{ pattern = "\\S" }, { pattern = "^[^/\\\\]+$" }]
+
+[provides.operations."aws_bedrock.converse".input_schema.properties.messages]
+type = "array"
+minItems = 1
+
+[provides.operations."aws_bedrock.converse".input_schema.properties.messages.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse".input_schema.properties.system]
+type = "array"
+
+[provides.operations."aws_bedrock.converse".input_schema.properties.system.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse".input_schema.properties.inference_config]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse".input_schema.properties.additional_model_request_fields]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse".input_schema.properties.additional_model_response_field_paths]
+type = "array"
+
+[provides.operations."aws_bedrock.converse".input_schema.properties.additional_model_response_field_paths.items]
+type = "string"
+minLength = 1
+pattern = "^/"
+
+[provides.operations."aws_bedrock.converse".input_schema.properties.guardrail_config]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse".input_schema.properties.performance_config]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse".input_schema.properties.prompt_variables]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse".input_schema.properties.request_metadata]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse".input_schema.properties.tool_config]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse".output_schema]
+type = "object"
+additionalProperties = true
 
 [provides.operations."aws_bedrock.converse".network_constraints]
 host_allow = ["bedrock-runtime.us-east-1.amazonaws.com", "bedrock-runtime.us-west-2.amazonaws.com"]
@@ -66,8 +129,105 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "best_effort"
-input_schema = { type = "object", required = ["model_id", "messages"] }
-output_schema = { type = "object" }
+
+[provides.operations."aws_bedrock.converse_stream".input_schema]
+type = "object"
+required = ["model_id", "messages"]
+additionalProperties = false
+
+[provides.operations."aws_bedrock.converse_stream".input_schema.properties.model_id]
+type = "string"
+minLength = 1
+allOf = [{ pattern = "\\S" }, { pattern = "^[^/\\\\]+$" }]
+
+[provides.operations."aws_bedrock.converse_stream".input_schema.properties.messages]
+type = "array"
+minItems = 1
+
+[provides.operations."aws_bedrock.converse_stream".input_schema.properties.messages.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse_stream".input_schema.properties.system]
+type = "array"
+
+[provides.operations."aws_bedrock.converse_stream".input_schema.properties.system.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse_stream".input_schema.properties.inference_config]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse_stream".input_schema.properties.additional_model_request_fields]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse_stream".input_schema.properties.additional_model_response_field_paths]
+type = "array"
+
+[provides.operations."aws_bedrock.converse_stream".input_schema.properties.additional_model_response_field_paths.items]
+type = "string"
+minLength = 1
+pattern = "^/"
+
+[provides.operations."aws_bedrock.converse_stream".input_schema.properties.guardrail_config]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse_stream".input_schema.properties.performance_config]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse_stream".input_schema.properties.prompt_variables]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse_stream".input_schema.properties.request_metadata]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse_stream".input_schema.properties.tool_config]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse_stream".output_schema]
+type = "object"
+required = ["events", "chunk_count", "total_payload_bytes"]
+additionalProperties = false
+
+[provides.operations."aws_bedrock.converse_stream".output_schema.properties.events]
+type = "array"
+
+[provides.operations."aws_bedrock.converse_stream".output_schema.properties.events.items]
+type = "object"
+required = ["headers", "payload_bytes"]
+additionalProperties = false
+
+[provides.operations."aws_bedrock.converse_stream".output_schema.properties.events.items.properties.event_type]
+type = ["string", "null"]
+
+[provides.operations."aws_bedrock.converse_stream".output_schema.properties.events.items.properties.headers]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.converse_stream".output_schema.properties.events.items.properties.payload_bytes]
+type = "integer"
+minimum = 0
+
+[provides.operations."aws_bedrock.converse_stream".output_schema.properties.events.items.properties.payload_json]
+type = ["object", "array", "string", "number", "boolean", "null"]
+
+[provides.operations."aws_bedrock.converse_stream".output_schema.properties.events.items.properties.payload_utf8]
+type = "string"
+
+[provides.operations."aws_bedrock.converse_stream".output_schema.properties.chunk_count]
+type = "integer"
+minimum = 0
+
+[provides.operations."aws_bedrock.converse_stream".output_schema.properties.total_payload_bytes]
+type = "integer"
+minimum = 0
 
 [provides.operations."aws_bedrock.converse_stream".network_constraints]
 host_allow = ["bedrock-runtime.us-east-1.amazonaws.com", "bedrock-runtime.us-west-2.amazonaws.com"]
@@ -94,8 +254,97 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "best_effort"
-input_schema = { type = "object", required = ["model_id"] }
-output_schema = { type = "object" }
+
+[provides.operations."aws_bedrock.invoke_model".input_schema]
+type = "object"
+required = ["model_id"]
+additionalProperties = false
+anyOf = [{ required = ["body"] }, { required = ["model_family"] }]
+allOf = [
+    { if = { properties = { model_family = { const = "anthropic_claude" } }, required = ["model_family"] }, then = { required = ["messages"] } },
+    { if = { properties = { model_family = { enum = ["meta_llama", "amazon_titan", "cohere_command", "mistral"] } }, required = ["model_family"] }, then = { required = ["prompt"] } },
+]
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.model_id]
+type = "string"
+minLength = 1
+allOf = [{ pattern = "\\S" }, { pattern = "^[^/\\\\]+$" }]
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.body]
+type = ["object", "array", "string", "number", "boolean", "null"]
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.model_family]
+type = "string"
+enum = ["anthropic_claude", "meta_llama", "amazon_titan", "cohere_command", "mistral"]
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.prompt]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.messages]
+type = "array"
+minItems = 1
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.messages.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.system]
+type = ["object", "array", "string", "number", "boolean", "null"]
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.max_tokens]
+type = "integer"
+minimum = 1
+maximum = 4294967295
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.temperature]
+type = "number"
+minimum = 0
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.top_p]
+type = "number"
+minimum = 0
+maximum = 1
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.accept]
+type = "string"
+minLength = 1
+pattern = "^[^\\r\\n]+$"
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.content_type]
+type = "string"
+minLength = 1
+pattern = "^[^\\r\\n]+$"
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.trace]
+type = "string"
+minLength = 1
+pattern = "^[^\\r\\n]+$"
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.guardrail_identifier]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.guardrail_version]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.performance_config_latency]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.service_tier]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.invoke_model".output_schema]
+type = "object"
+additionalProperties = true
 
 [provides.operations."aws_bedrock.invoke_model".network_constraints]
 host_allow = ["bedrock-runtime.us-east-1.amazonaws.com", "bedrock-runtime.us-west-2.amazonaws.com"]
@@ -122,8 +371,131 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "best_effort"
-input_schema = { type = "object", required = ["model_id"] }
-output_schema = { type = "object" }
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema]
+type = "object"
+required = ["model_id"]
+additionalProperties = false
+anyOf = [{ required = ["body"] }, { required = ["model_family"] }]
+allOf = [
+    { if = { properties = { model_family = { const = "anthropic_claude" } }, required = ["model_family"] }, then = { required = ["messages"] } },
+    { if = { properties = { model_family = { enum = ["meta_llama", "amazon_titan", "cohere_command", "mistral"] } }, required = ["model_family"] }, then = { required = ["prompt"] } },
+]
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.model_id]
+type = "string"
+minLength = 1
+allOf = [{ pattern = "\\S" }, { pattern = "^[^/\\\\]+$" }]
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.body]
+type = ["object", "array", "string", "number", "boolean", "null"]
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.model_family]
+type = "string"
+enum = ["anthropic_claude", "meta_llama", "amazon_titan", "cohere_command", "mistral"]
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.prompt]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.messages]
+type = "array"
+minItems = 1
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.messages.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.system]
+type = ["object", "array", "string", "number", "boolean", "null"]
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.max_tokens]
+type = "integer"
+minimum = 1
+maximum = 4294967295
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.temperature]
+type = "number"
+minimum = 0
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.top_p]
+type = "number"
+minimum = 0
+maximum = 1
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.accept]
+type = "string"
+minLength = 1
+pattern = "^[^\\r\\n]+$"
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.content_type]
+type = "string"
+minLength = 1
+pattern = "^[^\\r\\n]+$"
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.trace]
+type = "string"
+minLength = 1
+pattern = "^[^\\r\\n]+$"
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.guardrail_identifier]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.guardrail_version]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.performance_config_latency]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.service_tier]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.invoke_model_stream".output_schema]
+type = "object"
+required = ["events", "chunk_count", "total_payload_bytes"]
+additionalProperties = false
+
+[provides.operations."aws_bedrock.invoke_model_stream".output_schema.properties.events]
+type = "array"
+
+[provides.operations."aws_bedrock.invoke_model_stream".output_schema.properties.events.items]
+type = "object"
+required = ["headers", "payload_bytes"]
+additionalProperties = false
+
+[provides.operations."aws_bedrock.invoke_model_stream".output_schema.properties.events.items.properties.event_type]
+type = ["string", "null"]
+
+[provides.operations."aws_bedrock.invoke_model_stream".output_schema.properties.events.items.properties.headers]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.invoke_model_stream".output_schema.properties.events.items.properties.payload_bytes]
+type = "integer"
+minimum = 0
+
+[provides.operations."aws_bedrock.invoke_model_stream".output_schema.properties.events.items.properties.payload_json]
+type = ["object", "array", "string", "number", "boolean", "null"]
+
+[provides.operations."aws_bedrock.invoke_model_stream".output_schema.properties.events.items.properties.payload_utf8]
+type = "string"
+
+[provides.operations."aws_bedrock.invoke_model_stream".output_schema.properties.chunk_count]
+type = "integer"
+minimum = 0
+
+[provides.operations."aws_bedrock.invoke_model_stream".output_schema.properties.total_payload_bytes]
+type = "integer"
+minimum = 0
 
 [provides.operations."aws_bedrock.invoke_model_stream".network_constraints]
 host_allow = ["bedrock-runtime.us-east-1.amazonaws.com", "bedrock-runtime.us-west-2.amazonaws.com"]
@@ -150,8 +522,92 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
-input_schema = { type = "object" }
-output_schema = { type = "object" }
+
+[provides.operations."aws_bedrock.models.list".input_schema]
+type = "object"
+additionalProperties = false
+
+[provides.operations."aws_bedrock.models.list".input_schema.properties.by_customization_type]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.models.list".input_schema.properties.by_inference_type]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.models.list".input_schema.properties.by_output_modality]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.models.list".input_schema.properties.by_provider]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.models.list".output_schema]
+type = "object"
+required = ["modelSummaries"]
+additionalProperties = false
+
+[provides.operations."aws_bedrock.models.list".output_schema.properties.modelSummaries]
+type = "array"
+
+[provides.operations."aws_bedrock.models.list".output_schema.properties.modelSummaries.items]
+type = "object"
+required = ["modelArn", "modelId", "modelName", "providerName", "inputModalities", "outputModalities", "responseStreamingSupported", "customizationsSupported", "inferenceTypesSupported"]
+additionalProperties = false
+
+[provides.operations."aws_bedrock.models.list".output_schema.properties.modelSummaries.items.properties.modelArn]
+type = ["string", "null"]
+
+[provides.operations."aws_bedrock.models.list".output_schema.properties.modelSummaries.items.properties.modelId]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.models.list".output_schema.properties.modelSummaries.items.properties.modelName]
+type = ["string", "null"]
+
+[provides.operations."aws_bedrock.models.list".output_schema.properties.modelSummaries.items.properties.providerName]
+type = ["string", "null"]
+
+[provides.operations."aws_bedrock.models.list".output_schema.properties.modelSummaries.items.properties.inputModalities]
+type = "array"
+
+[provides.operations."aws_bedrock.models.list".output_schema.properties.modelSummaries.items.properties.inputModalities.items]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.models.list".output_schema.properties.modelSummaries.items.properties.outputModalities]
+type = "array"
+
+[provides.operations."aws_bedrock.models.list".output_schema.properties.modelSummaries.items.properties.outputModalities.items]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.models.list".output_schema.properties.modelSummaries.items.properties.responseStreamingSupported]
+type = ["boolean", "null"]
+
+[provides.operations."aws_bedrock.models.list".output_schema.properties.modelSummaries.items.properties.customizationsSupported]
+type = "array"
+
+[provides.operations."aws_bedrock.models.list".output_schema.properties.modelSummaries.items.properties.customizationsSupported.items]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.models.list".output_schema.properties.modelSummaries.items.properties.inferenceTypesSupported]
+type = "array"
+
+[provides.operations."aws_bedrock.models.list".output_schema.properties.modelSummaries.items.properties.inferenceTypesSupported.items]
+type = "string"
+minLength = 1
+pattern = "\\S"
 
 [provides.operations."aws_bedrock.models.list".network_constraints]
 host_allow = ["bedrock.us-east-1.amazonaws.com", "bedrock.us-west-2.amazonaws.com"]
@@ -178,8 +634,23 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
-input_schema = { type = "object" }
-output_schema = { type = "object" }
+
+[provides.operations."aws_bedrock.health".input_schema]
+type = "object"
+additionalProperties = false
+maxProperties = 0
+
+[provides.operations."aws_bedrock.health".output_schema]
+type = "object"
+required = ["control_plane_reachable", "model_count"]
+additionalProperties = false
+
+[provides.operations."aws_bedrock.health".output_schema.properties.control_plane_reachable]
+type = "boolean"
+
+[provides.operations."aws_bedrock.health".output_schema.properties.model_count]
+type = "integer"
+minimum = 0
 
 [provides.operations."aws_bedrock.health".network_constraints]
 host_allow = ["bedrock.us-east-1.amazonaws.com", "bedrock.us-west-2.amazonaws.com"]

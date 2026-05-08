@@ -35,6 +35,461 @@ use crate::types::{
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
+fn empty_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false
+    })
+}
+
+fn nonblank_string_schema() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 1,
+        "pattern": "\\S"
+    })
+}
+
+fn event_id_string_schema() -> Value {
+    json!({
+        "type": "string",
+        "pattern": "^[0-9A-Fa-f]{64}$"
+    })
+}
+
+fn https_url_schema() -> Value {
+    json!({
+        "type": "string",
+        "format": "uri",
+        "pattern": "^https://"
+    })
+}
+
+fn nostr_address_schema() -> Value {
+    json!({
+        "type": "string",
+        "maxLength": 320,
+        "pattern": r"^[^\s@]+@[^\s@]+$"
+    })
+}
+
+fn profile_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "name": { "type": "string", "maxLength": 256 },
+            "display_name": { "type": "string", "maxLength": 256 },
+            "displayName": { "type": "string", "maxLength": 256 },
+            "about": { "type": "string", "maxLength": 2000 },
+            "picture": https_url_schema(),
+            "banner": https_url_schema(),
+            "website": https_url_schema(),
+            "nip05": nostr_address_schema(),
+            "lud16": nostr_address_schema()
+        }
+    })
+}
+
+fn publish_note_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["content"],
+        "additionalProperties": false,
+        "properties": {
+            "content": nonblank_string_schema(),
+            "kind": { "type": "integer", "enum": [1] },
+            "tags": {
+                "type": "array",
+                "items": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                }
+            }
+        }
+    })
+}
+
+fn send_dm_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "anyOf": [
+            { "required": ["recipient"] },
+            { "required": ["recipient_pubkey"] },
+            { "required": ["target"] }
+        ],
+        "allOf": [
+            {
+                "anyOf": [
+                    { "required": ["plaintext"] },
+                    { "required": ["content"] }
+                ]
+            }
+        ],
+        "properties": {
+            "recipient": nonblank_string_schema(),
+            "recipient_pubkey": nonblank_string_schema(),
+            "target": nonblank_string_schema(),
+            "plaintext": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "\\S"
+            },
+            "content": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "\\S"
+            },
+            "reply_to_event_id": event_id_string_schema(),
+            "reply_to": event_id_string_schema(),
+            "allow_self_send": { "type": "boolean" }
+        }
+    })
+}
+
+fn profile_publish_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["profile"],
+        "additionalProperties": false,
+        "properties": {
+            "profile": profile_schema(),
+            "last_published_at": {
+                "type": "integer",
+                "minimum": 0
+            }
+        }
+    })
+}
+
+fn profile_import_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "pubkey": nonblank_string_schema(),
+            "local_profile": profile_schema()
+        }
+    })
+}
+
+fn query_events_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "authors": {
+                "type": "array",
+                "items": nonblank_string_schema()
+            },
+            "kinds": {
+                "type": "array",
+                "items": {
+                    "type": "integer",
+                    "minimum": 0
+                }
+            },
+            "ids": {
+                "type": "array",
+                "items": event_id_string_schema()
+            },
+            "since": { "type": "integer" },
+            "until": { "type": "integer" },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000
+            }
+        }
+    })
+}
+
+fn relay_array_schema() -> Value {
+    json!({
+        "type": "array",
+        "items": {
+            "type": "string",
+            "format": "uri"
+        }
+    })
+}
+
+fn relay_diagnostics_schema() -> Value {
+    json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "additionalProperties": true
+        }
+    })
+}
+
+fn relay_resilience_schema() -> Value {
+    json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "additionalProperties": true
+        }
+    })
+}
+
+fn relay_metrics_schema() -> Value {
+    json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "additionalProperties": true
+        }
+    })
+}
+
+fn nostr_event_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["id", "pubkey", "created_at", "kind"],
+        "additionalProperties": true,
+        "properties": {
+            "id": event_id_string_schema(),
+            "pubkey": event_id_string_schema(),
+            "created_at": { "type": "integer" },
+            "kind": { "type": "integer" },
+            "content": { "type": "string" },
+            "tags": {
+                "type": "array",
+                "items": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                }
+            },
+            "sig": event_id_string_schema()
+        }
+    })
+}
+
+fn profile_state_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": [
+            "load_result",
+            "persistence",
+            "connector_public_key_hex",
+            "last_published_at",
+            "last_published_event_id",
+            "last_publish_results",
+            "last_profile",
+            "updated_at_secs"
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "load_result": { "type": "string" },
+            "persistence": {
+                "type": "string",
+                "enum": ["zone_dir", "memory_only_no_zone_dir"]
+            },
+            "connector_public_key_hex": event_id_string_schema(),
+            "last_published_at": { "type": ["integer", "null"] },
+            "last_published_event_id": { "type": ["string", "null"] },
+            "last_publish_results": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+            },
+            "last_profile": { "type": ["object", "null"] },
+            "updated_at_secs": { "type": ["integer", "null"] }
+        }
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn output_schema_for(operation_id: &str) -> Value {
+    match operation_id {
+        OP_PUBLISH_NOTE => json!({
+            "type": "object",
+            "required": [
+                "event",
+                "accepted_relays",
+                "rejected_relays",
+                "relay_resilience",
+                "relay_metrics"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "event": nostr_event_schema(),
+                "accepted_relays": relay_diagnostics_schema(),
+                "rejected_relays": relay_diagnostics_schema(),
+                "relay_resilience": relay_resilience_schema(),
+                "relay_metrics": relay_metrics_schema()
+            }
+        }),
+        OP_SEND_DM => json!({
+            "type": "object",
+            "required": [
+                "event_id",
+                "event_kind",
+                "sender_pubkey_hex",
+                "recipient_pubkey_hex",
+                "recipient_format",
+                "tags",
+                "created_at",
+                "accepted_relays",
+                "rejected_relays",
+                "relay_resilience",
+                "relay_metrics"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "event_id": event_id_string_schema(),
+                "event_kind": { "type": "integer", "enum": [4] },
+                "sender_pubkey_hex": event_id_string_schema(),
+                "recipient_pubkey_hex": event_id_string_schema(),
+                "recipient_format": { "type": "string" },
+                "tags": {
+                    "type": "array",
+                    "items": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    }
+                },
+                "created_at": { "type": "integer" },
+                "accepted_relays": relay_diagnostics_schema(),
+                "rejected_relays": relay_diagnostics_schema(),
+                "relay_resilience": relay_resilience_schema(),
+                "relay_metrics": relay_metrics_schema()
+            }
+        }),
+        OP_PROFILE_PUBLISH => json!({
+            "type": "object",
+            "required": [
+                "event",
+                "event_kind",
+                "profile",
+                "display_profile",
+                "accepted_relays",
+                "rejected_relays",
+                "persist_recommended",
+                "persisted",
+                "persistence_result",
+                "profile_state",
+                "relay_resilience",
+                "relay_metrics"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "event": nostr_event_schema(),
+                "event_kind": { "type": "integer", "enum": [0] },
+                "profile": { "type": "object", "additionalProperties": true },
+                "display_profile": { "type": "object", "additionalProperties": true },
+                "accepted_relays": relay_diagnostics_schema(),
+                "rejected_relays": relay_diagnostics_schema(),
+                "persist_recommended": { "type": "boolean" },
+                "persisted": { "type": "boolean" },
+                "persistence_result": { "type": "string" },
+                "profile_state": profile_state_output_schema(),
+                "relay_resilience": relay_resilience_schema(),
+                "relay_metrics": relay_metrics_schema()
+            }
+        }),
+        OP_PROFILE_STATE => profile_state_output_schema(),
+        OP_PROFILE_IMPORT => json!({
+            "type": "object",
+            "required": [
+                "ok",
+                "pubkey_hex",
+                "relays_queried",
+                "relay_results",
+                "invalid_candidates",
+                "relay_resilience",
+                "relay_metrics"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "ok": { "type": "boolean" },
+                "pubkey_hex": event_id_string_schema(),
+                "error": { "type": "string" },
+                "profile": { "type": "object", "additionalProperties": true },
+                "display_profile": { "type": "object", "additionalProperties": true },
+                "merged_profile": { "type": "object", "additionalProperties": true },
+                "event": nostr_event_schema(),
+                "source_relay": { "type": "string", "format": "uri" },
+                "relays_queried": relay_array_schema(),
+                "relay_results": relay_diagnostics_schema(),
+                "dropped_profile_fields": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                },
+                "invalid_candidates": relay_diagnostics_schema(),
+                "relay_resilience": relay_resilience_schema(),
+                "relay_metrics": relay_metrics_schema()
+            }
+        }),
+        OP_QUERY_EVENTS => json!({
+            "type": "object",
+            "required": [
+                "subscription_id",
+                "filter",
+                "results",
+                "relay_resilience",
+                "relay_metrics"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "subscription_id": { "type": "string" },
+                "filter": { "type": "object", "additionalProperties": true },
+                "results": relay_diagnostics_schema(),
+                "relay_resilience": relay_resilience_schema(),
+                "relay_metrics": relay_metrics_schema()
+            }
+        }),
+        OP_LIST_RELAYS => json!({
+            "type": "object",
+            "required": ["relays", "public_key_hex"],
+            "additionalProperties": false,
+            "properties": {
+                "relays": relay_array_schema(),
+                "public_key_hex": event_id_string_schema()
+            }
+        }),
+        OP_HEALTH => json!({
+            "type": "object",
+            "required": [
+                "public_key_hex",
+                "relay_health",
+                "relay_resilience",
+                "relay_metrics"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "public_key_hex": event_id_string_schema(),
+                "relay_health": relay_diagnostics_schema(),
+                "relay_resilience": relay_resilience_schema(),
+                "relay_metrics": relay_metrics_schema()
+            }
+        }),
+        OP_RELAYS_HEALTH => json!({
+            "type": "object",
+            "required": [
+                "public_key_hex",
+                "relay_scores",
+                "scored_count",
+                "relay_resilience",
+                "relay_metrics"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "public_key_hex": event_id_string_schema(),
+                "relay_scores": relay_diagnostics_schema(),
+                "scored_count": { "type": "integer", "minimum": 0 },
+                "relay_resilience": relay_resilience_schema(),
+                "relay_metrics": relay_metrics_schema()
+            }
+        }),
+        _ => json!({ "type": "object" }),
+    }
+}
+
 // ─── Doctor types (V3 requirement) ───────────────────────────────────────
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -645,15 +1100,7 @@ impl NostrConnector {
                 RiskLevel::Medium,
                 SafetyTier::Risky,
                 IdempotencyClass::None,
-                json!({
-                    "type": "object",
-                    "required": ["content"],
-                    "properties": {
-                        "content": { "type": "string" },
-                        "kind": { "type": "integer", "enum": [1] },
-                        "tags": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } }
-                    }
-                }),
+                publish_note_input_schema(),
                 "Use when you need to publish one public note through the connector's bound keypair to every configured relay.",
                 &[
                     "This operation remains kind-1 public-note only; encrypted DMs require `nostr.dm.send`.",
@@ -671,20 +1118,7 @@ impl NostrConnector {
                 RiskLevel::High,
                 SafetyTier::Risky,
                 IdempotencyClass::None,
-                json!({
-                    "type": "object",
-                    "required": ["recipient", "plaintext"],
-                    "properties": {
-                        "recipient": { "type": "string" },
-                        "recipient_pubkey": { "type": "string" },
-                        "target": { "type": "string" },
-                        "plaintext": { "type": "string", "maxLength": 4096 },
-                        "content": { "type": "string", "maxLength": 4096 },
-                        "reply_to_event_id": { "type": "string" },
-                        "reply_to": { "type": "string" },
-                        "allow_self_send": { "type": "boolean" }
-                    }
-                }),
+                send_dm_input_schema(),
                 "Use for outbound encrypted direct messages when the caller has explicit `nostr.dm.write` authority.",
                 &[
                     "`recipient`, `recipient_pubkey`, and `target` accept raw hex, NIP-19 `npub`, and `nostr:npub`; aliases must agree if multiple are provided.",
@@ -702,26 +1136,7 @@ impl NostrConnector {
                 RiskLevel::Medium,
                 SafetyTier::Risky,
                 IdempotencyClass::None,
-                json!({
-                    "type": "object",
-                    "required": ["profile"],
-                    "properties": {
-                        "profile": {
-                            "type": "object",
-                            "properties": {
-                                "name": { "type": "string", "maxLength": 256 },
-                                "display_name": { "type": "string", "maxLength": 256 },
-                                "about": { "type": "string", "maxLength": 2000 },
-                                "picture": { "type": "string", "format": "uri" },
-                                "banner": { "type": "string", "format": "uri" },
-                                "website": { "type": "string", "format": "uri" },
-                                "nip05": { "type": "string" },
-                                "lud16": { "type": "string" }
-                            }
-                        },
-                        "last_published_at": { "type": "integer" }
-                    }
-                }),
+                profile_publish_input_schema(),
                 "Use when the connector's bound identity should publish or replace its public Nostr profile.",
                 &[
                     "This is a separate kind-0 profile operation; `nostr.notes.publish` remains kind-1 only.",
@@ -739,7 +1154,7 @@ impl NostrConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({ "type": "object" }),
+                empty_input_schema(),
                 "Use to inspect the last profile event id, timestamp, profile fields, and per-relay publish result persisted by this connector instance.",
                 &[
                     "This operation does not import profile data from relays; use `nostr.profile.import` for bounded relay reads.",
@@ -755,13 +1170,7 @@ impl NostrConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "pubkey": { "type": "string" },
-                        "local_profile": { "type": "object" }
-                    }
-                }),
+                profile_import_input_schema(),
                 "Use before profile editing or display to read the latest public kind-0 profile state through the connector's relay set.",
                 &[
                     "Import uses the configured relay list; there is no per-request relay override.",
@@ -778,17 +1187,7 @@ impl NostrConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "authors": { "type": "array", "items": { "type": "string" } },
-                        "kinds": { "type": "array", "items": { "type": "integer" } },
-                        "ids": { "type": "array", "items": { "type": "string" } },
-                        "since": { "type": "integer" },
-                        "until": { "type": "integer" },
-                        "limit": { "type": "integer" }
-                    }
-                }),
+                query_events_input_schema(),
                 "Use for bounded public-event queries when you already know the relay set and do not need a long-lived subscription.",
                 &[
                     "This is a bounded public-event query surface, not DM sync.",
@@ -806,7 +1205,7 @@ impl NostrConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({ "type": "object" }),
+                empty_input_schema(),
                 "Use to inspect which relays and public key this connector instance is bound to.",
                 &[
                     "This does not discover relays from NIP metadata or mutate relay policy.",
@@ -822,7 +1221,7 @@ impl NostrConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({ "type": "object" }),
+                empty_input_schema(),
                 "Use before publishing to confirm the configured relay set is reachable and the bound signing identity is coherent.",
                 &[
                     "Health checks websocket reachability only; it does not prove encrypted DM support.",
@@ -838,7 +1237,7 @@ impl NostrConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({ "type": "object" }),
+                empty_input_schema(),
                 "Use when you need detailed per-relay metrics including latency and NIP support, rather than just reachability.",
                 &[
                     "This operation probes relay kind support by issuing bounded REQs; some relays may rate-limit probing.",
@@ -1422,7 +1821,7 @@ fn operation(
         summary: summary.into(),
         description: Some(description.into()),
         input_schema,
-        output_schema: json!({ "type": "object" }),
+        output_schema: output_schema_for(id),
         capability: CapabilityId::from_static(capability),
         risk_level,
         safety_tier,
@@ -1546,6 +1945,431 @@ mod tests {
             .sign(signing_key)
             .expect("token should sign");
         CapabilityToken::from_raw(raw)
+    }
+
+    const EXPECTED_MANIFEST_SCHEMA_OPS: &[(&str, &str)] = &[
+        (OP_PUBLISH_NOTE, "notes_publish"),
+        (OP_SEND_DM, "dm_send"),
+        (OP_PROFILE_PUBLISH, "profile_publish"),
+        (OP_PROFILE_STATE, "profile_state"),
+        (OP_PROFILE_IMPORT, "profile_import"),
+        (OP_QUERY_EVENTS, "events_query"),
+        (OP_LIST_RELAYS, "relays_list"),
+        (OP_HEALTH, "health"),
+        (OP_RELAYS_HEALTH, "relays_health"),
+    ];
+
+    fn nostr_manifest() -> Result<toml::Value, String> {
+        toml::from_str(MANIFEST_TOML)
+            .map_err(|err| format!("Nostr manifest TOML should parse: {err}"))
+    }
+
+    fn manifest_operations(
+        manifest: &toml::Value,
+    ) -> Result<&toml::map::Map<String, toml::Value>, String> {
+        manifest
+            .get("provides")
+            .and_then(|provides| provides.get("operations"))
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| "manifest should declare operation tables".to_owned())
+    }
+
+    fn operation_schema(
+        manifest: &toml::Value,
+        operation_key: &str,
+        field: &str,
+    ) -> Result<serde_json::Value, String> {
+        let schema = manifest_operations(manifest)?
+            .get(operation_key)
+            .and_then(toml::Value::as_table)
+            .and_then(|operation| operation.get(field))
+            .ok_or_else(|| format!("{operation_key} should declare {field}"))?;
+        if schema.as_table().is_none_or(toml::map::Map::is_empty) {
+            return Err(format!(
+                "{operation_key}.{field} should be a non-empty schema table"
+            ));
+        }
+        serde_json::to_value(schema)
+            .map_err(|err| format!("{operation_key}.{field} should convert to JSON: {err}"))
+    }
+
+    fn validator_for(schema: &serde_json::Value) -> Result<jsonschema::Validator, String> {
+        jsonschema::Validator::new(schema)
+            .map_err(|err| format!("manifest operation schema should compile: {err}"))
+    }
+
+    fn assert_schema_accepts(
+        schema: &serde_json::Value,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        let errors = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "schema should accept {payload}; errors: {errors:?}"
+            ))
+        }
+    }
+
+    fn assert_schema_rejects(
+        schema: &serde_json::Value,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        if validator.iter_errors(payload).next().is_some() {
+            Ok(())
+        } else {
+            Err(format!("schema should reject {payload}"))
+        }
+    }
+
+    fn hex_64(ch: char) -> String {
+        ch.to_string().repeat(64)
+    }
+
+    fn sample_event(kind: u64) -> Value {
+        json!({
+            "id": hex_64('a'),
+            "pubkey": hex_64('b'),
+            "created_at": 1_715_000_000_u64,
+            "kind": kind,
+            "content": "hello",
+            "tags": [["p", hex_64('c')]],
+            "sig": hex_64('d')
+        })
+    }
+
+    fn sample_relay_diagnostics() -> Value {
+        json!([
+            {
+                "relay": "wss://relay.example.com",
+                "ok": true,
+                "latency_ms": 12
+            }
+        ])
+    }
+
+    fn sample_relay_resilience() -> Value {
+        json!([
+            {
+                "relay_url": "wss://relay.example.com",
+                "circuit_state": "closed",
+                "success_count": 1,
+                "failure_count": 0,
+                "skipped_count": 0,
+                "average_latency_ms": 12
+            }
+        ])
+    }
+
+    fn sample_relay_metrics() -> Value {
+        json!([
+            {
+                "labels": {
+                    "connector": "nostr",
+                    "operation": OP_HEALTH,
+                    "relay": "wss://relay.example.com",
+                    "circuit_state": "closed"
+                },
+                "success_count": 1,
+                "failure_count": 0,
+                "skipped_count": 0,
+                "average_latency_ms": 12
+            }
+        ])
+    }
+
+    fn sample_profile_state() -> Value {
+        json!({
+            "load_result": "state_loaded",
+            "persistence": "zone_dir",
+            "connector_public_key_hex": hex_64('e'),
+            "last_published_at": 1_715_000_000_u64,
+            "last_published_event_id": hex_64('f'),
+            "last_publish_results": {
+                "wss://relay.example.com": "ok"
+            },
+            "last_profile": {
+                "name": "alice"
+            },
+            "updated_at_secs": 1_715_000_001_u64
+        })
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn manifest_operation_schemas_compile_and_validate_core_payloads() -> Result<(), String> {
+        let manifest = nostr_manifest()?;
+        let operations = manifest_operations(&manifest)?;
+        let operation_catalog = NostrConnector::operations();
+
+        for (operation_id, manifest_key) in EXPECTED_MANIFEST_SCHEMA_OPS {
+            assert!(
+                operations.contains_key(*manifest_key),
+                "manifest should declare operation {manifest_key}"
+            );
+            let operation = operation_catalog
+                .iter()
+                .find(|operation| operation.id.as_str() == *operation_id)
+                .ok_or_else(|| format!("operation catalog should declare {operation_id}"))?;
+            for field in ["input_schema", "output_schema"] {
+                let schema = operation_schema(&manifest, manifest_key, field)?;
+                let _validator = validator_for(&schema)?;
+            }
+            assert_eq!(
+                operation.input_schema,
+                operation_schema(&manifest, manifest_key, "input_schema")?,
+                "{operation_id} input schema should match manifest"
+            );
+            assert_eq!(
+                operation.output_schema,
+                operation_schema(&manifest, manifest_key, "output_schema")?,
+                "{operation_id} output schema should match manifest"
+            );
+        }
+
+        for operation in operation_catalog {
+            let _input_validator = validator_for(&operation.input_schema)?;
+            let _output_validator = validator_for(&operation.output_schema)?;
+        }
+
+        let notes_input = operation_schema(&manifest, "notes_publish", "input_schema")?;
+        assert_schema_accepts(
+            &notes_input,
+            &json!({"content": "hello nostr", "kind": 1, "tags": [["t", "fcp"]]}),
+        )?;
+        assert_schema_rejects(&notes_input, &json!({}))?;
+        assert_schema_rejects(&notes_input, &json!({"content": "   "}))?;
+        assert_schema_rejects(&notes_input, &json!({"content": "hello", "kind": 4}))?;
+        assert_schema_rejects(&notes_input, &json!({"content": "hello", "extra": true}))?;
+
+        let dm_input = operation_schema(&manifest, "dm_send", "input_schema")?;
+        assert_schema_accepts(
+            &dm_input,
+            &json!({"recipient": hex_64('1'), "plaintext": "hello"}),
+        )?;
+        assert_schema_accepts(
+            &dm_input,
+            &json!({"target": hex_64('2'), "content": "hello", "allow_self_send": true}),
+        )?;
+        assert_schema_rejects(&dm_input, &json!({"recipient": hex_64('1')}))?;
+        assert_schema_rejects(
+            &dm_input,
+            &json!({"recipient": hex_64('1'), "plaintext": ""}),
+        )?;
+        assert_schema_rejects(
+            &dm_input,
+            &json!({"recipient": hex_64('1'), "plaintext": "hello", "reply_to": "short"}),
+        )?;
+        assert_schema_rejects(
+            &dm_input,
+            &json!({"recipient": hex_64('1'), "plaintext": "hello", "extra": true}),
+        )?;
+
+        let profile_publish_input = operation_schema(&manifest, "profile_publish", "input_schema")?;
+        assert_schema_accepts(
+            &profile_publish_input,
+            &json!({
+                "profile": {
+                    "name": "alice",
+                    "displayName": "Alice",
+                    "picture": "https://example.com/alice.png",
+                    "nip05": "alice@example.com"
+                },
+                "last_published_at": 1_715_000_000_u64
+            }),
+        )?;
+        assert_schema_rejects(&profile_publish_input, &json!({}))?;
+        assert_schema_rejects(
+            &profile_publish_input,
+            &json!({"profile": {"picture": "http://example.com/alice.png"}}),
+        )?;
+        assert_schema_rejects(
+            &profile_publish_input,
+            &json!({"profile": {"name": "alice", "extra": true}}),
+        )?;
+
+        let profile_import_input = operation_schema(&manifest, "profile_import", "input_schema")?;
+        assert_schema_accepts(&profile_import_input, &json!({}))?;
+        assert_schema_accepts(
+            &profile_import_input,
+            &json!({"pubkey": hex_64('3'), "local_profile": {"website": "https://example.com"}}),
+        )?;
+        assert_schema_rejects(&profile_import_input, &json!({"pubkey": "   "}))?;
+        assert_schema_rejects(
+            &profile_import_input,
+            &json!({"local_profile": {"website": "http://example.com"}}),
+        )?;
+        assert_schema_rejects(&profile_import_input, &json!({"unexpected": true}))?;
+
+        let events_input = operation_schema(&manifest, "events_query", "input_schema")?;
+        assert_schema_accepts(
+            &events_input,
+            &json!({
+                "authors": [hex_64('4')],
+                "kinds": [1, 4],
+                "ids": [hex_64('5')],
+                "since": -1,
+                "until": 1_715_000_000_i64,
+                "limit": 10
+            }),
+        )?;
+        assert_schema_rejects(&events_input, &json!({"ids": ["short"]}))?;
+        assert_schema_rejects(&events_input, &json!({"limit": 0}))?;
+        assert_schema_rejects(&events_input, &json!({"extra": true}))?;
+
+        for operation_key in ["profile_state", "relays_list", "health", "relays_health"] {
+            let input = operation_schema(&manifest, operation_key, "input_schema")?;
+            assert_schema_accepts(&input, &json!({}))?;
+            assert_schema_rejects(&input, &json!({"extra": true}))?;
+        }
+
+        let notes_output = operation_schema(&manifest, "notes_publish", "output_schema")?;
+        assert_schema_accepts(
+            &notes_output,
+            &json!({
+                "event": sample_event(1),
+                "accepted_relays": sample_relay_diagnostics(),
+                "rejected_relays": [],
+                "relay_resilience": sample_relay_resilience(),
+                "relay_metrics": sample_relay_metrics()
+            }),
+        )?;
+        assert_schema_rejects(&notes_output, &json!({"accepted_relays": []}))?;
+
+        let dm_output = operation_schema(&manifest, "dm_send", "output_schema")?;
+        assert_schema_accepts(
+            &dm_output,
+            &json!({
+                "event_id": hex_64('6'),
+                "event_kind": 4,
+                "sender_pubkey_hex": hex_64('7'),
+                "recipient_pubkey_hex": hex_64('8'),
+                "recipient_format": "hex",
+                "tags": [["p", hex_64('8')]],
+                "created_at": 1_715_000_000_u64,
+                "accepted_relays": sample_relay_diagnostics(),
+                "rejected_relays": [],
+                "relay_resilience": sample_relay_resilience(),
+                "relay_metrics": sample_relay_metrics()
+            }),
+        )?;
+        assert_schema_rejects(
+            &dm_output,
+            &json!({
+                "event_id": hex_64('6'),
+                "event_kind": 1,
+                "sender_pubkey_hex": hex_64('7'),
+                "recipient_pubkey_hex": hex_64('8'),
+                "recipient_format": "hex",
+                "tags": [],
+                "created_at": 1_715_000_000_u64,
+                "accepted_relays": [],
+                "rejected_relays": [],
+                "relay_resilience": [],
+                "relay_metrics": []
+            }),
+        )?;
+
+        let profile_publish_output =
+            operation_schema(&manifest, "profile_publish", "output_schema")?;
+        assert_schema_accepts(
+            &profile_publish_output,
+            &json!({
+                "event": sample_event(0),
+                "event_kind": 0,
+                "profile": {"name": "alice"},
+                "display_profile": {"name": "alice"},
+                "accepted_relays": sample_relay_diagnostics(),
+                "rejected_relays": [],
+                "persist_recommended": true,
+                "persisted": true,
+                "persistence_result": "state_persisted",
+                "profile_state": sample_profile_state(),
+                "relay_resilience": sample_relay_resilience(),
+                "relay_metrics": sample_relay_metrics()
+            }),
+        )?;
+
+        let profile_state_output = operation_schema(&manifest, "profile_state", "output_schema")?;
+        assert_schema_accepts(&profile_state_output, &sample_profile_state())?;
+        assert_schema_rejects(
+            &profile_state_output,
+            &json!({"load_result": "state_loaded"}),
+        )?;
+
+        let profile_import_output = operation_schema(&manifest, "profile_import", "output_schema")?;
+        assert_schema_accepts(
+            &profile_import_output,
+            &json!({
+                "ok": false,
+                "pubkey_hex": hex_64('9'),
+                "error": "no verified kind-0 profile found",
+                "relays_queried": ["wss://relay.example.com"],
+                "relay_results": sample_relay_diagnostics(),
+                "invalid_candidates": [],
+                "relay_resilience": sample_relay_resilience(),
+                "relay_metrics": sample_relay_metrics()
+            }),
+        )?;
+
+        let events_output = operation_schema(&manifest, "events_query", "output_schema")?;
+        assert_schema_accepts(
+            &events_output,
+            &json!({
+                "subscription_id": "sub-1",
+                "filter": {"limit": 10},
+                "results": sample_relay_diagnostics(),
+                "relay_resilience": sample_relay_resilience(),
+                "relay_metrics": sample_relay_metrics()
+            }),
+        )?;
+
+        let relays_output = operation_schema(&manifest, "relays_list", "output_schema")?;
+        assert_schema_accepts(
+            &relays_output,
+            &json!({"relays": ["wss://relay.example.com"], "public_key_hex": hex_64('a')}),
+        )?;
+
+        let health_output = operation_schema(&manifest, "health", "output_schema")?;
+        assert_schema_accepts(
+            &health_output,
+            &json!({
+                "public_key_hex": hex_64('b'),
+                "relay_health": sample_relay_diagnostics(),
+                "relay_resilience": sample_relay_resilience(),
+                "relay_metrics": sample_relay_metrics()
+            }),
+        )?;
+
+        let relays_health_output = operation_schema(&manifest, "relays_health", "output_schema")?;
+        assert_schema_accepts(
+            &relays_health_output,
+            &json!({
+                "public_key_hex": hex_64('c'),
+                "relay_scores": sample_relay_diagnostics(),
+                "scored_count": 1,
+                "relay_resilience": sample_relay_resilience(),
+                "relay_metrics": sample_relay_metrics()
+            }),
+        )?;
+        assert_schema_rejects(
+            &relays_health_output,
+            &json!({
+                "public_key_hex": hex_64('c'),
+                "relay_scores": [],
+                "scored_count": -1,
+                "relay_resilience": [],
+                "relay_metrics": []
+            }),
+        )?;
+
+        Ok(())
     }
 
     // ── Doctor tests ─────────────────────────────────────────────────

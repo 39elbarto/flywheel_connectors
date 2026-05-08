@@ -69,6 +69,379 @@ const VERIFY_COMMANDS: [&str; 5] = [
     "git diff --check -- connectors/wecom/src/{client,connector,error,types}.rs connectors/wecom/{manifest.toml,README.md}",
 ];
 
+fn bool_like_schema() -> Value {
+    json!({
+        "anyOf": [
+            { "type": "boolean" },
+            { "type": "integer", "enum": [0, 1] }
+        ]
+    })
+}
+
+fn send_text_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["content"],
+        "anyOf": [
+            { "required": ["touser"] },
+            { "required": ["toparty"] },
+            { "required": ["totag"] }
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "content": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "touser": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "toparty": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "totag": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "safe": bool_like_schema(),
+            "enable_duplicate_check": bool_like_schema(),
+            "duplicate_check_interval": { "type": "integer", "minimum": 0, "maximum": u32::MAX }
+        }
+    })
+}
+
+fn send_markdown_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["content"],
+        "anyOf": [
+            { "required": ["touser"] },
+            { "required": ["toparty"] },
+            { "required": ["totag"] }
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "content": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "touser": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "toparty": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "totag": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "enable_duplicate_check": bool_like_schema(),
+            "duplicate_check_interval": { "type": "integer", "minimum": 0, "maximum": u32::MAX }
+        }
+    })
+}
+
+fn send_media_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["media_id"],
+        "anyOf": [
+            { "required": ["touser"] },
+            { "required": ["toparty"] },
+            { "required": ["totag"] }
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "media_id": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "touser": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "toparty": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "totag": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "safe": bool_like_schema(),
+            "enable_duplicate_check": bool_like_schema(),
+            "duplicate_check_interval": { "type": "integer", "minimum": 0, "maximum": u32::MAX }
+        }
+    })
+}
+
+fn upload_media_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["media_type", "file_name", "content_base64"],
+        "additionalProperties": false,
+        "properties": {
+            "media_type": { "type": "string", "enum": ["image", "voice", "video", "file"] },
+            "file_name": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "mime_type": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "content_base64": { "type": "string", "minLength": 1, "contentEncoding": "base64" }
+        }
+    })
+}
+
+fn download_media_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["media_id"],
+        "additionalProperties": false,
+        "properties": {
+            "media_id": { "type": "string", "minLength": 1, "pattern": "\\S" }
+        }
+    })
+}
+
+fn get_user_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["userid"],
+        "additionalProperties": false,
+        "properties": {
+            "userid": { "type": "string", "minLength": 1, "pattern": "\\S" }
+        }
+    })
+}
+
+fn list_departments_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "id": { "type": "integer" }
+        }
+    })
+}
+
+fn callback_verify_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["msg_signature", "timestamp", "nonce", "echostr"],
+        "additionalProperties": false,
+        "properties": {
+            "msg_signature": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "timestamp": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "nonce": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "echostr": { "type": "string", "minLength": 1, "pattern": "\\S" }
+        }
+    })
+}
+
+fn callback_ingest_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["msg_signature", "timestamp", "nonce"],
+        "anyOf": [
+            { "required": ["body"] },
+            { "required": ["body_xml"] }
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "msg_signature": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "timestamp": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "nonce": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "body": { "type": "string", "minLength": 1, "description": "Raw XML body from the WeCom HTTP POST callback" },
+            "body_xml": { "type": "string", "minLength": 1, "description": "Alias for body when the host already labels the payload as XML" }
+        }
+    })
+}
+
+fn empty_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false
+    })
+}
+
+fn send_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            "errcode": { "type": "integer" },
+            "errmsg": { "type": "string" },
+            "msgid": { "type": "string" },
+            "invaliduser": { "type": "string" },
+            "invalidparty": { "type": "string" },
+            "invalidtag": { "type": "string" },
+            "response_code": { "type": "string" }
+        }
+    })
+}
+
+fn upload_media_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            "errcode": { "type": "integer" },
+            "errmsg": { "type": "string" },
+            "type": { "type": "string" },
+            "media_id": { "type": "string" },
+            "created_at": { "type": "integer", "minimum": 0 }
+        }
+    })
+}
+
+fn download_media_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["media_id", "content_length", "content_base64", "sha256"],
+        "additionalProperties": false,
+        "properties": {
+            "media_id": { "type": "string", "minLength": 1 },
+            "file_name": { "type": ["string", "null"], "minLength": 1 },
+            "mime_type": { "type": ["string", "null"], "minLength": 1 },
+            "content_length": { "type": "integer", "minimum": 0 },
+            "content_base64": { "type": "string", "contentEncoding": "base64" },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+    })
+}
+
+fn user_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            "errcode": { "type": "integer" },
+            "errmsg": { "type": "string" },
+            "userid": { "type": "string" },
+            "name": { "type": "string" },
+            "alias": { "type": "string" },
+            "mobile": { "type": "string" },
+            "email": { "type": "string" },
+            "gender": { "type": "string" },
+            "department": { "type": "array", "items": { "type": "integer" } },
+            "position": { "type": "string" },
+            "avatar": { "type": "string" },
+            "status": { "type": "integer" },
+            "enable": { "type": "integer" }
+        }
+    })
+}
+
+fn departments_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            "errcode": { "type": "integer" },
+            "errmsg": { "type": "string" },
+            "department": {
+                "type": "array",
+                "items": { "type": "object", "additionalProperties": true }
+            }
+        }
+    })
+}
+
+fn callback_verify_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["verified", "transport", "receive_id", "challenge", "http_response"],
+        "additionalProperties": false,
+        "properties": {
+            "verified": { "type": "boolean" },
+            "transport": { "type": "string", "enum": ["callback_http_get"] },
+            "receive_id": { "type": "string", "minLength": 1 },
+            "challenge": { "type": "string" },
+            "http_response": {
+                "type": "object",
+                "required": ["status", "content_type", "body"],
+                "additionalProperties": false,
+                "properties": {
+                    "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+                    "content_type": { "type": "string" },
+                    "body": { "type": "string" }
+                }
+            }
+        }
+    })
+}
+
+fn callback_ingest_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["delivery", "callback", "policy", "event"],
+        "additionalProperties": false,
+        "properties": {
+            "delivery": {
+                "type": "object",
+                "required": [
+                    "id",
+                    "transport",
+                    "verified",
+                    "msg_signature_hash",
+                    "timestamp",
+                    "timestamp_skew_secs",
+                    "nonce_hash",
+                    "nonce_key_hash",
+                    "receive_id_hash",
+                    "replay"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "id": { "type": "string", "minLength": 1 },
+                    "transport": { "type": "string", "enum": ["callback_http"] },
+                    "verified": { "type": "boolean" },
+                    "msg_signature_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{16}$" },
+                    "timestamp": { "type": "string" },
+                    "timestamp_skew_secs": { "type": "integer", "minimum": 0 },
+                    "nonce_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{16}$" },
+                    "nonce_key_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{16}$" },
+                    "message_key_hash": { "type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{16}$" },
+                    "receive_id_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{16}$" },
+                    "replay": { "type": "boolean" }
+                }
+            },
+            "callback": {
+                "type": "object",
+                "required": ["outer", "message", "plaintext_xml"],
+                "additionalProperties": false,
+                "properties": {
+                    "outer": { "type": ["object", "null"], "additionalProperties": { "type": "string" } },
+                    "message": { "type": ["object", "null"], "additionalProperties": { "type": "string" } },
+                    "plaintext_xml": { "type": ["string", "null"] }
+                }
+            },
+            "policy": {
+                "type": "object",
+                "required": [
+                    "model",
+                    "decision",
+                    "reason",
+                    "sender_user_hash",
+                    "external_user_hash",
+                    "room_hash",
+                    "persisted_replay_state",
+                    "redaction_status"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "model": { "type": "string", "enum": ["host_forwarded_callback_replay_and_policy"] },
+                    "decision": { "type": "string", "enum": ["accepted", "rejected", "duplicate"] },
+                    "reason": { "type": "string" },
+                    "sender_user_hash": { "type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{16}$" },
+                    "external_user_hash": { "type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{16}$" },
+                    "room_hash": { "type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{16}$" },
+                    "persisted_replay_state": { "type": "boolean" },
+                    "redaction_status": { "type": "string" }
+                }
+            },
+            "event": {
+                "anyOf": [
+                    { "type": "object", "additionalProperties": true },
+                    { "type": "null" }
+                ]
+            }
+        }
+    })
+}
+
+fn health_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["status", "token_issuance_probe", "details"],
+        "additionalProperties": false,
+        "properties": {
+            "status": { "type": "string", "enum": ["ok"] },
+            "token_issuance_probe": { "type": "string", "enum": ["GET /cgi-bin/gettoken"] },
+            "details": { "type": "object", "additionalProperties": true }
+        }
+    })
+}
+
+fn output_schema_for(operation_id: &str) -> Value {
+    match operation_id {
+        OP_SEND_TEXT | OP_SEND_MARKDOWN | OP_SEND_IMAGE | OP_SEND_FILE => send_output_schema(),
+        OP_UPLOAD_MEDIA => upload_media_output_schema(),
+        OP_DOWNLOAD_MEDIA => download_media_output_schema(),
+        OP_GET_USER => user_output_schema(),
+        OP_LIST_DEPARTMENTS => departments_output_schema(),
+        OP_VERIFY_CALLBACK_URL => callback_verify_output_schema(),
+        OP_INGEST_CALLBACK_EVENT => callback_ingest_output_schema(),
+        OP_HEALTH => health_output_schema(),
+        _ => json!({ "type": "object" }),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WeComConversation {
     kind: &'static str,
@@ -723,19 +1096,7 @@ impl WeComConnector {
                 RiskLevel::Medium,
                 SafetyTier::Risky,
                 IdempotencyClass::None,
-                json!({
-                    "type": "object",
-                    "required": ["content"],
-                    "properties": {
-                        "content": { "type": "string" },
-                        "touser": { "type": "string" },
-                        "toparty": { "type": "string" },
-                        "totag": { "type": "string" },
-                        "safe": { "type": "boolean" },
-                        "enable_duplicate_check": { "type": "boolean" },
-                        "duplicate_check_interval": { "type": "integer", "minimum": 0 }
-                    }
-                }),
+                send_text_input_schema(),
                 "Use when a work-zone automation must proactively deliver plain text into WeCom.",
             ),
             operation(
@@ -745,18 +1106,7 @@ impl WeComConnector {
                 RiskLevel::Medium,
                 SafetyTier::Risky,
                 IdempotencyClass::None,
-                json!({
-                    "type": "object",
-                    "required": ["content"],
-                    "properties": {
-                        "content": { "type": "string" },
-                        "touser": { "type": "string" },
-                        "toparty": { "type": "string" },
-                        "totag": { "type": "string" },
-                        "enable_duplicate_check": { "type": "boolean" },
-                        "duplicate_check_interval": { "type": "integer", "minimum": 0 }
-                    }
-                }),
+                send_markdown_input_schema(),
                 "Use when the destination accepts WeCom markdown rendering and rich formatting matters.",
             ),
             operation(
@@ -766,19 +1116,7 @@ impl WeComConnector {
                 RiskLevel::Medium,
                 SafetyTier::Risky,
                 IdempotencyClass::None,
-                json!({
-                    "type": "object",
-                    "required": ["media_id"],
-                    "properties": {
-                        "media_id": { "type": "string" },
-                        "touser": { "type": "string" },
-                        "toparty": { "type": "string" },
-                        "totag": { "type": "string" },
-                        "safe": { "type": "boolean" },
-                        "enable_duplicate_check": { "type": "boolean" },
-                        "duplicate_check_interval": { "type": "integer", "minimum": 0 }
-                    }
-                }),
+                send_media_input_schema(),
                 "Use after `wecom.media.upload` when you need to send one uploaded image by its temporary WeCom `media_id`.",
             ),
             operation(
@@ -788,19 +1126,7 @@ impl WeComConnector {
                 RiskLevel::Medium,
                 SafetyTier::Risky,
                 IdempotencyClass::None,
-                json!({
-                    "type": "object",
-                    "required": ["media_id"],
-                    "properties": {
-                        "media_id": { "type": "string" },
-                        "touser": { "type": "string" },
-                        "toparty": { "type": "string" },
-                        "totag": { "type": "string" },
-                        "safe": { "type": "boolean" },
-                        "enable_duplicate_check": { "type": "boolean" },
-                        "duplicate_check_interval": { "type": "integer", "minimum": 0 }
-                    }
-                }),
+                send_media_input_schema(),
                 "Use after `wecom.media.upload` when you need to send one uploaded file by its temporary WeCom `media_id`.",
             ),
             operation(
@@ -810,16 +1136,7 @@ impl WeComConnector {
                 RiskLevel::Medium,
                 SafetyTier::Risky,
                 IdempotencyClass::BestEffort,
-                json!({
-                    "type": "object",
-                    "required": ["media_type", "file_name", "content_base64"],
-                    "properties": {
-                        "media_type": { "type": "string", "enum": ["image", "voice", "video", "file"] },
-                        "file_name": { "type": "string" },
-                        "mime_type": { "type": "string" },
-                        "content_base64": { "type": "string" }
-                    }
-                }),
+                upload_media_input_schema(),
                 "Use before sending media messages that require a temporary WeCom media_id.",
             ),
             operation(
@@ -829,13 +1146,7 @@ impl WeComConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({
-                    "type": "object",
-                    "required": ["media_id"],
-                    "properties": {
-                        "media_id": { "type": "string" }
-                    }
-                }),
+                download_media_input_schema(),
                 "Use after inbound callback normalization when a MediaId or ThumbMediaId must be resolved into bytes.",
             ),
             operation(
@@ -845,13 +1156,7 @@ impl WeComConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({
-                    "type": "object",
-                    "required": ["userid"],
-                    "properties": {
-                        "userid": { "type": "string" }
-                    }
-                }),
+                get_user_input_schema(),
                 "Use for directory lookups when you already know the WeCom userid.",
             ),
             operation(
@@ -861,12 +1166,7 @@ impl WeComConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "integer" }
-                    }
-                }),
+                list_departments_input_schema(),
                 "Use for read-only org hierarchy discovery inside the bound tenant.",
             ),
             operation(
@@ -876,16 +1176,7 @@ impl WeComConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({
-                    "type": "object",
-                    "required": ["msg_signature", "timestamp", "nonce", "echostr"],
-                    "properties": {
-                        "msg_signature": { "type": "string" },
-                        "timestamp": { "type": "string" },
-                        "nonce": { "type": "string" },
-                        "echostr": { "type": "string" }
-                    }
-                }),
+                callback_verify_input_schema(),
                 "Use when the host receives WeCom's initial callback URL validation GET and needs the decrypted plaintext challenge.",
             ),
             operation(
@@ -895,17 +1186,7 @@ impl WeComConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({
-                    "type": "object",
-                    "required": ["msg_signature", "timestamp", "nonce", "body"],
-                    "properties": {
-                        "msg_signature": { "type": "string" },
-                        "timestamp": { "type": "string" },
-                        "nonce": { "type": "string" },
-                        "body": { "type": "string", "description": "Raw XML body from the WeCom HTTP POST callback" },
-                        "body_xml": { "type": "string", "description": "Alias for body when the host already labels the payload as XML" }
-                    }
-                }),
+                callback_ingest_input_schema(),
                 "Use when the host forwards a signed WeCom callback POST and needs a normalized EventEnvelope plus attachment references.",
             ),
             operation(
@@ -915,7 +1196,7 @@ impl WeComConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({ "type": "object" }),
+                empty_input_schema(),
                 "Use before invoking mutations when you need a bounded credential and connectivity check.",
             ),
         ]
@@ -1836,7 +2117,7 @@ fn operation(
         summary: summary.into(),
         description: Some(summary.into()),
         input_schema,
-        output_schema: json!({ "type": "object" }),
+        output_schema: output_schema_for(id),
         capability: CapabilityId::from_static(capability),
         risk_level,
         safety_tier,
@@ -1872,6 +2153,117 @@ mod tests {
 
     use super::*;
     use crate::types::DEFAULT_TIMEOUT_MS;
+
+    const EXPECTED_MANIFEST_SCHEMA_OPS: &[(&str, &str)] = &[
+        (OP_SEND_TEXT, "messages_send_text"),
+        (OP_SEND_MARKDOWN, "messages_send_markdown"),
+        (OP_SEND_IMAGE, "messages_send_image"),
+        (OP_SEND_FILE, "messages_send_file"),
+        (OP_UPLOAD_MEDIA, "media_upload"),
+        (OP_DOWNLOAD_MEDIA, "media_download"),
+        (OP_GET_USER, "users_get"),
+        (OP_LIST_DEPARTMENTS, "departments_list"),
+        (OP_VERIFY_CALLBACK_URL, "callback_verify_url"),
+        (OP_INGEST_CALLBACK_EVENT, "callback_ingest_event"),
+        (OP_HEALTH, "health"),
+    ];
+
+    fn wecom_manifest() -> Result<toml::Value, String> {
+        toml::from_str(MANIFEST_TOML)
+            .map_err(|err| format!("WeCom manifest TOML should parse: {err}"))
+    }
+
+    fn manifest_operations(
+        manifest: &toml::Value,
+    ) -> Result<&toml::map::Map<String, toml::Value>, String> {
+        manifest
+            .get("provides")
+            .and_then(|provides| provides.get("operations"))
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| "manifest should declare operation tables".to_owned())
+    }
+
+    fn operation_schema(
+        manifest: &toml::Value,
+        operation_key: &str,
+        field: &str,
+    ) -> Result<Value, String> {
+        let schema = manifest_operations(manifest)?
+            .get(operation_key)
+            .and_then(toml::Value::as_table)
+            .and_then(|operation| operation.get(field))
+            .ok_or_else(|| format!("{operation_key} should declare {field}"))?;
+        if schema.as_table().is_none_or(toml::map::Map::is_empty) {
+            return Err(format!(
+                "{operation_key}.{field} should be a non-empty schema table"
+            ));
+        }
+        serde_json::to_value(schema)
+            .map_err(|err| format!("{operation_key}.{field} should convert to JSON: {err}"))
+    }
+
+    fn validator_for(schema: &Value) -> Result<jsonschema::Validator, String> {
+        jsonschema::Validator::new(schema)
+            .map_err(|err| format!("manifest operation schema should compile: {err}"))
+    }
+
+    fn assert_schema_accepts(schema: &Value, payload: &Value) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        let errors = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "schema should accept {payload}; errors: {errors:?}"
+            ))
+        }
+    }
+
+    fn assert_schema_rejects(schema: &Value, payload: &Value) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        if validator.iter_errors(payload).next().is_some() {
+            Ok(())
+        } else {
+            Err(format!("schema should reject {payload}"))
+        }
+    }
+
+    fn sample_callback_ingest_output() -> Value {
+        json!({
+            "delivery": {
+                "id": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "transport": "callback_http",
+                "verified": true,
+                "msg_signature_hash": "sha256:1111111111111111",
+                "timestamp": "1700000000",
+                "timestamp_skew_secs": 0,
+                "nonce_hash": "sha256:2222222222222222",
+                "nonce_key_hash": "sha256:3333333333333333",
+                "message_key_hash": null,
+                "receive_id_hash": "sha256:4444444444444444",
+                "replay": false
+            },
+            "callback": {
+                "outer": { "Encrypt": "ciphertext" },
+                "message": { "FromUserName": "alice", "MsgType": "text" },
+                "plaintext_xml": "<xml><FromUserName>alice</FromUserName></xml>"
+            },
+            "policy": {
+                "model": WECOM_CALLBACK_POLICY_MODEL,
+                "decision": "accepted",
+                "reason": "accepted",
+                "sender_user_hash": "sha256:5555555555555555",
+                "external_user_hash": null,
+                "room_hash": null,
+                "persisted_replay_state": false,
+                "redaction_status": "tenant_and_callback_metadata_hashed_or_omitted"
+            },
+            "event": null
+        })
+    }
 
     fn handshake_request(
         host_public_key: [u8; 32],
@@ -2230,6 +2622,278 @@ mod tests {
                 .map(|readiness| readiness.callback_receive_id_mode),
             Some("explicit_override")
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn manifest_operation_schemas_compile_and_validate_core_payloads() -> Result<(), String> {
+        let manifest = wecom_manifest()?;
+        let operations = manifest_operations(&manifest)?;
+        assert_eq!(
+            operations.len(),
+            EXPECTED_MANIFEST_SCHEMA_OPS.len(),
+            "manifest operation inventory should match expected schema coverage"
+        );
+
+        let runtime_operations = WeComConnector::operations();
+        assert_eq!(
+            runtime_operations.len(),
+            EXPECTED_MANIFEST_SCHEMA_OPS.len(),
+            "runtime OperationInfo inventory should match manifest schema coverage"
+        );
+
+        for (operation_id, manifest_key) in EXPECTED_MANIFEST_SCHEMA_OPS {
+            let runtime = runtime_operations
+                .iter()
+                .find(|operation| operation.id.as_str() == *operation_id)
+                .ok_or_else(|| format!("runtime should expose {operation_id}"))?;
+
+            for field in ["input_schema", "output_schema"] {
+                let schema = operation_schema(&manifest, manifest_key, field)?;
+                let _validator = validator_for(&schema)?;
+            }
+
+            assert_eq!(
+                operation_schema(&manifest, manifest_key, "input_schema")?,
+                runtime.input_schema,
+                "{operation_id} runtime input schema should match manifest"
+            );
+            assert_eq!(
+                operation_schema(&manifest, manifest_key, "output_schema")?,
+                runtime.output_schema,
+                "{operation_id} runtime output schema should match manifest"
+            );
+        }
+
+        let send_text_input = operation_schema(&manifest, "messages_send_text", "input_schema")?;
+        assert_schema_accepts(
+            &send_text_input,
+            &json!({
+                "touser": "zhangsan",
+                "content": "hello",
+                "safe": 1,
+                "enable_duplicate_check": true,
+                "duplicate_check_interval": 300
+            }),
+        )?;
+        assert_schema_rejects(&send_text_input, &json!({ "content": "hello" }))?;
+        assert_schema_rejects(
+            &send_text_input,
+            &json!({ "touser": "zhangsan", "content": "hello", "unexpected": true }),
+        )?;
+
+        let markdown_input = operation_schema(&manifest, "messages_send_markdown", "input_schema")?;
+        assert_schema_accepts(
+            &markdown_input,
+            &json!({
+                "toparty": "42",
+                "content": "**hello**",
+                "enable_duplicate_check": 0
+            }),
+        )?;
+        assert_schema_rejects(
+            &markdown_input,
+            &json!({ "touser": "zhangsan", "content": "" }),
+        )?;
+
+        let image_input = operation_schema(&manifest, "messages_send_image", "input_schema")?;
+        assert_schema_accepts(
+            &image_input,
+            &json!({
+                "totag": "ops",
+                "media_id": "MEDIA123",
+                "safe": false
+            }),
+        )?;
+        assert_schema_rejects(&image_input, &json!({ "touser": "zhangsan" }))?;
+
+        let file_input = operation_schema(&manifest, "messages_send_file", "input_schema")?;
+        assert_schema_accepts(
+            &file_input,
+            &json!({
+                "toparty": "42",
+                "media_id": "MEDIA123",
+                "enable_duplicate_check": 1
+            }),
+        )?;
+
+        let upload_input = operation_schema(&manifest, "media_upload", "input_schema")?;
+        assert_schema_accepts(
+            &upload_input,
+            &json!({
+                "media_type": "image",
+                "file_name": "test.png",
+                "mime_type": "image/png",
+                "content_base64": "cG5n"
+            }),
+        )?;
+        assert_schema_rejects(
+            &upload_input,
+            &json!({
+                "media_type": "sticker",
+                "file_name": "test.png",
+                "content_base64": "cG5n"
+            }),
+        )?;
+
+        let download_input = operation_schema(&manifest, "media_download", "input_schema")?;
+        assert_schema_accepts(&download_input, &json!({ "media_id": "MEDIA123" }))?;
+        assert_schema_rejects(
+            &download_input,
+            &json!({ "media_id": "MEDIA123", "extra": true }),
+        )?;
+
+        let user_input = operation_schema(&manifest, "users_get", "input_schema")?;
+        assert_schema_accepts(&user_input, &json!({ "userid": "zhangsan" }))?;
+
+        let departments_input = operation_schema(&manifest, "departments_list", "input_schema")?;
+        assert_schema_accepts(&departments_input, &json!({}))?;
+        assert_schema_accepts(&departments_input, &json!({ "id": 42 }))?;
+        assert_schema_rejects(&departments_input, &json!({ "id": "42" }))?;
+
+        let verify_input = operation_schema(&manifest, "callback_verify_url", "input_schema")?;
+        assert_schema_accepts(
+            &verify_input,
+            &json!({
+                "msg_signature": "sig",
+                "timestamp": "1700000000",
+                "nonce": "nonce",
+                "echostr": "ciphertext"
+            }),
+        )?;
+
+        let ingest_input = operation_schema(&manifest, "callback_ingest_event", "input_schema")?;
+        assert_schema_accepts(
+            &ingest_input,
+            &json!({
+                "msg_signature": "sig",
+                "timestamp": "1700000000",
+                "nonce": "nonce",
+                "body": "<xml />"
+            }),
+        )?;
+        assert_schema_accepts(
+            &ingest_input,
+            &json!({
+                "msg_signature": "sig",
+                "timestamp": "1700000000",
+                "nonce": "nonce",
+                "body_xml": "<xml />"
+            }),
+        )?;
+        assert_schema_rejects(
+            &ingest_input,
+            &json!({
+                "msg_signature": "sig",
+                "timestamp": "1700000000",
+                "nonce": "nonce"
+            }),
+        )?;
+
+        let health_input = operation_schema(&manifest, "health", "input_schema")?;
+        assert_schema_accepts(&health_input, &json!({}))?;
+        assert_schema_rejects(&health_input, &json!({ "probe": true }))?;
+
+        for operation_key in [
+            "messages_send_text",
+            "messages_send_markdown",
+            "messages_send_image",
+            "messages_send_file",
+        ] {
+            let output = operation_schema(&manifest, operation_key, "output_schema")?;
+            assert_schema_accepts(
+                &output,
+                &json!({ "errcode": 0, "errmsg": "ok", "msgid": "mid-1" }),
+            )?;
+        }
+
+        let upload_output = operation_schema(&manifest, "media_upload", "output_schema")?;
+        assert_schema_accepts(
+            &upload_output,
+            &json!({
+                "errcode": 0,
+                "errmsg": "ok",
+                "type": "image",
+                "media_id": "MEDIA123",
+                "created_at": 1_700_000_000
+            }),
+        )?;
+
+        let download_output = operation_schema(&manifest, "media_download", "output_schema")?;
+        assert_schema_accepts(
+            &download_output,
+            &json!({
+                "media_id": "MEDIA123",
+                "file_name": "test.png",
+                "mime_type": "image/png",
+                "content_length": 8,
+                "content_base64": "cG5nLWRhdGE=",
+                "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            }),
+        )?;
+
+        let user_output = operation_schema(&manifest, "users_get", "output_schema")?;
+        assert_schema_accepts(
+            &user_output,
+            &json!({
+                "errcode": 0,
+                "errmsg": "ok",
+                "userid": "zhangsan",
+                "name": "Zhang San",
+                "department": [1, 2],
+                "status": 1
+            }),
+        )?;
+
+        let departments_output = operation_schema(&manifest, "departments_list", "output_schema")?;
+        assert_schema_accepts(
+            &departments_output,
+            &json!({
+                "errcode": 0,
+                "errmsg": "ok",
+                "department": [{ "id": 1, "name": "Engineering" }]
+            }),
+        )?;
+
+        let verify_output = operation_schema(&manifest, "callback_verify_url", "output_schema")?;
+        assert_schema_accepts(
+            &verify_output,
+            &json!({
+                "verified": true,
+                "transport": "callback_http_get",
+                "receive_id": "corp",
+                "challenge": "plain",
+                "http_response": {
+                    "status": 200,
+                    "content_type": "text/plain; charset=utf-8",
+                    "body": "plain"
+                }
+            }),
+        )?;
+
+        let ingest_output = operation_schema(&manifest, "callback_ingest_event", "output_schema")?;
+        assert_schema_accepts(&ingest_output, &sample_callback_ingest_output())?;
+
+        let health_output = operation_schema(&manifest, "health", "output_schema")?;
+        assert_schema_accepts(
+            &health_output,
+            &json!({
+                "status": "ok",
+                "token_issuance_probe": WECOM_TOKEN_PROBE,
+                "details": { "configured": true, "manifest_hash": WeComConnector::manifest_hash() }
+            }),
+        )?;
+        assert_schema_rejects(
+            &health_output,
+            &json!({
+                "status": "ok",
+                "token_issuance_probe": WECOM_TOKEN_PROBE,
+                "details": {},
+                "extra": true
+            }),
+        )?;
+
+        Ok(())
     }
 
     #[test]

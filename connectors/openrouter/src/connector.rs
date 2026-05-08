@@ -883,6 +883,228 @@ impl Default for OpenRouterConnector {
     }
 }
 
+fn chat_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["messages"],
+        "additionalProperties": false,
+        "properties": {
+            "model": {
+                "type": "string",
+                "minLength": 1,
+                "default": "openai/gpt-4.1-mini"
+            },
+            "messages": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "required": ["role", "content"],
+                    "additionalProperties": true,
+                    "properties": {
+                        "role": {
+                            "type": "string",
+                            "enum": ["system", "user", "assistant", "tool", "developer"]
+                        },
+                        "content": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {"type": "array"},
+                                {"type": "null"}
+                            ]
+                        },
+                        "name": {"type": "string"},
+                        "tool_call_id": {"type": "string"},
+                        "tool_calls": {"type": "array"}
+                    }
+                }
+            },
+            "max_tokens": {"type": "integer", "minimum": 1},
+            "temperature": {"type": "number", "minimum": 0, "maximum": 2},
+            "top_p": {"type": "number", "minimum": 0, "maximum": 1},
+            "response_format": {"type": "object"},
+            "tools": {"type": "array", "items": {"type": "object"}},
+            "tool_choice": {
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "object"},
+                    {"type": "null"}
+                ]
+            }
+        }
+    })
+}
+
+fn chat_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["id", "model", "content", "finish_reason", "usage", "raw"],
+        "additionalProperties": false,
+        "properties": {
+            "id": {"type": ["string", "null"]},
+            "model": {"type": ["string", "null"]},
+            "content": {
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "array"},
+                    {"type": "null"}
+                ]
+            },
+            "finish_reason": {"type": ["string", "null"]},
+            "usage": {
+                "oneOf": [
+                    {"type": "object"},
+                    {"type": "null"}
+                ]
+            },
+            "raw": {"type": "object"}
+        }
+    })
+}
+
+fn models_list_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+    })
+}
+
+fn models_list_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["data"],
+        "additionalProperties": true,
+        "properties": {
+            "data": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["id"],
+                    "additionalProperties": true,
+                    "properties": {
+                        "id": {"type": "string"},
+                        "name": {"type": "string"},
+                        "created": {"type": "integer"},
+                        "description": {"type": "string"},
+                        "context_length": {"type": "integer"},
+                        "pricing": {"type": "object"},
+                        "architecture": {"type": "object"},
+                        "top_provider": {"type": "object"},
+                        "per_request_limits": {
+                            "oneOf": [
+                                {"type": "object"},
+                                {"type": "null"}
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn video_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["prompt"],
+        "additionalProperties": false,
+        "properties": {
+            "model": {
+                "type": "string",
+                "minLength": 1,
+                "default": DEFAULT_VIDEO_MODEL
+            },
+            "prompt": {"type": "string", "minLength": 1},
+            "duration_seconds": {"type": "integer", "minimum": 1},
+            "resolution": {"type": "string"},
+            "aspect_ratio": {"type": "string"},
+            "size": {"type": "string"},
+            "audio": {"type": "boolean"},
+            "input_images": {
+                "type": "array",
+                "maxItems": MAX_VIDEO_INPUT_IMAGES,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "anyOf": [
+                        {"required": ["url"]},
+                        {"required": ["data_url"]},
+                        {"required": ["base64"]}
+                    ],
+                    "properties": {
+                        "role": {
+                            "type": "string",
+                            "enum": ["first_frame", "last_frame", "reference_image"]
+                        },
+                        "url": {"type": "string", "format": "uri"},
+                        "data_url": {
+                            "type": "string",
+                            "pattern": "^data:image/[^;]+;base64,"
+                        },
+                        "base64": {"type": "string", "minLength": 1},
+                        "mime_type": {"type": "string", "pattern": "^image/"}
+                    }
+                }
+            },
+            "input_videos": {"type": "array", "maxItems": 0},
+            "callback_url": {"type": "string", "format": "uri"},
+            "seed": {"type": "integer"},
+            "provider_options": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "callback_url": {"type": "string", "format": "uri"},
+                    "seed": {"type": "integer"}
+                }
+            },
+            "poll_interval_ms": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": MAX_VIDEO_POLL_INTERVAL_MS
+            },
+            "max_poll_attempts": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": MAX_VIDEO_POLL_ATTEMPTS
+            },
+            "max_download_bytes": {"type": "integer", "minimum": 1}
+        }
+    })
+}
+
+fn video_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["job_id", "status", "generation_id", "model", "usage", "video", "raw"],
+        "additionalProperties": false,
+        "properties": {
+            "job_id": {"type": "string", "minLength": 1},
+            "status": {"type": "string", "minLength": 1},
+            "generation_id": {"type": ["string", "null"]},
+            "model": {"type": "string", "minLength": 1},
+            "usage": {
+                "oneOf": [
+                    {"type": "object"},
+                    {"type": "null"}
+                ]
+            },
+            "video": {
+                "type": "object",
+                "required": ["mime_type", "base64", "byte_len", "file_name"],
+                "additionalProperties": false,
+                "properties": {
+                    "mime_type": {"type": "string", "pattern": "^video/"},
+                    "base64": {"type": "string", "minLength": 1},
+                    "byte_len": {"type": "integer", "minimum": 0},
+                    "file_name": {"type": "string", "enum": ["video-1.mp4", "video-1.webm"]}
+                }
+            },
+            "raw": {"type": "object"}
+        }
+    })
+}
+
 fn operations_info() -> Vec<Value> {
     vec![
         json!({
@@ -893,21 +1115,8 @@ fn operations_info() -> Vec<Value> {
             "risk_level": "medium",
             "safety_tier": "safe",
             "idempotency": "none",
-            "input_schema": {
-                "type": "object",
-                "required": ["messages"],
-                "properties": {
-                    "model": {"type": "string", "default": "openai/gpt-4.1-mini"},
-                    "messages": {"type": "array", "minItems": 1},
-                    "max_tokens": {"type": "integer"},
-                    "temperature": {"type": "number"},
-                    "top_p": {"type": "number"},
-                    "response_format": {"type": "object"},
-                    "tools": {"type": "array"},
-                    "tool_choice": {}
-                }
-            },
-            "output_schema": {"type": "object"},
+            "input_schema": chat_input_schema(),
+            "output_schema": chat_output_schema(),
             "ai_hints": {
                 "when_to_use": "Use when you need one routed model request through OpenRouter without building provider-specific clients.",
                 "common_mistakes": [
@@ -928,8 +1137,8 @@ fn operations_info() -> Vec<Value> {
             "risk_level": "low",
             "safety_tier": "safe",
             "idempotency": "strict",
-            "input_schema": {"type": "object", "properties": {}},
-            "output_schema": {"type": "object"},
+            "input_schema": models_list_input_schema(),
+            "output_schema": models_list_output_schema(),
             "ai_hints": {
                 "when_to_use": "Use to discover valid provider-qualified model IDs.",
                 "common_mistakes": ["Do not assume a first-party provider model ID works unchanged without the OpenRouter prefix."],
@@ -945,32 +1154,8 @@ fn operations_info() -> Vec<Value> {
             "risk_level": "medium",
             "safety_tier": "safe",
             "idempotency": "none",
-            "input_schema": {
-                "type": "object",
-                "required": ["prompt"],
-                "properties": {
-                    "model": {"type": "string", "default": DEFAULT_VIDEO_MODEL},
-                    "prompt": {"type": "string", "minLength": 1},
-                    "duration_seconds": {"type": "integer", "minimum": 1},
-                    "resolution": {"type": "string", "enum": ["720P", "1080P", "720p", "1080p"]},
-                    "aspect_ratio": {"type": "string", "enum": ["16:9", "9:16"]},
-                    "size": {"type": "string"},
-                    "audio": {"type": "boolean"},
-                    "input_images": {"type": "array", "maxItems": MAX_VIDEO_INPUT_IMAGES},
-                    "input_videos": {"type": "array", "maxItems": 0},
-                    "provider_options": {
-                        "type": "object",
-                        "properties": {
-                            "callback_url": {"type": "string"},
-                            "seed": {"type": "integer"}
-                        }
-                    },
-                    "poll_interval_ms": {"type": "integer", "minimum": 0, "maximum": MAX_VIDEO_POLL_INTERVAL_MS},
-                    "max_poll_attempts": {"type": "integer", "minimum": 1, "maximum": MAX_VIDEO_POLL_ATTEMPTS},
-                    "max_download_bytes": {"type": "integer", "minimum": 1}
-                }
-            },
-            "output_schema": {"type": "object"},
+            "input_schema": video_input_schema(),
+            "output_schema": video_output_schema(),
             "ai_hints": {
                 "when_to_use": "Use for a bounded OpenRouter image-to-video or text-to-video job when the caller can accept a base64-encoded returned asset.",
                 "common_mistakes": [
@@ -1338,6 +1523,76 @@ mod tests {
         matchers::{header, method, path},
     };
 
+    const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+    const EXPECTED_OPERATION_IDS: [&str; 3] = [
+        "openrouter.chat.completions",
+        "openrouter.models.list",
+        "openrouter.videos.generate",
+    ];
+
+    fn openrouter_manifest() -> Result<toml::Value, String> {
+        toml::from_str(MANIFEST_TOML)
+            .map_err(|err| format!("OpenRouter manifest TOML should parse: {err}"))
+    }
+
+    fn manifest_operations(
+        manifest: &toml::Value,
+    ) -> Result<&toml::map::Map<String, toml::Value>, String> {
+        manifest
+            .get("provides")
+            .and_then(|provides| provides.get("operations"))
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| "manifest should declare operation tables".to_owned())
+    }
+
+    fn operation_schema(
+        manifest: &toml::Value,
+        operation_id: &str,
+        field: &str,
+    ) -> Result<Value, String> {
+        let schema = manifest_operations(manifest)?
+            .get(operation_id)
+            .and_then(toml::Value::as_table)
+            .and_then(|operation| operation.get(field))
+            .ok_or_else(|| format!("{operation_id} should declare {field}"))?;
+        if schema.as_table().is_none_or(toml::map::Map::is_empty) {
+            return Err(format!(
+                "{operation_id}.{field} should be a non-empty schema table"
+            ));
+        }
+        serde_json::to_value(schema)
+            .map_err(|err| format!("{operation_id}.{field} should convert to JSON: {err}"))
+    }
+
+    fn validator_for(schema: &Value) -> Result<jsonschema::Validator, String> {
+        jsonschema::Validator::new(schema)
+            .map_err(|err| format!("manifest operation schema should compile: {err}"))
+    }
+
+    fn assert_schema_accepts(schema: &Value, payload: &Value) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        let errors = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "schema should accept {payload}; errors: {errors:?}"
+            ))
+        }
+    }
+
+    fn assert_schema_rejects(schema: &Value, payload: &Value) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        if validator.iter_errors(payload).next().is_some() {
+            Ok(())
+        } else {
+            Err(format!("schema should reject {payload}"))
+        }
+    }
+
     #[test]
     fn config_requires_exactly_one_auth_source() {
         let error = OpenRouterConfig::from_params(&json!({
@@ -1547,6 +1802,228 @@ mod tests {
             operation["id"] == "openrouter.videos.generate"
                 && operation["capability"] == "openrouter.video"
         }));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn manifest_operation_schemas_compile_and_validate_core_payloads() -> Result<(), String> {
+        let manifest = openrouter_manifest()?;
+        let manifest_operations = manifest_operations(&manifest)?;
+        let operation_catalog = operations_info();
+
+        for operation_id in EXPECTED_OPERATION_IDS {
+            assert!(
+                manifest_operations.contains_key(operation_id),
+                "manifest should declare operation {operation_id}"
+            );
+            let operation = operation_catalog
+                .iter()
+                .find(|operation| operation["id"] == operation_id)
+                .ok_or_else(|| format!("operation catalog should declare {operation_id}"))?;
+            for field in ["input_schema", "output_schema"] {
+                let schema = operation_schema(&manifest, operation_id, field)?;
+                let _validator = validator_for(&schema)?;
+                assert_eq!(
+                    operation[field], schema,
+                    "{operation_id} {field} should match manifest"
+                );
+            }
+        }
+
+        let chat_input =
+            operation_schema(&manifest, "openrouter.chat.completions", "input_schema")?;
+        assert_schema_accepts(
+            &chat_input,
+            &json!({
+                "model": "openai/gpt-4.1-mini",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 128,
+                "temperature": 0.4,
+                "top_p": 0.9,
+                "response_format": {"type": "json_object"},
+                "tools": [{"type": "function"}],
+                "tool_choice": "auto"
+            }),
+        )?;
+        assert_schema_rejects(&chat_input, &json!({}))?;
+        assert_schema_rejects(&chat_input, &json!({"messages": []}))?;
+        assert_schema_rejects(&chat_input, &json!({"messages": [{"role": "user"}]}))?;
+        assert_schema_rejects(
+            &chat_input,
+            &json!({"messages": [{"role": "user", "content": "hello"}], "stream": false}),
+        )?;
+        assert_schema_rejects(
+            &chat_input,
+            &json!({"messages": [{"role": "user", "content": "hello"}], "temperature": 3}),
+        )?;
+
+        let chat_output =
+            operation_schema(&manifest, "openrouter.chat.completions", "output_schema")?;
+        assert_schema_accepts(
+            &chat_output,
+            &json!({
+                "id": "gen-1",
+                "model": "openai/gpt-4.1-mini",
+                "content": "hello",
+                "finish_reason": "stop",
+                "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+                "raw": {"id": "gen-1", "choices": []}
+            }),
+        )?;
+        assert_schema_accepts(
+            &chat_output,
+            &json!({
+                "id": null,
+                "model": null,
+                "content": null,
+                "finish_reason": null,
+                "usage": null,
+                "raw": {}
+            }),
+        )?;
+        assert_schema_rejects(&chat_output, &json!({"id": "gen-1"}))?;
+        assert_schema_rejects(
+            &chat_output,
+            &json!({
+                "id": "gen-1",
+                "model": "openai/gpt-4.1-mini",
+                "content": "hello",
+                "finish_reason": "stop",
+                "usage": {},
+                "raw": {},
+                "extra": true
+            }),
+        )?;
+
+        let models_input = operation_schema(&manifest, "openrouter.models.list", "input_schema")?;
+        assert_schema_accepts(&models_input, &json!({}))?;
+        assert_schema_rejects(&models_input, &json!({"cursor": "next"}))?;
+
+        let models_output = operation_schema(&manifest, "openrouter.models.list", "output_schema")?;
+        assert_schema_accepts(
+            &models_output,
+            &json!({
+                "data": [{
+                    "id": "openai/gpt-4.1-mini",
+                    "name": "GPT-4.1 Mini",
+                    "created": 1_710_000_000,
+                    "description": "Routed model",
+                    "context_length": 128_000,
+                    "pricing": {"prompt": "0.00000015"},
+                    "architecture": {"modality": "text->text"},
+                    "top_provider": {"max_completion_tokens": 16384},
+                    "per_request_limits": null
+                }]
+            }),
+        )?;
+        assert_schema_rejects(&models_output, &json!({}))?;
+        assert_schema_rejects(&models_output, &json!({"data": [{}]}))?;
+
+        let video_input =
+            operation_schema(&manifest, "openrouter.videos.generate", "input_schema")?;
+        assert_schema_accepts(
+            &video_input,
+            &json!({
+                "prompt": "A chrome sphere glides across a quiet moonlit beach",
+                "model": "google/veo-3.1-fast",
+                "duration_seconds": 6,
+                "resolution": "720P",
+                "aspect_ratio": "16:9",
+                "audio": false,
+                "input_images": [
+                    {"base64": "Zmlyc3Q=", "mime_type": "image/png"},
+                    {"url": "https://example.test/last.png", "role": "last_frame"}
+                ],
+                "provider_options": {
+                    "callback_url": "https://example.test/openrouter-hook",
+                    "seed": 42
+                },
+                "poll_interval_ms": 0,
+                "max_poll_attempts": 3,
+                "max_download_bytes": 1_048_576
+            }),
+        )?;
+        assert_schema_accepts(
+            &video_input,
+            &json!({
+                "prompt": "A quiet lake at sunrise",
+                "callback_url": "https://example.test/openrouter-hook",
+                "seed": 7
+            }),
+        )?;
+        assert_schema_rejects(&video_input, &json!({}))?;
+        assert_schema_rejects(&video_input, &json!({"prompt": ""}))?;
+        assert_schema_rejects(
+            &video_input,
+            &json!({"prompt": "clip", "input_videos": [{"url": "https://example.test/a.mp4"}]}),
+        )?;
+        assert_schema_rejects(
+            &video_input,
+            &json!({"prompt": "clip", "input_images": [{"mime_type": "image/png"}]}),
+        )?;
+        assert_schema_rejects(
+            &video_input,
+            &json!({"prompt": "clip", "input_images": [{"base64": "x", "unexpected": true}]}),
+        )?;
+        assert_schema_rejects(&video_input, &json!({"prompt": "clip", "extra": true}))?;
+
+        let video_output =
+            operation_schema(&manifest, "openrouter.videos.generate", "output_schema")?;
+        assert_schema_accepts(
+            &video_output,
+            &json!({
+                "job_id": "job-123",
+                "status": "completed",
+                "generation_id": "gen-123",
+                "model": "google/veo-3.1-fast",
+                "usage": {"cost": 0.25},
+                "video": {
+                    "mime_type": "video/mp4",
+                    "base64": "bXA0",
+                    "byte_len": 3,
+                    "file_name": "video-1.mp4"
+                },
+                "raw": {"id": "job-123", "status": "completed"}
+            }),
+        )?;
+        assert_schema_rejects(&video_output, &json!({"job_id": "job-123"}))?;
+        assert_schema_rejects(
+            &video_output,
+            &json!({
+                "job_id": "job-123",
+                "status": "completed",
+                "generation_id": null,
+                "model": "google/veo-3.1-fast",
+                "usage": null,
+                "video": {
+                    "mime_type": "video/mp4",
+                    "base64": "bXA0",
+                    "byte_len": 3,
+                    "file_name": "video-1.mov"
+                },
+                "raw": {}
+            }),
+        )?;
+        assert_schema_rejects(
+            &video_output,
+            &json!({
+                "job_id": "job-123",
+                "status": "completed",
+                "generation_id": null,
+                "model": "google/veo-3.1-fast",
+                "usage": null,
+                "video": {
+                    "mime_type": "video/mp4",
+                    "base64": "bXA0",
+                    "byte_len": 3,
+                    "file_name": "video-1.mp4",
+                    "extra": true
+                },
+                "raw": {}
+            }),
+        )?;
+
+        Ok(())
     }
 
     #[fcp_async_core::runtime::test]

@@ -28,6 +28,70 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
 
+[provides.operations.search_text.input_schema]
+type = "object"
+required = ["query"]
+additionalProperties = false
+
+[provides.operations.search_text.input_schema.properties.query]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations.search_text.input_schema.properties.max_result_count]
+type = "integer"
+minimum = 0
+maximum = 4294967295
+
+[provides.operations.search_text.input_schema.properties.open_now]
+type = "boolean"
+
+[provides.operations.search_text.input_schema.properties.field_mask]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations.search_text.output_schema]
+type = "object"
+required = ["places"]
+additionalProperties = true
+
+[provides.operations.search_text.output_schema.properties.places]
+type = "array"
+
+[provides.operations.search_text.output_schema.properties.places.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations.search_text.output_schema.properties.places.items.properties.id]
+type = ["string", "null"]
+
+[provides.operations.search_text.output_schema.properties.places.items.properties.name]
+type = ["string", "null"]
+
+[provides.operations.search_text.output_schema.properties.places.items.properties.displayName]
+type = ["object", "null"]
+additionalProperties = true
+
+[provides.operations.search_text.output_schema.properties.places.items.properties.displayName.properties.text]
+type = ["string", "null"]
+
+[provides.operations.search_text.output_schema.properties.places.items.properties.displayName.properties.languageCode]
+type = ["string", "null"]
+
+[provides.operations.search_text.output_schema.properties.places.items.properties.formattedAddress]
+type = ["string", "null"]
+
+[provides.operations.search_text.output_schema.properties.places.items.properties.types]
+type = "array"
+
+[provides.operations.search_text.output_schema.properties.places.items.properties.types.items]
+type = "string"
+
+[provides.operations.search_text.output_schema.properties.places.items.properties.googleMapsUri]
+type = ["string", "null"]
+format = "uri"
+
 [provides.operations.search_text.network_constraints]
 host_allow = ["places.googleapis.com"]
 port_allow = [443]
@@ -44,6 +108,66 @@ capability = "google_places.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+
+[provides.operations.autocomplete.input_schema]
+type = "object"
+required = ["input"]
+additionalProperties = false
+
+[provides.operations.autocomplete.input_schema.properties.input]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations.autocomplete.input_schema.properties.session_token]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations.autocomplete.input_schema.properties.field_mask]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations.autocomplete.output_schema]
+type = "object"
+required = ["suggestions"]
+additionalProperties = true
+
+[provides.operations.autocomplete.output_schema.properties.suggestions]
+type = "array"
+
+[provides.operations.autocomplete.output_schema.properties.suggestions.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations.autocomplete.output_schema.properties.suggestions.items.properties.placePrediction]
+type = ["object", "null"]
+additionalProperties = true
+
+[provides.operations.autocomplete.output_schema.properties.suggestions.items.properties.placePrediction.properties.place]
+type = ["string", "null"]
+
+[provides.operations.autocomplete.output_schema.properties.suggestions.items.properties.placePrediction.properties.placeId]
+type = ["string", "null"]
+
+[provides.operations.autocomplete.output_schema.properties.suggestions.items.properties.placePrediction.properties.text]
+type = ["object", "null"]
+additionalProperties = true
+
+[provides.operations.autocomplete.output_schema.properties.suggestions.items.properties.placePrediction.properties.text.properties.text]
+type = ["string", "null"]
+
+[provides.operations.autocomplete.output_schema.properties.suggestions.items.properties.queryPrediction]
+type = ["object", "null"]
+additionalProperties = true
+
+[provides.operations.autocomplete.output_schema.properties.suggestions.items.properties.queryPrediction.properties.text]
+type = ["object", "null"]
+additionalProperties = true
+
+[provides.operations.autocomplete.output_schema.properties.suggestions.items.properties.queryPrediction.properties.text.properties.text]
+type = ["string", "null"]
 
 [provides.operations.autocomplete.network_constraints]
 host_allow = ["places.googleapis.com"]
@@ -62,6 +186,59 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
 
+[provides.operations.get_place.input_schema]
+type = "object"
+required = ["place"]
+additionalProperties = false
+
+[provides.operations.get_place.input_schema.properties.place]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations.get_place.input_schema.properties.language_code]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations.get_place.input_schema.properties.field_mask]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations.get_place.output_schema]
+type = "object"
+additionalProperties = true
+
+[provides.operations.get_place.output_schema.properties.id]
+type = ["string", "null"]
+
+[provides.operations.get_place.output_schema.properties.name]
+type = ["string", "null"]
+
+[provides.operations.get_place.output_schema.properties.displayName]
+type = ["object", "null"]
+additionalProperties = true
+
+[provides.operations.get_place.output_schema.properties.displayName.properties.text]
+type = ["string", "null"]
+
+[provides.operations.get_place.output_schema.properties.displayName.properties.languageCode]
+type = ["string", "null"]
+
+[provides.operations.get_place.output_schema.properties.formattedAddress]
+type = ["string", "null"]
+
+[provides.operations.get_place.output_schema.properties.types]
+type = "array"
+
+[provides.operations.get_place.output_schema.properties.types.items]
+type = "string"
+
+[provides.operations.get_place.output_schema.properties.googleMapsUri]
+type = ["string", "null"]
+format = "uri"
+
 [provides.operations.get_place.network_constraints]
 host_allow = ["places.googleapis.com"]
 port_allow = [443]
@@ -78,6 +255,48 @@ capability = "google_places.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+
+[provides.operations.health.input_schema]
+type = "object"
+additionalProperties = false
+maxProperties = 0
+
+[provides.operations.health.output_schema]
+type = "object"
+required = ["status", "base_url", "manifest_hash", "field_masks"]
+additionalProperties = false
+
+[provides.operations.health.output_schema.properties.status]
+type = "string"
+enum = ["ok"]
+
+[provides.operations.health.output_schema.properties.base_url]
+type = "string"
+format = "uri"
+
+[provides.operations.health.output_schema.properties.manifest_hash]
+type = "string"
+pattern = "^sha256:[0-9a-f]{64}$"
+
+[provides.operations.health.output_schema.properties.field_masks]
+type = "object"
+required = ["search_text", "autocomplete", "place_details"]
+additionalProperties = false
+
+[provides.operations.health.output_schema.properties.field_masks.properties.search_text]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations.health.output_schema.properties.field_masks.properties.autocomplete]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations.health.output_schema.properties.field_masks.properties.place_details]
+type = "string"
+minLength = 1
+pattern = "\\S"
 
 [provides.operations.health.network_constraints]
 host_allow = ["places.googleapis.com"]
@@ -96,4 +315,3 @@ cpu_percent = 25
 wall_clock_timeout_ms = 30000
 deny_exec = true
 deny_ptrace = true
-

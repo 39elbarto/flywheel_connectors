@@ -50,8 +50,8 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
-input_schema = { type = "object", properties = { page_token = { type = "string", description = "Pagination token" } } }
-output_schema = { type = "object", properties = { items = { type = "array" }, next_page_token = { type = ["string", "null"] } } }
+input_schema = { type = "object", additionalProperties = false, properties = { page_token = { type = "string", description = "Pagination token" } } }
+output_schema = { type = "object", required = ["items"], additionalProperties = false, properties = { items = { type = "array" }, next_page_token = { type = ["string", "null"] } } }
 network_constraints = { host_allow = ["circleci.com"], port_allow = [443], require_sni = true, deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, max_redirects = 0 }
 
 [provides.operations."circleci.projects.list".ai_hints]
@@ -67,8 +67,8 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
-input_schema = { type = "object", required = ["project_slug"], properties = { project_slug = { type = "string", description = "Project slug such as gh/org/repo or circleci/<org-id>/<project-id>" }, page_token = { type = "string", description = "Pagination token" } } }
-output_schema = { type = "object", properties = { items = { type = "array" }, next_page_token = { type = ["string", "null"] } } }
+input_schema = { type = "object", required = ["project_slug"], additionalProperties = false, properties = { project_slug = { type = "string", description = "Project slug such as gh/org/repo or circleci/<org-id>/<project-id>" }, page_token = { type = "string", description = "Pagination token" } } }
+output_schema = { type = "object", required = ["items"], additionalProperties = false, properties = { items = { type = "array" }, next_page_token = { type = ["string", "null"] } } }
 network_constraints = { host_allow = ["circleci.com"], port_allow = [443], require_sni = true, deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, max_redirects = 0 }
 
 [provides.operations."circleci.pipelines.list".ai_hints]
@@ -84,8 +84,8 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
-input_schema = { type = "object", required = ["pipeline_id"], properties = { pipeline_id = { type = "string", description = "Pipeline UUID" } } }
-output_schema = { type = "object", properties = { id = { type = "string" }, state = { type = "string" }, number = { type = "integer" } } }
+input_schema = { type = "object", required = ["pipeline_id"], additionalProperties = false, properties = { pipeline_id = { type = "string", description = "Pipeline UUID" } } }
+output_schema = { type = "object", required = ["id", "state", "number"], properties = { id = { type = "string" }, state = { type = "string" }, number = { type = "integer", minimum = 0 } } }
 network_constraints = { host_allow = ["circleci.com"], port_allow = [443], require_sni = true, deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, max_redirects = 0 }
 
 [provides.operations."circleci.pipelines.get".ai_hints]
@@ -101,8 +101,8 @@ risk_level = "high"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "best_effort"
-input_schema = { type = "object", required = ["project_slug"], properties = { project_slug = { type = "string", description = "Project slug such as gh/org/repo or circleci/<org-id>/<project-id>" }, branch = { type = "string", description = "Branch to run" }, tag = { type = "string", description = "Tag to run" }, parameters = { type = "object", description = "Pipeline parameters accepted by the target project config" } } }
-output_schema = { type = "object", properties = { id = { type = "string" }, state = { type = "string" }, number = { type = "integer" } } }
+input_schema = { type = "object", required = ["project_slug"], additionalProperties = false, properties = { project_slug = { type = "string", description = "Project slug such as gh/org/repo or circleci/<org-id>/<project-id>" }, branch = { type = "string", description = "Branch to run" }, tag = { type = "string", description = "Tag to run" }, parameters = { type = "object", description = "Pipeline parameters accepted by the target project config" } } }
+output_schema = { type = "object", required = ["id", "state", "number"], properties = { id = { type = "string" }, state = { type = "string" }, number = { type = "integer", minimum = 0 } } }
 network_constraints = { host_allow = ["circleci.com"], port_allow = [443], require_sni = true, deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, max_redirects = 0 }
 
 [provides.operations."circleci.pipelines.trigger".ai_hints]
@@ -118,8 +118,8 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
-input_schema = { type = "object", required = ["pipeline_id"], properties = { pipeline_id = { type = "string", description = "Pipeline UUID" }, page_token = { type = "string", description = "Pagination token" } } }
-output_schema = { type = "object", properties = { items = { type = "array" }, next_page_token = { type = ["string", "null"] } } }
+input_schema = { type = "object", required = ["pipeline_id"], additionalProperties = false, properties = { pipeline_id = { type = "string", description = "Pipeline UUID" }, page_token = { type = "string", description = "Pagination token" } } }
+output_schema = { type = "object", required = ["items"], additionalProperties = false, properties = { items = { type = "array" }, next_page_token = { type = ["string", "null"] } } }
 network_constraints = { host_allow = ["circleci.com"], port_allow = [443], require_sni = true, deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, max_redirects = 0 }
 
 [provides.operations."circleci.workflows.list".ai_hints]
@@ -135,8 +135,8 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
-input_schema = { type = "object", required = ["workflow_id"], properties = { workflow_id = { type = "string", description = "Workflow UUID" } } }
-output_schema = { type = "object", properties = { id = { type = "string" }, name = { type = "string" }, status = { type = "string" } } }
+input_schema = { type = "object", required = ["workflow_id"], additionalProperties = false, properties = { workflow_id = { type = "string", description = "Workflow UUID" } } }
+output_schema = { type = "object", required = ["id", "name", "status"], properties = { id = { type = "string" }, name = { type = "string" }, status = { type = "string" } } }
 network_constraints = { host_allow = ["circleci.com"], port_allow = [443], require_sni = true, deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, max_redirects = 0 }
 
 [provides.operations."circleci.workflows.get".ai_hints]
@@ -152,8 +152,8 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "strict"
-input_schema = { type = "object", required = ["workflow_id"], properties = { workflow_id = { type = "string", description = "Workflow UUID" } } }
-output_schema = { type = "object", properties = { message = { type = "string" } } }
+input_schema = { type = "object", required = ["workflow_id"], additionalProperties = false, properties = { workflow_id = { type = "string", description = "Workflow UUID" } } }
+output_schema = { type = "object", required = ["message"], additionalProperties = false, properties = { message = { type = "string" } } }
 network_constraints = { host_allow = ["circleci.com"], port_allow = [443], require_sni = true, deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, max_redirects = 0 }
 
 [provides.operations."circleci.workflows.cancel".ai_hints]
@@ -169,8 +169,8 @@ risk_level = "high"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "best_effort"
-input_schema = { type = "object", required = ["workflow_id"], properties = { workflow_id = { type = "string", description = "Workflow UUID" }, from_failed = { type = "boolean", description = "Only rerun failed jobs", default = false } } }
-output_schema = { type = "object", properties = { message = { type = "string" } } }
+input_schema = { type = "object", required = ["workflow_id"], additionalProperties = false, properties = { workflow_id = { type = "string", description = "Workflow UUID" }, from_failed = { type = "boolean", description = "Only rerun failed jobs", default = false } } }
+output_schema = { type = "object", required = ["message"], additionalProperties = false, properties = { message = { type = "string" } } }
 network_constraints = { host_allow = ["circleci.com"], port_allow = [443], require_sni = true, deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, max_redirects = 0 }
 
 [provides.operations."circleci.workflows.rerun".ai_hints]
@@ -186,8 +186,8 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
-input_schema = { type = "object", required = ["workflow_id"], properties = { workflow_id = { type = "string", description = "Workflow UUID" }, page_token = { type = "string", description = "Pagination token" } } }
-output_schema = { type = "object", properties = { items = { type = "array" }, next_page_token = { type = ["string", "null"] } } }
+input_schema = { type = "object", required = ["workflow_id"], additionalProperties = false, properties = { workflow_id = { type = "string", description = "Workflow UUID" }, page_token = { type = "string", description = "Pagination token" } } }
+output_schema = { type = "object", required = ["items"], additionalProperties = false, properties = { items = { type = "array" }, next_page_token = { type = ["string", "null"] } } }
 network_constraints = { host_allow = ["circleci.com"], port_allow = [443], require_sni = true, deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, max_redirects = 0 }
 
 [provides.operations."circleci.jobs.list".ai_hints]
@@ -203,8 +203,8 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
-input_schema = { type = "object", required = ["project_slug", "job_number"], properties = { project_slug = { type = "string", description = "Project slug such as gh/org/repo or circleci/<org-id>/<project-id>" }, job_number = { type = "integer", description = "CircleCI job number" } } }
-output_schema = { type = "object", properties = { id = { type = "string" }, name = { type = "string" }, status = { type = "string" } } }
+input_schema = { type = "object", required = ["project_slug", "job_number"], additionalProperties = false, properties = { project_slug = { type = "string", description = "Project slug such as gh/org/repo or circleci/<org-id>/<project-id>" }, job_number = { type = "integer", minimum = 0, description = "CircleCI job number" } } }
+output_schema = { type = "object", required = ["id", "name", "status"], properties = { id = { type = "string" }, name = { type = "string" }, status = { type = "string" } } }
 network_constraints = { host_allow = ["circleci.com"], port_allow = [443], require_sni = true, deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, max_redirects = 0 }
 
 [provides.operations."circleci.jobs.get".ai_hints]
@@ -220,8 +220,8 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
-input_schema = { type = "object" }
-output_schema = { type = "object", properties = { status = { type = "string" } } }
+input_schema = { type = "object", additionalProperties = false }
+output_schema = { type = "object", required = ["status"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] } } }
 network_constraints = { host_allow = ["circleci.com"], port_allow = [443], require_sni = true, deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, max_redirects = 0 }
 
 [provides.operations."circleci.health".ai_hints]

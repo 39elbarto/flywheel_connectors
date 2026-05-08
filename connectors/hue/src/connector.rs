@@ -28,6 +28,99 @@ const OP_LIST_SCENES: &str = "hue.list_scenes";
 const OP_SET_LIGHT_STATE: &str = "hue.set_light_state";
 const OP_RECALL_SCENE: &str = "hue.recall_scene";
 
+fn empty_input_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false
+    })
+}
+
+fn hue_response_envelope_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+            "data": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                }
+            },
+            "errors": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                }
+            },
+            "body": { "type": "string" }
+        }
+    })
+}
+
+fn health_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": [
+            "status",
+            "bridge_url",
+            "manifest_hash",
+            "transport",
+            "allow_insecure_ssl",
+            "app_key_configured"
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "status": { "type": "string", "enum": ["ok"] },
+            "bridge_url": { "type": "string", "format": "uri" },
+            "manifest_hash": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "transport": { "type": "string", "enum": ["http-loopback", "https"] },
+            "allow_insecure_ssl": { "type": "boolean" },
+            "app_key_configured": { "type": "boolean" }
+        }
+    })
+}
+
+fn set_light_state_input_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["light_id", "on"],
+        "additionalProperties": false,
+        "properties": {
+            "light_id": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+            },
+            "on": { "type": "boolean" },
+            "brightness": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100
+            }
+        }
+    })
+}
+
+fn recall_scene_input_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["scene_id"],
+        "additionalProperties": false,
+        "properties": {
+            "scene_id": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "\\S"
+            }
+        }
+    })
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorCheck {
     name: String,
@@ -128,8 +221,8 @@ impl HueConnector {
                 id: OperationId::from_static(OP_HEALTH),
                 summary: "Report Hue bridge health".into(),
                 description: Some("Probe the bridge health surface.".into()),
-                input_schema: json!({ "type": "object" }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: empty_input_schema(),
+                output_schema: health_output_schema(),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
@@ -148,8 +241,8 @@ impl HueConnector {
                 id: OperationId::from_static(OP_LIST_LIGHTS),
                 summary: "List Hue lights".into(),
                 description: Some("Return the bridge light inventory.".into()),
-                input_schema: json!({ "type": "object" }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: empty_input_schema(),
+                output_schema: hue_response_envelope_schema(),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
@@ -167,8 +260,8 @@ impl HueConnector {
                 id: OperationId::from_static(OP_LIST_SCENES),
                 summary: "List Hue scenes".into(),
                 description: Some("Return bridge scene inventory.".into()),
-                input_schema: json!({ "type": "object" }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: empty_input_schema(),
+                output_schema: hue_response_envelope_schema(),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
@@ -186,16 +279,8 @@ impl HueConnector {
                 id: OperationId::from_static(OP_SET_LIGHT_STATE),
                 summary: "Set Hue light state".into(),
                 description: Some("Set a Hue light on/off and optional brightness.".into()),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["light_id", "on"],
-                    "properties": {
-                        "light_id": { "type": "string" },
-                        "on": { "type": "boolean" },
-                        "brightness": { "type": "number" }
-                    }
-                }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: set_light_state_input_schema(),
+                output_schema: hue_response_envelope_schema(),
                 capability: CapabilityId::from_static(CAP_WRITE),
                 risk_level: RiskLevel::Medium,
                 safety_tier: SafetyTier::Risky,
@@ -217,14 +302,8 @@ impl HueConnector {
                 id: OperationId::from_static(OP_RECALL_SCENE),
                 summary: "Recall a Hue scene".into(),
                 description: Some("Tell the bridge to activate a scene.".into()),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["scene_id"],
-                    "properties": {
-                        "scene_id": { "type": "string" }
-                    }
-                }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: recall_scene_input_schema(),
+                output_schema: hue_response_envelope_schema(),
                 capability: CapabilityId::from_static(CAP_WRITE),
                 risk_level: RiskLevel::Medium,
                 safety_tier: SafetyTier::Risky,
@@ -524,6 +603,14 @@ mod tests {
 
     use super::*;
 
+    const EXPECTED_MANIFEST_SCHEMA_OPS: [(&str, &str); 5] = [
+        (OP_HEALTH, "health"),
+        (OP_LIST_LIGHTS, "list_lights"),
+        (OP_LIST_SCENES, "list_scenes"),
+        (OP_SET_LIGHT_STATE, "set_light_state"),
+        (OP_RECALL_SCENE, "recall_scene"),
+    ];
+
     fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
         HandshakeRequest {
             protocol_version: "2.0.0".into(),
@@ -567,6 +654,75 @@ mod tests {
         CapabilityToken::from_raw(raw)
     }
 
+    fn hue_manifest() -> Result<toml::Value, String> {
+        toml::from_str(MANIFEST_TOML)
+            .map_err(|err| format!("Hue manifest TOML should parse: {err}"))
+    }
+
+    fn manifest_operations(
+        manifest: &toml::Value,
+    ) -> Result<&toml::map::Map<String, toml::Value>, String> {
+        manifest
+            .get("provides")
+            .and_then(|provides| provides.get("operations"))
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| "manifest should declare operation tables".to_owned())
+    }
+
+    fn operation_schema(
+        manifest: &toml::Value,
+        operation_key: &str,
+        field: &str,
+    ) -> Result<serde_json::Value, String> {
+        let schema = manifest_operations(manifest)?
+            .get(operation_key)
+            .and_then(toml::Value::as_table)
+            .and_then(|operation| operation.get(field))
+            .ok_or_else(|| format!("{operation_key} should declare {field}"))?;
+        if schema.as_table().is_none_or(toml::map::Map::is_empty) {
+            return Err(format!(
+                "{operation_key}.{field} should be a non-empty schema table"
+            ));
+        }
+        serde_json::to_value(schema)
+            .map_err(|err| format!("{operation_key}.{field} should convert to JSON: {err}"))
+    }
+
+    fn validator_for(schema: &serde_json::Value) -> Result<jsonschema::Validator, String> {
+        jsonschema::Validator::new(schema)
+            .map_err(|err| format!("manifest operation schema should compile: {err}"))
+    }
+
+    fn assert_schema_accepts(
+        schema: &serde_json::Value,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        let errors = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "schema should accept {payload}; errors: {errors:?}"
+            ))
+        }
+    }
+
+    fn assert_schema_rejects(
+        schema: &serde_json::Value,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        if validator.iter_errors(payload).next().is_some() {
+            Ok(())
+        } else {
+            Err(format!("schema should reject {payload}"))
+        }
+    }
+
     #[test]
     fn operations_catalog_contains_expected_entries() {
         let operations = HueConnector::operations_info();
@@ -588,6 +744,133 @@ mod tests {
         assert_eq!(recall_scene.risk_level, RiskLevel::Medium);
         assert_eq!(recall_scene.safety_tier, SafetyTier::Risky);
         assert_eq!(recall_scene.idempotency, IdempotencyClass::BestEffort);
+    }
+
+    #[test]
+    fn manifest_operation_schemas_compile_and_validate_core_payloads() -> Result<(), String> {
+        let manifest = hue_manifest()?;
+        let operations = manifest_operations(&manifest)?;
+        let operation_catalog = HueConnector::operations_info();
+
+        for (operation_id, manifest_key) in EXPECTED_MANIFEST_SCHEMA_OPS {
+            assert!(
+                operations.contains_key(manifest_key),
+                "manifest should declare operation {manifest_key}"
+            );
+            let operation = operation_catalog
+                .iter()
+                .find(|operation| operation.id.as_str() == operation_id)
+                .ok_or_else(|| format!("operation catalog should declare {operation_id}"))?;
+            for field in ["input_schema", "output_schema"] {
+                let schema = operation_schema(&manifest, manifest_key, field)?;
+                let _validator = validator_for(&schema)?;
+            }
+            assert_eq!(
+                operation.input_schema,
+                operation_schema(&manifest, manifest_key, "input_schema")?,
+                "{operation_id} input schema should match manifest"
+            );
+            assert_eq!(
+                operation.output_schema,
+                operation_schema(&manifest, manifest_key, "output_schema")?,
+                "{operation_id} output schema should match manifest"
+            );
+        }
+
+        for operation in operation_catalog {
+            let _input_validator = validator_for(&operation.input_schema)?;
+            let _output_validator = validator_for(&operation.output_schema)?;
+        }
+
+        let health_input = operation_schema(&manifest, "health", "input_schema")?;
+        assert_schema_accepts(&health_input, &json!({}))?;
+        assert_schema_rejects(&health_input, &json!({"probe": true}))?;
+
+        let health_output = operation_schema(&manifest, "health", "output_schema")?;
+        assert_schema_accepts(
+            &health_output,
+            &json!({
+                "status": "ok",
+                "bridge_url": "http://127.0.0.1:18080",
+                "manifest_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "transport": "http-loopback",
+                "allow_insecure_ssl": false,
+                "app_key_configured": true
+            }),
+        )?;
+        assert_schema_rejects(
+            &health_output,
+            &json!({
+                "status": "ok",
+                "bridge_url": "http://127.0.0.1:18080",
+                "manifest_hash": "sha256:short",
+                "transport": "http-loopback",
+                "allow_insecure_ssl": false,
+                "app_key_configured": true
+            }),
+        )?;
+        assert_schema_rejects(
+            &health_output,
+            &json!({
+                "status": "ok",
+                "bridge_url": "http://127.0.0.1:18080",
+                "manifest_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "transport": "http-loopback",
+                "allow_insecure_ssl": false,
+                "app_key_configured": true,
+                "extra": true
+            }),
+        )?;
+
+        for operation_key in ["list_lights", "list_scenes"] {
+            let input = operation_schema(&manifest, operation_key, "input_schema")?;
+            assert_schema_accepts(&input, &json!({}))?;
+            assert_schema_rejects(&input, &json!({"light_id": "light-1"}))?;
+        }
+
+        let set_input = operation_schema(&manifest, "set_light_state", "input_schema")?;
+        assert_schema_accepts(
+            &set_input,
+            &json!({"light_id": "light-1", "on": true, "brightness": 50.0}),
+        )?;
+        assert_schema_accepts(&set_input, &json!({"light_id": "light-1", "on": false}))?;
+        assert_schema_rejects(&set_input, &json!({"light_id": "light-1"}))?;
+        assert_schema_rejects(&set_input, &json!({"light_id": "   ", "on": true}))?;
+        assert_schema_rejects(
+            &set_input,
+            &json!({"light_id": "light-1", "on": true, "brightness": 101.0}),
+        )?;
+        assert_schema_rejects(
+            &set_input,
+            &json!({"light_id": "light-1", "on": true, "extra": true}),
+        )?;
+
+        let recall_input = operation_schema(&manifest, "recall_scene", "input_schema")?;
+        assert_schema_accepts(&recall_input, &json!({"scene_id": "scene-1"}))?;
+        assert_schema_rejects(&recall_input, &json!({}))?;
+        assert_schema_rejects(&recall_input, &json!({"scene_id": "   "}))?;
+        assert_schema_rejects(
+            &recall_input,
+            &json!({"scene_id": "scene-1", "extra": true}),
+        )?;
+
+        for operation_key in [
+            "list_lights",
+            "list_scenes",
+            "set_light_state",
+            "recall_scene",
+        ] {
+            let output = operation_schema(&manifest, operation_key, "output_schema")?;
+            assert_schema_accepts(&output, &json!({"data": [{"id": "light-1"}]}))?;
+            assert_schema_accepts(
+                &output,
+                &json!({"errors": [{"description": "unauthorized user"}]}),
+            )?;
+            assert_schema_accepts(&output, &json!({"body": "raw non-json response"}))?;
+            assert_schema_rejects(&output, &json!([{"id": "light-1"}]))?;
+        }
+
+        Ok(())
     }
 
     #[fcp_async_core::runtime::test]

@@ -2721,6 +2721,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-azure-speech"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-manifest",
+ "fcp-prelude",
+ "fcp-sdk",
+ "fcp-testkit",
+ "hex",
+ "jsonschema",
+ "quick-xml",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-bigquery"
 version = "0.1.0"
 dependencies = [
@@ -4548,6 +4575,7 @@ dependencies = [
  "fcp-cbor",
  "fcp-core",
  "fcp-crypto",
+ "fcp-crypto-pq",
  "fcp-evidence",
  "fcp-kernel",
  "fcp-manifest",
@@ -5983,7 +6011,9 @@ dependencies = [
  "async-trait",
  "chrono",
  "fcp-async-core",
+ "fcp-oauth",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "url",
  "zeroize",

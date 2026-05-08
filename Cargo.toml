@@ -186,6 +186,7 @@ members = [
     "connectors/imessage",
     "connectors/vercel",
     "connectors/azure",
+    "connectors/azure-speech",
     "connectors/circleci",
     "connectors/package-registry",
     "connectors/confluence",

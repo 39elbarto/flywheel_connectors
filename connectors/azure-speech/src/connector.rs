@@ -1,0 +1,1586 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use fcp_async_core::time;
+use fcp_manifest::ConnectorManifest;
+use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use quick_xml::Reader;
+use quick_xml::events::Event;
+use reqwest::header::{
+    AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
+};
+use reqwest::{Client, Method, RequestBuilder, Response, StatusCode, multipart};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use url::Url;
+
+const CONNECTOR_ID: &str = "fcp.azure-speech";
+const CONNECTOR_VERSION: &str = "0.1.0";
+const AZURE_SPEECH_MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OPERATION_ORDER: [&str; 3] = [
+    "azure.speech.voices.list",
+    "azure.speech.tts.synthesize",
+    "azure.speech.stt.transcribe_fast",
+];
+const BOUNDARY: &str = "This connector exposes Azure Speech REST token exchange, regional voice discovery, REST text-to-speech synthesis, and Speech-to-text 2025-10-15 fast transcription. Realtime WebSocket and batch transcription are separate follow-up surfaces.";
+const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 60_000;
+const DEFAULT_INLINE_AUDIO_MAX_BYTES: usize = 1_048_576;
+const DEFAULT_TTS_MAX_AUDIO_BYTES: usize = 16 * 1_024 * 1_024;
+const DEFAULT_STT_MAX_AUDIO_BYTES: usize = 250 * 1_024 * 1_024;
+const ACCESS_TOKEN_TTL: Duration = Duration::from_secs(10 * 60);
+const ACCESS_TOKEN_REFRESH_AFTER: Duration = Duration::from_secs(9 * 60);
+const USER_AGENT_VALUE: &str = "fcp-azure-speech/0.1.0";
+const STT_API_VERSION: &str = "2025-10-15";
+const DEFAULT_TTS_OUTPUT_FORMAT: &str = "riff-24khz-16bit-mono-pcm";
+const DEFAULT_STT_LOCALE: &str = "en-US";
+const MAX_RETRIES: usize = 2;
+const RETRY_BASE_DELAY_MS: u64 = 100;
+
+const TTS_OUTPUT_FORMATS: &[&str] = &[
+    "amr-wb-16000hz",
+    "audio-16khz-16bit-32kbps-mono-opus",
+    "audio-16khz-32kbitrate-mono-mp3",
+    "audio-16khz-64kbitrate-mono-mp3",
+    "audio-16khz-128kbitrate-mono-mp3",
+    "audio-24khz-16bit-24kbps-mono-opus",
+    "audio-24khz-16bit-48kbps-mono-opus",
+    "audio-24khz-48kbitrate-mono-mp3",
+    "audio-24khz-96kbitrate-mono-mp3",
+    "audio-24khz-160kbitrate-mono-mp3",
+    "audio-48khz-96kbitrate-mono-mp3",
+    "audio-48khz-192kbitrate-mono-mp3",
+    "g722-16khz-64kbps",
+    "ogg-16khz-16bit-mono-opus",
+    "ogg-24khz-16bit-mono-opus",
+    "ogg-48khz-16bit-mono-opus",
+    "raw-8khz-8bit-mono-alaw",
+    "raw-8khz-8bit-mono-mulaw",
+    "raw-8khz-16bit-mono-pcm",
+    "raw-16khz-16bit-mono-pcm",
+    "raw-24khz-16bit-mono-pcm",
+    "raw-48khz-16bit-mono-pcm",
+    "riff-8khz-8bit-mono-alaw",
+    "riff-8khz-8bit-mono-mulaw",
+    "riff-8khz-16bit-mono-pcm",
+    "riff-22050hz-16bit-mono-pcm",
+    "riff-24khz-16bit-mono-pcm",
+    "riff-44100hz-16bit-mono-pcm",
+    "riff-48khz-16bit-mono-pcm",
+];
+
+const STT_CONTENT_TYPES: &[&str] = &[
+    "audio/wav",
+    "audio/wave",
+    "audio/x-wav",
+    "audio/mpeg",
+    "audio/mp3",
+    "audio/ogg",
+    "audio/flac",
+    "audio/webm",
+    "audio/mp4",
+];
+
+#[derive(Clone)]
+enum Auth {
+    SubscriptionKey(HeaderValue),
+    CredentialId { _id: String },
+}
+
+impl std::fmt::Debug for Auth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SubscriptionKey(_) => f
+                .debug_tuple("SubscriptionKey")
+                .field(&"[REDACTED]")
+                .finish(),
+            Self::CredentialId { _id: id } => {
+                f.debug_struct("CredentialId").field("_id", id).finish()
+            }
+        }
+    }
+}
+
+impl Auth {
+    const fn redacted_label(&self) -> &'static str {
+        match self {
+            Self::SubscriptionKey(_) => "subscription_key",
+            Self::CredentialId { .. } => "credential_id",
+        }
+    }
+
+    const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId { .. })
+    }
+
+    fn subscription_key(&self) -> FcpResult<&HeaderValue> {
+        match self {
+            Self::SubscriptionKey(value) => Ok(value),
+            Self::CredentialId { .. } => Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "credential_id mode requires host-side credential injection, which this connector slice does not implement".into(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AzureSpeechConfig {
+    auth: Auth,
+    region: String,
+    cloud: SpeechCloud,
+    token_url: String,
+    tts_base_url: String,
+    stt_base_url: String,
+    request_timeout_ms: u64,
+    inline_audio_max_bytes: usize,
+    tts_max_audio_bytes: usize,
+    stt_max_audio_bytes: usize,
+}
+
+impl std::fmt::Debug for AzureSpeechConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AzureSpeechConfig")
+            .field("auth", &self.auth)
+            .field("region", &self.region)
+            .field("cloud", &self.cloud)
+            .field("token_url", &self.token_url)
+            .field("tts_base_url", &self.tts_base_url)
+            .field("stt_base_url", &self.stt_base_url)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .field("inline_audio_max_bytes", &self.inline_audio_max_bytes)
+            .field("tts_max_audio_bytes", &self.tts_max_audio_bytes)
+            .field("stt_max_audio_bytes", &self.stt_max_audio_bytes)
+            .finish()
+    }
+}
+
+impl AzureSpeechConfig {
+    fn from_params(params: &Value) -> FcpResult<Self> {
+        let subscription_key = params
+            .get("subscription_key")
+            .or_else(|| params.get("api_key"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        let credential_id = params
+            .get("credential_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        let auth = match (subscription_key, credential_id) {
+            (Some(key), None) => {
+                Auth::SubscriptionKey(safe_header_value("subscription_key", &key)?)
+            }
+            (None, Some(credential_id)) => Auth::CredentialId { _id: credential_id },
+            (Some(_), Some(_)) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Provide exactly one of subscription_key/api_key or credential_id"
+                        .into(),
+                });
+            }
+            (None, None) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing subscription_key/api_key or credential_id".into(),
+                });
+            }
+        };
+        let region = params
+            .get("region")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "region is required".into(),
+            })?;
+        validate_region(region)?;
+        let region = region.to_ascii_lowercase();
+        let cloud = SpeechCloud::from_params(params)?;
+        let endpoints = SpeechEndpoints::for_region(&region, cloud);
+
+        let token_url = normalize_absolute_url(
+            params.get("token_url").and_then(Value::as_str),
+            &endpoints.token_url,
+            "token_url",
+            |url| is_loopback_url(url) || cloud.allows_token_host(host(url)),
+            true,
+        )?;
+        let tts_base_url = normalize_base_url(
+            params.get("tts_base_url").and_then(Value::as_str),
+            &endpoints.tts_base_url,
+            "tts_base_url",
+            |url| is_loopback_url(url) || cloud.allows_tts_host(host(url)),
+        )?;
+        let stt_base_url = normalize_base_url(
+            params.get("stt_base_url").and_then(Value::as_str),
+            &endpoints.stt_base_url,
+            "stt_base_url",
+            |url| is_loopback_url(url) || cloud.allows_token_host(host(url)),
+        )?;
+
+        Ok(Self {
+            auth,
+            region,
+            cloud,
+            token_url,
+            tts_base_url,
+            stt_base_url,
+            request_timeout_ms: bounded_usize(
+                params.get("request_timeout_ms"),
+                "request_timeout_ms",
+                DEFAULT_REQUEST_TIMEOUT_MS as usize,
+                100,
+                300_000,
+            )? as u64,
+            inline_audio_max_bytes: bounded_usize(
+                params.get("inline_audio_max_bytes"),
+                "inline_audio_max_bytes",
+                DEFAULT_INLINE_AUDIO_MAX_BYTES,
+                0,
+                DEFAULT_TTS_MAX_AUDIO_BYTES,
+            )?,
+            tts_max_audio_bytes: bounded_usize(
+                params.get("tts_max_audio_bytes"),
+                "tts_max_audio_bytes",
+                DEFAULT_TTS_MAX_AUDIO_BYTES,
+                1,
+                DEFAULT_TTS_MAX_AUDIO_BYTES,
+            )?,
+            stt_max_audio_bytes: bounded_usize(
+                params.get("stt_max_audio_bytes"),
+                "stt_max_audio_bytes",
+                DEFAULT_STT_MAX_AUDIO_BYTES,
+                1,
+                DEFAULT_STT_MAX_AUDIO_BYTES,
+            )?,
+        })
+    }
+
+    fn host_allowlist(&self) -> Vec<String> {
+        let mut hosts = vec![
+            host_from_url(&self.token_url),
+            host_from_url(&self.tts_base_url),
+            host_from_url(&self.stt_base_url),
+        ];
+        hosts.sort();
+        hosts.dedup();
+        hosts
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SpeechCloud {
+    Public,
+    UsGov,
+}
+
+impl SpeechCloud {
+    fn from_params(params: &Value) -> FcpResult<Self> {
+        match params
+            .get("cloud")
+            .and_then(Value::as_str)
+            .unwrap_or("public")
+        {
+            "public" => Ok(Self::Public),
+            "usgov" | "us-gov" | "azure-us-gov" => Ok(Self::UsGov),
+            other => Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("unsupported cloud {other:?}; expected public or usgov"),
+            }),
+        }
+    }
+
+    const fn token_suffix(self) -> &'static str {
+        match self {
+            Self::Public => ".api.cognitive.microsoft.com",
+            Self::UsGov => ".api.cognitive.microsoft.us",
+        }
+    }
+
+    const fn tts_suffix(self) -> &'static str {
+        match self {
+            Self::Public => ".tts.speech.microsoft.com",
+            Self::UsGov => ".tts.speech.azure.us",
+        }
+    }
+
+    fn allows_token_host(self, host: &str) -> bool {
+        host.ends_with(self.token_suffix())
+    }
+
+    fn allows_tts_host(self, host: &str) -> bool {
+        host.ends_with(self.tts_suffix())
+    }
+}
+
+struct SpeechEndpoints {
+    token_url: String,
+    tts_base_url: String,
+    stt_base_url: String,
+}
+
+impl SpeechEndpoints {
+    fn for_region(region: &str, cloud: SpeechCloud) -> Self {
+        Self {
+            token_url: format!(
+                "https://{region}{}/sts/v1.0/issueToken",
+                cloud.token_suffix()
+            ),
+            tts_base_url: format!("https://{region}{}", cloud.tts_suffix()),
+            stt_base_url: format!("https://{region}{}", cloud.token_suffix()),
+        }
+    }
+}
+
+struct CachedToken {
+    value: HeaderValue,
+    issued_at: Instant,
+}
+
+impl CachedToken {
+    fn is_fresh_at(&self, now: Instant) -> bool {
+        now.duration_since(self.issued_at) < ACCESS_TOKEN_REFRESH_AFTER
+            && now.duration_since(self.issued_at) < ACCESS_TOKEN_TTL
+    }
+}
+
+#[derive(Default)]
+struct TokenCache {
+    token: Mutex<Option<CachedToken>>,
+}
+
+impl TokenCache {
+    fn get_fresh_at(&self, now: Instant) -> Option<HeaderValue> {
+        let guard = self.token.lock().expect("token cache mutex poisoned");
+        guard
+            .as_ref()
+            .filter(|token| token.is_fresh_at(now))
+            .map(|token| token.value.clone())
+    }
+
+    fn store(&self, value: HeaderValue, issued_at: Instant) {
+        let mut guard = self.token.lock().expect("token cache mutex poisoned");
+        *guard = Some(CachedToken { value, issued_at });
+    }
+
+    fn clear(&self) {
+        let mut guard = self.token.lock().expect("token cache mutex poisoned");
+        *guard = None;
+    }
+}
+
+struct AzureSpeechClient {
+    http: Client,
+    config: AzureSpeechConfig,
+    token_cache: TokenCache,
+}
+
+impl AzureSpeechClient {
+    fn new(config: &AzureSpeechConfig) -> FcpResult<Self> {
+        let http = Client::builder()
+            .timeout(Duration::from_millis(config.request_timeout_ms))
+            .build()
+            .map_err(|error| FcpError::Internal {
+                message: format!("failed to build Azure Speech HTTP client: {error}"),
+            })?;
+        Ok(Self {
+            http,
+            config: config.clone(),
+            token_cache: TokenCache::default(),
+        })
+    }
+
+    async fn bearer_token(&self) -> FcpResult<HeaderValue> {
+        if let Some(token) = self.token_cache.get_fresh_at(Instant::now()) {
+            return Ok(token);
+        }
+
+        let key = self.config.auth.subscription_key()?;
+        let response = self
+            .send_with_retry(|| {
+                with_header(
+                    self.http
+                        .post(&self.config.token_url)
+                        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                        .header(CONTENT_LENGTH, "0"),
+                    HeaderName::from_static("ocp-apim-subscription-key"),
+                    key,
+                )
+            })
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(provider_error("issueToken", status, response).await);
+        }
+        let token_text = response.text().await.map_err(map_reqwest)?;
+        let token = token_text.trim();
+        if token.is_empty() {
+            return Err(FcpError::External {
+                service: "azure-speech.issueToken".into(),
+                message: "issueToken returned an empty token".into(),
+                status_code: Some(status.as_u16()),
+                retryable: false,
+                retry_after: None,
+            });
+        }
+        let header = bearer_header(token)?;
+        self.token_cache.store(header.clone(), Instant::now());
+        Ok(header)
+    }
+
+    async fn voices_list(&self) -> FcpResult<Value> {
+        let token = self.bearer_token().await?;
+        let url = format!("{}/cognitiveservices/voices/list", self.config.tts_base_url);
+        let response = self
+            .send_with_retry(|| {
+                with_header(
+                    self.http.get(&url).header(USER_AGENT, USER_AGENT_VALUE),
+                    AUTHORIZATION,
+                    &token,
+                )
+            })
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(provider_error("voices.list", status, response).await);
+        }
+        let voices: Value = response.json().await.map_err(map_reqwest)?;
+        Ok(json!({
+            "voices": voices,
+            "region": self.config.region,
+            "cloud": format!("{:?}", self.config.cloud).to_ascii_lowercase(),
+            "host_allow": self.config.host_allowlist(),
+        }))
+    }
+
+    async fn synthesize(&self, input: &Value) -> FcpResult<Value> {
+        let request = TtsRequest::from_input(input, self.config.inline_audio_max_bytes)?;
+        let token = self.bearer_token().await?;
+        let url = format!("{}/cognitiveservices/v1", self.config.tts_base_url);
+        let response = self
+            .send_with_retry(|| {
+                with_header(
+                    self.http
+                        .post(&url)
+                        .header(CONTENT_TYPE, "application/ssml+xml")
+                        .header("x-microsoft-outputformat", &request.output_format)
+                        .header(USER_AGENT, USER_AGENT_VALUE)
+                        .body(request.ssml.clone()),
+                    AUTHORIZATION,
+                    &token,
+                )
+            })
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(provider_error("tts.synthesize", status, response).await);
+        }
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        let bytes = response.bytes().await.map_err(map_reqwest)?;
+        if bytes.len() > self.config.tts_max_audio_bytes {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "synthesized audio exceeded configured cap of {} bytes",
+                    self.config.tts_max_audio_bytes
+                ),
+            });
+        }
+        let sha256 = sha256_hex(&bytes);
+        if bytes.len() <= request.inline_audio_max_bytes {
+            Ok(json!({
+                "mode": "inline",
+                "audio_base64": BASE64_STANDARD.encode(&bytes),
+                "byte_count": bytes.len(),
+                "sha256": sha256,
+                "output_format": request.output_format,
+                "provider_content_type": content_type,
+            }))
+        } else {
+            Ok(json!({
+                "mode": "artifact_reference",
+                "artifact": {
+                    "storage": "host_artifact_required",
+                    "byte_count": bytes.len(),
+                    "sha256": sha256,
+                    "provider_content_type": content_type,
+                    "output_format": request.output_format,
+                },
+                "audio_base64": Value::Null,
+            }))
+        }
+    }
+
+    async fn transcribe_fast(&self, input: &Value) -> FcpResult<Value> {
+        let request = SttRequest::from_input(input, self.config.stt_max_audio_bytes)?;
+        let key = self.config.auth.subscription_key()?;
+        let definition =
+            serde_json::to_string(&request.definition).map_err(|error| FcpError::Internal {
+                message: format!(
+                    "failed to serialize Azure Speech transcription definition: {error}"
+                ),
+            })?;
+        let url = format!(
+            "{}/speechtotext/transcriptions:transcribe?api-version={STT_API_VERSION}",
+            self.config.stt_base_url
+        );
+        let response = self
+            .send_with_retry(|| {
+                let audio = multipart::Part::bytes(request.audio.clone())
+                    .file_name("audio.bin")
+                    .mime_str(&request.content_type)
+                    .expect("validated STT content type should be a valid MIME string");
+                let form = multipart::Form::new()
+                    .text("definition", definition.clone())
+                    .part("audio", audio);
+                with_header(
+                    self.http
+                        .post(&url)
+                        .header(USER_AGENT, USER_AGENT_VALUE)
+                        .multipart(form),
+                    HeaderName::from_static("ocp-apim-subscription-key"),
+                    key,
+                )
+            })
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(provider_error("stt.transcribe_fast", status, response).await);
+        }
+        let value: Value = response.json().await.map_err(map_reqwest)?;
+        Ok(normalize_transcription_result(value, &request))
+    }
+
+    async fn send_with_retry<F>(&self, mut build: F) -> FcpResult<Response>
+    where
+        F: FnMut() -> RequestBuilder,
+    {
+        let mut attempt = 0;
+        loop {
+            let response = build().send().await.map_err(map_reqwest)?;
+            if !is_retryable_status(response.status()) || attempt >= MAX_RETRIES {
+                return Ok(response);
+            }
+            attempt += 1;
+            let delay_ms = retry_after_ms(&response)
+                .unwrap_or(RETRY_BASE_DELAY_MS.saturating_mul(attempt as u64));
+            time::sleep(Duration::from_millis(delay_ms.min(1_000))).await;
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TtsRequest {
+    ssml: String,
+    output_format: String,
+    inline_audio_max_bytes: usize,
+}
+
+impl TtsRequest {
+    fn from_input(input: &Value, config_inline_cap: usize) -> FcpResult<Self> {
+        let output_format = input
+            .get("output_format")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_TTS_OUTPUT_FORMAT);
+        validate_output_format(output_format)?;
+        let inline_audio_max_bytes = match input.get("inline_audio_max_bytes") {
+            Some(value) => bounded_usize(
+                Some(value),
+                "inline_audio_max_bytes",
+                config_inline_cap,
+                0,
+                DEFAULT_TTS_MAX_AUDIO_BYTES,
+            )?,
+            None => config_inline_cap,
+        };
+        let ssml = match input.get("ssml").and_then(Value::as_str) {
+            Some(ssml) if !ssml.trim().is_empty() => ssml.trim().to_owned(),
+            _ => {
+                let text = required_string(input, "text")?;
+                let voice = required_string(input, "voice")?;
+                let locale = input
+                    .get("locale")
+                    .or_else(|| input.get("language"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("en-US");
+                validate_locale(locale)?;
+                format!(
+                    "<speak version='1.0' xml:lang='{locale}'><voice name='{}'>{}</voice></speak>",
+                    xml_escape(voice),
+                    xml_escape(text)
+                )
+            }
+        };
+        validate_ssml(&ssml)?;
+        Ok(Self {
+            ssml,
+            output_format: output_format.to_owned(),
+            inline_audio_max_bytes,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct SttRequest {
+    audio: Vec<u8>,
+    content_type: String,
+    definition: Value,
+}
+
+impl SttRequest {
+    fn from_input(input: &Value, max_audio_bytes: usize) -> FcpResult<Self> {
+        let audio = decode_audio(input)?;
+        if audio.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "audio must not be empty".into(),
+            });
+        }
+        let request_max = match input.get("max_audio_bytes") {
+            Some(value) => bounded_usize(
+                Some(value),
+                "max_audio_bytes",
+                max_audio_bytes,
+                1,
+                max_audio_bytes,
+            )?,
+            None => max_audio_bytes,
+        };
+        if audio.len() > request_max {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("audio exceeds max_audio_bytes cap of {request_max}"),
+            });
+        }
+        let content_type = input
+            .get("content_type")
+            .or_else(|| input.get("mime_type"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("audio/wav");
+        validate_stt_content_type(content_type)?;
+
+        let locales = locales_from_input(input)?;
+        let mut definition = json!({ "locales": locales });
+        copy_definition_field(
+            &mut definition,
+            input,
+            "profanityFilterMode",
+            "profanity_filter_mode",
+        );
+        copy_definition_field(&mut definition, input, "diarization", "diarization");
+        copy_definition_field(&mut definition, input, "channels", "channels");
+        copy_definition_field(&mut definition, input, "phraseList", "phrase_list");
+        copy_definition_field(&mut definition, input, "enhancedMode", "enhanced_mode");
+        Ok(Self {
+            audio,
+            content_type: content_type.to_owned(),
+            definition,
+        })
+    }
+}
+
+pub struct AzureSpeechConnector {
+    base: Arc<BaseConnector>,
+    config: Option<AzureSpeechConfig>,
+    client: Option<Arc<AzureSpeechClient>>,
+    handshaken: bool,
+    request_count: AtomicU64,
+    error_count: AtomicU64,
+}
+
+#[allow(clippy::missing_errors_doc, clippy::unused_async)]
+impl AzureSpeechConnector {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            base: Arc::new(BaseConnector::new(ConnectorId::from_static(CONNECTOR_ID))),
+            config: None,
+            client: None,
+            handshaken: false,
+            request_count: AtomicU64::new(0),
+            error_count: AtomicU64::new(0),
+        }
+    }
+
+    pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
+        let config = AzureSpeechConfig::from_params(&params)?;
+        let client = AzureSpeechClient::new(&config)?;
+        self.config = Some(config.clone());
+        self.client = Some(Arc::new(client));
+        self.base.set_configured(true);
+        Ok(json!({
+            "connector_id": CONNECTOR_ID,
+            "configured": true,
+            "auth_mode": config.auth.redacted_label(),
+            "region": config.region,
+            "cloud": format!("{:?}", config.cloud).to_ascii_lowercase(),
+            "host_allow": config.host_allowlist(),
+            "request_timeout_ms": config.request_timeout_ms,
+            "inline_audio_max_bytes": config.inline_audio_max_bytes,
+        }))
+    }
+
+    pub async fn handle_handshake(&mut self, _params: Value) -> FcpResult<Value> {
+        if self.config.is_none() {
+            return Err(FcpError::NotConfigured);
+        }
+        self.handshaken = true;
+        self.base.set_handshaken(true);
+        Ok(json!({
+            "connector_id": CONNECTOR_ID,
+            "connector_version": CONNECTOR_VERSION,
+            "protocol_version": "2.0",
+            "capabilities": ["azure.speech.voices", "azure.speech.tts", "azure.speech.stt"],
+            "streaming_supported": false,
+            "surface_boundary": BOUNDARY,
+        }))
+    }
+
+    pub async fn handle_health(&self) -> FcpResult<Value> {
+        let live_requests_supported = self
+            .config
+            .as_ref()
+            .is_some_and(|config| !config.auth.is_secretless());
+        Ok(json!({
+            "status": if self.config.is_some() && self.handshaken && live_requests_supported {
+                "healthy"
+            } else if self.config.is_some() {
+                "degraded"
+            } else {
+                "unconfigured"
+            },
+            "configured": self.config.is_some(),
+            "handshaken": self.handshaken,
+            "live_requests_supported": live_requests_supported,
+            "requests": self.request_count.load(Ordering::Relaxed),
+            "errors": self.error_count.load(Ordering::Relaxed),
+            "host_allow": self.config.as_ref().map(AzureSpeechConfig::host_allowlist),
+        }))
+    }
+
+    pub async fn handle_doctor(&self) -> FcpResult<Value> {
+        let live_requests_supported = self
+            .config
+            .as_ref()
+            .is_some_and(|config| !config.auth.is_secretless());
+        Ok(json!({
+            "status": if self.config.is_some()
+                && self.client.is_some()
+                && self.handshaken
+                && live_requests_supported
+            {
+                "healthy"
+            } else if self.config.is_some() && self.client.is_some() {
+                "degraded"
+            } else {
+                "unhealthy"
+            },
+            "checks": [
+                { "name": "configuration", "passed": self.config.is_some(), "critical": true },
+                { "name": "client_initialized", "passed": self.client.is_some(), "critical": true },
+                {
+                    "name": "credential_injection",
+                    "passed": live_requests_supported,
+                    "critical": false,
+                    "message": if live_requests_supported {
+                        Value::Null
+                    } else {
+                        json!("credential_id mode requires host-side credential injection, which this connector slice does not implement.")
+                    }
+                },
+                { "name": "handshake", "passed": self.handshaken, "critical": false },
+                { "name": "surface_boundary", "passed": true, "critical": false, "message": BOUNDARY }
+            ]
+        }))
+    }
+
+    pub async fn handle_self_check(&self) -> FcpResult<Value> {
+        if self
+            .config
+            .as_ref()
+            .is_some_and(|config| config.auth.is_secretless())
+        {
+            return Ok(json!({
+                "status": "degraded",
+                "reason_code": "credential_injection_required",
+                "message": "Configured with credential_id; this connector slice cannot perform live checks without host-side credential injection."
+            }));
+        }
+        let Some(client) = &self.client else {
+            return Ok(json!({
+                "status": "degraded",
+                "reason_code": "not_configured",
+                "message": "Azure Speech is not configured."
+            }));
+        };
+        match client.bearer_token().await {
+            Ok(_) => Ok(json!({
+                "status": "ok",
+                "surface_boundary": BOUNDARY,
+            })),
+            Err(error) => Ok(json!({
+                "status": "failed",
+                "reason_code": "upstream_token_probe_failed",
+                "message": error.to_string(),
+            })),
+        }
+    }
+
+    pub async fn handle_introspect(&self) -> FcpResult<Value> {
+        Ok(json!({
+            "connector_id": CONNECTOR_ID,
+            "version": CONNECTOR_VERSION,
+            "operations": operations_info()?,
+            "deferred_operations": deferred_operations_info(),
+            "events": [],
+            "resource_types": [],
+            "provider_docs_rechecked": {
+                "tts_rest": "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/rest-text-to-speech",
+                "stt_fast_2025_10_15": "https://learn.microsoft.com/en-us/rest/api/speechtotext/transcriptions/transcribe?view=rest-speechtotext-2025-10-15"
+            }
+        }))
+    }
+
+    pub async fn handle_invoke(&self, params: Value) -> FcpResult<Value> {
+        self.base.check_ready()?;
+        let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
+            message: "Azure Speech client not initialized".into(),
+        })?;
+        if self
+            .config
+            .as_ref()
+            .is_some_and(|config| config.auth.is_secretless())
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "credential_id mode requires host-side credential injection, which this connector slice does not implement".into(),
+            });
+        }
+        let operation = params
+            .get("operation_id")
+            .or_else(|| params.get("operation"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing operation_id".into(),
+            })?;
+        let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
+        self.request_count.fetch_add(1, Ordering::Relaxed);
+        let result = match operation {
+            "azure.speech.voices.list" => client.voices_list().await,
+            "azure.speech.tts.synthesize" => client.synthesize(&input).await,
+            "azure.speech.stt.transcribe_fast" => client.transcribe_fast(&input).await,
+            _ => Err(FcpError::InvalidRequest {
+                code: 1002,
+                message: format!("Unknown operation: {operation}"),
+            }),
+        };
+        if result.is_err() {
+            self.error_count.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    pub async fn handle_simulate(&self, params: Value) -> FcpResult<Value> {
+        let operation = params
+            .get("operation_id")
+            .or_else(|| params.get("operation"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let supported = OPERATION_ORDER.contains(&operation);
+        let blocked_by_secretless_auth = supported
+            && self
+                .config
+                .as_ref()
+                .is_some_and(|config| config.auth.is_secretless());
+        Ok(json!({
+            "allowed": supported && !blocked_by_secretless_auth,
+            "reason": if blocked_by_secretless_auth {
+                "credential_id mode requires host-side credential injection, which this connector slice does not implement."
+            } else if supported {
+                "Supported operation."
+            } else {
+                "Unknown operation."
+            }
+        }))
+    }
+
+    pub async fn handle_shutdown(&mut self, _params: Value) -> FcpResult<Value> {
+        if let Some(client) = &self.client {
+            client.token_cache.clear();
+        }
+        self.config = None;
+        self.client = None;
+        self.handshaken = false;
+        self.base.set_configured(false);
+        self.base.set_handshaken(false);
+        Ok(json!({}))
+    }
+}
+
+impl Default for AzureSpeechConnector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn operations_info() -> FcpResult<Vec<Value>> {
+    let manifest =
+        ConnectorManifest::parse_str_unchecked(AZURE_SPEECH_MANIFEST_TOML).map_err(|error| {
+            FcpError::Internal {
+                message: format!("Embedded Azure Speech manifest is invalid: {error}"),
+            }
+        })?;
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        operation_order(left)
+            .cmp(&operation_order(right))
+            .then_with(|| left.cmp(right))
+    });
+    Ok(operations
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, operation))
+        .collect())
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|candidate| *candidate == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn operation_info_from_manifest(id: String, operation: fcp_manifest::OperationSection) -> Value {
+    let mut entry = serde_json::Map::new();
+    entry.insert("id".into(), Value::String(id));
+    entry.insert(
+        "summary".into(),
+        Value::String(operation.description.clone()),
+    );
+    entry.insert("description".into(), Value::String(operation.description));
+    entry.insert(
+        "capability".into(),
+        Value::String(operation.capability.as_str().to_string()),
+    );
+    entry.insert("risk_level".into(), json!(operation.risk_level));
+    entry.insert("safety_tier".into(), json!(operation.safety_tier));
+    entry.insert("idempotency".into(), json!(operation.idempotency));
+    entry.insert(
+        "requires_approval".into(),
+        json!(operation.requires_approval),
+    );
+    entry.insert(
+        "revocation_freshness".into(),
+        json!(operation.revocation_freshness),
+    );
+    entry.insert("input_schema".into(), operation.input_schema);
+    entry.insert("output_schema".into(), operation.output_schema);
+    entry.insert("ai_hints".into(), json!(operation.ai_hints));
+    if let Some(rate_limit) = operation.rate_limit {
+        entry.insert("rate_limit".into(), json!(rate_limit));
+    }
+    if let Some(network_constraints) = operation.network_constraints {
+        entry.insert("network_constraints".into(), json!(network_constraints));
+    }
+    Value::Object(entry)
+}
+
+fn deferred_operations_info() -> Vec<Value> {
+    vec![
+        json!({
+            "id": "azure.speech.stt.realtime.websocket",
+            "summary": "Azure Speech realtime STT/TTS WebSocket sessions",
+            "outcome": "deferred_to_streaming_slice",
+            "host_platform_required": true,
+            "rationale": "Realtime sessions need host-owned stream lifecycle, cancellation, and transcript fan-out; this bead covers core REST only."
+        }),
+        json!({
+            "id": "azure.speech.stt.batch",
+            "summary": "Azure Speech batch transcription and storage-backed jobs",
+            "outcome": "deferred_to_batch_slice",
+            "rationale": "Batch transcription has different storage, polling, and artifact retention requirements from fast transcription."
+        }),
+        json!({
+            "id": "azure.speech.entra.managed_identity",
+            "summary": "Microsoft Entra and managed identity authentication",
+            "outcome": "deferred_to_auth_slice",
+            "rationale": "This core REST slice supports subscription-key token exchange and host credential references only."
+        }),
+    ]
+}
+
+fn normalize_transcription_result(provider_result: Value, request: &SttRequest) -> Value {
+    let combined_text = provider_result
+        .get("combinedPhrases")
+        .and_then(Value::as_array)
+        .map(|phrases| {
+            phrases
+                .iter()
+                .filter_map(|phrase| phrase.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|text| !text.trim().is_empty())
+        .or_else(|| {
+            provider_result
+                .get("phrases")
+                .and_then(Value::as_array)
+                .map(|phrases| {
+                    phrases
+                        .iter()
+                        .filter_map(|phrase| phrase.get("text").and_then(Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+        })
+        .unwrap_or_default();
+    json!({
+        "text": combined_text,
+        "duration_milliseconds": provider_result.get("durationMilliseconds").cloned(),
+        "combined_phrases": provider_result.get("combinedPhrases").cloned(),
+        "phrases": provider_result.get("phrases").cloned(),
+        "provider_result": provider_result,
+        "audio": {
+            "byte_count": request.audio.len(),
+            "content_type": request.content_type,
+            "sha256": sha256_hex(&request.audio),
+        },
+        "api_version": STT_API_VERSION,
+    })
+}
+
+fn validate_region(region: &str) -> FcpResult<()> {
+    let valid = region.len() >= 2
+        && region.len() <= 64
+        && !region.starts_with('-')
+        && !region.ends_with('-')
+        && region
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if valid {
+        Ok(())
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "region must be a lowercase Azure region identifier".into(),
+        })
+    }
+}
+
+fn validate_locale(locale: &str) -> FcpResult<()> {
+    let valid = locale.len() >= 2
+        && locale.len() <= 16
+        && locale
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    if valid {
+        Ok(())
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("invalid locale {locale:?}"),
+        })
+    }
+}
+
+fn validate_output_format(output_format: &str) -> FcpResult<()> {
+    if TTS_OUTPUT_FORMATS.contains(&output_format) {
+        Ok(())
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported Azure Speech output_format {output_format:?}"),
+        })
+    }
+}
+
+fn validate_stt_content_type(content_type: &str) -> FcpResult<()> {
+    if STT_CONTENT_TYPES.contains(&content_type) {
+        Ok(())
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported STT content_type {content_type:?}"),
+        })
+    }
+}
+
+fn validate_ssml(ssml: &str) -> FcpResult<()> {
+    let mut reader = Reader::from_str(ssml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut first_element: Option<Vec<u8>> = None;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(start)) => {
+                if first_element.is_none() {
+                    first_element = Some(start.name().as_ref().to_vec());
+                }
+            }
+            Ok(Event::Empty(empty)) => {
+                if first_element.is_none() {
+                    first_element = Some(empty.name().as_ref().to_vec());
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("invalid SSML: {error}"),
+                });
+            }
+        }
+        buf.clear();
+    }
+    if first_element.as_deref() == Some(b"speak") {
+        Ok(())
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "SSML root element must be <speak>".into(),
+        })
+    }
+}
+
+fn decode_audio(input: &Value) -> FcpResult<Vec<u8>> {
+    let encoded = input
+        .get("audio_base64")
+        .or_else(|| input.get("audio_b64"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1003,
+            message: "audio_base64 is required".into(),
+        })?;
+    BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|error| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("audio_base64 is not valid base64: {error}"),
+        })
+}
+
+fn locales_from_input(input: &Value) -> FcpResult<Vec<String>> {
+    if let Some(locales) = input.get("locales").and_then(Value::as_array) {
+        let mut values = Vec::with_capacity(locales.len());
+        for locale in locales {
+            let Some(locale) = locale.as_str() else {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "locales must contain strings".into(),
+                });
+            };
+            validate_locale(locale)?;
+            values.push(locale.to_owned());
+        }
+        if values.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "locales must not be empty".into(),
+            });
+        }
+        return Ok(values);
+    }
+    let locale = input
+        .get("locale")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_STT_LOCALE);
+    validate_locale(locale)?;
+    Ok(vec![locale.to_owned()])
+}
+
+fn copy_definition_field(
+    definition: &mut Value,
+    input: &Value,
+    azure_name: &str,
+    input_name: &str,
+) {
+    let Some(value) = input.get(input_name) else {
+        return;
+    };
+    if let Some(object) = definition.as_object_mut() {
+        object.insert(azure_name.to_owned(), value.clone());
+    }
+}
+
+fn required_string(input: &Value, field: &str) -> FcpResult<&str> {
+    input
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} is required"),
+        })
+}
+
+fn bounded_usize(
+    value: Option<&Value>,
+    label: &str,
+    default: usize,
+    min: usize,
+    max: usize,
+) -> FcpResult<usize> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    let raw = value.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{label} must be an integer"),
+    })?;
+    let value = usize::try_from(raw).map_err(|_| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{label} is too large"),
+    })?;
+    if value < min || value > max {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label} must be between {min} and {max}"),
+        });
+    }
+    Ok(value)
+}
+
+fn normalize_base_url<F>(
+    override_value: Option<&str>,
+    default_value: &str,
+    label: &str,
+    allowed: F,
+) -> FcpResult<String>
+where
+    F: FnOnce(&Url) -> bool,
+{
+    normalize_absolute_url(override_value, default_value, label, allowed, false)
+}
+
+fn normalize_absolute_url<F>(
+    override_value: Option<&str>,
+    default_value: &str,
+    label: &str,
+    allowed: F,
+    allow_path: bool,
+) -> FcpResult<String>
+where
+    F: FnOnce(&Url) -> bool,
+{
+    let candidate = override_value
+        .unwrap_or(default_value)
+        .trim()
+        .trim_end_matches('/');
+    let parsed = Url::parse(candidate).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Invalid {label}: {error}"),
+    })?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label} must not include embedded credentials"),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label} must not include query or fragment"),
+        });
+    }
+    if !allow_path && parsed.path() != "/" && !parsed.path().is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label} must not include a path"),
+        });
+    }
+    let loopback = is_loopback_url(&parsed);
+    if parsed.scheme() != "https" && !(loopback && parsed.scheme() == "http") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label} must use https, except http loopback for tests"),
+        });
+    }
+    if !loopback && parsed.port_or_known_default() != Some(443) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label} must resolve to port 443"),
+        });
+    }
+    if !allowed(&parsed) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label} host is not allowed"),
+        });
+    }
+    Ok(parsed.to_string().trim_end_matches('/').to_string())
+}
+
+fn is_loopback_url(url: &Url) -> bool {
+    matches!(host(url), "localhost" | "127.0.0.1" | "::1") || host(url).ends_with(".localhost")
+}
+
+fn host(url: &Url) -> &str {
+    url.host_str().unwrap_or("")
+}
+
+fn host_from_url(url: &str) -> String {
+    Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(ToOwned::to_owned))
+        .unwrap_or_default()
+}
+
+fn safe_header_value(label: &str, value: &str) -> FcpResult<HeaderValue> {
+    HeaderValue::from_str(value).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{label} cannot be represented as a safe HTTP header: {error}"),
+    })
+}
+
+fn bearer_header(token: &str) -> FcpResult<HeaderValue> {
+    HeaderValue::from_str(&format!("Bearer {token}")).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!(
+            "Azure Speech token cannot be represented as a safe Authorization header: {error}"
+        ),
+    })
+}
+
+fn with_header(request: RequestBuilder, name: HeaderName, value: &HeaderValue) -> RequestBuilder {
+    let mut headers = HeaderMap::new();
+    headers.insert(name, value.clone());
+    request.headers(headers)
+}
+
+fn map_reqwest(error: reqwest::Error) -> FcpError {
+    if error.is_timeout() {
+        FcpError::UpstreamTimeout {
+            service: "azure-speech".into(),
+        }
+    } else {
+        FcpError::External {
+            service: "azure-speech".into(),
+            message: error.to_string(),
+            status_code: error.status().map(|status| status.as_u16()),
+            retryable: error.is_connect() || error.is_timeout(),
+            retry_after: None,
+        }
+    }
+}
+
+async fn provider_error(operation: &str, status: StatusCode, response: Response) -> FcpError {
+    let retryable = is_retryable_status(status);
+    let retry_after = retry_after_ms(&response).map(Duration::from_millis);
+    let message = response
+        .text()
+        .await
+        .unwrap_or_else(|error| format!("failed to read Azure Speech error body: {error}"));
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        FcpError::RateLimited {
+            retry_after_ms: retry_after
+                .map(|duration| duration.as_millis().try_into().unwrap_or(30_000))
+                .unwrap_or(30_000),
+            violation: None,
+        }
+    } else {
+        FcpError::External {
+            service: format!("azure-speech.{operation}"),
+            message,
+            status_code: Some(status.as_u16()),
+            retryable,
+            retry_after,
+        }
+    }
+}
+
+fn is_retryable_status(status: StatusCode) -> bool {
+    status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+fn retry_after_ms(response: &Response) -> Option<u64> {
+    response
+        .headers()
+        .get("retry-after-ms")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+        .or_else(|| {
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(|seconds| seconds.saturating_mul(1_000))
+        })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn region_validation_rejects_url_like_values() {
+        assert!(validate_region("eastus").is_ok());
+        assert!(validate_region("westus2").is_ok());
+        assert!(validate_region("https://eastus").is_err());
+        assert!(validate_region("EastUS").is_err());
+    }
+
+    #[test]
+    fn config_builds_public_regional_allowlist_without_secret_leakage() {
+        let config = AzureSpeechConfig::from_params(&json!({
+            "subscription_key": "secret-key",
+            "region": "eastus",
+        }))
+        .expect("config should parse");
+        assert_eq!(config.auth.redacted_label(), "subscription_key");
+        assert_eq!(
+            config.host_allowlist(),
+            vec![
+                "eastus.api.cognitive.microsoft.com".to_string(),
+                "eastus.tts.speech.microsoft.com".to_string(),
+            ]
+        );
+        assert!(!format!("{config:?}").contains("secret-key"));
+    }
+
+    #[test]
+    fn token_cache_refreshes_after_nine_minutes() {
+        let cache = TokenCache::default();
+        let issued_at = Instant::now();
+        cache.store(HeaderValue::from_static("Bearer token"), issued_at);
+        assert!(
+            cache
+                .get_fresh_at(issued_at + Duration::from_secs(8 * 60))
+                .is_some()
+        );
+        assert!(
+            cache
+                .get_fresh_at(issued_at + Duration::from_secs(9 * 60 + 1))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn tts_request_accepts_text_or_ssml_and_validates_output_format() {
+        let request = TtsRequest::from_input(
+            &json!({
+                "text": "hello <world>",
+                "voice": "en-US-ChristopherNeural",
+                "locale": "en-US",
+                "output_format": "riff-24khz-16bit-mono-pcm"
+            }),
+            DEFAULT_INLINE_AUDIO_MAX_BYTES,
+        )
+        .expect("text input should build SSML");
+        assert!(request.ssml.contains("&lt;world&gt;"));
+        assert!(TtsRequest::from_input(&json!({"ssml":"<speak></speak>"}), 128).is_ok());
+        assert!(
+            TtsRequest::from_input(
+                &json!({"ssml":"<speak></speak>","output_format":"not-real"}),
+                128
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn stt_request_validates_audio_content_type_and_size() {
+        let audio_base64 = BASE64_STANDARD.encode([1_u8, 2, 3, 4]);
+        let request = SttRequest::from_input(
+            &json!({
+                "audio_base64": audio_base64,
+                "content_type": "audio/wav",
+                "locale": "en-US"
+            }),
+            16,
+        )
+        .expect("audio should parse");
+        assert_eq!(request.audio.len(), 4);
+        assert_eq!(request.definition["locales"], json!(["en-US"]));
+        assert!(
+            SttRequest::from_input(
+                &json!({
+                    "audio_base64": BASE64_STANDARD.encode([1_u8, 2, 3]),
+                    "content_type": "application/octet-stream"
+                }),
+                16,
+            )
+            .is_err()
+        );
+        assert!(
+            SttRequest::from_input(
+                &json!({
+                    "audio_base64": BASE64_STANDARD.encode([1_u8, 2, 3]),
+                    "content_type": "audio/wav"
+                }),
+                2,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn transcription_result_preserves_phrase_channel_word_confidence_shape() {
+        let request = SttRequest::from_input(
+            &json!({
+                "audio_base64": BASE64_STANDARD.encode([1_u8, 2, 3]),
+                "content_type": "audio/wav",
+                "locales": ["en-US"]
+            }),
+            16,
+        )
+        .expect("request should parse");
+        let value = normalize_transcription_result(
+            json!({
+                "durationMilliseconds": 2000,
+                "combinedPhrases": [{"channel": 0, "text": "Weather"}],
+                "phrases": [{
+                    "channel": 0,
+                    "offsetMilliseconds": 40,
+                    "durationMilliseconds": 320,
+                    "text": "Weather",
+                    "confidence": 0.78,
+                    "words": [{"text": "weather", "confidence": 0.8}]
+                }]
+            }),
+            &request,
+        );
+        assert_eq!(value["text"], "Weather");
+        assert_eq!(value["phrases"][0]["channel"], 0);
+        assert_eq!(value["phrases"][0]["words"][0]["confidence"], 0.8);
+    }
+}

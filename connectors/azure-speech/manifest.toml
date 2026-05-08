@@ -1,0 +1,268 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:9b5da4d55eb471473c3f62df1bb694601e64af4ac7fc871341c2d2a5a5c72c75"
+
+[connector]
+id = "fcp.azure-speech"
+name = "Azure Speech"
+version = "0.1.0"
+description = "Azure Speech REST connector for regional voice discovery, text-to-speech synthesis, and 2025-10-15 fast transcription"
+archetypes = [
+    "operational",
+    "streaming",
+]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "This slice supports REST token exchange, voices.list, REST TTS synthesis, and fast STT transcription. Realtime WebSocket, batch transcription, and Entra/managed identity authentication remain explicit follow-up surfaces."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = []
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
+optional = [
+    "azure.speech.voices",
+    "azure.speech.tts",
+    "azure.speech.stt",
+]
+forbidden = [
+    "network.listen",
+    "system.exec",
+]
+
+[provides.operations."azure.speech.stt.transcribe_fast"]
+description = "Synchronously transcribe one audio file with Azure Speech-to-text REST API 2025-10-15"
+capability = "azure.speech.stt"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."azure.speech.stt.transcribe_fast".input_schema]
+required = ["audio_base64"]
+type = "object"
+
+[provides.operations."azure.speech.stt.transcribe_fast".input_schema.properties.audio_base64]
+minLength = 1
+type = "string"
+
+[provides.operations."azure.speech.stt.transcribe_fast".input_schema.properties.channels]
+type = "array"
+
+[provides.operations."azure.speech.stt.transcribe_fast".input_schema.properties.content_type]
+default = "audio/wav"
+type = "string"
+
+[provides.operations."azure.speech.stt.transcribe_fast".input_schema.properties.enhanced_mode]
+type = "object"
+
+[provides.operations."azure.speech.stt.transcribe_fast".input_schema.properties.locale]
+default = "en-US"
+type = "string"
+
+[provides.operations."azure.speech.stt.transcribe_fast".input_schema.properties.locales]
+minItems = 1
+type = "array"
+
+[provides.operations."azure.speech.stt.transcribe_fast".input_schema.properties.locales.items]
+type = "string"
+
+[provides.operations."azure.speech.stt.transcribe_fast".input_schema.properties.max_audio_bytes]
+maximum = 262144000
+minimum = 1
+type = "integer"
+
+[provides.operations."azure.speech.stt.transcribe_fast".input_schema.properties.phrase_list]
+type = "object"
+
+[provides.operations."azure.speech.stt.transcribe_fast".output_schema]
+type = "object"
+
+[provides.operations."azure.speech.stt.transcribe_fast".network_constraints]
+host_allow = [
+    "*.api.cognitive.microsoft.com",
+    "*.api.cognitive.microsoft.us",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."azure.speech.stt.transcribe_fast".ai_hints]
+when_to_use = "Use for a bounded one-file Azure Speech fast transcription request when synchronous transcription is acceptable."
+common_mistakes = [
+    "Do not use this for realtime streaming or batch storage-backed jobs.",
+    "Do not send audio above the configured max_audio_bytes cap.",
+    "The operation preserves provider phrase/channel/word confidence details in provider_result.",
+]
+examples = ['{"audio_base64":"<base64 wav>","content_type":"audio/wav","locale":"en-US"}']
+related = ["azure.speech.voices.list"]
+
+[provides.operations."azure.speech.tts.synthesize"]
+description = "Synthesize speech audio with Azure Speech REST text-to-speech"
+capability = "azure.speech.tts"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."azure.speech.tts.synthesize".input_schema]
+type = "object"
+
+[[provides.operations."azure.speech.tts.synthesize".input_schema.anyOf]]
+required = ["ssml"]
+
+[[provides.operations."azure.speech.tts.synthesize".input_schema.anyOf]]
+required = [
+    "text",
+    "voice",
+]
+
+[provides.operations."azure.speech.tts.synthesize".input_schema.properties.inline_audio_max_bytes]
+maximum = 16777216
+minimum = 0
+type = "integer"
+
+[provides.operations."azure.speech.tts.synthesize".input_schema.properties.locale]
+default = "en-US"
+type = "string"
+
+[provides.operations."azure.speech.tts.synthesize".input_schema.properties.output_format]
+default = "riff-24khz-16bit-mono-pcm"
+type = "string"
+
+[provides.operations."azure.speech.tts.synthesize".input_schema.properties.ssml]
+minLength = 1
+type = "string"
+
+[provides.operations."azure.speech.tts.synthesize".input_schema.properties.text]
+minLength = 1
+type = "string"
+
+[provides.operations."azure.speech.tts.synthesize".input_schema.properties.voice]
+minLength = 1
+type = "string"
+
+[provides.operations."azure.speech.tts.synthesize".output_schema]
+type = "object"
+
+[provides.operations."azure.speech.tts.synthesize".network_constraints]
+host_allow = [
+    "*.api.cognitive.microsoft.com",
+    "*.tts.speech.microsoft.com",
+    "*.api.cognitive.microsoft.us",
+    "*.tts.speech.azure.us",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 16777216
+
+[provides.operations."azure.speech.tts.synthesize".ai_hints]
+when_to_use = "Use when the caller needs bounded Azure Speech audio synthesis from text or SSML."
+common_mistakes = [
+    "Do not inline large audio blindly; results above inline_audio_max_bytes are returned as host artifact metadata only.",
+    "Validate SSML before invoking.",
+    "Use voices.list to pick a valid Azure voice name for the configured region.",
+]
+examples = ['{"text":"Hello","voice":"en-US-ChristopherNeural","locale":"en-US","output_format":"riff-24khz-16bit-mono-pcm"}']
+related = ["azure.speech.voices.list"]
+
+[provides.operations."azure.speech.voices.list"]
+description = "List Azure Speech voices for the configured region"
+capability = "azure.speech.voices"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."azure.speech.voices.list".input_schema]
+type = "object"
+
+[provides.operations."azure.speech.voices.list".input_schema.properties]
+
+[provides.operations."azure.speech.voices.list".output_schema]
+type = "object"
+
+[provides.operations."azure.speech.voices.list".network_constraints]
+host_allow = [
+    "*.api.cognitive.microsoft.com",
+    "*.tts.speech.microsoft.com",
+    "*.api.cognitive.microsoft.us",
+    "*.tts.speech.azure.us",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 2097152
+
+[provides.operations."azure.speech.voices.list".ai_hints]
+when_to_use = "Use to discover Azure Speech voice names and locales before synthesizing speech in the configured region."
+common_mistakes = [
+    "Do not use a Speech key from a different region.",
+    "Do not log subscription keys, issued bearer tokens, or full provider error bodies that might echo credentials.",
+]
+examples = ["{}"]
+related = ["azure.speech.tts.synthesize"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 60000
+fs_readonly_paths = []
+fs_writable_paths = []
+deny_exec = true
+deny_ptrace = true

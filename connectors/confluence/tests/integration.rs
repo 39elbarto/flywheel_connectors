@@ -23,6 +23,26 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TEST_EMAIL: &str = "user@example.com";
 const TEST_TOKEN: &str = "confluence-token-for-tests";
+const OP_SPACES_LIST: &str = "confluence.spaces.list";
+const OP_SPACES_GET: &str = "confluence.spaces.get";
+const OP_PAGES_LIST: &str = "confluence.pages.list";
+const OP_PAGES_GET: &str = "confluence.pages.get";
+const OP_PAGES_CREATE: &str = "confluence.pages.create";
+const OP_PAGES_UPDATE: &str = "confluence.pages.update";
+const OP_PAGES_DELETE: &str = "confluence.pages.delete";
+const OP_SEARCH: &str = "confluence.search";
+const OP_HEALTH: &str = "confluence.health";
+const EXPECTED_MANIFEST_SCHEMA_OPS: [(&str, &str); 9] = [
+    ("spaces_list", OP_SPACES_LIST),
+    ("spaces_get", OP_SPACES_GET),
+    ("pages_list", OP_PAGES_LIST),
+    ("pages_get", OP_PAGES_GET),
+    ("pages_create", OP_PAGES_CREATE),
+    ("pages_update", OP_PAGES_UPDATE),
+    ("pages_delete", OP_PAGES_DELETE),
+    ("search", OP_SEARCH),
+    ("health", OP_HEALTH),
+];
 
 fn expected_auth_header() -> String {
     let credentials = format!("{TEST_EMAIL}:{TEST_TOKEN}");
@@ -80,6 +100,229 @@ fn page_json(page_id: &str, title: &str) -> Value {
         },
         "_links": { "webui": "/spaces/ENG/pages/123" }
     })
+}
+
+fn confluence_manifest() -> toml::Value {
+    toml::from_str(include_str!("../manifest.toml")).expect("Confluence manifest TOML should parse")
+}
+
+fn manifest_operations(manifest: &toml::Value) -> &toml::Table {
+    manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("manifest should contain provides.operations")
+}
+
+fn operation_schema(manifest: &toml::Value, operation_key: &str, schema_key: &str) -> Value {
+    let schema = manifest_operations(manifest)
+        .get(operation_key)
+        .and_then(|operation| operation.get(schema_key))
+        .expect("operation should define requested schema");
+
+    serde_json::to_value(schema).expect("manifest schema should convert to JSON")
+}
+
+fn assert_schema_accepts(schema: &Value, payload: &Value) {
+    let validator = jsonschema::validator_for(schema).expect("schema should compile");
+    let errors = validator
+        .iter_errors(payload)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        errors.is_empty(),
+        "schema should accept payload {payload:#}: {errors:#?}"
+    );
+}
+
+fn assert_schema_rejects(schema: &Value, payload: &Value) {
+    let validator = jsonschema::validator_for(schema).expect("schema should compile");
+    let errors = validator
+        .iter_errors(payload)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        !errors.is_empty(),
+        "schema should reject payload {payload:#}"
+    );
+}
+
+fn assert_manifest_schema_catalog_matches_runtime(manifest: &toml::Value) {
+    let introspection = ConfluenceConnector::new().introspect();
+    assert_eq!(
+        introspection.operations.len(),
+        EXPECTED_MANIFEST_SCHEMA_OPS.len(),
+        "runtime operation catalog should stay aligned with manifest schema coverage"
+    );
+
+    for (manifest_key, operation_id) in EXPECTED_MANIFEST_SCHEMA_OPS {
+        let operation = introspection
+            .operations
+            .iter()
+            .find(|entry| entry.id.as_str() == operation_id)
+            .expect("runtime catalog should include manifest operation");
+        let input_schema = operation_schema(manifest, manifest_key, "input_schema");
+        let output_schema = operation_schema(manifest, manifest_key, "output_schema");
+
+        assert_eq!(
+            input_schema, operation.input_schema,
+            "{operation_id} manifest input_schema should match runtime OperationInfo"
+        );
+        assert_eq!(
+            output_schema, operation.output_schema,
+            "{operation_id} manifest output_schema should match runtime OperationInfo"
+        );
+        assert!(
+            jsonschema::validator_for(&input_schema).is_ok(),
+            "{operation_id} manifest input_schema should compile"
+        );
+        assert!(
+            jsonschema::validator_for(&output_schema).is_ok(),
+            "{operation_id} manifest output_schema should compile"
+        );
+    }
+}
+
+fn assert_input_schema_examples(manifest: &toml::Value) {
+    let spaces_list = operation_schema(manifest, "spaces_list", "input_schema");
+    assert_schema_accepts(&spaces_list, &json!({}));
+    assert_schema_accepts(&spaces_list, &json!({ "start": 0, "limit": 2 }));
+    assert_schema_rejects(&spaces_list, &json!({ "limit": "two" }));
+
+    let spaces_get = operation_schema(manifest, "spaces_get", "input_schema");
+    assert_schema_accepts(&spaces_get, &json!({ "space_key": "ENG" }));
+    assert_schema_rejects(&spaces_get, &json!({}));
+
+    let pages_list = operation_schema(manifest, "pages_list", "input_schema");
+    assert_schema_accepts(&pages_list, &json!({ "space_key": "ENG", "start": 2 }));
+    assert_schema_rejects(&pages_list, &json!({ "limit": 10 }));
+
+    let pages_get = operation_schema(manifest, "pages_get", "input_schema");
+    assert_schema_accepts(&pages_get, &json!({ "page_id": "page-1" }));
+    assert_schema_rejects(&pages_get, &json!({ "page_id": 42 }));
+
+    let pages_create = operation_schema(manifest, "pages_create", "input_schema");
+    assert_schema_accepts(
+        &pages_create,
+        &json!({
+            "space_key": "ENG",
+            "title": "Runbook",
+            "body": "<p>Hello</p>",
+            "parent_id": "parent-1"
+        }),
+    );
+    assert_schema_rejects(
+        &pages_create,
+        &json!({ "space_key": "ENG", "title": "Runbook" }),
+    );
+
+    let pages_update = operation_schema(manifest, "pages_update", "input_schema");
+    assert_schema_accepts(
+        &pages_update,
+        &json!({
+            "page_id": "page-1",
+            "title": "Runbook",
+            "body": "<p>Hello</p>",
+            "version_number": 2
+        }),
+    );
+    assert_schema_rejects(
+        &pages_update,
+        &json!({
+            "page_id": "page-1",
+            "title": "Runbook",
+            "body": "<p>Hello</p>",
+            "version_number": "2"
+        }),
+    );
+
+    let pages_delete = operation_schema(manifest, "pages_delete", "input_schema");
+    assert_schema_accepts(&pages_delete, &json!({ "page_id": "page-1" }));
+    assert_schema_rejects(&pages_delete, &json!({}));
+
+    let search = operation_schema(manifest, "search", "input_schema");
+    assert_schema_accepts(
+        &search,
+        &json!({ "cql": "space = ENG and text ~ \"runbook\"", "limit": 10 }),
+    );
+    assert_schema_rejects(&search, &json!({ "limit": 10 }));
+
+    let health = operation_schema(manifest, "health", "input_schema");
+    assert_schema_accepts(&health, &json!({}));
+}
+
+fn assert_output_schema_examples(manifest: &toml::Value) {
+    let paginated_output = json!({
+        "results": [space_json("ENG")],
+        "size": 1
+    });
+
+    let spaces_list = operation_schema(manifest, "spaces_list", "output_schema");
+    assert_schema_accepts(&spaces_list, &paginated_output);
+    assert_schema_rejects(&spaces_list, &json!({ "results": {}, "size": 1 }));
+
+    let spaces_get = operation_schema(manifest, "spaces_get", "output_schema");
+    assert_schema_accepts(&spaces_get, &space_json("ENG"));
+    assert_schema_rejects(
+        &spaces_get,
+        &json!({ "id": 1, "key": "ENG", "name": "Engineering" }),
+    );
+
+    let pages_list = operation_schema(manifest, "pages_list", "output_schema");
+    assert_schema_accepts(
+        &pages_list,
+        &json!({ "results": [page_json("page-1", "Runbook")], "size": 1 }),
+    );
+    assert_schema_rejects(
+        &pages_list,
+        &json!({ "results": "not an array", "size": 1 }),
+    );
+
+    let pages_get = operation_schema(manifest, "pages_get", "output_schema");
+    assert_schema_accepts(&pages_get, &page_json("page-1", "Runbook"));
+    assert_schema_rejects(&pages_get, &json!({ "id": "page-1", "title": 42 }));
+
+    let pages_create = operation_schema(manifest, "pages_create", "output_schema");
+    assert_schema_accepts(&pages_create, &page_json("page-created", "Created by FCP"));
+    assert_schema_rejects(
+        &pages_create,
+        &json!({ "id": 1, "title": "Created by FCP" }),
+    );
+
+    let pages_update = operation_schema(manifest, "pages_update", "output_schema");
+    assert_schema_accepts(&pages_update, &page_json("page-1", "Runbook updated"));
+    assert_schema_rejects(&pages_update, &json!({ "id": "page-1", "version": "3" }));
+
+    let pages_delete = operation_schema(manifest, "pages_delete", "output_schema");
+    assert_schema_accepts(&pages_delete, &json!({ "deleted": true }));
+    assert_schema_rejects(&pages_delete, &json!({ "deleted": "true" }));
+
+    let search = operation_schema(manifest, "search", "output_schema");
+    assert_schema_accepts(
+        &search,
+        &json!({
+            "results": [{
+                "title": "Runbook",
+                "excerpt": "Operational runbook",
+                "url": "/wiki/spaces/ENG/pages/page-1",
+                "content": page_json("page-1", "Runbook")
+            }],
+            "size": 1
+        }),
+    );
+    assert_schema_rejects(&search, &json!({ "results": {}, "size": 1 }));
+
+    let health = operation_schema(manifest, "health", "output_schema");
+    assert_schema_accepts(&health, &json!({ "status": "ok" }));
+    assert_schema_rejects(&health, &json!({ "status": 200 }));
+}
+
+#[test]
+fn manifest_operation_schemas_compile_and_validate_core_payloads() {
+    let manifest = confluence_manifest();
+    assert_manifest_schema_catalog_matches_runtime(&manifest);
+    assert_input_schema_examples(&manifest);
+    assert_output_schema_examples(&manifest);
 }
 
 #[fcp_async_core::runtime::test]

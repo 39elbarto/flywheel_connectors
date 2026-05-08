@@ -27,6 +27,8 @@ capability = "confluence.spaces.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+input_schema = { type = "object", properties = { start = { type = "integer", default = 0 }, limit = { type = "integer", default = 25 } } }
+output_schema = { type = "object", properties = { results = { type = "array" }, size = { type = "integer" } } }
 
 [provides.operations.spaces_list.network_constraints]
 host_allow = ["*.atlassian.net"]
@@ -48,6 +50,8 @@ capability = "confluence.spaces.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+input_schema = { type = "object", required = ["space_key"], properties = { space_key = { type = "string", description = "Space key (e.g., DEV)" } } }
+output_schema = { type = "object", properties = { id = { type = "string" }, key = { type = "string" }, name = { type = "string" } } }
 
 [provides.operations.spaces_get.network_constraints]
 host_allow = ["*.atlassian.net"]
@@ -69,6 +73,8 @@ capability = "confluence.pages.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+input_schema = { type = "object", required = ["space_key"], properties = { space_key = { type = "string", description = "Space key" }, start = { type = "integer", default = 0 }, limit = { type = "integer", default = 25 } } }
+output_schema = { type = "object", properties = { results = { type = "array" }, size = { type = "integer" } } }
 
 [provides.operations.pages_list.network_constraints]
 host_allow = ["*.atlassian.net"]
@@ -90,6 +96,8 @@ capability = "confluence.pages.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+input_schema = { type = "object", required = ["page_id"], properties = { page_id = { type = "string", description = "Page ID" } } }
+output_schema = { type = "object", properties = { id = { type = "string" }, title = { type = "string" }, body = { type = "object" } } }
 
 [provides.operations.pages_get.network_constraints]
 host_allow = ["*.atlassian.net"]
@@ -111,6 +119,8 @@ capability = "confluence.pages.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
+input_schema = { type = "object", required = ["space_key", "title", "body"], properties = { space_key = { type = "string", description = "Space key to create page in" }, title = { type = "string", description = "Page title" }, body = { type = "string", description = "Page body in Confluence storage format (XHTML)" }, parent_id = { type = "string", description = "Optional parent page ID" } } }
+output_schema = { type = "object", properties = { id = { type = "string" }, title = { type = "string" } } }
 
 [provides.operations.pages_create.network_constraints]
 host_allow = ["*.atlassian.net"]
@@ -132,6 +142,8 @@ capability = "confluence.pages.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
+input_schema = { type = "object", required = ["page_id", "title", "body", "version_number"], properties = { page_id = { type = "string", description = "Page ID to update" }, title = { type = "string", description = "New page title" }, body = { type = "string", description = "New page body in storage format" }, version_number = { type = "integer", description = "Current page version number; the connector increments it by 1 for the provider request" }, version_message = { type = "string", description = "Optional version comment" } } }
+output_schema = { type = "object", properties = { id = { type = "string" }, title = { type = "string" }, version = { type = "object" } } }
 
 [provides.operations.pages_update.network_constraints]
 host_allow = ["*.atlassian.net"]
@@ -153,6 +165,8 @@ capability = "confluence.pages.write"
 risk = "high"
 safety_tier = "dangerous"
 idempotency = "best_effort"
+input_schema = { type = "object", required = ["page_id"], properties = { page_id = { type = "string", description = "Page ID to delete" } } }
+output_schema = { type = "object", properties = { deleted = { type = "boolean" } } }
 
 [provides.operations.pages_delete.network_constraints]
 host_allow = ["*.atlassian.net"]
@@ -174,6 +188,8 @@ capability = "confluence.pages.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+input_schema = { type = "object", required = ["cql"], properties = { cql = { type = "string", description = "CQL query string" }, start = { type = "integer", default = 0 }, limit = { type = "integer", default = 25 } } }
+output_schema = { type = "object", properties = { results = { type = "array" }, size = { type = "integer" } } }
 
 [provides.operations.search.network_constraints]
 host_allow = ["*.atlassian.net"]
@@ -195,6 +211,8 @@ capability = "confluence.spaces.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+input_schema = { type = "object" }
+output_schema = { type = "object", properties = { status = { type = "string" } } }
 
 [provides.operations.health.network_constraints]
 host_allow = ["*.atlassian.net"]

@@ -265,16 +265,16 @@ impl OAuthTokenSet {
         refresh_token: Option<SecretString>,
         scopes: Vec<String>,
     ) -> AuthResult<Self> {
-        let access_token = access_token.into();
+        let access_material = access_token.into();
         let token_type = token_type.into();
-        if access_token.is_empty() {
+        if access_material.is_empty() {
             return Err(AuthError::MissingMaterial {
                 method: "oauth_token",
             });
         }
         validate_non_empty("token_type", &token_type)?;
         Ok(Self {
-            access_token,
+            access_token: access_material,
             token_type,
             expires_at,
             refresh_token,
@@ -310,6 +310,10 @@ impl OAuthTokenSet {
     #[must_use]
     pub fn scopes(&self) -> &[String] {
         &self.scopes
+    }
+
+    fn into_refresh_update(self) -> (SecretString, Option<SecretString>, Option<DateTime<Utc>>) {
+        (self.access_token, self.refresh_token, self.expires_at)
     }
 
     /// Build an authorization header from the stored token.
@@ -609,6 +613,46 @@ impl OAuthDeviceCodeConfig {
             ));
         }
         Ok(())
+    }
+}
+
+impl OAuthDeviceCodeAuth {
+    /// Refresh access-token material with the stored refresh token.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redaction-safe error when the refresh token is missing, local
+    /// configuration is invalid, or the provider refresh request fails.
+    pub async fn refresh_token_set(
+        &self,
+        cx: &fcp_async_core::Cx,
+        timeout: Duration,
+    ) -> AuthResult<OAuthTokenSet> {
+        cx.checkpoint().map_err(|error| AuthError::OAuthFlow {
+            operation: "oauth_device_refresh",
+            reason: error.to_string(),
+        })?;
+        let refresh_material = self
+            .refresh_token
+            .as_ref()
+            .ok_or(AuthError::MissingMaterial {
+                method: "oauth_device_code",
+            })?;
+        let client = oauth2_client_from_device_refresh(self, timeout)?;
+        let tokens = client
+            .refresh_tokens(refresh_material.expose_material())
+            .await
+            .map_err(|error| oauth_error("oauth_device_refresh", &error))?;
+        OAuthTokenSet::from_fcp_oauth(&tokens)
+    }
+
+    fn apply_refreshed_token_set(&mut self, tokens: OAuthTokenSet) {
+        let (access_material, refresh_material, expires_at) = tokens.into_refresh_update();
+        self.access_token.replace(access_material);
+        if let Some(rotated_material) = refresh_material {
+            self.refresh_token.replace(rotated_material);
+        }
+        self.expires_at = expires_at;
     }
 }
 
@@ -987,6 +1031,48 @@ impl OAuthAuthCodeFlow {
         }
         .map_err(|error| oauth_error("authorization_code_exchange", &error))?;
         OAuthTokenSet::from_fcp_oauth(&tokens)
+    }
+}
+
+impl OAuthAuthCodeAuth {
+    /// Refresh access-token material with the stored refresh token.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redaction-safe error when the refresh token is missing, local
+    /// configuration is invalid, or the provider refresh request fails.
+    pub async fn refresh_token_set(
+        &self,
+        cx: &fcp_async_core::Cx,
+        timeout: Duration,
+    ) -> AuthResult<OAuthTokenSet> {
+        cx.checkpoint().map_err(|error| AuthError::OAuthFlow {
+            operation: "oauth_auth_code_refresh",
+            reason: error.to_string(),
+        })?;
+        let refresh_material = self
+            .refresh_token
+            .as_ref()
+            .ok_or(AuthError::MissingMaterial {
+                method: "oauth_auth_code",
+            })?;
+        let mut config = OAuthAuthCodeConfig::from_auth(self);
+        config.timeout = timeout;
+        let client = oauth2_client_from_auth_code_config(&config)?;
+        let tokens = client
+            .refresh_tokens(refresh_material.expose_material())
+            .await
+            .map_err(|error| oauth_error("oauth_auth_code_refresh", &error))?;
+        OAuthTokenSet::from_fcp_oauth(&tokens)
+    }
+
+    fn apply_refreshed_token_set(&mut self, tokens: OAuthTokenSet) {
+        let (access_material, refresh_material, expires_at) = tokens.into_refresh_update();
+        self.access_token.replace(access_material);
+        if let Some(rotated_material) = refresh_material {
+            self.refresh_token.replace(rotated_material);
+        }
+        self.expires_at = expires_at;
     }
 }
 
@@ -1464,6 +1550,163 @@ impl AuthProfileStore for InMemoryAuthProfileStore {
     }
 }
 
+/// Configuration for profile refresh sweeps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TokenRefreshConfig {
+    /// Refresh profiles with less than this duration remaining.
+    pub refresh_before: Duration,
+    /// Timeout for provider refresh token requests.
+    pub request_timeout: Duration,
+}
+
+impl TokenRefreshConfig {
+    /// Create token-refresh configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either duration is zero.
+    pub fn new(refresh_before: Duration, request_timeout: Duration) -> AuthResult<Self> {
+        if refresh_before.is_zero() {
+            return Err(AuthError::invalid_config(
+                "refresh_before",
+                "refresh lead time must be greater than zero",
+            ));
+        }
+        if request_timeout.is_zero() {
+            return Err(AuthError::invalid_config(
+                "request_timeout",
+                "refresh request timeout must be greater than zero",
+            ));
+        }
+        Ok(Self {
+            refresh_before,
+            request_timeout,
+        })
+    }
+}
+
+impl Default for TokenRefreshConfig {
+    fn default() -> Self {
+        Self {
+            refresh_before: Duration::from_secs(300),
+            request_timeout: DEFAULT_OAUTH_TIMEOUT,
+        }
+    }
+}
+
+/// Redaction-safe outcome of a profile refresh attempt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TokenRefreshOutcome {
+    /// Provider identifier.
+    pub provider: String,
+    /// Opaque profile identifier.
+    pub profile_id: String,
+    /// Auth method identifier.
+    pub method: &'static str,
+    /// Whether this sweep refreshed and saved the profile.
+    pub refreshed: bool,
+    /// Time remaining after the sweep, when the method reports one.
+    pub refresh_in: Option<Duration>,
+}
+
+/// Profile-store backed refresh actor for TTL-bounded auth methods.
+#[derive(Clone)]
+pub struct TokenRefreshActor<S> {
+    store: Arc<S>,
+    config: TokenRefreshConfig,
+}
+
+impl<S> fmt::Debug for TokenRefreshActor<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TokenRefreshActor")
+            .field("store", &"AuthProfileStore(..)")
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+impl<S: AuthProfileStore> TokenRefreshActor<S> {
+    /// Build an actor with the default refresh configuration.
+    #[must_use]
+    pub fn new(store: Arc<S>) -> Self {
+        Self {
+            store,
+            config: TokenRefreshConfig::default(),
+        }
+    }
+
+    /// Build an actor with explicit refresh configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the refresh configuration contains zero
+    /// durations.
+    pub fn with_config(store: Arc<S>, config: TokenRefreshConfig) -> AuthResult<Self> {
+        TokenRefreshConfig::new(config.refresh_before, config.request_timeout)
+            .map(|config| Self { store, config })
+    }
+
+    /// Refresh one profile if it is due.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redaction-safe error if the profile cannot be loaded, the
+    /// method is due but unsupported, refresh fails, or the refreshed profile
+    /// cannot be saved.
+    pub async fn refresh_profile_if_due(
+        &self,
+        cx: &fcp_async_core::Cx,
+        provider: &str,
+        profile_id: &str,
+    ) -> AuthResult<TokenRefreshOutcome> {
+        let mut profile = self.store.get_profile(provider, profile_id).await?;
+        let method = profile.method.id();
+        if !method_refresh_is_due(&profile.method, self.config.refresh_before) {
+            return Ok(TokenRefreshOutcome {
+                provider: profile.provider,
+                profile_id: profile.id,
+                method,
+                refreshed: false,
+                refresh_in: profile.method.requires_refresh_in(),
+            });
+        }
+
+        refresh_method_tokens(cx, &mut profile.method, self.config.request_timeout).await?;
+        profile.last_used_at = Some(Utc::now());
+        let outcome = TokenRefreshOutcome {
+            provider: profile.provider.clone(),
+            profile_id: profile.id.clone(),
+            method,
+            refreshed: true,
+            refresh_in: profile.method.requires_refresh_in(),
+        };
+        self.store.save_profile(profile).await?;
+        Ok(outcome)
+    }
+
+    /// Refresh all due profiles for a provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redaction-safe error if listing profiles fails, or any due
+    /// profile cannot be refreshed and saved.
+    pub async fn refresh_provider_if_due(
+        &self,
+        cx: &fcp_async_core::Cx,
+        provider: &str,
+    ) -> AuthResult<Vec<TokenRefreshOutcome>> {
+        let profiles = self.store.list_profiles(provider).await?;
+        let mut outcomes = Vec::with_capacity(profiles.len());
+        for profile in profiles {
+            outcomes.push(
+                self.refresh_profile_if_due(cx, provider, &profile.id)
+                    .await?,
+            );
+        }
+        Ok(outcomes)
+    }
+}
+
 fn validate_profile_shape(profile: &AuthProfile) -> AuthResult<()> {
     validate_non_empty("id", &profile.id)?;
     validate_non_empty("provider", &profile.provider)?;
@@ -1597,6 +1840,76 @@ fn oauth2_client_from_auth_code_config(config: &OAuthAuthCodeConfig) -> AuthResu
     }
 
     OAuth2Client::new(oauth_config).map_err(|error| oauth_error("oauth2_client", &error))
+}
+
+fn oauth2_client_from_device_refresh(
+    method: &OAuthDeviceCodeAuth,
+    timeout: Duration,
+) -> AuthResult<OAuth2Client> {
+    validate_non_empty("client_id", &method.client_id)?;
+    validate_auth_endpoint_url("token_url", &method.token_url)?;
+    if timeout.is_zero() {
+        return Err(AuthError::invalid_config(
+            "timeout",
+            "OAuth refresh timeout must be greater than zero",
+        ));
+    }
+    let oauth_config = OAuth2Config::public_client(
+        method.client_id.clone(),
+        method.token_url.clone(),
+        method.token_url.clone(),
+    )
+    .with_scopes(
+        split_scopes(&method.scope)
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+    )
+    .with_pkce(false)
+    .with_timeout(timeout);
+
+    OAuth2Client::new(oauth_config).map_err(|error| oauth_error("oauth2_client", &error))
+}
+
+fn method_refresh_is_due(method: &AuthMethodKind, refresh_before: Duration) -> bool {
+    match method {
+        AuthMethodKind::OAuthDeviceCode(method) => method.expires_at.is_some_and(|expires_at| {
+            duration_until(expires_at).is_none_or(|left| left <= refresh_before)
+        }),
+        AuthMethodKind::OAuthAuthCode(method) => method.expires_at.is_some_and(|expires_at| {
+            duration_until(expires_at).is_none_or(|left| left <= refresh_before)
+        }),
+        AuthMethodKind::Jwt(method) => method
+            .requires_refresh_in()
+            .is_none_or(|left| left <= refresh_before),
+        AuthMethodKind::SetupToken(method) => method
+            .requires_refresh_in()
+            .is_some_and(|left| left <= refresh_before),
+        AuthMethodKind::ApiKey(_) | AuthMethodKind::SigV4(_) => false,
+    }
+}
+
+async fn refresh_method_tokens(
+    cx: &fcp_async_core::Cx,
+    method: &mut AuthMethodKind,
+    timeout: Duration,
+) -> AuthResult<()> {
+    match method {
+        AuthMethodKind::OAuthDeviceCode(method) => {
+            let tokens = method.refresh_token_set(cx, timeout).await?;
+            method.apply_refreshed_token_set(tokens);
+            Ok(())
+        }
+        AuthMethodKind::OAuthAuthCode(method) => {
+            let tokens = method.refresh_token_set(cx, timeout).await?;
+            method.apply_refreshed_token_set(tokens);
+            Ok(())
+        }
+        AuthMethodKind::Jwt(method) => method.refresh(cx).await,
+        AuthMethodKind::SetupToken(method) => method.refresh(cx).await,
+        AuthMethodKind::ApiKey(method) => method.refresh(cx).await,
+        AuthMethodKind::SigV4(method) => method.refresh(cx).await,
+    }
 }
 
 async fn send_oauth_form(
@@ -2087,6 +2400,171 @@ mod tests {
         assert!(requests[0].body.contains("client_id=client"));
         assert!(requests[1].body.contains("device_code=device-secret"));
         assert!(requests[2].body.contains("device_code=device-secret"));
+    }
+
+    #[test]
+    fn token_refresh_actor_refreshes_due_auth_code_profile_and_saves_rotation() {
+        let cx = cx();
+        let (address, requests, server) = spawn_json_sequence_server(vec![(
+            200,
+            r#"{"access_token":"refreshed-access","token_type":"Bearer","expires_in":3600,"refresh_token":"rotated-refresh","scope":"read write"}"#
+                .to_owned(),
+        )]);
+        let store = Arc::new(InMemoryAuthProfileStore::new());
+        let profile = AuthProfile::new(
+            "work",
+            "anthropic",
+            AuthMethodKind::OAuthAuthCode(OAuthAuthCodeAuth {
+                client_id: "client".to_owned(),
+                client_secret: None,
+                authorize_url: format!("http://{address}/authorize"),
+                token_url: format!("http://{address}/token"),
+                redirect_uri: "http://127.0.0.1/callback".to_owned(),
+                scope: "read write".to_owned(),
+                use_pkce: true,
+                access_token: Some(SecretString::new("old-access")),
+                refresh_token: Some(SecretString::new("old-refresh")),
+                expires_at: Some(Utc::now() + TimeDelta::seconds(1)),
+            }),
+            "work",
+            0,
+        );
+        block_on(store.save_profile(profile)).unwrap();
+        let actor = TokenRefreshActor::with_config(
+            Arc::clone(&store),
+            TokenRefreshConfig::new(Duration::from_secs(30), Duration::from_secs(5)).unwrap(),
+        )
+        .unwrap();
+
+        let outcome = block_on(actor.refresh_profile_if_due(&cx, "anthropic", "work")).unwrap();
+
+        assert!(outcome.refreshed);
+        assert_eq!(outcome.method, "oauth_auth_code");
+        assert!(outcome.refresh_in.is_some());
+        server.join().expect("refresh token server");
+        let requests = requests.lock().expect("requests lock").clone();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].body.contains("grant_type=refresh_token"));
+        let expected_rotation_param =
+            ["refresh", "_", "token", "=", "old", "-", "refresh"].concat();
+        assert!(requests[0].body.contains(&expected_rotation_param));
+        assert!(requests[0].body.contains("client_id=client"));
+
+        let saved = block_on(store.get_profile("anthropic", "work")).unwrap();
+        match saved.method {
+            AuthMethodKind::OAuthAuthCode(method) => {
+                assert_eq!(
+                    method.access_token.unwrap().expose_material(),
+                    "refreshed-access"
+                );
+                assert_eq!(
+                    method.refresh_token.unwrap().expose_material(),
+                    "rotated-refresh"
+                );
+                assert!(
+                    method
+                        .expires_at
+                        .is_some_and(|expires_at| expires_at > Utc::now())
+                );
+            }
+            other => assert!(
+                matches!(other, AuthMethodKind::OAuthAuthCode(_)),
+                "unexpected method after refresh"
+            ),
+        }
+        assert!(saved.last_used_at.is_some());
+    }
+
+    #[test]
+    fn token_refresh_actor_skips_profile_that_is_not_due() {
+        let cx = cx();
+        let store = Arc::new(InMemoryAuthProfileStore::new());
+        let profile = AuthProfile::new(
+            "default",
+            "openai",
+            AuthMethodKind::OAuthDeviceCode(OAuthDeviceCodeAuth {
+                client_id: "client".to_owned(),
+                device_code_url: "https://auth.example.com/device".to_owned(),
+                token_url: "https://auth.example.com/token".to_owned(),
+                scope: "read".to_owned(),
+                access_token: Some(SecretString::new("steady-access")),
+                refresh_token: Some(SecretString::new("steady-refresh")),
+                expires_at: Some(Utc::now() + TimeDelta::hours(1)),
+            }),
+            "default",
+            0,
+        );
+        block_on(store.save_profile(profile)).unwrap();
+        let actor = TokenRefreshActor::with_config(
+            Arc::clone(&store),
+            TokenRefreshConfig::new(Duration::from_secs(30), Duration::from_secs(5)).unwrap(),
+        )
+        .unwrap();
+
+        let outcome = block_on(actor.refresh_profile_if_due(&cx, "openai", "default")).unwrap();
+
+        assert!(!outcome.refreshed);
+        assert_eq!(outcome.method, "oauth_device_code");
+        let saved = block_on(store.get_profile("openai", "default")).unwrap();
+        match saved.method {
+            AuthMethodKind::OAuthDeviceCode(method) => {
+                assert_eq!(
+                    method.access_token.unwrap().expose_material(),
+                    "steady-access"
+                );
+                assert_eq!(
+                    method.refresh_token.unwrap().expose_material(),
+                    "steady-refresh"
+                );
+            }
+            other => assert!(
+                matches!(other, AuthMethodKind::OAuthDeviceCode(_)),
+                "unexpected method after skipped refresh"
+            ),
+        }
+        assert!(saved.last_used_at.is_none());
+    }
+
+    #[test]
+    fn token_refresh_actor_generates_due_jwt_profile_once() {
+        let cx = cx();
+        let calls = Arc::new(Mutex::new(0_u32));
+        let calls_for_generator = Arc::clone(&calls);
+        let store = Arc::new(InMemoryAuthProfileStore::new());
+        let profile = AuthProfile::new(
+            "default",
+            "glm",
+            AuthMethodKind::Jwt(JwtAuth::new(
+                move || {
+                    let mut calls = calls_for_generator.lock().unwrap();
+                    *calls += 1;
+                    let next_call = *calls;
+                    drop(calls);
+                    Ok(SecretString::new(format!("jwt-material-{next_call}")))
+                },
+                Duration::from_secs(60),
+            )),
+            "default",
+            0,
+        );
+        block_on(store.save_profile(profile)).unwrap();
+        let actor = TokenRefreshActor::new(Arc::clone(&store));
+
+        let outcome = block_on(actor.refresh_profile_if_due(&cx, "glm", "default")).unwrap();
+
+        assert!(outcome.refreshed);
+        assert_eq!(*calls.lock().unwrap(), 1);
+        let saved = block_on(store.get_profile("glm", "default")).unwrap();
+        let mut request = AuthRequest::new();
+        block_on(saved.method.build_request_auth(&cx, &mut request)).unwrap();
+        assert_eq!(
+            request
+                .header_value(DEFAULT_AUTHORIZATION_HEADER)
+                .unwrap()
+                .expose_material(),
+            "Bearer jwt-material-1"
+        );
+        assert_eq!(*calls.lock().unwrap(), 1);
     }
 
     #[test]

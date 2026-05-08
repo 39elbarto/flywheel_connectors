@@ -90,6 +90,180 @@ impl EmailGenericConnector {
         })
     }
 
+    fn empty_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false
+        })
+    }
+
+    fn monitor_policy_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": [
+                "allowed_senders_configured",
+                "allowed_senders_count",
+                "require_allowed_sender",
+                "drop_automated",
+                "allow_attachments",
+                "poll_interval_secs",
+                "max_body_chars",
+                "seen_uid_cap"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "allowed_senders_configured": { "type": "boolean" },
+                "allowed_senders_count": { "type": "integer", "minimum": 0 },
+                "require_allowed_sender": { "type": "boolean" },
+                "drop_automated": { "type": "boolean" },
+                "allow_attachments": { "type": "boolean" },
+                "poll_interval_secs": { "type": "integer", "minimum": 1 },
+                "max_body_chars": { "type": "integer", "minimum": 1 },
+                "seen_uid_cap": { "type": "integer", "minimum": 1 }
+            }
+        })
+    }
+
+    fn inbound_monitor_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["status", "streaming", "reason", "pre_emission_policy"],
+            "additionalProperties": false,
+            "properties": {
+                "status": { "type": "string", "enum": ["deferred"] },
+                "streaming": { "type": "boolean", "enum": [false] },
+                "reason": { "type": "string", "minLength": 1 },
+                "pre_emission_policy": {
+                    "type": "object",
+                    "required": [
+                        "sender_allowlist",
+                        "automated_sender_suppression",
+                        "bounded_uid_cache",
+                        "body_length_bound",
+                        "attachment_classification",
+                        "thread_metadata"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                        "sender_allowlist": { "type": "boolean" },
+                        "automated_sender_suppression": { "type": "boolean" },
+                        "bounded_uid_cache": { "type": "boolean" },
+                        "body_length_bound": { "type": "boolean" },
+                        "attachment_classification": { "type": "boolean" },
+                        "thread_metadata": { "type": "boolean" }
+                    }
+                }
+            }
+        })
+    }
+
+    fn health_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": [
+                "status",
+                "imap_host",
+                "smtp_host",
+                "manifest_hash",
+                "monitor_policy",
+                "inbound_monitor"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "status": { "type": "string", "enum": ["ok"] },
+                "imap_host": { "type": "string", "minLength": 1 },
+                "smtp_host": { "type": "string", "minLength": 1 },
+                "manifest_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                "monitor_policy": Self::monitor_policy_schema(),
+                "inbound_monitor": Self::inbound_monitor_schema()
+            }
+        })
+    }
+
+    fn list_mailboxes_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["mailboxes"],
+            "additionalProperties": false,
+            "properties": {
+                "mailboxes": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                }
+            }
+        })
+    }
+
+    fn search_messages_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["mailbox", "query"],
+            "additionalProperties": false,
+            "properties": {
+                "mailbox": { "type": "string", "minLength": 1 },
+                "query": { "type": "string", "minLength": 1 }
+            }
+        })
+    }
+
+    fn search_messages_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["mailbox", "query", "uids"],
+            "additionalProperties": false,
+            "properties": {
+                "mailbox": { "type": "string", "minLength": 1 },
+                "query": { "type": "string", "minLength": 1 },
+                "uids": {
+                    "type": "array",
+                    "items": { "type": "integer", "minimum": 0 }
+                }
+            }
+        })
+    }
+
+    fn send_message_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["to", "subject", "body"],
+            "additionalProperties": false,
+            "properties": {
+                "to": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "type": "string", "minLength": 1 }
+                },
+                "cc": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                },
+                "subject": { "type": "string" },
+                "body": { "type": "string" }
+            }
+        })
+    }
+
+    fn send_message_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["status", "to", "cc", "subject"],
+            "additionalProperties": false,
+            "properties": {
+                "status": { "type": "string", "enum": ["sent"] },
+                "to": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": { "type": "string", "minLength": 1 }
+                },
+                "cc": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                },
+                "subject": { "type": "string" }
+            }
+        })
+    }
+
     pub fn doctor(&self) -> DoctorResult {
         let mut checks = vec![DoctorCheck {
             name: "configured".into(),
@@ -148,8 +322,8 @@ impl EmailGenericConnector {
                     "Check basic IMAP reachability, configuration, and monitor-policy state."
                         .into(),
                 ),
-                input_schema: json!({ "type": "object" }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: Self::empty_input_schema(),
+                output_schema: Self::health_output_schema(),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
@@ -167,8 +341,8 @@ impl EmailGenericConnector {
                 id: OperationId::from_static(OP_LIST_MAILBOXES),
                 summary: "List IMAP mailboxes".into(),
                 description: Some("List available IMAP mailboxes.".into()),
-                input_schema: json!({ "type": "object" }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: Self::empty_input_schema(),
+                output_schema: Self::list_mailboxes_output_schema(),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
@@ -186,15 +360,8 @@ impl EmailGenericConnector {
                 id: OperationId::from_static(OP_SEARCH_MESSAGES),
                 summary: "Search IMAP messages".into(),
                 description: Some("Search a mailbox and return matching UIDs.".into()),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["mailbox", "query"],
-                    "properties": {
-                        "mailbox": { "type": "string" },
-                        "query": { "type": "string" }
-                    }
-                }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: Self::search_messages_input_schema(),
+                output_schema: Self::search_messages_output_schema(),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
@@ -212,17 +379,8 @@ impl EmailGenericConnector {
                 id: OperationId::from_static(OP_SEND_MESSAGE),
                 summary: "Send an email".into(),
                 description: Some("Send an email through SMTP.".into()),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["to", "subject", "body"],
-                    "properties": {
-                        "to": { "type": "array", "items": { "type": "string" } },
-                        "cc": { "type": "array", "items": { "type": "string" } },
-                        "subject": { "type": "string" },
-                        "body": { "type": "string" }
-                    }
-                }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: Self::send_message_input_schema(),
+                output_schema: Self::send_message_output_schema(),
                 capability: CapabilityId::from_static(CAP_WRITE),
                 risk_level: RiskLevel::Medium,
                 safety_tier: SafetyTier::Risky,
@@ -596,6 +754,106 @@ mod tests {
         CapabilityToken::from_raw(raw)
     }
 
+    const EXPECTED_MANIFEST_SCHEMA_OPS: &[(&str, &str)] = &[
+        (OP_HEALTH, "health"),
+        (OP_LIST_MAILBOXES, "list_mailboxes"),
+        (OP_SEARCH_MESSAGES, "search_messages"),
+        (OP_SEND_MESSAGE, "send_message"),
+    ];
+
+    fn email_generic_manifest() -> Result<toml::Value, String> {
+        toml::from_str(MANIFEST_TOML)
+            .map_err(|err| format!("Email Generic manifest TOML should parse: {err}"))
+    }
+
+    fn manifest_operations(
+        manifest: &toml::Value,
+    ) -> Result<&toml::map::Map<String, toml::Value>, String> {
+        manifest
+            .get("provides")
+            .and_then(|provides| provides.get("operations"))
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| "manifest should declare operation tables".to_owned())
+    }
+
+    fn operation_schema(
+        manifest: &toml::Value,
+        operation_key: &str,
+        field: &str,
+    ) -> Result<serde_json::Value, String> {
+        let schema = manifest_operations(manifest)?
+            .get(operation_key)
+            .and_then(toml::Value::as_table)
+            .and_then(|operation| operation.get(field))
+            .ok_or_else(|| format!("{operation_key} should declare {field}"))?;
+        if schema.as_table().is_none_or(toml::map::Map::is_empty) {
+            return Err(format!(
+                "{operation_key}.{field} should be a non-empty schema table"
+            ));
+        }
+        serde_json::to_value(schema)
+            .map_err(|err| format!("{operation_key}.{field} should convert to JSON: {err}"))
+    }
+
+    fn validator_for(schema: &serde_json::Value) -> Result<jsonschema::Validator, String> {
+        jsonschema::Validator::new(schema)
+            .map_err(|err| format!("manifest operation schema should compile: {err}"))
+    }
+
+    fn assert_schema_accepts(
+        schema: &serde_json::Value,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        let errors = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "schema should accept {payload}; errors: {errors:?}"
+            ))
+        }
+    }
+
+    fn assert_schema_rejects(
+        schema: &serde_json::Value,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        if validator.iter_errors(payload).next().is_some() {
+            Ok(())
+        } else {
+            Err(format!("schema should reject {payload}"))
+        }
+    }
+
+    fn sample_monitor_policy() -> serde_json::Value {
+        json!({
+            "allowed_senders_configured": true,
+            "allowed_senders_count": 1,
+            "require_allowed_sender": false,
+            "drop_automated": true,
+            "allow_attachments": false,
+            "poll_interval_secs": 30,
+            "max_body_chars": 4096,
+            "seen_uid_cap": 64
+        })
+    }
+
+    fn sample_health_output() -> serde_json::Value {
+        json!({
+            "status": "ok",
+            "imap_host": "imap.example.com",
+            "smtp_host": "smtp.example.com",
+            "manifest_hash": EmailGenericConnector::manifest_hash(),
+            "monitor_policy": sample_monitor_policy(),
+            "inbound_monitor": EmailGenericConnector::inbound_monitor_state()
+        })
+    }
+
     #[test]
     fn connector_id_is_correct() {
         let connector = EmailGenericConnector::new();
@@ -628,6 +886,175 @@ mod tests {
         assert!(ids.contains(&OP_LIST_MAILBOXES));
         assert!(ids.contains(&OP_SEARCH_MESSAGES));
         assert!(ids.contains(&OP_SEND_MESSAGE));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn manifest_operation_schemas_compile_and_validate_core_payloads() -> Result<(), String> {
+        let manifest = email_generic_manifest()?;
+        let operations = manifest_operations(&manifest)?;
+        let operation_catalog = EmailGenericConnector::operations_info();
+
+        for (operation_id, manifest_key) in EXPECTED_MANIFEST_SCHEMA_OPS {
+            assert!(
+                operations.contains_key(*manifest_key),
+                "manifest should declare operation {manifest_key}"
+            );
+            let operation = operation_catalog
+                .iter()
+                .find(|operation| operation.id.as_str() == *operation_id)
+                .ok_or_else(|| format!("operation catalog should declare {operation_id}"))?;
+            for field in ["input_schema", "output_schema"] {
+                let schema = operation_schema(&manifest, manifest_key, field)?;
+                let _validator = validator_for(&schema)?;
+            }
+            assert_eq!(
+                operation.input_schema,
+                operation_schema(&manifest, manifest_key, "input_schema")?,
+                "{operation_id} input schema should match manifest"
+            );
+            assert_eq!(
+                operation.output_schema,
+                operation_schema(&manifest, manifest_key, "output_schema")?,
+                "{operation_id} output schema should match manifest"
+            );
+        }
+
+        for operation in operation_catalog {
+            let _input_validator = validator_for(&operation.input_schema)?;
+            let _output_validator = validator_for(&operation.output_schema)?;
+        }
+
+        let health_input = operation_schema(&manifest, "health", "input_schema")?;
+        assert_schema_accepts(&health_input, &json!({}))?;
+        assert_schema_rejects(&health_input, &json!({"extra": true}))?;
+
+        let health_output = operation_schema(&manifest, "health", "output_schema")?;
+        assert_schema_accepts(&health_output, &sample_health_output())?;
+        assert_schema_rejects(
+            &health_output,
+            &json!({
+                "status": "ok",
+                "imap_host": "imap.example.com",
+                "smtp_host": "smtp.example.com",
+                "manifest_hash": EmailGenericConnector::manifest_hash(),
+                "inbound_monitor": EmailGenericConnector::inbound_monitor_state()
+            }),
+        )?;
+        assert_schema_rejects(
+            &health_output,
+            &json!({
+                "status": "ok",
+                "imap_host": "imap.example.com",
+                "smtp_host": "smtp.example.com",
+                "manifest_hash": "not-a-hash",
+                "monitor_policy": sample_monitor_policy(),
+                "inbound_monitor": EmailGenericConnector::inbound_monitor_state()
+            }),
+        )?;
+
+        let list_input = operation_schema(&manifest, "list_mailboxes", "input_schema")?;
+        assert_schema_accepts(&list_input, &json!({}))?;
+        assert_schema_rejects(&list_input, &json!({"extra": true}))?;
+
+        let list_output = operation_schema(&manifest, "list_mailboxes", "output_schema")?;
+        assert_schema_accepts(&list_output, &json!({"mailboxes": ["INBOX", "Archive"]}))?;
+        assert_schema_rejects(&list_output, &json!({}))?;
+        assert_schema_rejects(&list_output, &json!({"mailboxes": "INBOX"}))?;
+        assert_schema_rejects(&list_output, &json!({"mailboxes": [], "extra": true}))?;
+
+        let search_input = operation_schema(&manifest, "search_messages", "input_schema")?;
+        assert_schema_accepts(
+            &search_input,
+            &json!({"mailbox": "INBOX", "query": "deploy"}),
+        )?;
+        assert_schema_rejects(&search_input, &json!({"mailbox": "INBOX"}))?;
+        assert_schema_rejects(&search_input, &json!({"mailbox": "", "query": "deploy"}))?;
+        assert_schema_rejects(&search_input, &json!({"mailbox": "INBOX", "query": 4}))?;
+        assert_schema_rejects(
+            &search_input,
+            &json!({"mailbox": "INBOX", "query": "deploy", "extra": true}),
+        )?;
+
+        let search_output = operation_schema(&manifest, "search_messages", "output_schema")?;
+        assert_schema_accepts(
+            &search_output,
+            &json!({"mailbox": "INBOX", "query": "deploy", "uids": [1, 2, 3]}),
+        )?;
+        assert_schema_rejects(
+            &search_output,
+            &json!({"mailbox": "INBOX", "query": "deploy"}),
+        )?;
+        assert_schema_rejects(
+            &search_output,
+            &json!({"mailbox": "INBOX", "query": "deploy", "uids": [-1]}),
+        )?;
+        assert_schema_rejects(
+            &search_output,
+            &json!({"mailbox": "INBOX", "query": "deploy", "uids": [], "extra": true}),
+        )?;
+
+        let send_input = operation_schema(&manifest, "send_message", "input_schema")?;
+        assert_schema_accepts(
+            &send_input,
+            &json!({"to": ["ops@example.com"], "subject": "Deploy", "body": "Green"}),
+        )?;
+        assert_schema_accepts(
+            &send_input,
+            &json!({
+                "to": ["ops@example.com"],
+                "cc": ["audit@example.com"],
+                "subject": "Deploy",
+                "body": "Green"
+            }),
+        )?;
+        assert_schema_rejects(
+            &send_input,
+            &json!({"to": [], "subject": "Deploy", "body": "Green"}),
+        )?;
+        assert_schema_rejects(
+            &send_input,
+            &json!({"to": ["ops@example.com"], "subject": "Deploy"}),
+        )?;
+        assert_schema_rejects(
+            &send_input,
+            &json!({"to": ["ops@example.com", 4], "subject": "Deploy", "body": "Green"}),
+        )?;
+        assert_schema_rejects(
+            &send_input,
+            &json!({"to": ["ops@example.com"], "subject": "Deploy", "body": "Green", "extra": true}),
+        )?;
+
+        let send_output = operation_schema(&manifest, "send_message", "output_schema")?;
+        assert_schema_accepts(
+            &send_output,
+            &json!({
+                "status": "sent",
+                "to": ["ops@example.com"],
+                "cc": [],
+                "subject": "Deploy"
+            }),
+        )?;
+        assert_schema_rejects(
+            &send_output,
+            &json!({"status": "queued", "to": ["ops@example.com"], "cc": [], "subject": "Deploy"}),
+        )?;
+        assert_schema_rejects(
+            &send_output,
+            &json!({"status": "sent", "to": ["ops@example.com"], "subject": "Deploy"}),
+        )?;
+        assert_schema_rejects(
+            &send_output,
+            &json!({
+                "status": "sent",
+                "to": ["ops@example.com"],
+                "cc": [],
+                "subject": "Deploy",
+                "extra": true
+            }),
+        )?;
+
+        Ok(())
     }
 
     #[test]

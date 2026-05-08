@@ -843,7 +843,7 @@ mod tests {
             .and_then(toml::Value::as_table)
             .and_then(|operation| operation.get(field))
             .ok_or_else(|| format!("{operation_id} should declare {field}"))?;
-        if !schema.as_table().is_some_and(|table| !table.is_empty()) {
+        if schema.as_table().is_none_or(|table| table.is_empty()) {
             return Err(format!(
                 "{operation_id}.{field} should be a non-empty schema table"
             ));

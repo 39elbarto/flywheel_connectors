@@ -35,11 +35,12 @@
 //! | [`sample_pre`]| Mint-time: produce a short preimage `e` such that `A·e≡h`  |
 //! | [`verify`]   | Verify-time: check `A·e ≡ h (mod q)` and `‖e‖₂ ≤ B`        |
 //!
-//! The representation profile is deliberately seed-backed: public matrices are
-//! transmitted as 32-byte seeds and expanded under explicit memory bounds,
-//! while secret trapdoors remain secret-only storage blobs. Sub-token
-//! preimages use profile-derived packed coefficient lengths rather than the
-//! old fixed 64-byte scaffold.
+//! The public-matrix fixture profile remains seed-backed: public matrices are
+//! transmitted as 32-byte seeds and expanded under explicit memory bounds.
+//! Secret trapdoors now sit behind a versioned representation envelope so the
+//! current fixture seed bundles cannot be mistaken for production bases.
+//! Sub-token preimages use profile-derived packed coefficient lengths rather
+//! than the old fixed 64-byte scaffold.
 
 #![forbid(unsafe_code)]
 
@@ -54,16 +55,23 @@ use thiserror::Error;
 
 /// Current lattice representation profile version.
 ///
-/// Version 1 is a seed-backed profile: public matrix material is represented by
-/// a 32-byte SHAKE seed and secret trapdoor material is a sealed seed bundle.
-/// Expanded matrices are never serialized; callers must opt into expansion
-/// through arithmetic code that checks [`LatticeRepresentationProfile`] first.
-pub const LATTICE_REPRESENTATION_VERSION: u16 = 1;
+/// Version 2 keeps the version-1 public SHAKE seed fixtures stable, but wraps
+/// secret trapdoor material in a basis-capable metadata envelope. The envelope
+/// can carry fixture seed bundles today and a future reviewed basis envelope
+/// without changing public matrix or token wire formats.
+pub const LATTICE_REPRESENTATION_VERSION: u16 = 2;
+
+/// Public SHAKE fixture compatibility generation.
+///
+/// This stays at version 1 so previously pinned public matrix fixtures keep
+/// their deterministic hashes while the secret representation evolves.
+pub const FIXTURE_SHAKE_COMPATIBILITY_VERSION: u16 = 1;
 
 const MATRIX_SEED_BYTES: usize = 32;
 const SECRET_SEED_BUNDLE_BYTES: usize = 96;
 const MAX_PUBLIC_MATRIX_EXPANDED_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PREIMAGE_ENCODED_BYTES: usize = 1024 * 1024;
+const MAX_TRAPDOOR_SECRET_BYTES: usize = 1024 * 1024;
 
 /// Lattice security parameters (§3.2 of the design doc).
 ///
@@ -228,7 +236,7 @@ impl LatticeParams {
         )
     }
 
-    /// Secret storage bytes for the seed-backed trapdoor bundle.
+    /// Fixture seed-bundle bytes for the SHAKE compatibility trapdoor route.
     ///
     /// # Errors
     ///
@@ -294,10 +302,253 @@ pub struct LatticeRepresentationProfile {
     pub public_matrix_seed_bytes: usize,
     /// Upper-bound checked size for the expanded public matrix.
     pub public_matrix_expanded_bytes: usize,
-    /// Secret seed-bundle bytes stored for a trapdoor.
+    /// Fixture seed-bundle bytes for the SHAKE compatibility trapdoor route.
     pub trapdoor_storage_bytes: usize,
     /// Packed preimage byte length.
     pub preimage_encoded_bytes: usize,
+}
+
+/// Which trapdoor layer a secret representation belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrapdoorScope {
+    /// Root setup-time trapdoor.
+    Root,
+    /// Child trapdoor derived for a narrower delegation node.
+    Child,
+}
+
+/// Secret material storage strategy for a trapdoor representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrapdoorMaterialKind {
+    /// Deterministic SHAKE seed bundle used only by fixture scaffolding.
+    FixtureShakeSeedBundle,
+    /// Opaque envelope for a future reviewed MP12/CHKP/GPV basis route.
+    BasisEnvelope,
+}
+
+/// Redaction-safe bucket for the stored secret size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SecretStorageLengthBucket {
+    /// No secret bytes were present.
+    Empty,
+    /// Secret storage is at most 128 bytes.
+    UpTo128,
+    /// Secret storage is at most 4 KiB.
+    UpTo4KiB,
+    /// Secret storage is at most 64 KiB.
+    UpTo64KiB,
+    /// Secret storage is at most 1 MiB.
+    UpTo1MiB,
+    /// Secret storage exceeds the representation ceiling.
+    TooLarge,
+}
+
+impl SecretStorageLengthBucket {
+    #[must_use]
+    const fn from_len(len: usize) -> Self {
+        match len {
+            0 => Self::Empty,
+            1..=128 => Self::UpTo128,
+            129..=4096 => Self::UpTo4KiB,
+            4097..=65_536 => Self::UpTo64KiB,
+            65_537..=MAX_TRAPDOOR_SECRET_BYTES => Self::UpTo1MiB,
+            _ => Self::TooLarge,
+        }
+    }
+}
+
+/// Redaction-safe relation state for trapdoor/public-key metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrapdoorRelationResult {
+    /// Metadata matches the deterministic fixture contract only.
+    FixtureOnly,
+    /// Metadata is structurally compatible with a future reviewed primitive.
+    MetadataConsistent,
+    /// Metadata does not match the public key, parent key, or parameter profile.
+    MetadataMismatch,
+    /// A cryptographic relation check needs arithmetic that is not implemented.
+    UnsupportedPrimitive,
+}
+
+/// Redaction-safe quality bucket for the represented trapdoor basis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrapdoorNormQualityBucket {
+    /// Fixture seed bundle; no basis norm exists.
+    FixtureSeed,
+    /// Future basis route reports a small reviewed basis.
+    Small,
+    /// Future basis route is bounded for the configured V4 profile.
+    V4Bounded,
+    /// Future basis route reports an over-bound basis.
+    Oversized,
+    /// No quality statement is available yet.
+    Unknown,
+}
+
+/// Public, serializable metadata for a secret trapdoor representation.
+///
+/// This structure is safe for logs and evidence: it contains public hashes,
+/// parameter identifiers, and length buckets only. It never carries trapdoor
+/// coefficients, seed bytes, or expanded secret matrices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrapdoorRepresentationMetadata {
+    /// Representation envelope version.
+    pub version: u16,
+    /// Root or child layer.
+    pub scope: TrapdoorScope,
+    /// Stored secret material route.
+    pub material_kind: TrapdoorMaterialKind,
+    /// Parameter profile bound into the secret.
+    pub params: LatticeParams,
+    /// Public matrix seed/hash this secret claims to support.
+    pub public_matrix_hash: [u8; 32],
+    /// Parent public matrix seed/hash for child trapdoors.
+    pub parent_public_matrix_hash: Option<[u8; 32]>,
+    /// Redaction-safe storage length bucket.
+    pub secret_storage_len_bucket: SecretStorageLengthBucket,
+}
+
+impl TrapdoorRepresentationMetadata {
+    /// Validate that metadata is structurally well-formed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LatticePqError::InvalidTrapdoorSecret`] when the scope and
+    /// parent linkage are inconsistent, or parameter validation fails.
+    pub fn validate(self) -> LatticePqResult<()> {
+        self.params.validate()?;
+        if self.version != LATTICE_REPRESENTATION_VERSION {
+            return Err(LatticePqError::InvalidEncodingLength {
+                material: "trapdoor_version",
+                expected: usize::from(LATTICE_REPRESENTATION_VERSION),
+                got: usize::from(self.version),
+            });
+        }
+        match self.material_kind {
+            TrapdoorMaterialKind::FixtureShakeSeedBundle => {
+                let expected_bucket =
+                    SecretStorageLengthBucket::from_len(self.params.trapdoor_storage_bytes()?);
+                if self.secret_storage_len_bucket != expected_bucket {
+                    return Err(LatticePqError::InvalidTrapdoorSecret {
+                        material: "fixture_trapdoor_seed_bundle",
+                        reason: "fixture secret length bucket must match parameter profile",
+                    });
+                }
+            }
+            TrapdoorMaterialKind::BasisEnvelope
+                if matches!(
+                    self.secret_storage_len_bucket,
+                    SecretStorageLengthBucket::Empty | SecretStorageLengthBucket::TooLarge
+                ) =>
+            {
+                return Err(LatticePqError::InvalidTrapdoorSecret {
+                    material: "basis_envelope",
+                    reason: "basis envelope length bucket must be non-empty and within limits",
+                });
+            }
+            TrapdoorMaterialKind::BasisEnvelope => {}
+        }
+        match (self.scope, self.parent_public_matrix_hash) {
+            (TrapdoorScope::Root, None) | (TrapdoorScope::Child, Some(_)) => Ok(()),
+            (TrapdoorScope::Root, Some(_)) => Err(LatticePqError::InvalidTrapdoorSecret {
+                material: "root_trapdoor",
+                reason: "root trapdoor metadata must not include a parent hash",
+            }),
+            (TrapdoorScope::Child, None) => Err(LatticePqError::InvalidTrapdoorSecret {
+                material: "child_trapdoor",
+                reason: "child trapdoor metadata must include a parent hash",
+            }),
+        }
+    }
+}
+
+/// Redaction-safe summary of a trapdoor/public-key relation check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrapdoorRelationSummary {
+    /// Metadata checked.
+    pub metadata: TrapdoorRepresentationMetadata,
+    /// Relation outcome without exposing coefficients or secret bytes.
+    pub result: TrapdoorRelationResult,
+    /// Norm/quality bucket without exposing basis vectors.
+    pub norm_quality_bucket: TrapdoorNormQualityBucket,
+}
+
+fn validate_trapdoor_secret(
+    material_kind: TrapdoorMaterialKind,
+    params: LatticeParams,
+    len: usize,
+) -> LatticePqResult<SecretStorageLengthBucket> {
+    let bucket = SecretStorageLengthBucket::from_len(len);
+    if bucket == SecretStorageLengthBucket::TooLarge {
+        return Err(LatticePqError::RepresentationTooLarge {
+            material: "trapdoor_secret",
+            requested: len,
+            max: MAX_TRAPDOOR_SECRET_BYTES,
+        });
+    }
+    match material_kind {
+        TrapdoorMaterialKind::FixtureShakeSeedBundle => {
+            let expected = params.trapdoor_storage_bytes()?;
+            if len != expected {
+                return Err(LatticePqError::InvalidEncodingLength {
+                    material: "fixture_trapdoor_seed_bundle",
+                    expected,
+                    got: len,
+                });
+            }
+        }
+        TrapdoorMaterialKind::BasisEnvelope => {
+            if len == 0 {
+                return Err(LatticePqError::InvalidTrapdoorSecret {
+                    material: "basis_envelope",
+                    reason: "basis envelope must not be empty",
+                });
+            }
+        }
+    }
+    Ok(bucket)
+}
+
+fn trapdoor_metadata(
+    scope: TrapdoorScope,
+    material_kind: TrapdoorMaterialKind,
+    params: LatticeParams,
+    public_matrix_hash: [u8; 32],
+    parent_public_matrix_hash: Option<[u8; 32]>,
+    secret_len: usize,
+) -> LatticePqResult<TrapdoorRepresentationMetadata> {
+    let secret_storage_len_bucket = validate_trapdoor_secret(material_kind, params, secret_len)?;
+    let metadata = TrapdoorRepresentationMetadata {
+        version: LATTICE_REPRESENTATION_VERSION,
+        scope,
+        material_kind,
+        params,
+        public_matrix_hash,
+        parent_public_matrix_hash,
+        secret_storage_len_bucket,
+    };
+    metadata.validate()?;
+    Ok(metadata)
+}
+
+const fn norm_quality_bucket(
+    material_kind: TrapdoorMaterialKind,
+    secret_storage_len_bucket: SecretStorageLengthBucket,
+) -> TrapdoorNormQualityBucket {
+    match material_kind {
+        TrapdoorMaterialKind::FixtureShakeSeedBundle => TrapdoorNormQualityBucket::FixtureSeed,
+        TrapdoorMaterialKind::BasisEnvelope => match secret_storage_len_bucket {
+            SecretStorageLengthBucket::Empty | SecretStorageLengthBucket::TooLarge => {
+                TrapdoorNormQualityBucket::Oversized
+            }
+            SecretStorageLengthBucket::UpTo128 | SecretStorageLengthBucket::UpTo4KiB => {
+                TrapdoorNormQualityBucket::Small
+            }
+            SecretStorageLengthBucket::UpTo64KiB | SecretStorageLengthBucket::UpTo1MiB => {
+                TrapdoorNormQualityBucket::V4Bounded
+            }
+        },
+    }
 }
 
 fn checked_profile_product(
@@ -367,27 +618,97 @@ pub struct MasterPublicKey {
 /// verifiers and intentionally does not implement `Serialize`: only public
 /// matrix seeds and preimages cross the token boundary.
 ///
+/// Serialization boundary:
+///
+/// ```compile_fail
+/// use fcp_crypto_pq::{trap_gen, LatticeParams};
+///
+/// let (_, trapdoor) = trap_gen(LatticeParams::SMALL_TEST).unwrap();
+/// let _json = serde_json::to_string(&trapdoor).unwrap();
+/// ```
+///
 /// **Constant-time equality** (br-1zlht): the trapdoor IS the
 /// load-bearing secret of the lattice-trapdoor scheme. Equality via
 /// [`subtle::ConstantTimeEq`] not the derived `[u8; N]::eq`.
 #[derive(Clone, Eq)]
 pub struct MasterTrapdoor {
-    version: u16,
-    params: LatticeParams,
+    metadata: TrapdoorRepresentationMetadata,
     pub(crate) bytes: Vec<u8>,
 }
 
 impl MasterTrapdoor {
+    /// Build a fixture root trapdoor from encoded seed-bundle bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when parameters are malformed or the fixture secret
+    /// length does not match the profile-derived seed-bundle length.
+    pub fn from_fixture_seed_bundle(
+        params: LatticeParams,
+        public_matrix_hash: [u8; 32],
+        bytes: Vec<u8>,
+    ) -> LatticePqResult<Self> {
+        let metadata = trapdoor_metadata(
+            TrapdoorScope::Root,
+            TrapdoorMaterialKind::FixtureShakeSeedBundle,
+            params,
+            public_matrix_hash,
+            None,
+            bytes.len(),
+        )?;
+        Ok(Self { metadata, bytes })
+    }
+
+    /// Build a future basis-capable root trapdoor envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when parameters are malformed or the basis envelope is
+    /// empty or exceeds the secret storage ceiling.
+    pub fn from_basis_envelope(
+        params: LatticeParams,
+        public_matrix_hash: [u8; 32],
+        bytes: Vec<u8>,
+    ) -> LatticePqResult<Self> {
+        let metadata = trapdoor_metadata(
+            TrapdoorScope::Root,
+            TrapdoorMaterialKind::BasisEnvelope,
+            params,
+            public_matrix_hash,
+            None,
+            bytes.len(),
+        )?;
+        Ok(Self { metadata, bytes })
+    }
+
+    /// Redaction-safe metadata for this trapdoor.
+    #[must_use]
+    pub const fn metadata(&self) -> TrapdoorRepresentationMetadata {
+        self.metadata
+    }
+
     /// Representation version bound into this trapdoor.
     #[must_use]
     pub const fn representation_version(&self) -> u16 {
-        self.version
+        self.metadata.version
     }
 
     /// Parameter profile bound into this trapdoor.
     #[must_use]
     pub const fn params(&self) -> LatticeParams {
-        self.params
+        self.metadata.params
+    }
+
+    /// Secret material route for this trapdoor.
+    #[must_use]
+    pub const fn material_kind(&self) -> TrapdoorMaterialKind {
+        self.metadata.material_kind
+    }
+
+    /// Redaction-safe secret storage length bucket.
+    #[must_use]
+    pub const fn secret_storage_len_bucket(&self) -> SecretStorageLengthBucket {
+        self.metadata.secret_storage_len_bucket
     }
 
     /// Encoded secret storage byte length.
@@ -395,21 +716,44 @@ impl MasterTrapdoor {
     pub fn encoded_len(&self) -> usize {
         self.bytes.len()
     }
+
+    /// Redaction-safe relation summary against the public root key.
+    #[must_use]
+    pub fn relation_summary(&self, public: &MasterPublicKey) -> TrapdoorRelationSummary {
+        let metadata = self.metadata;
+        let root_public_matrix_hash = public.hash;
+        let structurally_matches = metadata.scope == TrapdoorScope::Root
+            && metadata.parent_public_matrix_hash.is_none()
+            && metadata.params == public.params
+            && metadata.public_matrix_hash == root_public_matrix_hash;
+        let result = if !structurally_matches {
+            TrapdoorRelationResult::MetadataMismatch
+        } else if metadata.material_kind == TrapdoorMaterialKind::FixtureShakeSeedBundle {
+            TrapdoorRelationResult::FixtureOnly
+        } else {
+            TrapdoorRelationResult::UnsupportedPrimitive
+        };
+        TrapdoorRelationSummary {
+            metadata,
+            result,
+            norm_quality_bucket: norm_quality_bucket(
+                metadata.material_kind,
+                metadata.secret_storage_len_bucket,
+            ),
+        }
+    }
 }
 
 impl PartialEq for MasterTrapdoor {
     fn eq(&self, other: &Self) -> bool {
-        self.version == other.version
-            && self.params == other.params
-            && constant_time_bytes_eq(&self.bytes, &other.bytes)
+        self.metadata == other.metadata && constant_time_bytes_eq(&self.bytes, &other.bytes)
     }
 }
 
 impl std::fmt::Debug for MasterTrapdoor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MasterTrapdoor")
-            .field("version", &self.version)
-            .field("params", &self.params)
+            .field("metadata", &self.metadata)
             .field("encoded_len", &self.bytes.len())
             .field("secret_material", &"<redacted>")
             .finish()
@@ -441,26 +785,104 @@ pub struct ZonePeriodPublicKey {
 /// Per-`(zone, period)` trapdoor `T_zp` returned by [`delegate`].
 ///
 /// Held by the issuance node; used to derive sub-tokens via [`sample_pre`].
+/// The secret child trapdoor intentionally does not implement `Serialize`.
+///
+/// ```compile_fail
+/// use fcp_crypto_pq::{delegate, trap_gen, DelegationPeriod, LatticeParams};
+///
+/// let params = LatticeParams::SMALL_TEST;
+/// let (master_public, master_trapdoor) = trap_gen(params).unwrap();
+/// let period = DelegationPeriod {
+///     start_secs: 1,
+///     end_secs: 2,
+/// };
+/// let (_, child_trapdoor) =
+///     delegate(&master_public, &master_trapdoor, [0_u8; 32], period, params).unwrap();
+/// let _json = serde_json::to_string(&child_trapdoor).unwrap();
+/// ```
 ///
 /// **Constant-time equality** (br-1zlht): see [`MasterTrapdoor`].
 #[derive(Clone, Eq)]
 pub struct ZonePeriodTrapdoor {
-    version: u16,
-    params: LatticeParams,
+    metadata: TrapdoorRepresentationMetadata,
     pub(crate) bytes: Vec<u8>,
 }
 
 impl ZonePeriodTrapdoor {
+    /// Build a fixture child trapdoor from encoded seed-bundle bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when parameters are malformed, parent linkage is
+    /// missing, or the fixture secret length does not match the profile.
+    pub fn from_fixture_seed_bundle(
+        params: LatticeParams,
+        parent_public_matrix_hash: [u8; 32],
+        public_matrix_hash: [u8; 32],
+        bytes: Vec<u8>,
+    ) -> LatticePqResult<Self> {
+        let metadata = trapdoor_metadata(
+            TrapdoorScope::Child,
+            TrapdoorMaterialKind::FixtureShakeSeedBundle,
+            params,
+            public_matrix_hash,
+            Some(parent_public_matrix_hash),
+            bytes.len(),
+        )?;
+        Ok(Self { metadata, bytes })
+    }
+
+    /// Build a future basis-capable child trapdoor envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when parameters are malformed or the basis envelope is
+    /// empty or exceeds the secret storage ceiling.
+    pub fn from_basis_envelope(
+        params: LatticeParams,
+        parent_public_matrix_hash: [u8; 32],
+        public_matrix_hash: [u8; 32],
+        bytes: Vec<u8>,
+    ) -> LatticePqResult<Self> {
+        let metadata = trapdoor_metadata(
+            TrapdoorScope::Child,
+            TrapdoorMaterialKind::BasisEnvelope,
+            params,
+            public_matrix_hash,
+            Some(parent_public_matrix_hash),
+            bytes.len(),
+        )?;
+        Ok(Self { metadata, bytes })
+    }
+
+    /// Redaction-safe metadata for this trapdoor.
+    #[must_use]
+    pub const fn metadata(&self) -> TrapdoorRepresentationMetadata {
+        self.metadata
+    }
+
     /// Representation version bound into this trapdoor.
     #[must_use]
     pub const fn representation_version(&self) -> u16 {
-        self.version
+        self.metadata.version
     }
 
     /// Parameter profile bound into this trapdoor.
     #[must_use]
     pub const fn params(&self) -> LatticeParams {
-        self.params
+        self.metadata.params
+    }
+
+    /// Secret material route for this trapdoor.
+    #[must_use]
+    pub const fn material_kind(&self) -> TrapdoorMaterialKind {
+        self.metadata.material_kind
+    }
+
+    /// Redaction-safe secret storage length bucket.
+    #[must_use]
+    pub const fn secret_storage_len_bucket(&self) -> SecretStorageLengthBucket {
+        self.metadata.secret_storage_len_bucket
     }
 
     /// Encoded secret storage byte length.
@@ -468,21 +890,48 @@ impl ZonePeriodTrapdoor {
     pub fn encoded_len(&self) -> usize {
         self.bytes.len()
     }
+
+    /// Redaction-safe relation summary against the child and parent public keys.
+    #[must_use]
+    pub fn relation_summary(
+        &self,
+        child_public: &ZonePeriodPublicKey,
+        parent_public: &MasterPublicKey,
+    ) -> TrapdoorRelationSummary {
+        let metadata = self.metadata;
+        let structurally_matches = metadata.scope == TrapdoorScope::Child
+            && metadata.parent_public_matrix_hash == Some(parent_public.hash)
+            && metadata.params == child_public.params
+            && metadata.params == parent_public.params
+            && metadata.public_matrix_hash == child_public.hash;
+        let result = if !structurally_matches {
+            TrapdoorRelationResult::MetadataMismatch
+        } else if metadata.material_kind == TrapdoorMaterialKind::FixtureShakeSeedBundle {
+            TrapdoorRelationResult::FixtureOnly
+        } else {
+            TrapdoorRelationResult::UnsupportedPrimitive
+        };
+        TrapdoorRelationSummary {
+            metadata,
+            result,
+            norm_quality_bucket: norm_quality_bucket(
+                metadata.material_kind,
+                metadata.secret_storage_len_bucket,
+            ),
+        }
+    }
 }
 
 impl PartialEq for ZonePeriodTrapdoor {
     fn eq(&self, other: &Self) -> bool {
-        self.version == other.version
-            && self.params == other.params
-            && constant_time_bytes_eq(&self.bytes, &other.bytes)
+        self.metadata == other.metadata && constant_time_bytes_eq(&self.bytes, &other.bytes)
     }
 }
 
 impl std::fmt::Debug for ZonePeriodTrapdoor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ZonePeriodTrapdoor")
-            .field("version", &self.version)
-            .field("params", &self.params)
+            .field("metadata", &self.metadata)
             .field("encoded_len", &self.bytes.len())
             .field("secret_material", &"<redacted>")
             .finish()
@@ -816,6 +1265,15 @@ pub enum LatticePqError {
         key: LatticeParams,
     },
 
+    /// Secret trapdoor metadata or storage is malformed.
+    #[error("invalid trapdoor secret `{material}`: {reason}")]
+    InvalidTrapdoorSecret {
+        /// Secret material being decoded.
+        material: &'static str,
+        /// Human-readable rejection reason.
+        reason: &'static str,
+    },
+
     /// `period.start_secs >= period.end_secs`.
     #[error("invalid delegation period: start {start_secs} not < end {end_secs}")]
     InvalidPeriod {
@@ -875,16 +1333,14 @@ pub type LatticePqResult<T> = Result<T, LatticePqError>;
 /// remains `LatticePqResult` to preserve forward compatibility.
 pub fn trap_gen(params: LatticeParams) -> LatticePqResult<(MasterPublicKey, MasterTrapdoor)> {
     params.validate()?;
+    let public_hash = trap_gen_seed(params, b"master-public-matrix-seed");
+    let trapdoor_bytes = trap_gen_secret_bundle(params)?;
     Ok((
         MasterPublicKey {
-            hash: trap_gen_seed(params, b"master-public-matrix-seed"),
+            hash: public_hash,
             params,
         },
-        MasterTrapdoor {
-            version: LATTICE_REPRESENTATION_VERSION,
-            params,
-            bytes: trap_gen_secret_bundle(params)?,
-        },
+        MasterTrapdoor::from_fixture_seed_bundle(params, public_hash, trapdoor_bytes)?,
     ))
 }
 
@@ -918,10 +1374,10 @@ pub fn delegate(
             key: parent_pub.params,
         });
     }
-    if params != parent_trap.params {
+    if params != parent_trap.params() {
         return Err(LatticePqError::ParameterMismatch {
             caller: params,
-            key: parent_trap.params,
+            key: parent_trap.params(),
         });
     }
     params.validate()?;
@@ -942,11 +1398,12 @@ pub fn delegate(
             period,
             params,
         },
-        ZonePeriodTrapdoor {
-            version: LATTICE_REPRESENTATION_VERSION,
+        ZonePeriodTrapdoor::from_fixture_seed_bundle(
             params,
-            bytes: trap_bytes?,
-        },
+            parent_pub.hash,
+            pub_hash,
+            trap_bytes?,
+        )?,
     ))
 }
 
@@ -979,10 +1436,10 @@ pub fn sample_pre(
             key: key.params,
         });
     }
-    if params != trap.params {
+    if params != trap.params() {
         return Err(LatticePqError::ParameterMismatch {
             caller: params,
-            key: trap.params,
+            key: trap.params(),
         });
     }
     params.validate()?;
@@ -1184,6 +1641,292 @@ mod tests {
         );
         assert_eq!(zp_trap.params(), p);
         assert_eq!(zp_trap.encoded_len(), p.trapdoor_storage_bytes().unwrap());
+    }
+
+    #[test]
+    fn trapdoor_metadata_round_trips_without_secret_material() {
+        let p = LatticeParams::SMALL_TEST;
+        let (master_pub, master_trap) = trap_gen(p).unwrap();
+        let zone = [7u8; 32];
+        let (zone_pub, zone_trap) =
+            delegate(&master_pub, &master_trap, zone, ref_period(), p).unwrap();
+
+        let master_metadata = master_trap.metadata();
+        assert_eq!(master_metadata.version, LATTICE_REPRESENTATION_VERSION);
+        assert_eq!(master_metadata.scope, TrapdoorScope::Root);
+        assert_eq!(
+            master_metadata.material_kind,
+            TrapdoorMaterialKind::FixtureShakeSeedBundle
+        );
+        assert_eq!(master_metadata.public_matrix_hash, master_pub.hash);
+        assert_eq!(master_metadata.parent_public_matrix_hash, None);
+        assert_eq!(
+            master_metadata.secret_storage_len_bucket,
+            SecretStorageLengthBucket::UpTo128
+        );
+
+        let json = serde_json::to_string(&master_metadata).unwrap();
+        assert!(!json.contains("secret_material"));
+        assert!(!json.contains("seed_bundle"));
+        let master_back: TrapdoorRepresentationMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(master_back, master_metadata);
+
+        let zone_metadata = zone_trap.metadata();
+        assert_eq!(zone_metadata.scope, TrapdoorScope::Child);
+        assert_eq!(
+            zone_metadata.parent_public_matrix_hash,
+            Some(master_pub.hash)
+        );
+        assert_eq!(zone_metadata.public_matrix_hash, zone_pub.hash);
+        let zone_json = serde_json::to_string(&zone_metadata).unwrap();
+        let zone_back: TrapdoorRepresentationMetadata = serde_json::from_str(&zone_json).unwrap();
+        assert_eq!(zone_back, zone_metadata);
+    }
+
+    #[test]
+    fn trapdoor_metadata_validation_rejects_malformed_public_envelopes() {
+        let p = LatticeParams::SMALL_TEST;
+        let (master_pub, master_trap) = trap_gen(p).unwrap();
+        let (zone_pub, zone_trap) =
+            delegate(&master_pub, &master_trap, [0x22; 32], ref_period(), p).unwrap();
+
+        let mut wrong_version = master_trap.metadata();
+        wrong_version.version = LATTICE_REPRESENTATION_VERSION + 1;
+        let err = wrong_version.validate().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::InvalidEncodingLength {
+                    material: "trapdoor_version",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+
+        let mut root_with_parent = master_trap.metadata();
+        root_with_parent.parent_public_matrix_hash = Some(master_pub.hash);
+        let err = root_with_parent.validate().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::InvalidTrapdoorSecret {
+                    material: "root_trapdoor",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+
+        let mut child_without_parent = zone_trap.metadata();
+        child_without_parent.parent_public_matrix_hash = None;
+        let err = child_without_parent.validate().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::InvalidTrapdoorSecret {
+                    material: "child_trapdoor",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+
+        let mut malformed_profile = zone_trap.metadata();
+        malformed_profile.params.q = 1;
+        let err = malformed_profile.validate().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::InvalidParameter {
+                    field: "q",
+                    value: 1,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+
+        let mut wrong_fixture_bucket = master_trap.metadata();
+        wrong_fixture_bucket.secret_storage_len_bucket = SecretStorageLengthBucket::UpTo4KiB;
+        let err = wrong_fixture_bucket.validate().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::InvalidTrapdoorSecret {
+                    material: "fixture_trapdoor_seed_bundle",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+
+        let mut empty_basis_bucket =
+            MasterTrapdoor::from_basis_envelope(p, master_pub.hash, vec![0xAA])
+                .unwrap()
+                .metadata();
+        empty_basis_bucket.secret_storage_len_bucket = SecretStorageLengthBucket::Empty;
+        let err = empty_basis_bucket.validate().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::InvalidTrapdoorSecret {
+                    material: "basis_envelope",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+
+        let mut bad_tag = serde_json::to_value(master_trap.metadata()).unwrap();
+        bad_tag["material_kind"] = serde_json::Value::String("ImaginaryTrapdoorRoute".to_owned());
+        assert!(
+            serde_json::from_value::<TrapdoorRepresentationMetadata>(bad_tag).is_err(),
+            "unknown material route tags must fail deserialization"
+        );
+
+        assert_eq!(zone_pub.params, p, "fixture child public key still valid");
+    }
+
+    #[test]
+    fn trapdoor_relation_summaries_are_redaction_safe() {
+        let p = LatticeParams::SMALL_TEST;
+        let (master_pub, master_trap) = trap_gen(p).unwrap();
+        let zone = [11u8; 32];
+        let period = ref_period();
+        let (zone_pub, zone_trap) = delegate(&master_pub, &master_trap, zone, period, p).unwrap();
+
+        let root_summary = master_trap.relation_summary(&master_pub);
+        assert_eq!(root_summary.result, TrapdoorRelationResult::FixtureOnly);
+        assert_eq!(
+            root_summary.norm_quality_bucket,
+            TrapdoorNormQualityBucket::FixtureSeed
+        );
+
+        let child_summary = zone_trap.relation_summary(&zone_pub, &master_pub);
+        assert_eq!(child_summary.result, TrapdoorRelationResult::FixtureOnly);
+        assert_eq!(
+            child_summary.norm_quality_bucket,
+            TrapdoorNormQualityBucket::FixtureSeed
+        );
+
+        let summary_json = serde_json::to_string(&child_summary).unwrap();
+        assert!(!summary_json.contains("secret_material"));
+        assert!(!summary_json.contains("coeff"));
+        assert!(!summary_json.contains("seed_bundle"));
+    }
+
+    #[test]
+    fn trapdoor_relation_summaries_detect_public_metadata_mismatch() {
+        let p = LatticeParams::SMALL_TEST;
+        let (master_pub, master_trap) = trap_gen(p).unwrap();
+        let (zone_pub, zone_trap) =
+            delegate(&master_pub, &master_trap, [0x33; 32], ref_period(), p).unwrap();
+
+        let mut wrong_master_pub = master_pub.clone();
+        wrong_master_pub.hash[0] ^= 0xFF;
+        assert_eq!(
+            master_trap.relation_summary(&wrong_master_pub).result,
+            TrapdoorRelationResult::MetadataMismatch
+        );
+
+        let mut wrong_child_pub = zone_pub.clone();
+        wrong_child_pub.hash[0] ^= 0xFF;
+        assert_eq!(
+            zone_trap
+                .relation_summary(&wrong_child_pub, &master_pub)
+                .result,
+            TrapdoorRelationResult::MetadataMismatch
+        );
+        assert_eq!(
+            zone_trap
+                .relation_summary(&zone_pub, &wrong_master_pub)
+                .result,
+            TrapdoorRelationResult::MetadataMismatch
+        );
+    }
+
+    #[test]
+    fn basis_envelope_constructors_are_basis_capable_but_not_success_claims() {
+        let p = LatticeParams::SMALL_TEST;
+        let public_hash = [0x44; 32];
+        let parent_hash = [0x55; 32];
+        let root = MasterTrapdoor::from_basis_envelope(p, public_hash, vec![0xA5; 4096]).unwrap();
+        let child =
+            ZonePeriodTrapdoor::from_basis_envelope(p, parent_hash, [0x66; 32], vec![0x5A; 8192])
+                .unwrap();
+
+        assert_eq!(root.material_kind(), TrapdoorMaterialKind::BasisEnvelope);
+        assert_eq!(
+            root.secret_storage_len_bucket(),
+            SecretStorageLengthBucket::UpTo4KiB
+        );
+        assert_eq!(
+            child.secret_storage_len_bucket(),
+            SecretStorageLengthBucket::UpTo64KiB
+        );
+        assert_eq!(root.encoded_len(), 4096);
+        assert_eq!(child.encoded_len(), 8192);
+
+        let public = MasterPublicKey {
+            hash: public_hash,
+            params: p,
+        };
+        let summary = root.relation_summary(&public);
+        assert_eq!(summary.result, TrapdoorRelationResult::UnsupportedPrimitive);
+        assert_eq!(
+            summary.norm_quality_bucket,
+            TrapdoorNormQualityBucket::Small
+        );
+    }
+
+    #[test]
+    fn malformed_trapdoor_secrets_are_rejected() {
+        let p = LatticeParams::SMALL_TEST;
+        let public_hash = [0x44; 32];
+
+        let err =
+            MasterTrapdoor::from_fixture_seed_bundle(p, public_hash, vec![0_u8; 95]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::InvalidEncodingLength {
+                    material: "fixture_trapdoor_seed_bundle",
+                    expected: 96,
+                    got: 95
+                }
+            ),
+            "got {err:?}"
+        );
+
+        let err = MasterTrapdoor::from_basis_envelope(p, public_hash, Vec::new()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::InvalidTrapdoorSecret {
+                    material: "basis_envelope",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+
+        let err = MasterTrapdoor::from_basis_envelope(
+            p,
+            public_hash,
+            vec![0_u8; MAX_TRAPDOOR_SECRET_BYTES + 1],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::RepresentationTooLarge {
+                    material: "trapdoor_secret",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
     }
 
     #[test]

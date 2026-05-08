@@ -149,16 +149,22 @@ sieve / BKZ attacks as of 2026.
 ### 3.2 Representation profile and key sizes
 
 The implemented scaffold now pins
-`fcp_crypto_pq::LATTICE_REPRESENTATION_VERSION = 1`. Version 1 is a
-seed-backed representation profile:
+`fcp_crypto_pq::LATTICE_REPRESENTATION_VERSION = 2`. Version 2 keeps the
+version-1 public SHAKE fixture seeds stable, but moves secret trapdoors behind
+a basis-capable metadata envelope:
 
 - Public matrices serialize as a 32-byte SHAKE seed. The expanded
   `V4_REFERENCE` matrix is `512 * 16384 * 4 = 33,554,432` bytes and is
   never stored in certificates or tokens.
-- Trapdoors are secret-only 96-byte seed bundles in the scaffold. They do
-  not implement `Serialize`, redact `Debug`, and zeroize their byte storage
-  on drop. The future MP12/CHKP implementation may replace the bundle with a
-  sealed basis, but it must keep the public/secret boundary explicit.
+- Trapdoors are secret-only representation envelopes. Fixture trapdoors carry
+  the existing 96-byte SHAKE seed bundle as `FixtureShakeSeedBundle`, while
+  future reviewed arithmetic may carry `BasisEnvelope` material behind the
+  same redacted, non-`Serialize`, zeroized boundary.
+- Root and child trapdoors expose redaction-safe metadata and relation
+  summaries: representation version, scope, material kind, parameter profile,
+  public matrix hash, optional parent public matrix hash, relation result,
+  norm/quality bucket, and secret storage length bucket. They never expose
+  coefficients, secret seeds, or expanded secret matrices.
 - Layer-3 preimages serialize as profile-derived packed coefficients. For
   `V4_REFERENCE`, the length is `16384 * 4 = 65,536` bytes; malformed lengths
   are rejected before cryptographic verification.
@@ -170,7 +176,8 @@ seed-backed representation profile:
 |---------------------------------|-----------------------------|--------------------------------------------|
 | Public matrix seed              | 32 B                        | Serialized public certificate material     |
 | Expanded public matrix `A`      | 33,554,432 B                | Derived on demand; guarded by a 64 MiB cap |
-| Trapdoor seed bundle            | 96 B                        | Secret-only, redacted, zeroized on drop    |
+| Fixture trapdoor seed bundle    | 96 B                        | Secret-only, redacted, zeroized on drop    |
+| Basis-envelope secret storage   | <= 1 MiB                    | Future reviewed route; bucketed in logs    |
 | Sub-token preimage              | 65,536 B                    | Profile-derived packed `Z_q^m` vector      |
 | Verification time               | ~0.5 ms projected           | One matrix-vector multiply mod q + norm check |
 
@@ -428,8 +435,8 @@ into the following sub-beads:
 
 1. **kyopb.1.3.1** — `crates/fcp-crypto-pq` crate scaffolding +
    `TrapGen` / `Delegate` / `SamplePre` / `Verify` primitives. The
-   version-1 representation profile is implemented; real MP12/CHKP/GPV
-   arithmetic remains follow-up work. ~2-3 engineer-weeks total.
+   version-2 basis-capable representation envelope is implemented; real
+   MP12/CHKP/GPV arithmetic remains follow-up work. ~2-3 engineer-weeks total.
 2. **kyopb.1.3.2** — `LatticeDelegationVerifier` trait implementation
    wiring stub from this commit to the kyopb.1.3.1 primitives.
    ~1 engineer-week.

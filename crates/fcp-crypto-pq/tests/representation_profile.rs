@@ -1,10 +1,11 @@
-use std::{fs, process::Command};
+use std::{fs, process::Command, time::Instant};
 
 use serde::Serialize;
 
 use fcp_crypto_pq::{
     DelegationPeriod, LATTICE_REPRESENTATION_VERSION, LatticeParams, LatticePqError,
-    LatticePreimage, delegate, operation_hash, trap_gen, verify,
+    LatticePreimage, LatticeRepresentationProfile, OperationHash, SecretStorageLengthBucket,
+    TrapdoorNormQualityBucket, TrapdoorRelationResult, delegate, operation_hash, trap_gen, verify,
 };
 
 #[derive(Debug, Serialize)]
@@ -12,15 +13,21 @@ struct EvidenceLog<'a> {
     command_line: &'a str,
     git_revision: String,
     artifact_path: &'a str,
+    fixture_id: &'a str,
     profile: &'a str,
     representation_version: u16,
     params: LatticeParams,
     matrix_dimensions: MatrixDimensions,
+    encoded_public_lengths: EncodedPublicLengths,
     encoded_lengths: EncodedLengths,
     allocation_estimate: AllocationEstimate,
+    relation_check_result: RelationCheckResultEvidence,
+    trapdoor_norm_quality_bucket: TrapdoorNormQualityEvidence,
+    secret_storage_len_bucket: SecretStorageBucketEvidence,
     redaction: RedactionEvidence,
     deterministic_shake_compatibility: DeterministicShakeCompatibility,
     policy_bridge_compatibility: PolicyBridgeCompatibility,
+    timing_ms: u128,
     result: &'a str,
     skip_reason: Option<&'a str>,
 }
@@ -48,6 +55,16 @@ struct EncodedLengths {
 }
 
 #[derive(Debug, Serialize)]
+struct EncodedPublicLengths {
+    #[serde(rename = "master_public_seed_bytes")]
+    master_public_seed: usize,
+    #[serde(rename = "zone_period_public_seed_bytes")]
+    zone_period_public_seed: usize,
+    #[serde(rename = "operation_hash_bytes")]
+    operation_hash: usize,
+}
+
+#[derive(Debug, Serialize)]
 struct AllocationEstimate {
     #[serde(rename = "public_matrix_expanded_bytes")]
     public_matrix_expanded: usize,
@@ -60,6 +77,24 @@ struct AllocationEstimate {
 }
 
 #[derive(Debug, Serialize)]
+struct RelationCheckResultEvidence {
+    root: TrapdoorRelationResult,
+    child: TrapdoorRelationResult,
+}
+
+#[derive(Debug, Serialize)]
+struct TrapdoorNormQualityEvidence {
+    root: TrapdoorNormQualityBucket,
+    child: TrapdoorNormQualityBucket,
+}
+
+#[derive(Debug, Serialize)]
+struct SecretStorageBucketEvidence {
+    root: SecretStorageLengthBucket,
+    child: SecretStorageLengthBucket,
+}
+
+#[derive(Debug, Serialize)]
 struct RedactionEvidence {
     master_trapdoor_debug_redacted: bool,
     zone_period_trapdoor_debug_redacted: bool,
@@ -68,9 +103,10 @@ struct RedactionEvidence {
 
 #[derive(Debug, Serialize)]
 struct DeterministicShakeCompatibility {
-    #[serde(rename = "master_public_seed_hex")]
+    fixture_public_generation_version: u16,
+    #[serde(rename = "master_public_seed_blake3_hex")]
     master_public_seed: String,
-    #[serde(rename = "zone_period_seed_hex")]
+    #[serde(rename = "zone_period_seed_blake3_hex")]
     zone_period_seed: String,
     #[serde(rename = "operation_hash_hex")]
     operation_hash: String,
@@ -89,7 +125,115 @@ const fn period() -> DelegationPeriod {
     }
 }
 
+const fn verify_result(
+    verify_outcome: &Result<(), LatticePqError>,
+) -> (&'static str, Option<&'static str>) {
+    match verify_outcome {
+        Ok(()) => ("passed", None),
+        Err(LatticePqError::NotImplemented { .. }) => {
+            ("skipped", Some("verify primitive not implemented"))
+        }
+        Err(_) => ("failed", None),
+    }
+}
+
+fn rejects_legacy_fixed_64_byte_preimage(
+    params: LatticeParams,
+    preimage_encoded_bytes: usize,
+) -> bool {
+    if preimage_encoded_bytes == 64 {
+        return false;
+    }
+
+    matches!(
+        LatticePreimage::from_encoded_bytes(params, vec![0_u8; 64]),
+        Err(LatticePqError::InvalidEncodingLength { .. })
+    )
+}
+
+fn fixture_id(profile: &str) -> &'static str {
+    match profile {
+        "SMALL_TEST" => "fixture:small_test:representation-v2",
+        "V4_REFERENCE" => "fixture:v4_reference:representation-v2",
+        _ => "fixture:unknown:representation-v2",
+    }
+}
+
+const fn matrix_dimensions(
+    params: LatticeParams,
+    representation: &LatticeRepresentationProfile,
+) -> MatrixDimensions {
+    MatrixDimensions {
+        n: params.n,
+        m: params.m,
+        q: params.q,
+        coefficient_bytes: representation.coefficient_bytes,
+    }
+}
+
+const fn encoded_lengths(representation: &LatticeRepresentationProfile) -> EncodedLengths {
+    EncodedLengths {
+        public_matrix_seed: representation.public_matrix_seed_bytes,
+        public_matrix_expanded: representation.public_matrix_expanded_bytes,
+        trapdoor_storage: representation.trapdoor_storage_bytes,
+        preimage_encoded: representation.preimage_encoded_bytes,
+    }
+}
+
+const fn allocation_estimate(representation: &LatticeRepresentationProfile) -> AllocationEstimate {
+    AllocationEstimate {
+        public_matrix_expanded: representation.public_matrix_expanded_bytes,
+        max_public_matrix_expanded: 64 * 1024 * 1024,
+        preimage_encoded: representation.preimage_encoded_bytes,
+        max_preimage_encoded: 1024 * 1024,
+    }
+}
+
+fn redaction_evidence(
+    master_debug: &str,
+    zone_debug: &str,
+    preimage_debug: &str,
+) -> RedactionEvidence {
+    RedactionEvidence {
+        master_trapdoor_debug_redacted: master_debug.contains("<redacted>")
+            && !master_debug.contains("bytes"),
+        zone_period_trapdoor_debug_redacted: zone_debug.contains("<redacted>")
+            && !zone_debug.contains("bytes"),
+        preimage_debug_redacted: preimage_debug.contains("<redacted>")
+            && !preimage_debug.contains("bytes"),
+    }
+}
+
+fn deterministic_shake_compatibility(
+    master_seed: [u8; 32],
+    zone_period_seed: [u8; 32],
+    op_hash: OperationHash,
+) -> DeterministicShakeCompatibility {
+    DeterministicShakeCompatibility {
+        fixture_public_generation_version: fcp_crypto_pq::FIXTURE_SHAKE_COMPATIBILITY_VERSION,
+        master_public_seed: hex::encode(blake3::hash(&master_seed).as_bytes()),
+        zone_period_seed: hex::encode(blake3::hash(&zone_period_seed).as_bytes()),
+        operation_hash: hex::encode(op_hash.0),
+    }
+}
+
+fn policy_bridge_compatibility(
+    params: LatticeParams,
+    representation: &LatticeRepresentationProfile,
+    preimage: &LatticePreimage,
+) -> PolicyBridgeCompatibility {
+    PolicyBridgeCompatibility {
+        preimage_length_matches_profile: preimage.encoded_len()
+            == representation.preimage_encoded_bytes,
+        rejects_legacy_fixed_64_byte_preimage: rejects_legacy_fixed_64_byte_preimage(
+            params,
+            representation.preimage_encoded_bytes,
+        ),
+    }
+}
+
 fn evidence_for(profile: &'static str, params: LatticeParams) -> EvidenceLog<'static> {
+    let started = Instant::now();
     let representation = params
         .representation_profile()
         .expect("test profiles must have bounded representation");
@@ -99,70 +243,57 @@ fn evidence_for(profile: &'static str, params: LatticeParams) -> EvidenceLog<'st
         delegate(&master_pub, &master_trap, zone, period(), params).expect("delegate succeeds");
     let preimage = LatticePreimage::fixture_zero(params).expect("fixture preimage length is valid");
     let op_hash = operation_hash(&zone, period(), b"op:read", b"principal:alice");
+    let root_relation = master_trap.relation_summary(&master_pub);
+    let child_relation = zone_trap.relation_summary(&zone_pub, &master_pub);
     let verify_outcome = verify(&zone_pub, op_hash, &preimage, period().start_secs, params);
-    let (result, skip_reason) = match verify_outcome {
-        Ok(()) => ("passed", None),
-        Err(LatticePqError::NotImplemented { .. }) => {
-            ("skipped", Some("verify primitive not implemented"))
-        }
-        Err(_) => ("failed", None),
-    };
+    let (result, skip_reason) = verify_result(&verify_outcome);
 
-    let master_debug = format!("{master_trap:?}");
-    let zone_debug = format!("{zone_trap:?}");
-    let preimage_debug = format!("{preimage:?}");
-    let rejects_legacy_fixed_64_byte_preimage = if representation.preimage_encoded_bytes == 64 {
-        false
-    } else {
-        matches!(
-            LatticePreimage::from_encoded_bytes(params, vec![0_u8; 64]),
-            Err(LatticePqError::InvalidEncodingLength { .. })
-        )
-    };
+    let redaction = redaction_evidence(
+        &format!("{master_trap:?}"),
+        &format!("{zone_trap:?}"),
+        &format!("{preimage:?}"),
+    );
 
     EvidenceLog {
-        command_line: "cargo test -p fcp-crypto-pq representation_profile_evidence_jsonl_is_secret_free -- --nocapture",
+        command_line: "rch exec -- env CARGO_TARGET_DIR=<redacted> cargo test -p fcp-crypto-pq representation_profile_evidence_jsonl_is_secret_free -- --nocapture",
         git_revision: git_revision(),
         artifact_path: ARTIFACT_PATH,
+        fixture_id: fixture_id(profile),
         profile,
         representation_version: LATTICE_REPRESENTATION_VERSION,
         params,
-        matrix_dimensions: MatrixDimensions {
-            n: params.n,
-            m: params.m,
-            q: params.q,
-            coefficient_bytes: representation.coefficient_bytes,
+        matrix_dimensions: matrix_dimensions(params, &representation),
+        encoded_public_lengths: EncodedPublicLengths {
+            master_public_seed: master_pub.hash.len(),
+            zone_period_public_seed: zone_pub.hash.len(),
+            operation_hash: op_hash.0.len(),
         },
-        encoded_lengths: EncodedLengths {
-            public_matrix_seed: representation.public_matrix_seed_bytes,
-            public_matrix_expanded: representation.public_matrix_expanded_bytes,
-            trapdoor_storage: representation.trapdoor_storage_bytes,
-            preimage_encoded: representation.preimage_encoded_bytes,
+        encoded_lengths: encoded_lengths(&representation),
+        allocation_estimate: allocation_estimate(&representation),
+        relation_check_result: RelationCheckResultEvidence {
+            root: root_relation.result,
+            child: child_relation.result,
         },
-        allocation_estimate: AllocationEstimate {
-            public_matrix_expanded: representation.public_matrix_expanded_bytes,
-            max_public_matrix_expanded: 64 * 1024 * 1024,
-            preimage_encoded: representation.preimage_encoded_bytes,
-            max_preimage_encoded: 1024 * 1024,
+        trapdoor_norm_quality_bucket: TrapdoorNormQualityEvidence {
+            root: root_relation.norm_quality_bucket,
+            child: child_relation.norm_quality_bucket,
         },
-        redaction: RedactionEvidence {
-            master_trapdoor_debug_redacted: master_debug.contains("<redacted>")
-                && !master_debug.contains("bytes"),
-            zone_period_trapdoor_debug_redacted: zone_debug.contains("<redacted>")
-                && !zone_debug.contains("bytes"),
-            preimage_debug_redacted: preimage_debug.contains("<redacted>")
-                && !preimage_debug.contains("bytes"),
+        secret_storage_len_bucket: SecretStorageBucketEvidence {
+            root: master_trap.secret_storage_len_bucket(),
+            child: zone_trap.secret_storage_len_bucket(),
         },
-        deterministic_shake_compatibility: DeterministicShakeCompatibility {
-            master_public_seed: hex::encode(master_pub.hash),
-            zone_period_seed: hex::encode(zone_pub.hash),
-            operation_hash: hex::encode(op_hash.0),
-        },
-        policy_bridge_compatibility: PolicyBridgeCompatibility {
-            preimage_length_matches_profile: preimage.encoded_len()
-                == representation.preimage_encoded_bytes,
-            rejects_legacy_fixed_64_byte_preimage,
-        },
+        redaction,
+        deterministic_shake_compatibility: deterministic_shake_compatibility(
+            master_pub.hash,
+            zone_pub.hash,
+            op_hash,
+        ),
+        policy_bridge_compatibility: policy_bridge_compatibility(
+            params,
+            &representation,
+            &preimage,
+        ),
+        timing_ms: started.elapsed().as_millis(),
         result,
         skip_reason,
     }
@@ -217,6 +348,21 @@ fn representation_profile_evidence_jsonl_is_secret_free() {
                 .preimage_length_matches_profile,
             "policy bridge must consume the profile-derived preimage length"
         );
+        assert_eq!(
+            evidence.relation_check_result.root,
+            TrapdoorRelationResult::FixtureOnly,
+            "root relation must be an explicit fixture-only summary"
+        );
+        assert_eq!(
+            evidence.relation_check_result.child,
+            TrapdoorRelationResult::FixtureOnly,
+            "child relation must be an explicit fixture-only summary"
+        );
+        assert_eq!(
+            evidence.trapdoor_norm_quality_bucket.root,
+            TrapdoorNormQualityBucket::FixtureSeed,
+            "fixture trapdoor must not claim a basis norm"
+        );
 
         let line = serde_json::to_string(&evidence).expect("evidence log serializes");
         assert!(
@@ -230,6 +376,10 @@ fn representation_profile_evidence_jsonl_is_secret_free() {
         assert!(
             !line.contains("pool-material") && !line.contains("preimage_bytes"),
             "evidence log must not expose secret payload labels: {line}"
+        );
+        assert!(
+            !line.contains("op:read") && !line.contains("principal:alice"),
+            "evidence log must not expose raw operation or principal text: {line}"
         );
         eprintln!("{line}");
         lines.push(line);

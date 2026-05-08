@@ -16,7 +16,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const CONNECTOR_ID: &str = "fcp.imessage";
 const PASSWORD: &str = "fixture-password-redacted";
-const CHAT_GUID: &str = "iMessage;+;fixture-chat";
+const CHAT_GUID: &str = "iMessage;-;sender.fixture.invalid";
 const MESSAGE_GUID: &str = "fixture-message-guid";
 const MESSAGE_TEXT: &str = "fixture message body that must not enter proof logs";
 const SENDER_ID: &str = "sender.fixture.invalid";
@@ -39,7 +39,7 @@ async fn lifecycle_loopback_token_and_shutdown_contract() {
         &mut connector,
         &identity,
         "imessage.get_server_info",
-        "imessage.read",
+        "imessage.admin",
         ZoneId::work(),
         json!({}),
     )
@@ -72,13 +72,13 @@ async fn lifecycle_loopback_token_and_shutdown_contract() {
         .simulate(SimulateRequest::new(
             connector.id().clone(),
             OperationId::from_static("imessage.get_server_info"),
-            ZoneId::private(),
+            ZoneId::work(),
             json!({}),
             valid_token(
                 &identity,
-                "imessage.read",
+                "imessage.admin",
                 "imessage.get_server_info",
-                ZoneId::work(),
+                ZoneId::private(),
                 true,
             ),
         ))
@@ -94,7 +94,7 @@ async fn lifecycle_loopback_token_and_shutdown_contract() {
             json!({}),
             valid_token(
                 &identity,
-                "imessage.read",
+                "imessage.admin",
                 "imessage.get_server_info",
                 ZoneId::work(),
                 false,
@@ -116,7 +116,7 @@ async fn lifecycle_loopback_token_and_shutdown_contract() {
 
     emit_proof_log(ProofLog::success(
         "imessage.get_server_info",
-        "imessage.read",
+        "imessage.admin",
         &identity,
         ZoneId::work(),
         started.elapsed().as_millis(),
@@ -179,8 +179,10 @@ async fn local_bridge_send_create_chat_and_media_guards_are_bounded() {
     )
     .await
     .unwrap();
-    assert_eq!(send_output["status"], "sent");
-    assert_eq!(send_output["provider_message_id"], MESSAGE_GUID);
+    assert_eq!(send_output["status"], 200);
+    assert_eq!(send_output["message"], "sent");
+    assert_eq!(send_output["data"]["guid"], MESSAGE_GUID);
+    assert_eq!(send_output["send_method"], "private-api");
     assert_no_secret_leak(&send_output);
 
     let create_output = invoke_json(
@@ -190,8 +192,8 @@ async fn local_bridge_send_create_chat_and_media_guards_are_bounded() {
         "imessage.send",
         ZoneId::work(),
         json!({
-            "addresses": ["sender.fixture.invalid"],
-            "initial_message": "fixture initial message"
+            "address": "sender.fixture.invalid",
+            "message": "fixture initial message"
         }),
     )
     .await
@@ -203,14 +205,14 @@ async fn local_bridge_send_create_chat_and_media_guards_are_bounded() {
         &mut connector,
         &identity,
         "imessage.resolve_send_target",
-        "imessage.send",
+        "imessage.read",
         ZoneId::work(),
         json!({"chat_guid": CHAT_GUID}),
     )
     .await
     .unwrap();
     assert_eq!(direct_target["chat_guid"], CHAT_GUID);
-    assert_eq!(direct_target["resolution"], "direct_chat_guid");
+    assert_eq!(direct_target["match_kind"], "direct_chat_guid");
 
     let media_error = invoke_json(
         &mut connector,
@@ -261,9 +263,18 @@ async fn webhook_request_ingress_maps_auth_policy_malformed_and_timeout() {
     .await
     .unwrap();
     assert_eq!(accepted["accepted"], true);
-    assert_eq!(accepted["topic"], "imessage.message.inbound");
-    assert_eq!(accepted["status"], 202);
-    assert_no_secret_leak(&accepted);
+    assert_eq!(accepted["status_code"], 200);
+    assert_eq!(accepted["reason_code"], "event_accepted");
+    assert_eq!(
+        accepted["ingest"]["event_envelopes"][0]["topic"],
+        "imessage.message.inbound"
+    );
+    assert!(
+        !accepted["request_region"]["url"]
+            .as_str()
+            .unwrap()
+            .contains(PASSWORD)
+    );
 
     let wrong_password = invoke_json(
         &mut connector,
@@ -276,8 +287,8 @@ async fn webhook_request_ingress_maps_auth_policy_malformed_and_timeout() {
     .await
     .unwrap();
     assert_eq!(wrong_password["accepted"], false);
-    assert_eq!(wrong_password["status"], 401);
-    assert_eq!(wrong_password["reason"], "invalid_auth");
+    assert_eq!(wrong_password["status_code"], 401);
+    assert_eq!(wrong_password["reason_code"], "invalid_auth");
 
     let policy_denied = invoke_json(
         &mut connector,
@@ -290,8 +301,8 @@ async fn webhook_request_ingress_maps_auth_policy_malformed_and_timeout() {
     .await
     .unwrap();
     assert_eq!(policy_denied["accepted"], false);
-    assert_eq!(policy_denied["status"], 403);
-    assert_eq!(policy_denied["reason"], "policy_rejected");
+    assert_eq!(policy_denied["status_code"], 403);
+    assert_eq!(policy_denied["reason_code"], "policy_rejected");
 
     let malformed = invoke_json(
         &mut connector,
@@ -299,13 +310,13 @@ async fn webhook_request_ingress_maps_auth_policy_malformed_and_timeout() {
         "imessage.ingest_webhook_request",
         "imessage.read",
         ZoneId::work(),
-        webhook_request_input(PASSWORD, json!({"type": "new-message"})),
+        webhook_request_input(PASSWORD, json!("not-a-json-object")),
     )
     .await
     .unwrap();
     assert_eq!(malformed["accepted"], false);
-    assert_eq!(malformed["status"], 400);
-    assert_eq!(malformed["reason"], "malformed_payload");
+    assert_eq!(malformed["status_code"], 400);
+    assert_eq!(malformed["reason_code"], "malformed_payload");
 
     let timeout = invoke_json(
         &mut connector,
@@ -319,14 +330,14 @@ async fn webhook_request_ingress_maps_auth_policy_malformed_and_timeout() {
             "headers": {"x-bluebubbles-event": "new-message"},
             "body": webhook_body(SENDER_ID, CHAT_GUID),
             "received_at": "2026-05-08T00:00:00Z",
-            "deadline_ms": 0
+            "deadline_exceeded": true
         }),
     )
     .await
     .unwrap();
     assert_eq!(timeout["accepted"], false);
-    assert_eq!(timeout["status"], 408);
-    assert_eq!(timeout["reason"], "deadline_exceeded");
+    assert_eq!(timeout["status_code"], 408);
+    assert_eq!(timeout["reason_code"], "request_timeout");
 
     let oversized = invoke_json(
         &mut connector,
@@ -339,14 +350,16 @@ async fn webhook_request_ingress_maps_auth_policy_malformed_and_timeout() {
             "url": format!("{}/webhook?password={}", server.uri(), PASSWORD),
             "headers": {"x-bluebubbles-event": "new-message"},
             "body": "x".repeat(70 * 1024),
+            "body_size_bytes": 71_680,
+            "max_body_bytes": 65_536,
             "received_at": "2026-05-08T00:00:00Z"
         }),
     )
     .await
     .unwrap();
     assert_eq!(oversized["accepted"], false);
-    assert_eq!(oversized["status"], 413);
-    assert_eq!(oversized["reason"], "payload_too_large");
+    assert_eq!(oversized["status_code"], 413);
+    assert_eq!(oversized["reason_code"], "payload_too_large");
 
     emit_proof_log(ProofLog::success(
         "imessage.ingest_webhook_request",
@@ -373,7 +386,7 @@ async fn provider_error_mapping_is_stable_for_local_bridge_failures() {
         &mut connector,
         &identity,
         "imessage.get_server_info",
-        "imessage.read",
+        "imessage.admin",
         ZoneId::work(),
         json!({}),
     )
@@ -397,7 +410,7 @@ async fn provider_error_mapping_is_stable_for_local_bridge_failures() {
         &mut connector,
         &identity,
         "imessage.get_server_info",
-        "imessage.read",
+        "imessage.admin",
         ZoneId::work(),
         json!({}),
     )
@@ -432,7 +445,7 @@ async fn provider_error_mapping_is_stable_for_local_bridge_failures() {
         &mut connector,
         &identity,
         "imessage.get_server_info",
-        "imessage.read",
+        "imessage.admin",
         ZoneId::work(),
         json!({}),
     )

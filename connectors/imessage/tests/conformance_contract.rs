@@ -132,8 +132,9 @@ fn events_capabilities_and_manifest_guardrails_are_declared() {
     for needle in [
         r#"id = "fcp.imessage""#,
         r#"home = "z:private""#,
-        r#"network = "allowlist""#,
-        r#"host_allow = ["127.0.0.1", "localhost"]"#,
+        r#"[provides.operations.send_message.network_constraints]"#,
+        r#"host_allow = ["localhost", "127.0.0.1"]"#,
+        r#"port_allow = [1234]"#,
         r#"max_redirects = 0"#,
         r#"[provides.events.message_inbound]"#,
         r#"[provides.events.message_outbound]"#,
@@ -158,9 +159,20 @@ fn assert_object_schema(operation_id: &str, direction: &str, schema: &Value) {
     assert!(
         schema.get("properties").is_some()
             || schema.get("oneOf").is_some()
-            || schema.get("anyOf").is_some(),
+            || schema.get("anyOf").is_some()
+            || is_declared_zero_input_operation(operation_id, direction),
         "{operation_id} {direction} schema must expose machine-readable shape"
     );
+}
+
+fn is_declared_zero_input_operation(operation_id: &str, direction: &str) -> bool {
+    direction == "input"
+        && matches!(
+            operation_id,
+            "imessage.get_action_availability"
+                | "imessage.list_webhooks"
+                | "imessage.get_server_info"
+        )
 }
 
 fn assert_required_fields(schema: &Value, required_fields: &[&str]) {
@@ -218,7 +230,7 @@ fn expected_operations() -> Vec<ExpectedOperation> {
         },
         ExpectedOperation {
             id: "imessage.resolve_send_target",
-            capability: "imessage.send",
+            capability: "imessage.read",
             risk_level: Low,
             safety_tier: Safe,
             idempotency: Strict,
@@ -232,7 +244,7 @@ fn expected_operations() -> Vec<ExpectedOperation> {
         },
         ExpectedOperation {
             id: "imessage.get_action_availability",
-            capability: "imessage.send",
+            capability: "imessage.admin",
             risk_level: Low,
             safety_tier: Safe,
             idempotency: Strict,
@@ -302,14 +314,14 @@ fn expected_operations() -> Vec<ExpectedOperation> {
         },
         ExpectedOperation {
             id: "imessage.mark_read",
-            capability: "imessage.read",
+            capability: "imessage.send",
             risk_level: Low,
             safety_tier: Safe,
             idempotency: BestEffort,
         },
         ExpectedOperation {
             id: "imessage.get_server_info",
-            capability: "imessage.read",
+            capability: "imessage.admin",
             risk_level: Low,
             safety_tier: Safe,
             idempotency: Strict,

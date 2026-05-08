@@ -352,7 +352,7 @@ impl ImapFixture {
         let command_log = Arc::clone(&commands);
         let handle = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept IMAP client");
-            handle_imap(stream, mode, command_log);
+            handle_imap(stream, mode, &command_log);
         });
         Self {
             port,
@@ -374,7 +374,7 @@ impl ImapFixture {
     }
 }
 
-fn handle_imap(mut stream: TcpStream, mode: ImapMode, commands: Arc<Mutex<Vec<String>>>) {
+fn handle_imap(mut stream: TcpStream, mode: ImapMode, commands: &Arc<Mutex<Vec<String>>>) {
     write_response(&mut stream, "* OK fcp email generic fixture ready");
     let mut reader = BufReader::new(stream.try_clone().expect("clone IMAP stream"));
     let mut line = String::new();
@@ -440,7 +440,7 @@ impl SmtpFixture {
         let command_log = Arc::clone(&commands);
         let handle = thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept SMTP client");
-            handle_smtp(stream, mode, command_log);
+            handle_smtp(stream, mode, &command_log);
         });
         Self {
             port,
@@ -462,7 +462,7 @@ impl SmtpFixture {
     }
 }
 
-fn handle_smtp(mut stream: TcpStream, mode: SmtpMode, commands: Arc<Mutex<Vec<String>>>) {
+fn handle_smtp(mut stream: TcpStream, mode: SmtpMode, commands: &Arc<Mutex<Vec<String>>>) {
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("set SMTP fixture read timeout");
@@ -540,7 +540,7 @@ fn handle_smtp(mut stream: TcpStream, mode: SmtpMode, commands: Arc<Mutex<Vec<St
             }
         } else if upper == "DATA" {
             write_response(&mut stream, "354 end with dot");
-            read_message_data(&mut reader, &commands);
+            read_message_data(&mut reader, commands);
             write_response(&mut stream, "250 queued");
         } else if upper == "QUIT" {
             write_response(&mut stream, "221 bye");

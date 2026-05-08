@@ -2700,6 +2700,11 @@ impl Base64Bytes {
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+
+    #[must_use]
+    pub const fn from_vec(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
 }
 
 impl TryFrom<String> for Base64Bytes {
@@ -2747,6 +2752,108 @@ impl Serialize for Base64Bytes {
     }
 }
 
+/// Request attribution supplied by connector SDKs for host-mediated egress.
+///
+/// The host verifies the capability token and derives credential allow-lists
+/// from it; callers must not send raw credentials here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostEgressContext {
+    pub connector_id: String,
+    pub operation_id: String,
+    pub zone_id: String,
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    pub capability_token_cbor_b64: String,
+}
+
+/// Redaction-safe HTTP header used by the host-egress transport contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostEgressHttpHeader {
+    pub name: String,
+    pub value: String,
+}
+
+/// Connector-to-host HTTP egress request. Bodies are base64-prefixed bytes so
+/// JSON logs and fixtures do not accidentally reinterpret binary payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostEgressHttpRequest {
+    pub context: HostEgressContext,
+    pub url: String,
+    pub method: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<HostEgressHttpHeader>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<Base64Bytes>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
+}
+
+/// Connector-to-host one-shot TCP egress request. This intentionally models a
+/// bounded exchange, not an unbounded stream, so tests and operators get clear
+/// limits and deterministic logs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostEgressTcpRequest {
+    pub context: HostEgressContext,
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub tls: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sni_override: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write: Option<Base64Bytes>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_limit_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_id: Option<String>,
+}
+
+/// Redaction-safe authorization metadata returned with host-egress responses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostEgressDecisionMetadata {
+    pub connector_id: String,
+    pub operation_id: String,
+    pub zone_id: String,
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    pub execution_mode: String,
+    pub constraint_source: String,
+    pub decision: String,
+    pub resolved_host: String,
+    pub resolved_port: u16,
+    pub credential_injected: bool,
+    pub elapsed_ms: u128,
+}
+
+/// Host-mediated HTTP egress response. The host never echoes request headers or
+/// injected credentials; only upstream response headers and body are returned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostEgressHttpResponse {
+    pub status: u16,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<HostEgressHttpHeader>,
+    pub body: Base64Bytes,
+    pub egress: HostEgressDecisionMetadata,
+}
+
+/// Host-mediated TCP egress response for a bounded exchange.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostEgressTcpResponse {
+    pub bytes_written: u64,
+    pub bytes_read: u64,
+    pub read: Base64Bytes,
+    pub egress: HostEgressDecisionMetadata,
+}
+
 /// Embed a connector manifest in the output binary (NORMATIVE).
 ///
 /// Connectors MUST embed the manifest in a platform-specific section so it can be extracted
@@ -2785,6 +2892,71 @@ mod tests {
     const PLACEHOLDER_HASH: &str = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
     const EMBEDDED_MINIMAL_MANIFEST: &[u8] =
         include_bytes!("../../../tests/vectors/manifest/manifest_minimal.toml");
+
+    #[test]
+    fn br_d9us6_host_egress_contract_roundtrips_binary_bodies_as_prefixed_base64() {
+        let request = HostEgressHttpRequest {
+            context: HostEgressContext {
+                connector_id: "fcp.test.egress:utility:1.0.0".to_string(),
+                operation_id: "test.http".to_string(),
+                zone_id: "z:work".to_string(),
+                request_id: "req-d9us6-contract".to_string(),
+                correlation_id: Some("corr-d9us6-contract".to_string()),
+                capability_token_cbor_b64: "dGVzdA==".to_string(),
+            },
+            url: "http://127.0.0.1:8080/v1".to_string(),
+            method: "POST".to_string(),
+            headers: vec![HostEgressHttpHeader {
+                name: "content-type".to_string(),
+                value: "application/octet-stream".to_string(),
+            }],
+            body: Some(Base64Bytes::from_vec(vec![0, 1, 2, 255])),
+            credential_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
+        };
+
+        let json = serde_json::to_string(&request).expect("serialize host egress request");
+        assert!(json.contains("base64:AAEC/w=="));
+        let decoded: HostEgressHttpRequest =
+            serde_json::from_str(&json).expect("decode host egress request");
+        assert_eq!(decoded.body.expect("body").as_bytes(), &[0_u8, 1, 2, 255]);
+        assert_eq!(decoded.context.operation_id, "test.http");
+    }
+
+    #[test]
+    fn br_d9us6_host_egress_response_metadata_is_redaction_safe() {
+        let response = HostEgressTcpResponse {
+            bytes_written: 4,
+            bytes_read: 4,
+            read: Base64Bytes::from_vec(b"PONG".to_vec()),
+            egress: HostEgressDecisionMetadata {
+                connector_id: "fcp.test.egress:utility:1.0.0".to_string(),
+                operation_id: "test.tcp".to_string(),
+                zone_id: "z:work".to_string(),
+                request_id: "req-d9us6-response".to_string(),
+                correlation_id: None,
+                execution_mode: "host_egress_proxy".to_string(),
+                constraint_source: "managed_connector_config.operation_network_constraints"
+                    .to_string(),
+                decision: "allow".to_string(),
+                resolved_host: "127.0.0.1".to_string(),
+                resolved_port: 9999,
+                credential_injected: true,
+                elapsed_ms: 7,
+            },
+        };
+
+        let json = serde_json::to_string(&response).expect("serialize host egress response");
+        assert!(json.contains("host_egress_proxy"));
+        assert!(!json.contains("Authorization"));
+        assert!(!json.contains("token"));
+        assert_eq!(
+            serde_json::from_str::<HostEgressTcpResponse>(&json)
+                .expect("decode response")
+                .read
+                .as_bytes(),
+            b"PONG"
+        );
+    }
 
     struct TestLog {
         test_name: &'static str,

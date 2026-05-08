@@ -735,7 +735,7 @@ impl CredentialPool {
     }
 
     /// Change the pool selection strategy.
-    pub fn set_strategy(&mut self, strategy: CredentialPoolStrategy) {
+    pub const fn set_strategy(&mut self, strategy: CredentialPoolStrategy) {
         self.strategy = strategy;
         self.sticky_current = None;
     }
@@ -746,7 +746,7 @@ impl CredentialPool {
     ///
     /// Returns [`CredentialPoolError::InvalidMaxConcurrentPerCredential`] when
     /// `max` is zero.
-    pub fn set_max_concurrent_per_credential(
+    pub const fn set_max_concurrent_per_credential(
         &mut self,
         max: u32,
     ) -> Result<(), CredentialPoolError> {
@@ -758,7 +758,7 @@ impl CredentialPool {
     }
 
     /// Set the all-pool-exhausted behavior.
-    pub fn set_exhausted_behavior(&mut self, behavior: PoolExhaustedBehavior) {
+    pub const fn set_exhausted_behavior(&mut self, behavior: PoolExhaustedBehavior) {
         self.exhausted_behavior = behavior;
     }
 
@@ -787,6 +787,61 @@ impl CredentialPool {
             });
         };
         let credential_id = entry.credential_id;
+        let payload = entry.payload.clone();
+        entry.last_used_at = Some(now);
+        if self.strategy == CredentialPoolStrategy::Sticky {
+            self.sticky_current = Some(credential_id);
+        }
+
+        let lease_id = CredentialLeaseToken(self.next_lease_serial);
+        self.next_lease_serial = self.next_lease_serial.saturating_add(1);
+        *self.active_leases.entry(credential_id).or_default() += 1;
+        self.lease_index.insert(lease_id, credential_id);
+
+        Ok(CredentialLease {
+            token: lease_id,
+            credential_id,
+            payload,
+            pool_key: self.key.clone(),
+        })
+    }
+
+    /// Acquire a lease for a specific credential in this pool.
+    ///
+    /// Host-mediated egress uses explicit credential ids from a verified
+    /// capability token. It must not silently substitute a different pooled
+    /// credential via the pool selection strategy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialPoolError::CredentialNotFound`] when the credential
+    /// is absent, [`CredentialPoolError::PoolWaitRequired`] when a cooldown has
+    /// a known expiry and the pool is in wait mode, or
+    /// [`CredentialPoolError::PoolExhausted`] when the credential is currently
+    /// unavailable.
+    pub fn acquire_specific(
+        &mut self,
+        credential_id: CredentialId,
+        now: DateTime<Utc>,
+    ) -> Result<CredentialLease, CredentialPoolError> {
+        let Some(index) = self.index_of(credential_id) else {
+            return Err(CredentialPoolError::CredentialNotFound { credential_id });
+        };
+        if !self.can_select(index, now) {
+            return match self.exhausted_behavior {
+                PoolExhaustedBehavior::FailFast => Err(CredentialPoolError::PoolExhausted {
+                    key: self.key.clone(),
+                }),
+                PoolExhaustedBehavior::Wait => self.wait_required_or_exhausted(now),
+            };
+        }
+
+        let Some(entry) = self.entries.get_mut(index) else {
+            return Err(CredentialPoolError::SelectionIndexInvalid {
+                key: self.key.clone(),
+                index,
+            });
+        };
         let payload = entry.payload.clone();
         entry.last_used_at = Some(now);
         if self.strategy == CredentialPoolStrategy::Sticky {
@@ -1031,6 +1086,10 @@ impl CredentialPool {
             .position(|entry| entry.credential_id == credential_id)
     }
 
+    fn contains_credential(&self, credential_id: CredentialId) -> bool {
+        self.index_of(credential_id).is_some()
+    }
+
     fn entry_mut(&mut self, credential_id: CredentialId) -> Option<&mut PooledCredential> {
         self.entries
             .iter_mut()
@@ -1210,6 +1269,43 @@ impl CredentialPoolRegistry {
         now: DateTime<Utc>,
     ) -> Result<CredentialLease, CredentialPoolError> {
         self.pool_mut_or_err(key)?.acquire(now)
+    }
+
+    /// Acquire a lease for an explicit credential id within a zone.
+    ///
+    /// The lookup is deterministic across providers and does not expose secret
+    /// payloads unless a lease is successfully created.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialPoolError::CredentialNotFound`] when no pool in the
+    /// zone contains the credential, or the underlying pool acquisition error.
+    pub fn acquire_specific_in_zone(
+        &mut self,
+        zone_id: &ZoneId,
+        credential_id: CredentialId,
+        now: DateTime<Utc>,
+    ) -> Result<CredentialLease, CredentialPoolError> {
+        let mut matching_keys = self
+            .pools
+            .iter()
+            .filter(|(key, pool)| {
+                key.zone_id == *zone_id && pool.contains_credential(credential_id)
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        matching_keys.sort_by(|left, right| {
+            left.provider
+                .as_str()
+                .cmp(right.provider.as_str())
+                .then_with(|| left.zone_id.as_str().cmp(right.zone_id.as_str()))
+        });
+        let Some(key) = matching_keys.into_iter().next() else {
+            return Err(CredentialPoolError::CredentialNotFound { credential_id });
+        };
+
+        self.pool_mut_or_err(&key)?
+            .acquire_specific(credential_id, now)
     }
 
     /// Release a previously acquired registry lease.

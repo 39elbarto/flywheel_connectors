@@ -19,6 +19,7 @@ fcp-core = { path = "../fcp-core" }
 fcp-prelude = { path = "../fcp-prelude" }
 fcp-evidence = { path = "../fcp-evidence" }
 fcp-kernel = { path = "../fcp-kernel" }
+fcp-manifest = { workspace = true }
 fcp-mesh = { path = "../fcp-mesh" }
 fcp-policy = { path = "../fcp-policy" }
 fcp-async-core = { path = "../fcp-async-core" }
@@ -59,8 +60,14 @@ semver = { version = "1", features = ["serde"] }
 axum = { version = "0.8", features = ["json"] }
 hyper = "1.8.1"
 hyper-util = { version = "0.1.20", features = ["server", "service", "http1", "http2"] }
+reqwest.workspace = true
+rustls = { version = "0.23.38", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2.2.0"
+rustls-platform-verifier = "0.6.2"
 tower = { version = "0.5.3", features = ["util"] }
 fcp-sandbox = { version = "0.1.0", path = "../fcp-sandbox" }
+url.workspace = true
+x509-parser = "0.18.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 fcp-raptorq = { path = "../fcp-raptorq" }
@@ -69,8 +76,8 @@ mach2 = "0.4"
 [dev-dependencies]
 fcp-testkit = { path = "../fcp-testkit" }
 fcp-telegram = { path = "../../connectors/telegram", features = ["test-support"] }
-reqwest.workspace = true
 tempfile = "3"
+rcgen = "0.14.7"
 insta.workspace = true
 criterion.workspace = true
 proptest = { workspace = true }

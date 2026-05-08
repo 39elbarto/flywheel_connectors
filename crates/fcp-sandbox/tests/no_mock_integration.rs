@@ -1295,6 +1295,65 @@ async fn wasi_runtime_network_policy_controls_preview2_socket_hostcalls() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn br_p3pd4_wasi_runner_receives_operation_constraints_and_blocks_raw_sockets() {
+    let constraints = mediated_constraints();
+    let config = WasiConfig::default().with_network_constraints(constraints);
+    assert!(
+        config.block_direct_network,
+        "host handoff must keep raw Preview2 sockets disabled for mediated profiles"
+    );
+
+    let runner = WasiConnectorRunner::new(config.clone()).unwrap();
+    runner
+        .validate_http_access("https://api.example.com/v1/messages", "GET")
+        .expect("operation host and port should reach NetworkCapabilityGate");
+    assert!(
+        runner
+            .validate_http_access("https://api.other.example.com/v1/messages", "GET")
+            .is_err(),
+        "NetworkCapabilityGate must reject hosts outside the operation policy"
+    );
+    assert!(
+        runner
+            .validate_tcp_access("api.example.com", 8443, true)
+            .is_err(),
+        "NetworkCapabilityGate must reject ports outside the operation policy"
+    );
+
+    let runtime = WasiRuntime::new(config).unwrap();
+    let mut store = runtime.create_store().unwrap();
+    {
+        let mut sockets = store.data_mut().sockets();
+        let network = instance_network::Host::instance_network(&mut sockets).unwrap();
+        let dns_err = ip_name_lookup::Host::resolve_addresses(
+            &mut sockets,
+            network,
+            "api.example.com".into(),
+        )
+        .unwrap_err();
+        assert!(
+            dns_err.to_string().contains("resolver-failure"),
+            "strict mediated profiles must deny raw DNS hostcalls"
+        );
+
+        let tcp_network = instance_network::Host::instance_network(&mut sockets).unwrap();
+        let tcp_result = sockets
+            .table
+            .get(&tcp_network)
+            .unwrap()
+            .check_socket_addr(
+                std::net::SocketAddr::from(([93, 184, 216, 34], 443)),
+                SocketAddrUse::TcpConnect,
+            )
+            .await;
+        assert!(
+            tcp_result.is_err(),
+            "strict mediated profiles must deny raw TCP hostcalls even for policy-shaped endpoints"
+        );
+    }
+}
+
+#[fcp_async_core::runtime::test]
 async fn wasi_runtime_network_guard_authorizes_mediated_http_requests_inside_store() {
     let runtime =
         WasiRuntime::new(WasiConfig::default().with_network_constraints(mediated_constraints()))

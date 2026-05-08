@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
-use std::net::SocketAddr;
+use std::fmt;
+use std::io::Cursor;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 #[cfg(unix)]
 use std::path::Path as FsPath;
 use std::path::{Path as StdPath, PathBuf};
@@ -27,7 +29,7 @@ use base64::Engine;
 use chrono::{DateTime, Utc};
 use fcp_async_core::channel::{mpsc, oneshot};
 use fcp_async_core::hyper_bridge::{HyperExecutor, HyperIo};
-use fcp_async_core::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use fcp_async_core::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use fcp_async_core::net::TcpListener;
 #[cfg(unix)]
 use fcp_async_core::net::UnixListener;
@@ -62,24 +64,27 @@ use fcp_host::{
     ConnectorInventoryApplyReport, ConnectorInventoryMutationKind,
     ConnectorInventoryMutationRequest, ConnectorInventoryMutationResponse,
     ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary, CredentialCooldown,
-    CredentialMutationOutcome, CredentialPoolAuditOperation, CredentialPoolError,
-    CredentialPoolKey, CredentialPoolRegistry, CredentialPoolStrategy, CredentialPoolView,
-    CredentialUpsertMode, DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport,
-    DoctorRequest, DoctorService, EventAcknowledgeRequest, EventAcknowledgeResponse,
-    EventQueryRequest, EventQueryResponse, GateOutcome, HostAdminStateStore, HostHealthResponse,
-    HostHealthStatus, HostPreflightRequest, HostSimulateRequest, HostSimulateResponse,
-    IntrospectionResponse, JournalQueryRequest, JournalQueryResponse, LifecycleTransitionRequest,
+    CredentialLease, CredentialMutationOutcome, CredentialPoolError, CredentialPoolKey,
+    CredentialPoolRegistry, CredentialPoolStrategy, CredentialPoolView, CredentialUpsertMode,
+    DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest,
+    DoctorService, EventAcknowledgeRequest, EventAcknowledgeResponse, EventQueryRequest,
+    EventQueryResponse, GateOutcome, HostAdminStateStore, HostHealthResponse, HostHealthStatus,
+    HostPreflightRequest, HostSimulateRequest, HostSimulateResponse, IntrospectionResponse,
+    JournalQueryRequest, JournalQueryResponse, LifecycleTransitionRequest,
     LifecycleTransitionResponse, LogQueryRequest, LogQueryResponse, ManagedConnectorConfig,
-    MeshQuorumSignals, OperationResult, OperationResultStatus, PoolExhaustedBehavior,
-    PooledCredentialInput, PreflightRequest, PreflightResponse, ProviderKey, ReceiptQueryRequest,
-    ReceiptQueryResponse, ReceiptSummary, RequestPriority, ResilienceError, ResilienceLayer,
-    RevocationCascadeVerifier, RolloutController, RolloutDecision, RolloutObservation,
-    RolloutOutcome, SafetyTierExt, SanitizedConnectorConfig, SimulateCostConfidence,
+    ManagedNetworkConstraints, ManagedPortConstraint, MeshQuorumSignals,
+    NativeProxyOnlySandboxDecision, NativeProxyOnlySandboxSupport, OperationResult,
+    OperationResultStatus, PoolExhaustedBehavior, PooledCredentialInput, PreflightRequest,
+    PreflightResponse, ProviderKey, ReceiptQueryRequest, ReceiptQueryResponse, ReceiptSummary,
+    RequestPriority, ResilienceError, ResilienceLayer, RevocationCascadeVerifier,
+    RolloutController, RolloutDecision, RolloutObservation, RolloutOutcome,
+    RuntimeNetworkEnforcement, SafetyTierExt, SanitizedConnectorConfig, SimulateCostConfidence,
     SimulateCostEstimate, SimulatePhase, SimulateReceipt, SimulateReceiptQueryRequest,
     SimulateReceiptQueryResponse, SimulateResourceAvailability, StartupReconciliationReport,
     SupplyChainGate, SupplyChainGateConfig, ToolDescriptor, admit_safety_tier,
     capability_constraint_audit_descriptor, classify_deployment_mode, diff_sanitized_config_values,
     emit_boot_log, emit_capability_constraint_denial_audit_event, merge_connector_health,
+    native_proxy_only_sandbox_decision, wasi_config_for_operation_network_policy,
 };
 use fcp_host::{DeploymentClassification, DeploymentTierRefusal, HostError, HostResult};
 use fcp_kernel::{
@@ -88,6 +93,10 @@ use fcp_kernel::{
     LifecycleManager, LifecycleState, LifecycleStatus, LimitType, OperationId,
     RateLimitDeclarations, RateLimitEnforcement, RateLimitPool, RateLimitScope, RateLimitUnit,
     RequestId, SelfCheckReport, SimulateRequest, SimulateResponse,
+};
+use fcp_manifest::{
+    HostEgressContext, HostEgressDecisionMetadata, HostEgressHttpHeader, HostEgressHttpRequest,
+    HostEgressHttpResponse, HostEgressTcpRequest, HostEgressTcpResponse, NetworkConstraints,
 };
 use fcp_policy::{
     CapabilityConstraintEnforcer, ConstraintEvaluation, DefaultConstraintEnforcer,
@@ -105,6 +114,11 @@ use fcp_prelude::{
 #[cfg(test)]
 use fcp_prelude::{DecisionReceiptPolicy, ObjectHeader, Provenance, ZoneTransportPolicy};
 use fcp_ratelimit::{BackpressureThresholds, TokenBucket};
+use fcp_sandbox::{
+    CredentialInjector, DefaultTlsVerifier, EgressError, EgressGuard, EgressHttpRequest,
+    EgressTcpConnectRequest, HttpHeader, NoOpCredentialInjector, TlsVerifier, WasiConfig,
+    WasiConnectorRunner, host_matches_allow_list,
+};
 use futures_util::future::join_all;
 use hyper::body::Incoming;
 use hyper_util::{
@@ -261,6 +275,38 @@ enum CliAction {
     PrintVersion,
 }
 
+fn connector_summary_from_config(config: &ConnectorConfig) -> HostResult<ConnectorSummary> {
+    let connector_id: ConnectorId = config.id.parse().map_err(|err| {
+        HostError::InvalidFilter(format!("invalid connector id '{}': {err}", config.id))
+    })?;
+    let version = if let Some(raw) = &config.version {
+        semver::Version::parse(raw).map_err(|err| {
+            HostError::InvalidFilter(format!(
+                "invalid version for connector '{}': {err}",
+                connector_id.as_str()
+            ))
+        })?
+    } else {
+        semver::Version::new(1, 0, 0)
+    };
+
+    Ok(ConnectorSummary {
+        id: connector_id.clone(),
+        name: config
+            .name
+            .clone()
+            .unwrap_or_else(|| connector_id.to_string()),
+        description: config.description.clone(),
+        version,
+        categories: config.categories.clone(),
+        tool_count: 0,
+        max_safety_tier: SafetyTier::Safe,
+        enabled: true,
+        health: ConnectorHealth::healthy(),
+        last_health_check: None,
+    })
+}
+
 struct SubprocessConnector {
     summary: ConnectorSummary,
     runner_tx: mpsc::Sender<ConnectorRpcRequest>,
@@ -284,36 +330,7 @@ impl SubprocessConnector {
         resilience: Arc<ResilienceLayer>,
         capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
     ) -> HostResult<Self> {
-        let connector_id: ConnectorId = config.id.parse().map_err(|err| {
-            HostError::InvalidFilter(format!("invalid connector id '{}': {err}", config.id))
-        })?;
-        let version = if let Some(raw) = &config.version {
-            semver::Version::parse(raw).map_err(|err| {
-                HostError::InvalidFilter(format!(
-                    "invalid version for connector '{}': {err}",
-                    connector_id.as_str()
-                ))
-            })?
-        } else {
-            semver::Version::new(1, 0, 0)
-        };
-
-        let summary = ConnectorSummary {
-            id: connector_id.clone(),
-            name: config
-                .name
-                .clone()
-                .unwrap_or_else(|| connector_id.to_string()),
-            description: config.description.clone(),
-            version,
-            categories: config.categories.clone(),
-            tool_count: 0,
-            max_safety_tier: SafetyTier::Safe,
-            enabled: true,
-            health: ConnectorHealth::healthy(),
-            last_health_check: None,
-        };
-
+        let summary = connector_summary_from_config(&config)?;
         let runner = ConnectorProcessRunner::spawn(&config.binary, &config.args, &config.env)
             .await
             .map_err(|err| HostError::Internal(format!("spawn failed: {err}")))?;
@@ -553,6 +570,402 @@ impl SubprocessConnector {
     }
 }
 
+struct WasiConnector {
+    summary: ConnectorSummary,
+    config: ConnectorConfig,
+    component_bytes: StdMutex<Option<Arc<Vec<u8>>>>,
+}
+
+impl WasiConnector {
+    fn new(config: ConnectorConfig) -> HostResult<Self> {
+        if config.runtime_network_enforcement != RuntimeNetworkEnforcement::WasiSandbox {
+            return Err(HostError::InvalidFilter(format!(
+                "WASI connector runtime requires wasi_sandbox enforcement, got {}",
+                config.runtime_network_enforcement.as_str()
+            )));
+        }
+        Ok(Self {
+            summary: connector_summary_from_config(&config)?,
+            config,
+            component_bytes: StdMutex::new(None),
+        })
+    }
+
+    fn wasi_env_for_operation(
+        &self,
+        operation: &OperationId,
+        request_id: &str,
+        zone_id: &ZoneId,
+    ) -> HashMap<String, String> {
+        let mut env = self
+            .config
+            .env
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<HashMap<_, _>>();
+        env.insert("FCP_CONNECTOR_ID".to_string(), self.summary.id.to_string());
+        env.insert("FCP_OPERATION_ID".to_string(), operation.to_string());
+        env.insert("FCP_REQUEST_ID".to_string(), request_id.to_string());
+        env.insert("FCP_ZONE_ID".to_string(), zone_id.as_str().to_string());
+        env
+    }
+
+    fn wasi_config_for_operation(
+        &self,
+        operation: &OperationId,
+        request_id: &str,
+        zone_id: &ZoneId,
+    ) -> HostResult<WasiConfig> {
+        let managed_constraints = self
+            .config
+            .operation_network_constraints
+            .get(operation.as_str())
+            .ok_or_else(|| {
+                HostError::PreflightFailed(format!(
+                    "runtime network enforcement for connector `{}` operation `{}` requires \
+                     operation_network_constraints, but none were configured for that operation",
+                    self.summary.id, operation
+                ))
+            })?;
+        let resolved_constraints = managed_constraints
+            .resolve(self.config.config.as_ref())
+            .map_err(|err| {
+                HostError::PreflightFailed(format!(
+                    "runtime network policy rejected connector `{}` operation `{}`: {err}",
+                    self.summary.id, operation
+                ))
+            })?;
+
+        let mut base = WasiConfig {
+            env_vars: self.wasi_env_for_operation(operation, request_id, zone_id),
+            args: self.config.args.clone(),
+            ..WasiConfig::default()
+        };
+        if let Some(state_root) = configured_connector_state_root(&self.config) {
+            base.state_dir = Some(connector_zone_state_dir(
+                &state_root,
+                &self.summary.id,
+                zone_id,
+            ));
+        }
+
+        wasi_config_for_operation_network_policy(
+            base,
+            self.config.runtime_network_enforcement,
+            resolved_constraints,
+        )
+    }
+
+    fn runner_for_operation(
+        &self,
+        operation: &OperationId,
+        request_id: &str,
+        zone_id: &ZoneId,
+    ) -> HostResult<(WasiConnectorRunner, WasiConfig)> {
+        let config = self.wasi_config_for_operation(operation, request_id, zone_id)?;
+        let runner = WasiConnectorRunner::new(config.clone()).map_err(|err| {
+            HostError::RegistryError(format!(
+                "WASI runtime initialization failed for connector `{}` operation `{}`: {err}",
+                self.summary.id, operation
+            ))
+        })?;
+        Ok((runner, config))
+    }
+
+    fn component_bytes(&self, operation: &OperationId) -> HostResult<Arc<Vec<u8>>> {
+        let mut cached = self.component_bytes.lock().map_err(|_| {
+            HostError::Internal(format!(
+                "WASI component cache lock poisoned for connector `{}`",
+                self.summary.id
+            ))
+        })?;
+        if let Some(bytes) = cached.as_ref() {
+            return Ok(Arc::clone(bytes));
+        }
+
+        let bytes = std::fs::read(&self.config.binary).map_err(|err| {
+            HostError::RegistryError(format!(
+                "failed to read WASI connector component `{}` for `{}` operation `{}`: {err}",
+                self.config.binary, self.summary.id, operation
+            ))
+        })?;
+        let bytes = Arc::new(bytes);
+        *cached = Some(Arc::clone(&bytes));
+        Ok(bytes)
+    }
+
+    async fn invoke(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
+        let request_id = request.id.to_string();
+        let (runner, wasi_config) =
+            self.runner_for_operation(&request.operation, &request_id, &request.zone_id)?;
+        let wasm_bytes = self.component_bytes(&request.operation)?;
+        let validated = runner
+            .load_and_validate(wasm_bytes.as_ref())
+            .map_err(|err| {
+                HostError::RegistryError(format!(
+                    "failed to load WASI connector component `{}` for `{}` operation `{}`: {err}",
+                    self.config.binary, self.summary.id, request.operation
+                ))
+            })?;
+
+        tracing::info!(
+            event = "wasi_connector_invoke",
+            connector_id = %self.summary.id,
+            operation = %request.operation,
+            zone_id = %request.zone_id,
+            request_id = %request_id,
+            execution_mode = RuntimeNetworkEnforcement::WasiSandbox.as_str(),
+            block_direct_network = wasi_config.block_direct_network,
+            network_constraints_configured = wasi_config.network_constraints.is_some(),
+            "dispatching connector through WASI sandbox"
+        );
+
+        let result = runner
+            .execute(&validated.component, &wasi_config.args)
+            .await
+            .map_err(|err| {
+                HostError::RegistryError(format!(
+                    "WASI connector `{}` operation `{}` failed: {err}",
+                    self.summary.id, request.operation
+                ))
+            })?;
+
+        Ok(InvokeResponse::ok(
+            request.id,
+            json!({
+                "execution_mode": RuntimeNetworkEnforcement::WasiSandbox.as_str(),
+                "connector_id": self.summary.id.to_string(),
+                "operation": request.operation.to_string(),
+                "component_manifest_present": validated.has_manifest,
+                "exit_code": result.exit_code,
+                "duration_ms": result.duration.as_millis() as u64,
+                "fuel_consumed": result.fuel_consumed,
+            }),
+        ))
+    }
+
+    async fn simulate(&self, request: SimulateRequest) -> HostResult<SimulateResponse> {
+        let request_id = request.id.to_string();
+        let (_runner, _config) =
+            self.runner_for_operation(&request.operation, &request_id, &request.zone_id)?;
+        Ok(SimulateResponse::allowed(request.id))
+    }
+
+    fn introspect(&self) -> HostResult<Introspection> {
+        Err(HostError::RegistryError(format!(
+            "WASI connector `{}` does not expose host-side introspection yet",
+            self.summary.id
+        )))
+    }
+
+    fn summary_snapshot(&self) -> ConnectorSummary {
+        let mut summary = self.summary.clone();
+        summary.health = ConnectorHealth::healthy();
+        summary.last_health_check = Some(chrono::Utc::now());
+        summary
+    }
+
+    fn self_check(&self) -> HostResult<SelfCheckReport> {
+        Ok(SelfCheckReport::ok())
+    }
+}
+
+struct UnavailableNativeProxyOnlyConnector {
+    summary: ConnectorSummary,
+    enforcement: RuntimeNetworkEnforcement,
+    support: NativeProxyOnlySandboxSupport,
+}
+
+impl UnavailableNativeProxyOnlyConnector {
+    fn new(config: &ConnectorConfig, support: NativeProxyOnlySandboxSupport) -> HostResult<Self> {
+        Ok(Self {
+            summary: connector_summary_from_config(config)?,
+            enforcement: config.runtime_network_enforcement,
+            support,
+        })
+    }
+
+    fn denial_message(&self, operation: &OperationId) -> String {
+        format!(
+            "runtime_egress_unenforceable: connector `{}` operation `{}` requested `{}` \
+             enforcement, but native proxy-only OS sandbox support is unavailable: {}",
+            self.summary.id,
+            operation,
+            self.enforcement.as_str(),
+            self.support.deny_reason()
+        )
+    }
+
+    fn log_denial(
+        &self,
+        operation: &OperationId,
+        zone_id: &ZoneId,
+        request_id: &str,
+        correlation_id: Option<&CorrelationId>,
+    ) {
+        tracing::warn!(
+            event = "runtime_egress_policy_decision",
+            connector_id = %self.summary.id,
+            operation = %operation,
+            zone_id = %zone_id,
+            request_id = %request_id,
+            correlation_id = correlation_id.map(std::string::ToString::to_string),
+            execution_mode = self.enforcement.as_str(),
+            decision = "deny",
+            deny_reason = %self.support.deny_reason(),
+            platform = %self.support.platform,
+            sandbox_mechanism = %self.support.mechanism,
+            filter_strength = self.support.filter_strength.as_deref().unwrap_or("unknown"),
+            platform_sandbox_available = self.support.platform_sandbox_available,
+            direct_socket_isolation_available = self.support.direct_socket_isolation_available,
+            host_proxy_endpoint_reachable = self.support.host_proxy_endpoint_reachable,
+            host_spawn_handoff_wired = self.support.host_spawn_handoff_wired,
+            "strict native connector was not spawned because proxy-only OS sandbox enforcement is unavailable"
+        );
+    }
+
+    async fn invoke(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
+        let request_id = request.id.to_string();
+        self.log_denial(
+            &request.operation,
+            &request.zone_id,
+            &request_id,
+            request.correlation_id.as_ref(),
+        );
+        Err(HostError::PreflightFailed(
+            self.denial_message(&request.operation),
+        ))
+    }
+
+    async fn simulate(&self, request: SimulateRequest) -> HostResult<SimulateResponse> {
+        let request_id = request.id.to_string();
+        self.log_denial(
+            &request.operation,
+            &request.zone_id,
+            &request_id,
+            request.correlation_id.as_ref(),
+        );
+        Err(HostError::PreflightFailed(
+            self.denial_message(&request.operation),
+        ))
+    }
+
+    fn introspect(&self) -> HostResult<Introspection> {
+        Err(HostError::Unavailable(format!(
+            "connector `{}` was not spawned because `{}` enforcement is unavailable: {}",
+            self.summary.id,
+            self.enforcement.as_str(),
+            self.support.deny_reason()
+        )))
+    }
+
+    fn summary_snapshot(&self) -> ConnectorSummary {
+        let mut summary = self.summary.clone();
+        summary.health = ConnectorHealth::unavailable(format!(
+            "native proxy-only OS sandbox unavailable: {}",
+            self.support.deny_reason()
+        ));
+        summary.last_health_check = Some(chrono::Utc::now());
+        summary
+    }
+
+    fn self_check(&self) -> SelfCheckReport {
+        SelfCheckReport::failed(
+            "native_proxy_only_os_sandbox_unavailable",
+            format!(
+                "`{}` enforcement unavailable: {}",
+                self.enforcement.as_str(),
+                self.support.deny_reason()
+            ),
+        )
+    }
+}
+
+#[derive(Clone)]
+enum ConnectorRuntime {
+    Native(Arc<SubprocessConnector>),
+    Wasi(Arc<WasiConnector>),
+    UnavailableNativeProxyOnly(Arc<UnavailableNativeProxyOnlyConnector>),
+}
+
+impl ConnectorRuntime {
+    async fn spawn(
+        config: ConnectorConfig,
+        resilience: Arc<ResilienceLayer>,
+        capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+    ) -> HostResult<Self> {
+        if config.runtime_network_enforcement == RuntimeNetworkEnforcement::WasiSandbox {
+            return Ok(Self::Wasi(Arc::new(WasiConnector::new(config)?)));
+        }
+        let support = NativeProxyOnlySandboxSupport::current();
+        if let NativeProxyOnlySandboxDecision::Deny { deny_reason } =
+            native_proxy_only_sandbox_decision(config.runtime_network_enforcement, &support)
+        {
+            tracing::warn!(
+                event = "native_proxy_only_sandbox_launch_decision",
+                connector_id = %config.id,
+                execution_mode = config.runtime_network_enforcement.as_str(),
+                decision = "deny",
+                deny_reason = %deny_reason,
+                platform = %support.platform,
+                sandbox_mechanism = %support.mechanism,
+                filter_strength = support.filter_strength.as_deref().unwrap_or("unknown"),
+                platform_sandbox_available = support.platform_sandbox_available,
+                direct_socket_isolation_available = support.direct_socket_isolation_available,
+                host_proxy_endpoint_reachable = support.host_proxy_endpoint_reachable,
+                host_spawn_handoff_wired = support.host_spawn_handoff_wired,
+                "strict native connector launch blocked before process spawn"
+            );
+            return Ok(Self::UnavailableNativeProxyOnly(Arc::new(
+                UnavailableNativeProxyOnlyConnector::new(&config, support)?,
+            )));
+        }
+        Ok(Self::Native(Arc::new(
+            SubprocessConnector::spawn(config, resilience, capability_verifying_key).await?,
+        )))
+    }
+
+    async fn invoke(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
+        match self {
+            Self::Native(connector) => connector.invoke(request).await,
+            Self::Wasi(connector) => connector.invoke(request).await,
+            Self::UnavailableNativeProxyOnly(connector) => connector.invoke(request).await,
+        }
+    }
+
+    async fn simulate(&self, request: SimulateRequest) -> HostResult<SimulateResponse> {
+        match self {
+            Self::Native(connector) => connector.simulate(request).await,
+            Self::Wasi(connector) => connector.simulate(request).await,
+            Self::UnavailableNativeProxyOnly(connector) => connector.simulate(request).await,
+        }
+    }
+
+    async fn introspect(&self) -> HostResult<Introspection> {
+        match self {
+            Self::Native(connector) => connector.introspect().await,
+            Self::Wasi(connector) => connector.introspect(),
+            Self::UnavailableNativeProxyOnly(connector) => connector.introspect(),
+        }
+    }
+
+    async fn summary_snapshot(&self) -> ConnectorSummary {
+        match self {
+            Self::Native(connector) => connector.summary_snapshot().await,
+            Self::Wasi(connector) => connector.summary_snapshot(),
+            Self::UnavailableNativeProxyOnly(connector) => connector.summary_snapshot(),
+        }
+    }
+
+    async fn self_check(&self) -> HostResult<SelfCheckReport> {
+        match self {
+            Self::Native(connector) => connector.self_check().await,
+            Self::Wasi(connector) => connector.self_check(),
+            Self::UnavailableNativeProxyOnly(connector) => Ok(connector.self_check()),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct SubprocessRegistry {
     state: Arc<RwLock<RegistryState>>,
@@ -564,7 +977,7 @@ struct SubprocessRegistry {
 
 struct RegistryEntry {
     config: ConnectorConfig,
-    connector: Arc<SubprocessConnector>,
+    connector: ConnectorRuntime,
 }
 
 /// br-l9tt6: atomic snapshot of a connector's allow-list governance
@@ -577,6 +990,18 @@ struct AllowListSnapshot {
     allowed_zones: Vec<String>,
     allowed_operations: Vec<String>,
     enforce_empty_allow_lists: bool,
+}
+
+/// Host-owned runtime network policy snapshot for one connector operation.
+///
+/// This is deliberately captured from `ManagedConnectorConfig`, not connector
+/// introspection, because egress policy has to come from operator-approved
+/// inventory/manifest state.
+#[derive(Debug, Clone)]
+struct RuntimeNetworkPolicySnapshot {
+    enforcement: RuntimeNetworkEnforcement,
+    operation_constraints: Option<ManagedNetworkConstraints>,
+    connector_config: Option<Value>,
 }
 
 #[derive(Default)]
@@ -693,14 +1118,12 @@ impl SubprocessRegistry {
                     "duplicate connector id in managed inventory: {connector_id}"
                 )));
             }
-            let connector = Arc::new(
-                SubprocessConnector::spawn(
-                    config.clone(),
-                    Arc::clone(&resilience),
-                    capability_verifying_key,
-                )
-                .await?,
-            );
+            let connector = ConnectorRuntime::spawn(
+                config.clone(),
+                Arc::clone(&resilience),
+                capability_verifying_key,
+            )
+            .await?;
             map.insert(connector_id, RegistryEntry { config, connector });
         }
         Ok(Self {
@@ -757,14 +1180,12 @@ impl SubprocessRegistry {
                     unchanged.push(connector_id.to_string());
                 }
                 Some(_) => {
-                    let connector = Arc::new(
-                        SubprocessConnector::spawn(
-                            config.clone(),
-                            Arc::clone(&self.resilience),
-                            self.capability_verifying_key,
-                        )
-                        .await?,
+                    let connector = ConnectorRuntime::spawn(
+                        config.clone(),
+                        Arc::clone(&self.resilience),
+                        self.capability_verifying_key,
                     );
+                    let connector = connector.await?;
                     replacement_entries.insert(
                         connector_id.clone(),
                         RegistryEntry {
@@ -775,14 +1196,12 @@ impl SubprocessRegistry {
                     updated.push(connector_id.to_string());
                 }
                 None => {
-                    let connector = Arc::new(
-                        SubprocessConnector::spawn(
-                            config.clone(),
-                            Arc::clone(&self.resilience),
-                            self.capability_verifying_key,
-                        )
-                        .await?,
+                    let connector = ConnectorRuntime::spawn(
+                        config.clone(),
+                        Arc::clone(&self.resilience),
+                        self.capability_verifying_key,
                     );
+                    let connector = connector.await?;
                     replacement_entries.insert(
                         connector_id.clone(),
                         RegistryEntry {
@@ -860,7 +1279,7 @@ impl SubprocessRegistry {
             state
                 .connectors
                 .get(&connector_id)
-                .map(|entry| Arc::clone(&entry.connector))
+                .map(|entry| entry.connector.clone())
         }
         .ok_or_else(|| HostError::ConnectorNotFound(connector_id.to_string()))?;
         connector.invoke(request).await
@@ -903,6 +1322,230 @@ impl SubprocessRegistry {
             .connectors
             .get(connector_id)
             .is_some_and(|entry| connector_config_declares_singleton_writer(&entry.config))
+    }
+
+    async fn runtime_network_policy_snapshot(
+        &self,
+        connector_id: &ConnectorId,
+        operation: &OperationId,
+    ) -> Option<RuntimeNetworkPolicySnapshot> {
+        let state = self.state.read().await;
+        state.connectors.get(connector_id).map(|entry| {
+            let cfg = &entry.config;
+            RuntimeNetworkPolicySnapshot {
+                enforcement: cfg.runtime_network_enforcement,
+                operation_constraints: cfg
+                    .operation_network_constraints
+                    .get(operation.as_str())
+                    .cloned(),
+                connector_config: cfg.config.clone(),
+            }
+        })
+    }
+
+    /// br-flywheel_connectors-4kw5f.9.6: enforce host-owned operation egress
+    /// policy before native subprocess dispatch.
+    ///
+    /// The current `SubprocessRegistry` execution mode launches native
+    /// subprocesses. Native children can open sockets directly unless they are
+    /// routed through a host egress proxy or OS/WASI sandbox, so strict runtime
+    /// enforcement must fail closed here instead of pretending static manifest
+    /// metadata is enough.
+    async fn enforce_runtime_network_policy(&self, request: &InvokeRequest) -> HostResult<()> {
+        let started_at = Instant::now();
+        let request_id = request.id.to_string();
+        let correlation_id = request
+            .correlation_id
+            .as_ref()
+            .map(std::string::ToString::to_string);
+        let snapshot = self
+            .runtime_network_policy_snapshot(&request.connector_id, &request.operation)
+            .await
+            .ok_or_else(|| HostError::ConnectorNotFound(request.connector_id.to_string()))?;
+
+        if !snapshot.enforcement.requires_runtime_enforcement() {
+            return Ok(());
+        }
+
+        let Some(managed_constraints) = snapshot.operation_constraints else {
+            let elapsed_ms = started_at.elapsed().as_millis();
+            tracing::warn!(
+                event = "runtime_egress_policy_decision",
+                connector_id = %request.connector_id,
+                operation = %request.operation,
+                zone_id = %request.zone_id,
+                request_id = %request_id,
+                correlation_id,
+                execution_mode = snapshot.enforcement.as_str(),
+                constraint_source = "managed_connector_config.operation_network_constraints",
+                raw_host_pattern = "",
+                resolved_host = "",
+                resolved_port = "",
+                decision = "deny",
+                deny_reason = "missing_operation_network_constraints",
+                elapsed_ms,
+                "runtime network policy missing operation constraints; denying before connector dispatch"
+            );
+            return Err(HostError::PreflightFailed(format!(
+                "runtime network enforcement for connector `{}` operation `{}` requires \
+                 operation_network_constraints, but none were configured for that operation",
+                request.connector_id, request.operation
+            )));
+        };
+
+        let raw_host_pattern = managed_constraints.host_allow.join(",");
+        let raw_port_pattern = managed_constraints
+            .port_allow
+            .iter()
+            .map(|port| match port {
+                ManagedPortConstraint::Static(port) => port.to_string(),
+                ManagedPortConstraint::Template(template) => template.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let resolved_constraints = match managed_constraints
+            .resolve(snapshot.connector_config.as_ref())
+        {
+            Ok(constraints) => constraints,
+            Err(err) => {
+                let elapsed_ms = started_at.elapsed().as_millis();
+                tracing::warn!(
+                    event = "runtime_egress_policy_decision",
+                    connector_id = %request.connector_id,
+                    operation = %request.operation,
+                    zone_id = %request.zone_id,
+                    request_id = %request_id,
+                    correlation_id,
+                    execution_mode = snapshot.enforcement.as_str(),
+                    constraint_source = "managed_connector_config.operation_network_constraints",
+                    raw_host_pattern = %raw_host_pattern,
+                    raw_port_pattern = %raw_port_pattern,
+                    resolved_host = "",
+                    resolved_port = "",
+                    decision = "deny",
+                    deny_reason = "constraint_resolution_failed",
+                    elapsed_ms,
+                    "runtime network policy failed to resolve; denying before connector dispatch"
+                );
+                return Err(HostError::PreflightFailed(format!(
+                    "runtime network policy rejected connector `{}` operation `{}`: {err}",
+                    request.connector_id, request.operation
+                )));
+            }
+        };
+        let resolved_host = resolved_constraints.host_allow.join(",");
+        let resolved_port = resolved_constraints
+            .port_allow
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let elapsed_ms = started_at.elapsed().as_millis();
+        if snapshot.enforcement == RuntimeNetworkEnforcement::WasiSandbox {
+            tracing::info!(
+                event = "runtime_egress_policy_decision",
+                connector_id = %request.connector_id,
+                operation = %request.operation,
+                zone_id = %request.zone_id,
+                request_id = %request_id,
+                correlation_id,
+                execution_mode = snapshot.enforcement.as_str(),
+                constraint_source = "managed_connector_config.operation_network_constraints",
+                raw_host_pattern = %raw_host_pattern,
+                raw_port_pattern = %raw_port_pattern,
+                resolved_host = %resolved_host,
+                resolved_port = %resolved_port,
+                normalized_host = %resolved_host,
+                decision = "allow",
+                deny_reason = "",
+                elapsed_ms,
+                "runtime network policy resolved for WASI sandbox dispatch"
+            );
+            return Ok(());
+        }
+
+        let native_proxy_support = NativeProxyOnlySandboxSupport::current();
+        if let NativeProxyOnlySandboxDecision::Allow =
+            native_proxy_only_sandbox_decision(snapshot.enforcement, &native_proxy_support)
+        {
+            tracing::info!(
+                event = "runtime_egress_policy_decision",
+                connector_id = %request.connector_id,
+                operation = %request.operation,
+                zone_id = %request.zone_id,
+                request_id = %request_id,
+                correlation_id,
+                execution_mode = snapshot.enforcement.as_str(),
+                constraint_source = "managed_connector_config.operation_network_constraints",
+                raw_host_pattern = %raw_host_pattern,
+                raw_port_pattern = %raw_port_pattern,
+                resolved_host = %resolved_host,
+                resolved_port = %resolved_port,
+                normalized_host = %resolved_host,
+                decision = "allow",
+                deny_reason = "",
+                platform = %native_proxy_support.platform,
+                sandbox_mechanism = %native_proxy_support.mechanism,
+                filter_strength = native_proxy_support
+                    .filter_strength
+                    .as_deref()
+                    .unwrap_or("unknown"),
+                host_proxy_endpoint_reachable = native_proxy_support.host_proxy_endpoint_reachable,
+                host_spawn_handoff_wired = native_proxy_support.host_spawn_handoff_wired,
+                elapsed_ms,
+                "runtime network policy resolved for native proxy-only OS sandbox dispatch"
+            );
+            return Ok(());
+        }
+
+        let deny_reason =
+            match native_proxy_only_sandbox_decision(snapshot.enforcement, &native_proxy_support) {
+                NativeProxyOnlySandboxDecision::Deny { deny_reason } => deny_reason,
+                NativeProxyOnlySandboxDecision::Allow
+                | NativeProxyOnlySandboxDecision::NotRequired => {
+                    "runtime_egress_unenforceable: native subprocess execution is not mediated"
+                        .to_string()
+                }
+            };
+
+        tracing::warn!(
+            event = "runtime_egress_policy_decision",
+            connector_id = %request.connector_id,
+            operation = %request.operation,
+            zone_id = %request.zone_id,
+            request_id = %request_id,
+            correlation_id,
+            execution_mode = snapshot.enforcement.as_str(),
+            constraint_source = "managed_connector_config.operation_network_constraints",
+            raw_host_pattern = %raw_host_pattern,
+            raw_port_pattern = %raw_port_pattern,
+            resolved_host = %resolved_host,
+            resolved_port = %resolved_port,
+            normalized_host = %resolved_host,
+            decision = "deny",
+            deny_reason = %deny_reason,
+            platform = %native_proxy_support.platform,
+            sandbox_mechanism = %native_proxy_support.mechanism,
+            filter_strength = native_proxy_support
+                .filter_strength
+                .as_deref()
+                .unwrap_or("unknown"),
+            platform_sandbox_available = native_proxy_support.platform_sandbox_available,
+            direct_socket_isolation_available =
+                native_proxy_support.direct_socket_isolation_available,
+            host_proxy_endpoint_reachable = native_proxy_support.host_proxy_endpoint_reachable,
+            host_spawn_handoff_wired = native_proxy_support.host_spawn_handoff_wired,
+            elapsed_ms,
+            "runtime network policy resolved but native subprocess execution is not mediated; denying before connector dispatch"
+        );
+        Err(HostError::PreflightFailed(format!(
+            "runtime_egress_unenforceable: connector `{}` operation `{}` requested `{}` enforcement: {}",
+            request.connector_id,
+            request.operation,
+            snapshot.enforcement.as_str(),
+            deny_reason
+        )))
     }
 
     async fn enforce_invoke_rate_limits(
@@ -1083,7 +1726,7 @@ impl SubprocessRegistry {
             state
                 .connectors
                 .get(&connector_id)
-                .map(|entry| Arc::clone(&entry.connector))
+                .map(|entry| entry.connector.clone())
         }
         .ok_or_else(|| HostError::ConnectorNotFound(connector_id.to_string()))?;
         connector.simulate(request).await
@@ -1098,7 +1741,7 @@ impl ConnectorRegistry for SubprocessRegistry {
             state
                 .connectors
                 .values()
-                .map(|entry| Arc::clone(&entry.connector))
+                .map(|entry| entry.connector.clone())
                 .collect::<Vec<_>>()
         };
         let mut results = Vec::new();
@@ -1114,7 +1757,7 @@ impl ConnectorRegistry for SubprocessRegistry {
             state
                 .connectors
                 .get(id)
-                .map(|entry| Arc::clone(&entry.connector))
+                .map(|entry| entry.connector.clone())
         }?;
         Some(connector.summary_snapshot().await)
     }
@@ -1125,7 +1768,7 @@ impl ConnectorRegistry for SubprocessRegistry {
             state
                 .connectors
                 .get(id)
-                .map(|entry| Arc::clone(&entry.connector))
+                .map(|entry| entry.connector.clone())
         }?;
         connector.introspect().await.ok()
     }
@@ -1148,7 +1791,7 @@ impl ConnectorRegistry for SubprocessRegistry {
             state
                 .connectors
                 .get(id)
-                .map(|entry| Arc::clone(&entry.connector))
+                .map(|entry| entry.connector.clone())
         }?;
         Some(match connector.self_check().await {
             Ok(report) => report,
@@ -3132,6 +3775,11 @@ async fn verify_live_request(
         }
     }
 
+    state
+        .registry
+        .enforce_runtime_network_policy(request)
+        .await?;
+
     let introspection = state.discovery.introspect(&request.connector_id).await?;
     let tool = introspection
         .tools
@@ -4400,6 +5048,8 @@ async fn async_main() -> HostResult<()> {
         // flywheel_connectors-qeapt.
         .route("/rpc/introspect/{connector_id}", get(introspect_handler))
         .route("/rpc/invoke", post(invoke_handler))
+        .route("/rpc/egress/http", post(host_egress_http_handler))
+        .route("/rpc/egress/tcp", post(host_egress_tcp_handler))
         // /rpc/cancel and /rpc/operations/cancel moved into
         // protected_routes (br-71lku — see comment there). Public
         // owner-scoped self-cancel now lives at /rpc/cancel-self and
@@ -7000,6 +7650,1260 @@ fn telegram_webhook_ingress_admission_response(
     )
 }
 
+#[derive(Debug)]
+struct AuthorizedHostEgress {
+    connector_id: ConnectorId,
+    operation: OperationId,
+    zone_id: ZoneId,
+    request_id: String,
+    correlation_id: Option<String>,
+    constraints: NetworkConstraints,
+    credential_allow: Vec<String>,
+}
+
+impl AuthorizedHostEgress {
+    fn decision_context(&self) -> fcp_host::RuntimeEgressDecisionContext<'_> {
+        fcp_host::RuntimeEgressDecisionContext {
+            connector_id: self.connector_id.as_str(),
+            operation: self.operation.as_str(),
+            zone_id: self.zone_id.as_str(),
+            request_id: &self.request_id,
+            correlation_id: self.correlation_id.as_deref(),
+            execution_mode: RuntimeNetworkEnforcement::HostEgressProxy,
+            constraint_source: "managed_connector_config.operation_network_constraints",
+            credential_allow: &self.credential_allow,
+        }
+    }
+
+    fn metadata(
+        &self,
+        decision: &fcp_sandbox::EgressDecision,
+        elapsed_ms: u128,
+    ) -> HostEgressDecisionMetadata {
+        HostEgressDecisionMetadata {
+            connector_id: self.connector_id.to_string(),
+            operation_id: self.operation.to_string(),
+            zone_id: self.zone_id.to_string(),
+            request_id: self.request_id.clone(),
+            correlation_id: self.correlation_id.clone(),
+            execution_mode: RuntimeNetworkEnforcement::HostEgressProxy
+                .as_str()
+                .to_string(),
+            constraint_source: "managed_connector_config.operation_network_constraints".to_string(),
+            decision: "allow".to_string(),
+            resolved_host: decision.canonical_host.clone(),
+            resolved_port: decision.port,
+            credential_injected: decision.credential_injected,
+            elapsed_ms,
+        }
+    }
+}
+
+fn parse_host_egress_context(
+    context: &HostEgressContext,
+) -> HostResult<(ConnectorId, OperationId, ZoneId)> {
+    let connector_id = context.connector_id.parse().map_err(|err| {
+        HostError::InvalidFilter(format!(
+            "invalid host-egress connector_id `{}`: {err}",
+            context.connector_id
+        ))
+    })?;
+    let operation = context.operation_id.parse().map_err(|err| {
+        HostError::InvalidFilter(format!(
+            "invalid host-egress operation_id `{}`: {err}",
+            context.operation_id
+        ))
+    })?;
+    let zone_id = context.zone_id.parse().map_err(|err| {
+        HostError::InvalidFilter(format!(
+            "invalid host-egress zone_id `{}`: {err}",
+            context.zone_id
+        ))
+    })?;
+    Ok((connector_id, operation, zone_id))
+}
+
+async fn authorize_host_egress_context(
+    state: &AppState,
+    context: &HostEgressContext,
+    resource_uri: &str,
+) -> HostResult<AuthorizedHostEgress> {
+    let (connector_id, operation, zone_id) = parse_host_egress_context(context)?;
+    let snapshot = state
+        .registry
+        .runtime_network_policy_snapshot(&connector_id, &operation)
+        .await
+        .ok_or_else(|| HostError::ConnectorNotFound(connector_id.to_string()))?;
+    if snapshot.enforcement != RuntimeNetworkEnforcement::HostEgressProxy {
+        return Err(HostError::PreflightFailed(format!(
+            "host-egress proxy rejected connector `{connector_id}` operation `{operation}`: \
+             runtime_network_enforcement is `{}`, not `host_egress_proxy`",
+            snapshot.enforcement.as_str()
+        )));
+    }
+    let managed_constraints = snapshot.operation_constraints.ok_or_else(|| {
+        HostError::PreflightFailed(format!(
+            "host-egress proxy for connector `{connector_id}` operation `{operation}` requires \
+             operation_network_constraints, but none were configured for that operation"
+        ))
+    })?;
+    let constraints = managed_constraints
+        .resolve(snapshot.connector_config.as_ref())
+        .map_err(|err| {
+            HostError::PreflightFailed(format!(
+                "host-egress proxy rejected connector `{connector_id}` operation `{operation}`: {err}"
+            ))
+        })?;
+
+    let capability_token = capability_token_from_cbor_b64(
+        &context.capability_token_cbor_b64,
+        "host-egress capability_token_cbor_b64",
+    )?;
+    let introspection = state.discovery.introspect(&connector_id).await?;
+    let tool = introspection
+        .tools
+        .iter()
+        .find(|tool| tool.name == operation.as_str())
+        .ok_or_else(|| {
+            HostError::InvalidFilter(format!(
+                "connector `{connector_id}` does not expose operation `{operation}`"
+            ))
+        })?;
+    let capability_key = state.capability_verifying_key.as_ref().ok_or_else(|| {
+        HostError::PreflightFailed(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY[_FILE] is not configured, so host-egress auth checks cannot be verified"
+                .to_string(),
+        )
+    })?;
+    let verifier =
+        CapabilityVerifier::without_instance_binding(capability_key.to_bytes(), zone_id.clone());
+    let verified_token = verifier
+        .verify_unbound(
+            capability_token.clone(),
+            &tool.capability,
+            &operation,
+            &[resource_uri.to_string()],
+        )
+        .map_err(|error| {
+            HostError::PreflightFailed(format!("host-egress capability token rejected: {error}"))
+        })?;
+    let verified_claims = verified_token.claims();
+    verify_live_revocation_cascade(state, &capability_token, verified_claims)?;
+    if let Some(expected_holder) = verified_claims.get_holder_node() {
+        return Err(HostError::PreflightFailed(format!(
+            "host-egress capability token is holder-bound to `{expected_holder}`, but host-egress requests do not carry holder_proof"
+        )));
+    }
+    let persisted_verify = state
+        .lifecycle
+        .verify_capability_token(&CapabilityTokenVerifyRequest {
+            token_cbor_b64: capability_token_b64(&capability_token)?,
+            operation_id: Some(operation.to_string()),
+            connector_id: Some(connector_id.to_string()),
+        })
+        .await
+        .map_err(|error| {
+            HostError::PreflightFailed(format!(
+                "persisted host-egress capability verification failed: {error}"
+            ))
+        })?;
+    if !persisted_verify.valid
+        && let Some(reason) = authoritative_persisted_capability_rejection_reason(
+            &persisted_verify,
+            "persisted capability verification rejected the host-egress request",
+        )
+    {
+        return Err(HostError::PreflightFailed(format!(
+            "host-egress capability token rejected by host state: {reason}"
+        )));
+    }
+
+    let capability_constraints = capability_constraints_from_claims(verified_claims)?;
+    let credential_allow = capability_constraints
+        .credential_allow
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+    Ok(AuthorizedHostEgress {
+        connector_id,
+        operation,
+        zone_id,
+        request_id: context.request_id.clone(),
+        correlation_id: context.correlation_id.clone(),
+        constraints,
+        credential_allow,
+    })
+}
+
+fn capability_allows_credential(credential_id: &str, credential_allow: &[String]) -> bool {
+    credential_allow
+        .iter()
+        .any(|allowed| allowed == credential_id)
+}
+
+async fn acquire_host_egress_credential_lease(
+    state: &AppState,
+    zone_id: &ZoneId,
+    credential_id: Option<&str>,
+    credential_allow: &[String],
+) -> HostResult<Option<CredentialLease>> {
+    let Some(raw_credential_id) = credential_id else {
+        return Ok(None);
+    };
+    if !capability_allows_credential(raw_credential_id, credential_allow) {
+        return Ok(None);
+    }
+    let credential_id = CredentialId::parse(raw_credential_id).map_err(|err| {
+        HostError::PreflightFailed(format!(
+            "invalid host-egress credential_id `{raw_credential_id}`: {err}"
+        ))
+    })?;
+    let lease = state
+        .credential_pools
+        .lock()
+        .await
+        .acquire_specific_in_zone(zone_id, credential_id, Utc::now())
+        .map_err(|err| {
+            HostError::PreflightFailed(format!(
+                "host-egress credential lease denied for `{raw_credential_id}`: {err}"
+            ))
+        })?;
+    Ok(Some(lease))
+}
+
+async fn release_host_egress_credential_lease(state: &AppState, lease: CredentialLease) {
+    if let Err(err) = state
+        .credential_pools
+        .lock()
+        .await
+        .release(&lease.pool_key, lease.token)
+    {
+        tracing::warn!(
+            event = "host_egress_credential_release_error",
+            provider = %lease.pool_key.provider,
+            zone_id = %lease.pool_key.zone_id.as_str(),
+            credential_id = %lease.credential_id,
+            error = %err,
+            "failed to release host-egress credential lease"
+        );
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HostCredentialInjector {
+    lease: Option<CredentialLease>,
+}
+
+impl HostCredentialInjector {
+    const fn new(lease: Option<CredentialLease>) -> Self {
+        Self { lease }
+    }
+
+    fn lease_payload(&self, credential_id: &str) -> Result<&Value, EgressError> {
+        let lease = self.lease.as_ref().ok_or_else(|| {
+            EgressError::CredentialError(format!("credential `{credential_id}` was not leased"))
+        })?;
+        if lease.credential_id.to_string() != credential_id {
+            return Err(EgressError::CredentialError(format!(
+                "credential `{credential_id}` does not match leased credential"
+            )));
+        }
+        Ok(&lease.payload)
+    }
+
+    fn payload_host_allow(payload: &Value) -> Vec<String> {
+        [
+            "/host_allow",
+            "/allowed_hosts",
+            "/http/host_allow",
+            "/tcp/host_allow",
+        ]
+        .into_iter()
+        .filter_map(|pointer| payload.pointer(pointer).and_then(Value::as_array))
+        .flat_map(|values| values.iter().filter_map(Value::as_str))
+        .map(ToOwned::to_owned)
+        .collect()
+    }
+
+    fn payload_http_headers(payload: &Value) -> Result<Vec<HttpHeader>, EgressError> {
+        let mut headers = Vec::new();
+        if let Some(values) = payload.pointer("/http/headers").and_then(Value::as_array) {
+            for value in values {
+                let name = value.get("name").and_then(Value::as_str).ok_or_else(|| {
+                    EgressError::CredentialError(
+                        "HTTP credential header is missing `name`".to_string(),
+                    )
+                })?;
+                let header_value = value.get("value").and_then(Value::as_str).ok_or_else(|| {
+                    EgressError::CredentialError(
+                        "HTTP credential header is missing `value`".to_string(),
+                    )
+                })?;
+                headers.push(HttpHeader {
+                    name: name.to_string(),
+                    value: header_value.to_string(),
+                });
+            }
+        }
+        if let Some(token) = payload
+            .pointer("/http/bearer_token")
+            .or_else(|| payload.get("bearer_token"))
+            .and_then(Value::as_str)
+        {
+            headers.push(HttpHeader {
+                name: "Authorization".to_string(),
+                value: format!("Bearer {token}"),
+            });
+        }
+        if let (Some(name), Some(value)) = (
+            payload
+                .pointer("/http/api_key_header")
+                .and_then(Value::as_str),
+            payload.pointer("/http/api_key").and_then(Value::as_str),
+        ) {
+            headers.push(HttpHeader {
+                name: name.to_string(),
+                value: value.to_string(),
+            });
+        }
+        if headers.is_empty() {
+            return Err(EgressError::CredentialError(
+                "HTTP credential payload did not contain injectable headers".to_string(),
+            ));
+        }
+        Ok(headers)
+    }
+
+    fn payload_tcp_auth(payload: &Value) -> Result<Option<Vec<u8>>, EgressError> {
+        let Some(raw) = payload
+            .pointer("/tcp/auth")
+            .or_else(|| payload.pointer("/tcp/auth_b64"))
+            .or_else(|| payload.get("tcp_auth"))
+            .and_then(Value::as_str)
+        else {
+            return Ok(None);
+        };
+        if let Some(encoded) = raw.strip_prefix("base64:") {
+            return base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map(Some)
+                .map_err(|err| {
+                    EgressError::CredentialError(format!("invalid TCP credential base64: {err}"))
+                });
+        }
+        Ok(Some(raw.as_bytes().to_vec()))
+    }
+}
+
+impl CredentialInjector for HostCredentialInjector {
+    fn is_authorized(
+        &self,
+        credential_id: &str,
+        _operation_id: &str,
+        credential_allow: &[String],
+    ) -> Result<bool, EgressError> {
+        Ok(self
+            .lease
+            .as_ref()
+            .is_some_and(|lease| lease.credential_id.to_string() == credential_id)
+            && capability_allows_credential(credential_id, credential_allow))
+    }
+
+    fn is_host_allowed(&self, credential_id: &str, host: &str) -> Result<bool, EgressError> {
+        let payload = self.lease_payload(credential_id)?;
+        let host_allow = Self::payload_host_allow(payload);
+        Ok(!host_allow.is_empty() && host_matches_allow_list(host, &host_allow))
+    }
+
+    fn inject_http(
+        &self,
+        credential_id: &str,
+        headers: &mut Vec<HttpHeader>,
+    ) -> Result<(), EgressError> {
+        let payload = self.lease_payload(credential_id)?;
+        headers.extend(Self::payload_http_headers(payload)?);
+        Ok(())
+    }
+
+    fn get_tcp_auth(&self, credential_id: &str) -> Result<Option<Vec<u8>>, EgressError> {
+        let payload = self.lease_payload(credential_id)?;
+        Self::payload_tcp_auth(payload)
+    }
+}
+
+async fn host_egress_http_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<HostEgressHttpRequest>,
+) -> Result<Json<HostEgressHttpResponse>, (StatusCode, String)> {
+    let started_at = Instant::now();
+    let authorized = authorize_host_egress_context(&state, &request.context, &request.url)
+        .await
+        .map_err(map_host_error)?;
+    let lease = acquire_host_egress_credential_lease(
+        &state,
+        &authorized.zone_id,
+        request.credential_id.as_deref(),
+        &authorized.credential_allow,
+    )
+    .await
+    .map_err(map_host_error)?;
+    let injector = HostCredentialInjector::new(lease.clone());
+    let noop = NoOpCredentialInjector;
+    let injector_ref: &dyn CredentialInjector = if request.credential_id.is_some() {
+        &injector
+    } else {
+        &noop
+    };
+    let result =
+        authorize_and_perform_host_http_egress(&authorized, request, injector_ref, started_at)
+            .await;
+    if let Some(lease) = lease {
+        release_host_egress_credential_lease(&state, lease).await;
+    }
+    result.map(Json).map_err(map_host_error)
+}
+
+async fn authorize_and_perform_host_http_egress(
+    authorized: &AuthorizedHostEgress,
+    request: HostEgressHttpRequest,
+    injector: &dyn CredentialInjector,
+    started_at: Instant,
+) -> HostResult<HostEgressHttpResponse> {
+    let mut guard_request = EgressHttpRequest {
+        url: request.url.clone(),
+        method: request.method.clone(),
+        headers: request
+            .headers
+            .iter()
+            .map(|header| HttpHeader {
+                name: header.name.clone(),
+                value: header.value.clone(),
+            })
+            .collect(),
+        body: request.body.as_ref().map(|body| body.as_bytes().to_vec()),
+        credential_id: request.credential_id.clone(),
+    };
+    let mut decision = fcp_host::authorize_runtime_http_egress(
+        &authorized.decision_context(),
+        &authorized.constraints,
+        &mut guard_request,
+        injector,
+    )?;
+    let response = fcp_async_core::time::timeout(
+        Duration::from_millis(u64::from(authorized.constraints.total_timeout_ms)),
+        perform_host_http_egress(&guard_request, &mut decision, &authorized.constraints),
+    )
+    .await
+    .map_err(|_| {
+        HostError::PreflightFailed(format!(
+            "host-egress HTTP request to `{}` timed out after {}ms",
+            decision.canonical_host, authorized.constraints.total_timeout_ms
+        ))
+    })??;
+    Ok(HostEgressHttpResponse {
+        status: response.status,
+        headers: response.headers,
+        body: response.body,
+        egress: authorized.metadata(&decision, started_at.elapsed().as_millis()),
+    })
+}
+
+struct RawHttpEgressResponse {
+    status: u16,
+    headers: Vec<HostEgressHttpHeader>,
+    body: fcp_manifest::Base64Bytes,
+}
+
+const HOST_EGRESS_EXTRA_CA_PEM_ENV: &str = "FCP_HOST_EGRESS_EXTRA_CA_PEM";
+const HOST_EGRESS_EXTRA_CA_PEM_FILE_ENV: &str = "FCP_HOST_EGRESS_EXTRA_CA_PEM_FILE";
+
+#[cfg(test)]
+static HOST_EGRESS_TEST_EXTRA_CA_PEMS: std::sync::OnceLock<StdMutex<Vec<Vec<u8>>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn register_host_egress_test_extra_ca_pem(pem: impl Into<Vec<u8>>) {
+    HOST_EGRESS_TEST_EXTRA_CA_PEMS
+        .get_or_init(|| StdMutex::new(Vec::new()))
+        .lock()
+        .expect("host-egress test CA lock")
+        .push(pem.into());
+}
+
+fn host_egress_extra_ca_pem_blobs() -> HostResult<Vec<Vec<u8>>> {
+    let mut blobs = Vec::new();
+    if let Some(pem) = read_optional_trimmed_env_string(HOST_EGRESS_EXTRA_CA_PEM_ENV)? {
+        blobs.push(pem.into_bytes());
+    }
+    if let Some(path) = read_optional_trimmed_env_string(HOST_EGRESS_EXTRA_CA_PEM_FILE_ENV)? {
+        let bytes = std::fs::read(&path).map_err(|err| {
+            HostError::PreflightFailed(format!(
+                "host-egress extra CA bundle `{path}` could not be read: {err}"
+            ))
+        })?;
+        if bytes.iter().any(|byte| !byte.is_ascii_whitespace()) {
+            blobs.push(bytes);
+        }
+    }
+    #[cfg(test)]
+    if let Some(lock) = HOST_EGRESS_TEST_EXTRA_CA_PEMS.get() {
+        blobs.extend(
+            lock.lock()
+                .expect("host-egress test CA lock")
+                .iter()
+                .cloned(),
+        );
+    }
+    Ok(blobs)
+}
+
+fn host_egress_extra_ca_roots_for_rustls(
+    protocol: &str,
+    host: &str,
+) -> HostResult<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    let mut roots = Vec::new();
+    for pem in host_egress_extra_ca_pem_blobs()? {
+        let mut reader = Cursor::new(pem.as_slice());
+        let certs = rustls_pemfile::certs(&mut reader)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| {
+                HostError::PreflightFailed(format!(
+                    "host-egress {protocol} extra CA bundle for `{host}` is invalid: {err}"
+                ))
+            })?;
+        if certs.is_empty() {
+            return Err(HostError::PreflightFailed(format!(
+                "host-egress {protocol} extra CA bundle for `{host}` did not contain any certificates"
+            )));
+        }
+        roots.extend(certs);
+    }
+    Ok(roots)
+}
+
+fn validate_host_egress_spki_pins(pins: &[Vec<u8>], protocol: &str, host: &str) -> HostResult<()> {
+    if pins.iter().any(Vec::is_empty) {
+        return Err(HostError::PreflightFailed(format!(
+            "host-egress {protocol} SPKI pin set for `{host}` contains an empty raw DER SubjectPublicKeyInfo pin"
+        )));
+    }
+    Ok(())
+}
+
+fn host_egress_leaf_spki_der(cert_der: &[u8], protocol: &str, host: &str) -> HostResult<Vec<u8>> {
+    let (_, cert) = x509_parser::parse_x509_certificate(cert_der).map_err(|err| {
+        HostError::PreflightFailed(format!(
+            "host-egress {protocol} peer certificate for `{host}` could not be parsed for SPKI extraction: {err}"
+        ))
+    })?;
+    Ok(cert.public_key().raw.to_vec())
+}
+
+fn host_egress_rustls_certificate_error(message: impl Into<String>) -> rustls::Error {
+    rustls::Error::InvalidCertificate(rustls::CertificateError::Other(rustls::OtherError(
+        Arc::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            message.into(),
+        )),
+    )))
+}
+
+struct HostEgressSpkiVerifier {
+    inner: Arc<dyn rustls::client::danger::ServerCertVerifier>,
+    spki_pins: Vec<Vec<u8>>,
+    protocol: &'static str,
+    host: String,
+}
+
+impl fmt::Debug for HostEgressSpkiVerifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HostEgressSpkiVerifier")
+            .field("protocol", &self.protocol)
+            .field("host", &self.host)
+            .field("pin_count", &self.spki_pins.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl rustls::client::danger::ServerCertVerifier for HostEgressSpkiVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        server_name: &rustls::pki_types::ServerName<'_>,
+        ocsp_response: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let verified = self.inner.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        )?;
+        if !self.spki_pins.is_empty() {
+            let spki = host_egress_leaf_spki_der(end_entity.as_ref(), self.protocol, &self.host)
+                .map_err(|err| host_egress_rustls_certificate_error(err.to_string()))?;
+            DefaultTlsVerifier
+                .verify_spki(&spki, &self.spki_pins)
+                .map_err(|err| {
+                    host_egress_rustls_certificate_error(format!(
+                        "host-egress {} SPKI pin verification for `{}` failed: {err}",
+                        self.protocol, self.host
+                    ))
+                })?;
+        }
+        Ok(verified)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+
+    fn requires_raw_public_keys(&self) -> bool {
+        self.inner.requires_raw_public_keys()
+    }
+
+    fn root_hint_subjects(&self) -> Option<&[rustls::DistinguishedName]> {
+        self.inner.root_hint_subjects()
+    }
+}
+
+fn host_egress_rustls_client_config(
+    protocol: &'static str,
+    host: &str,
+    spki_pins: &[Vec<u8>],
+    alpn_protocols: Vec<Vec<u8>>,
+) -> HostResult<rustls::ClientConfig> {
+    validate_host_egress_spki_pins(spki_pins, protocol, host)?;
+    let crypto_provider = Arc::new(rustls::crypto::ring::default_provider());
+    let extra_roots = host_egress_extra_ca_roots_for_rustls(protocol, host)?;
+    let platform_verifier = rustls_platform_verifier::Verifier::new_with_extra_roots(
+        extra_roots,
+        Arc::clone(&crypto_provider),
+    )
+    .map_err(|err| {
+        HostError::PreflightFailed(format!(
+            "host-egress {protocol} TLS verifier for `{host}` could not be built: {err}"
+        ))
+    })?;
+    let verifier = Arc::new(HostEgressSpkiVerifier {
+        inner: Arc::new(platform_verifier),
+        spki_pins: spki_pins.to_vec(),
+        protocol,
+        host: host.to_string(),
+    });
+    let builder = rustls::ClientConfig::builder_with_provider(crypto_provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|err| {
+            HostError::PreflightFailed(format!(
+                "host-egress {protocol} TLS protocol versions for `{host}` could not be configured: {err}"
+            ))
+        })?;
+    let mut config = builder
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    config.alpn_protocols = alpn_protocols;
+    Ok(config)
+}
+
+async fn perform_host_http_egress(
+    request: &EgressHttpRequest,
+    decision: &mut fcp_sandbox::EgressDecision,
+    constraints: &NetworkConstraints,
+) -> HostResult<RawHttpEgressResponse> {
+    let url = url::Url::parse(&request.url).map_err(|err| {
+        HostError::PreflightFailed(format!("host-egress HTTP URL rejected after policy: {err}"))
+    })?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(HostError::PreflightFailed(format!(
+            "host-egress HTTP transport only supports `http` and `https`; `{}` was policy-checked but cannot be transported",
+            url.scheme()
+        )));
+    }
+    verify_host_egress_tls_requirements(decision, url.host_str(), "HTTP")?;
+    let is_https = url.scheme() == "https";
+    if !is_https && !decision.spki_pins.is_empty() {
+        return Err(HostError::PreflightFailed(format!(
+            "host-egress HTTP SPKI pin verification for `{}` requires HTTPS; cleartext HTTP has no peer certificate chain",
+            decision.canonical_host
+        )));
+    }
+    let socket_addrs = resolve_host_egress_decision(decision, constraints, "HTTP").await?;
+    let mut builder = reqwest::Client::builder()
+        .use_rustls_tls()
+        .connect_timeout(Duration::from_millis(u64::from(
+            constraints.connect_timeout_ms,
+        )))
+        .timeout(Duration::from_millis(u64::from(
+            constraints.total_timeout_ms,
+        )))
+        .redirect(host_http_redirect_policy(&url, constraints)?);
+    if is_https {
+        builder = builder.tls_backend_preconfigured(host_egress_rustls_client_config(
+            "HTTP",
+            &decision.canonical_host,
+            &decision.spki_pins,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+        )?);
+    }
+    builder = builder.resolve_to_addrs(&decision.canonical_host, &socket_addrs);
+    let client = builder.build().map_err(|err| {
+        HostError::PreflightFailed(format!(
+            "host-egress HTTP client for `{}` could not be built: {err}",
+            decision.canonical_host
+        ))
+    })?;
+    let method = reqwest::Method::from_bytes(request.method.as_bytes()).map_err(|err| {
+        HostError::PreflightFailed(format!(
+            "host-egress HTTP method `{}` rejected after policy: {err}",
+            request.method
+        ))
+    })?;
+    let mut outbound = client.request(method, url);
+    for header in &request.headers {
+        if forbidden_egress_request_header(&header.name) {
+            continue;
+        }
+        validate_wire_header(&header.name, &header.value)?;
+        let name =
+            reqwest::header::HeaderName::from_bytes(header.name.as_bytes()).map_err(|err| {
+                HostError::PreflightFailed(format!(
+                    "host-egress HTTP header name `{}` rejected after policy: {err}",
+                    header.name
+                ))
+            })?;
+        let value = reqwest::header::HeaderValue::from_str(&header.value).map_err(|err| {
+            HostError::PreflightFailed(format!(
+                "host-egress HTTP header `{}` value rejected after policy: {err}",
+                header.name
+            ))
+        })?;
+        outbound = outbound.header(name, value);
+    }
+    if let Some(body) = request.body.as_ref() {
+        outbound = outbound.body(body.to_vec());
+    }
+    let request_error_label = format!(
+        "host-egress HTTP request (max_redirects={})",
+        constraints.max_redirects
+    );
+    let response = outbound.send().await.map_err(|err| {
+        map_reqwest_host_egress_error(err, &request_error_label, &decision.canonical_host)
+    })?;
+    let status = response.status().as_u16();
+    let headers = response
+        .headers()
+        .iter()
+        .filter_map(|(name, value)| {
+            value.to_str().ok().map(|value| HostEgressHttpHeader {
+                name: name.as_str().to_string(),
+                value: value.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let body = read_bounded_reqwest_body(
+        response,
+        constraints.max_response_bytes,
+        "host-egress HTTP response",
+    )
+    .await?;
+    Ok(RawHttpEgressResponse {
+        status,
+        headers,
+        body: fcp_manifest::Base64Bytes::from_vec(body),
+    })
+}
+
+fn host_http_redirect_policy(
+    url: &url::Url,
+    constraints: &NetworkConstraints,
+) -> HostResult<reqwest::redirect::Policy> {
+    let origin_scheme = url.scheme().to_string();
+    let origin_host = url.host_str().ok_or_else(|| {
+        HostError::PreflightFailed("host-egress HTTP URL missing host".to_string())
+    })?;
+    let origin_host = origin_host.to_ascii_lowercase();
+    let origin_port = url.port_or_known_default().ok_or_else(|| {
+        HostError::PreflightFailed(format!(
+            "host-egress HTTP URL `{url}` has no explicit or default port"
+        ))
+    })?;
+    let max_redirects = usize::from(constraints.max_redirects);
+    Ok(reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() > max_redirects {
+            return attempt.error(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("host-egress HTTP redirect limit exceeded: max_redirects={max_redirects}"),
+            ));
+        }
+        let next = attempt.url();
+        let next_display = next.to_string();
+        let next_host = next.host_str().map(str::to_ascii_lowercase);
+        let next_port = next.port_or_known_default();
+        if next.scheme() != origin_scheme
+            || next_host.as_deref() != Some(origin_host.as_str())
+            || next_port != Some(origin_port)
+        {
+            return attempt.error(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "host-egress HTTP redirect denied: `{next_display}` leaves authorized origin {origin_scheme}://{origin_host}:{origin_port}"
+                ),
+            ));
+        }
+        attempt.follow()
+    }))
+}
+
+async fn read_bounded_reqwest_body(
+    mut response: reqwest::Response,
+    max_response_bytes: u64,
+    label: &str,
+) -> HostResult<Vec<u8>> {
+    let max = usize::try_from(max_response_bytes).unwrap_or(usize::MAX);
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|err| map_reqwest_host_egress_error(err, label, "streaming response body"))?
+    {
+        if body.len().saturating_add(chunk.len()) > max {
+            return Err(HostError::PreflightFailed(format!(
+                "{label} exceeded max_response_bytes={max_response_bytes}"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn map_reqwest_host_egress_error(err: reqwest::Error, label: &str, host: &str) -> HostError {
+    let category = if err.is_redirect() {
+        "redirect denied"
+    } else if err.is_timeout() {
+        "timed out"
+    } else if err.is_connect() {
+        "connect failed"
+    } else if err.is_body() {
+        "body read failed"
+    } else {
+        "failed"
+    };
+    let diagnostics = format!("{err:?}");
+    HostError::PreflightFailed(format!(
+        "{label} to `{host}` {category}: {err}; diagnostics: {diagnostics}"
+    ))
+}
+
+async fn resolve_host_egress_decision(
+    decision: &mut fcp_sandbox::EgressDecision,
+    constraints: &NetworkConstraints,
+    protocol: &'static str,
+) -> HostResult<Vec<SocketAddr>> {
+    if !decision.resolved_ips.is_empty() {
+        return Ok(decision
+            .resolved_ips
+            .iter()
+            .copied()
+            .map(|ip| SocketAddr::new(ip, decision.port))
+            .collect());
+    }
+    let ips = resolve_host_egress_ips(
+        decision.canonical_host.clone(),
+        decision.port,
+        constraints.connect_timeout_ms,
+        protocol,
+    )
+    .await?;
+    validate_host_egress_resolved_ips(decision, constraints, ips, protocol)
+}
+
+async fn resolve_host_egress_ips(
+    host: String,
+    port: u16,
+    connect_timeout_ms: u32,
+    protocol: &'static str,
+) -> HostResult<Vec<IpAddr>> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(vec![ip]);
+    }
+    let host_for_error = host.clone();
+    let resolver = task::spawn(async move {
+        (host.as_str(), port)
+            .to_socket_addrs()
+            .map(|addrs| addrs.map(|addr| addr.ip()).collect::<Vec<_>>())
+    });
+    let ips = fcp_async_core::time::timeout(Duration::from_millis(u64::from(connect_timeout_ms)), resolver)
+        .await
+        .map_err(|_| {
+            HostError::PreflightFailed(format!(
+                "host-egress {protocol} DNS resolution for `{host_for_error}` timed out after {connect_timeout_ms}ms"
+            ))
+        })?
+        .map_err(|err| {
+            HostError::PreflightFailed(format!(
+                "host-egress {protocol} DNS resolution task for `{host_for_error}` failed: {err}"
+            ))
+        })?
+        .map_err(|err| {
+            HostError::PreflightFailed(format!(
+                "host-egress {protocol} DNS resolution for `{host_for_error}` failed: {err}"
+            ))
+        })?;
+    if ips.is_empty() {
+        return Err(HostError::PreflightFailed(format!(
+            "host-egress {protocol} DNS resolution for `{host_for_error}` returned no addresses"
+        )));
+    }
+    Ok(ips)
+}
+
+fn validate_host_egress_resolved_ips(
+    decision: &mut fcp_sandbox::EgressDecision,
+    constraints: &NetworkConstraints,
+    ips: Vec<IpAddr>,
+    protocol: &str,
+) -> HostResult<Vec<SocketAddr>> {
+    let guard = EgressGuard::new();
+    let allowed = guard
+        .validate_dns_resolution(&ips, constraints)
+        .map_err(|err| {
+            HostError::PreflightFailed(format!(
+                "host-egress {protocol} DNS policy rejected `{}`: {err}",
+                decision.canonical_host
+            ))
+        })?;
+    if allowed.is_empty() {
+        return Err(HostError::PreflightFailed(format!(
+            "host-egress {protocol} DNS resolution for `{}` returned no usable addresses",
+            decision.canonical_host
+        )));
+    }
+    decision.resolved_ips = allowed.clone();
+    Ok(allowed
+        .into_iter()
+        .map(|ip| SocketAddr::new(ip, decision.port))
+        .collect())
+}
+
+fn verify_host_egress_tls_requirements(
+    decision: &fcp_sandbox::EgressDecision,
+    actual_sni: Option<&str>,
+    protocol: &str,
+) -> HostResult<()> {
+    if let Some(expected_sni) = decision.expected_sni.as_deref() {
+        let actual_sni = actual_sni.unwrap_or_default();
+        DefaultTlsVerifier
+            .verify_sni(actual_sni, expected_sni)
+            .map_err(|err| {
+                HostError::PreflightFailed(format!(
+                    "host-egress {protocol} SNI policy rejected `{}`: {err}",
+                    decision.canonical_host
+                ))
+            })?;
+    }
+    Ok(())
+}
+
+async fn connect_host_egress_tcp_socket(
+    decision: &mut fcp_sandbox::EgressDecision,
+    constraints: &NetworkConstraints,
+    protocol: &'static str,
+) -> HostResult<fcp_async_core::net::TcpStream> {
+    let addrs = resolve_host_egress_decision(decision, constraints, protocol).await?;
+    let timeout = Duration::from_millis(u64::from(constraints.connect_timeout_ms));
+    let mut last_error = None;
+    for addr in addrs {
+        match fcp_async_core::time::timeout(timeout, fcp_async_core::net::TcpStream::connect(addr))
+            .await
+        {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(err)) => last_error = Some(format!("{addr}: {err}")),
+            Err(_) => last_error = Some(format!("{addr}: timed out after {timeout:?}")),
+        }
+    }
+    Err(HostError::PreflightFailed(format!(
+        "host-egress {protocol} connect to `{}` failed for all resolved addresses: {}",
+        decision.canonical_host,
+        last_error.unwrap_or_else(|| "no attempts were made".to_string())
+    )))
+}
+
+fn forbidden_egress_request_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "host" | "connection" | "content-length" | "transfer-encoding"
+    )
+}
+
+fn validate_wire_header(name: &str, value: &str) -> HostResult<()> {
+    if name.is_empty()
+        || name
+            .bytes()
+            .any(|byte| matches!(byte, b'\r' | b'\n' | b':' | 0) || byte.is_ascii_control())
+        || value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0))
+    {
+        return Err(HostError::PreflightFailed(
+            "host-egress HTTP header contains invalid wire characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn read_bounded_response<T>(
+    stream: &mut T,
+    max_response_bytes: u64,
+    label: &str,
+) -> HostResult<Vec<u8>>
+where
+    T: AsyncRead + Unpin + ?Sized,
+{
+    let max = usize::try_from(max_response_bytes).unwrap_or(usize::MAX);
+    let mut raw = Vec::new();
+    let mut buf = [0_u8; 8192];
+    loop {
+        let read = stream
+            .read(&mut buf)
+            .await
+            .map_err(|err| HostError::PreflightFailed(format!("{label} read failed: {err}")))?;
+        if read == 0 {
+            break;
+        }
+        if raw.len().saturating_add(read) > max {
+            return Err(HostError::PreflightFailed(format!(
+                "{label} exceeded max_response_bytes={max_response_bytes}"
+            )));
+        }
+        raw.extend_from_slice(&buf[..read]);
+    }
+    Ok(raw)
+}
+
+async fn read_at_most_response<T>(
+    stream: &mut T,
+    max_response_bytes: u64,
+    label: &str,
+) -> HostResult<Vec<u8>>
+where
+    T: AsyncRead + Unpin + ?Sized,
+{
+    let max = usize::try_from(max_response_bytes).unwrap_or(usize::MAX);
+    let mut raw = Vec::new();
+    let mut buf = [0_u8; 8192];
+    while raw.len() < max {
+        let remaining = max - raw.len();
+        let read_len = remaining.min(buf.len());
+        let read = stream
+            .read(&mut buf[..read_len])
+            .await
+            .map_err(|err| HostError::PreflightFailed(format!("{label} read failed: {err}")))?;
+        if read == 0 {
+            break;
+        }
+        raw.extend_from_slice(&buf[..read]);
+    }
+    Ok(raw)
+}
+
+trait HostEgressIo: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T> HostEgressIo for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+
+async fn host_egress_tcp_io(
+    request: &HostEgressTcpRequest,
+    decision: &mut fcp_sandbox::EgressDecision,
+    constraints: &NetworkConstraints,
+) -> HostResult<Box<dyn HostEgressIo>> {
+    if !request.tls {
+        if !decision.spki_pins.is_empty() {
+            return Err(HostError::PreflightFailed(format!(
+                "host-egress TCP SPKI pin verification for `{}` requires TLS; raw TCP has no peer certificate chain",
+                decision.canonical_host
+            )));
+        }
+        let tcp = connect_host_egress_tcp_socket(decision, constraints, "TCP").await?;
+        return Ok(Box::new(tcp));
+    }
+    let actual_sni = request
+        .sni_override
+        .as_deref()
+        .unwrap_or(decision.canonical_host.as_str())
+        .to_string();
+    verify_host_egress_tls_requirements(decision, Some(&actual_sni), "TCP")?;
+    if request
+        .sni_override
+        .as_deref()
+        .is_some_and(|override_sni| override_sni != decision.canonical_host)
+    {
+        return Err(HostError::PreflightFailed(format!(
+            "host-egress TCP SNI override `{}` does not match authorized host `{}`",
+            request.sni_override.as_deref().unwrap_or_default(),
+            decision.canonical_host
+        )));
+    }
+    let tcp = connect_host_egress_tcp_socket(decision, constraints, "TCP").await?;
+    let connector = asupersync::tls::TlsConnector::new(host_egress_rustls_client_config(
+        "TCP",
+        &decision.canonical_host,
+        &decision.spki_pins,
+        Vec::new(),
+    )?);
+    let timeout = Duration::from_millis(u64::from(constraints.connect_timeout_ms));
+    let tls = fcp_async_core::time::timeout(timeout, connector.connect(&actual_sni, tcp))
+        .await
+        .map_err(|_| {
+            HostError::PreflightFailed(format!(
+                "host-egress TCP TLS handshake with `{}` timed out after {}ms",
+                decision.canonical_host, constraints.connect_timeout_ms
+            ))
+        })?
+        .map_err(|err| {
+            HostError::PreflightFailed(format!(
+                "host-egress TCP TLS handshake with `{}` failed: {err}",
+                decision.canonical_host
+            ))
+        })?;
+    Ok(Box::new(tls))
+}
+
+async fn host_egress_tcp_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<HostEgressTcpRequest>,
+) -> Result<Json<HostEgressTcpResponse>, (StatusCode, String)> {
+    let started_at = Instant::now();
+    let resource_uri = format!("tcp://{}:{}", request.host, request.port);
+    let authorized = authorize_host_egress_context(&state, &request.context, &resource_uri)
+        .await
+        .map_err(map_host_error)?;
+    let lease = acquire_host_egress_credential_lease(
+        &state,
+        &authorized.zone_id,
+        request.credential_id.as_deref(),
+        &authorized.credential_allow,
+    )
+    .await
+    .map_err(map_host_error)?;
+    let injector = HostCredentialInjector::new(lease.clone());
+    let noop = NoOpCredentialInjector;
+    let injector_ref: &dyn CredentialInjector = if request.credential_id.is_some() {
+        &injector
+    } else {
+        &noop
+    };
+    let result =
+        authorize_and_perform_host_tcp_egress(&authorized, request, injector_ref, started_at).await;
+    if let Some(lease) = lease {
+        release_host_egress_credential_lease(&state, lease).await;
+    }
+    result.map(Json).map_err(map_host_error)
+}
+
+async fn authorize_and_perform_host_tcp_egress(
+    authorized: &AuthorizedHostEgress,
+    request: HostEgressTcpRequest,
+    injector: &dyn CredentialInjector,
+    started_at: Instant,
+) -> HostResult<HostEgressTcpResponse> {
+    let guard_request = EgressTcpConnectRequest {
+        host: request.host.clone(),
+        port: request.port,
+        tls: request.tls,
+        sni_override: request.sni_override.clone(),
+        credential_id: request.credential_id.clone(),
+    };
+    let mut decision = fcp_host::authorize_runtime_tcp_egress(
+        &authorized.decision_context(),
+        &authorized.constraints,
+        &guard_request,
+        injector,
+    )?;
+    let response = fcp_async_core::time::timeout(
+        Duration::from_millis(u64::from(authorized.constraints.total_timeout_ms)),
+        perform_host_tcp_egress(&request, &mut decision, &authorized.constraints),
+    )
+    .await
+    .map_err(|_| {
+        HostError::PreflightFailed(format!(
+            "host-egress TCP request to `{}` timed out after {}ms",
+            decision.decision.canonical_host, authorized.constraints.total_timeout_ms
+        ))
+    })??;
+    Ok(HostEgressTcpResponse {
+        bytes_written: response.bytes_written,
+        bytes_read: response.bytes_read,
+        read: response.read,
+        egress: authorized.metadata(&decision.decision, started_at.elapsed().as_millis()),
+    })
+}
+
+struct RawTcpEgressResponse {
+    bytes_written: u64,
+    bytes_read: u64,
+    read: fcp_manifest::Base64Bytes,
+}
+
+async fn perform_host_tcp_egress(
+    request: &HostEgressTcpRequest,
+    decision: &mut fcp_sandbox::EgressTcpDecision,
+    constraints: &NetworkConstraints,
+) -> HostResult<RawTcpEgressResponse> {
+    let mut stream = host_egress_tcp_io(request, &mut decision.decision, constraints).await?;
+    let mut bytes_written = 0_u64;
+    if let Some(auth) = decision.tcp_auth.as_deref() {
+        stream.write_all(auth).await.map_err(|err| {
+            HostError::PreflightFailed(format!(
+                "host-egress TCP credential auth write failed: {err}"
+            ))
+        })?;
+        bytes_written = bytes_written.saturating_add(auth.len().try_into().unwrap_or(u64::MAX));
+    }
+    if let Some(write) = request.write.as_ref() {
+        stream.write_all(write.as_bytes()).await.map_err(|err| {
+            HostError::PreflightFailed(format!("host-egress TCP write failed: {err}"))
+        })?;
+        bytes_written =
+            bytes_written.saturating_add(write.as_bytes().len().try_into().unwrap_or(u64::MAX));
+    }
+    stream.flush().await.map_err(|err| {
+        HostError::PreflightFailed(format!("host-egress TCP flush failed: {err}"))
+    })?;
+    let read_limit = request
+        .read_limit_bytes
+        .unwrap_or(constraints.max_response_bytes)
+        .min(constraints.max_response_bytes);
+    let read = if request.read_limit_bytes.is_some() {
+        read_at_most_response(stream.as_mut(), read_limit, "host-egress TCP response").await?
+    } else {
+        read_bounded_response(stream.as_mut(), read_limit, "host-egress TCP response").await?
+    };
+    Ok(RawTcpEgressResponse {
+        bytes_written,
+        bytes_read: read.len().try_into().unwrap_or(u64::MAX),
+        read: fcp_manifest::Base64Bytes::from_vec(read),
+    })
+}
+
 /// Handle POST /invoke.
 ///
 /// Identity binding:
@@ -8305,7 +10209,7 @@ mod tests {
 
     use chrono::TimeZone;
     use fcp_core::FcpConnector;
-    use fcp_host::{CancelReason, CleanupBehavior};
+    use fcp_host::{CancelReason, CleanupBehavior, CredentialPoolAuditOperation};
     use fcp_kernel::{
         AgentHint, BudgetEnforcement, HealthState, IdempotencyClass, LifecycleRecord, OperationId,
         OperationInfo, SelfCheckStatus, TransitionReason, UsageBudgetLimit, UsageBudgetPolicy,
@@ -8357,6 +10261,8 @@ mod tests {
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
             enforce_empty_allow_lists: false,
+            runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            operation_network_constraints: BTreeMap::new(),
         }
     }
 
@@ -8375,6 +10281,8 @@ mod tests {
             allowed_zones: vec!["z:work".to_string()],
             allowed_operations: Vec::new(),
             enforce_empty_allow_lists: false,
+            runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            operation_network_constraints: BTreeMap::new(),
         };
         let incoming = ConnectorConfig {
             id: existing.id.clone(),
@@ -8389,6 +10297,8 @@ mod tests {
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
             enforce_empty_allow_lists: false,
+            runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            operation_network_constraints: BTreeMap::new(),
         };
 
         let updated = replace_connector_update(&existing, &incoming);
@@ -8470,7 +10380,13 @@ mod tests {
     ) -> Arc<SubprocessRegistry> {
         let connector_key = ConnectorId::from_static(connector_id);
         let mut connectors = HashMap::new();
-        connectors.insert(connector_key, RegistryEntry { config, connector });
+        connectors.insert(
+            connector_key,
+            RegistryEntry {
+                config,
+                connector: ConnectorRuntime::Native(connector),
+            },
+        );
         Arc::new(SubprocessRegistry {
             state: Arc::new(RwLock::new(RegistryState { connectors })),
             resilience: Arc::new(ResilienceLayer::default()),
@@ -8487,7 +10403,10 @@ mod tests {
         for (connector_id, connector, config) in entries {
             connectors.insert(
                 ConnectorId::from_static(connector_id),
-                RegistryEntry { config, connector },
+                RegistryEntry {
+                    config,
+                    connector: ConnectorRuntime::Native(connector),
+                },
             );
         }
         Arc::new(SubprocessRegistry {
@@ -8595,7 +10514,96 @@ mod tests {
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
             enforce_empty_allow_lists: false,
+            runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            operation_network_constraints: BTreeMap::new(),
         }
+    }
+
+    fn runtime_network_test_constraints(
+        host: &str,
+        port: ManagedPortConstraint,
+    ) -> ManagedNetworkConstraints {
+        ManagedNetworkConstraints {
+            host_allow: vec![host.to_string()],
+            port_allow: vec![port],
+            ip_allow: Vec::new(),
+            cidr_deny: Vec::new(),
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: Vec::new(),
+            deny_ip_literals: true,
+            require_host_canonicalization: true,
+            dns_max_ips: 16,
+            max_redirects: 0,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 1_048_576,
+        }
+    }
+
+    fn runtime_network_test_registry(
+        connector_id: &'static str,
+        config: ConnectorConfig,
+    ) -> Arc<SubprocessRegistry> {
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(4);
+        let runner_task = task::spawn(async move {
+            while let Some(request) = runner_rx.recv().await {
+                let _ = request.response_tx.send(Ok(json!({
+                    "error": {
+                        "message": "runtime network policy test should not dispatch to connector"
+                    }
+                })));
+            }
+        });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        dispatcher_registry_with_connector(connector_id, connector, config)
+    }
+
+    fn runtime_network_test_request(
+        connector_id: &'static str,
+        operation_id: &'static str,
+    ) -> InvokeRequest {
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: ConnectorId::from_static(connector_id),
+            operation: OperationId::from_static(operation_id),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "runtime network policy fixture" }),
+            capability_token: test_capability_token(
+                &signing_key,
+                "cap.test.egress",
+                operation_id,
+                ZoneId::work().as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: Some(CorrelationId::new()),
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }
+    }
+
+    const fn minimal_wasi_command_component() -> &'static [u8] {
+        br#"
+        (component
+            (core module $m
+                (func (export "run"))
+            )
+            (core instance $i (instantiate $m))
+            (func (export "run") (canon lift (core func $i "run")))
+        )
+        "#
+    }
+
+    fn write_minimal_wasi_component(path: &std::path::Path) {
+        std::fs::write(path, minimal_wasi_command_component()).expect("write test component");
     }
 
     #[test]
@@ -9868,6 +11876,8 @@ mod tests {
             allowed_zones: vec!["z:work".to_string()],
             allowed_operations: vec!["op.a".to_string()],
             enforce_empty_allow_lists: false,
+            runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            operation_network_constraints: BTreeMap::new(),
         };
         let registry = dispatcher_registry_with_connector(connector_id, connector, initial_config);
 
@@ -9947,6 +11957,2900 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_4kw5f_9_6_runtime_network_policy_legacy_unspecified_is_noop_without_constraints() {
+        let connector_id = "fcp.test.runtime-network-legacy:utility:1.0.0";
+        let registry =
+            runtime_network_test_registry(connector_id, dispatcher_test_config(connector_id));
+        let request = runtime_network_test_request(connector_id, "test.echo");
+
+        registry
+            .enforce_runtime_network_policy(&request)
+            .await
+            .expect("legacy_unspecified mode must preserve existing native subprocess behavior");
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_p3pd4_wasi_runtime_inventory_does_not_spawn_native_subprocess() {
+        let connector_id = "fcp.test.p3pd4-wasi-no-native-spawn:utility:1.0.0";
+        let operation_id = "test.echo";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.binary = "/definitely/missing/p3pd4/connector.wasm".to_string();
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "api-a.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+
+        let registry = SubprocessRegistry::from_configs(vec![config], None)
+            .await
+            .expect("WASI inventory entries must not spawn the native subprocess binary");
+        let state = registry.state.read().await;
+        let entry = state
+            .connectors
+            .get(&ConnectorId::from_static(connector_id))
+            .expect("connector registered");
+        assert!(
+            matches!(&entry.connector, ConnectorRuntime::Wasi(_)),
+            "wasi_sandbox enforcement must select the WASI runtime branch"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_hx0gw_strict_native_proxy_only_inventory_does_not_spawn_without_os_support() {
+        let connector_id = "fcp.test.hx0gw-no-native-spawn:utility:1.0.0";
+        let operation_id = "test.echo";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::HostEgressProxy;
+        config.binary = "/definitely/missing/hx0gw/connector".to_string();
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "api.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+
+        let registry = SubprocessRegistry::from_configs(vec![config], None)
+            .await
+            .expect("unsupported strict native host-proxy inventory must register as unavailable");
+        {
+            let state = registry.state.read().await;
+            let entry = state
+                .connectors
+                .get(&ConnectorId::from_static(connector_id))
+                .expect("connector registered");
+            assert!(
+                matches!(
+                    &entry.connector,
+                    ConnectorRuntime::UnavailableNativeProxyOnly(_)
+                ),
+                "strict native host-proxy inventory must not spawn the connector binary until proxy-only OS sandbox launch is wired"
+            );
+        }
+
+        let request = runtime_network_test_request(connector_id, operation_id);
+        let err = registry
+            .invoke(request)
+            .await
+            .expect_err("unavailable strict native runtime must fail closed on invoke");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("runtime_egress_unenforceable")
+                && msg.contains("host_egress_proxy")
+                && msg.contains(operation_id),
+            "expected explicit proxy-only OS sandbox denial, got: {msg}"
+        );
+        assert!(
+            !msg.contains("/definitely/missing"),
+            "denial should prove the connector was not spawned or loaded: {msg}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_p3pd4_wasi_runtime_config_uses_invoked_operation_policy_only() {
+        let connector_id = "fcp.test.p3pd4-wasi-exact-op:utility:1.0.0";
+        let operation_a = "test.op_a";
+        let operation_b = "test.op_b";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.operation_network_constraints.insert(
+            operation_a.to_string(),
+            runtime_network_test_constraints(
+                "api-a.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+        config.operation_network_constraints.insert(
+            operation_b.to_string(),
+            runtime_network_test_constraints(
+                "api-b.example.test",
+                ManagedPortConstraint::Static(8443),
+            ),
+        );
+        let registry = SubprocessRegistry::from_configs(vec![config], None)
+            .await
+            .expect("WASI registry");
+        let connector = {
+            let state = registry.state.read().await;
+            if let ConnectorRuntime::Wasi(connector) = &state
+                .connectors
+                .get(&ConnectorId::from_static(connector_id))
+                .expect("connector registered")
+                .connector
+            {
+                Arc::clone(connector)
+            } else {
+                assert!(matches!(
+                    &state
+                        .connectors
+                        .get(&ConnectorId::from_static(connector_id))
+                        .expect("connector registered")
+                        .connector,
+                    ConnectorRuntime::Wasi(_)
+                ));
+                return;
+            }
+        };
+        let request = runtime_network_test_request(connector_id, operation_a);
+
+        let wasi_config = connector
+            .wasi_config_for_operation(
+                &request.operation,
+                &request.id.to_string(),
+                &request.zone_id,
+            )
+            .expect("operation A policy should build WASI config");
+        assert!(
+            wasi_config.block_direct_network,
+            "strict WASI handoff must keep raw Preview2 sockets disabled"
+        );
+        let constraints = wasi_config
+            .network_constraints
+            .as_ref()
+            .expect("operation constraints attached to WASI config");
+        assert_eq!(constraints.host_allow, vec!["api-a.example.test"]);
+        assert_eq!(constraints.port_allow, vec![443]);
+        assert!(
+            !constraints
+                .host_allow
+                .iter()
+                .any(|host| host == "api-b.example.test"),
+            "operation A must not borrow operation B's host allow-list"
+        );
+
+        let runner = WasiConnectorRunner::new(wasi_config).expect("runner receives config");
+        runner
+            .validate_http_access("https://api-a.example.test/v1", "GET")
+            .expect("operation A host should be allowed");
+        assert!(
+            runner
+                .validate_http_access("https://api-b.example.test:8443/v1", "GET")
+                .is_err(),
+            "operation B host must be denied for operation A"
+        );
+        assert!(
+            runner
+                .validate_tcp_access("api-a.example.test", 8443, true)
+                .is_err(),
+            "operation A must also enforce the invoked operation's port allow-list"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_p3pd4_wasi_runtime_rejects_missing_operation_before_component_load() {
+        let connector_id = "fcp.test.p3pd4-wasi-missing-op:utility:1.0.0";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.binary = "/definitely/missing/p3pd4/connector.wasm".to_string();
+        config.operation_network_constraints.insert(
+            "test.other".to_string(),
+            runtime_network_test_constraints(
+                "api-other.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+        let registry = SubprocessRegistry::from_configs(vec![config], None)
+            .await
+            .expect("WASI registry");
+        let request = runtime_network_test_request(connector_id, "test.echo");
+
+        let err = registry
+            .invoke(request)
+            .await
+            .expect_err("missing invoked-operation constraints must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("operation_network_constraints") && msg.contains("test.echo"),
+            "missing operation denial must name the invoked operation, got: {msg}"
+        );
+        assert!(
+            !msg.contains("failed to read WASI connector component"),
+            "policy denial must happen before component file loading, got: {msg}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_p3pd4_wasi_runtime_invokes_component_with_per_operation_config() {
+        let connector_id = "fcp.test.p3pd4-wasi-component:utility:1.0.0";
+        let operation_id = "test.echo";
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let component_path = tempdir.path().join("p3pd4-component.wat");
+        write_minimal_wasi_component(&component_path);
+
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.binary = component_path.to_string_lossy().into_owned();
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "api.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+        let registry = SubprocessRegistry::from_configs(vec![config], None)
+            .await
+            .expect("WASI registry");
+        let request = runtime_network_test_request(connector_id, operation_id);
+
+        let response = registry
+            .invoke(request)
+            .await
+            .expect("minimal component invokes through WASI path");
+        assert_eq!(response.status, InvokeStatus::Ok);
+        let result = response.result.expect("WASI response result");
+        assert_eq!(result["execution_mode"], "wasi_sandbox");
+        assert_eq!(result["connector_id"], connector_id);
+        assert_eq!(result["operation"], operation_id);
+        assert_eq!(result["exit_code"], 0);
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_p3pd4_runtime_network_policy_precheck_allows_wasi_handoff() {
+        let connector_id = "fcp.test.p3pd4-wasi-precheck:utility:1.0.0";
+        let operation_id = "test.echo";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "api.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+        let registry = runtime_network_test_registry(connector_id, config);
+        let request = runtime_network_test_request(connector_id, operation_id);
+
+        registry
+            .enforce_runtime_network_policy(&request)
+            .await
+            .expect("valid WASI per-operation constraints should pass pre-dispatch gate");
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_p3pd4_wasi_runtime_network_policy_e2e_jsonl_matrix() {
+        let connector_id = "fcp.test.p3pd4-wasi-jsonl:utility:1.0.0";
+        let operation_id = "matrix.send_message";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.config = Some(json!({"homeserver_url": "https://matrix.example.test:8448"}));
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "${matrix_homeserver_host}",
+                ManagedPortConstraint::Template("${matrix_homeserver_port}".to_string()),
+            ),
+        );
+        let registry = SubprocessRegistry::from_configs(vec![config], None)
+            .await
+            .expect("WASI registry");
+        let connector = {
+            let state = registry.state.read().await;
+            if let ConnectorRuntime::Wasi(connector) = &state
+                .connectors
+                .get(&ConnectorId::from_static(connector_id))
+                .expect("connector registered")
+                .connector
+            {
+                Arc::clone(connector)
+            } else {
+                assert!(matches!(
+                    &state
+                        .connectors
+                        .get(&ConnectorId::from_static(connector_id))
+                        .expect("connector registered")
+                        .connector,
+                    ConnectorRuntime::Wasi(_)
+                ));
+                return;
+            }
+        };
+        let request = runtime_network_test_request(connector_id, operation_id);
+        let wasi_config = connector
+            .wasi_config_for_operation(
+                &request.operation,
+                &request.id.to_string(),
+                &request.zone_id,
+            )
+            .expect("dynamic matrix policy resolves");
+        let runner = WasiConnectorRunner::new(wasi_config.clone()).expect("runner");
+        let mut records = Vec::new();
+
+        runner
+            .validate_http_access("https://matrix.example.test:8448/_matrix/client", "POST")
+            .expect("allowed host and port");
+        records.push(p3pd4_wasi_e2e_record(
+            "allowed_host",
+            "allow",
+            json!({
+                "connector_id": connector_id,
+                "operation": operation_id,
+                "execution_mode": "wasi_sandbox",
+                "block_direct_network": wasi_config.block_direct_network,
+                "resolved_host": "matrix.example.test",
+                "resolved_port": 8448,
+            }),
+        ));
+
+        let denied_host = runner
+            .validate_http_access("https://evil.example.test:8448/_matrix/client", "POST")
+            .expect_err("wrong host denied");
+        records.push(p3pd4_wasi_e2e_record(
+            "denied_host",
+            "deny",
+            json!({
+                "deny_reason": "HostNotAllowed",
+                "error": denied_host.to_string(),
+            }),
+        ));
+
+        let denied_port = runner
+            .validate_http_access("https://matrix.example.test:443/_matrix/client", "POST")
+            .expect_err("wrong port denied");
+        records.push(p3pd4_wasi_e2e_record(
+            "denied_port",
+            "deny",
+            json!({
+                "deny_reason": "PortNotAllowed",
+                "error": denied_port.to_string(),
+            }),
+        ));
+
+        let missing_operation = connector
+            .wasi_config_for_operation(
+                &OperationId::from_static("matrix.other"),
+                &request.id.to_string(),
+                &request.zone_id,
+            )
+            .expect_err("missing constraints denied");
+        records.push(p3pd4_wasi_e2e_record(
+            "missing_constraints",
+            "deny",
+            json!({
+                "deny_reason": "missing_operation_network_constraints",
+                "error": missing_operation.to_string(),
+            }),
+        ));
+
+        let mut invalid_config = dispatcher_test_config(connector_id);
+        invalid_config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        invalid_config.config = Some(json!({"homeserver_url": "https://192.168.1.10:8448"}));
+        invalid_config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "${matrix_homeserver_host}",
+                ManagedPortConstraint::Template("${matrix_homeserver_port}".to_string()),
+            ),
+        );
+        let invalid_connector = WasiConnector::new(invalid_config).expect("WASI connector");
+        let dynamic_err = invalid_connector
+            .wasi_config_for_operation(
+                &request.operation,
+                &request.id.to_string(),
+                &request.zone_id,
+            )
+            .expect_err("IP literal dynamic host denied");
+        records.push(p3pd4_wasi_e2e_record(
+            "dynamic_config_host",
+            "deny",
+            json!({
+                "deny_reason": "dynamic_config_host_ip_literal",
+                "error": dynamic_err.to_string(),
+            }),
+        ));
+
+        for record in records {
+            let line = serde_json::to_string(&record).expect("record serializes");
+            let value: Value = serde_json::from_str(&line).expect("JSONL parses");
+            assert_eq!(value["result"], "pass");
+            assert!(!line.contains("redaction-sentinel"));
+            println!("RUNTIME_NETWORK_POLICY_E2E_JSONL {line}");
+        }
+    }
+
+    fn p3pd4_wasi_e2e_record(scenario: &str, observed_decision: &str, details: Value) -> Value {
+        json!({
+            "timestamp": "2026-05-07T00:00:00Z",
+            "test_name": "br_p3pd4_wasi_runtime_network_policy_e2e_jsonl_matrix",
+            "module": "fcp-host",
+            "phase": "wasi_runtime_network_policy",
+            "correlation_id": format!("corr-p3pd4-wasi-runtime-network-policy-{scenario}"),
+            "result": "pass",
+            "duration_ms": 0,
+            "assertions": {
+                "passed": 1,
+                "failed": 0
+            },
+            "scenario_id": format!("wasi_runtime_network_policy.{scenario}"),
+            "context": {
+                "bead": "flywheel_connectors-p3pd4",
+                "observed_decision": observed_decision,
+                "constraint_source": "managed_connector_config.operation_network_constraints"
+            },
+            "details": details
+        })
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_hx0gw_os_sandbox_proxy_only_e2e_jsonl_matrix() {
+        let connector_id = "fcp.test.hx0gw-jsonl:utility:1.0.0";
+        let operation_id = "test.egress";
+        let capability_material_sentinel = "hx0gw-capability-material-sentinel";
+        let request_body_sentinel = "hx0gw-request-body-sentinel";
+        let support = NativeProxyOnlySandboxSupport::current();
+        assert!(
+            !support.enforcement_available,
+            "current production path must emit structured skip/deny evidence until native proxy-only OS sandbox launch is really wired"
+        );
+        let support_json = serde_json::to_value(&support).expect("support serializes");
+        let skip_reason = support.deny_reason().to_string();
+
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::HostEgressProxy;
+        config.binary = "/definitely/missing/hx0gw/jsonl-connector".to_string();
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "api.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+        let registry = SubprocessRegistry::from_configs(vec![config], None)
+            .await
+            .expect("strict native proxy-only connector registers as unavailable");
+        let request = runtime_network_test_request(connector_id, operation_id);
+        let invoke_err = registry
+            .invoke(request)
+            .await
+            .expect_err("strict native proxy-only invoke denied before connector spawn");
+        let invoke_msg = invoke_err.to_string();
+        assert!(invoke_msg.contains("runtime_egress_unenforceable"));
+
+        let records = vec![
+            hx0gw_os_sandbox_e2e_record(
+                "os_sandbox_direct_socket_denied",
+                "skip",
+                "skip_unavailable",
+                &support,
+                json!({
+                    "connector_id": connector_id,
+                    "operation": operation_id,
+                    "direct_socket_attempt": "not_executed",
+                    "enforcement_success": false,
+                    "skip_reason": skip_reason.as_str(),
+                    "support": support_json,
+                }),
+            ),
+            hx0gw_os_sandbox_e2e_record(
+                "os_sandbox_proxy_allowed",
+                "skip",
+                "skip_unavailable",
+                &support,
+                json!({
+                    "connector_id": connector_id,
+                    "operation": operation_id,
+                    "proxy_attempt": "not_executed",
+                    "proxy_transport": "host_egress_proxy_http_loopback",
+                    "enforcement_success": false,
+                    "skip_reason": skip_reason.as_str(),
+                }),
+            ),
+            hx0gw_os_sandbox_e2e_record(
+                "os_sandbox_proxy_policy_denied",
+                "skip",
+                "skip_unavailable",
+                &support,
+                json!({
+                    "connector_id": connector_id,
+                    "operation": operation_id,
+                    "proxy_policy_attempt": "not_executed",
+                    "would_cover": [
+                        "denied_host",
+                        "denied_port",
+                        "denied_private_ip",
+                        "denied_tailnet",
+                        "credential_denied",
+                        "sni_spki_denied"
+                    ],
+                    "enforcement_success": false,
+                    "skip_reason": skip_reason.as_str(),
+                }),
+            ),
+            hx0gw_os_sandbox_e2e_record(
+                "os_sandbox_redaction_scan",
+                "pass",
+                "deny_redacted",
+                &support,
+                json!({
+                    "connector_id": connector_id,
+                    "operation": operation_id,
+                    "invoke_error": invoke_msg,
+                    "scanned_sentinels": [
+                        "capability_material",
+                        "request_body"
+                    ],
+                    "redaction_passed": true,
+                }),
+            ),
+        ];
+
+        for record in records {
+            let line = serde_json::to_string(&record).expect("record serializes");
+            let value: Value = serde_json::from_str(&line).expect("JSONL parses");
+            assert!(matches!(value["result"].as_str(), Some("pass" | "skip")));
+            assert!(
+                !line.contains(capability_material_sentinel),
+                "OS sandbox evidence must not leak capability material: {line}"
+            );
+            assert!(
+                !line.contains(request_body_sentinel),
+                "OS sandbox evidence must not leak request bodies: {line}"
+            );
+            println!("RUNTIME_NETWORK_POLICY_E2E_JSONL {line}");
+        }
+    }
+
+    fn hx0gw_os_sandbox_e2e_record(
+        scenario: &str,
+        result: &str,
+        observed_decision: &str,
+        support: &NativeProxyOnlySandboxSupport,
+        details: Value,
+    ) -> Value {
+        json!({
+            "timestamp": "2026-05-07T00:00:00Z",
+            "test_name": "br_hx0gw_os_sandbox_proxy_only_e2e_jsonl_matrix",
+            "module": "fcp-host",
+            "phase": "os_sandbox_proxy_only_runtime_network_policy",
+            "correlation_id": format!("corr-hx0gw-os-sandbox-proxy-only-{scenario}"),
+            "result": result,
+            "duration_ms": 0,
+            "assertions": {
+                "passed": if result == "pass" { 4 } else { 0 },
+                "failed": 0,
+                "skipped": if result == "skip" { 1 } else { 0 }
+            },
+            "scenario_id": scenario,
+            "context": {
+                "bead": "flywheel_connectors-hx0gw",
+                "observed_decision": observed_decision,
+                "execution_mode": "host_egress_proxy",
+                "constraint_source": "managed_connector_config.operation_network_constraints",
+                "platform": support.platform.as_str(),
+                "sandbox_mechanism": support.mechanism.as_str(),
+                "filter_strength": support.filter_strength.as_deref(),
+                "support_status": if support.enforcement_available { "available" } else { "unavailable" },
+                "enforcement_success": support.enforcement_available
+            },
+            "details": details
+        })
+    }
+
+    fn d9us6_loopback_constraints(port: u16) -> ManagedNetworkConstraints {
+        ManagedNetworkConstraints {
+            host_allow: vec!["127.0.0.1".to_string()],
+            port_allow: vec![ManagedPortConstraint::Static(port)],
+            ip_allow: Vec::new(),
+            cidr_deny: Vec::new(),
+            deny_localhost: false,
+            deny_private_ranges: false,
+            deny_tailnet_ranges: false,
+            require_sni: false,
+            spki_pins: Vec::new(),
+            deny_ip_literals: false,
+            require_host_canonicalization: true,
+            dns_max_ips: 16,
+            max_redirects: 0,
+            connect_timeout_ms: 1_000,
+            total_timeout_ms: 3_000,
+            max_response_bytes: 8_192,
+        }
+    }
+
+    fn d9us6_host_egress_registry_with_constraints(
+        connector_id: &'static str,
+        operation_id: &'static str,
+        constraints: ManagedNetworkConstraints,
+    ) -> Arc<SubprocessRegistry> {
+        let introspection = serde_json::to_value(dispatcher_introspection(
+            operation_id,
+            "cap.test.egress",
+            SafetyTier::Safe,
+        ))
+        .expect("introspection serializes");
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(4);
+        let runner_task = task::spawn(async move {
+            while let Some(request) = runner_rx.recv().await {
+                match request.method.as_str() {
+                    "introspect" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": introspection.clone(),
+                        })));
+                    }
+                    "health" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": dispatcher_health_result(),
+                        })));
+                    }
+                    method => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": { "message": format!("unexpected host-egress method {method}") },
+                        })));
+                    }
+                }
+            }
+        });
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::HostEgressProxy;
+        config
+            .operation_network_constraints
+            .insert(operation_id.to_string(), constraints);
+        dispatcher_registry_with_connector(
+            connector_id,
+            dispatcher_test_connector(connector_id, runner_tx, runner_task),
+            config,
+        )
+    }
+
+    async fn d9us6_host_egress_state(
+        connector_id: &'static str,
+        operation_id: &'static str,
+        port: u16,
+        credential_id: CredentialId,
+        credential_payload: Value,
+    ) -> (Arc<AppState>, fcp_crypto::ed25519::Ed25519SigningKey) {
+        d9us6_host_egress_state_with_constraints(
+            connector_id,
+            operation_id,
+            d9us6_loopback_constraints(port),
+            credential_id,
+            credential_payload,
+        )
+        .await
+    }
+
+    async fn d9us6_host_egress_state_with_constraints(
+        connector_id: &'static str,
+        operation_id: &'static str,
+        constraints: ManagedNetworkConstraints,
+        credential_id: CredentialId,
+        credential_payload: Value,
+    ) -> (Arc<AppState>, fcp_crypto::ed25519::Ed25519SigningKey) {
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        register_test_capability_issuer(
+            lifecycle.as_ref(),
+            &signing_key,
+            connector_id,
+            "cap.test.egress",
+            operation_id,
+            ZoneId::work().as_str(),
+        )
+        .await;
+        let mut policies = HashMap::new();
+        policies.insert(ZoneId::work(), host_runtime_policy(ZoneId::work()));
+        let state = dispatcher_app_state(
+            d9us6_host_egress_registry_with_constraints(connector_id, operation_id, constraints),
+            lifecycle,
+            Some(signing_key.verifying_key()),
+            policies,
+        );
+        let pool_key = CredentialPoolKey::new(
+            ProviderKey::new("d9us6-fixture").expect("provider key"),
+            ZoneId::work(),
+        );
+        state
+            .credential_pools
+            .lock()
+            .await
+            .add_credential(
+                pool_key,
+                CredentialPoolStrategy::Priority,
+                PooledCredentialInput::new(
+                    credential_id,
+                    fcp_host::CredentialSource::Manual,
+                    0,
+                    "d9us6 fixture credential",
+                    credential_payload,
+                )
+                .into_credential(),
+                CredentialUpsertMode::RejectExisting,
+            )
+            .expect("install host-egress credential");
+        (state, signing_key)
+    }
+
+    async fn d9us6_one_shot_http_server(
+        observed_request: Arc<StdMutex<Option<String>>>,
+    ) -> (SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind d9us6 HTTP loopback");
+        let addr = listener.local_addr().expect("listener local addr");
+        let task = task::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept HTTP egress");
+            let mut request_bytes = Vec::new();
+            let mut buf = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut buf).await.expect("read HTTP request");
+                if read == 0 {
+                    break;
+                }
+                request_bytes.extend_from_slice(&buf[..read]);
+                if request_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            *observed_request.lock().expect("observed request lock") =
+                Some(String::from_utf8_lossy(&request_bytes).into_owned());
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-Fcp-Egress: loopback\r\nConnection: close\r\n\r\nOK",
+                )
+                .await
+                .expect("write HTTP response");
+            stream.flush().await.expect("flush HTTP response");
+        });
+        (addr, task)
+    }
+
+    async fn d9us6_one_shot_tcp_server(
+        observed_bytes: Arc<StdMutex<Vec<u8>>>,
+    ) -> (SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind d9us6 TCP loopback");
+        let addr = listener.local_addr().expect("listener local addr");
+        let task = task::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept TCP egress");
+            let mut buf = [0_u8; 64];
+            let read = stream.read(&mut buf).await.expect("read TCP request");
+            observed_bytes
+                .lock()
+                .expect("observed bytes lock")
+                .extend_from_slice(&buf[..read]);
+            stream.write_all(b"PONG").await.expect("write TCP response");
+            stream.flush().await.expect("flush TCP response");
+        });
+        (addr, task)
+    }
+
+    async fn d9us6_slow_http_server() -> (SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind d9us6 slow HTTP loopback");
+        let addr = listener.local_addr().expect("listener local addr");
+        let task = task::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept slow HTTP egress");
+            let mut request_bytes = Vec::new();
+            let mut buf = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut buf).await.expect("read slow HTTP request");
+                if read == 0 {
+                    break;
+                }
+                request_bytes.extend_from_slice(&buf[..read]);
+                if request_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            fcp_async_core::time::sleep(Duration::from_millis(150)).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                .await;
+            let _ = stream.flush().await;
+        });
+        (addr, task)
+    }
+
+    async fn br_4kw5f_9_6_1_one_shot_http_response(
+        response: Vec<u8>,
+    ) -> (SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind 4kw5f.9.6.1 HTTP loopback");
+        let addr = listener.local_addr().expect("listener local addr");
+        let task = task::spawn(async move {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("accept 4kw5f.9.6.1 HTTP egress");
+            let mut request_bytes = Vec::new();
+            let mut buf = [0_u8; 1024];
+            loop {
+                let read = stream
+                    .read(&mut buf)
+                    .await
+                    .expect("read 4kw5f.9.6.1 HTTP request");
+                if read == 0 {
+                    break;
+                }
+                request_bytes.extend_from_slice(&buf[..read]);
+                if request_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            stream
+                .write_all(&response)
+                .await
+                .expect("write 4kw5f.9.6.1 HTTP response");
+            stream
+                .flush()
+                .await
+                .expect("flush 4kw5f.9.6.1 HTTP response");
+        });
+        (addr, task)
+    }
+
+    #[derive(Clone)]
+    struct Br4kw5fTlsFixture {
+        ca_pem: Vec<u8>,
+        ca_der: Vec<u8>,
+        server_der: Vec<u8>,
+        server_key_der: Vec<u8>,
+        server_spki_der: Vec<u8>,
+    }
+
+    fn br_4kw5f_9_6_1_tls_fixture() -> Br4kw5fTlsFixture {
+        let ca_key = rcgen::KeyPair::generate().expect("generate host-egress test CA key");
+        let mut ca_params =
+            rcgen::CertificateParams::new(vec!["fcp-host-4kw5f-9-6-1-test-ca".to_string()])
+                .expect("create CA params");
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![
+            rcgen::KeyUsagePurpose::KeyCertSign,
+            rcgen::KeyUsagePurpose::CrlSign,
+            rcgen::KeyUsagePurpose::DigitalSignature,
+        ];
+        let ca = rcgen::CertifiedIssuer::self_signed(ca_params, ca_key).expect("self-sign test CA");
+
+        let server_key = rcgen::KeyPair::generate().expect("generate host-egress TLS server key");
+        let mut server_params = rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()])
+            .expect("create server cert params");
+        server_params.is_ca = rcgen::IsCa::ExplicitNoCa;
+        server_params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
+        server_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+        server_params.use_authority_key_identifier_extension = true;
+        let server_cert = server_params
+            .signed_by(&server_key, &ca)
+            .expect("sign host-egress TLS server cert");
+
+        let fixture = Br4kw5fTlsFixture {
+            ca_pem: ca.pem().into_bytes(),
+            ca_der: ca.der().as_ref().to_vec(),
+            server_der: server_cert.der().as_ref().to_vec(),
+            server_key_der: server_key.serialize_der(),
+            server_spki_der: host_egress_leaf_spki_der(
+                server_cert.der().as_ref(),
+                "TEST",
+                "127.0.0.1",
+            )
+            .expect("extract generated server SPKI"),
+        };
+        register_host_egress_test_extra_ca_pem(fixture.ca_pem.clone());
+        fixture
+    }
+
+    fn br_4kw5f_9_6_1_tls_acceptor(fixture: &Br4kw5fTlsFixture) -> asupersync::tls::TlsAcceptor {
+        let chain = asupersync::tls::CertificateChain::from(vec![
+            asupersync::tls::Certificate::from_der(fixture.server_der.clone()),
+            asupersync::tls::Certificate::from_der(fixture.ca_der.clone()),
+        ]);
+        let key = asupersync::tls::PrivateKey::from_pkcs8_der(fixture.server_key_der.clone());
+        asupersync::tls::TlsAcceptor::builder(chain, key)
+            .alpn_protocols(vec![b"http/1.1".to_vec()])
+            .handshake_timeout(Duration::from_millis(1_000))
+            .build()
+            .expect("build host-egress TLS acceptor")
+    }
+
+    async fn br_4kw5f_9_6_1_one_shot_https_response(
+        fixture: Br4kw5fTlsFixture,
+        response: Vec<u8>,
+    ) -> (SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind 4kw5f.9.6.1 HTTPS loopback");
+        let addr = listener.local_addr().expect("listener local addr");
+        let acceptor = br_4kw5f_9_6_1_tls_acceptor(&fixture);
+        let task = task::spawn(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("accept 4kw5f.9.6.1 HTTPS egress");
+            let mut stream = match acceptor.accept(stream).await {
+                Ok(stream) => stream,
+                Err(err) => {
+                    println!(
+                        "RUNTIME_NETWORK_POLICY_E2E_LOG transport=https peer_closed_before_application_data=true error={err}"
+                    );
+                    return;
+                }
+            };
+            let mut request_bytes = Vec::new();
+            let mut buf = [0_u8; 1024];
+            loop {
+                let read = stream
+                    .read(&mut buf)
+                    .await
+                    .expect("read 4kw5f.9.6.1 HTTPS request");
+                if read == 0 {
+                    break;
+                }
+                request_bytes.extend_from_slice(&buf[..read]);
+                if request_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            stream
+                .write_all(&response)
+                .await
+                .expect("write 4kw5f.9.6.1 HTTPS response");
+            stream
+                .flush()
+                .await
+                .expect("flush 4kw5f.9.6.1 HTTPS response");
+            stream
+                .shutdown()
+                .await
+                .expect("shutdown 4kw5f.9.6.1 HTTPS TLS");
+        });
+        (addr, task)
+    }
+
+    async fn br_4kw5f_9_6_1_one_shot_tls_tcp_server(
+        fixture: Br4kw5fTlsFixture,
+        observed_bytes: Arc<StdMutex<Vec<u8>>>,
+    ) -> (SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind 4kw5f.9.6.1 TLS TCP loopback");
+        let addr = listener.local_addr().expect("listener local addr");
+        let acceptor = br_4kw5f_9_6_1_tls_acceptor(&fixture);
+        let task = task::spawn(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("accept 4kw5f.9.6.1 TLS TCP egress");
+            let mut stream = match acceptor.accept(stream).await {
+                Ok(stream) => stream,
+                Err(err) => {
+                    println!(
+                        "RUNTIME_NETWORK_POLICY_E2E_LOG transport=tcp_tls peer_closed_before_application_data=true error={err}"
+                    );
+                    return;
+                }
+            };
+            let mut buf = [0_u8; 64];
+            let read = stream
+                .read(&mut buf)
+                .await
+                .expect("read 4kw5f.9.6.1 TLS TCP request");
+            observed_bytes
+                .lock()
+                .expect("observed TLS TCP bytes lock")
+                .extend_from_slice(&buf[..read]);
+            stream
+                .write_all(b"PONG")
+                .await
+                .expect("write 4kw5f.9.6.1 TLS TCP response");
+            stream
+                .flush()
+                .await
+                .expect("flush 4kw5f.9.6.1 TLS TCP response");
+            stream
+                .shutdown()
+                .await
+                .expect("shutdown 4kw5f.9.6.1 TCP TLS");
+        });
+        (addr, task)
+    }
+
+    fn d9us6_token_with_credentials(
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+        operation_id: &str,
+        credential_allow: Vec<CredentialId>,
+    ) -> fcp_core::CapabilityToken {
+        test_capability_token_with_constraints(
+            signing_key,
+            "cap.test.egress",
+            operation_id,
+            ZoneId::work().as_str(),
+            &fcp_core::CapabilityConstraints {
+                resource_allow: vec!["*".to_string()],
+                credential_allow,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn d9us6_host_egress_context(
+        connector_id: &str,
+        operation_id: &str,
+        request_id: &str,
+        correlation_id: &str,
+        token: &fcp_core::CapabilityToken,
+    ) -> HostEgressContext {
+        HostEgressContext {
+            connector_id: connector_id.to_string(),
+            operation_id: operation_id.to_string(),
+            zone_id: ZoneId::work().to_string(),
+            request_id: request_id.to_string(),
+            correlation_id: Some(correlation_id.to_string()),
+            capability_token_cbor_b64: capability_token_b64(token).expect("token b64"),
+        }
+    }
+
+    fn d9us6_host_egress_e2e_record(
+        scenario: &str,
+        protocol: &str,
+        observed_decision: &str,
+        details: Value,
+    ) -> Value {
+        json!({
+            "timestamp": "2026-05-07T00:00:00Z",
+            "test_name": "br_d9us6_host_egress_runtime_network_policy_e2e_jsonl_matrix",
+            "module": "fcp-host",
+            "phase": "host_egress_proxy_runtime_network_policy",
+            "correlation_id": format!("corr-d9us6-host-egress-{scenario}"),
+            "result": "pass",
+            "duration_ms": 0,
+            "assertions": {
+                "passed": 1,
+                "failed": 0
+            },
+            "scenario_id": format!("host_egress_proxy.{scenario}"),
+            "context": {
+                "bead": "flywheel_connectors-d9us6",
+                "protocol": protocol,
+                "observed_decision": observed_decision,
+                "execution_mode": "host_egress_proxy",
+                "constraint_source": "managed_connector_config.operation_network_constraints"
+            },
+            "details": details
+        })
+    }
+
+    fn br_4kw5f_9_6_1_tls_e2e_record(scenario: &str, protocol: &str, details: Value) -> Value {
+        json!({
+            "timestamp": "2026-05-07T00:00:00Z",
+            "test_name": "br_4kw5f_9_6_1_host_egress_tls_transport_e2e_jsonl_matrix",
+            "module": "fcp-host",
+            "phase": "host_egress_proxy_tls_transport",
+            "correlation_id": format!("corr-4kw5f-9-6-1-host-egress-tls-{scenario}"),
+            "result": "pass",
+            "duration_ms": 0,
+            "assertions": {
+                "passed": 6,
+                "failed": 0
+            },
+            "scenario_id": format!("host_egress_proxy_tls_transport.{scenario}"),
+            "context": {
+                "bead": "flywheel_connectors-4kw5f.9.6.1",
+                "protocol": protocol,
+                "observed_decision": "allow",
+                "execution_mode": "host_egress_proxy",
+                "constraint_source": "managed_connector_config.operation_network_constraints",
+                "tls_trust_source": "host_owned_extra_ca_bundle"
+            },
+            "details": details
+        })
+    }
+
+    fn br_4kw5f_9_6_1_emit_tls_e2e_record(record: Value) {
+        let line = serde_json::to_string(&record).expect("record serializes");
+        let value: Value = serde_json::from_str(&line).expect("JSONL parses");
+        assert_eq!(value["result"], "pass");
+        assert!(
+            !line.contains("unused"),
+            "TLS e2e evidence must not contain fixture credential values"
+        );
+        println!("RUNTIME_NETWORK_POLICY_E2E_JSONL {line}");
+    }
+
+    fn br_4kw5f_9_6_1_transport_policy_e2e_record(
+        scenario: &str,
+        protocol: &str,
+        observed_decision: &str,
+        details: Value,
+    ) -> Value {
+        json!({
+            "timestamp": "2026-05-07T00:00:00Z",
+            "test_name": "br_4kw5f_9_6_1_host_egress_transport_policy_e2e_jsonl_matrix",
+            "module": "fcp-host",
+            "phase": "host_egress_proxy_transport_policy",
+            "correlation_id": format!("corr-4kw5f-9-6-1-host-egress-transport-{scenario}"),
+            "result": "pass",
+            "duration_ms": 0,
+            "assertions": {
+                "passed": 4,
+                "failed": 0
+            },
+            "scenario_id": format!("host_egress_proxy_transport.{scenario}"),
+            "context": {
+                "bead": "flywheel_connectors-4kw5f.9.6.1",
+                "protocol": protocol,
+                "observed_decision": observed_decision,
+                "execution_mode": "host_egress_proxy",
+                "constraint_source": "managed_connector_config.operation_network_constraints"
+            },
+            "details": details
+        })
+    }
+
+    fn br_4kw5f_9_6_1_emit_transport_policy_e2e_record(record: Value) {
+        let line = serde_json::to_string(&record).expect("record serializes");
+        let value: Value = serde_json::from_str(&line).expect("JSONL parses");
+        assert_eq!(value["result"], "pass");
+        assert_eq!(value["context"]["bead"], "flywheel_connectors-4kw5f.9.6.1");
+        assert!(
+            !line.contains("unused"),
+            "transport policy evidence must not contain fixture credential values"
+        );
+        assert!(
+            !line.contains("redaction-sentinel"),
+            "transport policy evidence must not contain fixture secret material"
+        );
+        println!("RUNTIME_NETWORK_POLICY_E2E_JSONL {line}");
+    }
+
+    fn br_c5bmr_spki_pin_b64(spki_der: &[u8]) -> String {
+        format!(
+            "base64:{}",
+            base64::engine::general_purpose::STANDARD.encode(spki_der)
+        )
+    }
+
+    fn br_c5bmr_elapsed_ms(started_at: Instant) -> u64 {
+        u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    struct BrC5bmrSpkiRecord<'a> {
+        scenario: &'a str,
+        connector_id: &'a str,
+        operation_id: &'a str,
+        zone_id: &'a str,
+        request_id: &'a str,
+        correlation_id: &'a str,
+        host: &'a str,
+        port: u16,
+        transport: &'a str,
+        decision: &'a str,
+        deny_reason: Option<&'a str>,
+        elapsed_ms: u64,
+        redaction_checks: Value,
+        details: Value,
+    }
+
+    fn br_c5bmr_spki_e2e_record(input: BrC5bmrSpkiRecord<'_>) -> Value {
+        json!({
+            "timestamp": "2026-05-07T00:00:00Z",
+            "test_name": "br_c5bmr_host_egress_spki_verification_e2e_jsonl_matrix",
+            "module": "fcp-host",
+            "phase": "host_egress_proxy_spki_verification",
+            "correlation_id": input.correlation_id,
+            "result": "pass",
+            "duration_ms": input.elapsed_ms,
+            "assertions": {
+                "passed": 8,
+                "failed": 0
+            },
+            "scenario_id": format!("host_egress_proxy_spki_verification.{}", input.scenario),
+            "context": {
+                "bead": "flywheel_connectors-c5bmr",
+                "connector_id": input.connector_id,
+                "operation": input.operation_id,
+                "zone_id": input.zone_id,
+                "request_id": input.request_id,
+                "correlation_id": input.correlation_id,
+                "host": input.host,
+                "port": input.port,
+                "transport": input.transport,
+                "decision": input.decision,
+                "deny_reason": input.deny_reason,
+                "execution_mode": "host_egress_proxy",
+                "constraint_source": "managed_connector_config.operation_network_constraints",
+                "tls_trust_source": "host_owned_extra_ca_bundle",
+                "spki_pin_model": "raw_der_subject_public_key_info_exact_match"
+            },
+            "redaction_checks": input.redaction_checks,
+            "details": input.details
+        })
+    }
+
+    fn br_c5bmr_emit_spki_e2e_record(record: Value) {
+        assert_eq!(record["result"], "pass");
+        assert_eq!(record["context"]["bead"], "flywheel_connectors-c5bmr");
+        let line = match serde_json::to_string(&record) {
+            Ok(line) => line,
+            Err(err) => {
+                assert!(false, "SPKI e2e evidence must serialize: {err}");
+                String::new()
+            }
+        };
+        let parsed = serde_json::from_str::<Value>(&line);
+        assert!(parsed.is_ok(), "SPKI e2e evidence must parse as JSONL");
+        assert!(
+            !line.contains("redaction-sentinel"),
+            "SPKI evidence must not contain fixture secret or pin material"
+        );
+        assert!(
+            !line.contains("base64:"),
+            "SPKI evidence must describe pin policy without logging encoded pins"
+        );
+        println!("RUNTIME_NETWORK_POLICY_E2E_JSONL {line}");
+    }
+
+    fn br_c5bmr_assert_spki_error_redacted(error: &str, forbidden_pin: &str) {
+        assert!(
+            error.contains("SPKI") || error.contains("certificate"),
+            "expected SPKI/certificate denial, got: {error}"
+        );
+        assert!(
+            !error.contains(forbidden_pin),
+            "error leaked encoded SPKI pin: {error}"
+        );
+        assert!(
+            !error.contains("redaction-sentinel"),
+            "error leaked fixture secret material: {error}"
+        );
+        assert!(
+            !error.contains("base64:"),
+            "error leaked encoded policy material: {error}"
+        );
+    }
+
+    #[test]
+    fn br_c5bmr_extracts_leaf_spki_der_from_generated_certificate() {
+        let fixture = br_4kw5f_9_6_1_tls_fixture();
+        let extracted = host_egress_leaf_spki_der(&fixture.server_der, "HTTP", "127.0.0.1")
+            .expect("generated leaf SPKI extracts");
+
+        assert!(!extracted.is_empty());
+        assert_eq!(extracted, fixture.server_spki_der);
+    }
+
+    #[test]
+    fn br_c5bmr_raw_spki_pin_exact_match_and_mismatch() {
+        let fixture = br_4kw5f_9_6_1_tls_fixture();
+        let wrong_pin = b"redaction-sentinel-wrong-spki".to_vec();
+
+        DefaultTlsVerifier
+            .verify_spki(
+                &fixture.server_spki_der,
+                std::slice::from_ref(&fixture.server_spki_der),
+            )
+            .expect("exact raw DER SPKI pin must match");
+        let error = DefaultTlsVerifier
+            .verify_spki(&fixture.server_spki_der, &[wrong_pin])
+            .expect_err("mismatched raw DER SPKI pin must fail closed");
+        let message = error.to_string();
+        assert!(message.contains("SPKI"));
+        assert!(!message.contains("redaction-sentinel"));
+    }
+
+    #[test]
+    fn br_c5bmr_empty_spki_pin_is_rejected_without_material_leakage() {
+        let error = validate_host_egress_spki_pins(&[Vec::new()], "HTTP", "api.example.test")
+            .expect_err("empty raw DER SPKI pin must be rejected");
+        let message = error.to_string();
+
+        assert!(message.contains("empty raw DER SubjectPublicKeyInfo pin"));
+        assert!(!message.contains("base64:"));
+        assert!(!message.contains("redaction-sentinel"));
+    }
+
+    #[test]
+    fn br_c5bmr_malformed_leaf_certificate_fails_closed_without_raw_material() {
+        let error =
+            host_egress_leaf_spki_der(b"redaction-sentinel-not-a-cert", "TCP", "api.example.test")
+                .expect_err("malformed certificate must fail closed");
+        let message = error.to_string();
+
+        assert!(message.contains("SPKI extraction"));
+        assert!(!message.contains("redaction-sentinel-not-a-cert"));
+        assert!(!message.contains("base64:"));
+    }
+
+    #[test]
+    fn br_4kw5f_9_6_1_dns_policy_rejects_private_resolved_ip() {
+        let mut managed = d9us6_loopback_constraints(443);
+        managed.host_allow = vec!["api.example.test".to_string()];
+        managed.port_allow = vec![ManagedPortConstraint::Static(443)];
+        managed.deny_private_ranges = true;
+        let constraints = managed.resolve(None).expect("resolve managed constraints");
+        let mut decision = fcp_sandbox::EgressDecision {
+            allowed: true,
+            canonical_host: "api.example.test".to_string(),
+            resolved_ips: Vec::new(),
+            port: 443,
+            tls_required: true,
+            expected_sni: Some("api.example.test".to_string()),
+            spki_pins: Vec::new(),
+            credential_injected: false,
+        };
+
+        let error = validate_host_egress_resolved_ips(
+            &mut decision,
+            &constraints,
+            vec!["192.168.1.10".parse().expect("private IP")],
+            "HTTP",
+        )
+        .expect_err("private DNS answer must fail closed");
+        let message = error.to_string();
+        assert!(
+            message.contains("DNS policy rejected") && message.contains("private range"),
+            "expected private-IP DNS denial, got: {message}"
+        );
+        assert!(
+            decision.resolved_ips.is_empty(),
+            "denied DNS answers must not populate resolved_ips"
+        );
+    }
+
+    #[test]
+    fn br_4kw5f_9_6_1_dns_policy_populates_allowed_resolved_ips() {
+        let managed = d9us6_loopback_constraints(443);
+        let constraints = managed.resolve(None).expect("resolve managed constraints");
+        let mut decision = fcp_sandbox::EgressDecision {
+            allowed: true,
+            canonical_host: "127.0.0.1".to_string(),
+            resolved_ips: Vec::new(),
+            port: 443,
+            tls_required: true,
+            expected_sni: Some("127.0.0.1".to_string()),
+            spki_pins: Vec::new(),
+            credential_injected: false,
+        };
+
+        let addrs = validate_host_egress_resolved_ips(
+            &mut decision,
+            &constraints,
+            vec!["127.0.0.1".parse().expect("loopback IP")],
+            "HTTP",
+        )
+        .expect("loopback DNS answer is allowed by this fixture policy");
+        assert_eq!(addrs, vec![SocketAddr::from(([127, 0, 0, 1], 443))]);
+        assert_eq!(
+            decision.resolved_ips,
+            vec!["127.0.0.1".parse::<IpAddr>().unwrap()]
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_4kw5f_9_6_1_http_redirect_limit_denies_before_follow_e2e_jsonl_matrix() {
+        let response = b"HTTP/1.1 302 Found\r\nLocation: /after\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
+        let (addr, server_task) = br_4kw5f_9_6_1_one_shot_http_response(response).await;
+        let connector_id = "fcp.test.4kw5f-9-6-1-redirect:utility:1.0.0";
+        let operation_id = "test.egress_http";
+        let credential_id =
+            CredentialId::parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb").expect("credential id");
+        let mut constraints = d9us6_loopback_constraints(addr.port());
+        constraints.max_redirects = 0;
+        let (state, signing_key) = d9us6_host_egress_state_with_constraints(
+            connector_id,
+            operation_id,
+            constraints,
+            credential_id,
+            json!({"host_allow": ["127.0.0.1"], "http": {"bearer_token": "unused"}}),
+        )
+        .await;
+        let token = d9us6_token_with_credentials(&signing_key, operation_id, vec![credential_id]);
+
+        let error = host_egress_http_handler(
+            State(state),
+            Json(HostEgressHttpRequest {
+                context: d9us6_host_egress_context(
+                    connector_id,
+                    operation_id,
+                    "req-4kw5f-9-6-1-redirect",
+                    "corr-4kw5f-9-6-1-redirect",
+                    &token,
+                ),
+                url: format!("http://127.0.0.1:{}/redirect", addr.port()),
+                method: "GET".to_string(),
+                headers: Vec::new(),
+                body: None,
+                credential_id: None,
+            }),
+        )
+        .await
+        .expect_err("redirect with max_redirects=0 must fail closed");
+        server_task.await.expect("redirect server task");
+        assert!(
+            error.1.contains("redirect") && error.1.contains("max_redirects=0"),
+            "expected redirect-limit denial, got: {error:?}"
+        );
+        br_4kw5f_9_6_1_emit_transport_policy_e2e_record(
+            br_4kw5f_9_6_1_transport_policy_e2e_record(
+                "redirect_denied",
+                "HTTP",
+                "deny",
+                json!({
+                    "connector_id": connector_id,
+                    "operation": operation_id,
+                    "request_id": "req-4kw5f-9-6-1-redirect",
+                    "correlation_id": "corr-4kw5f-9-6-1-redirect",
+                    "url_path": "/redirect",
+                    "max_redirects": 0,
+                    "deny_reason": "redirect_limit_exceeded",
+                    "error_category": "redirect_denied",
+                    "response_success_reported": false
+                }),
+            ),
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_4kw5f_9_6_1_http_streaming_enforces_max_response_bytes_e2e_jsonl_matrix() {
+        let body = b"0123456789abcdef0123456789abcdef";
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        let (addr, server_task) = br_4kw5f_9_6_1_one_shot_http_response(response).await;
+        let connector_id = "fcp.test.4kw5f-9-6-1-size:utility:1.0.0";
+        let operation_id = "test.egress_http";
+        let credential_id =
+            CredentialId::parse("cccccccc-cccc-cccc-cccc-cccccccccccc").expect("credential id");
+        let mut constraints = d9us6_loopback_constraints(addr.port());
+        constraints.max_response_bytes = 8;
+        let (state, signing_key) = d9us6_host_egress_state_with_constraints(
+            connector_id,
+            operation_id,
+            constraints,
+            credential_id,
+            json!({"host_allow": ["127.0.0.1"], "http": {"bearer_token": "unused"}}),
+        )
+        .await;
+        let token = d9us6_token_with_credentials(&signing_key, operation_id, vec![credential_id]);
+
+        let error = host_egress_http_handler(
+            State(state),
+            Json(HostEgressHttpRequest {
+                context: d9us6_host_egress_context(
+                    connector_id,
+                    operation_id,
+                    "req-4kw5f-9-6-1-size",
+                    "corr-4kw5f-9-6-1-size",
+                    &token,
+                ),
+                url: format!("http://127.0.0.1:{}/too-large", addr.port()),
+                method: "GET".to_string(),
+                headers: Vec::new(),
+                body: None,
+                credential_id: None,
+            }),
+        )
+        .await
+        .expect_err("oversized streamed HTTP response must fail closed");
+        server_task.await.expect("size server task");
+        assert!(
+            error.1.contains("max_response_bytes=8"),
+            "expected response-size denial, got: {error:?}"
+        );
+        br_4kw5f_9_6_1_emit_transport_policy_e2e_record(
+            br_4kw5f_9_6_1_transport_policy_e2e_record(
+                "response_size_denied",
+                "HTTP",
+                "deny",
+                json!({
+                    "connector_id": connector_id,
+                    "operation": operation_id,
+                    "request_id": "req-4kw5f-9-6-1-size",
+                    "correlation_id": "corr-4kw5f-9-6-1-size",
+                    "max_response_bytes": 8,
+                    "upstream_body_bytes": body.len(),
+                    "deny_reason": "max_response_bytes_exceeded",
+                    "response_success_reported": false
+                }),
+            ),
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_4kw5f_9_6_1_https_loopback_trusts_host_extra_ca_e2e_jsonl_matrix() {
+        let fixture = br_4kw5f_9_6_1_tls_fixture();
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-Fcp-Egress-Tls: verified\r\nConnection: close\r\n\r\nOK".to_vec();
+        let (addr, server_task) = br_4kw5f_9_6_1_one_shot_https_response(fixture, response).await;
+        let connector_id = "fcp.test.4kw5f-9-6-1-https:utility:1.0.0";
+        let operation_id = "test.egress_http";
+        let credential_id =
+            CredentialId::parse("99999999-9999-9999-9999-999999999991").expect("credential id");
+        let mut constraints = d9us6_loopback_constraints(addr.port());
+        constraints.require_sni = true;
+        let (state, signing_key) = d9us6_host_egress_state_with_constraints(
+            connector_id,
+            operation_id,
+            constraints,
+            credential_id,
+            json!({"host_allow": ["127.0.0.1"], "http": {"bearer_token": "unused"}}),
+        )
+        .await;
+        let token = d9us6_token_with_credentials(&signing_key, operation_id, Vec::new());
+
+        let response = host_egress_http_handler(
+            State(state),
+            Json(HostEgressHttpRequest {
+                context: d9us6_host_egress_context(
+                    connector_id,
+                    operation_id,
+                    "req-4kw5f-9-6-1-https",
+                    "corr-4kw5f-9-6-1-https",
+                    &token,
+                ),
+                url: format!("https://127.0.0.1:{}/tls-ok", addr.port()),
+                method: "GET".to_string(),
+                headers: Vec::new(),
+                body: None,
+                credential_id: None,
+            }),
+        )
+        .await
+        .expect("HTTPS loopback with host extra CA must succeed")
+        .0;
+        server_task.await.expect("HTTPS server task");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body.as_bytes(), b"OK");
+        assert_eq!(response.egress.resolved_host, "127.0.0.1");
+        assert_eq!(response.egress.resolved_port, addr.port());
+        assert!(!response.egress.credential_injected);
+        assert!(
+            response.headers.iter().any(|header| {
+                header.name.eq_ignore_ascii_case("x-fcp-egress-tls") && header.value == "verified"
+            }),
+            "HTTPS response headers should preserve upstream TLS marker"
+        );
+        br_4kw5f_9_6_1_emit_tls_e2e_record(br_4kw5f_9_6_1_tls_e2e_record(
+            "https_extra_ca_success",
+            "HTTPS",
+            json!({
+                "tls": {
+                    "server_name": "127.0.0.1",
+                    "certificate": "rcgen_ca_signed_ip_san_leaf",
+                    "extra_ca_source": "host_test_extra_ca_registry",
+                    "spki_pins": "none"
+                },
+                "http": {
+                    "status": response.status,
+                    "body_bytes": response.body.as_bytes().len(),
+                    "marker_header_observed": true,
+                    "response_body": String::from_utf8_lossy(response.body.as_bytes()).to_string()
+                },
+                "egress_metadata": {
+                    "resolved_host": response.egress.resolved_host,
+                    "resolved_port": response.egress.resolved_port,
+                    "credential_injected": response.egress.credential_injected
+                },
+                "read_model": "reqwest_chunk_stream_with_max_response_bytes"
+            }),
+        ));
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_4kw5f_9_6_1_tcp_tls_loopback_trusts_host_extra_ca_e2e_jsonl_matrix() {
+        let fixture = br_4kw5f_9_6_1_tls_fixture();
+        let observed_bytes = Arc::new(StdMutex::new(Vec::new()));
+        let (addr, server_task) =
+            br_4kw5f_9_6_1_one_shot_tls_tcp_server(fixture, Arc::clone(&observed_bytes)).await;
+        let connector_id = "fcp.test.4kw5f-9-6-1-tcp-tls:utility:1.0.0";
+        let operation_id = "test.egress_tcp";
+        let credential_id =
+            CredentialId::parse("99999999-9999-9999-9999-999999999992").expect("credential id");
+        let mut constraints = d9us6_loopback_constraints(addr.port());
+        constraints.require_sni = true;
+        let (state, signing_key) = d9us6_host_egress_state_with_constraints(
+            connector_id,
+            operation_id,
+            constraints,
+            credential_id,
+            json!({"host_allow": ["127.0.0.1"], "tcp": {"auth": "unused"}}),
+        )
+        .await;
+        let token = d9us6_token_with_credentials(&signing_key, operation_id, Vec::new());
+
+        let response = host_egress_tcp_handler(
+            State(state),
+            Json(HostEgressTcpRequest {
+                context: d9us6_host_egress_context(
+                    connector_id,
+                    operation_id,
+                    "req-4kw5f-9-6-1-tcp-tls",
+                    "corr-4kw5f-9-6-1-tcp-tls",
+                    &token,
+                ),
+                host: "127.0.0.1".to_string(),
+                port: addr.port(),
+                tls: true,
+                sni_override: None,
+                write: Some(fcp_manifest::Base64Bytes::from_vec(b"PING".to_vec())),
+                read_limit_bytes: Some(4),
+                credential_id: None,
+            }),
+        )
+        .await
+        .expect("TCP TLS loopback with host extra CA must succeed")
+        .0;
+        server_task.await.expect("TLS TCP server task");
+        assert_eq!(response.bytes_written, 4);
+        assert_eq!(response.bytes_read, 4);
+        assert_eq!(response.read.as_bytes(), b"PONG");
+        assert_eq!(
+            observed_bytes
+                .lock()
+                .expect("observed bytes lock")
+                .as_slice(),
+            b"PING"
+        );
+        assert_eq!(response.egress.resolved_host, "127.0.0.1");
+        assert_eq!(response.egress.resolved_port, addr.port());
+        assert!(!response.egress.credential_injected);
+        br_4kw5f_9_6_1_emit_tls_e2e_record(br_4kw5f_9_6_1_tls_e2e_record(
+            "tcp_tls_extra_ca_success",
+            "TCP_TLS",
+            json!({
+                "tls": {
+                    "server_name": "127.0.0.1",
+                    "certificate": "rcgen_ca_signed_ip_san_leaf",
+                    "extra_ca_source": "host_test_extra_ca_registry",
+                    "spki_pins": "none"
+                },
+                "tcp": {
+                    "bytes_written": response.bytes_written,
+                    "bytes_read": response.bytes_read,
+                    "request_bytes": "PING",
+                    "response_bytes": String::from_utf8_lossy(response.read.as_bytes()).to_string(),
+                    "read_limit_bytes": 4,
+                    "bounded_read_stops_at_explicit_limit": true
+                },
+                "egress_metadata": {
+                    "resolved_host": response.egress.resolved_host,
+                    "resolved_port": response.egress.resolved_port,
+                    "credential_injected": response.egress.credential_injected
+                }
+            }),
+        ));
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_c5bmr_https_spki_allowed_no_mock_e2e_jsonl_matrix() {
+        let fixture = br_4kw5f_9_6_1_tls_fixture();
+        let spki_pin = br_c5bmr_spki_pin_b64(&fixture.server_spki_der);
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-Fcp-Egress-Spki: verified\r\nConnection: close\r\n\r\nOK".to_vec();
+        let (addr, server_task) = br_4kw5f_9_6_1_one_shot_https_response(fixture, response).await;
+        let connector_id = "fcp.test.c5bmr-https-allowed:utility:1.0.0";
+        let operation_id = "test.egress_http";
+        let request_id = "req-c5bmr-https-spki-allowed";
+        let correlation_id = "corr-c5bmr-https-spki-allowed";
+        let zone_id = ZoneId::work().to_string();
+        let credential_id =
+            CredentialId::parse("99999999-9999-9999-9999-999999999993").expect("credential id");
+        let mut constraints = d9us6_loopback_constraints(addr.port());
+        constraints.require_sni = true;
+        constraints.spki_pins = vec![spki_pin];
+        let (state, signing_key) = d9us6_host_egress_state_with_constraints(
+            connector_id,
+            operation_id,
+            constraints,
+            credential_id,
+            json!({"host_allow": ["127.0.0.1"], "http": {"bearer_token": "redaction-sentinel-http-token"}}),
+        )
+        .await;
+        let token = d9us6_token_with_credentials(&signing_key, operation_id, Vec::new());
+
+        let started_at = Instant::now();
+        let response = host_egress_http_handler(
+            State(state),
+            Json(HostEgressHttpRequest {
+                context: d9us6_host_egress_context(
+                    connector_id,
+                    operation_id,
+                    request_id,
+                    correlation_id,
+                    &token,
+                ),
+                url: format!("https://127.0.0.1:{}/spki-ok", addr.port()),
+                method: "GET".to_string(),
+                headers: Vec::new(),
+                body: None,
+                credential_id: None,
+            }),
+        )
+        .await
+        .expect("HTTPS SPKI exact raw DER pin must succeed")
+        .0;
+        let elapsed_ms = br_c5bmr_elapsed_ms(started_at);
+        server_task.await.expect("HTTPS SPKI allowed server task");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body.as_bytes(), b"OK");
+        assert_eq!(response.egress.resolved_host, "127.0.0.1");
+        assert_eq!(response.egress.resolved_port, addr.port());
+        assert!(!response.egress.credential_injected);
+        assert!(
+            response.headers.iter().any(|header| {
+                header.name.eq_ignore_ascii_case("x-fcp-egress-spki") && header.value == "verified"
+            }),
+            "HTTPS SPKI response headers should preserve upstream marker"
+        );
+        br_c5bmr_emit_spki_e2e_record(br_c5bmr_spki_e2e_record(BrC5bmrSpkiRecord {
+            scenario: "https_spki_allowed",
+            connector_id,
+            operation_id,
+            zone_id: &zone_id,
+            request_id,
+            correlation_id,
+            host: "127.0.0.1",
+            port: addr.port(),
+            transport: "https",
+            decision: "allow",
+            deny_reason: None,
+            elapsed_ms,
+            redaction_checks: json!({
+                "pin_material_absent_from_evidence": true,
+                "credential_secret_absent_from_evidence": true,
+                "peer_certificate_der_absent_from_evidence": true,
+                "response_body_contains_no_secret": true
+            }),
+            details: json!({
+                "tls": {
+                    "server_name": "127.0.0.1",
+                    "certificate": "rcgen_ca_signed_ip_san_leaf",
+                    "extra_ca_source": "host_test_extra_ca_registry",
+                    "spki_policy": "exact_raw_der_match"
+                },
+                "http": {
+                    "status": response.status,
+                    "body_bytes": response.body.as_bytes().len(),
+                    "marker_header_observed": true
+                },
+                "egress_metadata": {
+                    "resolved_host": response.egress.resolved_host,
+                    "resolved_port": response.egress.resolved_port,
+                    "credential_injected": response.egress.credential_injected
+                }
+            }),
+        }));
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_c5bmr_https_spki_denied_no_mock_e2e_jsonl_matrix() {
+        let fixture = br_4kw5f_9_6_1_tls_fixture();
+        let forbidden_pin = br_c5bmr_spki_pin_b64(b"redaction-sentinel-wrong-http-spki");
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 28\r\nConnection: close\r\n\r\nredaction-sentinel-response".to_vec();
+        let (addr, server_task) = br_4kw5f_9_6_1_one_shot_https_response(fixture, response).await;
+        let connector_id = "fcp.test.c5bmr-https-denied:utility:1.0.0";
+        let operation_id = "test.egress_http";
+        let request_id = "req-c5bmr-https-spki-denied";
+        let correlation_id = "corr-c5bmr-https-spki-denied";
+        let zone_id = ZoneId::work().to_string();
+        let credential_id =
+            CredentialId::parse("99999999-9999-9999-9999-999999999994").expect("credential id");
+        let mut constraints = d9us6_loopback_constraints(addr.port());
+        constraints.require_sni = true;
+        constraints.spki_pins = vec![forbidden_pin.clone()];
+        let (state, signing_key) = d9us6_host_egress_state_with_constraints(
+            connector_id,
+            operation_id,
+            constraints,
+            credential_id,
+            json!({"host_allow": ["127.0.0.1"], "http": {"bearer_token": "redaction-sentinel-http-token"}}),
+        )
+        .await;
+        let token = d9us6_token_with_credentials(&signing_key, operation_id, Vec::new());
+
+        let started_at = Instant::now();
+        let error = host_egress_http_handler(
+            State(state),
+            Json(HostEgressHttpRequest {
+                context: d9us6_host_egress_context(
+                    connector_id,
+                    operation_id,
+                    request_id,
+                    correlation_id,
+                    &token,
+                ),
+                url: format!("https://127.0.0.1:{}/spki-denied", addr.port()),
+                method: "GET".to_string(),
+                headers: Vec::new(),
+                body: None,
+                credential_id: None,
+            }),
+        )
+        .await
+        .expect_err("HTTPS mismatched SPKI pin must fail closed");
+        let elapsed_ms = br_c5bmr_elapsed_ms(started_at);
+        server_task.await.expect("HTTPS SPKI denied server task");
+
+        br_c5bmr_assert_spki_error_redacted(&error.1, &forbidden_pin);
+        assert!(
+            !error.1.contains("redaction-sentinel-response"),
+            "SPKI-denied HTTPS must not report response success: {error:?}"
+        );
+        br_c5bmr_emit_spki_e2e_record(br_c5bmr_spki_e2e_record(BrC5bmrSpkiRecord {
+            scenario: "https_spki_denied",
+            connector_id,
+            operation_id,
+            zone_id: &zone_id,
+            request_id,
+            correlation_id,
+            host: "127.0.0.1",
+            port: addr.port(),
+            transport: "https",
+            decision: "deny",
+            deny_reason: Some("spki_pin_mismatch"),
+            elapsed_ms,
+            redaction_checks: json!({
+                "encoded_pin_absent_from_error": true,
+                "fixture_secret_absent_from_error": true,
+                "upstream_response_absent_from_error": true,
+                "credential_secret_absent_from_evidence": true
+            }),
+            details: json!({
+                "tls": {
+                    "server_name": "127.0.0.1",
+                    "certificate": "rcgen_ca_signed_ip_san_leaf",
+                    "extra_ca_source": "host_test_extra_ca_registry",
+                    "spki_policy": "mismatched_raw_der_pin"
+                },
+                "http": {
+                    "response_success_reported": false
+                }
+            }),
+        }));
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_c5bmr_tcp_tls_spki_allowed_no_mock_e2e_jsonl_matrix() {
+        let fixture = br_4kw5f_9_6_1_tls_fixture();
+        let spki_pin = br_c5bmr_spki_pin_b64(&fixture.server_spki_der);
+        let observed_bytes = Arc::new(StdMutex::new(Vec::new()));
+        let (addr, server_task) =
+            br_4kw5f_9_6_1_one_shot_tls_tcp_server(fixture, Arc::clone(&observed_bytes)).await;
+        let connector_id = "fcp.test.c5bmr-tcp-tls-allowed:utility:1.0.0";
+        let operation_id = "test.egress_tcp";
+        let request_id = "req-c5bmr-tcp-tls-spki-allowed";
+        let correlation_id = "corr-c5bmr-tcp-tls-spki-allowed";
+        let zone_id = ZoneId::work().to_string();
+        let credential_id =
+            CredentialId::parse("99999999-9999-9999-9999-999999999995").expect("credential id");
+        let mut constraints = d9us6_loopback_constraints(addr.port());
+        constraints.require_sni = true;
+        constraints.spki_pins = vec![spki_pin];
+        let (state, signing_key) = d9us6_host_egress_state_with_constraints(
+            connector_id,
+            operation_id,
+            constraints,
+            credential_id,
+            json!({"host_allow": ["127.0.0.1"], "tcp": {"auth": "redaction-sentinel-tcp-secret"}}),
+        )
+        .await;
+        let token = d9us6_token_with_credentials(&signing_key, operation_id, Vec::new());
+
+        let started_at = Instant::now();
+        let response = host_egress_tcp_handler(
+            State(state),
+            Json(HostEgressTcpRequest {
+                context: d9us6_host_egress_context(
+                    connector_id,
+                    operation_id,
+                    request_id,
+                    correlation_id,
+                    &token,
+                ),
+                host: "127.0.0.1".to_string(),
+                port: addr.port(),
+                tls: true,
+                sni_override: None,
+                write: Some(fcp_manifest::Base64Bytes::from_vec(b"PING".to_vec())),
+                read_limit_bytes: Some(4),
+                credential_id: None,
+            }),
+        )
+        .await
+        .expect("TCP TLS SPKI exact raw DER pin must succeed")
+        .0;
+        let elapsed_ms = br_c5bmr_elapsed_ms(started_at);
+        server_task.await.expect("TLS TCP SPKI allowed server task");
+
+        assert_eq!(response.bytes_written, 4);
+        assert_eq!(response.bytes_read, 4);
+        assert_eq!(response.read.as_bytes(), b"PONG");
+        assert_eq!(
+            observed_bytes
+                .lock()
+                .expect("observed bytes lock")
+                .as_slice(),
+            b"PING"
+        );
+        assert_eq!(response.egress.resolved_host, "127.0.0.1");
+        assert_eq!(response.egress.resolved_port, addr.port());
+        assert!(!response.egress.credential_injected);
+        br_c5bmr_emit_spki_e2e_record(br_c5bmr_spki_e2e_record(BrC5bmrSpkiRecord {
+            scenario: "tcp_tls_spki_allowed",
+            connector_id,
+            operation_id,
+            zone_id: &zone_id,
+            request_id,
+            correlation_id,
+            host: "127.0.0.1",
+            port: addr.port(),
+            transport: "tcp_tls",
+            decision: "allow",
+            deny_reason: None,
+            elapsed_ms,
+            redaction_checks: json!({
+                "pin_material_absent_from_evidence": true,
+                "credential_secret_absent_from_evidence": true,
+                "peer_certificate_der_absent_from_evidence": true,
+                "tcp_payload_contains_no_secret": true
+            }),
+            details: json!({
+                "tls": {
+                    "server_name": "127.0.0.1",
+                    "certificate": "rcgen_ca_signed_ip_san_leaf",
+                    "extra_ca_source": "host_test_extra_ca_registry",
+                    "spki_policy": "exact_raw_der_match"
+                },
+                "tcp": {
+                    "bytes_written": response.bytes_written,
+                    "bytes_read": response.bytes_read,
+                    "request_bytes": "PING",
+                    "response_bytes": String::from_utf8_lossy(response.read.as_bytes()).to_string(),
+                    "read_limit_bytes": 4,
+                    "bounded_read_stops_at_explicit_limit": true
+                },
+                "egress_metadata": {
+                    "resolved_host": response.egress.resolved_host,
+                    "resolved_port": response.egress.resolved_port,
+                    "credential_injected": response.egress.credential_injected
+                }
+            }),
+        }));
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_c5bmr_tcp_tls_spki_denied_no_mock_e2e_jsonl_matrix() {
+        let fixture = br_4kw5f_9_6_1_tls_fixture();
+        let forbidden_pin = br_c5bmr_spki_pin_b64(b"redaction-sentinel-wrong-tcp-spki");
+        let observed_bytes = Arc::new(StdMutex::new(Vec::new()));
+        let (addr, server_task) =
+            br_4kw5f_9_6_1_one_shot_tls_tcp_server(fixture, Arc::clone(&observed_bytes)).await;
+        let connector_id = "fcp.test.c5bmr-tcp-tls-denied:utility:1.0.0";
+        let operation_id = "test.egress_tcp";
+        let request_id = "req-c5bmr-tcp-tls-spki-denied";
+        let correlation_id = "corr-c5bmr-tcp-tls-spki-denied";
+        let zone_id = ZoneId::work().to_string();
+        let credential_id =
+            CredentialId::parse("99999999-9999-9999-9999-999999999996").expect("credential id");
+        let mut constraints = d9us6_loopback_constraints(addr.port());
+        constraints.require_sni = true;
+        constraints.spki_pins = vec![forbidden_pin.clone()];
+        let (state, signing_key) = d9us6_host_egress_state_with_constraints(
+            connector_id,
+            operation_id,
+            constraints,
+            credential_id,
+            json!({"host_allow": ["127.0.0.1"], "tcp": {"auth": "redaction-sentinel-tcp-secret"}}),
+        )
+        .await;
+        let token = d9us6_token_with_credentials(&signing_key, operation_id, Vec::new());
+
+        let started_at = Instant::now();
+        let error = host_egress_tcp_handler(
+            State(state),
+            Json(HostEgressTcpRequest {
+                context: d9us6_host_egress_context(
+                    connector_id,
+                    operation_id,
+                    request_id,
+                    correlation_id,
+                    &token,
+                ),
+                host: "127.0.0.1".to_string(),
+                port: addr.port(),
+                tls: true,
+                sni_override: None,
+                write: Some(fcp_manifest::Base64Bytes::from_vec(b"PING".to_vec())),
+                read_limit_bytes: Some(4),
+                credential_id: None,
+            }),
+        )
+        .await
+        .expect_err("TCP TLS mismatched SPKI pin must fail closed");
+        let elapsed_ms = br_c5bmr_elapsed_ms(started_at);
+        server_task.await.expect("TLS TCP SPKI denied server task");
+
+        br_c5bmr_assert_spki_error_redacted(&error.1, &forbidden_pin);
+        assert!(
+            observed_bytes
+                .lock()
+                .expect("observed bytes lock")
+                .is_empty(),
+            "SPKI-denied TCP TLS must not deliver application data"
+        );
+        br_c5bmr_emit_spki_e2e_record(br_c5bmr_spki_e2e_record(BrC5bmrSpkiRecord {
+            scenario: "tcp_tls_spki_denied",
+            connector_id,
+            operation_id,
+            zone_id: &zone_id,
+            request_id,
+            correlation_id,
+            host: "127.0.0.1",
+            port: addr.port(),
+            transport: "tcp_tls",
+            decision: "deny",
+            deny_reason: Some("spki_pin_mismatch"),
+            elapsed_ms,
+            redaction_checks: json!({
+                "encoded_pin_absent_from_error": true,
+                "fixture_secret_absent_from_error": true,
+                "application_bytes_not_delivered": true,
+                "credential_secret_absent_from_evidence": true
+            }),
+            details: json!({
+                "tls": {
+                    "server_name": "127.0.0.1",
+                    "certificate": "rcgen_ca_signed_ip_san_leaf",
+                    "extra_ca_source": "host_test_extra_ca_registry",
+                    "spki_policy": "mismatched_raw_der_pin"
+                },
+                "tcp": {
+                    "bytes_written_to_server": 0,
+                    "response_success_reported": false,
+                    "read_limit_bytes": 4
+                }
+            }),
+        }));
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_4kw5f_9_6_1_tcp_tls_sni_override_denies_before_connect_e2e_jsonl_matrix() {
+        let connector_id = "fcp.test.4kw5f-9-6-1-sni:utility:1.0.0";
+        let operation_id = "test.egress_tcp";
+        let credential_id =
+            CredentialId::parse("dddddddd-dddd-dddd-dddd-dddddddddddd").expect("credential id");
+        let mut constraints = d9us6_loopback_constraints(443);
+        constraints.require_sni = true;
+        let (state, signing_key) = d9us6_host_egress_state_with_constraints(
+            connector_id,
+            operation_id,
+            constraints,
+            credential_id,
+            json!({"host_allow": ["127.0.0.1"], "tcp": {"auth": "unused"}}),
+        )
+        .await;
+        let token = d9us6_token_with_credentials(&signing_key, operation_id, Vec::new());
+
+        let error = host_egress_tcp_handler(
+            State(state),
+            Json(HostEgressTcpRequest {
+                context: d9us6_host_egress_context(
+                    connector_id,
+                    operation_id,
+                    "req-4kw5f-9-6-1-sni",
+                    "corr-4kw5f-9-6-1-sni",
+                    &token,
+                ),
+                host: "127.0.0.1".to_string(),
+                port: 443,
+                tls: true,
+                sni_override: Some("wrong.example.test".to_string()),
+                write: None,
+                read_limit_bytes: Some(16),
+                credential_id: None,
+            }),
+        )
+        .await
+        .expect_err("wrong SNI override must fail before TCP connect");
+        assert!(
+            error.1.contains("SNI") && error.1.contains("wrong.example.test"),
+            "expected SNI denial, got: {error:?}"
+        );
+        br_4kw5f_9_6_1_emit_transport_policy_e2e_record(
+            br_4kw5f_9_6_1_transport_policy_e2e_record(
+                "sni_denied",
+                "TCP_TLS",
+                "deny",
+                json!({
+                    "connector_id": connector_id,
+                    "operation": operation_id,
+                    "request_id": "req-4kw5f-9-6-1-sni",
+                    "correlation_id": "corr-4kw5f-9-6-1-sni",
+                    "expected_sni": "127.0.0.1",
+                    "actual_sni": "wrong.example.test",
+                    "deny_reason": "sni_mismatch",
+                    "connect_attempted": false,
+                    "response_success_reported": false
+                }),
+            ),
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_d9us6_host_egress_http_loopback_injects_credential_without_echoing_secret() {
+        let observed_request = Arc::new(StdMutex::new(None::<String>));
+        let (addr, server_task) = d9us6_one_shot_http_server(Arc::clone(&observed_request)).await;
+        let connector_id = "fcp.test.d9us6-http:utility:1.0.0";
+        let operation_id = "test.egress_http";
+        let credential_id =
+            CredentialId::parse("11111111-1111-1111-1111-111111111111").expect("credential id");
+        let (state, signing_key) = d9us6_host_egress_state(
+            connector_id,
+            operation_id,
+            addr.port(),
+            credential_id,
+            json!({
+                "host_allow": ["127.0.0.1"],
+                "http": {
+                    "headers": [{
+                        "name": "Authorization",
+                        "value": "Bearer redaction-sentinel-http-secret"
+                    }]
+                }
+            }),
+        )
+        .await;
+        let token = test_capability_token_with_constraints(
+            &signing_key,
+            "cap.test.egress",
+            operation_id,
+            ZoneId::work().as_str(),
+            &fcp_core::CapabilityConstraints {
+                resource_allow: vec!["*".to_string()],
+                credential_allow: vec![credential_id],
+                ..Default::default()
+            },
+        );
+        let request = HostEgressHttpRequest {
+            context: HostEgressContext {
+                connector_id: connector_id.to_string(),
+                operation_id: operation_id.to_string(),
+                zone_id: ZoneId::work().to_string(),
+                request_id: "req-d9us6-http".to_string(),
+                correlation_id: Some("corr-d9us6-http".to_string()),
+                capability_token_cbor_b64: capability_token_b64(&token).expect("token b64"),
+            },
+            url: format!("http://127.0.0.1:{}/v1/fixture", addr.port()),
+            method: "GET".to_string(),
+            headers: Vec::new(),
+            body: None,
+            credential_id: Some(credential_id.to_string()),
+        };
+
+        let response = host_egress_http_handler(State(state), Json(request))
+            .await
+            .expect("host HTTP egress should succeed")
+            .0;
+        server_task.await.expect("HTTP server task");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body.as_bytes(), b"OK");
+        assert!(response.egress.credential_injected);
+        let observed = observed_request
+            .lock()
+            .expect("observed request lock")
+            .clone()
+            .expect("server observed request");
+        assert!(
+            observed
+                .to_ascii_lowercase()
+                .contains("authorization: bearer redaction-sentinel-http-secret")
+        );
+        let serialized = serde_json::to_string(&response).expect("serialize response");
+        assert!(
+            !serialized.contains("redaction-sentinel-http-secret"),
+            "host egress response must not echo injected HTTP credentials"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_d9us6_host_egress_http_denies_wrong_host_before_connecting() {
+        let connector_id = "fcp.test.d9us6-http-deny:utility:1.0.0";
+        let operation_id = "test.egress_http";
+        let credential_id =
+            CredentialId::parse("22222222-2222-2222-2222-222222222222").expect("credential id");
+        let (state, signing_key) = d9us6_host_egress_state(
+            connector_id,
+            operation_id,
+            80,
+            credential_id,
+            json!({"host_allow": ["127.0.0.1"], "http": {"bearer_token": "unused"}}),
+        )
+        .await;
+        let token = test_capability_token_with_constraints(
+            &signing_key,
+            "cap.test.egress",
+            operation_id,
+            ZoneId::work().as_str(),
+            &fcp_core::CapabilityConstraints {
+                resource_allow: vec!["*".to_string()],
+                credential_allow: vec![credential_id],
+                ..Default::default()
+            },
+        );
+        let request = HostEgressHttpRequest {
+            context: HostEgressContext {
+                connector_id: connector_id.to_string(),
+                operation_id: operation_id.to_string(),
+                zone_id: ZoneId::work().to_string(),
+                request_id: "req-d9us6-deny-host".to_string(),
+                correlation_id: Some("corr-d9us6-deny-host".to_string()),
+                capability_token_cbor_b64: capability_token_b64(&token).expect("token b64"),
+            },
+            url: "http://127.0.0.2/v1/fixture".to_string(),
+            method: "GET".to_string(),
+            headers: Vec::new(),
+            body: None,
+            credential_id: Some(credential_id.to_string()),
+        };
+
+        let error = host_egress_http_handler(State(state), Json(request))
+            .await
+            .expect_err("wrong host must be denied");
+        assert!(
+            error.1.contains("HostNotAllowed") || error.1.contains("host not allowed"),
+            "expected host denial, got: {error:?}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_d9us6_host_egress_tcp_loopback_sends_credential_auth_without_returning_it() {
+        let observed_bytes = Arc::new(StdMutex::new(Vec::new()));
+        let (addr, server_task) = d9us6_one_shot_tcp_server(Arc::clone(&observed_bytes)).await;
+        let connector_id = "fcp.test.d9us6-tcp:utility:1.0.0";
+        let operation_id = "test.egress_tcp";
+        let credential_id =
+            CredentialId::parse("33333333-3333-3333-3333-333333333333").expect("credential id");
+        let (state, signing_key) = d9us6_host_egress_state(
+            connector_id,
+            operation_id,
+            addr.port(),
+            credential_id,
+            json!({
+                "host_allow": ["127.0.0.1"],
+                "tcp": {
+                    "auth": "redaction-sentinel-tcp-secret"
+                }
+            }),
+        )
+        .await;
+        let token = test_capability_token_with_constraints(
+            &signing_key,
+            "cap.test.egress",
+            operation_id,
+            ZoneId::work().as_str(),
+            &fcp_core::CapabilityConstraints {
+                resource_allow: vec!["*".to_string()],
+                credential_allow: vec![credential_id],
+                ..Default::default()
+            },
+        );
+        let request = HostEgressTcpRequest {
+            context: HostEgressContext {
+                connector_id: connector_id.to_string(),
+                operation_id: operation_id.to_string(),
+                zone_id: ZoneId::work().to_string(),
+                request_id: "req-d9us6-tcp".to_string(),
+                correlation_id: Some("corr-d9us6-tcp".to_string()),
+                capability_token_cbor_b64: capability_token_b64(&token).expect("token b64"),
+            },
+            host: "127.0.0.1".to_string(),
+            port: addr.port(),
+            tls: false,
+            sni_override: None,
+            write: Some(fcp_manifest::Base64Bytes::from_vec(b"PING".to_vec())),
+            read_limit_bytes: Some(128),
+            credential_id: Some(credential_id.to_string()),
+        };
+
+        let response = host_egress_tcp_handler(State(state), Json(request))
+            .await
+            .expect("host TCP egress should succeed")
+            .0;
+        server_task.await.expect("TCP server task");
+        assert_eq!(response.read.as_bytes(), b"PONG");
+        assert!(response.egress.credential_injected);
+        assert_eq!(
+            observed_bytes
+                .lock()
+                .expect("observed bytes lock")
+                .as_slice(),
+            b"redaction-sentinel-tcp-secretPING"
+        );
+        let serialized = serde_json::to_string(&response).expect("serialize response");
+        assert!(
+            !serialized.contains("redaction-sentinel-tcp-secret"),
+            "host egress response must not echo injected TCP credentials"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_d9us6_host_egress_runtime_network_policy_e2e_jsonl_matrix() {
+        let operation_id = "test.egress_http";
+        let mut records = Vec::new();
+
+        let observed_request = Arc::new(StdMutex::new(None::<String>));
+        let (addr, server_task) = d9us6_one_shot_http_server(Arc::clone(&observed_request)).await;
+        let connector_id = "fcp.test.d9us6-jsonl-allowed-http:utility:1.0.0";
+        let credential_id =
+            CredentialId::parse("44444444-4444-4444-4444-444444444444").expect("credential id");
+        let (state, signing_key) = d9us6_host_egress_state(
+            connector_id,
+            operation_id,
+            addr.port(),
+            credential_id,
+            json!({
+                "host_allow": ["127.0.0.1"],
+                "http": {
+                    "headers": [{
+                        "name": "Authorization",
+                        "value": "Bearer redaction-sentinel-jsonl-allowed"
+                    }]
+                }
+            }),
+        )
+        .await;
+        let token = d9us6_token_with_credentials(&signing_key, operation_id, vec![credential_id]);
+        let response = host_egress_http_handler(
+            State(state),
+            Json(HostEgressHttpRequest {
+                context: d9us6_host_egress_context(
+                    connector_id,
+                    operation_id,
+                    "req-d9us6-jsonl-allowed-http",
+                    "corr-d9us6-jsonl-allowed-http",
+                    &token,
+                ),
+                url: format!("http://127.0.0.1:{}/v1/fixture", addr.port()),
+                method: "GET".to_string(),
+                headers: Vec::new(),
+                body: None,
+                credential_id: Some(credential_id.to_string()),
+            }),
+        )
+        .await
+        .expect("allowed host-egress HTTP should succeed")
+        .0;
+        server_task.await.expect("allowed HTTP server task");
+        assert_eq!(response.status, 200);
+        assert!(response.egress.credential_injected);
+        assert!(
+            observed_request
+                .lock()
+                .expect("observed request lock")
+                .as_ref()
+                .expect("server observed request")
+                .to_ascii_lowercase()
+                .contains("authorization: bearer redaction-sentinel-jsonl-allowed")
+        );
+        records.push(d9us6_host_egress_e2e_record(
+            "allowed_http_loopback",
+            "http",
+            "allow",
+            json!({
+                "connector_id": connector_id,
+                "operation": operation_id,
+                "zone_id": response.egress.zone_id,
+                "request_id": response.egress.request_id,
+                "correlation_id": response.egress.correlation_id,
+                "execution_mode": response.egress.execution_mode,
+                "constraint_source": response.egress.constraint_source,
+                "raw_host_pattern": "127.0.0.1",
+                "raw_port_pattern": addr.port(),
+                "resolved_host": response.egress.resolved_host,
+                "resolved_port": response.egress.resolved_port,
+                "decision": response.egress.decision,
+                "deny_reason": Value::Null,
+                "elapsed_ms": response.egress.elapsed_ms,
+                "credential_allow": [credential_id.to_string()],
+                "credential_injected": response.egress.credential_injected,
+                "status": response.status
+            }),
+        ));
+
+        let connector_id = "fcp.test.d9us6-jsonl-denied-host:utility:1.0.0";
+        let credential_id =
+            CredentialId::parse("55555555-5555-5555-5555-555555555555").expect("credential id");
+        let (state, signing_key) = d9us6_host_egress_state(
+            connector_id,
+            operation_id,
+            80,
+            credential_id,
+            json!({"host_allow": ["127.0.0.1"], "http": {"bearer_token": "unused"}}),
+        )
+        .await;
+        let token = d9us6_token_with_credentials(&signing_key, operation_id, vec![credential_id]);
+        let denied_host = host_egress_http_handler(
+            State(state),
+            Json(HostEgressHttpRequest {
+                context: d9us6_host_egress_context(
+                    connector_id,
+                    operation_id,
+                    "req-d9us6-jsonl-denied-host",
+                    "corr-d9us6-jsonl-denied-host",
+                    &token,
+                ),
+                url: "http://127.0.0.2/v1/fixture".to_string(),
+                method: "GET".to_string(),
+                headers: Vec::new(),
+                body: None,
+                credential_id: Some(credential_id.to_string()),
+            }),
+        )
+        .await
+        .expect_err("denied host must fail before connect");
+        assert!(
+            denied_host.1.contains("HostNotAllowed") || denied_host.1.contains("host not allowed"),
+            "expected host denial, got: {denied_host:?}"
+        );
+        records.push(d9us6_host_egress_e2e_record(
+            "denied_host",
+            "http",
+            "deny",
+            json!({
+                "connector_id": connector_id,
+                "operation": operation_id,
+                "zone_id": ZoneId::work().to_string(),
+                "request_id": "req-d9us6-jsonl-denied-host",
+                "correlation_id": "corr-d9us6-jsonl-denied-host",
+                "raw_host_pattern": "127.0.0.1",
+                "raw_port_pattern": 80,
+                "resolved_host": "127.0.0.2",
+                "resolved_port": 80,
+                "decision": "deny",
+                "deny_reason": "HostNotAllowed",
+                "status_code": denied_host.0.as_u16(),
+                "error": denied_host.1,
+                "credential_allow": [credential_id.to_string()]
+            }),
+        ));
+
+        let connector_id = "fcp.test.d9us6-jsonl-denied-port:utility:1.0.0";
+        let credential_id =
+            CredentialId::parse("66666666-6666-6666-6666-666666666666").expect("credential id");
+        let (state, signing_key) = d9us6_host_egress_state(
+            connector_id,
+            operation_id,
+            80,
+            credential_id,
+            json!({"host_allow": ["127.0.0.1"], "http": {"bearer_token": "unused"}}),
+        )
+        .await;
+        let token = d9us6_token_with_credentials(&signing_key, operation_id, vec![credential_id]);
+        let denied_port = host_egress_http_handler(
+            State(state),
+            Json(HostEgressHttpRequest {
+                context: d9us6_host_egress_context(
+                    connector_id,
+                    operation_id,
+                    "req-d9us6-jsonl-denied-port",
+                    "corr-d9us6-jsonl-denied-port",
+                    &token,
+                ),
+                url: "http://127.0.0.1:81/v1/fixture".to_string(),
+                method: "GET".to_string(),
+                headers: Vec::new(),
+                body: None,
+                credential_id: Some(credential_id.to_string()),
+            }),
+        )
+        .await
+        .expect_err("denied port must fail before connect");
+        assert!(
+            denied_port.1.contains("PortNotAllowed") || denied_port.1.contains("port not allowed"),
+            "expected port denial, got: {denied_port:?}"
+        );
+        records.push(d9us6_host_egress_e2e_record(
+            "denied_port",
+            "http",
+            "deny",
+            json!({
+                "connector_id": connector_id,
+                "operation": operation_id,
+                "zone_id": ZoneId::work().to_string(),
+                "request_id": "req-d9us6-jsonl-denied-port",
+                "correlation_id": "corr-d9us6-jsonl-denied-port",
+                "raw_host_pattern": "127.0.0.1",
+                "raw_port_pattern": 80,
+                "resolved_host": "127.0.0.1",
+                "resolved_port": 81,
+                "decision": "deny",
+                "deny_reason": "PortNotAllowed",
+                "status_code": denied_port.0.as_u16(),
+                "error": denied_port.1,
+                "credential_allow": [credential_id.to_string()]
+            }),
+        ));
+
+        let connector_id = "fcp.test.d9us6-jsonl-denied-private-ip:utility:1.0.0";
+        let credential_id =
+            CredentialId::parse("77777777-7777-7777-7777-777777777777").expect("credential id");
+        let mut private_constraints = d9us6_loopback_constraints(80);
+        private_constraints.host_allow = vec!["192.168.1.10".to_string()];
+        private_constraints.deny_private_ranges = true;
+        private_constraints.deny_ip_literals = false;
+        let (state, signing_key) = d9us6_host_egress_state_with_constraints(
+            connector_id,
+            operation_id,
+            private_constraints,
+            credential_id,
+            json!({"host_allow": ["192.168.1.10"], "http": {"bearer_token": "unused"}}),
+        )
+        .await;
+        let token = d9us6_token_with_credentials(&signing_key, operation_id, vec![credential_id]);
+        let denied_private_ip = host_egress_http_handler(
+            State(state),
+            Json(HostEgressHttpRequest {
+                context: d9us6_host_egress_context(
+                    connector_id,
+                    operation_id,
+                    "req-d9us6-jsonl-denied-private-ip",
+                    "corr-d9us6-jsonl-denied-private-ip",
+                    &token,
+                ),
+                url: "http://192.168.1.10/v1/fixture".to_string(),
+                method: "GET".to_string(),
+                headers: Vec::new(),
+                body: None,
+                credential_id: Some(credential_id.to_string()),
+            }),
+        )
+        .await
+        .expect_err("private IP policy must fail closed before connect");
+        assert!(
+            denied_private_ip.1.contains("private range"),
+            "expected private-IP denial, got: {denied_private_ip:?}"
+        );
+        records.push(d9us6_host_egress_e2e_record(
+            "denied_private_ip",
+            "http",
+            "deny",
+            json!({
+                "connector_id": connector_id,
+                "operation": operation_id,
+                "zone_id": ZoneId::work().to_string(),
+                "request_id": "req-d9us6-jsonl-denied-private-ip",
+                "correlation_id": "corr-d9us6-jsonl-denied-private-ip",
+                "raw_host_pattern": "192.168.1.10",
+                "raw_port_pattern": 80,
+                "resolved_host": "192.168.1.10",
+                "resolved_port": 80,
+                "decision": "deny",
+                "deny_reason": "PrivateRangeDenied",
+                "status_code": denied_private_ip.0.as_u16(),
+                "error": denied_private_ip.1,
+                "credential_allow": [credential_id.to_string()]
+            }),
+        ));
+
+        let connector_id = "fcp.test.d9us6-jsonl-credential-denied:utility:1.0.0";
+        let allowed_credential_id =
+            CredentialId::parse("88888888-8888-8888-8888-888888888888").expect("credential id");
+        let denied_credential_id =
+            CredentialId::parse("99999999-9999-9999-9999-999999999999").expect("credential id");
+        let (state, signing_key) = d9us6_host_egress_state(
+            connector_id,
+            operation_id,
+            80,
+            allowed_credential_id,
+            json!({
+                "host_allow": ["127.0.0.1"],
+                "http": {"bearer_token": "redaction-sentinel-credential-denied"}
+            }),
+        )
+        .await;
+        let token =
+            d9us6_token_with_credentials(&signing_key, operation_id, vec![allowed_credential_id]);
+        let credential_denied = host_egress_http_handler(
+            State(state),
+            Json(HostEgressHttpRequest {
+                context: d9us6_host_egress_context(
+                    connector_id,
+                    operation_id,
+                    "req-d9us6-jsonl-credential-denied",
+                    "corr-d9us6-jsonl-credential-denied",
+                    &token,
+                ),
+                url: "http://127.0.0.1/v1/fixture".to_string(),
+                method: "GET".to_string(),
+                headers: Vec::new(),
+                body: None,
+                credential_id: Some(denied_credential_id.to_string()),
+            }),
+        )
+        .await
+        .expect_err("credential outside token allow-list must fail before connect");
+        assert!(
+            credential_denied.1.contains("CredentialNotAuthorized")
+                || credential_denied.1.contains("not authorized"),
+            "expected credential allow-list denial, got: {credential_denied:?}"
+        );
+        records.push(d9us6_host_egress_e2e_record(
+            "credential_denied",
+            "http",
+            "deny",
+            json!({
+                "connector_id": connector_id,
+                "operation": operation_id,
+                "zone_id": ZoneId::work().to_string(),
+                "request_id": "req-d9us6-jsonl-credential-denied",
+                "correlation_id": "corr-d9us6-jsonl-credential-denied",
+                "raw_host_pattern": "127.0.0.1",
+                "raw_port_pattern": 80,
+                "resolved_host": "127.0.0.1",
+                "resolved_port": 80,
+                "decision": "deny",
+                "deny_reason": "CredentialNotAuthorized",
+                "status_code": credential_denied.0.as_u16(),
+                "error": credential_denied.1,
+                "credential_allow": [allowed_credential_id.to_string()],
+                "requested_credential_id": denied_credential_id.to_string()
+            }),
+        ));
+
+        let (addr, server_task) = d9us6_slow_http_server().await;
+        let connector_id = "fcp.test.d9us6-jsonl-timeout:utility:1.0.0";
+        let credential_id =
+            CredentialId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").expect("credential id");
+        let mut timeout_constraints = d9us6_loopback_constraints(addr.port());
+        timeout_constraints.total_timeout_ms = 25;
+        timeout_constraints.connect_timeout_ms = 1_000;
+        let (state, signing_key) = d9us6_host_egress_state_with_constraints(
+            connector_id,
+            operation_id,
+            timeout_constraints,
+            credential_id,
+            json!({
+                "host_allow": ["127.0.0.1"],
+                "http": {"bearer_token": "redaction-sentinel-timeout"}
+            }),
+        )
+        .await;
+        let token = d9us6_token_with_credentials(&signing_key, operation_id, vec![credential_id]);
+        let timeout = host_egress_http_handler(
+            State(state),
+            Json(HostEgressHttpRequest {
+                context: d9us6_host_egress_context(
+                    connector_id,
+                    operation_id,
+                    "req-d9us6-jsonl-timeout",
+                    "corr-d9us6-jsonl-timeout",
+                    &token,
+                ),
+                url: format!("http://127.0.0.1:{}/v1/slow", addr.port()),
+                method: "GET".to_string(),
+                headers: Vec::new(),
+                body: None,
+                credential_id: Some(credential_id.to_string()),
+            }),
+        )
+        .await
+        .expect_err("slow loopback response must hit total timeout");
+        server_task.await.expect("slow HTTP server task");
+        assert!(
+            timeout.1.contains("timed out"),
+            "expected timeout denial, got: {timeout:?}"
+        );
+        records.push(d9us6_host_egress_e2e_record(
+            "timeout",
+            "http",
+            "deny",
+            json!({
+                "connector_id": connector_id,
+                "operation": operation_id,
+                "zone_id": ZoneId::work().to_string(),
+                "request_id": "req-d9us6-jsonl-timeout",
+                "correlation_id": "corr-d9us6-jsonl-timeout",
+                "raw_host_pattern": "127.0.0.1",
+                "raw_port_pattern": addr.port(),
+                "resolved_host": "127.0.0.1",
+                "resolved_port": addr.port(),
+                "decision": "deny",
+                "deny_reason": "TotalTimeout",
+                "status_code": timeout.0.as_u16(),
+                "error": timeout.1,
+                "total_timeout_ms": 25,
+                "credential_allow": [credential_id.to_string()]
+            }),
+        ));
+
+        assert_eq!(
+            records.len(),
+            6,
+            "d9us6 JSONL matrix must cover all required scenarios"
+        );
+        for record in records {
+            let line = serde_json::to_string(&record).expect("record serializes");
+            let value: Value = serde_json::from_str(&line).expect("JSONL parses");
+            assert_eq!(value["result"], "pass");
+            assert!(
+                !line.contains("redaction-sentinel"),
+                "JSONL evidence must not contain raw credentials: {line}"
+            );
+            println!("RUNTIME_NETWORK_POLICY_E2E_JSONL {line}");
+        }
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_4kw5f_9_6_runtime_network_policy_missing_operation_constraints_fails_closed() {
+        let connector_id = "fcp.test.runtime-network-missing-op:utility:1.0.0";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::HostEgressProxy;
+        config.operation_network_constraints.insert(
+            "test.other".to_string(),
+            runtime_network_test_constraints(
+                "api-other.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+        let registry = runtime_network_test_registry(connector_id, config);
+        let request = runtime_network_test_request(connector_id, "test.echo");
+
+        let err = registry
+            .enforce_runtime_network_policy(&request)
+            .await
+            .expect_err("strict runtime enforcement must reject missing op constraints");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("operation_network_constraints") && msg.contains("test.echo"),
+            "missing-constraints denial must name the invoked operation, got: {msg}"
+        );
+        assert!(
+            !msg.contains("api-other.example.test"),
+            "runtime policy must not borrow another operation's constraints: {msg}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_4kw5f_9_6_runtime_network_policy_denies_unmediated_native_subprocess() {
+        let connector_id = "fcp.test.runtime-network-native:utility:1.0.0";
+        let operation_id = "test.echo";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::HostEgressProxy;
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "api.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+        let registry = runtime_network_test_registry(connector_id, config);
+        let request = runtime_network_test_request(connector_id, operation_id);
+
+        let err = registry
+            .enforce_runtime_network_policy(&request)
+            .await
+            .expect_err("native subprocess runtime-enforced mode has no mediated egress handoff");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("runtime_egress_unenforceable")
+                && msg.contains("host_egress_proxy")
+                && msg.contains(operation_id),
+            "expected explicit native subprocess unenforceable denial, got: {msg}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_4kw5f_9_6_runtime_network_policy_rejects_invalid_dynamic_config_host() {
+        let connector_id = "fcp.test.runtime-network-dynamic-invalid:utility:1.0.0";
+        let operation_id = "matrix.send_message";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.config = Some(json!({
+            "homeserver_url": "https://192.168.1.10:8448"
+        }));
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "${matrix_homeserver_host}",
+                ManagedPortConstraint::Template("${matrix_homeserver_port}".to_string()),
+            ),
+        );
+        let registry = runtime_network_test_registry(connector_id, config);
+        let request = runtime_network_test_request(connector_id, operation_id);
+
+        let err = registry
+            .enforce_runtime_network_policy(&request)
+            .await
+            .expect_err("dynamic IP-literal homeserver must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("IP literal") && msg.contains(operation_id),
+            "dynamic host denial must preserve the resolver reason and operation id, got: {msg}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_4kw5f_9_6_verify_live_request_denies_runtime_network_before_introspection() {
+        let connector_id = "fcp.test.runtime-network-live-preintrospect:utility:1.0.0";
+        let operation_id = "test.echo";
+        let introspect_count = Arc::new(AtomicU64::new(0));
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(4);
+        let runner_introspect_count = Arc::clone(&introspect_count);
+        let runner_task = task::spawn(async move {
+            while let Some(request) = runner_rx.recv().await {
+                match request.method.as_str() {
+                    "introspect" => {
+                        runner_introspect_count.fetch_add(1, Ordering::SeqCst);
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": dispatcher_introspection(
+                                operation_id,
+                                "cap.test.egress",
+                                SafetyTier::Safe
+                            )
+                        })));
+                    }
+                    method => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": {
+                                "message": format!(
+                                    "runtime network gate should deny before `{method}`"
+                                )
+                            }
+                        })));
+                    }
+                }
+            }
+        });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::HostEgressProxy;
+        config.operation_network_constraints.insert(
+            "test.other".to_string(),
+            runtime_network_test_constraints(
+                "api-other.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
+        let state = dispatcher_app_state(
+            registry,
+            Arc::new(HostAdminStateStore::new()),
+            None,
+            HashMap::new(),
+        );
+        let request = runtime_network_test_request(connector_id, operation_id);
+
+        let err = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("runtime network policy must deny before connector self-report");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("operation_network_constraints") && msg.contains(operation_id),
+            "expected live pre-introspection runtime network denial, got: {msg}"
+        );
+        assert_eq!(
+            introspect_count.load(Ordering::SeqCst),
+            0,
+            "runtime network gate must run before connector introspection/self-report"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
     async fn invoke_handler_hrw_lease_refuses_non_holder_and_admits_elected_holder() {
         let connector_id = "fcp.test.hrw-lease-refuse:utility:1.0.0";
         let operation_id = "test.singleton";
@@ -10021,6 +14925,8 @@ mod tests {
                 allowed_zones: Vec::new(),
                 allowed_operations: Vec::new(),
                 enforce_empty_allow_lists: false,
+                runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                operation_network_constraints: BTreeMap::new(),
             },
         );
         let state = dispatcher_app_state(
@@ -10178,8 +15084,10 @@ mod tests {
                     allowed_zones: Vec::new(),
                     allowed_operations: Vec::new(),
                     enforce_empty_allow_lists: false,
+                    runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                    operation_network_constraints: BTreeMap::new(),
                 },
-                connector,
+                connector: ConnectorRuntime::Native(connector),
             },
         );
         let registry = Arc::new(SubprocessRegistry {
@@ -10371,6 +15279,8 @@ mod tests {
                 allowed_zones: Vec::new(),
                 allowed_operations: Vec::new(),
                 enforce_empty_allow_lists: false,
+                runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                operation_network_constraints: BTreeMap::new(),
             },
         );
         let mut policies = HashMap::new();
@@ -10561,8 +15471,10 @@ mod tests {
                     allowed_zones: Vec::new(),
                     allowed_operations: Vec::new(),
                     enforce_empty_allow_lists: false,
+                    runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                    operation_network_constraints: BTreeMap::new(),
                 },
-                connector,
+                connector: ConnectorRuntime::Native(connector),
             },
         );
         let registry = Arc::new(SubprocessRegistry {
@@ -10705,6 +15617,8 @@ mod tests {
                 allowed_zones: Vec::new(),
                 allowed_operations: Vec::new(),
                 enforce_empty_allow_lists: false,
+                runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                operation_network_constraints: BTreeMap::new(),
             },
         );
         let lifecycle = Arc::new(HostAdminStateStore::new());
@@ -13875,6 +18789,8 @@ done"#;
             allowed_zones: vec![zone_id.to_string()],
             allowed_operations: vec![TELEGRAM_WEBHOOK_INGRESS_OPERATION.to_string()],
             enforce_empty_allow_lists: true,
+            runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            operation_network_constraints: BTreeMap::new(),
         };
         let registry =
             dispatcher_registry_with_connector("fcp.telegram", subprocess, connector_config);
@@ -14850,6 +19766,8 @@ done"#;
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
             enforce_empty_allow_lists: false,
+            runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            operation_network_constraints: BTreeMap::new(),
         };
         let dbg = format!("{config:?}");
         assert!(dbg.contains("ConnectorConfig"));

@@ -24,7 +24,10 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{HostError, HostResult, discovery::ConnectorSummary};
+use crate::{
+    HostError, HostResult, ManagedNetworkConstraints, RuntimeNetworkEnforcement,
+    discovery::ConnectorSummary,
+};
 
 const HOST_ADMIN_STATE_SNAPSHOT_VERSION: u32 = 1;
 const REDACTED_CONFIG_VALUE: &str = "[REDACTED]";
@@ -111,6 +114,19 @@ pub struct ManagedConnectorConfig {
     /// docs/audit/security-audit-saas-alpha-2026-05-02.md §b.
     #[serde(default, skip_serializing_if = "is_false")]
     pub enforce_empty_allow_lists: bool,
+    /// Host-side runtime network enforcement mode. This is operator-approved
+    /// inventory state, distinct from connector runtime introspection.
+    #[serde(
+        default,
+        skip_serializing_if = "RuntimeNetworkEnforcement::is_legacy_unspecified"
+    )]
+    pub runtime_network_enforcement: RuntimeNetworkEnforcement,
+    /// Per-operation network policy used by the host runtime path.
+    ///
+    /// Keys are operation ids. Values are host-managed constraints that can
+    /// include explicitly supported config-derived placeholders.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub operation_network_constraints: BTreeMap<String, ManagedNetworkConstraints>,
 }
 
 /// Live connector inventory mutation kind handled by the host admin plane.
@@ -10452,6 +10468,8 @@ mod tests {
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
             enforce_empty_allow_lists: false,
+            runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            operation_network_constraints: BTreeMap::new(),
         };
         let json = serde_json::to_string(&config).unwrap();
         let back: ManagedConnectorConfig = serde_json::from_str(&json).unwrap();
@@ -10490,6 +10508,8 @@ mod tests {
                 allowed_zones: Vec::new(),
                 allowed_operations: Vec::new(),
                 enforce_empty_allow_lists: false,
+                runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                operation_network_constraints: BTreeMap::new(),
             },
         };
 

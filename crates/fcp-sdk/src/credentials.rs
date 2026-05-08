@@ -265,6 +265,7 @@ mod tests {
             let requests = client.requests.lock().unwrap();
             assert_eq!(requests.len(), 1);
             assert_eq!(requests[0].operation.as_deref(), Some("chat.completions"));
+            drop(requests);
         }
 
         fcp_async_core::runtime::block_on_sync(
@@ -275,7 +276,7 @@ mod tests {
 
         let report = CredentialErrorReport::new(
             lease.credential_id,
-            lease.lease_token.clone(),
+            lease.lease_token,
             CredentialErrorKind::RateLimited,
         )
         .with_retry_after_seconds(15);
@@ -303,6 +304,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert!(requests[0].provider.is_none());
         assert!(requests[0].operation.is_none());
+        drop(requests);
     }
 
     #[test]

@@ -206,6 +206,10 @@ use std::time::Duration;
 
 use fcp_async_core::{AsyncError, ExecutionContext};
 use fcp_manifest::{ConnectorManifest, ManifestTimeouts};
+#[cfg(feature = "connector-http")]
+use fcp_manifest::{
+    HostEgressHttpRequest, HostEgressHttpResponse, HostEgressTcpRequest, HostEgressTcpResponse,
+};
 use tracing::{debug, warn};
 
 use crate::FcpError;
@@ -243,6 +247,7 @@ pub struct ConnectorRuntime {
 }
 
 const MANIFEST_REQUEST_TIMEOUT_ENV_VAR: &str = "FCP_REQUEST_TIMEOUT_MS";
+const HOST_EGRESS_PROXY_URL_ENV_VAR: &str = "FCP_HOST_EGRESS_PROXY_URL";
 
 /// Operator opt-in that lets `FCP_REQUEST_TIMEOUT_MS` actually take effect.
 ///
@@ -340,6 +345,9 @@ pub struct ConnectorRuntimeConfig {
     pub wall_clock_timeout: Duration,
     /// Timeout for graceful shutdown.
     pub shutdown_timeout: Duration,
+    /// Connector-facing host egress endpoint. When present, SDK egress helpers
+    /// use `/rpc/egress/*` instead of opening direct sockets.
+    pub host_egress_proxy_url: Option<String>,
 }
 
 impl Default for ConnectorRuntimeConfig {
@@ -349,6 +357,7 @@ impl Default for ConnectorRuntimeConfig {
             connect_timeout: Duration::from_secs(10),
             wall_clock_timeout: Duration::from_secs(120),
             shutdown_timeout: Duration::from_secs(30),
+            host_egress_proxy_url: None,
         }
     }
 }
@@ -362,6 +371,7 @@ impl ConnectorRuntimeConfig {
             connect_timeout: Duration::from_secs(5),
             wall_clock_timeout: Duration::from_secs(60),
             shutdown_timeout: Duration::from_secs(30),
+            host_egress_proxy_url: None,
         }
     }
 
@@ -438,6 +448,26 @@ impl ConnectorRuntimeConfig {
     #[must_use]
     pub const fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.shutdown_timeout = timeout;
+        self
+    }
+
+    /// Builder: set the host egress proxy base URL.
+    #[must_use]
+    pub fn with_host_egress_proxy_url(mut self, url: impl Into<String>) -> Self {
+        self.host_egress_proxy_url = Some(url.into());
+        self
+    }
+
+    /// Builder: read the host egress proxy base URL from the launch
+    /// environment the host gives strict host-proxy connectors.
+    #[must_use]
+    pub fn with_host_egress_proxy_url_from_env(mut self) -> Self {
+        if let Some(url) = std::env::var_os(HOST_EGRESS_PROXY_URL_ENV_VAR)
+            .map(|value| value.to_string_lossy().trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            self.host_egress_proxy_url = Some(url);
+        }
         self
     }
 
@@ -547,6 +577,216 @@ impl ConnectorRuntime {
     #[must_use]
     pub const fn shutdown_timeout(&self) -> Duration {
         self.config.shutdown_timeout
+    }
+
+    /// Host egress proxy URL used by SDK network helpers, if configured.
+    #[must_use]
+    pub fn host_egress_proxy_url(&self) -> Option<&str> {
+        self.config.host_egress_proxy_url.as_deref()
+    }
+
+    /// Build a connector-facing client for host-mediated HTTP/TCP egress.
+    ///
+    /// The helper is only available with `connector-http`, matching the rest of
+    /// the SDK HTTP client surface.
+    #[cfg(feature = "connector-http")]
+    #[must_use]
+    pub fn host_egress_proxy_client(&self) -> Option<HostEgressProxyClient> {
+        self.host_egress_proxy_url().map(HostEgressProxyClient::new)
+    }
+}
+
+/// Connector-side client for the host egress proxy.
+#[cfg(feature = "connector-http")]
+#[derive(Debug, Clone)]
+pub struct HostEgressProxyClient {
+    base_url: String,
+    client: reqwest::Client,
+}
+
+#[cfg(feature = "connector-http")]
+impl HostEgressProxyClient {
+    /// Construct a host egress proxy client from a base URL such as
+    /// `http://127.0.0.1:7878`.
+    #[must_use]
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// Absolute host RPC endpoint for mediated HTTP egress.
+    #[must_use]
+    pub fn http_endpoint(&self) -> String {
+        format!("{}/rpc/egress/http", self.base_url)
+    }
+
+    /// Absolute host RPC endpoint for mediated TCP egress.
+    #[must_use]
+    pub fn tcp_endpoint(&self) -> String {
+        format!("{}/rpc/egress/tcp", self.base_url)
+    }
+
+    /// Send an HTTP request through the host egress proxy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostEgressProxyError`] when transport fails, the host rejects
+    /// the status code, or the response body does not match the contract.
+    pub async fn http(
+        &self,
+        request: &HostEgressHttpRequest,
+    ) -> Result<HostEgressHttpResponse, HostEgressProxyError> {
+        let response = self
+            .client
+            .post(self.http_endpoint())
+            .json(request)
+            .send()
+            .await
+            .map_err(HostEgressProxyError::Transport)?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(HostEgressProxyError::Rejected {
+                status: status.as_u16(),
+                body: redact_http_host_egress_rejection_body(request, body),
+            });
+        }
+        response
+            .json()
+            .await
+            .map_err(HostEgressProxyError::Transport)
+    }
+
+    /// Send a bounded TCP exchange through the host egress proxy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostEgressProxyError`] when transport fails, the host rejects
+    /// the status code, or the response body does not match the contract.
+    pub async fn tcp(
+        &self,
+        request: &HostEgressTcpRequest,
+    ) -> Result<HostEgressTcpResponse, HostEgressProxyError> {
+        let response = self
+            .client
+            .post(self.tcp_endpoint())
+            .json(request)
+            .send()
+            .await
+            .map_err(HostEgressProxyError::Transport)?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(HostEgressProxyError::Rejected {
+                status: status.as_u16(),
+                body: redact_tcp_host_egress_rejection_body(request, body),
+            });
+        }
+        response
+            .json()
+            .await
+            .map_err(HostEgressProxyError::Transport)
+    }
+}
+
+#[cfg(feature = "connector-http")]
+const HOST_EGRESS_REDACTION_MARKER: &str = "[redacted-host-egress-sensitive]";
+#[cfg(feature = "connector-http")]
+const HOST_EGRESS_REDACTION_MIN_FRAGMENT_LEN: usize = 4;
+
+#[cfg(feature = "connector-http")]
+fn redact_sensitive_fragment(redacted: &mut String, fragment: &str) {
+    if fragment.len() >= HOST_EGRESS_REDACTION_MIN_FRAGMENT_LEN && redacted.contains(fragment) {
+        *redacted = redacted.replace(fragment, HOST_EGRESS_REDACTION_MARKER);
+    }
+}
+
+#[cfg(feature = "connector-http")]
+fn redact_request_body_fragment(redacted: &mut String, bytes: &[u8]) {
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        redact_sensitive_fragment(redacted, text);
+    }
+}
+
+#[cfg(feature = "connector-http")]
+fn redact_header_value_fragments(redacted: &mut String, header_value: &str) {
+    redact_sensitive_fragment(redacted, header_value);
+    for fragment in header_value.split_ascii_whitespace() {
+        redact_sensitive_fragment(redacted, fragment);
+    }
+}
+
+#[cfg(feature = "connector-http")]
+fn redact_http_host_egress_rejection_body(request: &HostEgressHttpRequest, body: String) -> String {
+    let mut redacted = body;
+    redact_sensitive_fragment(&mut redacted, &request.context.capability_token_cbor_b64);
+    redact_sensitive_fragment(&mut redacted, &request.url);
+    if let Some(credential_id) = request.credential_id.as_deref() {
+        redact_sensitive_fragment(&mut redacted, credential_id);
+    }
+    for header in &request.headers {
+        redact_header_value_fragments(&mut redacted, &header.value);
+    }
+    if let Some(request_body) = request.body.as_ref() {
+        let encoded: String = request_body.clone().into();
+        redact_sensitive_fragment(&mut redacted, &encoded);
+        redact_request_body_fragment(&mut redacted, request_body.as_bytes());
+    }
+    redacted
+}
+
+#[cfg(feature = "connector-http")]
+fn redact_tcp_host_egress_rejection_body(request: &HostEgressTcpRequest, body: String) -> String {
+    let mut redacted = body;
+    redact_sensitive_fragment(&mut redacted, &request.context.capability_token_cbor_b64);
+    if let Some(credential_id) = request.credential_id.as_deref() {
+        redact_sensitive_fragment(&mut redacted, credential_id);
+    }
+    if let Some(write) = request.write.as_ref() {
+        let encoded: String = write.clone().into();
+        redact_sensitive_fragment(&mut redacted, &encoded);
+        redact_request_body_fragment(&mut redacted, write.as_bytes());
+    }
+    redacted
+}
+
+/// Errors returned by [`HostEgressProxyClient`].
+#[cfg(feature = "connector-http")]
+#[derive(Debug, thiserror::Error)]
+pub enum HostEgressProxyError {
+    /// The connector could not reach the host proxy or decode its response.
+    #[error("host egress proxy transport failed: {0}")]
+    Transport(reqwest::Error),
+    /// The host proxy rejected the request before returning a contract payload.
+    #[error("host egress proxy rejected request with HTTP {status}: {body}")]
+    Rejected {
+        /// HTTP status returned by the host proxy.
+        status: u16,
+        /// Redacted rejection body returned by the host proxy.
+        body: String,
+    },
+}
+
+#[cfg(feature = "connector-http")]
+impl HostEgressProxyError {
+    /// HTTP status for host rejections, when the proxy returned one.
+    #[must_use]
+    pub const fn status(&self) -> Option<u16> {
+        match self {
+            Self::Transport(_) => None,
+            Self::Rejected { status, .. } => Some(*status),
+        }
+    }
+
+    /// Redacted rejection body returned by the host proxy.
+    #[must_use]
+    pub fn rejection_body(&self) -> Option<&str> {
+        match self {
+            Self::Transport(_) => None,
+            Self::Rejected { body, .. } => Some(body),
+        }
     }
 }
 
@@ -1019,6 +1259,7 @@ deny_ptrace = true
         assert_eq!(config.connect_timeout, Duration::from_secs(10));
         assert_eq!(config.wall_clock_timeout, Duration::from_secs(120));
         assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
+        assert!(config.host_egress_proxy_url.is_none());
     }
 
     #[test]
@@ -1060,6 +1301,173 @@ deny_ptrace = true
             ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(60)),
         );
         assert_eq!(runtime.request_timeout(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn br_d9us6_runtime_config_exposes_host_egress_proxy_url() {
+        let runtime = ConnectorRuntime::new(
+            ConnectorRuntimeConfig::default().with_host_egress_proxy_url("http://127.0.0.1:7878/"),
+        );
+        assert_eq!(
+            runtime.host_egress_proxy_url(),
+            Some("http://127.0.0.1:7878/")
+        );
+    }
+
+    #[cfg(feature = "connector-http")]
+    #[test]
+    fn br_d9us6_host_egress_client_routes_helpers_to_host_rpc_paths() {
+        let runtime = ConnectorRuntime::new(
+            ConnectorRuntimeConfig::default().with_host_egress_proxy_url("http://127.0.0.1:7878/"),
+        );
+        let client = runtime
+            .host_egress_proxy_client()
+            .expect("configured host egress proxy client");
+        assert_eq!(
+            client.http_endpoint(),
+            "http://127.0.0.1:7878/rpc/egress/http"
+        );
+        assert_eq!(
+            client.tcp_endpoint(),
+            "http://127.0.0.1:7878/rpc/egress/tcp"
+        );
+    }
+
+    #[cfg(feature = "connector-http")]
+    fn br_b0qqv_host_egress_context(
+        operation_id: &str,
+        request_id: &str,
+    ) -> fcp_manifest::HostEgressContext {
+        fcp_manifest::HostEgressContext {
+            connector_id: "fcp.test.b0qqv:utility:1.0.0".to_string(),
+            operation_id: operation_id.to_string(),
+            zone_id: "z:work".to_string(),
+            request_id: request_id.to_string(),
+            correlation_id: Some(format!("corr-{request_id}")),
+            capability_token_cbor_b64: "capability-material-redaction-sentinel".to_string(),
+        }
+    }
+
+    #[cfg(feature = "connector-http")]
+    #[test]
+    fn br_b0qqv_host_egress_proxy_http_request_serialization_preserves_strict_contract() {
+        let request = HostEgressHttpRequest {
+            context: br_b0qqv_host_egress_context("messages.create", "req-b0qqv-http"),
+            url: "https://api.example.test/v1/messages".to_string(),
+            method: "POST".to_string(),
+            headers: vec![fcp_manifest::HostEgressHttpHeader {
+                name: "x-fcp-request".to_string(),
+                value: "req-b0qqv-http".to_string(),
+            }],
+            body: Some(fcp_manifest::Base64Bytes::from_vec(
+                br#"{"message":"hello"}"#.to_vec(),
+            )),
+            credential_id: Some("cred-b0qqv-redacted-id".to_string()),
+        };
+
+        let value = serde_json::to_value(&request).expect("serialize HTTP host-egress request");
+        assert_eq!(
+            value["context"]["connector_id"],
+            "fcp.test.b0qqv:utility:1.0.0"
+        );
+        assert_eq!(value["context"]["operation_id"], "messages.create");
+        assert_eq!(value["context"]["zone_id"], "z:work");
+        assert_eq!(value["context"]["request_id"], "req-b0qqv-http");
+        assert_eq!(value["context"]["correlation_id"], "corr-req-b0qqv-http");
+        assert_eq!(value["url"], "https://api.example.test/v1/messages");
+        assert_eq!(value["method"], "POST");
+        assert_eq!(value["headers"][0]["name"], "x-fcp-request");
+        assert_eq!(value["headers"][0]["value"], "req-b0qqv-http");
+        assert_eq!(value["body"], "base64:eyJtZXNzYWdlIjoiaGVsbG8ifQ==");
+        assert_eq!(value["credential_id"], "cred-b0qqv-redacted-id");
+
+        let decoded: HostEgressHttpRequest =
+            serde_json::from_value(value).expect("decode HTTP host-egress request");
+        assert_eq!(
+            decoded.body.expect("request body").as_bytes(),
+            br#"{"message":"hello"}"#
+        );
+    }
+
+    #[cfg(feature = "connector-http")]
+    #[test]
+    fn br_b0qqv_host_egress_proxy_tcp_request_serialization_preserves_strict_contract() {
+        let request = HostEgressTcpRequest {
+            context: br_b0qqv_host_egress_context("socket.exchange", "req-b0qqv-tcp"),
+            host: "api.example.test".to_string(),
+            port: 443,
+            tls: true,
+            sni_override: Some("api.example.test".to_string()),
+            write: Some(fcp_manifest::Base64Bytes::from_vec(b"PING".to_vec())),
+            read_limit_bytes: Some(1024),
+            credential_id: Some("cred-b0qqv-redacted-id".to_string()),
+        };
+
+        let value = serde_json::to_value(&request).expect("serialize TCP host-egress request");
+        assert_eq!(value["context"]["operation_id"], "socket.exchange");
+        assert_eq!(value["context"]["request_id"], "req-b0qqv-tcp");
+        assert_eq!(value["host"], "api.example.test");
+        assert_eq!(value["port"], 443);
+        assert_eq!(value["tls"], true);
+        assert_eq!(value["sni_override"], "api.example.test");
+        assert_eq!(value["write"], "base64:UElORw==");
+        assert_eq!(value["read_limit_bytes"], 1024);
+        assert_eq!(value["credential_id"], "cred-b0qqv-redacted-id");
+
+        let decoded: HostEgressTcpRequest =
+            serde_json::from_value(value).expect("decode TCP host-egress request");
+        assert_eq!(decoded.write.expect("write payload").as_bytes(), b"PING");
+    }
+
+    #[cfg(feature = "connector-http")]
+    #[test]
+    fn br_b0qqv_host_egress_proxy_rejection_redacts_request_material() {
+        let request = HostEgressHttpRequest {
+            context: br_b0qqv_host_egress_context("messages.create", "req-b0qqv-redact"),
+            url: "https://api.example.test/v1/messages?proof_marker=url-redaction-sentinel"
+                .to_string(),
+            method: "POST".to_string(),
+            headers: vec![fcp_manifest::HostEgressHttpHeader {
+                name: "authorization".to_string(),
+                value: "Bearer header-redaction-sentinel".to_string(),
+            }],
+            body: Some(fcp_manifest::Base64Bytes::from_vec(
+                b"body-redaction-sentinel".to_vec(),
+            )),
+            credential_id: Some("credential-redaction-sentinel".to_string()),
+        };
+        let echoed_body = "deny_reason=denied_host; capability-material-redaction-sentinel; \
+            https://api.example.test/v1/messages?proof_marker=url-redaction-sentinel; \
+            Bearer header-redaction-sentinel; body-redaction-sentinel; \
+            base64:Ym9keS1yZWRhY3Rpb24tc2VudGluZWw=; credential-redaction-sentinel";
+
+        let redacted = redact_http_host_egress_rejection_body(&request, echoed_body.to_string());
+        assert!(redacted.contains("deny_reason=denied_host"));
+        for leaked in [
+            "capability-material-redaction-sentinel",
+            "url-redaction-sentinel",
+            "header-redaction-sentinel",
+            "body-redaction-sentinel",
+            "base64:Ym9keS1yZWRhY3Rpb24tc2VudGluZWw=",
+            "credential-redaction-sentinel",
+        ] {
+            assert!(
+                !redacted.contains(leaked),
+                "redacted rejection body leaked {leaked}: {redacted}"
+            );
+        }
+
+        let error = HostEgressProxyError::Rejected {
+            status: 403,
+            body: redacted,
+        };
+        assert_eq!(error.status(), Some(403));
+        assert!(
+            error
+                .rejection_body()
+                .expect("rejection body")
+                .contains("deny_reason=denied_host")
+        );
     }
 
     #[test]

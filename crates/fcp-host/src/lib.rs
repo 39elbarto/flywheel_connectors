@@ -46,6 +46,7 @@ mod invoke_audit;
 mod migration_linux;
 #[cfg(target_os = "macos")]
 mod migration_macos;
+mod network_policy;
 mod output_capture;
 mod progress;
 mod redaction;
@@ -73,6 +74,7 @@ pub use invoke_audit::*;
 pub use migration_linux::*;
 #[cfg(target_os = "macos")]
 pub use migration_macos::*;
+pub use network_policy::*;
 pub use output_capture::*;
 pub use progress::*;
 pub use redaction::*;

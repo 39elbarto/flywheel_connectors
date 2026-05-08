@@ -194,3 +194,6 @@ ubs_*.json
 # Compiled project binaries
 /connector
 /fcp-host
+
+# git-stash-janitor workspace (transient, persists across phases of one run)
+.stash_janitor_workspace/

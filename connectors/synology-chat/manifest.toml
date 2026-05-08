@@ -42,11 +42,53 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "none"
-input_schema = { type = "object", required = ["text"] }
-output_schema = { type = "object" }
 
 [provides.operations.send_message.ai_hints]
 when_to_use = "When you need to deliver a chat message into a Synology Chat webhook target"
+
+[provides.operations.send_message.input_schema]
+type = "object"
+required = ["text"]
+additionalProperties = false
+
+[provides.operations.send_message.input_schema.properties.text]
+type = "string"
+minLength = 1
+
+[provides.operations.send_message.input_schema.properties.user_id]
+type = "string"
+
+[provides.operations.send_message.input_schema.properties.user_ids]
+type = "array"
+
+[provides.operations.send_message.input_schema.properties.user_ids.items]
+type = "string"
+minLength = 1
+
+[provides.operations.send_message.input_schema.properties.bot_name]
+type = "string"
+
+[provides.operations.send_message.output_schema]
+type = "object"
+required = ["status", "http_status", "response_kind"]
+additionalProperties = true
+
+[provides.operations.send_message.output_schema.properties.status]
+enum = ["ok"]
+
+[provides.operations.send_message.output_schema.properties.http_status]
+type = "integer"
+minimum = 100
+maximum = 599
+
+[provides.operations.send_message.output_schema.properties.response_kind]
+type = "string"
+enum = ["empty", "json", "text"]
+
+[provides.operations.send_message.output_schema.properties.body]
+
+[provides.operations.send_message.output_schema.properties.raw_body]
+type = "string"
 
 [provides.operations.send_file_url]
 description = "Send a SSRF-checked Synology Chat media or file URL"
@@ -55,11 +97,84 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "none"
-input_schema = { type = "object", required = ["file_url"] }
-output_schema = { type = "object" }
 
 [provides.operations.send_file_url.ai_hints]
 when_to_use = "When you need Synology Chat to fetch a media or file URL and want the connector to enforce URL SSRF policy before dispatch"
+
+[provides.operations.send_file_url.input_schema]
+type = "object"
+required = ["file_url"]
+additionalProperties = false
+
+[provides.operations.send_file_url.input_schema.properties.file_url]
+type = "string"
+minLength = 1
+maxLength = 2048
+description = "HTTP or HTTPS media URL for Synology Chat to fetch"
+
+[provides.operations.send_file_url.input_schema.properties.user_id]
+type = "string"
+
+[provides.operations.send_file_url.input_schema.properties.user_ids]
+type = "array"
+
+[provides.operations.send_file_url.input_schema.properties.user_ids.items]
+type = "string"
+minLength = 1
+
+[provides.operations.send_file_url.input_schema.properties.bot_name]
+type = "string"
+
+[provides.operations.send_file_url.output_schema]
+type = "object"
+required = ["status", "http_status", "response_kind", "file_url_policy"]
+additionalProperties = true
+
+[provides.operations.send_file_url.output_schema.properties.status]
+enum = ["ok"]
+
+[provides.operations.send_file_url.output_schema.properties.http_status]
+type = "integer"
+minimum = 100
+maximum = 599
+
+[provides.operations.send_file_url.output_schema.properties.response_kind]
+type = "string"
+enum = ["empty", "json", "text"]
+
+[provides.operations.send_file_url.output_schema.properties.body]
+
+[provides.operations.send_file_url.output_schema.properties.raw_body]
+type = "string"
+
+[provides.operations.send_file_url.output_schema.properties.file_url_policy]
+type = "object"
+required = ["decision", "classification", "scheme", "host", "resolved_ip_count", "allowlisted_host"]
+additionalProperties = false
+
+[provides.operations.send_file_url.output_schema.properties.file_url_policy.properties.decision]
+type = "string"
+
+[provides.operations.send_file_url.output_schema.properties.file_url_policy.properties.classification]
+type = "string"
+
+[provides.operations.send_file_url.output_schema.properties.file_url_policy.properties.scheme]
+type = "string"
+
+[provides.operations.send_file_url.output_schema.properties.file_url_policy.properties.host]
+type = "string"
+
+[provides.operations.send_file_url.output_schema.properties.file_url_policy.properties.port]
+type = "integer"
+minimum = 1
+maximum = 65535
+
+[provides.operations.send_file_url.output_schema.properties.file_url_policy.properties.resolved_ip_count]
+type = "integer"
+minimum = 0
+
+[provides.operations.send_file_url.output_schema.properties.file_url_policy.properties.allowlisted_host]
+type = "boolean"
 
 [provides.operations.send_payload]
 description = "Send a raw Synology Chat webhook payload"
@@ -68,11 +183,39 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "none"
-input_schema = { type = "object", required = ["payload"] }
-output_schema = { type = "object" }
 
 [provides.operations.send_payload.ai_hints]
 when_to_use = "When you need advanced webhook payload control for cards or attachments and intentionally accept unchecked provider-specific passthrough"
+
+[provides.operations.send_payload.input_schema]
+type = "object"
+required = ["payload"]
+additionalProperties = false
+
+[provides.operations.send_payload.input_schema.properties.payload]
+type = "object"
+
+[provides.operations.send_payload.output_schema]
+type = "object"
+required = ["status", "http_status", "response_kind"]
+additionalProperties = true
+
+[provides.operations.send_payload.output_schema.properties.status]
+enum = ["ok"]
+
+[provides.operations.send_payload.output_schema.properties.http_status]
+type = "integer"
+minimum = 100
+maximum = 599
+
+[provides.operations.send_payload.output_schema.properties.response_kind]
+type = "string"
+enum = ["empty", "json", "text"]
+
+[provides.operations.send_payload.output_schema.properties.body]
+
+[provides.operations.send_payload.output_schema.properties.raw_body]
+type = "string"
 
 [provides.operations.ingest_outgoing_webhook]
 description = "Policy-check, verify, and normalize a host-forwarded Synology Chat outgoing-webhook payload"
@@ -81,11 +224,148 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
-input_schema = { type = "object", required = ["payload"], properties = { payload = { type = "object" }, token = { type = "string" }, headers = { type = "object" }, query = { type = "object" }, body_size_bytes = { type = "integer" }, body_read_elapsed_ms = { type = "integer" }, source_id = { type = "string" } } }
-output_schema = { type = "object" }
 
 [provides.operations.ingest_outgoing_webhook.ai_hints]
 when_to_use = "When fcp-host forwards an outgoing-webhook payload and you need stable channel, thread, sender, attachment, and ingress-policy metadata"
+
+[provides.operations.ingest_outgoing_webhook.input_schema]
+type = "object"
+required = ["payload"]
+additionalProperties = false
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.payload]
+type = "object"
+required = ["channel_id", "channel_type", "user_id", "username", "post_id", "thread_id", "timestamp", "text"]
+additionalProperties = true
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.payload.properties.token]
+type = "string"
+minLength = 1
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.payload.properties.channel_id]
+type = ["string", "integer"]
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.payload.properties.channel_type]
+type = ["string", "integer"]
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.payload.properties.channel_name]
+type = "string"
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.payload.properties.user_id]
+type = ["string", "integer"]
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.payload.properties.username]
+type = "string"
+minLength = 1
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.payload.properties.post_id]
+type = ["string", "integer"]
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.payload.properties.thread_id]
+type = ["string", "integer"]
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.payload.properties.timestamp]
+type = ["string", "integer"]
+minimum = 0
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.payload.properties.text]
+type = "string"
+minLength = 1
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.payload.properties.trigger_word]
+type = "string"
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.payload.properties.file_url]
+type = "string"
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.payload.properties.attachments]
+type = "array"
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.payload.properties.files]
+type = "array"
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.payload.properties.file]
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.token]
+type = "string"
+minLength = 1
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.headers]
+type = "object"
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.query]
+type = "object"
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.body_size_bytes]
+type = "integer"
+minimum = 0
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.body_read_elapsed_ms]
+type = "integer"
+minimum = 0
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.source_id]
+type = "string"
+
+[provides.operations.ingest_outgoing_webhook.input_schema.properties.delivery_id]
+type = "string"
+
+[provides.operations.ingest_outgoing_webhook.output_schema]
+type = "object"
+required = ["event"]
+additionalProperties = false
+
+[provides.operations.ingest_outgoing_webhook.output_schema.properties.event]
+type = "object"
+required = ["topic", "event_type", "delivery_id", "resource_uri", "channel", "thread", "sender", "message", "attachments", "reply", "ingress_policy"]
+additionalProperties = true
+
+[provides.operations.ingest_outgoing_webhook.output_schema.properties.event.properties.topic]
+enum = ["synology_chat.outgoing_webhook.received"]
+
+[provides.operations.ingest_outgoing_webhook.output_schema.properties.event.properties.event_type]
+enum = ["outgoing_webhook"]
+
+[provides.operations.ingest_outgoing_webhook.output_schema.properties.event.properties.delivery_id]
+type = "string"
+minLength = 1
+
+[provides.operations.ingest_outgoing_webhook.output_schema.properties.event.properties.resource_uri]
+type = "string"
+minLength = 1
+
+[provides.operations.ingest_outgoing_webhook.output_schema.properties.event.properties.channel]
+type = "object"
+required = ["id", "type", "resource_uri"]
+additionalProperties = true
+
+[provides.operations.ingest_outgoing_webhook.output_schema.properties.event.properties.thread]
+type = "object"
+required = ["id", "resource_uri", "is_threaded"]
+additionalProperties = true
+
+[provides.operations.ingest_outgoing_webhook.output_schema.properties.event.properties.sender]
+type = "object"
+required = ["user_id", "username", "resource_uri"]
+additionalProperties = true
+
+[provides.operations.ingest_outgoing_webhook.output_schema.properties.event.properties.message]
+type = "object"
+required = ["post_id", "text", "sanitized_text", "timestamp_ms"]
+additionalProperties = true
+
+[provides.operations.ingest_outgoing_webhook.output_schema.properties.event.properties.attachments]
+type = "array"
+
+[provides.operations.ingest_outgoing_webhook.output_schema.properties.event.properties.reply]
+type = "object"
+required = ["mode", "supports_text", "supports_file_url"]
+additionalProperties = true
+
+[provides.operations.ingest_outgoing_webhook.output_schema.properties.event.properties.ingress_policy]
+type = "object"
+required = ["mode", "hosted_listener", "token_source", "token_verification", "body", "sender", "dm", "rate_limit", "sanitization", "source_hash", "raw_payload_logged"]
+additionalProperties = true
 
 [provides.operations.webhook_normalize]
 description = "Normalize a raw inbound Synology Chat webhook payload into a stable event envelope"
@@ -94,11 +374,100 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
-input_schema = { type = "object", required = ["payload"] }
-output_schema = { type = "object" }
 
 [provides.operations.webhook_normalize.ai_hints]
 when_to_use = "When you need to normalize any inbound Synology Chat webhook payload into a stable event shape with optional token verification"
+
+[provides.operations.webhook_normalize.input_schema]
+type = "object"
+required = ["payload"]
+additionalProperties = false
+
+[provides.operations.webhook_normalize.input_schema.properties.payload]
+type = "object"
+additionalProperties = true
+
+[provides.operations.webhook_normalize.input_schema.properties.payload.properties.user_id]
+
+[provides.operations.webhook_normalize.input_schema.properties.payload.properties.username]
+type = "string"
+
+[provides.operations.webhook_normalize.input_schema.properties.payload.properties.post_id]
+
+[provides.operations.webhook_normalize.input_schema.properties.payload.properties.channel_id]
+
+[provides.operations.webhook_normalize.input_schema.properties.payload.properties.channel_name]
+type = "string"
+
+[provides.operations.webhook_normalize.input_schema.properties.payload.properties.channel_type]
+
+[provides.operations.webhook_normalize.input_schema.properties.payload.properties.text]
+type = "string"
+
+[provides.operations.webhook_normalize.input_schema.properties.payload.properties.timestamp]
+
+[provides.operations.webhook_normalize.input_schema.properties.payload.properties.token]
+type = "string"
+
+[provides.operations.webhook_normalize.input_schema.properties.payload.properties.trigger_word]
+type = "string"
+
+[provides.operations.webhook_normalize.input_schema.properties.payload.properties.thread_id]
+
+[provides.operations.webhook_normalize.input_schema.properties.payload.properties.file_url]
+type = "string"
+
+[provides.operations.webhook_normalize.output_schema]
+type = "object"
+required = ["event", "token_verification"]
+additionalProperties = false
+
+[provides.operations.webhook_normalize.output_schema.properties.event]
+type = "object"
+required = ["event_type", "channel_id", "channel_name", "sender_id", "sender_name", "text", "timestamp", "trigger_word", "is_threaded", "thread_id", "file_url", "token_verified", "raw"]
+additionalProperties = true
+
+[provides.operations.webhook_normalize.output_schema.properties.event.properties.event_type]
+enum = ["inbound_webhook"]
+
+[provides.operations.webhook_normalize.output_schema.properties.event.properties.channel_id]
+type = ["string", "null"]
+
+[provides.operations.webhook_normalize.output_schema.properties.event.properties.channel_name]
+type = ["string", "null"]
+
+[provides.operations.webhook_normalize.output_schema.properties.event.properties.sender_id]
+type = ["string", "null"]
+
+[provides.operations.webhook_normalize.output_schema.properties.event.properties.sender_name]
+type = ["string", "null"]
+
+[provides.operations.webhook_normalize.output_schema.properties.event.properties.text]
+type = ["string", "null"]
+
+[provides.operations.webhook_normalize.output_schema.properties.event.properties.timestamp]
+type = ["string", "null"]
+
+[provides.operations.webhook_normalize.output_schema.properties.event.properties.trigger_word]
+type = ["string", "null"]
+
+[provides.operations.webhook_normalize.output_schema.properties.event.properties.is_threaded]
+type = "boolean"
+
+[provides.operations.webhook_normalize.output_schema.properties.event.properties.thread_id]
+type = ["string", "null"]
+
+[provides.operations.webhook_normalize.output_schema.properties.event.properties.file_url]
+type = ["string", "null"]
+
+[provides.operations.webhook_normalize.output_schema.properties.event.properties.token_verified]
+type = ["boolean", "null"]
+
+[provides.operations.webhook_normalize.output_schema.properties.event.properties.raw]
+
+[provides.operations.webhook_normalize.output_schema.properties.token_verification]
+type = "string"
+enum = ["verified", "mismatch", "missing_from_payload", "not_configured"]
 
 [provides.operations.health]
 description = "Report Synology Chat connector configuration and delivery target"
@@ -107,11 +476,85 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
-input_schema = { type = "object" }
-output_schema = { type = "object" }
 
 [provides.operations.health.ai_hints]
 when_to_use = "When you need to confirm the Synology Chat connector is configured"
+
+[provides.operations.health.input_schema]
+type = "object"
+additionalProperties = false
+maxProperties = 0
+
+[provides.operations.health.output_schema]
+type = "object"
+required = ["status", "delivery_target", "request_timeout_ms", "allow_insecure_ssl", "outgoing_token_configured", "allowed_file_url_hosts", "forwarded_ingress_policy", "raw_payload_file_url_policy", "receive_path", "reply_semantics", "manifest_hash"]
+additionalProperties = true
+
+[provides.operations.health.output_schema.properties.status]
+enum = ["ok"]
+
+[provides.operations.health.output_schema.properties.delivery_target]
+type = "object"
+required = ["mode", "scheme", "host", "origin", "path_hint", "incoming_url_redacted"]
+additionalProperties = true
+
+[provides.operations.health.output_schema.properties.delivery_target.properties.mode]
+enum = ["incoming_webhook"]
+
+[provides.operations.health.output_schema.properties.delivery_target.properties.scheme]
+type = "string"
+
+[provides.operations.health.output_schema.properties.delivery_target.properties.host]
+type = "string"
+
+[provides.operations.health.output_schema.properties.delivery_target.properties.port]
+type = ["integer", "null"]
+minimum = 1
+maximum = 65535
+
+[provides.operations.health.output_schema.properties.delivery_target.properties.origin]
+type = "string"
+
+[provides.operations.health.output_schema.properties.delivery_target.properties.path_hint]
+type = "string"
+
+[provides.operations.health.output_schema.properties.delivery_target.properties.incoming_url_redacted]
+type = "string"
+
+[provides.operations.health.output_schema.properties.request_timeout_ms]
+type = "integer"
+minimum = 0
+
+[provides.operations.health.output_schema.properties.allow_insecure_ssl]
+type = "boolean"
+
+[provides.operations.health.output_schema.properties.outgoing_token_configured]
+type = "boolean"
+
+[provides.operations.health.output_schema.properties.allowed_file_url_hosts]
+type = "array"
+
+[provides.operations.health.output_schema.properties.allowed_file_url_hosts.items]
+type = "string"
+
+[provides.operations.health.output_schema.properties.forwarded_ingress_policy]
+type = "object"
+required = ["sender_policy", "allowed_sender_ids", "dm_policy", "allowed_dm_sender_ids", "body_limit_bytes", "body_timeout_ms", "invalid_token_limit_per_minute", "sender_limit_per_minute", "hosted_listener", "reply_user_id_resolution"]
+additionalProperties = true
+
+[provides.operations.health.output_schema.properties.raw_payload_file_url_policy]
+enum = ["unchecked_passthrough"]
+
+[provides.operations.health.output_schema.properties.receive_path]
+type = "string"
+enum = ["disabled", "forwarded_outgoing_webhook"]
+
+[provides.operations.health.output_schema.properties.reply_semantics]
+type = "string"
+enum = ["outbound_only", "outgoing_webhook_response"]
+
+[provides.operations.health.output_schema.properties.manifest_hash]
+type = "string"
 
 [sandbox]
 profile = "strict"

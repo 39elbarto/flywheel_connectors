@@ -31,7 +31,16 @@ const OP_SEND_MESSAGE: &str = "synology_chat.send_message";
 const OP_SEND_FILE_URL: &str = "synology_chat.send_file_url";
 const OP_SEND_PAYLOAD: &str = "synology_chat.send_payload";
 const OP_INGEST_OUTGOING_WEBHOOK: &str = "synology_chat.ingest_outgoing_webhook";
+const OP_WEBHOOK_NORMALIZE: &str = "synology_chat.webhook.normalize";
 const OP_HEALTH: &str = "synology_chat.health";
+const EXPECTED_MANIFEST_SCHEMA_OPS: [(&str, &str); 6] = [
+    ("send_message", OP_SEND_MESSAGE),
+    ("send_file_url", OP_SEND_FILE_URL),
+    ("send_payload", OP_SEND_PAYLOAD),
+    ("ingest_outgoing_webhook", OP_INGEST_OUTGOING_WEBHOOK),
+    ("webhook_normalize", OP_WEBHOOK_NORMALIZE),
+    ("health", OP_HEALTH),
+];
 
 fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
     HandshakeRequest {
@@ -354,6 +363,364 @@ fn append_evidence(path: &Path, value: &Value) {
         serde_json::to_string(&value).expect("evidence should serialize")
     )
     .expect("evidence line should write");
+}
+
+fn synology_chat_manifest() -> toml::Value {
+    toml::from_str(include_str!("../manifest.toml"))
+        .expect("Synology Chat manifest TOML should parse")
+}
+
+fn manifest_operations(manifest: &toml::Value) -> &toml::Table {
+    manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("manifest should contain provides.operations")
+}
+
+fn operation_schema(manifest: &toml::Value, operation_key: &str, schema_key: &str) -> Value {
+    let schema = manifest_operations(manifest)
+        .get(operation_key)
+        .and_then(|operation| operation.get(schema_key))
+        .expect("operation should define requested schema");
+
+    serde_json::to_value(schema).expect("manifest schema should convert to JSON")
+}
+
+fn assert_schema_accepts(schema: &Value, payload: &Value) {
+    let validator = jsonschema::validator_for(schema).expect("schema should compile");
+    let errors = validator
+        .iter_errors(payload)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        errors.is_empty(),
+        "schema should accept payload {payload:#}: {errors:#?}"
+    );
+}
+
+fn assert_schema_rejects(schema: &Value, payload: &Value) {
+    let validator = jsonschema::validator_for(schema).expect("schema should compile");
+    let errors = validator
+        .iter_errors(payload)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        !errors.is_empty(),
+        "schema should reject payload {payload:#}"
+    );
+}
+
+fn dispatch_output() -> Value {
+    json!({
+        "status": "ok",
+        "http_status": 200,
+        "response_kind": "json",
+        "body": { "queued": true }
+    })
+}
+
+fn file_url_dispatch_output() -> Value {
+    json!({
+        "status": "ok",
+        "http_status": 200,
+        "response_kind": "empty",
+        "file_url_policy": {
+            "decision": "allowed",
+            "classification": "public_dns",
+            "scheme": "https",
+            "host": "cdn.example.com",
+            "port": 443,
+            "resolved_ip_count": 1,
+            "allowlisted_host": false
+        }
+    })
+}
+
+fn outgoing_webhook_input_payload() -> Value {
+    json!({
+        "payload": {
+            "token": "shared-secret",
+            "channel_id": "34",
+            "channel_type": "1",
+            "channel_name": "Labb",
+            "user_id": "4",
+            "username": "mikael",
+            "post_id": "146028888128",
+            "thread_id": "0",
+            "timestamp": 1_646_827_836_131_i64,
+            "text": "Tjena",
+            "trigger_word": "Tjena",
+            "attachments": [{ "text": "Details" }]
+        },
+        "body_size_bytes": 512,
+        "body_read_elapsed_ms": 20,
+        "source_id": "loopback-forwarder",
+        "delivery_id": "delivery-1"
+    })
+}
+
+fn outgoing_webhook_output() -> Value {
+    json!({
+        "event": {
+            "topic": "synology_chat.outgoing_webhook.received",
+            "event_type": "outgoing_webhook",
+            "delivery_id": "delivery-1",
+            "resource_uri": "synology-chat://channels/34/posts/146028888128",
+            "channel": {
+                "id": "34",
+                "type": "1",
+                "name": "Labb",
+                "resource_uri": "synology-chat://channels/34"
+            },
+            "thread": {
+                "id": null,
+                "resource_uri": null,
+                "is_threaded": false
+            },
+            "sender": {
+                "user_id": "4",
+                "username": "mikael",
+                "resource_uri": "synology-chat://users/4"
+            },
+            "message": {
+                "post_id": "146028888128",
+                "text": "Tjena",
+                "sanitized_text": "Tjena",
+                "trigger_word": "Tjena",
+                "timestamp_ms": 1_646_827_836_131_i64
+            },
+            "attachments": [],
+            "reply": {
+                "mode": "outgoing_webhook_response",
+                "supports_text": true,
+                "supports_file_url": true
+            },
+            "ingress_policy": {
+                "mode": "host_forwarded",
+                "hosted_listener": false,
+                "token_source": "payload.token",
+                "token_verification": "verified",
+                "body": {
+                    "size_bytes": 512,
+                    "limit_bytes": 65_536,
+                    "read_elapsed_ms": 20,
+                    "timeout_ms": 5_000
+                },
+                "sender": { "decision": "allowed" },
+                "dm": { "decision": "not_applicable" },
+                "rate_limit": { "decision": "allowed" },
+                "sanitization": { "raw_text_logged": false },
+                "source_hash": "sha256:abc",
+                "raw_payload_logged": false
+            }
+        }
+    })
+}
+
+fn normalized_webhook_output() -> Value {
+    json!({
+        "event": {
+            "event_type": "inbound_webhook",
+            "channel_id": "34",
+            "channel_name": "Labb",
+            "sender_id": "4",
+            "sender_name": "mikael",
+            "text": "Hello",
+            "timestamp": "1646827836131",
+            "trigger_word": null,
+            "is_threaded": false,
+            "thread_id": null,
+            "file_url": null,
+            "token_verified": true,
+            "raw": { "text": "Hello" }
+        },
+        "token_verification": "verified"
+    })
+}
+
+fn health_output() -> Value {
+    json!({
+        "status": "ok",
+        "delivery_target": {
+            "mode": "incoming_webhook",
+            "scheme": "https",
+            "host": "nas.example.com",
+            "port": 443,
+            "origin": "https://nas.example.com:443",
+            "path_hint": "/webhook",
+            "incoming_url_redacted": "https://nas.example.com:443/webhook"
+        },
+        "request_timeout_ms": 15_000,
+        "allow_insecure_ssl": false,
+        "outgoing_token_configured": true,
+        "allowed_file_url_hosts": ["cdn.example.com"],
+        "forwarded_ingress_policy": {
+            "sender_policy": "open",
+            "allowed_sender_ids": [],
+            "dm_policy": "open",
+            "allowed_dm_sender_ids": [],
+            "body_limit_bytes": 65_536,
+            "body_timeout_ms": 5_000,
+            "invalid_token_limit_per_minute": 10,
+            "sender_limit_per_minute": 60,
+            "hosted_listener": false,
+            "reply_user_id_resolution": "stable_webhook_user_id"
+        },
+        "raw_payload_file_url_policy": "unchecked_passthrough",
+        "receive_path": "forwarded_outgoing_webhook",
+        "reply_semantics": "outgoing_webhook_response",
+        "manifest_hash": "sha256:manifest"
+    })
+}
+
+fn assert_manifest_schema_catalog_matches_runtime(manifest: &toml::Value) {
+    let introspection = SynologyChatConnector::new().introspect();
+    assert_eq!(
+        introspection.operations.len(),
+        EXPECTED_MANIFEST_SCHEMA_OPS.len(),
+        "runtime operation catalog should stay aligned with manifest schema coverage"
+    );
+
+    for (manifest_key, operation_id) in EXPECTED_MANIFEST_SCHEMA_OPS {
+        let operation = introspection
+            .operations
+            .iter()
+            .find(|entry| entry.id.as_str() == operation_id)
+            .expect("runtime catalog should include manifest operation");
+        let input_schema = operation_schema(manifest, manifest_key, "input_schema");
+        let output_schema = operation_schema(manifest, manifest_key, "output_schema");
+
+        assert_eq!(
+            input_schema, operation.input_schema,
+            "{operation_id} manifest input_schema should match runtime OperationInfo"
+        );
+        assert_eq!(
+            output_schema, operation.output_schema,
+            "{operation_id} manifest output_schema should match runtime OperationInfo"
+        );
+        assert!(
+            jsonschema::validator_for(&input_schema).is_ok(),
+            "{operation_id} manifest input_schema should compile"
+        );
+        assert!(
+            jsonschema::validator_for(&output_schema).is_ok(),
+            "{operation_id} manifest output_schema should compile"
+        );
+    }
+}
+
+fn assert_input_schema_examples(manifest: &toml::Value) {
+    let send_message_input = operation_schema(manifest, "send_message", "input_schema");
+    assert_schema_accepts(
+        &send_message_input,
+        &json!({
+            "text": "Hello from Flywheel",
+            "user_ids": ["4"],
+            "bot_name": "Build Bot"
+        }),
+    );
+    assert_schema_rejects(&send_message_input, &json!({ "text": "" }));
+    assert_schema_rejects(
+        &send_message_input,
+        &json!({ "text": "Hello", "unexpected": true }),
+    );
+
+    let send_file_url_input = operation_schema(manifest, "send_file_url", "input_schema");
+    assert_schema_accepts(
+        &send_file_url_input,
+        &json!({
+            "file_url": "https://cdn.example.com/report.pdf",
+            "user_id": "4"
+        }),
+    );
+    assert_schema_rejects(&send_file_url_input, &json!({ "file_url": "" }));
+
+    let send_payload_input = operation_schema(manifest, "send_payload", "input_schema");
+    assert_schema_accepts(
+        &send_payload_input,
+        &json!({ "payload": { "text": "Webhook body", "attachments": [{ "text": "Details" }] } }),
+    );
+    assert_schema_rejects(&send_payload_input, &json!({ "payload": "not-an-object" }));
+
+    let ingest_input = operation_schema(manifest, "ingest_outgoing_webhook", "input_schema");
+    assert_schema_accepts(&ingest_input, &outgoing_webhook_input_payload());
+    assert_schema_rejects(
+        &ingest_input,
+        &json!({
+            "payload": {
+                "channel_id": "34",
+                "channel_type": "1",
+                "user_id": "4",
+                "post_id": "146028888128",
+                "thread_id": "0",
+                "timestamp": 1_646_827_836_131_i64,
+                "text": "missing username"
+            }
+        }),
+    );
+    assert_schema_rejects(
+        &ingest_input,
+        &json!({
+            "payload": outgoing_webhook_payload("4", "1", "ok"),
+            "body_size_bytes": -1
+        }),
+    );
+
+    let normalize_input = operation_schema(manifest, "webhook_normalize", "input_schema");
+    assert_schema_accepts(
+        &normalize_input,
+        &json!({ "payload": { "channel_id": 34, "user_id": 4, "text": "Hello" } }),
+    );
+    assert_schema_rejects(&normalize_input, &json!({}));
+    assert_schema_rejects(
+        &normalize_input,
+        &json!({ "payload": {}, "unexpected": true }),
+    );
+
+    let health_input = operation_schema(manifest, "health", "input_schema");
+    assert_schema_accepts(&health_input, &json!({}));
+    assert_schema_rejects(&health_input, &json!({ "probe": true }));
+}
+
+fn assert_output_schema_examples(manifest: &toml::Value) {
+    let dispatch_schema = operation_schema(manifest, "send_message", "output_schema");
+    assert_schema_accepts(&dispatch_schema, &dispatch_output());
+    assert_schema_rejects(&dispatch_schema, &json!({ "http_status": 200 }));
+
+    let file_output_schema = operation_schema(manifest, "send_file_url", "output_schema");
+    assert_schema_accepts(&file_output_schema, &file_url_dispatch_output());
+    assert_schema_rejects(&file_output_schema, &dispatch_output());
+
+    let ingest_output_schema =
+        operation_schema(manifest, "ingest_outgoing_webhook", "output_schema");
+    assert_schema_accepts(&ingest_output_schema, &outgoing_webhook_output());
+    let mut malformed_event = outgoing_webhook_output();
+    malformed_event["event"]
+        .as_object_mut()
+        .expect("event object")
+        .remove("topic");
+    assert_schema_rejects(&ingest_output_schema, &malformed_event);
+
+    let normalize_output_schema = operation_schema(manifest, "webhook_normalize", "output_schema");
+    let normalized = normalized_webhook_output();
+    assert_schema_accepts(&normalize_output_schema, &normalized);
+    assert_schema_rejects(
+        &normalize_output_schema,
+        &json!({ "event": normalized["event"].clone(), "token_verification": "maybe" }),
+    );
+
+    let health_output_schema = operation_schema(manifest, "health", "output_schema");
+    assert_schema_accepts(&health_output_schema, &health_output());
+    assert_schema_rejects(&health_output_schema, &json!({ "status": "ok" }));
+}
+
+#[test]
+fn manifest_operation_schemas_compile_and_validate_core_payloads() {
+    let manifest = synology_chat_manifest();
+    assert_manifest_schema_catalog_matches_runtime(&manifest);
+    assert_input_schema_examples(&manifest);
+    assert_output_schema_examples(&manifest);
 }
 
 #[fcp_async_core::runtime::test]

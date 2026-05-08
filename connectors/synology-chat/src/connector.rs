@@ -184,6 +184,484 @@ impl SynologyChatConnector {
         &self.base.instance_id
     }
 
+    fn nonblank_string_schema() -> Value {
+        json!({
+            "type": "string",
+            "minLength": 1
+        })
+    }
+
+    fn optional_string_schema() -> Value {
+        json!({ "type": "string" })
+    }
+
+    fn string_array_schema() -> Value {
+        json!({
+            "type": "array",
+            "items": Self::nonblank_string_schema()
+        })
+    }
+
+    fn string_or_integer_schema() -> Value {
+        json!({ "type": ["string", "integer"] })
+    }
+
+    fn nonnegative_integer_schema() -> Value {
+        json!({
+            "type": "integer",
+            "minimum": 0
+        })
+    }
+
+    fn empty_input_schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "maxProperties": 0
+        })
+    }
+
+    fn send_message_input_schema() -> Value {
+        json!({
+            "type": "object",
+            "required": ["text"],
+            "additionalProperties": false,
+            "properties": {
+                "text": Self::nonblank_string_schema(),
+                "user_id": Self::optional_string_schema(),
+                "user_ids": Self::string_array_schema(),
+                "bot_name": Self::optional_string_schema()
+            }
+        })
+    }
+
+    fn send_file_url_input_schema() -> Value {
+        json!({
+            "type": "object",
+            "required": ["file_url"],
+            "additionalProperties": false,
+            "properties": {
+                "file_url": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048,
+                    "description": "HTTP or HTTPS media URL for Synology Chat to fetch"
+                },
+                "user_id": Self::optional_string_schema(),
+                "user_ids": Self::string_array_schema(),
+                "bot_name": Self::optional_string_schema()
+            }
+        })
+    }
+
+    fn send_payload_input_schema() -> Value {
+        json!({
+            "type": "object",
+            "required": ["payload"],
+            "additionalProperties": false,
+            "properties": {
+                "payload": { "type": "object" }
+            }
+        })
+    }
+
+    fn outgoing_webhook_payload_schema() -> Value {
+        json!({
+            "type": "object",
+            "required": [
+                "channel_id",
+                "channel_type",
+                "user_id",
+                "username",
+                "post_id",
+                "thread_id",
+                "timestamp",
+                "text"
+            ],
+            "additionalProperties": true,
+            "properties": {
+                "token": Self::nonblank_string_schema(),
+                "channel_id": Self::string_or_integer_schema(),
+                "channel_type": Self::string_or_integer_schema(),
+                "channel_name": Self::optional_string_schema(),
+                "user_id": Self::string_or_integer_schema(),
+                "username": Self::nonblank_string_schema(),
+                "post_id": Self::string_or_integer_schema(),
+                "thread_id": Self::string_or_integer_schema(),
+                "timestamp": {
+                    "type": ["string", "integer"],
+                    "minimum": 0
+                },
+                "text": Self::nonblank_string_schema(),
+                "trigger_word": Self::optional_string_schema(),
+                "file_url": Self::optional_string_schema(),
+                "attachments": { "type": "array" },
+                "files": { "type": "array" },
+                "file": {}
+            }
+        })
+    }
+
+    fn ingest_outgoing_webhook_input_schema() -> Value {
+        json!({
+            "type": "object",
+            "required": ["payload"],
+            "additionalProperties": false,
+            "properties": {
+                "payload": Self::outgoing_webhook_payload_schema(),
+                "token": Self::nonblank_string_schema(),
+                "headers": { "type": "object" },
+                "query": { "type": "object" },
+                "body_size_bytes": Self::nonnegative_integer_schema(),
+                "body_read_elapsed_ms": Self::nonnegative_integer_schema(),
+                "source_id": Self::optional_string_schema(),
+                "delivery_id": Self::optional_string_schema()
+            }
+        })
+    }
+
+    fn webhook_normalize_input_schema() -> Value {
+        json!({
+            "type": "object",
+            "required": ["payload"],
+            "additionalProperties": false,
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "properties": {
+                        "user_id": {},
+                        "username": Self::optional_string_schema(),
+                        "post_id": {},
+                        "channel_id": {},
+                        "channel_name": Self::optional_string_schema(),
+                        "channel_type": {},
+                        "text": Self::optional_string_schema(),
+                        "timestamp": {},
+                        "token": Self::optional_string_schema(),
+                        "trigger_word": Self::optional_string_schema(),
+                        "thread_id": {},
+                        "file_url": Self::optional_string_schema()
+                    }
+                }
+            }
+        })
+    }
+
+    fn dispatch_output_schema() -> Value {
+        json!({
+            "type": "object",
+            "required": ["status", "http_status", "response_kind"],
+            "additionalProperties": true,
+            "properties": {
+                "status": { "enum": ["ok"] },
+                "http_status": {
+                    "type": "integer",
+                    "minimum": 100,
+                    "maximum": 599
+                },
+                "response_kind": {
+                    "type": "string",
+                    "enum": ["empty", "json", "text"]
+                },
+                "body": {},
+                "raw_body": { "type": "string" }
+            }
+        })
+    }
+
+    fn file_url_policy_output_schema() -> Value {
+        json!({
+            "type": "object",
+            "required": [
+                "decision",
+                "classification",
+                "scheme",
+                "host",
+                "resolved_ip_count",
+                "allowlisted_host"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "decision": { "type": "string" },
+                "classification": { "type": "string" },
+                "scheme": { "type": "string" },
+                "host": { "type": "string" },
+                "port": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535
+                },
+                "resolved_ip_count": Self::nonnegative_integer_schema(),
+                "allowlisted_host": { "type": "boolean" }
+            }
+        })
+    }
+
+    fn send_file_url_output_schema() -> Value {
+        json!({
+            "type": "object",
+            "required": ["status", "http_status", "response_kind", "file_url_policy"],
+            "additionalProperties": true,
+            "properties": {
+                "status": { "enum": ["ok"] },
+                "http_status": {
+                    "type": "integer",
+                    "minimum": 100,
+                    "maximum": 599
+                },
+                "response_kind": {
+                    "type": "string",
+                    "enum": ["empty", "json", "text"]
+                },
+                "body": {},
+                "raw_body": { "type": "string" },
+                "file_url_policy": Self::file_url_policy_output_schema()
+            }
+        })
+    }
+
+    fn outgoing_webhook_event_schema() -> Value {
+        json!({
+            "type": "object",
+            "required": [
+                "topic",
+                "event_type",
+                "delivery_id",
+                "resource_uri",
+                "channel",
+                "thread",
+                "sender",
+                "message",
+                "attachments",
+                "reply",
+                "ingress_policy"
+            ],
+            "additionalProperties": true,
+            "properties": {
+                "topic": { "enum": ["synology_chat.outgoing_webhook.received"] },
+                "event_type": { "enum": ["outgoing_webhook"] },
+                "delivery_id": Self::nonblank_string_schema(),
+                "resource_uri": Self::nonblank_string_schema(),
+                "channel": {
+                    "type": "object",
+                    "required": ["id", "type", "resource_uri"],
+                    "additionalProperties": true
+                },
+                "thread": {
+                    "type": "object",
+                    "required": ["id", "resource_uri", "is_threaded"],
+                    "additionalProperties": true
+                },
+                "sender": {
+                    "type": "object",
+                    "required": ["user_id", "username", "resource_uri"],
+                    "additionalProperties": true
+                },
+                "message": {
+                    "type": "object",
+                    "required": ["post_id", "text", "sanitized_text", "timestamp_ms"],
+                    "additionalProperties": true
+                },
+                "attachments": { "type": "array" },
+                "reply": {
+                    "type": "object",
+                    "required": ["mode", "supports_text", "supports_file_url"],
+                    "additionalProperties": true
+                },
+                "ingress_policy": {
+                    "type": "object",
+                    "required": [
+                        "mode",
+                        "hosted_listener",
+                        "token_source",
+                        "token_verification",
+                        "body",
+                        "sender",
+                        "dm",
+                        "rate_limit",
+                        "sanitization",
+                        "source_hash",
+                        "raw_payload_logged"
+                    ],
+                    "additionalProperties": true
+                }
+            }
+        })
+    }
+
+    fn ingest_outgoing_webhook_output_schema() -> Value {
+        json!({
+            "type": "object",
+            "required": ["event"],
+            "additionalProperties": false,
+            "properties": {
+                "event": Self::outgoing_webhook_event_schema()
+            }
+        })
+    }
+
+    fn normalized_inbound_event_schema() -> Value {
+        json!({
+            "type": "object",
+            "required": [
+                "event_type",
+                "channel_id",
+                "channel_name",
+                "sender_id",
+                "sender_name",
+                "text",
+                "timestamp",
+                "trigger_word",
+                "is_threaded",
+                "thread_id",
+                "file_url",
+                "token_verified",
+                "raw"
+            ],
+            "additionalProperties": true,
+            "properties": {
+                "event_type": { "enum": ["inbound_webhook"] },
+                "channel_id": { "type": ["string", "null"] },
+                "channel_name": { "type": ["string", "null"] },
+                "sender_id": { "type": ["string", "null"] },
+                "sender_name": { "type": ["string", "null"] },
+                "text": { "type": ["string", "null"] },
+                "timestamp": { "type": ["string", "null"] },
+                "trigger_word": { "type": ["string", "null"] },
+                "is_threaded": { "type": "boolean" },
+                "thread_id": { "type": ["string", "null"] },
+                "file_url": { "type": ["string", "null"] },
+                "token_verified": { "type": ["boolean", "null"] },
+                "raw": {}
+            }
+        })
+    }
+
+    fn webhook_normalize_output_schema() -> Value {
+        json!({
+            "type": "object",
+            "required": ["event", "token_verification"],
+            "additionalProperties": false,
+            "properties": {
+                "event": Self::normalized_inbound_event_schema(),
+                "token_verification": {
+                    "type": "string",
+                    "enum": [
+                        "verified",
+                        "mismatch",
+                        "missing_from_payload",
+                        "not_configured"
+                    ]
+                }
+            }
+        })
+    }
+
+    fn health_output_schema() -> Value {
+        json!({
+            "type": "object",
+            "required": [
+                "status",
+                "delivery_target",
+                "request_timeout_ms",
+                "allow_insecure_ssl",
+                "outgoing_token_configured",
+                "allowed_file_url_hosts",
+                "forwarded_ingress_policy",
+                "raw_payload_file_url_policy",
+                "receive_path",
+                "reply_semantics",
+                "manifest_hash"
+            ],
+            "additionalProperties": true,
+            "properties": {
+                "status": { "enum": ["ok"] },
+                "delivery_target": {
+                    "type": "object",
+                    "required": [
+                        "mode",
+                        "scheme",
+                        "host",
+                        "origin",
+                        "path_hint",
+                        "incoming_url_redacted"
+                    ],
+                    "additionalProperties": true,
+                    "properties": {
+                        "mode": { "enum": ["incoming_webhook"] },
+                        "scheme": { "type": "string" },
+                        "host": { "type": "string" },
+                        "port": {
+                            "type": ["integer", "null"],
+                            "minimum": 1,
+                            "maximum": 65535
+                        },
+                        "origin": { "type": "string" },
+                        "path_hint": { "type": "string" },
+                        "incoming_url_redacted": { "type": "string" }
+                    }
+                },
+                "request_timeout_ms": Self::nonnegative_integer_schema(),
+                "allow_insecure_ssl": { "type": "boolean" },
+                "outgoing_token_configured": { "type": "boolean" },
+                "allowed_file_url_hosts": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                },
+                "forwarded_ingress_policy": {
+                    "type": "object",
+                    "required": [
+                        "sender_policy",
+                        "allowed_sender_ids",
+                        "dm_policy",
+                        "allowed_dm_sender_ids",
+                        "body_limit_bytes",
+                        "body_timeout_ms",
+                        "invalid_token_limit_per_minute",
+                        "sender_limit_per_minute",
+                        "hosted_listener",
+                        "reply_user_id_resolution"
+                    ],
+                    "additionalProperties": true
+                },
+                "raw_payload_file_url_policy": { "enum": ["unchecked_passthrough"] },
+                "receive_path": {
+                    "type": "string",
+                    "enum": ["disabled", "forwarded_outgoing_webhook"]
+                },
+                "reply_semantics": {
+                    "type": "string",
+                    "enum": ["outbound_only", "outgoing_webhook_response"]
+                },
+                "manifest_hash": { "type": "string" }
+            }
+        })
+    }
+
+    fn input_schema_for(operation: &str) -> Value {
+        match operation {
+            OP_SEND_MESSAGE => Self::send_message_input_schema(),
+            OP_SEND_FILE_URL => Self::send_file_url_input_schema(),
+            OP_SEND_PAYLOAD => Self::send_payload_input_schema(),
+            OP_INGEST_OUTGOING_WEBHOOK => Self::ingest_outgoing_webhook_input_schema(),
+            OP_WEBHOOK_NORMALIZE => Self::webhook_normalize_input_schema(),
+            OP_HEALTH => Self::empty_input_schema(),
+            _ => json!({ "type": "object" }),
+        }
+    }
+
+    fn output_schema_for(operation: &str) -> Value {
+        match operation {
+            OP_SEND_MESSAGE | OP_SEND_PAYLOAD => Self::dispatch_output_schema(),
+            OP_SEND_FILE_URL => Self::send_file_url_output_schema(),
+            OP_INGEST_OUTGOING_WEBHOOK => Self::ingest_outgoing_webhook_output_schema(),
+            OP_WEBHOOK_NORMALIZE => Self::webhook_normalize_output_schema(),
+            OP_HEALTH => Self::health_output_schema(),
+            _ => json!({ "type": "object" }),
+        }
+    }
+
     #[must_use]
     pub fn operations_info() -> Vec<OperationInfo> {
         vec![
@@ -191,20 +669,8 @@ impl SynologyChatConnector {
                 id: OperationId::from_static(OP_SEND_MESSAGE),
                 summary: "Send a Synology Chat message".into(),
                 description: Some("Deliver a message through a Synology Chat incoming webhook.".into()),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["text"],
-                    "properties": {
-                        "text": { "type": "string" },
-                        "user_id": { "type": "string" },
-                        "user_ids": {
-                            "type": "array",
-                            "items": { "type": "string" }
-                        },
-                        "bot_name": { "type": "string" }
-                    }
-                }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: Self::input_schema_for(OP_SEND_MESSAGE),
+                output_schema: Self::output_schema_for(OP_SEND_MESSAGE),
                 capability: CapabilityId::from_static(CAP_WRITE),
                 risk_level: RiskLevel::Medium,
                 safety_tier: SafetyTier::Risky,
@@ -224,32 +690,8 @@ impl SynologyChatConnector {
                 id: OperationId::from_static(OP_SEND_FILE_URL),
                 summary: "Send a Synology Chat file URL".into(),
                 description: Some("Validate a media or file URL with the connector SSRF policy, then deliver it through the configured Synology Chat incoming webhook.".into()),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["file_url"],
-                    "properties": {
-                        "file_url": {
-                            "type": "string",
-                            "maxLength": 2048,
-                            "description": "HTTP or HTTPS media URL for Synology Chat to fetch"
-                        },
-                        "user_id": { "type": "string" },
-                        "user_ids": {
-                            "type": "array",
-                            "items": { "type": "string" }
-                        },
-                        "bot_name": { "type": "string" }
-                    }
-                }),
-                output_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "status": { "type": "string" },
-                        "http_status": { "type": "integer" },
-                        "response_kind": { "type": "string" },
-                        "file_url_policy": { "type": "object" }
-                    }
-                }),
+                input_schema: Self::input_schema_for(OP_SEND_FILE_URL),
+                output_schema: Self::output_schema_for(OP_SEND_FILE_URL),
                 capability: CapabilityId::from_static(CAP_WRITE),
                 risk_level: RiskLevel::Medium,
                 safety_tier: SafetyTier::Risky,
@@ -270,14 +712,8 @@ impl SynologyChatConnector {
                 id: OperationId::from_static(OP_SEND_PAYLOAD),
                 summary: "Send a raw Synology Chat webhook payload".into(),
                 description: Some("Forward an arbitrary JSON object to a Synology Chat incoming webhook for advanced card or attachment use cases. Raw passthrough is intentionally not inspected for nested file_url fields; use synology_chat.send_file_url when the connector should enforce media URL SSRF policy.".into()),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["payload"],
-                    "properties": {
-                        "payload": { "type": "object" }
-                    }
-                }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: Self::input_schema_for(OP_SEND_PAYLOAD),
+                output_schema: Self::output_schema_for(OP_SEND_PAYLOAD),
                 capability: CapabilityId::from_static(CAP_WRITE),
                 risk_level: RiskLevel::Medium,
                 safety_tier: SafetyTier::Risky,
@@ -301,56 +737,8 @@ impl SynologyChatConnector {
                 description: Some(
                     "Apply forwarded body budgets, token alias verification, sender/DM/rate policy, and text sanitization before normalizing a host-forwarded Synology Chat outgoing-webhook payload into a stable event envelope without pretending this connector hosts the listener.".into(),
                 ),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["payload"],
-                    "properties": {
-                        "payload": {
-                            "type": "object",
-                            "required": [
-                                "channel_id",
-                                "channel_type",
-                                "user_id",
-                                "username",
-                                "post_id",
-                                "thread_id",
-                                "timestamp",
-                                "text"
-                            ],
-                            "properties": {
-                                "token": { "type": "string" },
-                                "channel_id": { "type": ["string", "integer"] },
-                                "channel_type": { "type": ["string", "integer"] },
-                                "channel_name": { "type": "string" },
-                                "user_id": { "type": ["string", "integer"] },
-                                "username": { "type": "string" },
-                                "post_id": { "type": ["string", "integer"] },
-                                "thread_id": { "type": ["string", "integer"] },
-                                "timestamp": { "type": ["string", "integer"] },
-                                "text": { "type": "string" },
-                                "trigger_word": { "type": "string" },
-                                "file_url": { "type": "string" },
-                                "attachments": { "type": "array" },
-                                "files": { "type": "array" },
-                                "file": {}
-                            }
-                        },
-                        "token": { "type": "string" },
-                        "headers": { "type": "object" },
-                        "query": { "type": "object" },
-                        "body_size_bytes": { "type": "integer" },
-                        "body_read_elapsed_ms": { "type": "integer" },
-                        "source_id": { "type": "string" },
-                        "delivery_id": { "type": "string" }
-                    }
-                }),
-                output_schema: json!({
-                    "type": "object",
-                    "required": ["event"],
-                    "properties": {
-                        "event": { "type": "object" }
-                    }
-                }),
+                input_schema: Self::input_schema_for(OP_INGEST_OUTGOING_WEBHOOK),
+                output_schema: Self::output_schema_for(OP_INGEST_OUTGOING_WEBHOOK),
                 capability: CapabilityId::from_static(CAP_WEBHOOK),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
@@ -380,37 +768,8 @@ impl SynologyChatConnector {
                 description: Some(
                     "Accept a raw inbound Synology Chat webhook payload and return a normalized event envelope. If outgoing_token is configured, token verification is performed and the result is included. Unlike ingest_outgoing_webhook, this operation does not reject on token mismatch — it reports the verification status and lets the caller decide.".into(),
                 ),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["payload"],
-                    "properties": {
-                        "payload": {
-                            "type": "object",
-                            "properties": {
-                                "user_id": {},
-                                "username": { "type": "string" },
-                                "post_id": {},
-                                "channel_id": {},
-                                "channel_name": { "type": "string" },
-                                "channel_type": {},
-                                "text": { "type": "string" },
-                                "timestamp": {},
-                                "token": { "type": "string" },
-                                "trigger_word": { "type": "string" },
-                                "thread_id": {},
-                                "file_url": { "type": "string" }
-                            }
-                        }
-                    }
-                }),
-                output_schema: json!({
-                    "type": "object",
-                    "required": ["event"],
-                    "properties": {
-                        "event": { "type": "object" },
-                        "token_verification": { "type": "string" }
-                    }
-                }),
+                input_schema: Self::input_schema_for(OP_WEBHOOK_NORMALIZE),
+                output_schema: Self::output_schema_for(OP_WEBHOOK_NORMALIZE),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
@@ -435,8 +794,8 @@ impl SynologyChatConnector {
                 id: OperationId::from_static(OP_HEALTH),
                 summary: "Report connector health".into(),
                 description: Some("Return configured webhook target details.".into()),
-                input_schema: json!({ "type": "object" }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: Self::input_schema_for(OP_HEALTH),
+                output_schema: Self::output_schema_for(OP_HEALTH),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,

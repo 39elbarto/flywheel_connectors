@@ -20,12 +20,18 @@ use url::Url;
 const CONNECTOR_ID: &str = "fcp.azure-speech";
 const CONNECTOR_VERSION: &str = "0.1.0";
 const AZURE_SPEECH_MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const DOC_TTS_TEXT_STREAMING: &str = "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-lower-speech-synthesis-latency#how-to-use-text-streaming";
+const DOC_STT_REALTIME: &str =
+    "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-recognize-speech";
+const DOC_SDK_CONNECTIONS: &str =
+    "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-control-connections";
 const OPERATION_ORDER: [&str; 3] = [
     "azure.speech.voices.list",
     "azure.speech.tts.synthesize",
     "azure.speech.stt.transcribe_fast",
 ];
-const BOUNDARY: &str = "This connector exposes Azure Speech REST token exchange, regional voice discovery, REST text-to-speech synthesis, and Speech-to-text 2025-10-15 fast transcription. Realtime WebSocket and batch transcription are separate follow-up surfaces.";
+const BOUNDARY: &str = "This connector exposes Azure Speech REST token exchange, regional voice discovery, REST text-to-speech synthesis, and Speech-to-text 2025-10-15 fast transcription. Realtime WebSocket streaming is blocked until Microsoft documents a direct STT/TTS wire protocol or FCP adopts an equivalent SDK-compatible framing; batch transcription and Entra auth remain separate follow-up surfaces.";
+const STREAMING_BLOCKER_REASON: &str = "Current Microsoft Learn documentation exposes TTS text streaming through Speech SDK TextStream on the WebSocket v2 endpoint, and realtime STT through Speech SDK SpeechRecognizer/AudioConfig push-stream APIs. It does not publish a direct WebSocket frame protocol for a standalone Rust connector, so this connector must not guess or reverse-engineer the live wire format.";
 const DEFAULT_REQUEST_TIMEOUT_MS: usize = 60_000;
 const DEFAULT_INLINE_AUDIO_MAX_BYTES: usize = 1_048_576;
 const DEFAULT_TTS_MAX_AUDIO_BYTES: usize = 16 * 1_024 * 1_024;
@@ -751,6 +757,7 @@ impl AzureSpeechConnector {
             "protocol_version": "2.0",
             "capabilities": ["azure.speech.voices", "azure.speech.tts", "azure.speech.stt"],
             "streaming_supported": false,
+            "streaming_blocker": streaming_blocker_info(),
             "surface_boundary": BOUNDARY,
         }))
     }
@@ -855,7 +862,10 @@ impl AzureSpeechConnector {
             "resource_types": [],
             "provider_docs_rechecked": {
                 "tts_rest": "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/rest-text-to-speech",
-                "stt_fast_2025_10_15": "https://learn.microsoft.com/en-us/rest/api/speechtotext/transcriptions/transcribe?view=rest-speechtotext-2025-10-15"
+                "stt_fast_2025_10_15": "https://learn.microsoft.com/en-us/rest/api/speechtotext/transcriptions/transcribe?view=rest-speechtotext-2025-10-15",
+                "tts_text_streaming_sdk": DOC_TTS_TEXT_STREAMING,
+                "stt_realtime_sdk": DOC_STT_REALTIME,
+                "sdk_connection_reuse": DOC_SDK_CONNECTIONS
             }
         }))
     }
@@ -1007,11 +1017,22 @@ fn operation_info_from_manifest(id: String, operation: fcp_manifest::OperationSe
 fn deferred_operations_info() -> Vec<Value> {
     vec![
         json!({
-            "id": "azure.speech.stt.realtime.websocket",
-            "summary": "Azure Speech realtime STT/TTS WebSocket sessions",
-            "outcome": "deferred_to_streaming_slice",
+            "id": "azure.speech.tts.text_stream.websocket",
+            "summary": "Azure Speech TTS text streaming over WebSocket v2",
+            "outcome": "blocked_official_sdk_only_protocol",
             "host_platform_required": true,
-            "rationale": "Realtime sessions need host-owned stream lifecycle, cancellation, and transcript fan-out; this bead covers core REST only."
+            "rationale": STREAMING_BLOCKER_REASON,
+            "official_docs": [DOC_TTS_TEXT_STREAMING, DOC_SDK_CONNECTIONS],
+            "implementation_gate": "Do not implement live TTS text streaming until Microsoft documents the direct WebSocket request/response framing or FCP intentionally vendors an SDK-compatible protocol layer."
+        }),
+        json!({
+            "id": "azure.speech.stt.realtime.websocket",
+            "summary": "Azure Speech realtime STT WebSocket sessions",
+            "outcome": "blocked_official_sdk_only_protocol",
+            "host_platform_required": true,
+            "rationale": STREAMING_BLOCKER_REASON,
+            "official_docs": [DOC_STT_REALTIME, DOC_SDK_CONNECTIONS],
+            "implementation_gate": "Do not implement live realtime STT until the direct audio chunk and transcript frame protocol is documented or represented by an approved FCP host-stream adapter."
         }),
         json!({
             "id": "azure.speech.stt.batch",
@@ -1026,6 +1047,16 @@ fn deferred_operations_info() -> Vec<Value> {
             "rationale": "This core REST slice supports subscription-key token exchange and host credential references only."
         }),
     ]
+}
+
+fn streaming_blocker_info() -> Value {
+    json!({
+        "status": "blocked_official_sdk_only_protocol",
+        "reason": STREAMING_BLOCKER_REASON,
+        "tts_text_streaming_doc": DOC_TTS_TEXT_STREAMING,
+        "stt_realtime_doc": DOC_STT_REALTIME,
+        "sdk_connection_doc": DOC_SDK_CONNECTIONS,
+    })
 }
 
 fn normalize_transcription_result(provider_result: &Value, request: &SttRequest) -> Value {
@@ -1594,5 +1625,50 @@ mod tests {
         assert_eq!(value["text"], "Weather");
         assert_eq!(value["phrases"][0]["channel"], 0);
         assert_eq!(value["phrases"][0]["words"][0]["confidence"], 0.8);
+    }
+
+    #[test]
+    fn streaming_surface_is_blocked_on_official_sdk_only_docs() {
+        let blocker = streaming_blocker_info();
+        assert_eq!(blocker["status"], "blocked_official_sdk_only_protocol");
+        assert!(
+            blocker["reason"]
+                .as_str()
+                .expect("blocker reason should be a string")
+                .contains("does not publish a direct WebSocket frame protocol")
+        );
+
+        let deferred = deferred_operations_info();
+        let deferred_ids: Vec<_> = deferred
+            .iter()
+            .map(|operation| {
+                operation
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .expect("deferred operation id should be a string")
+            })
+            .collect();
+        assert!(deferred_ids.contains(&"azure.speech.tts.text_stream.websocket"));
+        assert!(deferred_ids.contains(&"azure.speech.stt.realtime.websocket"));
+        for operation in deferred.iter().filter(|operation| {
+            operation.get("outcome").and_then(Value::as_str)
+                == Some("blocked_official_sdk_only_protocol")
+        }) {
+            assert!(
+                operation
+                    .get("official_docs")
+                    .and_then(Value::as_array)
+                    .expect("official docs should be listed")
+                    .iter()
+                    .all(Value::is_string)
+            );
+            assert!(
+                operation
+                    .get("implementation_gate")
+                    .and_then(Value::as_str)
+                    .expect("implementation gate should be a string")
+                    .starts_with("Do not implement live")
+            );
+        }
     }
 }

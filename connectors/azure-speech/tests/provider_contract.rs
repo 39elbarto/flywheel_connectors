@@ -101,6 +101,30 @@ async fn azure_speech_manifest_operations_match_runtime_introspection() {
             .iter()
             .any(|host| host.as_str() == Some("*.api.cognitive.microsoft.com"))
     );
+
+    let streaming_blocker = introspection
+        .get("deferred_operations")
+        .and_then(Value::as_array)
+        .expect("deferred operations should be an array")
+        .iter()
+        .find(|operation| {
+            operation.get("id").and_then(Value::as_str)
+                == Some("azure.speech.tts.text_stream.websocket")
+        })
+        .expect("TTS text-stream WebSocket blocker should be present");
+    assert_eq!(
+        streaming_blocker["outcome"],
+        "blocked_official_sdk_only_protocol"
+    );
+    assert!(
+        streaming_blocker["official_docs"]
+            .as_array()
+            .expect("official docs should be present")
+            .iter()
+            .any(|doc| doc
+                .as_str()
+                .is_some_and(|doc| doc.contains("text-streaming")))
+    );
 }
 
 #[test]

@@ -5,6 +5,8 @@
 //! - **Structured Logging**: JSON-formatted logs with automatic field injection
 //! - **Metrics Collection**: Counters, gauges, histograms with Prometheus export
 //! - **Distributed Tracing**: Span creation with W3C Trace Context propagation
+//! - **Optional OTLP Export**: Host/runtime-level OpenTelemetry export for
+//!   traces, metrics, and logs when the `otlp` Cargo feature is enabled
 //!
 //! # Quick Start
 //!
@@ -20,6 +22,16 @@
 //! // Record metrics
 //! fcp_telemetry::metrics::increment_counter("requests_total", &[("connector", "my-connector")]);
 //! ```
+//!
+//! # OTLP Export
+//!
+//! OTLP is intentionally implemented as a crate-level host/runtime feature, not
+//! as a sandboxed connector binary. Operators enable it with the `otlp` feature
+//! and standard OpenTelemetry environment variables such as
+//! `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`,
+//! `OTEL_SERVICE_NAME`, and `OTEL_RESOURCE_ATTRIBUTES`. Use
+//! [`otlp_readiness`] to surface a redaction-safe admin/readiness summary before
+//! starting exporters.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
@@ -117,6 +129,84 @@ pub const OTLP_HEADERS_ENV_VARS: [&str; 2] = [
     "OTEL_EXPORTER_OTLP_HEADERS",
     "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
 ];
+
+/// Host/runtime boundary used by the OTLP exporter.
+pub const OTLP_EXPORT_BOUNDARY: &str = "fcp-telemetry-crate";
+
+/// OTLP signal export support for the current config/build.
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+pub struct OtlpSignalSupport {
+    /// Whether trace export can be initialized.
+    pub traces: bool,
+
+    /// Whether metric export can be initialized.
+    pub metrics: bool,
+
+    /// Whether log export can be initialized.
+    pub logs: bool,
+}
+
+impl OtlpSignalSupport {
+    const NONE: Self = Self {
+        traces: false,
+        metrics: false,
+        logs: false,
+    };
+
+    const ALL: Self = Self {
+        traces: true,
+        metrics: true,
+        logs: true,
+    };
+}
+
+/// Redaction-safe readiness summary for host/admin OTLP diagnostics.
+///
+/// This intentionally reports endpoint classes and counts instead of raw
+/// endpoint URLs, collector headers, or resource attribute values. Host/admin
+/// APIs can serialize this type directly without exposing bearer tokens,
+/// account IDs, local paths, or collector hostnames.
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct OtlpReadiness {
+    /// Implementation boundary. OTLP export is a crate-level runtime feature,
+    /// not a connector binary.
+    pub boundary: &'static str,
+
+    /// Stable readiness status: `disabled`, `unavailable`, `fail`, or `ready`.
+    pub status: &'static str,
+
+    /// Whether operator configuration requested OTLP export.
+    pub enabled: bool,
+
+    /// Whether this build includes the optional `otlp` feature.
+    pub feature_compiled: bool,
+
+    /// Whether a non-empty OTLP endpoint was configured.
+    pub endpoint_configured: bool,
+
+    /// Redaction-safe endpoint class, never the raw endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint_class: Option<&'static str>,
+
+    /// Signal export support for this config/build.
+    pub signals: OtlpSignalSupport,
+
+    /// Number of validated collector headers. Header values are never exposed.
+    pub collector_header_count: usize,
+
+    /// Number of validated resource attributes. Attribute values are never exposed.
+    pub resource_attribute_count: usize,
+
+    /// Operator configured trace sample rate.
+    pub trace_sample_rate: f64,
+
+    /// Stable class for the configured sample rate.
+    pub trace_sample_rate_class: &'static str,
+
+    /// Redaction-safe message suitable for admin/readiness output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
 
 fn resolve_prometheus_port() -> u16 {
     resolve_prometheus_port_with(|key| std::env::var(key).ok())
@@ -291,6 +381,95 @@ pub fn current_telemetry_config() -> Option<&'static TelemetryConfig> {
     TELEMETRY.get().map(|state| &state.config)
 }
 
+/// Return whether this build can initialize OTLP exporters.
+#[must_use]
+pub const fn otlp_feature_compiled() -> bool {
+    cfg!(feature = "otlp")
+}
+
+/// Build a redaction-safe OTLP readiness summary for host/admin diagnostics.
+///
+/// The returned value is safe to serialize into readiness APIs and evidence
+/// logs. It validates the same endpoint/header/resource settings used during
+/// exporter initialization, but it reports only endpoint class and counts.
+#[must_use]
+pub fn otlp_readiness(config: &TelemetryConfig) -> OtlpReadiness {
+    let endpoint = config.otlp_endpoint.as_deref().and_then(non_empty_trimmed);
+    let endpoint_class = endpoint
+        .as_deref()
+        .map(classify_otlp_endpoint)
+        .or_else(|| config.otlp_endpoint.as_deref().map(|_| "invalid"));
+    let feature_compiled = otlp_feature_compiled();
+    let trace_sample_rate_class = trace_sample_rate_class(config.trace_sample_rate);
+    let base = OtlpReadiness {
+        boundary: OTLP_EXPORT_BOUNDARY,
+        status: "disabled",
+        enabled: false,
+        feature_compiled,
+        endpoint_configured: endpoint.is_some(),
+        endpoint_class,
+        signals: OtlpSignalSupport::NONE,
+        collector_header_count: config.otlp_headers.len(),
+        resource_attribute_count: config.otlp_resource_attributes.len(),
+        trace_sample_rate: config.trace_sample_rate,
+        trace_sample_rate_class,
+        message: None,
+    };
+
+    if !config.otlp_enabled {
+        return OtlpReadiness {
+            message: Some("OTLP export is disabled by configuration".to_string()),
+            ..base
+        };
+    }
+
+    let Some(endpoint) = endpoint else {
+        return OtlpReadiness {
+            status: "fail",
+            enabled: true,
+            endpoint_configured: false,
+            message: Some("OTLP export is enabled but no endpoint is configured".to_string()),
+            ..base
+        };
+    };
+
+    let validation = validate_otlp_endpoint(&endpoint)
+        .and_then(|()| validate_otlp_headers(&config.otlp_headers))
+        .and_then(|()| validate_otlp_resource_attributes(&config.otlp_resource_attributes));
+
+    if let Err(error) = validation {
+        return OtlpReadiness {
+            status: "fail",
+            enabled: true,
+            endpoint_configured: true,
+            endpoint_class: Some("invalid"),
+            message: Some(error.to_string()),
+            ..base
+        };
+    }
+
+    if !feature_compiled {
+        return OtlpReadiness {
+            status: "unavailable",
+            enabled: true,
+            endpoint_configured: true,
+            message: Some(
+                "OTLP export requires fcp-telemetry to be built with the `otlp` feature"
+                    .to_string(),
+            ),
+            ..base
+        };
+    }
+
+    OtlpReadiness {
+        status: "ready",
+        enabled: true,
+        endpoint_configured: true,
+        signals: OtlpSignalSupport::ALL,
+        ..base
+    }
+}
+
 impl TelemetryConfig {
     /// Create a new configuration with the given service name.
     #[must_use]
@@ -452,6 +631,54 @@ where
 {
     keys.into_iter()
         .find_map(|key| get_env(key).and_then(|value| non_empty_trimmed(&value)))
+}
+
+fn classify_otlp_endpoint(endpoint: &str) -> &'static str {
+    let Some(rest) = endpoint.strip_prefix("https://") else {
+        let Some(rest) = endpoint.strip_prefix("http://") else {
+            return "invalid";
+        };
+        return if is_loopback_otlp_authority(rest) {
+            "http_loopback"
+        } else {
+            "http_plaintext"
+        };
+    };
+
+    if is_loopback_otlp_authority(rest) {
+        "https_loopback"
+    } else {
+        "https"
+    }
+}
+
+fn is_loopback_otlp_authority(rest: &str) -> bool {
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    if let Some(host) = authority
+        .strip_prefix('[')
+        .and_then(|value| value.split(']').next())
+    {
+        return host == "::1";
+    }
+    let host = authority
+        .rsplit_once(':')
+        .map_or(authority, |(host, _port)| host);
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+        || host.ends_with(".localhost")
+        || host.starts_with("127.")
+}
+
+const fn trace_sample_rate_class(rate: f64) -> &'static str {
+    if rate.is_nan() {
+        "disabled_invalid"
+    } else if rate <= 0.0 {
+        "disabled_zero"
+    } else if rate >= 1.0 {
+        "always_on"
+    } else {
+        "ratio"
+    }
 }
 
 const fn is_valid_otlp_name_char(ch: char) -> bool {
@@ -1337,6 +1564,100 @@ mod tests {
     }
 
     #[test]
+    fn test_otlp_readiness_disabled_is_redaction_safe() -> Result<(), TelemetryError> {
+        let config = TelemetryConfig::new("svc")
+            .try_with_otlp_headers("authorization=Bearer%20secret-token")?
+            .try_with_otlp_resource_attributes("cloud.account.id=123456789")?;
+
+        let readiness = otlp_readiness(&config);
+        assert_eq!(readiness.boundary, OTLP_EXPORT_BOUNDARY);
+        assert_eq!(readiness.status, "disabled");
+        assert!(!readiness.enabled);
+        assert!(!readiness.endpoint_configured);
+        assert!(!readiness.signals.traces);
+        assert_eq!(readiness.collector_header_count, 1);
+        assert_eq!(readiness.resource_attribute_count, 1);
+
+        let rendered = serde_json::to_string(&readiness)
+            .map_err(|error| TelemetryError::Config(error.to_string()))?;
+        assert!(rendered.contains("fcp-telemetry-crate"));
+        assert!(!rendered.contains("secret-token"));
+        assert!(!rendered.contains("123456789"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_otlp_readiness_reports_feature_and_signal_support() -> Result<(), TelemetryError> {
+        let config = TelemetryConfig::new("svc")
+            .with_otlp("https://collector.example.com:4317/v1/traces")
+            .with_sample_rate(0.25)
+            .try_with_otlp_headers("authorization=Bearer%20secret-token")?
+            .try_with_otlp_resource_attributes("cloud.account.id=123456789")?;
+
+        let readiness = otlp_readiness(&config);
+        assert!(readiness.enabled);
+        if cfg!(feature = "otlp") {
+            assert!(readiness.feature_compiled);
+        } else {
+            assert!(!readiness.feature_compiled);
+        }
+        assert!(readiness.endpoint_configured);
+        assert_eq!(readiness.endpoint_class, Some("https"));
+        assert_eq!(readiness.collector_header_count, 1);
+        assert_eq!(readiness.resource_attribute_count, 1);
+        assert_eq!(readiness.trace_sample_rate_class, "ratio");
+        if cfg!(feature = "otlp") {
+            assert_eq!(readiness.status, "ready");
+            assert!(readiness.signals.traces);
+            assert!(readiness.signals.metrics);
+            assert!(readiness.signals.logs);
+            assert!(readiness.message.is_none());
+        } else {
+            assert_eq!(readiness.status, "unavailable");
+            assert!(!readiness.signals.traces);
+            assert!(!readiness.signals.metrics);
+            assert!(!readiness.signals.logs);
+            assert!(
+                readiness
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("`otlp` feature"))
+            );
+        }
+
+        let rendered = serde_json::to_string(&readiness)
+            .map_err(|error| TelemetryError::Config(error.to_string()))?;
+        assert!(!rendered.contains("collector.example.com"));
+        assert!(!rendered.contains("secret-token"));
+        assert!(!rendered.contains("123456789"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_otlp_readiness_reports_invalid_config_before_feature_availability()
+    -> Result<(), TelemetryError> {
+        let config = TelemetryConfig::new("svc").with_otlp("https://api-key@collector:4317");
+
+        let readiness = otlp_readiness(&config);
+        assert_eq!(readiness.status, "fail");
+        assert!(readiness.enabled);
+        assert_eq!(readiness.endpoint_class, Some("invalid"));
+        assert!(!readiness.signals.traces);
+        assert!(
+            readiness
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("user-info credentials"))
+        );
+
+        let rendered = serde_json::to_string(&readiness)
+            .map_err(|error| TelemetryError::Config(error.to_string()))?;
+        assert!(!rendered.contains("api-key"));
+        assert!(!rendered.contains("collector:4317"));
+        Ok(())
+    }
+
+    #[test]
     fn test_telemetry_config_debug() {
         let config = TelemetryConfig::default();
         let debug_str = format!("{config:?}");
@@ -1533,7 +1854,6 @@ mod tests {
         init_telemetry_with(
             &state,
             config.clone(),
-            true,
             |_| {
                 logging_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -1542,27 +1862,24 @@ mod tests {
                 prometheus_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
-            otlp_init_hooks(
-                |_, _, _, _| {
-                    otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                },
-                |_, _, _, _| {
-                    otlp_log_calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                },
-                |_, _, _, _, _| {
-                    otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                },
-            ),
+            |_, _, _, _| {
+                otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_, _, _, _| {
+                otlp_log_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_, _, _, _, _| {
+                otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
         )
         .unwrap();
 
         init_telemetry_with(
             &state,
             config,
-            true,
             |_| {
                 logging_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -1571,20 +1888,18 @@ mod tests {
                 prometheus_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
-            otlp_init_hooks(
-                |_, _, _, _| {
-                    otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                },
-                |_, _, _, _| {
-                    otlp_log_calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                },
-                |_, _, _, _, _| {
-                    otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                },
-            ),
+            |_, _, _, _| {
+                otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_, _, _, _| {
+                otlp_log_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_, _, _, _, _| {
+                otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
         )
         .unwrap();
 
@@ -1607,17 +1922,14 @@ mod tests {
         let first = init_telemetry_with(
             &state,
             TelemetryConfig::new("first-attempt"),
-            true,
             |_| {
                 logging_calls.fetch_add(1, Ordering::SeqCst);
                 Err(TelemetryError::LoggingInit("boom".to_string()))
             },
             |_| Ok(()),
-            otlp_init_hooks(
-                |_, _, _, _| Ok(()),
-                |_, _, _, _| Ok(()),
-                |_, _, _, _, _| Ok(()),
-            ),
+            |_, _, _, _| Ok(()),
+            |_, _, _, _| Ok(()),
+            |_, _, _, _, _| Ok(()),
         );
 
         assert!(matches!(first, Err(TelemetryError::LoggingInit(_))));
@@ -1626,17 +1938,14 @@ mod tests {
         init_telemetry_with(
             &state,
             TelemetryConfig::new("second-attempt"),
-            true,
             |_| {
                 logging_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
             |_| Ok(()),
-            otlp_init_hooks(
-                |_, _, _, _| Ok(()),
-                |_, _, _, _| Ok(()),
-                |_, _, _, _, _| Ok(()),
-            ),
+            |_, _, _, _| Ok(()),
+            |_, _, _, _| Ok(()),
+            |_, _, _, _, _| Ok(()),
         )
         .unwrap();
 
@@ -1663,17 +1972,14 @@ mod tests {
             TelemetryConfig::new("sample-rate-test")
                 .with_otlp("http://collector:4317")
                 .with_sample_rate(0.05),
-            true,
             |_| Ok(()),
             |_| Ok(()),
-            otlp_init_hooks(
-                |_, _, _, _| Ok(()),
-                |_, _, _, _| Ok(()),
-                |_, _, rate, _, _| {
-                    *captured_rate.lock().expect("lock") = Some(rate);
-                    Ok(())
-                },
-            ),
+            |_, _, _, _| Ok(()),
+            |_, _, _, _| Ok(()),
+            |_, _, rate, _, _| {
+                *captured_rate.lock().expect("lock") = Some(rate);
+                Ok(())
+            },
         )
         .unwrap();
 
@@ -1706,20 +2012,17 @@ mod tests {
                 .with_otlp("http://collector:4317")
                 .with_otlp_headers(headers)
                 .with_otlp_resource_attributes(attributes),
-            true,
             |_| Ok(()),
             |_| Ok(()),
-            otlp_init_hooks(
-                |_, _, headers, attributes| {
-                    capture_otlp_config(&captured_metrics, "metrics", headers, attributes)
-                },
-                |_, _, headers, attributes| {
-                    capture_otlp_config(&captured_logs, "logs", headers, attributes)
-                },
-                |_, _, _, headers, attributes| {
-                    capture_otlp_config(&captured_traces, "traces", headers, attributes)
-                },
-            ),
+            |_, _, headers, attributes| {
+                capture_otlp_config(&captured_metrics, "metrics", headers, attributes)
+            },
+            |_, _, headers, attributes| {
+                capture_otlp_config(&captured_logs, "logs", headers, attributes)
+            },
+            |_, _, _, headers, attributes| {
+                capture_otlp_config(&captured_traces, "traces", headers, attributes)
+            },
         )?;
 
         let captured_logs = captured_otlp_config(captured_logs, "logs")?;
@@ -1761,27 +2064,26 @@ mod tests {
         let otlp_metric_calls = AtomicUsize::new(0);
         let otlp_log_calls = AtomicUsize::new(0);
         let otlp_trace_calls = AtomicUsize::new(0);
+        let mut config = TelemetryConfig::new("sync").with_otlp("http://collector:4317");
+        config.otlp_enabled = false;
 
         init_telemetry_with(
             &state,
-            TelemetryConfig::new("sync").with_otlp("http://collector:4317"),
-            false,
+            config,
             |_| Ok(()),
             |_| Ok(()),
-            otlp_init_hooks(
-                |_, _, _, _| {
-                    otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                },
-                |_, _, _, _| {
-                    otlp_log_calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                },
-                |_, _, _, _, _| {
-                    otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                },
-            ),
+            |_, _, _, _| {
+                otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_, _, _, _| {
+                otlp_log_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_, _, _, _, _| {
+                otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
         )
         .unwrap();
 
@@ -1892,7 +2194,6 @@ mod tests {
             TelemetryConfig::new("bad-otlp")
                 .with_prometheus(9091)
                 .with_otlp("https://api-key@collector.example.com:4317"),
-            true,
             |_| {
                 logging_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -1901,20 +2202,18 @@ mod tests {
                 prometheus_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
-            otlp_init_hooks(
-                |_, _, _, _| {
-                    otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                },
-                |_, _, _, _| {
-                    otlp_log_calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                },
-                |_, _, _, _, _| {
-                    otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                },
-            ),
+            |_, _, _, _| {
+                otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_, _, _, _| {
+                otlp_log_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_, _, _, _, _| {
+                otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
         );
 
         assert!(matches!(result, Err(TelemetryError::Config(_))));
@@ -1939,17 +2238,14 @@ mod tests {
         let result = init_telemetry_with(
             &state,
             config,
-            true,
             |_| {
                 logging_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
             |_| Ok(()),
-            otlp_init_hooks(
-                |_, _, _, _| Ok(()),
-                |_, _, _, _| Ok(()),
-                |_, _, _, _, _| Ok(()),
-            ),
+            |_, _, _, _| Ok(()),
+            |_, _, _, _| Ok(()),
+            |_, _, _, _, _| Ok(()),
         );
 
         assert!(matches!(result, Err(TelemetryError::Config(_))));

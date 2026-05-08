@@ -295,11 +295,6 @@ pub fn otlp_logger_provider() -> Option<SdkLoggerProvider> {
     OTLP_LOGGER_PROVIDER.get().cloned()
 }
 
-#[cfg(not(feature = "otlp"))]
-pub const fn otlp_logger_provider() -> Option<()> {
-    None
-}
-
 #[cfg(feature = "otlp")]
 fn init_otlp_tracer_with_sample_rate_impl(
     service_name: &str,
@@ -469,7 +464,7 @@ pub fn flush_otlp_logs() -> Result<(), TelemetryError> {
 ///
 /// This build has no OTLP provider, so flushing is a no-op.
 #[cfg(not(feature = "otlp"))]
-pub fn flush_otlp_logs() -> Result<(), TelemetryError> {
+pub const fn flush_otlp_logs() -> Result<(), TelemetryError> {
     Ok(())
 }
 
@@ -494,7 +489,7 @@ pub fn shutdown_otlp_logs() -> Result<(), TelemetryError> {
 ///
 /// This build has no OTLP provider, so shutdown is a no-op.
 #[cfg(not(feature = "otlp"))]
-pub fn shutdown_otlp_logs() -> Result<(), TelemetryError> {
+pub const fn shutdown_otlp_logs() -> Result<(), TelemetryError> {
     Ok(())
 }
 
@@ -519,7 +514,7 @@ pub fn flush_otlp_metrics() -> Result<(), TelemetryError> {
 ///
 /// This build has no OTLP provider, so flushing is a no-op.
 #[cfg(not(feature = "otlp"))]
-pub fn flush_otlp_metrics() -> Result<(), TelemetryError> {
+pub const fn flush_otlp_metrics() -> Result<(), TelemetryError> {
     Ok(())
 }
 
@@ -544,7 +539,7 @@ pub fn shutdown_otlp_metrics() -> Result<(), TelemetryError> {
 ///
 /// This build has no OTLP provider, so shutdown is a no-op.
 #[cfg(not(feature = "otlp"))]
-pub fn shutdown_otlp_metrics() -> Result<(), TelemetryError> {
+pub const fn shutdown_otlp_metrics() -> Result<(), TelemetryError> {
     Ok(())
 }
 
@@ -569,7 +564,7 @@ pub fn flush_otlp_tracer() -> Result<(), TelemetryError> {
 ///
 /// This build has no OTLP provider, so flushing is a no-op.
 #[cfg(not(feature = "otlp"))]
-pub fn flush_otlp_tracer() -> Result<(), TelemetryError> {
+pub const fn flush_otlp_tracer() -> Result<(), TelemetryError> {
     Ok(())
 }
 
@@ -594,7 +589,7 @@ pub fn shutdown_otlp_tracer() -> Result<(), TelemetryError> {
 ///
 /// This build has no OTLP provider, so shutdown is a no-op.
 #[cfg(not(feature = "otlp"))]
-pub fn shutdown_otlp_tracer() -> Result<(), TelemetryError> {
+pub const fn shutdown_otlp_tracer() -> Result<(), TelemetryError> {
     Ok(())
 }
 

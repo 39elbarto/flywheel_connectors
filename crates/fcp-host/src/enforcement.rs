@@ -36,7 +36,8 @@ use fcp_kernel::{ConnectorId, OperationId};
 use fcp_mesh::PeerProtocolCapabilities;
 use fcp_policy::{
     CapabilityConstraintEnforcer, ConstraintDenialKind, DefaultConstraintEnforcer,
-    RequestDescriptor, ZoneId,
+    LatticeDelegationError, LatticeDelegationVerifier, LatticeDelegationVerifierImpl,
+    LatticeSubToken, RequestDescriptor, ZoneId,
 };
 use fcp_prelude::{
     CapabilityConstraints, EnforcementCheckId, EnforcementCheckOrder, IdValidationError, ObjectId,
@@ -119,6 +120,8 @@ pub struct EnforcementConfig {
     pub revocation_registry: Option<Arc<RevocationRegistry>>,
     /// Revocation-cascade verifier for token and issuer-chain checks.
     pub revocation_cascade: Option<Arc<RevocationCascadeVerifier>>,
+    /// V4 lattice-delegation verifier for post-quantum capability tokens.
+    pub lattice_delegation_verifier: Option<Arc<LatticeDelegationVerifierImpl>>,
 }
 
 impl Default for EnforcementConfig {
@@ -137,6 +140,7 @@ impl Default for EnforcementConfig {
             zone_allowed_operations: HashMap::new(),
             revocation_registry: None,
             revocation_cascade: None,
+            lattice_delegation_verifier: None,
         }
     }
 }
@@ -180,6 +184,16 @@ impl EnforcementConfig {
     #[must_use]
     pub fn with_revocation_cascade(mut self, verifier: Arc<RevocationCascadeVerifier>) -> Self {
         self.revocation_cascade = Some(verifier);
+        self
+    }
+
+    /// Set the V4 lattice-delegation verifier.
+    #[must_use]
+    pub fn with_lattice_delegation_verifier(
+        mut self,
+        verifier: Arc<LatticeDelegationVerifierImpl>,
+    ) -> Self {
+        self.lattice_delegation_verifier = Some(verifier);
         self
     }
 
@@ -402,6 +416,9 @@ pub struct EnforcementContext {
     pub capability_claims: Vec<String>,
     /// Capability ID required by the requested operation, if resolved.
     pub required_capability: Option<String>,
+    /// V4 lattice sub-token presented by the request, when the capability
+    /// envelope is a post-quantum lattice token instead of legacy string claims.
+    pub lattice_sub_token: Option<LatticeSubToken>,
     /// Parsed constraints from the presented capability token.
     pub capability_constraints: Option<CapabilityConstraints>,
     /// Content-addressed object targeted by the request, when constraint checks need it.
@@ -475,6 +492,7 @@ pub struct EnforcementContextBuilder {
     principal: Option<String>,
     capability_claims: Vec<String>,
     required_capability: Option<String>,
+    lattice_sub_token: Option<LatticeSubToken>,
     capability_constraints: Option<CapabilityConstraints>,
     constraint_object_id: Option<ObjectId>,
     constraint_host: Option<String>,
@@ -557,6 +575,13 @@ impl EnforcementContextBuilder {
     #[must_use]
     pub fn required_capability(mut self, capability: impl Into<String>) -> Self {
         self.required_capability = Some(capability.into());
+        self
+    }
+
+    /// Set the V4 lattice sub-token presented by the request.
+    #[must_use]
+    pub fn lattice_sub_token(mut self, sub_token: LatticeSubToken) -> Self {
+        self.lattice_sub_token = Some(sub_token);
         self
     }
 
@@ -739,6 +764,7 @@ impl EnforcementContextBuilder {
             principal: self.principal?,
             capability_claims: self.capability_claims,
             required_capability: self.required_capability,
+            lattice_sub_token: self.lattice_sub_token,
             capability_constraints: self.capability_constraints,
             constraint_object_id: self.constraint_object_id,
             constraint_host: self.constraint_host,
@@ -940,6 +966,40 @@ fn parse_operation_id_for_check(operation: &str) -> Result<OperationId, CheckOut
             reason_code: "INVALID_OPERATION_ID".into(),
             explanation: format!("operation '{operation}' is not canonical: {err}"),
         })
+}
+
+fn parse_principal_id_for_check(principal: &str) -> Result<PrincipalId, CheckOutcome> {
+    PrincipalId::new(principal).map_err(|err: IdValidationError| CheckOutcome::Deny {
+        reason_code: "INVALID_PRINCIPAL_ID".into(),
+        explanation: format!("principal is not canonical: {err}"),
+    })
+}
+
+const fn lattice_delegation_reason_code(error: &LatticeDelegationError) -> &'static str {
+    match error {
+        LatticeDelegationError::NotImplemented => "LATTICE_NOT_IMPLEMENTED",
+        LatticeDelegationError::UnknownCertificate { .. } => "LATTICE_UNKNOWN_CERTIFICATE",
+        LatticeDelegationError::OutsidePeriod { .. } => "LATTICE_OUTSIDE_PERIOD",
+        LatticeDelegationError::VerificationEquationFailed { .. } => {
+            "LATTICE_VERIFICATION_EQUATION_FAILED"
+        }
+        LatticeDelegationError::PreimageTooLong { .. } => "LATTICE_PREIMAGE_TOO_LONG",
+        LatticeDelegationError::ZoneMismatch { .. } => "LATTICE_ZONE_MISMATCH",
+        LatticeDelegationError::IncompleteDelegationChain { .. } => {
+            "LATTICE_INCOMPLETE_DELEGATION_CHAIN"
+        }
+        LatticeDelegationError::ChainTooDeep { .. } => "LATTICE_CHAIN_TOO_DEEP",
+        LatticeDelegationError::PreimageEncodingMismatch { .. } => {
+            "LATTICE_PREIMAGE_ENCODING_MISMATCH"
+        }
+        LatticeDelegationError::ParameterMismatch { .. } => "LATTICE_PARAMETER_MISMATCH",
+        LatticeDelegationError::OperationMismatch { .. } => "LATTICE_OPERATION_MISMATCH",
+        LatticeDelegationError::PrincipalMismatch { .. } => "LATTICE_PRINCIPAL_MISMATCH",
+        LatticeDelegationError::CertificatePublicKeyMismatch { .. } => {
+            "LATTICE_CERTIFICATE_PUBLIC_KEY_MISMATCH"
+        }
+        LatticeDelegationError::RequestBindingMismatch { .. } => "LATTICE_REQUEST_BINDING_MISMATCH",
+    }
 }
 
 /// Audit event type emitted when capability constraints deny a request.
@@ -1156,7 +1216,42 @@ impl EnforcementCheck for CapabilityVerifyCheck {
         "capability_verify"
     }
 
-    fn check(&self, ctx: &EnforcementContext, _config: &EnforcementConfig) -> CheckOutcome {
+    fn check(&self, ctx: &EnforcementContext, config: &EnforcementConfig) -> CheckOutcome {
+        if let Some(sub_token) = ctx.lattice_sub_token.as_ref() {
+            let Some(verifier) = config.lattice_delegation_verifier.as_deref() else {
+                return CheckOutcome::Deny {
+                    reason_code: "LATTICE_VERIFIER_NOT_CONFIGURED".into(),
+                    explanation: "request presented a lattice capability token, but no lattice delegation verifier is configured".into(),
+                };
+            };
+            let request_zone = match parse_zone_id_for_check(&ctx.zone_id) {
+                Ok(zone) => zone,
+                Err(outcome) => return outcome,
+            };
+            let request_operation = match parse_operation_id_for_check(&ctx.operation) {
+                Ok(operation) => operation,
+                Err(outcome) => return outcome,
+            };
+            let request_principal = match parse_principal_id_for_check(&ctx.principal) {
+                Ok(principal) => principal,
+                Err(outcome) => return outcome,
+            };
+
+            return match verifier.verify_sub_token(
+                sub_token,
+                &request_zone,
+                &request_operation,
+                &request_principal,
+                ctx.timestamp_ms,
+            ) {
+                Ok(_) => CheckOutcome::Allow,
+                Err(error) => CheckOutcome::Deny {
+                    reason_code: lattice_delegation_reason_code(&error).into(),
+                    explanation: format!("lattice delegation rejected request: {error}"),
+                },
+            };
+        }
+
         if ctx.capability_claims.is_empty() {
             return CheckOutcome::Deny {
                 reason_code: "NO_CAPABILITY_CLAIMS".into(),
@@ -2065,6 +2160,7 @@ fn test_context() -> EnforcementContext {
         principal: "agent-alpha".into(),
         capability_claims: vec!["messages.write".into()],
         required_capability: Some("messages.write".into()),
+        lattice_sub_token: None,
         capability_constraints: None,
         constraint_object_id: None,
         constraint_host: None,
@@ -2121,9 +2217,100 @@ fn test_mesh_active_classification() -> std::sync::Arc<DeploymentClassification>
 mod tests {
     use super::*;
     use fcp_cbor::SchemaId;
+    use fcp_crypto_pq as pq;
+    use fcp_policy::{DelegationCertificate, DelegationCertificateId, DelegationPeriod};
 
     fn constraint_object_id() -> ObjectId {
         ObjectId::from_unscoped_bytes(b"constraint-object")
+    }
+
+    fn lattice_cert_id(byte: u8) -> DelegationCertificateId {
+        DelegationCertificateId::from_bytes([byte; 32])
+    }
+
+    const fn lattice_period() -> DelegationPeriod {
+        DelegationPeriod {
+            start_unix_ms: 1_700_000_000_000,
+            end_unix_ms: 1_700_003_600_000,
+        }
+    }
+
+    fn lattice_unit_fixture(
+        params: pq::LatticeParams,
+    ) -> (
+        Arc<LatticeDelegationVerifierImpl>,
+        LatticeSubToken,
+        ZoneId,
+        OperationId,
+        PrincipalId,
+        u64,
+    ) {
+        let zone = "z:prod".parse::<ZoneId>().unwrap();
+        let operation = OperationId::new("send_message").unwrap();
+        let principal = PrincipalId::new("agent-alpha").unwrap();
+        let policy_period = lattice_period();
+        let crypto_zone = LatticeDelegationVerifierImpl::zone_to_crypto(&zone);
+        let crypto_period = LatticeDelegationVerifierImpl::period_to_crypto(policy_period);
+        let entropy = pq::TrapGenEntropy::from_fixture_seed(
+            b"fcp-host/lattice-dispatcher-unit-v1",
+            [0x5A; 32],
+        );
+        let (master_public, master_trapdoor) = pq::trap_gen_with_entropy(params, &entropy).unwrap();
+        let (public_key, trapdoor) = pq::delegate(
+            &master_public,
+            &master_trapdoor,
+            crypto_zone,
+            crypto_period,
+            params,
+        )
+        .unwrap();
+        let h = pq::operation_hash(
+            &crypto_zone,
+            crypto_period,
+            operation.as_str().as_bytes(),
+            principal.as_str().as_bytes(),
+        );
+        let preimage = pq::sample_pre(&public_key, &trapdoor, h, params).unwrap();
+        let certificate = DelegationCertificate {
+            cert_id: lattice_cert_id(0xA1),
+            zone_id: zone.clone(),
+            period: policy_period,
+            parent_cert_id: None,
+            public_key,
+        };
+        let verifier =
+            LatticeDelegationVerifierImpl::with_certificates(params, [certificate.clone()]);
+        let request_descriptor_hash = LatticeDelegationVerifierImpl::request_descriptor_hash(
+            &certificate.cert_id,
+            &zone,
+            certificate.period,
+            &operation,
+            &principal,
+            &certificate.public_key.hash,
+            &verifier.trust_set_id(),
+        );
+        let sub_token = LatticeSubToken {
+            cert_id: certificate.cert_id,
+            op_id: operation.clone(),
+            principal_id: principal.clone(),
+            request_descriptor_hash,
+            preimage_bytes: preimage.as_bytes().to_vec(),
+        };
+        (
+            Arc::new(verifier),
+            sub_token,
+            zone,
+            operation,
+            principal,
+            policy_period.start_unix_ms,
+        )
+    }
+
+    fn denial_reason_code(outcome: CheckOutcome) -> Option<String> {
+        match outcome {
+            CheckOutcome::Deny { reason_code, .. } => Some(reason_code),
+            CheckOutcome::Allow | CheckOutcome::Skip { .. } => None,
+        }
     }
 
     // ── EnforcementConfig ──
@@ -2163,6 +2350,16 @@ mod tests {
     fn config_builder_critical_taints() {
         let config = EnforcementConfig::new().with_critical_taint_flags(vec!["custom".into()]);
         assert_eq!(config.critical_taint_flags, vec!["custom"]);
+    }
+
+    #[test]
+    fn config_builder_lattice_delegation_verifier() {
+        let (verifier, _, _, _, _, _) = lattice_unit_fixture(pq::LatticeParams::SMALL_TEST);
+        let config = EnforcementConfig::new().with_lattice_delegation_verifier(verifier);
+        assert!(
+            config.lattice_delegation_verifier.is_some(),
+            "lattice verifier should be available to CapabilityVerifyCheck"
+        );
     }
 
     #[test]
@@ -3021,6 +3218,88 @@ mod tests {
             assert_eq!(reason_code, "MISSING_REQUIRED_CAPABILITY");
             assert!(explanation.contains("send_message"));
         }
+    }
+
+    #[test]
+    fn capability_verify_allows_valid_lattice_sub_token() {
+        let (verifier, sub_token, _, _, _, now) =
+            lattice_unit_fixture(pq::LatticeParams::SMALL_TEST);
+        let mut ctx = test_context();
+        ctx.timestamp_ms = now;
+        ctx.lattice_sub_token = Some(sub_token);
+        ctx.capability_claims = Vec::new();
+        ctx.required_capability = None;
+        let config = EnforcementConfig::new().with_lattice_delegation_verifier(verifier);
+
+        let outcome = CapabilityVerifyCheck.check(&ctx, &config);
+        assert!(outcome.is_allow());
+    }
+
+    #[test]
+    fn capability_verify_denies_lattice_token_without_configured_verifier() {
+        let (_, sub_token, _, _, _, now) = lattice_unit_fixture(pq::LatticeParams::SMALL_TEST);
+        let mut ctx = test_context();
+        ctx.timestamp_ms = now;
+        ctx.lattice_sub_token = Some(sub_token);
+        ctx.capability_claims = vec!["*".into()];
+        let outcome = CapabilityVerifyCheck.check(&ctx, &EnforcementConfig::default());
+
+        assert_eq!(
+            denial_reason_code(outcome).as_deref(),
+            Some("LATTICE_VERIFIER_NOT_CONFIGURED")
+        );
+    }
+
+    #[test]
+    fn capability_verify_denies_forged_lattice_token_even_with_legacy_claim() {
+        let (verifier, mut sub_token, _, _, _, now) =
+            lattice_unit_fixture(pq::LatticeParams::SMALL_TEST);
+        *sub_token
+            .preimage_bytes
+            .first_mut()
+            .expect("fixture preimage must not be empty") ^= 0x01;
+        let mut ctx = test_context();
+        ctx.timestamp_ms = now;
+        ctx.lattice_sub_token = Some(sub_token);
+        ctx.capability_claims = vec!["*".into(), "messages.write".into()];
+        let config = EnforcementConfig::new().with_lattice_delegation_verifier(verifier);
+
+        assert_eq!(
+            denial_reason_code(CapabilityVerifyCheck.check(&ctx, &config)).as_deref(),
+            Some("LATTICE_VERIFICATION_EQUATION_FAILED")
+        );
+    }
+
+    #[test]
+    fn capability_verify_maps_lattice_operation_mismatch() {
+        let (verifier, sub_token, _, _, _, now) =
+            lattice_unit_fixture(pq::LatticeParams::SMALL_TEST);
+        let mut ctx = test_context();
+        ctx.timestamp_ms = now;
+        ctx.operation = "list_channels".into();
+        ctx.lattice_sub_token = Some(sub_token);
+        let config = EnforcementConfig::new().with_lattice_delegation_verifier(verifier);
+
+        assert_eq!(
+            denial_reason_code(CapabilityVerifyCheck.check(&ctx, &config)).as_deref(),
+            Some("LATTICE_OPERATION_MISMATCH")
+        );
+    }
+
+    #[test]
+    fn capability_verify_maps_lattice_principal_mismatch() {
+        let (verifier, sub_token, _, _, _, now) =
+            lattice_unit_fixture(pq::LatticeParams::SMALL_TEST);
+        let mut ctx = test_context();
+        ctx.timestamp_ms = now;
+        ctx.principal = "agent-beta".into();
+        ctx.lattice_sub_token = Some(sub_token);
+        let config = EnforcementConfig::new().with_lattice_delegation_verifier(verifier);
+
+        assert_eq!(
+            denial_reason_code(CapabilityVerifyCheck.check(&ctx, &config)).as_deref(),
+            Some("LATTICE_PRINCIPAL_MISMATCH")
+        );
     }
 
     #[test]

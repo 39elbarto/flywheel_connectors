@@ -75,6 +75,7 @@ mach2 = "0.4"
 
 [dev-dependencies]
 fcp-testkit = { path = "../fcp-testkit" }
+fcp-crypto-pq = { path = "../fcp-crypto-pq" }
 fcp-telegram = { path = "../../connectors/telegram", features = ["test-support"] }
 tempfile = "3"
 rcgen = "0.14.7"

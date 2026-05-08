@@ -4,10 +4,9 @@
 //! This module is the **policy-layer abstraction** for the V4 lattice-
 //! trapdoor capability scheme. The cryptographic primitives
 //! (`TrapGen` / `Delegate` / `SamplePre` / `Verify`) live in
-//! [`fcp_crypto_pq`] (br-kyopb.1.3.1 scaffolded them); the Lean 4
-//! soundness proof and throughput benchmark are still pending — see
-//! `docs/post-quantum/lattice_trapdoor_delegation.md` §8 for the
-//! 4-bead implementation roadmap.
+//! [`fcp_crypto_pq`] (br-kyopb.1.3.1 scaffolded them). The Lean 4
+//! soundness proof is tracked separately; this module owns the
+//! policy/dispatcher verifier contract.
 //!
 //! ## Why this lives in policy
 //!
@@ -302,8 +301,8 @@ pub enum LatticeDelegationError {
 /// The policy-layer abstraction over lattice-trapdoor capability
 /// verification (br-kyopb.1.3).
 ///
-/// Concrete implementations live in `fcp-crypto-pq` (TBD in
-/// kyopb.1.3.2). The trait is exposed here in fcp-policy because
+/// Cryptographic primitives live in `fcp-crypto-pq`. The trait is
+/// exposed here in fcp-policy because
 /// capability-token verification is a policy concern (not a crypto
 /// concern) — the crypto layer provides primitives; the policy layer
 /// composes them with the rest of the enforcement chain.
@@ -343,13 +342,11 @@ pub trait LatticeDelegationVerifier: Send + Sync {
 }
 
 /// Stub implementation that always returns
-/// [`LatticeDelegationError::NotImplemented`]. The default
-/// production verifier until kyopb.1.3.2 lands a real one.
+/// [`LatticeDelegationError::NotImplemented`].
 ///
-/// Hosts that want V4 lattice support today MUST replace this with a
-/// concrete implementation (which doesn't exist yet — the design
-/// doc and stub trait land in kyopb.1.3; the crypto crate scaffolding
-/// is provided by fcp-crypto-pq; the trait wiring is kyopb.1.3.2).
+/// Hosts that want V4 lattice support MUST configure
+/// [`LatticeDelegationVerifierImpl`] with a real trust set. Keep this
+/// sentinel for hosts/profiles where V4 is intentionally inactive.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct UnimplementedLatticeDelegationVerifier;
 
@@ -401,14 +398,9 @@ impl LatticeDelegationVerifier for UnimplementedLatticeDelegationVerifier {
 ///    policy-layer error variants (preserving operator-readable
 ///    `cert_id` hex in each).
 ///
-/// All step-1-through-5 checks run **before** the cryptographic call,
-/// so they remain load-bearing even while
-/// [`fcp_crypto_pq::sample_pre`] / [`fcp_crypto_pq::verify`] return
-/// `NotImplemented` from their stub bodies. This means the production
-/// verifier is fully testable end-to-end today — the negative paths
-/// produce precise errors and the positive path terminates at
-/// `NotImplemented` (signalling fall-back-to-V3) instead of a fake
-/// success.
+/// All structural checks run **before** the cryptographic call, so
+/// malformed or replayed tokens fail before the expensive verification
+/// equation whenever the policy envelope is already inconsistent.
 #[derive(Debug, Clone)]
 pub struct LatticeDelegationVerifierImpl {
     certificates: HashMap<DelegationCertificateId, DelegationCertificate>,
@@ -473,9 +465,16 @@ impl LatticeDelegationVerifierImpl {
             .certificates
             .values()
             .map(|cert| {
-                let mut entry = Vec::with_capacity(96);
+                let crypto_period = Self::period_to_crypto(cert.period);
+                let mut entry = Vec::with_capacity(184);
                 entry.extend_from_slice(cert.cert_id.as_bytes());
+                entry.extend_from_slice(&Self::zone_to_crypto(&cert.zone_id));
+                entry.extend_from_slice(&crypto_period.start_secs.to_le_bytes());
+                entry.extend_from_slice(&crypto_period.end_secs.to_le_bytes());
                 entry.extend_from_slice(&cert.public_key.hash);
+                entry.extend_from_slice(&cert.public_key.zone_id);
+                entry.extend_from_slice(&cert.public_key.period.start_secs.to_le_bytes());
+                entry.extend_from_slice(&cert.public_key.period.end_secs.to_le_bytes());
                 if let Some(parent) = cert.parent_cert_id {
                     entry.extend_from_slice(parent.as_bytes());
                 } else {
@@ -508,6 +507,7 @@ impl LatticeDelegationVerifierImpl {
     /// `crypto.contains(now_unix_ms / 1000)` (proven by the `+ 1`
     /// after flooring, which lifts the exclusive crypto upper to be
     /// strictly above any flooring of the inclusive policy upper).
+    #[must_use]
     pub const fn period_to_crypto(period: DelegationPeriod) -> pq::DelegationPeriod {
         pq::DelegationPeriod {
             start_secs: period.start_unix_ms / 1000,
@@ -583,8 +583,6 @@ impl LatticeDelegationVerifierImpl {
         &self,
         leaf: &DelegationCertificate,
         request_zone: &ZoneId,
-        request_operation: &OperationId,
-        request_principal: &PrincipalId,
         now_unix_ms: u64,
     ) -> Result<(), LatticeDelegationError> {
         if &leaf.zone_id != request_zone {
@@ -593,7 +591,6 @@ impl LatticeDelegationVerifierImpl {
                 request_zone: request_zone.as_str().to_string(),
             });
         }
-        let _ = (request_operation, request_principal);
         if leaf.public_key.params != self.params {
             return Err(LatticeDelegationError::ParameterMismatch {
                 verifier_n: self.params.n,
@@ -840,13 +837,7 @@ impl LatticeDelegationVerifier for LatticeDelegationVerifierImpl {
 
         // Steps 2-3 — zone agreement, public-key envelope consistency,
         // and leaf-period containment.
-        self.validate_leaf_request(
-            leaf,
-            request_zone,
-            request_operation,
-            request_principal,
-            now_unix_ms,
-        )?;
+        self.validate_leaf_request(leaf, request_zone, now_unix_ms)?;
 
         // Step 4 — parent-chain walk (depth-bounded).
         self.validate_parent_chain(leaf, now_unix_ms)?;
@@ -901,7 +892,11 @@ mod tests {
         PrincipalId::new("agent.test").unwrap()
     }
 
-    fn public_key_for(byte: u8, zone: &ZoneId, period: DelegationPeriod) -> pq::ZonePeriodPublicKey {
+    fn public_key_for(
+        byte: u8,
+        zone: &ZoneId,
+        period: DelegationPeriod,
+    ) -> pq::ZonePeriodPublicKey {
         let hash = [byte; 32];
         pq::ZonePeriodPublicKey {
             hash,
@@ -1082,9 +1077,10 @@ mod tests {
         let back: DelegationCertificate = serde_json::from_str(&json).unwrap();
         assert_eq!(certificate, back);
         assert!(
-            json.contains("abababab"),
-            "public key hash remains explicit public certificate material"
+            json.contains("\"public_key\"") && json.contains("\"hash\""),
+            "public key remains explicit public certificate material"
         );
+        assert_eq!(back.public_key.hash, [0xAB; 32]);
     }
 
     // ── Production verifier tests (br-kyopb.1.3.2) ───────────────────
@@ -1146,6 +1142,7 @@ mod tests {
         params: pq::LatticeParams,
     ) -> (
         LatticeDelegationVerifierImpl,
+        DelegationCertificate,
         LatticeSubToken,
         ZoneId,
         OperationId,
@@ -1187,8 +1184,7 @@ mod tests {
             parent_cert_id: None,
             public_key,
         };
-        let verifier =
-            LatticeDelegationVerifierImpl::with_certificates(params, [leaf.clone()]);
+        let verifier = LatticeDelegationVerifierImpl::with_certificates(params, [leaf.clone()]);
         let mut sub = LatticeSubToken {
             cert_id: leaf.cert_id,
             op_id: operation.clone(),
@@ -1199,6 +1195,7 @@ mod tests {
         sub = bind_sub(&verifier, &leaf, sub);
         (
             verifier,
+            leaf,
             sub,
             zone,
             operation,
@@ -1444,21 +1441,25 @@ mod tests {
 
     #[test]
     fn impl_accepts_chain_at_max_depth() {
-        // Exactly params.depth = 4 hops. Should pass cheap-checks and
-        // terminate at NotImplemented (the crypto-pq stub).
-        let p = period(0, 10_000_000);
+        // Exactly params.depth = 4 hops. The parent certificates are
+        // policy trust-set structure; the leaf certificate carries real
+        // verifier-computable public matrix material and a real preimage.
+        let p = period(1_700_000_000_000, 1_700_003_600_000);
         let mut certs = Vec::new();
         certs.push(cert(0x01, ZoneId::work(), p, None));
-        for i in 2_u8..=5 {
+        for i in 2_u8..=4 {
             certs.push(cert(i, ZoneId::work(), p, Some(i - 1)));
         }
-        let leaf = certs.last().expect("leaf exists").clone();
+        let (_, mut leaf, mut sub, zone, operation, principal, now) =
+            minted_token_fixture(ref_params());
+        leaf.parent_cert_id = Some(cert_id(0x04));
+        certs.push(leaf.clone());
         let v = LatticeDelegationVerifierImpl::with_certificates(ref_params(), certs);
-        let sub = bind_sub(&v, &leaf, sub_for(0x05));
-        let err = v
-            .verify_sub_token(&sub, &ZoneId::work(), &operation(), &principal(), 5_000_000)
-            .expect_err("crypto-pq stub MUST surface as NotImplemented");
-        assert_eq!(err, LatticeDelegationError::NotImplemented);
+        sub = bind_sub(&v, &leaf, sub);
+        let receipt = v
+            .verify_sub_token(&sub, &zone, &operation, &principal, now)
+            .expect("max-depth chain with real leaf material verifies");
+        assert_eq!(receipt.cert_id, leaf.cert_id);
     }
 
     #[test]
@@ -1493,18 +1494,91 @@ mod tests {
     }
 
     #[test]
-    fn impl_happy_path_terminates_at_not_implemented_until_crypto_lands() {
-        // Single-cert root, all cheap checks pass. The crypto-pq verify
-        // stub returns NotImplemented; the verifier MUST surface that
-        // as the policy-layer NotImplemented (signalling V3 fall-back).
-        let p = period(1_000_000, 2_000_000);
-        let leaf = cert(0x10, ZoneId::work(), p, None);
-        let v = LatticeDelegationVerifierImpl::with_certificates(ref_params(), [leaf.clone()]);
-        let sub = bind_sub(&v, &leaf, sub_for(0x10));
+    fn impl_happy_path_returns_receipt_for_supported_crypto_routes() {
+        for params in [
+            pq::LatticeParams::SMALL_TEST,
+            pq::LatticeParams::V4_REFERENCE,
+        ] {
+            let (v, leaf, sub, zone, operation, principal, now) = minted_token_fixture(params);
+            let receipt = v
+                .verify_sub_token(&sub, &zone, &operation, &principal, now)
+                .expect("supported lattice route verifies through fcp-policy");
+
+            assert_eq!(receipt.cert_id, leaf.cert_id);
+            assert_eq!(receipt.period, leaf.period);
+            assert_eq!(receipt.verified_at_unix_ms, now);
+            assert_eq!(receipt.trust_set_id, v.trust_set_id());
+            assert_eq!(receipt.request_descriptor_hash, sub.request_descriptor_hash);
+            assert_ne!(receipt.request_descriptor_hash, [0_u8; 32]);
+        }
+    }
+
+    #[test]
+    fn impl_rejects_operation_mismatch_before_crypto_verify() {
+        let (v, _, sub, zone, _, principal, now) =
+            minted_token_fixture(pq::LatticeParams::SMALL_TEST);
+        let request_operation = OperationId::new("op.other").unwrap();
         let err = v
-            .verify_sub_token(&sub, &ZoneId::work(), &operation(), &principal(), 1_500_000)
-            .expect_err("happy path MUST surface as NotImplemented until crypto lands");
-        assert_eq!(err, LatticeDelegationError::NotImplemented);
+            .verify_sub_token(&sub, &zone, &request_operation, &principal, now)
+            .expect_err("wrong operation must not reuse a lattice receipt");
+        assert!(matches!(
+            err,
+            LatticeDelegationError::OperationMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn impl_rejects_principal_mismatch_before_crypto_verify() {
+        let (v, _, sub, zone, operation, _, now) =
+            minted_token_fixture(pq::LatticeParams::SMALL_TEST);
+        let request_principal = PrincipalId::new("agent.other").unwrap();
+        let err = v
+            .verify_sub_token(&sub, &zone, &operation, &request_principal, now)
+            .expect_err("wrong principal must not reuse a lattice receipt");
+        assert!(matches!(
+            err,
+            LatticeDelegationError::PrincipalMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn impl_rejects_receipt_replay_after_trust_set_change() {
+        let (_, leaf, sub, zone, operation, principal, now) =
+            minted_token_fixture(pq::LatticeParams::SMALL_TEST);
+        let mut extra = leaf.clone();
+        extra.cert_id = cert_id(0x74);
+        let replay_verifier = LatticeDelegationVerifierImpl::with_certificates(
+            pq::LatticeParams::SMALL_TEST,
+            [leaf, extra],
+        );
+
+        let err = replay_verifier
+            .verify_sub_token(&sub, &zone, &operation, &principal, now)
+            .expect_err("request binding includes the trust-set digest");
+        assert!(matches!(
+            err,
+            LatticeDelegationError::RequestBindingMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn impl_rejects_certificate_public_key_envelope_mismatch() {
+        let (v, mut leaf, mut sub, zone, operation, principal, now) =
+            minted_token_fixture(pq::LatticeParams::SMALL_TEST);
+        leaf.public_key.zone_id = LatticeDelegationVerifierImpl::zone_to_crypto(&ZoneId::public());
+        let verifier = LatticeDelegationVerifierImpl::with_certificates(
+            pq::LatticeParams::SMALL_TEST,
+            [leaf.clone()],
+        );
+        sub = bind_sub(&v, &leaf, sub);
+
+        let err = verifier
+            .verify_sub_token(&sub, &zone, &operation, &principal, now)
+            .expect_err("certificate public key must match the policy zone envelope");
+        assert!(matches!(
+            err,
+            LatticeDelegationError::CertificatePublicKeyMismatch { .. }
+        ));
     }
 
     #[test]

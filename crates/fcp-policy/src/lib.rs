@@ -305,10 +305,10 @@ pub use fcp_evidence::{
 
 // ── Lattice-Trapdoor Capability Delegation (kyopb.1.3, V4 PQ) ─────
 //
-// Stub trait surface for post-quantum-safe capability delegation via
+// Policy verifier surface for post-quantum-safe capability delegation via
 // lattice trapdoors. The full design is documented in
-// `docs/post-quantum/lattice_trapdoor_delegation.md`. The cryptographic
-// primitives live in a future `fcp-crypto-pq` crate (kyopb.1.3.1).
+// `docs/post-quantum/lattice_trapdoor_delegation.md`; the cryptographic
+// primitives live in `fcp-crypto-pq`.
 
 pub mod lattice_delegation;
 

@@ -11,37 +11,20 @@
 //! - **ML-DSA-65** — V4 owner-key candidate. Real FIPS 204 primitives
 //!   via [`fcp_crypto::ml_dsa`] (`RustCrypto` `ml-dsa` crate).
 //! - **Lattice-trapdoor** — V4 capability-delegation candidate. Calls
-//!   into [`fcp_crypto_pq`]. This benchmark keeps the explicit fixture-only
-//!   setup/delegation helpers as a bridge-cost floor even though the production
-//!   V4 TrapGen/Delegate public-matrix route now exists. `sample_pre` / `verify`
-//!   currently return
-//!   `LatticePqError::NotImplemented`; the structural / hashing /
-//!   parameter-check work IS real (public-matrix seed derivation,
-//!   period-bounds checks, parameter agreement, etc.).
+//!   the reviewed `fcp-internal-mp12-chkp-no-ffi-v1` route in
+//!   [`fcp_crypto_pq`] for `TrapGen`, `Delegate`, `SamplePre`, and
+//!   `Verify`.
 //!
 //! ## What the lattice numbers mean — IMPORTANT
 //!
-//! Because this benchmark's `V4_REFERENCE` TrapGen/Delegate path is
-//! deliberately fixture-only and `sample_pre` / `verify` are stubs, the
-//! lattice-trapdoor group reflects **the cost of the bridge-floor primitives,
-//! NOT the cost the real large-profile Micciancio-Peikert `TrapGen` /
-//! Cash-Hofheinz-Kiltz-Peikert basis-shortening /
-//! Gentry-Peikert-Vaikuntanathan `SamplePre` will incur once they land**.
-//!
-//! This bench's lattice numbers are therefore a **lower bound** on
-//! actual production throughput — they represent only the bridge
-//! work the verifier always pays (parameter checks, period bounds,
-//! hash-input construction). Real `sample_pre` is dominated by
-//! Gaussian-distribution sampling over the lattice (typically 1-10ms
-//! at the `V4_REFERENCE` profile per the design doc §3.2, ~10⁵× slower
-//! than Ed25519 sign); real `verify` is matrix-vector multiplication
-//! plus norm check (~100µs-1ms, ~10²-10³× slower than Ed25519
-//! verify).
+//! The lattice numbers are real route measurements for this repository's
+//! internal no-FFI arithmetic path. They include public-matrix material
+//! construction, bounded basis-envelope derivation, preimage sampling,
+//! matrix-vector verification, norm checks, and period/parameter checks.
 //!
 //! The companion document `docs/post-quantum/throughput_benchmark.md`
-//! records both the measured stub numbers and the projected real-impl
-//! numbers from the lattice literature, with the regression-tracking
-//! plan for when the lattice arithmetic lands.
+//! records the latest raw measurements plus the host policy/dispatcher
+//! e2e timing artifact that exercises this same primitive route.
 //!
 //! ## Reproducibility
 //!
@@ -59,9 +42,9 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 use fcp_crypto::{Ed25519SigningKey, Ed25519VerifyingKey, MlDsa65SigningKey, MlDsa65VerifyingKey};
 use fcp_crypto_pq::{
-    DelegationPeriod, LatticeParams, LatticePreimage, MasterPublicKey, MasterTrapdoor,
-    ZonePeriodPublicKey, ZonePeriodTrapdoor, delegate_fixture, operation_hash, sample_pre,
-    trap_gen_fixture, verify,
+    DelegationPeriod, LatticeParams, MasterPublicKey, MasterTrapdoor, TrapGenEntropy,
+    ZonePeriodPublicKey, ZonePeriodTrapdoor, delegate, operation_hash, sample_pre,
+    trap_gen_with_entropy, verify,
 };
 
 const SAMPLE_MESSAGE: &[u8] = b"capability-token canonical body for throughput-bench/v0";
@@ -85,9 +68,10 @@ fn lattice_setup() -> (
     ZonePeriodTrapdoor,
 ) {
     let params = LatticeParams::V4_REFERENCE;
-    let (mp, mt) = trap_gen_fixture(params).expect("fixture trap_gen never fails");
-    let (zp, zt) = delegate_fixture(&mp, &mt, REQUEST_ZONE, ref_period(), params)
-        .expect("fixture delegate never fails on agreeing params");
+    let entropy = TrapGenEntropy::from_fixture_seed(b"fcp-pq-bench/lattice-setup-v1", [0x17; 32]);
+    let (mp, mt) = trap_gen_with_entropy(params, &entropy).expect("trap_gen succeeds");
+    let (zp, zt) =
+        delegate(&mp, &mt, REQUEST_ZONE, ref_period(), params).expect("delegate succeeds");
     (params, mp, mt, zp, zt)
 }
 
@@ -96,6 +80,9 @@ fn lattice_setup() -> (
 fn bench_keygen(c: &mut Criterion) {
     let mut group = c.benchmark_group("keygen");
     group.throughput(Throughput::Elements(1));
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(10));
 
     group.bench_function("ed25519", |b| {
         b.iter(|| {
@@ -111,13 +98,15 @@ fn bench_keygen(c: &mut Criterion) {
 
     group.bench_function("lattice_trapdoor_master_setup", |b| {
         // The lattice analogue of "key generation" is `trap_gen`, which
-        // returns the master public key + trapdoor. In the real impl
-        // this is the most expensive lattice operation (lattice basis
-        // sampling); in the scaffold it's a single SHAKE256 expansion so the
-        // number is a lower bound.
+        // returns the master public key + trapdoor. This measures the
+        // reviewed route, not the legacy fixture seed-bundle helper.
         let params = LatticeParams::V4_REFERENCE;
+        let entropy = TrapGenEntropy::from_fixture_seed(b"fcp-pq-bench/trap-gen-v1", [0x23; 32]);
         b.iter(|| {
-            let _ = black_box(trap_gen_fixture(black_box(params)).expect("fixture never fails"));
+            let _ = black_box(
+                trap_gen_with_entropy(black_box(params), black_box(&entropy))
+                    .expect("trap_gen succeeds"),
+            );
         });
     });
 
@@ -129,6 +118,9 @@ fn bench_keygen(c: &mut Criterion) {
 fn bench_sign(c: &mut Criterion) {
     let mut group = c.benchmark_group("sign_or_issue");
     group.throughput(Throughput::Elements(1));
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(10));
 
     let ed_sk = Ed25519SigningKey::generate();
     group.bench_function("ed25519_sign", |b| {
@@ -148,15 +140,13 @@ fn bench_sign(c: &mut Criterion) {
         });
     });
 
-    // The lattice analogue of "sign" is one delegate hop (issuance node
-    // mints a per-(zone, period) sub-trapdoor). Real impl: CHKP basis-
-    // shortening over a lattice basis. Scaffold: deterministic SHAKE256
-    // chain. Numbers represent the structural bridge cost only.
+    // The lattice analogue of "sign" at this layer is one delegate hop:
+    // the issuance node mints a per-(zone, period) sub-trapdoor.
     let (params, mp, mt, _, _) = lattice_setup();
     group.bench_function("lattice_delegate_one_hop", |b| {
         b.iter(|| {
             let _ = black_box(
-                delegate_fixture(
+                delegate(
                     black_box(&mp),
                     black_box(&mt),
                     black_box(REQUEST_ZONE),
@@ -184,6 +174,22 @@ fn bench_sign(c: &mut Criterion) {
         });
     });
 
+    let (params, _, _, zp, zt) = lattice_setup();
+    let h = operation_hash(&REQUEST_ZONE, ref_period(), REQUEST_OP, REQUEST_PRINCIPAL);
+    group.bench_function("lattice_sample_pre_real_route", |b| {
+        b.iter(|| {
+            let _ = black_box(
+                sample_pre(
+                    black_box(&zp),
+                    black_box(&zt),
+                    black_box(h),
+                    black_box(params),
+                )
+                .expect("sample_pre succeeds"),
+            );
+        });
+    });
+
     group.finish();
 }
 
@@ -192,6 +198,9 @@ fn bench_sign(c: &mut Criterion) {
 fn bench_verify(c: &mut Criterion) {
     let mut group = c.benchmark_group("verify");
     group.throughput(Throughput::Elements(1));
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(10));
 
     let ed25519_signer = Ed25519SigningKey::generate();
     let ed25519_checker: Ed25519VerifyingKey = ed25519_signer.verifying_key();
@@ -221,27 +230,20 @@ fn bench_verify(c: &mut Criterion) {
         });
     });
 
-    // Lattice verify: the cryptographic body returns NotImplemented;
-    // what we measure here is the structural-check cost (parameter
-    // agreement, period bounds) plus the NotImplemented branch. This is
-    // a hard floor for the production verify cost — real impl adds
-    // matrix-vector multiplication + norm check on top of this.
-    let (params, _, _, zp, _) = lattice_setup();
+    let (params, _, _, zp, zt) = lattice_setup();
     let h = operation_hash(&REQUEST_ZONE, ref_period(), REQUEST_OP, REQUEST_PRINCIPAL);
-    let preimage = LatticePreimage::fixture_zero(params).expect("reference preimage fixture");
+    let preimage = sample_pre(&zp, &zt, h, params).expect("sample_pre succeeds");
     let now_secs = ref_period().start_secs + 100;
-    group.bench_function("lattice_verify_structural_floor", |b| {
+    group.bench_function("lattice_verify_real_route", |b| {
         b.iter(|| {
-            // Returns Err(NotImplemented) — but only after running
-            // every cheap structural check, so the timing reflects
-            // the bridge floor cost the real verify must pay too.
-            let _ = black_box(verify(
+            black_box(verify(
                 black_box(&zp),
                 black_box(h),
                 black_box(&preimage),
                 black_box(now_secs),
                 black_box(params),
-            ));
+            ))
+            .expect("verify succeeds");
         });
     });
 
@@ -253,8 +255,9 @@ fn bench_verify(c: &mut Criterion) {
 fn bench_end_to_end(c: &mut Criterion) {
     let mut group = c.benchmark_group("end_to_end");
     group.throughput(Throughput::Elements(1));
-    // E2E groups are noisier; bump warmup to stabilize.
-    group.warm_up_time(Duration::from_secs(2));
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(10));
 
     group.bench_function("ed25519_sign_then_verify", |b| {
         let sk = Ed25519SigningKey::generate();
@@ -282,15 +285,14 @@ fn bench_end_to_end(c: &mut Criterion) {
         });
     });
 
-    // Lattice E2E: trap_gen → delegate → operation_hash → sample_pre →
-    // verify. sample_pre returns NotImplemented immediately; verify
-    // runs structural checks then NotImplemented. Measures the full
-    // bridge-cost path the production verifier pays.
-    group.bench_function("lattice_full_pipeline_floor", |b| {
+    // Lattice E2E: trap_gen → delegate → operation_hash → sample_pre → verify.
+    group.bench_function("lattice_full_crypto_route", |b| {
         let params = LatticeParams::V4_REFERENCE;
+        let entropy = TrapGenEntropy::from_fixture_seed(b"fcp-pq-bench/full-route-v1", [0x31; 32]);
         b.iter(|| {
-            let (mp, mt) = trap_gen_fixture(black_box(params)).expect("trap_gen fixture");
-            let (zp, zt) = delegate_fixture(
+            let (mp, mt) =
+                trap_gen_with_entropy(black_box(params), black_box(&entropy)).expect("trap_gen");
+            let (zp, zt) = delegate(
                 black_box(&mp),
                 black_box(&mt),
                 black_box(REQUEST_ZONE),
@@ -304,27 +306,22 @@ fn bench_end_to_end(c: &mut Criterion) {
                 black_box(REQUEST_OP),
                 black_box(REQUEST_PRINCIPAL),
             );
-            // sample_pre returns NotImplemented; we still pay its
-            // entry cost (one parameter-equality check) which is what
-            // the real impl will gate on too.
-            let _ = black_box(sample_pre(
+            let preimage = black_box(sample_pre(
                 black_box(&zp),
                 black_box(&zt),
                 black_box(h),
                 black_box(params),
-            ));
-            // Verify with a placeholder preimage — exercises the same
-            // bridge code real callers will use.
-            let preimage =
-                LatticePreimage::fixture_zero(params).expect("reference preimage fixture");
+            ))
+            .expect("sample_pre");
             let now_secs = ref_period().start_secs + 100;
-            let _ = black_box(verify(
+            black_box(verify(
                 black_box(&zp),
                 black_box(h),
                 black_box(&preimage),
                 black_box(now_secs),
                 black_box(params),
-            ));
+            ))
+            .expect("verify");
         });
     });
 

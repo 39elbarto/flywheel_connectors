@@ -1,290 +1,203 @@
-# V4 throughput benchmark — lattice-trapdoor delegation vs Ed25519 + ML-DSA-65
+# V4 Throughput Benchmark: Lattice Delegation vs Ed25519 and ML-DSA-65
 
-**Bead:** `flywheel_connectors-kyopb.1.3.4` ([J.5.3.4]).
+**Bead:** `flywheel_connectors-kyopb.1.3.1.1.5` ([J.5.3.1.1.e]).
 **Bench file:** `crates/fcp-crypto-pq/benches/lattice_vs_ed25519_vs_mldsa.rs`.
-**Companion docs:** `docs/post-quantum/lattice_trapdoor_delegation.md` (design),
-`docs/post-quantum/v3_v4_compatibility_ledger.md` (cross-version dispatch).
+**E2E harness:** `crates/fcp-host/tests/lattice_policy_dispatcher_e2e.rs`.
+**Companion docs:** `docs/post-quantum/lattice_trapdoor_delegation.md` and
+`docs/post-quantum/v3_v4_compatibility_ledger.md`.
 
-This document records the first throughput measurements for the V4
-post-quantum capability-delegation stack against the V3 (Ed25519) and
-intermediate (ML-DSA-65) baselines. Numbers are honest about what is
-real today vs what will become real once the lattice arithmetic lands
-(`kyopb.1.3.1.1` and follow-ups).
+This document records the 2026-05-08 real-route benchmark closeout for the V4
+post-quantum lattice delegation path. The previous 2026-05-02 report measured
+stub bridge costs and projected the real lattice implementation. Those stub
+numbers are now obsolete: the benchmark exercises real `TrapGen -> Delegate ->
+SamplePre -> Verify` code for `V4_REFERENCE`, and the host e2e harness routes a
+real lattice sub-token through policy enforcement.
 
-## TL;DR
+## Summary
 
-| Family       | Keygen     | Sign / issue | Verify     | End-to-end |
-| ------------ | ---------: | -----------: | ---------: | ---------: |
-| Ed25519      |    9.16 µs |      8.63 µs |   21.40 µs |   30.11 µs |
-| ML-DSA-65    |  188.00 µs |    230.00 µs |   25.63 µs |  259.07 µs |
-| Lattice stub | (see §3.3) |   (see §3.3) | (see §3.3) | (see §3.3) |
+| Family | Keygen / setup | Sign / issue | Verify | End-to-end |
+| --- | ---: | ---: | ---: | ---: |
+| Ed25519 | 36.523 us | 38.531 us | 82.795 us | 104.99 us |
+| ML-DSA-65 | 771.99 us | 1.2600 ms | 130.22 us | 1.5139 ms |
+| V4 lattice real route | 480.29 ms | 1.6327 s delegate / 536.96 ms sample_pre | 498.33 ms | 2.1870 s |
 
-Lattice-stub numbers are intentionally **omitted from this summary**
-because they reflect placeholder seed expansion rather than the
-production lattice arithmetic. They appear in §3 as historical
-**bridge-cost floor** measurements, and §4 records the projected
-real-impl numbers from the lattice literature so the team has a
-concrete regression-tracking target for when `kyopb.1.3.1.1` lands.
+Read this as a correctness closeout, not a production performance closeout. The
+new route is real and no longer hides behind `NotImplemented`, but it is far
+above the hot-path targets. The closeout filed follow-up beads for the three
+measured bottlenecks:
 
-## 1. Methodology
+- `flywheel_connectors-kyopb.1.3.1.1.12`: optimize `trap_gen` and `delegate` setup latency.
+- `flywheel_connectors-kyopb.1.3.1.1.13`: optimize `sample_pre` and verifier latency.
+- `flywheel_connectors-kyopb.1.3.1.1.14`: optimize host policy dispatcher pipeline latency.
 
-### 1.1 What is measured
+## Methodology
 
-Three signature/delegation families across four shapes:
-
-- **`keygen`** — produce a fresh signing key (or master trapdoor for
-  the lattice family).
-- **`sign_or_issue`** — Ed25519 / ML-DSA `sign(msg, ctx)`; lattice
-  `delegate(parent, zone, period)` plus a separate per-op
-  `operation_hash` measurement (the deterministic hash a sub-token
-  binds to before the cryptographic mint).
-- **`verify`** — Ed25519 / ML-DSA `verify(msg, ctx, sig)`; lattice
-  `verify(zp_pub, h, preimage, now, params)` — runs every structural
-  check (parameter agreement, period bounds) before the cryptographic
-  body, so the stub measurement is the bridge-cost floor.
-- **`end_to_end`** — full sign-then-verify (or full pipeline:
-  `trap_gen → delegate → operation_hash → sample_pre → verify`).
-
-### 1.2 Implementations under test
-
-- **Ed25519** — production `fcp_crypto::ed25519` (ed25519-dalek under
-  the hood).
-- **ML-DSA-65** — production `fcp_crypto::ml_dsa` (RustCrypto `ml-dsa`
-  crate, FIPS 204).
-- **Lattice-trapdoor** — `fcp_crypto_pq` (`br-kyopb.1.3.1` stubs).
-  `trap_gen` and `delegate` now deterministically derive a 32-byte
-  public-matrix seed and a 96-byte secret trapdoor seed bundle via
-  SHAKE256. `sample_pre` returns `LatticePqError::NotImplemented`
-  immediately; `verify` validates the representation profile and the
-  65,536-byte `V4_REFERENCE` preimage length before returning
-  `NotImplemented`.
-
-The concrete numbers in §3 were captured on 2026-05-02 before the
-SHAKE256 fixture scaffold in `flywheel_connectors-kyopb.1.3.1.1.1`;
-they remain useful only as lower-bound historical context until the
-research implementation reruns this benchmark.
-
-### 1.3 Hardware + toolchain
-
-| Item            | Value                                              |
-| --------------- | -------------------------------------------------- |
-| CPU             | Apple M3 Pro (arm64)                               |
-| OS              | macOS 14 (Darwin 25.2.0)                           |
-| Rust            | nightly 1.97.0 (matches workspace `rust-version`)  |
-| Build profile   | `[bench]` → optimized release                      |
-| `CARGO_TARGET_DIR` | `/Volumes/USB_NVME/fcp-alpha-pq` (USB NVMe ext.) |
-| Criterion       | `0.8` (workspace pin)                              |
-
-Numbers below were captured with reduced sample size for a tight
-turnaround (`--warm-up-time 1 --measurement-time 3 --sample-size 30
---output-format=bencher`); the pinned reproducibility command in §5
-uses Criterion's defaults so CI runs produce statistically tighter
-numbers.
-
-## 2. Reproducibility
-
-### 2.1 Quick run (developer machine, ~30s wall time)
+The benchmark command was run through `rch` on worker `vmi1153651`:
 
 ```sh
-TMPDIR=/Volumes/USB_NVME \
-  AGENT_NAME=$YOUR_AGENT \
-  CARGO_TARGET_DIR=/Volumes/USB_NVME/fcp-alpha-pq \
-  cargo bench -p fcp-crypto-pq --bench lattice_vs_ed25519_vs_mldsa -- \
-    --warm-up-time 1 \
-    --measurement-time 3 \
-    --sample-size 30 \
-    --output-format=bencher
+rch exec -- cargo bench -p fcp-crypto-pq --bench lattice_vs_ed25519_vs_mldsa
 ```
 
-### 2.2 CI / regression-tracking run (Criterion defaults, ~2-3 min)
+The harness uses Criterion with `sample_size(10)`, `warm_up_time(1s)`, and
+`measurement_time(10s)` for the benchmark groups so the seconds-scale lattice
+operations complete in an operator-friendly time while still producing intervals.
+The remote run completed with exit code 0 on 2026-05-08.
+
+The host/policy e2e harness was run separately and wrote redaction-safe JSONL to:
+
+```text
+target/fcp-host/lattice-policy-dispatcher-evidence.jsonl
+```
+
+That e2e artifact records command line, git revision, parameter profile,
+fixture hash, zone/period/certificate/trust-set/request hashes, matrix
+dimensions, primitive timings, verifier result, dispatcher decision, error
+mapping, cleanup result, and skip reason fields. It intentionally stores hashes
+and buckets rather than raw principals, zones, operation names, preimages,
+trapdoors, or credentials.
+
+## Criterion Results
+
+### Keygen / Setup
+
+| Benchmark | Mean interval |
+| --- | ---: |
+| `keygen/ed25519` | 33.470 us - 39.665 us, mean 36.523 us |
+| `keygen/ml_dsa_65` | 679.32 us - 898.16 us, mean 771.99 us |
+| `keygen/lattice_trapdoor_master_setup` | 467.75 ms - 491.34 ms, mean 480.29 ms |
+
+The V4 master setup path is roughly 13,000x slower than Ed25519 keygen on this
+run. That is acceptable for an offline setup operation only if it is amortized
+and not on a request path. It still violates the closeout threshold that files a
+follow-up when `trap_gen` exceeds 1s in e2e and is close enough to that ceiling
+that setup/delegation profiling is mandatory.
+
+### Sign / Issue
+
+| Benchmark | Mean interval |
+| --- | ---: |
+| `sign_or_issue/ed25519_sign` | 36.096 us - 40.861 us, mean 38.531 us |
+| `sign_or_issue/ml_dsa_65_sign` | 1.1910 ms - 1.3692 ms, mean 1.2600 ms |
+| `sign_or_issue/lattice_delegate_one_hop` | 1.3067 s - 1.9624 s, mean 1.6327 s |
+| `sign_or_issue/lattice_operation_hash` | 347.88 ns - 397.43 ns, mean 371.27 ns |
+| `sign_or_issue/lattice_sample_pre_real_route` | 488.34 ms - 593.05 ms, mean 536.96 ms |
+
+`operation_hash` is already negligible. `delegate` and `sample_pre` are the real
+issue: a one-hop delegate takes seconds, and each per-operation `sample_pre`
+takes about half a second. This rules out hot per-request issuance until the
+lattice path is optimized or moved behind a long-lived sub-token issuance model.
+
+### Verify
+
+| Benchmark | Mean interval |
+| --- | ---: |
+| `verify/ed25519_verify` | 73.552 us - 90.897 us, mean 82.795 us |
+| `verify/ml_dsa_65_verify` | 122.77 us - 134.66 us, mean 130.22 us |
+| `verify/lattice_verify_real_route` | 481.79 ms - 514.93 ms, mean 498.33 ms |
+
+The measured verifier is roughly 6,000x slower than Ed25519 verify and roughly
+3,800x slower than ML-DSA-65 verify in this run. That is far above the intended
+`100 us - 1 ms` verifier band from the design target and far above the hot-path
+threshold of 10ms.
+
+### End-to-End
+
+| Benchmark | Mean interval |
+| --- | ---: |
+| `end_to_end/ed25519_sign_then_verify` | 102.85 us - 106.24 us, mean 104.99 us |
+| `end_to_end/ml_dsa_65_sign_then_verify` | 1.3925 ms - 1.6755 ms, mean 1.5139 ms |
+| `end_to_end/lattice_full_crypto_route` | 2.1249 s - 2.2625 s, mean 2.1870 s |
+
+The full crypto route is real and passes, but it is not production-fast. It is
+about 20,800x slower than Ed25519 sign-then-verify and about 1,400x slower than
+ML-DSA-65 sign-then-verify on this worker.
+
+## Host Policy Dispatcher E2E
+
+The no-mock host e2e harness exercises the real policy dispatcher branch rather
+than relying on legacy string capability claims. It covers allow paths for
+`SMALL_TEST` and `V4_REFERENCE`, plus denials for forged preimage, mismatched
+zone, mismatched period, mismatched operation, mismatched principal, malformed
+preimage, missing certificate, incomplete delegation chain, chain too deep, and
+trust-set/request-binding replay mismatch.
+
+The `V4_REFERENCE` record measured:
+
+| Primitive | Time |
+| --- | ---: |
+| `trap_gen_ms` | 3497.744 ms |
+| `delegate_ms` | 7001.602 ms |
+| `sample_pre_ms` | 3520.432 ms |
+| `policy_verify_ms` | 3512.016 ms |
+| `dispatcher_ms` | 3528.587 ms |
+| `policy_dispatcher_ms` | 7040.603 ms |
+
+Those e2e numbers are slower than the isolated Criterion run because the e2e
+path uses the full policy/host envelope and records evidence for each scenario.
+They are still useful because they measure the actual user-facing enforcement
+path: once a lattice token is present, the dispatcher requires a configured
+`LatticeDelegationVerifierImpl`, denies forged lattice tokens even if legacy
+string claims are present, and maps policy failures to stable `LATTICE_*` reason
+codes.
+
+## Decision Thresholds
+
+The closeout does not relax security or remove functionality to hit a number.
+Instead it keeps the real route intact, records measured behavior, and opens
+optimization work where the system is not yet user-optimal.
+
+| Area | Threshold | 2026-05-08 result | Follow-up |
+| --- | ---: | ---: | --- |
+| `trap_gen` / setup | file follow-up if setup exceeds 1s in e2e | 3.498s e2e, 480ms isolated | `.12` |
+| `delegate` | file follow-up if one-hop delegate blocks issuance UX | 7.002s e2e, 1.633s isolated | `.12` |
+| `sample_pre` | target <=10ms for hot issuance | 3.520s e2e, 537ms isolated | `.13` |
+| `verify` | target <=10ms for hot dispatch | 3.512s e2e, 498ms isolated | `.13` |
+| policy dispatcher | target <=10ms total hot path | 7.041s e2e | `.14` |
+
+## Reproducibility
+
+Run the benchmark:
 
 ```sh
-AGENT_NAME=$YOUR_AGENT \
-  cargo bench -p fcp-crypto-pq --bench lattice_vs_ed25519_vs_mldsa
+rch exec -- cargo bench -p fcp-crypto-pq --bench lattice_vs_ed25519_vs_mldsa
 ```
 
-Output lands in `target/criterion/` as HTML reports under each group
-(`keygen/`, `sign_or_issue/`, `verify/`, `end_to_end/`).
+Run the host e2e harness with detailed logging:
 
-## 3. Results (2026-05-02, M3 Pro)
+```sh
+rch exec -- cargo test -p fcp-host --test lattice_policy_dispatcher_e2e -- --nocapture
+```
 
-### 3.1 Group: `keygen`
+Run the policy property/integration lane:
 
-| Implementation                   | ns/iter | ± σ     | ops/sec  |
-| -------------------------------- | ------: | ------: | -------: |
-| Ed25519                          |   9,161 |     218 | 109,000  |
-| ML-DSA-65                        | 187,972 |  14,384 |   5,300  |
-| Lattice-trapdoor (stub)          |      92 |       2 | 10.9 M   |
+```sh
+rch exec -- cargo test -p fcp-policy --test lattice_delegation_proptest -- --nocapture
+rch exec -- cargo test -p fcp-policy lattice_delegation -- --nocapture
+```
 
-**Read:** Ed25519 keygen ~110k/s; ML-DSA-65 ~5k/s (~20× slower —
-matches FIPS 204 expectations). Lattice stub was one seed expansion —
-the real `TrapGen` will be ~3-5 orders of magnitude slower (lattice
-basis sampling). See §4.
+Before closing performance-sensitive changes, also run:
 
-### 3.2 Group: `sign_or_issue`
+```sh
+rch exec -- cargo check -p fcp-policy -p fcp-host -p fcp-crypto-pq --tests --benches
+rch exec -- cargo clippy -p fcp-policy -p fcp-host -p fcp-crypto-pq --tests --benches -- -D warnings
+rch exec -- cargo fmt --check
+```
 
-| Implementation                          | ns/iter | ± σ     | ops/sec  |
-| --------------------------------------- | ------: | ------: | -------: |
-| Ed25519 sign                            |   8,627 |      31 | 116,000  |
-| ML-DSA-65 sign                          | 230,028 |  13,621 |   4,350  |
-| Lattice `delegate` one hop (stub)       |     191 |       1 |  5.2 M   |
-| Lattice `operation_hash` (real, BLAKE3 digest) |     143 |       1 |  7.0 M   |
+## Historical Note
 
-**Read:** Ed25519 sign and ML-DSA sign are both end-to-end real
-operations; the ~27× sign-time gap is inherent to ML-DSA's lattice
-sampling. The lattice `delegate` stub was a chained seed derivation
-(parent → child seed); real CHKP basis-shortening will be
-substantially slower (see §4). The `operation_hash` row is *not* a
-stub — it's the production digest construction every real sub-token
-mint also pays before SHAKE256 RHS expansion.
+The 2026-05-02 report listed `Lattice stub` bridge-cost floors and projected
+real implementation numbers. Those rows were useful while `sample_pre` and
+`verify` returned `NotImplemented`; they are no longer valid performance data.
+Use the 2026-05-08 tables above as the baseline for regression tracking and for
+all future optimization beads.
 
-### 3.3 Group: `verify`
+## References
 
-| Implementation                                    | ns/iter | ± σ | ops/sec  |
-| ------------------------------------------------- | ------: | --: | -------: |
-| Ed25519 verify                                    |  21,401 | 143 |  46,700  |
-| ML-DSA-65 verify                                  |  25,627 | 262 |  39,000  |
-| Lattice `verify` structural floor (stub returns NotImplemented) |      2 |   0 |    500 M |
-
-**Read:** ML-DSA verify is only ~20% slower than Ed25519 verify — both
-are well under 30 µs and look identical at typical FCP request rates.
-The lattice "2 ns" number reflects the bridge-cost floor *only*: the
-parameter-equality check that gates the `NotImplemented` return.
-**Once the real verification equation lands, this number will jump by
-~3-5 orders of magnitude** (see §4).
-
-### 3.4 Group: `end_to_end`
-
-| Implementation                       | ns/iter | ± σ    | ops/sec |
-| ------------------------------------ | ------: | -----: | ------: |
-| Ed25519 sign-then-verify             |  30,107 |    772 | 33,200  |
-| ML-DSA-65 sign-then-verify           | 259,067 |  9,281 |  3,860  |
-| Lattice full-pipeline floor (stub)   |     446 |      4 |  2.2 M  |
-
-**Read:** Ed25519 round-trip is the FCP3 baseline (~33k full
-sign+verify cycles per second per core). ML-DSA-65 is ~8.5× slower
-end-to-end. Lattice-stub end-to-end is meaningless as an absolute
-number; it's useful only as a regression baseline for the bridge cost
-the production verifier will always pay regardless of the
-cryptographic implementation.
-
-## 4. Projected real-impl numbers (literature)
-
-The lattice arithmetic to land in `kyopb.1.3.1.1` (Micciancio-Peikert
-TrapGen, Cash-Hofheinz-Kiltz-Peikert basis-shortening, Gentry-Peikert-
-Vaikuntanathan SamplePre) has well-characterised performance at the
-`V4_REFERENCE` parameter profile (`n=512`, `q≈2³²`, `m≈16384`, `σ≈113`,
-`L=4`). Per the design doc §3.2 references and the public lattice-
-crypto literature (Micciancio-Peikert 2012; CHKP 2010; GPV 2008):
-
-| Operation       | Stub measured      | Projected real-impl       | Multiplier  |
-| --------------- | -----------------: | ------------------------: | ----------: |
-| `trap_gen`      |              92 ns | **~10-100 ms**            | ~10⁵-10⁶× |
-| `delegate`      |             191 ns | **~1-10 ms**              | ~10⁴-10⁵× |
-| `sample_pre`    | NotImplemented (0) | **~1-10 ms**              | n/a (stub)  |
-| `verify`        |               2 ns | **~100 µs - 1 ms**        | ~10⁴-10⁵× |
-
-These multipliers rest on three observations:
-
-1. `TrapGen` is dominated by sampling a discrete-Gaussian basis over
-   `Z_q^{n×m}` — at `n=512, m=16384` this is the most expensive
-   lattice operation in the scheme. Reference implementations
-   (e.g. Open-Source-Lattice-Cryptography, GHL21 follow-ups) report
-   ~10-100 ms on commodity hardware.
-2. `Delegate` (CHKP basis-shortening) needs to compute a short basis
-   from the parent's trapdoor; one-shot cost dominated by Gaussian
-   sampling inside the orthogonal complement. ~1-10 ms range.
-3. `SamplePre` (GPV) is per-op; reference impls report ~1-10 ms at
-   `n=512` (the bottleneck for issuance throughput).
-4. `Verify` is a single matrix-vector product `A·e mod q` plus a
-   2-norm check. Asymptotically `O(n·m·log q)` bit-operations; with
-   AVX-512 / NEON tuning, optimized impls reach ~100 µs - 1 ms at
-   `V4_REFERENCE`.
-
-### 4.1 Implications for production dispatch
-
-If the projected numbers hold (`verify` ~100 µs-1 ms), V4 capability
-verification is **~5-50× slower than V3 Ed25519 verify** but
-**~4-40× faster than ML-DSA-65 verify** — well within the budget of a
-single capability check at typical FCP request rates (≥ 1 kHz/core
-remains achievable on V4).
-
-The architectural argument for V4 in the design doc §1 stands:
-
-- Offline-batched issuance (mint thousands of sub-tokens from one
-  `delegate` hop without further owner-key participation) eliminates
-  the per-token round-trip cost that ML-DSA requires today.
-- Forward-period unforgeability (compromising the issuance node at
-  time `t` does NOT let an attacker mint sub-tokens for `t' < t`
-  because the trapdoor at the relevant period is gone) is impossible
-  to achieve with any non-lattice signature scheme.
-
-These properties are what justify a 5-50× verify-time slowdown vs
-Ed25519. They are NOT achievable by any tightening of the V3 path.
-
-## 5. Regression tracking
-
-When `kyopb.1.3.1.1` lands the real lattice arithmetic, this bench
-becomes a load-bearing regression gate. The acceptance criteria for
-that bead should include:
-
-1. Re-run `cargo bench -p fcp-crypto-pq --bench
-   lattice_vs_ed25519_vs_mldsa` post-implementation.
-2. Update §3 of this document with the new numbers and §4 multipliers
-   (replace projections with measurements).
-3. If `lattice_verify_structural_floor` jumps by more than 10× (i.e.
-   the cryptographic body is unexpectedly expensive), file a
-   follow-up bead for vectorisation work (NTT-based mat-vec, AVX-512
-   tuning).
-4. If `lattice_full_pipeline_floor` exceeds **10 ms total**, the V4
-   capability-verify path is too slow for hot-path dispatch and
-   should be relegated to long-lived sub-token issuance only (V3
-   stays the default for short-lived per-request tokens). Decision
-   point recorded for the team.
-
-### 5.1 Representation-profile caveat
-
-The benchmark now uses the version-1 representation profile from
-`fcp_crypto_pq`: public matrices are seed-backed, trapdoors are
-secret-only 96-byte seed bundles, and the `V4_REFERENCE` preimage
-fixture is 65,536 bytes. Historical results from 2026-05-02 were
-captured before that profile existed and should be read only as
-bridge-cost floors, not as measurements of the final wire/storage
-shape.
-
-## 6. Notes on bench fidelity
-
-- Numbers were captured with reduced-sample Criterion settings for
-  the initial baseline. CI runs (Criterion defaults) will produce
-  tighter intervals — expect the ML-DSA-65 standard deviations to
-  shrink considerably with full sample size.
-- The lattice-stub numbers are NOT representative of production;
-  they are bridge-cost floors. Reading absolute throughput from them
-  is meaningless.
-- Single-core measurements only. Server-side production throughput
-  scales with cores assuming per-request locality (no shared-key
-  contention on signing).
-- M3 Pro is the local development reference; CI x86_64 runs may
-  differ by a constant factor (typically Ed25519 / ML-DSA verify are
-  similar within 2× across modern x86 / arm).
-
-## 7. References
-
-1. Micciancio, D. & Peikert, C. *Trapdoors for Lattices: Simpler,
-   Tighter, Faster, Smaller.* TCC 2012.
-2. Cash, D., Hofheinz, D., Kiltz, E. & Peikert, C. *Bonsai Trees, or
-   How to Delegate a Lattice Basis.* Eurocrypt 2010.
-3. Gentry, C., Peikert, C. & Vaikuntanathan, V. *Trapdoors for Hard
-   Lattices and New Cryptographic Constructions.* STOC 2008.
-4. NIST FIPS 204 (ML-DSA / CRYSTALS-Dilithium) — published Aug 2024.
-5. RFC 8032 (Ed25519).
-
-## 8. Provenance
-
-- Bench harness landed in `crates/fcp-crypto-pq/benches/
-  lattice_vs_ed25519_vs_mldsa.rs` under `br-kyopb.1.3.4` (AmberLark,
-  2026-05-02).
-- Numbers in §3 captured 2026-05-02 on M3 Pro under the reduced-
-  sample command in §1.3 / §2.1.
-- Update this section every time §3 numbers are re-captured (date,
-  hardware, full vs reduced sample).
+1. Micciancio, D. and Peikert, C. *Trapdoors for Lattices: Simpler, Tighter,
+   Faster, Smaller.* TCC 2012.
+2. Cash, D., Hofheinz, D., Kiltz, E. and Peikert, C. *Bonsai Trees, or How to
+   Delegate a Lattice Basis.* Eurocrypt 2010.
+3. Gentry, C., Peikert, C. and Vaikuntanathan, V. *Trapdoors for Hard Lattices
+   and New Cryptographic Constructions.* STOC 2008.
+4. NIST FIPS 204, ML-DSA / CRYSTALS-Dilithium.
+5. RFC 8032, Ed25519.

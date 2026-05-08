@@ -137,7 +137,8 @@ const fn rust_reached_crypto_or_accepted(
         Ok(_)
             | Err(LatticeDelegationError::NotImplemented
                 | LatticeDelegationError::VerificationEquationFailed { .. }
-                | LatticeDelegationError::PreimageTooLong { .. })
+                | LatticeDelegationError::PreimageTooLong { .. }
+                | LatticeDelegationError::ParameterMismatch { .. })
     )
 }
 
@@ -398,9 +399,10 @@ proptest! {
     /// and uses a correctly encoded preimage so the only possible structural
     /// disagreement is one of the three Lean-modeled checks: leaf zone agreement,
     /// leaf period containment, or ancestor period containment. A Lean-accepted
-    /// tuple must reach the crypto verifier (today: `NotImplemented`; later:
-    /// crypto result), while a Lean-rejected tuple must stop at a structural
-    /// `ZoneMismatch` or `OutsidePeriod` before crypto is reached.
+    /// tuple must reach the crypto verifier (which can return a fixture-route
+    /// crypto/config error in this structural harness), while a Lean-rejected
+    /// tuple must stop at a structural `ZoneMismatch` or `OutsidePeriod`
+    /// before crypto is reached.
     #[test]
     fn lattice_delegation_rust_matches_lean_structural_model(
         chain_len in 0usize..=4,

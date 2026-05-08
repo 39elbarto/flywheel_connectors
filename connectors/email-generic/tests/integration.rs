@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_crypto::cose::CapabilityTokenBuilder;
@@ -28,7 +28,6 @@ use sha2::{Digest as _, Sha256};
 
 const CONNECTOR_ID: &str = "fcp.email-generic";
 const OP_HEALTH: &str = "email_generic.health";
-const OP_LIST_MAILBOXES: &str = "email_generic.list_mailboxes";
 const OP_SEARCH_MESSAGES: &str = "email_generic.search_messages";
 const OP_SEND_MESSAGE: &str = "email_generic.send_message";
 const CAP_READ: &str = "email_generic.read";
@@ -157,7 +156,7 @@ fn smtp_loopback_sends_message_and_classifies_permanent_failure() {
 }
 
 #[test]
-fn smtp_starttls_mode_attempts_starttls_before_failing_closed() {
+fn smtp_tls_mode_fails_closed_before_sending_credentials() {
     let fixture = SmtpFixture::start(SmtpMode::StartTlsAdvertised);
     let config = config_with_ports(1993, fixture.port(), false, true);
     let client = EmailGenericClient::from_config(&config).expect("client config");
@@ -168,15 +167,20 @@ fn smtp_starttls_mode_attempts_starttls_before_failing_closed() {
     assert!(!error.to_string().contains("secret"));
     let commands = fixture.join();
     assert!(
-        commands.iter().any(|line| line == "STARTTLS"),
-        "client should attempt STARTTLS when smtp.starttls=true"
+        commands
+            .iter()
+            .any(|line| line == "TLS_HANDSHAKE_BYTES_WITHOUT_STARTTLS"),
+        "client should fail during TLS setup before SMTP AUTH; observed {commands:?}"
+    );
+    assert!(
+        commands.iter().all(|line| !line.starts_with("AUTH")),
+        "client must not send credentials after TLS setup fails; observed {commands:?}"
     );
 }
 
 #[fcp_async_core::runtime::test]
 async fn connector_lifecycle_self_check_and_capability_denial() {
     let imap_fixture = ImapFixture::start(ImapMode::Ok);
-    let smtp_fixture = SmtpFixture::start(SmtpMode::Accept);
     let mut connector = EmailGenericConnector::new();
 
     assert_eq!(connector.id().as_str(), CONNECTOR_ID);
@@ -186,12 +190,7 @@ async fn connector_lifecycle_self_check_and_capability_denial() {
     ));
 
     connector
-        .configure(config_json(
-            imap_fixture.port(),
-            smtp_fixture.port(),
-            false,
-            false,
-        ))
+        .configure(config_json(imap_fixture.port(), 2525, false, false))
         .await
         .expect("configure should accept loopback config");
     assert!(matches!(
@@ -254,7 +253,6 @@ async fn connector_lifecycle_self_check_and_capability_denial() {
         HealthState::Degraded { .. }
     ));
 
-    let _ = smtp_fixture.join();
     let _ = imap_fixture.join();
 }
 
@@ -465,15 +463,49 @@ impl SmtpFixture {
 }
 
 fn handle_smtp(mut stream: TcpStream, mode: SmtpMode, commands: Arc<Mutex<Vec<String>>>) {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set SMTP fixture read timeout");
     write_response(&mut stream, "220 fcp email generic smtp fixture");
     let mut reader = BufReader::new(stream.try_clone().expect("clone SMTP stream"));
-    let mut line = String::new();
+    let mut line = Vec::new();
     loop {
         line.clear();
-        if reader.read_line(&mut line).expect("read SMTP line") == 0 {
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(error) if !line.is_empty() => {
+                commands.lock().expect("commands lock").push(format!(
+                    "TLS_HANDSHAKE_BYTES_WITHOUT_STARTTLS:{:?}",
+                    error.kind()
+                ));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => break,
+            Err(error) => {
+                commands
+                    .lock()
+                    .expect("commands lock")
+                    .push(format!("SMTP_FIXTURE_READ_ERROR:{:?}", error.kind()));
+                break;
+            }
+        }
+        if line.starts_with(b"STARTTLS") {
+            commands
+                .lock()
+                .expect("commands lock")
+                .push("STARTTLS".to_owned());
+            write_response(&mut stream, "220 begin tls");
             break;
         }
-        let command = line.trim_end_matches(['\r', '\n']).to_owned();
+        let Ok(decoded) = std::str::from_utf8(&line) else {
+            commands
+                .lock()
+                .expect("commands lock")
+                .push("TLS_HANDSHAKE_BYTES_WITHOUT_STARTTLS".to_owned());
+            break;
+        };
+        let command = decoded.trim_end_matches(['\r', '\n']).to_owned();
         commands
             .lock()
             .expect("commands lock")

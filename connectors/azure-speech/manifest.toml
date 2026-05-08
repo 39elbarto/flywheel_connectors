@@ -5,13 +5,13 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:9b5da4d55eb471473c3f62df1bb694601e64af4ac7fc871341c2d2a5a5c72c75"
+interface_hash = "blake3-256:fcp.interface.v2:ffd32fa3b46916b215ccd5751eab6fc0b81857b51407f7385215d470c13c4c9e"
 
 [connector]
 id = "fcp.azure-speech"
 name = "Azure Speech"
 version = "0.1.0"
-description = "Azure Speech REST connector for regional voice discovery, text-to-speech synthesis, and 2025-10-15 fast transcription"
+description = "Azure Speech REST connector for regional voice discovery, text-to-speech synthesis, and 2025-10-15 fast plus batch transcription"
 archetypes = [
     "operational",
     "streaming",
@@ -21,7 +21,7 @@ format = "native"
 [connector.state]
 model = "stateless"
 state_schema_version = "1"
-migration_hint = "This slice supports REST token exchange, voices.list, REST TTS synthesis, and fast STT transcription. Realtime WebSocket, batch transcription, and Entra/managed identity authentication remain explicit follow-up surfaces."
+migration_hint = "This slice supports REST token exchange, voices.list, REST TTS synthesis, fast STT transcription, and 2025-10-15 batch STT submit/status/files. Realtime WebSocket, custom speech project/model lifecycle, and Entra/managed identity authentication remain explicit follow-up surfaces."
 
 [zones]
 home = "z:work"
@@ -47,6 +47,259 @@ optional = [
 forbidden = [
     "network.listen",
     "system.exec",
+]
+
+[provides.operations."azure.speech.stt.batch.files"]
+description = "List redacted file metadata for an Azure Speech-to-text REST API batch transcription job"
+capability = "azure.speech.stt"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."azure.speech.stt.batch.files".input_schema]
+type = "object"
+
+[[provides.operations."azure.speech.stt.batch.files".input_schema.anyOf]]
+required = ["transcription_id"]
+
+[[provides.operations."azure.speech.stt.batch.files".input_schema.anyOf]]
+required = ["transcription_url"]
+
+[provides.operations."azure.speech.stt.batch.files".input_schema.properties.filter]
+type = "string"
+
+[provides.operations."azure.speech.stt.batch.files".input_schema.properties.sas_validity_seconds]
+minimum = 0
+type = "integer"
+
+[provides.operations."azure.speech.stt.batch.files".input_schema.properties.skip]
+minimum = 0
+type = "integer"
+
+[provides.operations."azure.speech.stt.batch.files".input_schema.properties.top]
+minimum = 1
+type = "integer"
+
+[provides.operations."azure.speech.stt.batch.files".input_schema.properties.transcription_id]
+minLength = 1
+type = "string"
+
+[provides.operations."azure.speech.stt.batch.files".input_schema.properties.transcription_url]
+minLength = 1
+type = "string"
+
+[provides.operations."azure.speech.stt.batch.files".output_schema]
+type = "object"
+
+[provides.operations."azure.speech.stt.batch.files".network_constraints]
+host_allow = [
+    "*.api.cognitive.microsoft.com",
+    "*.api.cognitive.microsoft.us",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."azure.speech.stt.batch.files".ai_hints]
+when_to_use = "Use after batch.get reports completion to list transcription/result file metadata with SAS URLs redacted."
+common_mistakes = [
+    "Do not log contentUrl values returned by Azure; runtime output replaces them with URL descriptors.",
+    "Use sas_validity_seconds only when a short-lived provider file URL is actually needed.",
+]
+examples = ['{"transcription_id":"ba7ea6f5-3065-40b7-b49a-a90f48584683","sas_validity_seconds":300}']
+related = [
+    "azure.speech.stt.batch.submit",
+    "azure.speech.stt.batch.get",
+]
+
+[provides.operations."azure.speech.stt.batch.get"]
+description = "Fetch status for an Azure Speech-to-text REST API 2025-10-15 batch transcription job"
+capability = "azure.speech.stt"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."azure.speech.stt.batch.get".input_schema]
+type = "object"
+
+[[provides.operations."azure.speech.stt.batch.get".input_schema.anyOf]]
+required = ["transcription_id"]
+
+[[provides.operations."azure.speech.stt.batch.get".input_schema.anyOf]]
+required = ["transcription_url"]
+
+[provides.operations."azure.speech.stt.batch.get".input_schema.properties.transcription_id]
+minLength = 1
+type = "string"
+
+[provides.operations."azure.speech.stt.batch.get".input_schema.properties.transcription_url]
+minLength = 1
+type = "string"
+
+[provides.operations."azure.speech.stt.batch.get".output_schema]
+type = "object"
+
+[provides.operations."azure.speech.stt.batch.get".network_constraints]
+host_allow = [
+    "*.api.cognitive.microsoft.com",
+    "*.api.cognitive.microsoft.us",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."azure.speech.stt.batch.get".ai_hints]
+when_to_use = "Use to poll a submitted Azure Speech batch transcription job without exposing the raw provider self URL."
+common_mistakes = [
+    "Do not pass retired v3.x transcription URLs.",
+    "Prefer transcription_id when available; transcription_url must use the configured STT host and api-version 2025-10-15.",
+]
+examples = ['{"transcription_id":"ba7ea6f5-3065-40b7-b49a-a90f48584683"}']
+related = [
+    "azure.speech.stt.batch.submit",
+    "azure.speech.stt.batch.files",
+]
+
+[provides.operations."azure.speech.stt.batch.submit"]
+description = "Submit an Azure Speech-to-text REST API 2025-10-15 batch transcription job from storage URLs or a Blob container"
+capability = "azure.speech.stt"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."azure.speech.stt.batch.submit".input_schema]
+required = [
+    "display_name",
+    "locale",
+]
+type = "object"
+
+[[provides.operations."azure.speech.stt.batch.submit".input_schema.anyOf]]
+required = ["content_urls"]
+
+[[provides.operations."azure.speech.stt.batch.submit".input_schema.anyOf]]
+required = ["content_container_url"]
+
+[provides.operations."azure.speech.stt.batch.submit".input_schema.properties.content_container_url]
+minLength = 1
+type = "string"
+
+[provides.operations."azure.speech.stt.batch.submit".input_schema.properties.content_urls]
+maxItems = 1000
+minItems = 1
+type = "array"
+
+[provides.operations."azure.speech.stt.batch.submit".input_schema.properties.content_urls.items]
+minLength = 1
+type = "string"
+
+[provides.operations."azure.speech.stt.batch.submit".input_schema.properties.custom_properties]
+type = "object"
+
+[provides.operations."azure.speech.stt.batch.submit".input_schema.properties.description]
+type = "string"
+
+[provides.operations."azure.speech.stt.batch.submit".input_schema.properties.diarization]
+type = "object"
+
+[provides.operations."azure.speech.stt.batch.submit".input_schema.properties.display_form_word_level_timestamps_enabled]
+type = "boolean"
+
+[provides.operations."azure.speech.stt.batch.submit".input_schema.properties.display_name]
+minLength = 1
+type = "string"
+
+[provides.operations."azure.speech.stt.batch.submit".input_schema.properties.language_identification]
+type = "object"
+
+[provides.operations."azure.speech.stt.batch.submit".input_schema.properties.locale]
+default = "en-US"
+type = "string"
+
+[provides.operations."azure.speech.stt.batch.submit".input_schema.properties.model]
+type = "object"
+
+[provides.operations."azure.speech.stt.batch.submit".input_schema.properties.profanity_filter_mode]
+type = "string"
+
+[provides.operations."azure.speech.stt.batch.submit".input_schema.properties.project]
+type = "object"
+
+[provides.operations."azure.speech.stt.batch.submit".input_schema.properties.properties]
+type = "object"
+
+[provides.operations."azure.speech.stt.batch.submit".input_schema.properties.punctuation_mode]
+type = "string"
+
+[provides.operations."azure.speech.stt.batch.submit".input_schema.properties.time_to_live_hours]
+minimum = 1
+type = "integer"
+
+[provides.operations."azure.speech.stt.batch.submit".input_schema.properties.word_level_timestamps_enabled]
+type = "boolean"
+
+[provides.operations."azure.speech.stt.batch.submit".output_schema]
+type = "object"
+
+[provides.operations."azure.speech.stt.batch.submit".network_constraints]
+host_allow = [
+    "*.api.cognitive.microsoft.com",
+    "*.api.cognitive.microsoft.us",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."azure.speech.stt.batch.submit".ai_hints]
+when_to_use = "Use for storage-backed Azure Speech batch transcription jobs with one or more content URLs or one Azure Blob container URL."
+common_mistakes = [
+    "Do not pass raw audio bytes; batch transcription reads storage URLs.",
+    "Do not log SAS URLs. Runtime output returns URL hashes/descriptors instead of raw provider URLs.",
+    "Use batch.get and batch.files to poll status and retrieve redacted result-file metadata.",
+]
+examples = ['{"display_name":"nightly-support-calls","locale":"en-US","content_urls":["https://storage.example/audio.wav?sig=<redacted>"],"time_to_live_hours":48}']
+related = [
+    "azure.speech.stt.batch.get",
+    "azure.speech.stt.batch.files",
 ]
 
 [provides.operations."azure.speech.stt.transcribe_fast"]

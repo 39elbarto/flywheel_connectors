@@ -20,17 +20,24 @@ use url::Url;
 const CONNECTOR_ID: &str = "fcp.azure-speech";
 const CONNECTOR_VERSION: &str = "0.1.0";
 const AZURE_SPEECH_MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const DOC_STT_REST_OVERVIEW: &str =
+    "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/rest-speech-to-text";
+const DOC_STT_TRANSCRIBE: &str = "https://learn.microsoft.com/en-us/rest/api/speechtotext/transcriptions/transcribe?view=rest-speechtotext-2025-10-15";
+const DOC_STT_BATCH_SUBMIT: &str = "https://learn.microsoft.com/en-us/rest/api/speechtotext/transcriptions/submit?view=rest-speechtotext-2025-10-15";
 const DOC_TTS_TEXT_STREAMING: &str = "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-lower-speech-synthesis-latency#how-to-use-text-streaming";
 const DOC_STT_REALTIME: &str =
     "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-recognize-speech";
 const DOC_SDK_CONNECTIONS: &str =
     "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-control-connections";
-const OPERATION_ORDER: [&str; 3] = [
+const OPERATION_ORDER: [&str; 6] = [
     "azure.speech.voices.list",
     "azure.speech.tts.synthesize",
     "azure.speech.stt.transcribe_fast",
+    "azure.speech.stt.batch.submit",
+    "azure.speech.stt.batch.get",
+    "azure.speech.stt.batch.files",
 ];
-const BOUNDARY: &str = "This connector exposes Azure Speech REST token exchange, regional voice discovery, REST text-to-speech synthesis, and Speech-to-text 2025-10-15 fast transcription. Realtime WebSocket streaming is blocked until Microsoft documents a direct STT/TTS wire protocol or FCP adopts an equivalent SDK-compatible framing; batch transcription and Entra auth remain separate follow-up surfaces.";
+const BOUNDARY: &str = "This connector exposes Azure Speech REST token exchange, regional voice discovery, REST text-to-speech synthesis, and Speech-to-text 2025-10-15 fast transcription plus batch submit/status/files surfaces. Realtime WebSocket streaming is blocked until Microsoft documents a direct STT/TTS wire protocol or FCP adopts an equivalent SDK-compatible framing; custom speech projects/models and Entra auth remain separate follow-up surfaces.";
 const STREAMING_BLOCKER_REASON: &str = "Current Microsoft Learn documentation exposes TTS text streaming through Speech SDK TextStream on the WebSocket v2 endpoint, and realtime STT through Speech SDK SpeechRecognizer/AudioConfig push-stream APIs. It does not publish a direct WebSocket frame protocol for a standalone Rust connector, so this connector must not guess or reverse-engineer the live wire format.";
 const DEFAULT_REQUEST_TIMEOUT_MS: usize = 60_000;
 const DEFAULT_INLINE_AUDIO_MAX_BYTES: usize = 1_048_576;
@@ -570,6 +577,103 @@ impl AzureSpeechClient {
         Ok(normalize_transcription_result(&value, &request))
     }
 
+    async fn batch_submit(&self, input: &Value) -> FcpResult<Value> {
+        let request = BatchSubmitRequest::from_input(input)?;
+        let key = self.config.auth.subscription_key()?;
+        let url = format!(
+            "{}/speechtotext/transcriptions:submit?api-version={STT_API_VERSION}",
+            self.config.stt_base_url
+        );
+        let response = self
+            .send_with_retry(|| {
+                with_header(
+                    self.http
+                        .post(&url)
+                        .header(USER_AGENT, USER_AGENT_VALUE)
+                        .json(&request.body),
+                    HeaderName::from_static("ocp-apim-subscription-key"),
+                    key,
+                )
+            })
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(provider_error("stt.batch.submit", status, response).await);
+        }
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok())
+            .map(url_descriptor);
+        let value: Value = response.json().await.map_err(|error| map_reqwest(&error))?;
+        let transcription_id_hash = transcription_id_hash_from_value(&value);
+        Ok(json!({
+            "operation": "azure.speech.stt.batch.submit",
+            "api_version": STT_API_VERSION,
+            "status_code": status.as_u16(),
+            "content_source": request.content_source,
+            "transcription_id_hash": transcription_id_hash,
+            "location": location,
+            "transcription": sanitize_provider_urls(&value),
+        }))
+    }
+
+    async fn batch_get(&self, input: &Value) -> FcpResult<Value> {
+        let url = BatchResourceRequest::from_input(input, &self.config.stt_base_url)?.status_url;
+        let key = self.config.auth.subscription_key()?;
+        let response = self
+            .send_with_retry(|| {
+                with_header(
+                    self.http
+                        .get(url.as_str())
+                        .header(USER_AGENT, USER_AGENT_VALUE),
+                    HeaderName::from_static("ocp-apim-subscription-key"),
+                    key,
+                )
+            })
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(provider_error("stt.batch.get", status, response).await);
+        }
+        let value: Value = response.json().await.map_err(|error| map_reqwest(&error))?;
+        Ok(json!({
+            "operation": "azure.speech.stt.batch.get",
+            "api_version": STT_API_VERSION,
+            "status_code": status.as_u16(),
+            "transcription_id_hash": transcription_id_hash_from_value(&value),
+            "transcription": sanitize_provider_urls(&value),
+        }))
+    }
+
+    async fn batch_files(&self, input: &Value) -> FcpResult<Value> {
+        let url =
+            BatchResourceRequest::from_input(input, &self.config.stt_base_url)?.files_url(input)?;
+        let key = self.config.auth.subscription_key()?;
+        let response = self
+            .send_with_retry(|| {
+                with_header(
+                    self.http
+                        .get(url.as_str())
+                        .header(USER_AGENT, USER_AGENT_VALUE),
+                    HeaderName::from_static("ocp-apim-subscription-key"),
+                    key,
+                )
+            })
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(provider_error("stt.batch.files", status, response).await);
+        }
+        let value: Value = response.json().await.map_err(|error| map_reqwest(&error))?;
+        Ok(json!({
+            "operation": "azure.speech.stt.batch.files",
+            "api_version": STT_API_VERSION,
+            "status_code": status.as_u16(),
+            "files": sanitize_provider_urls(&value),
+        }))
+    }
+
     async fn send_with_retry<F>(&self, mut build: F) -> FcpResult<Response>
     where
         F: FnMut() -> RequestBuilder,
@@ -701,6 +805,102 @@ impl SttRequest {
             content_type: content_type.to_owned(),
             definition,
         })
+    }
+}
+
+struct BatchSubmitRequest {
+    body: Value,
+    content_source: Value,
+}
+
+#[derive(Clone, Copy)]
+enum BatchContentSourceInput<'a> {
+    Urls(&'a [Value]),
+    ContainerUrl(&'a str),
+}
+
+impl BatchSubmitRequest {
+    fn from_input(input: &Value) -> FcpResult<Self> {
+        let display_name = required_string(input, "display_name")?;
+        let locale = input
+            .get("locale")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_STT_LOCALE);
+        validate_locale(locale)?;
+
+        let mut body = serde_json::Map::new();
+        body.insert("displayName".into(), json!(display_name));
+        body.insert("locale".into(), json!(locale));
+        copy_optional_string(&mut body, input, "description", "description");
+        copy_optional_object(&mut body, input, "customProperties", "custom_properties")?;
+        copy_optional_object(&mut body, input, "model", "model")?;
+        copy_optional_object(&mut body, input, "project", "project")?;
+        copy_optional_object(&mut body, input, "dataset", "dataset")?;
+        let content_source =
+            append_batch_content_source(&mut body, batch_content_source_input(input)?)?;
+        body.insert("properties".into(), batch_properties_from_input(input)?);
+
+        Ok(Self {
+            body: Value::Object(body),
+            content_source,
+        })
+    }
+}
+
+struct BatchResourceRequest {
+    status_url: Url,
+}
+
+impl BatchResourceRequest {
+    fn from_input(input: &Value, stt_base_url: &str) -> FcpResult<Self> {
+        let base = Url::parse(stt_base_url).map_err(|error| FcpError::Internal {
+            message: format!("configured stt_base_url is invalid: {error}"),
+        })?;
+        let status_url = if let Some(raw) = input
+            .get("transcription_url")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            normalize_transcription_resource_url(raw, &base)?
+        } else {
+            let transcription_id = required_string(input, "transcription_id")?;
+            validate_transcription_id(transcription_id)?;
+            let mut url = base;
+            url.set_path(&format!("/speechtotext/transcriptions/{transcription_id}"));
+            url.set_query(Some(&format!("api-version={STT_API_VERSION}")));
+            url
+        };
+        Ok(Self { status_url })
+    }
+
+    fn files_url(&self, input: &Value) -> FcpResult<Url> {
+        let mut url = self.status_url.clone();
+        let base_path = url.path().trim_end_matches('/');
+        if !base_path.ends_with("/files") {
+            url.set_path(&format!("{base_path}/files"));
+        }
+        let mut pairs = vec![("api-version".to_string(), STT_API_VERSION.to_string())];
+        copy_query_integer(
+            input,
+            &mut pairs,
+            "sas_validity_seconds",
+            "sasValidityInSeconds",
+        )?;
+        copy_query_integer(input, &mut pairs, "skip", "skip")?;
+        copy_query_integer(input, &mut pairs, "top", "top")?;
+        if let Some(filter) = input
+            .get("filter")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            pairs.push(("filter".into(), filter.to_owned()));
+        }
+        url.query_pairs_mut().clear().extend_pairs(pairs);
+        Ok(url)
     }
 }
 
@@ -862,7 +1062,9 @@ impl AzureSpeechConnector {
             "resource_types": [],
             "provider_docs_rechecked": {
                 "tts_rest": "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/rest-text-to-speech",
-                "stt_fast_2025_10_15": "https://learn.microsoft.com/en-us/rest/api/speechtotext/transcriptions/transcribe?view=rest-speechtotext-2025-10-15",
+                "stt_rest_overview": DOC_STT_REST_OVERVIEW,
+                "stt_fast_2025_10_15": DOC_STT_TRANSCRIBE,
+                "stt_batch_submit_2025_10_15": DOC_STT_BATCH_SUBMIT,
                 "tts_text_streaming_sdk": DOC_TTS_TEXT_STREAMING,
                 "stt_realtime_sdk": DOC_STT_REALTIME,
                 "sdk_connection_reuse": DOC_SDK_CONNECTIONS
@@ -899,6 +1101,9 @@ impl AzureSpeechConnector {
             "azure.speech.voices.list" => client.voices_list().await,
             "azure.speech.tts.synthesize" => client.synthesize(&input).await,
             "azure.speech.stt.transcribe_fast" => client.transcribe_fast(&input).await,
+            "azure.speech.stt.batch.submit" => client.batch_submit(&input).await,
+            "azure.speech.stt.batch.get" => client.batch_get(&input).await,
+            "azure.speech.stt.batch.files" => client.batch_files(&input).await,
             _ => Err(FcpError::InvalidRequest {
                 code: 1002,
                 message: format!("Unknown operation: {operation}"),
@@ -1035,10 +1240,10 @@ fn deferred_operations_info() -> Vec<Value> {
             "implementation_gate": "Do not implement live realtime STT until the direct audio chunk and transcript frame protocol is documented or represented by an approved FCP host-stream adapter."
         }),
         json!({
-            "id": "azure.speech.stt.batch",
-            "summary": "Azure Speech batch transcription and storage-backed jobs",
-            "outcome": "deferred_to_batch_slice",
-            "rationale": "Batch transcription has different storage, polling, and artifact retention requirements from fast transcription."
+            "id": "azure.speech.stt.custom_speech.projects",
+            "summary": "Azure Speech custom speech project, dataset, model training, and endpoint lifecycle",
+            "outcome": "deferred_to_custom_speech_slice",
+            "rationale": "The direct REST coverage here includes fast transcription and batch job submit/status/files. Custom speech project/model training and deployment endpoints are a separate lifecycle surface with different data retention and review requirements."
         }),
         json!({
             "id": "azure.speech.entra.managed_identity",
@@ -1255,6 +1460,333 @@ fn copy_definition_field(
     if let Some(object) = definition.as_object_mut() {
         object.insert(azure_name.to_owned(), value.clone());
     }
+}
+
+fn copy_optional_string(
+    body: &mut serde_json::Map<String, Value>,
+    input: &Value,
+    azure_name: &str,
+    input_name: &str,
+) {
+    let Some(value) = input
+        .get(input_name)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    body.insert(azure_name.to_owned(), json!(value));
+}
+
+fn copy_optional_object(
+    body: &mut serde_json::Map<String, Value>,
+    input: &Value,
+    azure_name: &str,
+    input_name: &str,
+) -> FcpResult<()> {
+    let Some(value) = input.get(input_name) else {
+        return Ok(());
+    };
+    if !value.is_object() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{input_name} must be an object"),
+        });
+    }
+    body.insert(azure_name.to_owned(), value.clone());
+    Ok(())
+}
+
+fn validated_url_array(
+    values: &[Value],
+    label: &str,
+    min: usize,
+    max: usize,
+) -> FcpResult<Vec<String>> {
+    if values.len() < min || values.len() > max {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label} must contain between {min} and {max} URLs"),
+        });
+    }
+    let mut urls = Vec::with_capacity(values.len());
+    for value in values {
+        let Some(url) = value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("{label} entries must be non-empty strings"),
+            });
+        };
+        validate_external_https_url(url, label)?;
+        urls.push(url.to_owned());
+    }
+    Ok(urls)
+}
+
+fn validate_external_https_url(url: &str, label: &str) -> FcpResult<()> {
+    let parsed = Url::parse(url).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{label} contains an invalid URL: {error}"),
+    })?;
+    if parsed.scheme() != "https" {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label} URLs must use https"),
+        });
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label} URLs must not contain embedded credentials"),
+        });
+    }
+    if parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label} URLs must not contain fragments"),
+        });
+    }
+    Ok(())
+}
+
+fn copy_query_integer(
+    input: &Value,
+    pairs: &mut Vec<(String, String)>,
+    input_name: &str,
+    query_name: &str,
+) -> FcpResult<()> {
+    let Some(value) = input.get(input_name) else {
+        return Ok(());
+    };
+    let value = value.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{input_name} must be a non-negative integer"),
+    })?;
+    pairs.push((query_name.to_owned(), value.to_string()));
+    Ok(())
+}
+
+fn normalize_transcription_resource_url(raw: &str, base: &Url) -> FcpResult<Url> {
+    let mut parsed = Url::parse(raw).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("transcription_url is invalid: {error}"),
+    })?;
+    if parsed.scheme() != base.scheme() || host(&parsed) != host(base) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "transcription_url must use the configured Azure Speech STT host".into(),
+        });
+    }
+    if parsed.path().contains("/speechtotext/v3.") || parsed.path().contains("/speechtotext/v3/") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "retired v3.x Speech-to-text transcription URLs are not accepted".into(),
+        });
+    }
+    if !parsed.path().starts_with("/speechtotext/transcriptions/") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "transcription_url must point at /speechtotext/transcriptions/{id}".into(),
+        });
+    }
+    if parsed.path().contains("/files") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "transcription_url must identify the transcription; files are requested by azure.speech.stt.batch.files".into(),
+        });
+    }
+    for (key, value) in parsed.query_pairs() {
+        if key == "api-version" && value != STT_API_VERSION {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("transcription_url api-version must be {STT_API_VERSION}"),
+            });
+        }
+    }
+    parsed.set_query(Some(&format!("api-version={STT_API_VERSION}")));
+    Ok(parsed)
+}
+
+fn validate_transcription_id(transcription_id: &str) -> FcpResult<()> {
+    let valid = transcription_id.len() <= 128
+        && !transcription_id.is_empty()
+        && transcription_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-');
+    if valid {
+        Ok(())
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "transcription_id must be a non-empty UUID-style identifier".into(),
+        })
+    }
+}
+
+fn batch_content_source_input(input: &Value) -> FcpResult<BatchContentSourceInput<'_>> {
+    let content_urls = input.get("content_urls").and_then(Value::as_array);
+    let content_container_url = input
+        .get("content_container_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    match (content_urls, content_container_url) {
+        (Some(urls), None) => Ok(BatchContentSourceInput::Urls(urls)),
+        (None, Some(url)) => Ok(BatchContentSourceInput::ContainerUrl(url)),
+        (Some(_), Some(_)) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Provide exactly one of content_urls or content_container_url".into(),
+        }),
+        (None, None) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "content_urls or content_container_url is required".into(),
+        }),
+    }
+}
+
+fn append_batch_content_source(
+    body: &mut serde_json::Map<String, Value>,
+    source: BatchContentSourceInput<'_>,
+) -> FcpResult<Value> {
+    match source {
+        BatchContentSourceInput::Urls(urls) => {
+            let urls = validated_url_array(urls, "content_urls", 1, 1000)?;
+            let url_hashes = urls
+                .iter()
+                .map(|url| sha256_hex(url.as_bytes()))
+                .collect::<Vec<_>>();
+            let count = urls.len();
+            body.insert("contentUrls".into(), json!(urls));
+            Ok(json!({
+                "mode": "content_urls",
+                "count": count,
+                "url_hashes": url_hashes
+            }))
+        }
+        BatchContentSourceInput::ContainerUrl(url) => {
+            validate_external_https_url(url, "content_container_url")?;
+            body.insert("contentContainerUrl".into(), json!(url));
+            Ok(json!({
+                "mode": "content_container_url",
+                "url": url_descriptor(url),
+            }))
+        }
+    }
+}
+
+fn batch_properties_from_input(input: &Value) -> FcpResult<Value> {
+    let mut properties = input
+        .get("properties")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if !properties.is_object() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "properties must be an object".into(),
+        });
+    }
+    copy_definition_field(
+        &mut properties,
+        input,
+        "wordLevelTimestampsEnabled",
+        "word_level_timestamps_enabled",
+    );
+    copy_definition_field(
+        &mut properties,
+        input,
+        "displayFormWordLevelTimestampsEnabled",
+        "display_form_word_level_timestamps_enabled",
+    );
+    copy_definition_field(
+        &mut properties,
+        input,
+        "punctuationMode",
+        "punctuation_mode",
+    );
+    copy_definition_field(
+        &mut properties,
+        input,
+        "profanityFilterMode",
+        "profanity_filter_mode",
+    );
+    copy_definition_field(
+        &mut properties,
+        input,
+        "timeToLiveHours",
+        "time_to_live_hours",
+    );
+    copy_definition_field(&mut properties, input, "channels", "channels");
+    copy_definition_field(&mut properties, input, "diarization", "diarization");
+    copy_definition_field(
+        &mut properties,
+        input,
+        "languageIdentification",
+        "language_identification",
+    );
+    Ok(properties)
+}
+
+fn transcription_id_hash_from_value(value: &Value) -> Value {
+    value
+        .get("self")
+        .and_then(Value::as_str)
+        .and_then(|url| Url::parse(url).ok())
+        .and_then(|url| transcription_id_from_url(&url))
+        .map_or(Value::Null, |id| json!(sha256_hex(id.as_bytes())))
+}
+
+fn transcription_id_from_url(url: &Url) -> Option<String> {
+    let mut segments = url.path_segments()?;
+    while let Some(segment) = segments.next() {
+        if segment == "transcriptions" {
+            return segments.next().map(ToOwned::to_owned);
+        }
+    }
+    None
+}
+
+fn sanitize_provider_urls(value: &Value) -> Value {
+    match value {
+        Value::String(text) => Url::parse(text)
+            .ok()
+            .filter(|url| matches!(url.scheme(), "http" | "https"))
+            .map_or_else(
+                || Value::String(text.clone()),
+                |url| url_descriptor(url.as_str()),
+            ),
+        Value::Array(values) => Value::Array(values.iter().map(sanitize_provider_urls).collect()),
+        Value::Object(object) => {
+            let sanitized = object
+                .iter()
+                .map(|(key, value)| (key.clone(), sanitize_provider_urls(value)))
+                .collect();
+            Value::Object(sanitized)
+        }
+        other => other.clone(),
+    }
+}
+
+fn url_descriptor(raw: &str) -> Value {
+    let parsed = Url::parse(raw);
+    let host = parsed
+        .as_ref()
+        .ok()
+        .and_then(Url::host_str)
+        .unwrap_or("unparseable");
+    let path = parsed.as_ref().map_or("", Url::path);
+    json!({
+        "redacted": true,
+        "host": host,
+        "path_sha256": sha256_hex(path.as_bytes()),
+        "query_redacted": parsed.as_ref().is_ok_and(|url| url.query().is_some()),
+        "url_sha256": sha256_hex(raw.as_bytes()),
+    })
 }
 
 fn required_string<'a>(input: &'a Value, field: &str) -> FcpResult<&'a str> {

@@ -122,3 +122,125 @@ async fn fast_transcription_posts_2025_10_15_multipart_and_preserves_result_shap
         0.8
     );
 }
+
+#[fcp_async_core::runtime::test]
+async fn batch_transcription_submit_get_and_files_redact_provider_urls() {
+    let server = MockServer::start().await;
+    let transcription_id = "ba7ea6f5-3065-40b7-b49a-a90f48584683";
+    Mock::given(method("POST"))
+        .and(path("/speechtotext/transcriptions:submit"))
+        .and(query_param("api-version", "2025-10-15"))
+        .and(header("ocp-apim-subscription-key", "loopback-secret"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .insert_header(
+                    "location",
+                    format!(
+                        "{}/speechtotext/transcriptions/{transcription_id}?api-version=2025-10-15",
+                        server.uri()
+                    ),
+                )
+                .set_body_json(json!({
+                    "self": format!("{}/speechtotext/transcriptions/{transcription_id}?api-version=2025-10-15", server.uri()),
+                    "displayName": "nightly support calls",
+                    "locale": "en-US",
+                    "links": {
+                        "files": format!("{}/speechtotext/transcriptions/{transcription_id}/files?api-version=2025-10-15&sig=SECRET", server.uri())
+                    },
+                    "status": "Running"
+                })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/speechtotext/transcriptions/{transcription_id}")))
+        .and(query_param("api-version", "2025-10-15"))
+        .and(header("ocp-apim-subscription-key", "loopback-secret"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "self": format!("{}/speechtotext/transcriptions/{transcription_id}?api-version=2025-10-15", server.uri()),
+            "status": "Succeeded",
+            "links": {
+                "files": format!("{}/speechtotext/transcriptions/{transcription_id}/files?api-version=2025-10-15", server.uri())
+            },
+            "properties": {
+                "durationMilliseconds": 42000
+            }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/speechtotext/transcriptions/{transcription_id}/files"
+        )))
+        .and(query_param("api-version", "2025-10-15"))
+        .and(query_param("sasValidityInSeconds", "300"))
+        .and(query_param("top", "2"))
+        .and(header("ocp-apim-subscription-key", "loopback-secret"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "values": [{
+                "name": "audio.wav.json",
+                "kind": "Transcription",
+                "links": {
+                    "contentUrl": "https://storage.example/transcript.json?sig=SECRET&se=2030-01-01"
+                }
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let connector = configured_connector(&server).await;
+    let submit = connector
+        .handle_invoke(json!({
+            "operation_id": "azure.speech.stt.batch.submit",
+            "input": {
+                "display_name": "nightly support calls",
+                "locale": "en-US",
+                "content_urls": ["https://storage.example/audio.wav?sig=SECRET"],
+                "time_to_live_hours": 48,
+                "profanity_filter_mode": "Masked"
+            }
+        }))
+        .await
+        .expect("batch submit should succeed");
+    assert_eq!(submit["api_version"], "2025-10-15");
+    assert_eq!(submit["content_source"]["mode"], "content_urls");
+    assert!(submit["transcription_id_hash"].as_str().is_some());
+    assert!(
+        !serde_json::to_string(&submit)
+            .expect("submit JSON should serialize")
+            .contains("SECRET")
+    );
+
+    let status = connector
+        .handle_invoke(json!({
+            "operation_id": "azure.speech.stt.batch.get",
+            "input": {
+                "transcription_id": transcription_id
+            }
+        }))
+        .await
+        .expect("batch status should succeed");
+    assert_eq!(status["transcription"]["status"], "Succeeded");
+
+    let files = connector
+        .handle_invoke(json!({
+            "operation_id": "azure.speech.stt.batch.files",
+            "input": {
+                "transcription_id": transcription_id,
+                "sas_validity_seconds": 300,
+                "top": 2
+            }
+        }))
+        .await
+        .expect("batch files should succeed");
+    assert_eq!(files["files"]["values"][0]["name"], "audio.wav.json");
+    assert_eq!(
+        files["files"]["values"][0]["links"]["contentUrl"]["redacted"],
+        true
+    );
+    assert!(
+        !serde_json::to_string(&files)
+            .expect("files JSON should serialize")
+            .contains("SECRET")
+    );
+}

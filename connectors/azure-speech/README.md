@@ -5,9 +5,15 @@ This connector implements the core Azure Speech REST surface for FCP:
 - regional token exchange through `issueToken`
 - `voices/list` discovery
 - REST text-to-speech synthesis through `/cognitiveservices/v1`
-- Speech-to-text fast transcription through `2025-10-15`
+- Speech-to-text fast and batch transcription through `2025-10-15`
 
-Realtime WebSocket sessions, batch transcription, and Microsoft Entra managed identity are intentionally separate follow-up surfaces.
+Realtime WebSocket sessions, custom speech project/model lifecycle, and Microsoft Entra managed identity are intentionally separate follow-up surfaces.
+
+## Speech-to-text REST Status
+
+`flywheel_connectors-4kw5f.2.9.6.1.3` covers the current `2025-10-15` REST paths that are explicit in Microsoft Learn: fast transcription via `/speechtotext/transcriptions:transcribe` and batch transcription submit/status/files via `/speechtotext/transcriptions:submit` plus the transcription resource and files links returned by that API. Batch input accepts storage URLs or a Blob container URL; runtime output redacts provider URLs and SAS-bearing file links into hashes/descriptors.
+
+Custom speech projects, dataset/model training, deployment endpoints, and webhook management are not part of this connector slice.
 
 ## Realtime WebSocket Status
 

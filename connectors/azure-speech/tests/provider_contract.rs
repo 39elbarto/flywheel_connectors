@@ -4,10 +4,13 @@ use jsonschema::Validator;
 use serde_json::{Value, json};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
-const EXPECTED_OPERATION_IDS: [&str; 3] = [
+const EXPECTED_OPERATION_IDS: [&str; 6] = [
     "azure.speech.voices.list",
     "azure.speech.tts.synthesize",
     "azure.speech.stt.transcribe_fast",
+    "azure.speech.stt.batch.submit",
+    "azure.speech.stt.batch.get",
+    "azure.speech.stt.batch.files",
 ];
 
 fn azure_speech_manifest_unchecked() -> ConnectorManifest {
@@ -101,6 +104,24 @@ async fn azure_speech_manifest_operations_match_runtime_introspection() {
             .iter()
             .any(|host| host.as_str() == Some("*.api.cognitive.microsoft.com"))
     );
+    let batch_submit = runtime_operations
+        .iter()
+        .find(|operation| {
+            operation.get("id").and_then(Value::as_str) == Some("azure.speech.stt.batch.submit")
+        })
+        .expect("batch submit operation should be present");
+    assert_eq!(batch_submit["capability"], "azure.speech.stt");
+    assert_eq!(
+        batch_submit["input_schema"]["properties"]["locale"]["default"],
+        "en-US"
+    );
+    let batch_files = runtime_operations
+        .iter()
+        .find(|operation| {
+            operation.get("id").and_then(Value::as_str) == Some("azure.speech.stt.batch.files")
+        })
+        .expect("batch files operation should be present");
+    assert_eq!(batch_files["idempotency"], "strict");
 
     let streaming_blocker = introspection
         .get("deferred_operations")
@@ -152,4 +173,45 @@ fn azure_speech_manifest_schemas_cover_core_request_shapes() {
         }),
     );
     assert_schema_rejects(stt_schema, &json!({"content_type": "audio/wav"}));
+
+    let batch_submit_schema = manifest_input_schema(&manifest, "azure.speech.stt.batch.submit");
+    assert_schema_accepts(
+        batch_submit_schema,
+        &json!({
+            "display_name": "nightly support calls",
+            "locale": "en-US",
+            "content_urls": ["https://storage.example/audio.wav?sig=redacted"],
+            "time_to_live_hours": 48
+        }),
+    );
+    assert_schema_accepts(
+        batch_submit_schema,
+        &json!({
+            "display_name": "nightly support calls",
+            "locale": "en-US",
+            "content_container_url": "https://storage.example/container?sig=redacted"
+        }),
+    );
+    assert_schema_rejects(
+        batch_submit_schema,
+        &json!({"display_name": "missing source", "locale": "en-US"}),
+    );
+
+    let batch_get_schema = manifest_input_schema(&manifest, "azure.speech.stt.batch.get");
+    assert_schema_accepts(
+        batch_get_schema,
+        &json!({"transcription_id": "ba7ea6f5-3065-40b7-b49a-a90f48584683"}),
+    );
+    assert_schema_rejects(batch_get_schema, &json!({}));
+
+    let batch_files_schema = manifest_input_schema(&manifest, "azure.speech.stt.batch.files");
+    assert_schema_accepts(
+        batch_files_schema,
+        &json!({
+            "transcription_id": "ba7ea6f5-3065-40b7-b49a-a90f48584683",
+            "sas_validity_seconds": 300,
+            "top": 2
+        }),
+    );
+    assert_schema_rejects(batch_files_schema, &json!({"top": 2}));
 }

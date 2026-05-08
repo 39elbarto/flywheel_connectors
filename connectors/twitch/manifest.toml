@@ -28,6 +28,85 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "none"
 
+[provides.operations.streams_list.input_schema]
+type = "object"
+additionalProperties = false
+
+[provides.operations.streams_list.input_schema.properties.game_id]
+type = "string"
+description = "Filter streams to a Twitch game/category ID."
+
+[provides.operations.streams_list.input_schema.properties.user_login]
+type = "string"
+description = "Filter streams to a broadcaster login."
+
+[provides.operations.streams_list.input_schema.properties.first]
+type = "integer"
+description = "Maximum number of streams to return."
+minimum = 1
+maximum = 100
+default = 20
+
+[provides.operations.streams_list.output_schema]
+type = "object"
+required = ["streams", "count"]
+additionalProperties = false
+
+[provides.operations.streams_list.output_schema.properties.streams]
+type = "array"
+description = "Currently live streams returned by Twitch Helix."
+
+[provides.operations.streams_list.output_schema.properties.streams.items]
+type = "object"
+required = ["id", "user_id", "user_login", "user_name", "game_id", "game_name", "type", "title", "viewer_count", "started_at", "language", "tags", "is_mature"]
+additionalProperties = false
+
+[provides.operations.streams_list.output_schema.properties.streams.items.properties.id]
+type = "string"
+
+[provides.operations.streams_list.output_schema.properties.streams.items.properties.user_id]
+type = "string"
+
+[provides.operations.streams_list.output_schema.properties.streams.items.properties.user_login]
+type = "string"
+
+[provides.operations.streams_list.output_schema.properties.streams.items.properties.user_name]
+type = "string"
+
+[provides.operations.streams_list.output_schema.properties.streams.items.properties.game_id]
+type = "string"
+
+[provides.operations.streams_list.output_schema.properties.streams.items.properties.game_name]
+type = "string"
+
+[provides.operations.streams_list.output_schema.properties.streams.items.properties.type]
+type = "string"
+
+[provides.operations.streams_list.output_schema.properties.streams.items.properties.title]
+type = "string"
+
+[provides.operations.streams_list.output_schema.properties.streams.items.properties.viewer_count]
+type = "integer"
+minimum = 0
+
+[provides.operations.streams_list.output_schema.properties.streams.items.properties.started_at]
+type = "string"
+format = "date-time"
+
+[provides.operations.streams_list.output_schema.properties.streams.items.properties.language]
+type = "string"
+
+[provides.operations.streams_list.output_schema.properties.streams.items.properties.tags]
+type = "array"
+items = { type = "string" }
+
+[provides.operations.streams_list.output_schema.properties.streams.items.properties.is_mature]
+type = "boolean"
+
+[provides.operations.streams_list.output_schema.properties.count]
+type = "integer"
+minimum = 0
+
 [provides.operations.streams_list.network_constraints]
 host_allow = ["api.twitch.tv"]
 port_allow = [443]
@@ -49,6 +128,28 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "none"
 
+[provides.operations.streams_get.input_schema]
+type = "object"
+required = ["user_login"]
+additionalProperties = false
+
+[provides.operations.streams_get.input_schema.properties.user_login]
+type = "string"
+description = "Broadcaster login to check for a live stream."
+minLength = 1
+
+[provides.operations.streams_get.output_schema]
+type = "object"
+required = ["stream", "is_live"]
+additionalProperties = false
+
+[provides.operations.streams_get.output_schema.properties.stream]
+type = ["object", "null"]
+description = "The live stream object when the requested user is live; null otherwise."
+
+[provides.operations.streams_get.output_schema.properties.is_live]
+type = "boolean"
+
 [provides.operations.streams_get.network_constraints]
 host_allow = ["api.twitch.tv"]
 port_allow = [443]
@@ -63,6 +164,57 @@ capability = "twitch.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+
+[provides.operations.users_get.input_schema]
+type = "object"
+required = ["login"]
+additionalProperties = false
+
+[provides.operations.users_get.input_schema.properties.login]
+type = "string"
+description = "Twitch user login to retrieve."
+minLength = 1
+
+[provides.operations.users_get.output_schema]
+type = "object"
+additionalProperties = false
+
+[provides.operations.users_get.output_schema.properties.id]
+type = "string"
+
+[provides.operations.users_get.output_schema.properties.login]
+type = "string"
+
+[provides.operations.users_get.output_schema.properties.display_name]
+type = "string"
+
+[provides.operations.users_get.output_schema.properties.type]
+type = "string"
+
+[provides.operations.users_get.output_schema.properties.broadcaster_type]
+type = "string"
+
+[provides.operations.users_get.output_schema.properties.description]
+type = "string"
+
+[provides.operations.users_get.output_schema.properties.profile_image_url]
+type = "string"
+format = "uri"
+
+[provides.operations.users_get.output_schema.properties.offline_image_url]
+type = "string"
+format = "uri"
+
+[provides.operations.users_get.output_schema.properties.view_count]
+type = "integer"
+minimum = 0
+
+[provides.operations.users_get.output_schema.properties.created_at]
+type = "string"
+format = "date-time"
+
+[provides.operations.users_get.output_schema.properties.error]
+type = "string"
 
 [provides.operations.users_get.network_constraints]
 host_allow = ["api.twitch.tv"]
@@ -79,6 +231,59 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "none"
 
+[provides.operations.channels_get.input_schema]
+type = "object"
+required = ["broadcaster_id"]
+additionalProperties = false
+
+[provides.operations.channels_get.input_schema.properties.broadcaster_id]
+type = "string"
+description = "Numeric Twitch broadcaster/user ID."
+minLength = 1
+
+[provides.operations.channels_get.output_schema]
+type = "object"
+additionalProperties = false
+
+[provides.operations.channels_get.output_schema.properties.broadcaster_id]
+type = "string"
+
+[provides.operations.channels_get.output_schema.properties.broadcaster_login]
+type = "string"
+
+[provides.operations.channels_get.output_schema.properties.broadcaster_name]
+type = "string"
+
+[provides.operations.channels_get.output_schema.properties.broadcaster_language]
+type = "string"
+
+[provides.operations.channels_get.output_schema.properties.game_name]
+type = "string"
+
+[provides.operations.channels_get.output_schema.properties.game_id]
+type = "string"
+
+[provides.operations.channels_get.output_schema.properties.title]
+type = "string"
+
+[provides.operations.channels_get.output_schema.properties.delay]
+type = "integer"
+minimum = 0
+
+[provides.operations.channels_get.output_schema.properties.tags]
+type = "array"
+items = { type = "string" }
+
+[provides.operations.channels_get.output_schema.properties.content_classification_labels]
+type = "array"
+items = { type = "string" }
+
+[provides.operations.channels_get.output_schema.properties.is_branded_content]
+type = "boolean"
+
+[provides.operations.channels_get.output_schema.properties.error]
+type = "string"
+
 [provides.operations.channels_get.network_constraints]
 host_allow = ["api.twitch.tv"]
 port_allow = [443]
@@ -93,6 +298,85 @@ capability = "twitch.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+
+[provides.operations.clips_list.input_schema]
+type = "object"
+required = ["broadcaster_id"]
+additionalProperties = false
+
+[provides.operations.clips_list.input_schema.properties.broadcaster_id]
+type = "string"
+description = "Numeric Twitch broadcaster/user ID whose clips should be listed."
+minLength = 1
+
+[provides.operations.clips_list.input_schema.properties.first]
+type = "integer"
+description = "Maximum number of clips to return."
+minimum = 1
+maximum = 100
+default = 20
+
+[provides.operations.clips_list.output_schema]
+type = "object"
+required = ["clips", "count"]
+additionalProperties = false
+
+[provides.operations.clips_list.output_schema.properties.clips]
+type = "array"
+description = "Clips returned by Twitch Helix."
+
+[provides.operations.clips_list.output_schema.properties.clips.items]
+type = "object"
+required = ["id", "url", "embed_url", "broadcaster_id", "broadcaster_name", "creator_id", "creator_name", "game_id", "language", "title", "view_count", "created_at", "duration"]
+additionalProperties = false
+
+[provides.operations.clips_list.output_schema.properties.clips.items.properties.id]
+type = "string"
+
+[provides.operations.clips_list.output_schema.properties.clips.items.properties.url]
+type = "string"
+format = "uri"
+
+[provides.operations.clips_list.output_schema.properties.clips.items.properties.embed_url]
+type = "string"
+format = "uri"
+
+[provides.operations.clips_list.output_schema.properties.clips.items.properties.broadcaster_id]
+type = "string"
+
+[provides.operations.clips_list.output_schema.properties.clips.items.properties.broadcaster_name]
+type = "string"
+
+[provides.operations.clips_list.output_schema.properties.clips.items.properties.creator_id]
+type = "string"
+
+[provides.operations.clips_list.output_schema.properties.clips.items.properties.creator_name]
+type = "string"
+
+[provides.operations.clips_list.output_schema.properties.clips.items.properties.game_id]
+type = "string"
+
+[provides.operations.clips_list.output_schema.properties.clips.items.properties.language]
+type = "string"
+
+[provides.operations.clips_list.output_schema.properties.clips.items.properties.title]
+type = "string"
+
+[provides.operations.clips_list.output_schema.properties.clips.items.properties.view_count]
+type = "integer"
+minimum = 0
+
+[provides.operations.clips_list.output_schema.properties.clips.items.properties.created_at]
+type = "string"
+format = "date-time"
+
+[provides.operations.clips_list.output_schema.properties.clips.items.properties.duration]
+type = "number"
+minimum = 0
+
+[provides.operations.clips_list.output_schema.properties.count]
+type = "integer"
+minimum = 0
 
 [provides.operations.clips_list.network_constraints]
 host_allow = ["api.twitch.tv"]
@@ -109,6 +393,50 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "none"
 
+[provides.operations.games_list.input_schema]
+type = "object"
+additionalProperties = false
+
+[provides.operations.games_list.input_schema.properties.name]
+type = "string"
+description = "Game/category name to search for."
+minLength = 1
+
+[provides.operations.games_list.input_schema.properties.id]
+type = "string"
+description = "Twitch game/category ID."
+minLength = 1
+
+[provides.operations.games_list.output_schema]
+type = "object"
+required = ["games", "count"]
+additionalProperties = false
+
+[provides.operations.games_list.output_schema.properties.games]
+type = "array"
+description = "Games/categories returned by Twitch Helix."
+
+[provides.operations.games_list.output_schema.properties.games.items]
+type = "object"
+required = ["id", "name", "box_art_url", "igdb_id"]
+additionalProperties = false
+
+[provides.operations.games_list.output_schema.properties.games.items.properties.id]
+type = "string"
+
+[provides.operations.games_list.output_schema.properties.games.items.properties.name]
+type = "string"
+
+[provides.operations.games_list.output_schema.properties.games.items.properties.box_art_url]
+type = "string"
+
+[provides.operations.games_list.output_schema.properties.games.items.properties.igdb_id]
+type = "string"
+
+[provides.operations.games_list.output_schema.properties.count]
+type = "integer"
+minimum = 0
+
 [provides.operations.games_list.network_constraints]
 host_allow = ["api.twitch.tv"]
 port_allow = [443]
@@ -123,6 +451,36 @@ capability = "twitch.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+
+[provides.operations.health.input_schema]
+type = "object"
+additionalProperties = false
+
+[provides.operations.health.output_schema]
+type = "object"
+required = ["status", "api_reachable"]
+additionalProperties = false
+
+[provides.operations.health.output_schema.properties.status]
+type = "string"
+enum = ["ok", "degraded"]
+
+[provides.operations.health.output_schema.properties.api_reachable]
+type = "boolean"
+
+[provides.operations.health.output_schema.properties.token_valid]
+type = "boolean"
+
+[provides.operations.health.output_schema.properties.expires_in]
+type = "integer"
+minimum = 0
+
+[provides.operations.health.output_schema.properties.scopes]
+type = "array"
+items = { type = "string" }
+
+[provides.operations.health.output_schema.properties.error]
+type = "string"
 
 [provides.operations.health.network_constraints]
 host_allow = ["api.twitch.tv", "id.twitch.tv"]

@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OperationId,
-    OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
+    HealthSnapshot, IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse,
+    OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
     SimulateRequest, SimulateResponse,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
@@ -145,6 +145,11 @@ impl TwitchConnector {
         }
     }
 
+    #[must_use]
+    pub fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
+    }
+
     fn manifest_hash() -> String {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
@@ -220,11 +225,11 @@ impl TwitchConnector {
                 critical: true,
             });
 
-            let has_token = self.client.as_ref().is_some_and(|c| c.has_token());
+            let oauth_ready = self.client.as_ref().is_some_and(|c| c.has_token());
             checks.push(DoctorCheck {
                 name: "oauth_token".into(),
-                passed: has_token,
-                message: Some(if has_token {
+                passed: oauth_ready,
+                message: Some(if oauth_ready {
                     "OAuth2 token acquired".into()
                 } else {
                     "OAuth2 token not yet acquired; will be acquired on first request".into()
@@ -448,7 +453,10 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_HEALTH),
             summary: "Check Twitch API health".into(),
             description: Some("Validates API connectivity and token validity".into()),
-            input_schema: json!({ "type": "object" }),
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
             output_schema: json!({
                 "type": "object",
                 "properties": {
@@ -503,6 +511,7 @@ impl FcpConnector for TwitchConnector {
             &config.client_id,
             &config.client_secret,
             config.retry.clone(),
+            Duration::from_millis(config.request_timeout_ms),
         )
         .map_err(|e| FcpError::Internal {
             message: format!("Failed to create Twitch client: {e}"),
@@ -799,6 +808,85 @@ impl TwitchConnector {
 mod tests {
     use super::*;
 
+    const EXPECTED_MANIFEST_SCHEMA_OPS: [&str; 7] = [
+        "streams_list",
+        "streams_get",
+        "users_get",
+        "channels_get",
+        "clips_list",
+        "games_list",
+        "health",
+    ];
+
+    fn twitch_manifest() -> Result<toml::Value, String> {
+        toml::from_str(MANIFEST_TOML)
+            .map_err(|err| format!("Twitch manifest TOML should parse: {err}"))
+    }
+
+    fn manifest_operations(
+        manifest: &toml::Value,
+    ) -> Result<&toml::map::Map<String, toml::Value>, String> {
+        manifest
+            .get("provides")
+            .and_then(|provides| provides.get("operations"))
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| "manifest should declare operation tables".to_owned())
+    }
+
+    fn operation_schema(
+        manifest: &toml::Value,
+        operation_id: &str,
+        field: &str,
+    ) -> Result<serde_json::Value, String> {
+        let schema = manifest_operations(manifest)?
+            .get(operation_id)
+            .and_then(toml::Value::as_table)
+            .and_then(|operation| operation.get(field))
+            .ok_or_else(|| format!("{operation_id} should declare {field}"))?;
+        if !schema.as_table().is_some_and(|table| !table.is_empty()) {
+            return Err(format!(
+                "{operation_id}.{field} should be a non-empty schema table"
+            ));
+        }
+        serde_json::to_value(schema)
+            .map_err(|err| format!("{operation_id}.{field} should convert to JSON: {err}"))
+    }
+
+    fn validator_for(schema: &serde_json::Value) -> Result<jsonschema::Validator, String> {
+        jsonschema::Validator::new(schema)
+            .map_err(|err| format!("manifest operation schema should compile: {err}"))
+    }
+
+    fn assert_schema_accepts(
+        schema: &serde_json::Value,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        let errors = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "schema should accept {payload}; errors: {errors:?}"
+            ))
+        }
+    }
+
+    fn assert_schema_rejects(
+        schema: &serde_json::Value,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        if validator.iter_errors(payload).next().is_some() {
+            Ok(())
+        } else {
+            Err(format!("schema should reject {payload}"))
+        }
+    }
+
     #[test]
     fn connector_id() {
         let connector = TwitchConnector::new();
@@ -834,6 +922,127 @@ mod tests {
     }
 
     #[test]
+    fn manifest_operation_schemas_compile_and_validate_core_payloads() -> Result<(), String> {
+        let manifest = twitch_manifest()?;
+        let operations = manifest_operations(&manifest)?;
+
+        for operation_id in EXPECTED_MANIFEST_SCHEMA_OPS {
+            assert!(
+                operations.contains_key(operation_id),
+                "manifest should declare operation {operation_id}"
+            );
+            for field in ["input_schema", "output_schema"] {
+                let schema = operation_schema(&manifest, operation_id, field)?;
+                let _validator = validator_for(&schema)?;
+            }
+        }
+
+        let streams_list_input = operation_schema(&manifest, "streams_list", "input_schema")?;
+        assert_schema_accepts(
+            &streams_list_input,
+            &json!({"game_id": "509658", "user_login": "example", "first": 20}),
+        )?;
+        assert_schema_rejects(&streams_list_input, &json!({"first": 0}))?;
+        assert_schema_rejects(&streams_list_input, &json!({"first": 20, "extra": true}))?;
+
+        let streams_get_input = operation_schema(&manifest, "streams_get", "input_schema")?;
+        assert_schema_accepts(&streams_get_input, &json!({"user_login": "example"}))?;
+        assert_schema_rejects(&streams_get_input, &json!({}))?;
+
+        let users_get_input = operation_schema(&manifest, "users_get", "input_schema")?;
+        assert_schema_accepts(&users_get_input, &json!({"login": "example"}))?;
+        assert_schema_rejects(
+            &users_get_input,
+            &json!({"login": "example", "extra": true}),
+        )?;
+
+        let channels_get_input = operation_schema(&manifest, "channels_get", "input_schema")?;
+        assert_schema_accepts(&channels_get_input, &json!({"broadcaster_id": "12345"}))?;
+        assert_schema_rejects(
+            &channels_get_input,
+            &json!({"broadcaster_login": "example"}),
+        )?;
+
+        let clips_list_input = operation_schema(&manifest, "clips_list", "input_schema")?;
+        assert_schema_accepts(
+            &clips_list_input,
+            &json!({"broadcaster_id": "12345", "first": 10}),
+        )?;
+        assert_schema_rejects(&clips_list_input, &json!({"first": 10}))?;
+
+        let games_list_input = operation_schema(&manifest, "games_list", "input_schema")?;
+        assert_schema_accepts(&games_list_input, &json!({"name": "Just Chatting"}))?;
+        assert_schema_rejects(&games_list_input, &json!({"id": "509658", "extra": true}))?;
+
+        let streams_list_output = operation_schema(&manifest, "streams_list", "output_schema")?;
+        assert_schema_accepts(
+            &streams_list_output,
+            &json!({
+                "streams": [{
+                    "id": "stream-1",
+                    "user_id": "12345",
+                    "user_login": "example",
+                    "user_name": "Example",
+                    "game_id": "509658",
+                    "game_name": "Just Chatting",
+                    "type": "live",
+                    "title": "Fixture stream",
+                    "viewer_count": 42,
+                    "started_at": "2026-05-07T07:00:00Z",
+                    "language": "en",
+                    "tags": ["English"],
+                    "is_mature": false
+                }],
+                "count": 1
+            }),
+        )?;
+        assert_schema_rejects(&streams_list_output, &json!({"streams": []}))?;
+
+        let users_get_output = operation_schema(&manifest, "users_get", "output_schema")?;
+        assert_schema_accepts(
+            &users_get_output,
+            &json!({
+                "id": "12345",
+                "login": "example",
+                "display_name": "Example",
+                "type": "",
+                "broadcaster_type": "partner",
+                "description": "fixture user",
+                "profile_image_url": "https://static-cdn.jtvnw.net/user.png",
+                "offline_image_url": "https://static-cdn.jtvnw.net/offline.png",
+                "view_count": 99,
+                "created_at": "2026-05-07T07:00:00Z"
+            }),
+        )?;
+        assert_schema_accepts(&users_get_output, &json!({"error": "User not found"}))?;
+        assert_schema_rejects(
+            &users_get_output,
+            &json!({"error": "User not found", "extra": true}),
+        )?;
+
+        let health_output = operation_schema(&manifest, "health", "output_schema")?;
+        assert_schema_accepts(
+            &health_output,
+            &json!({
+                "status": "ok",
+                "api_reachable": true,
+                "token_valid": true,
+                "expires_in": 3600,
+                "scopes": ["user:read:email"]
+            }),
+        )?;
+        assert_schema_accepts(
+            &health_output,
+            &json!({"status": "degraded", "api_reachable": false, "error": "Invalid token"}),
+        )?;
+        assert_schema_rejects(
+            &health_output,
+            &json!({"status": "failed", "api_reachable": false}),
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn no_write_ops_are_exposed() {
         let ops = operations_info();
         let ids: Vec<&str> = ops.iter().map(|o| o.id.as_str()).collect();
@@ -843,25 +1052,27 @@ mod tests {
     }
 
     #[test]
-    fn streams_list_is_safe() {
+    fn streams_list_is_safe() -> Result<(), String> {
         let ops = operations_info();
         let op = ops
             .iter()
             .find(|o| o.id.as_str() == "twitch.streams.list")
-            .unwrap();
+            .ok_or_else(|| "twitch.streams.list operation should exist".to_owned())?;
         assert_eq!(op.safety_tier, SafetyTier::Safe);
         assert_eq!(op.risk_level, RiskLevel::Low);
         assert_eq!(op.idempotency, IdempotencyClass::None);
+        Ok(())
     }
 
     #[test]
-    fn health_is_strict_idempotent() {
+    fn health_is_strict_idempotent() -> Result<(), String> {
         let ops = operations_info();
         let op = ops
             .iter()
             .find(|o| o.id.as_str() == "twitch.health")
-            .unwrap();
+            .ok_or_else(|| "twitch.health operation should exist".to_owned())?;
         assert_eq!(op.idempotency, IdempotencyClass::Strict);
+        Ok(())
     }
 
     #[test]
@@ -892,15 +1103,19 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn self_check_unconfigured() {
+    async fn self_check_unconfigured() -> Result<(), String> {
         let connector = TwitchConnector::new();
-        let report = connector.self_check().await.unwrap();
+        let report = connector
+            .self_check()
+            .await
+            .map_err(|err| format!("self check should complete: {err}"))?;
         // Should be degraded since not configured
         assert!(report.reason_code.is_some());
+        Ok(())
     }
 
     #[fcp_async_core::runtime::test]
-    async fn simulate_allowed() {
+    async fn simulate_allowed() -> Result<(), String> {
         use fcp_prelude::{CapabilityToken, ZoneId};
         let connector = TwitchConnector::new();
         let req = SimulateRequest::new(
@@ -910,8 +1125,12 @@ mod tests {
             json!({}),
             CapabilityToken::test_token(),
         );
-        let resp = connector.simulate(req).await.unwrap();
+        let resp = connector
+            .simulate(req)
+            .await
+            .map_err(|err| format!("simulate should complete: {err}"))?;
         assert!(matches!(resp, SimulateResponse { .. }));
+        Ok(())
     }
 
     #[fcp_async_core::runtime::test]
@@ -940,7 +1159,7 @@ mod tests {
     }
 
     #[test]
-    fn read_ops_use_read_capability() {
+    fn read_ops_use_read_capability() -> Result<(), String> {
         let ops = operations_info();
         let read_ops = [
             "twitch.streams.list",
@@ -952,17 +1171,21 @@ mod tests {
             "twitch.health",
         ];
         for op_id in read_ops {
-            let op = ops.iter().find(|o| o.id.as_str() == op_id).unwrap();
+            let op = ops
+                .iter()
+                .find(|o| o.id.as_str() == op_id)
+                .ok_or_else(|| format!("{op_id} operation should exist"))?;
             assert_eq!(
                 op.capability.as_str(),
                 "twitch.read",
                 "op {op_id} should use read cap"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn all_exposed_ops_use_read_capability() {
+    fn all_exposed_ops_use_read_capability() -> Result<(), String> {
         let ops = operations_info();
         let exposed_ops = [
             "twitch.streams.list",
@@ -974,12 +1197,16 @@ mod tests {
             "twitch.health",
         ];
         for op_id in exposed_ops {
-            let op = ops.iter().find(|o| o.id.as_str() == op_id).unwrap();
+            let op = ops
+                .iter()
+                .find(|o| o.id.as_str() == op_id)
+                .ok_or_else(|| format!("{op_id} operation should exist"))?;
             assert_eq!(
                 op.capability.as_str(),
                 "twitch.read",
                 "op {op_id} should use read cap"
             );
         }
+        Ok(())
     }
 }

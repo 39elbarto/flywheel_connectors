@@ -51,9 +51,10 @@ impl TwitchClient {
         client_id: &str,
         client_secret: &str,
         retry_config: HttpRetryConfig,
+        request_timeout: Duration,
     ) -> TwitchResult<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(request_timeout)
             .build()
             .map_err(TwitchError::Http)?;
 
@@ -600,6 +601,7 @@ mod tests {
             "test_client_id",
             "test_client_secret",
             HttpRetryConfig::default(),
+            Duration::from_secs(30),
         );
         assert!(client.is_ok());
     }
@@ -613,6 +615,7 @@ mod tests {
             "id",
             "secret",
             HttpRetryConfig::default(),
+            Duration::from_secs(30),
         )
         .unwrap();
         assert!(!client.base_url().ends_with('/'));
@@ -627,6 +630,7 @@ mod tests {
             "my_client_id",
             "super_secret_value",
             HttpRetryConfig::default(),
+            Duration::from_secs(30),
         )
         .unwrap();
         let debug_output = format!("{client:?}");
@@ -646,6 +650,7 @@ mod tests {
             "id",
             "secret",
             HttpRetryConfig::default(),
+            Duration::from_secs(30),
         )
         .unwrap();
         assert!(!client.has_token());
@@ -671,6 +676,7 @@ mod tests {
             "test_id",
             "test_secret",
             HttpRetryConfig::default(),
+            Duration::from_secs(30),
         )
         .unwrap();
 
@@ -694,6 +700,7 @@ mod tests {
             "bad_id",
             "bad_secret",
             HttpRetryConfig::default(),
+            Duration::from_secs(30),
         )
         .unwrap();
 
@@ -721,6 +728,7 @@ mod tests {
             "cid",
             "secret",
             HttpRetryConfig::default(),
+            Duration::from_secs(30),
         )
         .unwrap();
         client.access_token = Some("tok".into());
@@ -770,6 +778,7 @@ mod tests {
             "cid",
             "secret",
             HttpRetryConfig::default(),
+            Duration::from_secs(30),
         )
         .unwrap();
         client.access_token = Some("tok".into());
@@ -793,6 +802,7 @@ mod tests {
             "cid",
             "secret",
             HttpRetryConfig::default(),
+            Duration::from_secs(30),
         )
         .unwrap();
         client.access_token = Some("bad_tok".into());

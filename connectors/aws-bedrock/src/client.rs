@@ -13,8 +13,8 @@ use fcp_sdk::sigv4::{
 use crate::error::{BedrockError, BedrockResult, bedrock_error_from_status};
 use crate::event_stream::decode_event_stream;
 use crate::types::{
-    BedrockAuth, BedrockStreamResponse, ConverseInput, FoundationModelsResponse, HealthStatus,
-    InvokeModelInput, ListModelsInput,
+    BedrockAuth, BedrockStreamEvent, BedrockStreamResponse, ConverseInput, FoundationModelSummary,
+    FoundationModelsResponse, HealthStatus, InvokeModelInput, ListModelsInput, ModelListSource,
 };
 
 pub struct BedrockClient {
@@ -24,6 +24,8 @@ pub struct BedrockClient {
     retry_config: HttpRetryConfig,
     runtime_base_url: Option<String>,
     control_base_url: Option<String>,
+    mantle_bearer_token: Option<String>,
+    mantle_base_url: Option<String>,
 }
 
 impl std::fmt::Debug for BedrockClient {
@@ -43,6 +45,8 @@ impl BedrockClient {
         request_timeout_ms: u64,
         runtime_base_url: Option<String>,
         control_base_url: Option<String>,
+        mantle_bearer_token: Option<String>,
+        mantle_base_url: Option<String>,
     ) -> BedrockResult<Self> {
         let client = Client::builder()
             .timeout(Duration::from_millis(request_timeout_ms))
@@ -56,6 +60,8 @@ impl BedrockClient {
             retry_config,
             runtime_base_url: normalize_base_url(runtime_base_url),
             control_base_url: normalize_base_url(control_base_url),
+            mantle_bearer_token: trim_optional_nonempty(mantle_bearer_token),
+            mantle_base_url: normalize_base_url(mantle_base_url),
         })
     }
 
@@ -75,11 +81,26 @@ impl BedrockClient {
             .unwrap_or_else(|| format!("https://bedrock.{}.amazonaws.com", self.region))
     }
 
+    fn mantle_root_url(&self) -> String {
+        self.mantle_base_url
+            .clone()
+            .unwrap_or_else(|| format!("https://bedrock-mantle.{}.api.aws", self.region))
+    }
+
+    fn mantle_openai_url(&self) -> String {
+        resolve_mantle_openai_base_url(&self.mantle_root_url())
+    }
+
+    fn mantle_anthropic_url(&self) -> String {
+        resolve_mantle_anthropic_base_url(&self.mantle_root_url())
+    }
+
     pub async fn converse(
         &self,
         runtime: &ConnectorRuntime,
         input: &ConverseInput,
     ) -> BedrockResult<serde_json::Value> {
+        self.require_sigv4_credentials()?;
         validate_model_id(&input.model_id)?;
         let path = format!("/model/{}/converse", input.model_id);
         let url = format!("{}{}", self.runtime_url(), path);
@@ -92,6 +113,7 @@ impl BedrockClient {
         runtime: &ConnectorRuntime,
         input: &ConverseInput,
     ) -> BedrockResult<BedrockStreamResponse> {
+        self.require_sigv4_credentials()?;
         validate_model_id(&input.model_id)?;
         let path = format!("/model/{}/converse-stream", input.model_id);
         let url = format!("{}{}", self.runtime_url(), path);
@@ -105,6 +127,12 @@ impl BedrockClient {
         runtime: &ConnectorRuntime,
         input: &InvokeModelInput,
     ) -> BedrockResult<serde_json::Value> {
+        if input.is_mantle_anthropic_messages() {
+            return self
+                .mantle_anthropic_messages(runtime, input, false, "invoke_model")
+                .await;
+        }
+        self.require_sigv4_credentials()?;
         validate_model_id(&input.model_id)?;
         let path = format!("/model/{}/invoke", input.model_id);
         let url = format!("{}{}", self.runtime_url(), path);
@@ -118,6 +146,10 @@ impl BedrockClient {
         runtime: &ConnectorRuntime,
         input: &InvokeModelInput,
     ) -> BedrockResult<BedrockStreamResponse> {
+        if input.is_mantle_anthropic_messages() {
+            return self.mantle_anthropic_messages_stream(runtime, input).await;
+        }
+        self.require_sigv4_credentials()?;
         validate_model_id(&input.model_id)?;
         let path = format!("/model/{}/invoke-with-response-stream", input.model_id);
         let url = format!("{}{}", self.runtime_url(), path);
@@ -138,6 +170,10 @@ impl BedrockClient {
         runtime: &ConnectorRuntime,
         input: &ListModelsInput,
     ) -> BedrockResult<FoundationModelsResponse> {
+        if matches!(input.source, Some(ModelListSource::Mantle)) {
+            return self.list_mantle_models(runtime).await;
+        }
+        self.require_sigv4_credentials()?;
         let mut query = Vec::new();
         push_query(
             &mut query,
@@ -195,6 +231,147 @@ impl BedrockClient {
             control_plane_reachable: true,
             model_count: models.model_summaries.len(),
         })
+    }
+
+    async fn list_mantle_models(
+        &self,
+        runtime: &ConnectorRuntime,
+    ) -> BedrockResult<FoundationModelsResponse> {
+        let auth_value = self.require_mantle_bearer_token()?;
+        let url = format!("{}/models", self.mantle_openai_url());
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let auth_value = auth_value.clone();
+            async move {
+                debug!(attempt, "Bedrock Mantle list models");
+                let req = with_bearer_auth(
+                    with_static_request_header(client.get(&url), "Accept", "application/json"),
+                    &auth_value,
+                );
+                match handle_json_response::<MantleModelsResponse>(req).await {
+                    AttemptOutcome::Success(response) => {
+                        AttemptOutcome::Success(FoundationModelsResponse::from(response))
+                    }
+                    AttemptOutcome::Retryable { error, retry_after } => {
+                        AttemptOutcome::Retryable { error, retry_after }
+                    }
+                    AttemptOutcome::Terminal(error) => AttemptOutcome::Terminal(error),
+                }
+            }
+        })
+        .await
+    }
+
+    async fn mantle_anthropic_messages(
+        &self,
+        runtime: &ConnectorRuntime,
+        input: &InvokeModelInput,
+        force_stream: bool,
+        op: &'static str,
+    ) -> BedrockResult<serde_json::Value> {
+        validate_nonblank("model_id", &input.model_id)?;
+        let body = input.mantle_anthropic_body(force_stream)?;
+        let beta_header = input.mantle_beta_header();
+        let auth_value = self.require_mantle_bearer_token()?;
+        let url = format!("{}/v1/messages", self.mantle_anthropic_url());
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let auth_value = auth_value.clone();
+            let beta_header = beta_header.clone();
+            let body = body.clone();
+            async move {
+                debug!(attempt, op, "Bedrock Mantle Anthropic Messages request");
+                let req = with_bearer_auth(
+                    with_static_request_header(
+                        with_static_request_header(
+                            with_static_request_header(
+                                client.post(&url),
+                                "Accept",
+                                "application/json",
+                            ),
+                            "Content-Type",
+                            "application/json",
+                        ),
+                        "anthropic-beta",
+                        &beta_header,
+                    ),
+                    &auth_value,
+                )
+                .json(&body);
+                handle_json_response::<serde_json::Value>(req).await
+            }
+        })
+        .await
+    }
+
+    async fn mantle_anthropic_messages_stream(
+        &self,
+        runtime: &ConnectorRuntime,
+        input: &InvokeModelInput,
+    ) -> BedrockResult<BedrockStreamResponse> {
+        validate_nonblank("model_id", &input.model_id)?;
+        let body = input.mantle_anthropic_body(true)?;
+        let beta_header = input.mantle_beta_header();
+        let auth_value = self.require_mantle_bearer_token()?;
+        let url = format!("{}/v1/messages", self.mantle_anthropic_url());
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let auth_value = auth_value.clone();
+            let beta_header = beta_header.clone();
+            let body = body.clone();
+            async move {
+                debug!(attempt, "Bedrock Mantle Anthropic Messages stream request");
+                let req = with_bearer_auth(
+                    with_static_request_header(
+                        with_static_request_header(
+                            with_static_request_header(
+                                client.post(&url),
+                                "Accept",
+                                "text/event-stream",
+                            ),
+                            "Content-Type",
+                            "application/json",
+                        ),
+                        "anthropic-beta",
+                        &beta_header,
+                    ),
+                    &auth_value,
+                )
+                .json(&body);
+                handle_sse_response(req).await
+            }
+        })
+        .await
+    }
+
+    fn require_mantle_bearer_token(&self) -> BedrockResult<String> {
+        self.mantle_bearer_token
+            .clone()
+            .ok_or_else(|| BedrockError::Unauthorized(
+                "mantle_bearer_token is required for Bedrock Mantle operations; pass a token derived from AWS_BEARER_TOKEN_BEDROCK or an IAM bearer-token generator".into(),
+            ))
+    }
+
+    fn require_sigv4_credentials(&self) -> BedrockResult<()> {
+        if self.auth.has_sigv4_credentials() {
+            Ok(())
+        } else {
+            Err(BedrockError::Unauthorized(
+                "access_key_id and secret_access_key are required for native Bedrock SigV4 operations".into(),
+            ))
+        }
     }
 
     async fn post_json(
@@ -361,6 +538,36 @@ fn normalize_base_url(base_url: Option<String>) -> Option<String> {
     })
 }
 
+fn trim_optional_nonempty(value: Option<String>) -> Option<String> {
+    value.and_then(|entry| {
+        let trimmed = entry.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
+}
+
+fn strip_known_mantle_suffix(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if let Some(root) = trimmed.strip_suffix("/anthropic") {
+        root.to_string()
+    } else if let Some(root) = trimmed.strip_suffix("/v1") {
+        root.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn resolve_mantle_openai_base_url(base_url: &str) -> String {
+    format!("{}/v1", strip_known_mantle_suffix(base_url))
+}
+
+fn resolve_mantle_anthropic_base_url(base_url: &str) -> String {
+    format!("{}/anthropic", strip_known_mantle_suffix(base_url))
+}
+
 fn validate_model_id(model_id: &str) -> BedrockResult<()> {
     let trimmed = model_id.trim();
     if trimmed.is_empty() {
@@ -376,6 +583,13 @@ fn validate_model_id(model_id: &str) -> BedrockResult<()> {
         return Err(BedrockError::InvalidInput(
             "model_id contains path traversal characters; pass a Bedrock model id or inference profile id, not an unencoded path".into(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_nonblank(label: &str, value: &str) -> BedrockResult<()> {
+    if value.trim().is_empty() {
+        return Err(BedrockError::InvalidInput(format!("{label} is required")));
     }
     Ok(())
 }
@@ -508,6 +722,10 @@ fn with_static_request_header(
     req.header(name, value) // ubs:ignore - outgoing reqwest request header, not a response header sink
 }
 
+fn with_bearer_auth(req: RequestBuilder, auth_value: &str) -> RequestBuilder {
+    with_static_request_header(req, "Authorization", &format!("Bearer {auth_value}"))
+}
+
 async fn handle_json_response<T: serde::de::DeserializeOwned>(
     req: RequestBuilder,
 ) -> AttemptOutcome<T, BedrockError> {
@@ -563,6 +781,30 @@ async fn handle_event_stream_response(
     }
 }
 
+async fn handle_sse_response(
+    req: RequestBuilder,
+) -> AttemptOutcome<BedrockStreamResponse, BedrockError> {
+    let resp = match req.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return AttemptOutcome::Retryable {
+                error: BedrockError::Http(error),
+                retry_after: None,
+            };
+        }
+    };
+    let status = resp.status().as_u16();
+    let retry_after = retry_after(&resp);
+    let text = match resp.text().await {
+        Ok(body) => body,
+        Err(error) => return AttemptOutcome::Terminal(BedrockError::Http(error)),
+    };
+    if !(200..300).contains(&status) {
+        return classify_error(status, retry_after, &text);
+    }
+    AttemptOutcome::Success(decode_sse_stream(&text))
+}
+
 fn retry_after(resp: &reqwest::Response) -> Option<Duration> {
     resp.headers()
         .get("retry-after")
@@ -592,6 +834,87 @@ fn classify_error<T>(
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct MantleModelsResponse {
+    #[serde(default)]
+    data: Vec<MantleModelEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct MantleModelEntry {
+    id: String,
+    #[serde(default)]
+    owned_by: Option<String>,
+}
+
+impl From<MantleModelsResponse> for FoundationModelsResponse {
+    fn from(value: MantleModelsResponse) -> Self {
+        let model_summaries = value
+            .data
+            .into_iter()
+            .filter(|model| !model.id.trim().is_empty())
+            .map(|model| FoundationModelSummary {
+                model_arn: None,
+                model_id: model.id.clone(),
+                model_name: Some(model.id),
+                provider_name: model
+                    .owned_by
+                    .or_else(|| Some("Amazon Bedrock Mantle".into())),
+                input_modalities: vec!["TEXT".into()],
+                output_modalities: vec!["TEXT".into()],
+                response_streaming_supported: Some(true),
+                customizations_supported: Vec::new(),
+                inference_types_supported: vec!["MANTLE".into()],
+            })
+            .collect();
+        Self { model_summaries }
+    }
+}
+
+fn decode_sse_stream(text: &str) -> BedrockStreamResponse {
+    let mut events = Vec::new();
+    let mut event_type: Option<String> = None;
+    let mut data_lines = Vec::new();
+
+    for line in text.lines().chain(std::iter::once("")) {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            if !data_lines.is_empty() {
+                let payload = data_lines.join("\n");
+                let payload_json = serde_json::from_str::<serde_json::Value>(&payload).ok();
+                let payload_utf8 = if payload_json.is_none() {
+                    Some(payload.clone())
+                } else {
+                    None
+                };
+                events.push(BedrockStreamEvent {
+                    event_type: event_type.take(),
+                    headers: BTreeMap::new(),
+                    payload_bytes: payload.len(),
+                    payload_json,
+                    payload_utf8,
+                });
+                data_lines.clear();
+            }
+            event_type = None;
+            continue;
+        }
+        if line.starts_with(':') {
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("event:") {
+            event_type = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("data:") {
+            let value = value.trim_start();
+            if value != "[DONE]" {
+                data_lines.push(value.to_string());
+            }
+        }
+    }
+
+    BedrockStreamResponse::from_events(events)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,5 +929,44 @@ mod tests {
     #[test]
     fn query_values_are_percent_encoded() {
         assert_eq!(percent_encode_query("Amazon Titan"), "Amazon%20Titan");
+    }
+
+    #[test]
+    fn mantle_base_url_derivation_handles_openai_and_anthropic_suffixes() {
+        assert_eq!(
+            resolve_mantle_openai_base_url("https://bedrock-mantle.us-east-1.api.aws"),
+            "https://bedrock-mantle.us-east-1.api.aws/v1"
+        );
+        assert_eq!(
+            resolve_mantle_anthropic_base_url("https://bedrock-mantle.us-east-1.api.aws/v1"),
+            "https://bedrock-mantle.us-east-1.api.aws/anthropic"
+        );
+        assert_eq!(
+            resolve_mantle_openai_base_url("https://bedrock-mantle.us-east-1.api.aws/anthropic"),
+            "https://bedrock-mantle.us-east-1.api.aws/v1"
+        );
+    }
+
+    #[test]
+    fn sse_decoder_maps_anthropic_events_to_stream_response() {
+        let stream = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\"}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+            "data: [DONE]\n\n",
+        );
+
+        let decoded = decode_sse_stream(stream);
+
+        assert_eq!(decoded.chunk_count, 2);
+        assert_eq!(
+            decoded.events[0].event_type.as_deref(),
+            Some("message_start")
+        );
+        assert_eq!(
+            decoded.events[1].payload_json.as_ref().unwrap()["delta"]["text"],
+            "hi"
+        );
     }
 }

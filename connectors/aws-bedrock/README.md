@@ -1,6 +1,6 @@
 # AWS Bedrock Connector V1 Contract
 
-> **Status**: Bedrock Runtime and control-plane slice documented with SigV4, event-stream, and verification-bundle boundaries
+> **Status**: Bedrock Runtime, Bedrock Mantle Anthropic Messages, and control-plane slices documented with SigV4, bearer-token, event-stream/SSE, and verification-bundle boundaries
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: `scripts/e2e/aws_bedrock_connector_verification.sh`
@@ -12,7 +12,7 @@
 
 ## Purpose
 
-This document fixes the operator-facing contract for `fcp.aws-bedrock`. The connector exposes the AWS Bedrock Runtime and model-discovery surface currently implemented in this crate: Converse, ConverseStream, InvokeModel, InvokeModelWithResponseStream, foundation model listing, and local health/provisioning metadata for one configured AWS region and static credential set.
+This document fixes the operator-facing contract for `fcp.aws-bedrock`. The connector exposes the AWS Bedrock Runtime and model-discovery surface currently implemented in this crate: Converse, ConverseStream, InvokeModel, InvokeModelWithResponseStream, foundation model listing, Bedrock Mantle Anthropic Messages routing, Mantle model listing, and local health/provisioning metadata for one configured AWS region and credential set.
 
 The connector is intentionally a Bedrock Runtime adapter. It is not an AWS account bootstrapper, IAM policy authoring tool, model-access enrollment flow, Bedrock Agents client, Knowledge Bases client, Guardrails manager, Prompt Management editor, Marketplace endpoint provisioner, async invoke job tracker, billing analyzer, quota manager, or generic AWS SDK wrapper.
 
@@ -31,17 +31,20 @@ Important runtime truths the contract preserves:
 
 - Package and binary name are `fcp-aws-bedrock`.
 - Runtime and manifest connector ID are `fcp.aws-bedrock`.
-- Configuration requires `region`, `access_key_id`, and `secret_access_key`.
+- Configuration requires `region` plus either `access_key_id` and `secret_access_key` for SigV4 calls or `mantle_bearer_token` for Bedrock Mantle calls.
 - `session_token` is optional and changes the reported auth mode from `static_keys` to `static_keys_with_session_token`.
 - `request_timeout_ms` defaults to `240000` and must be greater than zero.
 - `retry` uses the shared `HttpRetryConfig` and `RetryLoop` path.
 - `runtime_base_url` and `control_base_url` are optional endpoint overrides for deterministic verification.
+- `mantle_base_url` is an optional endpoint override for deterministic Mantle `/v1/models` and `/anthropic/v1/messages` verification.
 - Endpoint overrides are trimmed, stripped of trailing slashes, must not include credentials, query strings, or fragments, and must use HTTPS unless they target localhost for verification.
 - Default Runtime endpoint shape is `https://bedrock-runtime.{region}.amazonaws.com`.
 - Default control-plane endpoint shape is `https://bedrock.{region}.amazonaws.com`.
 - All Bedrock requests are SigV4-signed with service name `bedrock`.
+- Bedrock Mantle requests use bearer auth and never treat `AWS_BEARER_TOKEN_BEDROCK` as an Anthropic API key. The connector accepts the resulting bearer token as `mantle_bearer_token`; IAM credential-chain token minting remains a provisioning concern.
 - `converse` and `converse_stream` use the unified Bedrock message shape.
 - `invoke_model` and `invoke_model_stream` accept either raw `body` JSON or a connector-built body for selected model families.
+- `invoke_model` and `invoke_model_stream` also accept `model_family = "mantle_anthropic_messages"` to call Mantle's `/anthropic/v1/messages` route, including default `fine-grained-tool-streaming-2025-05-14` beta header injection, optional reasoning budget expansion, and SSE normalization into the existing stream response envelope.
 - Built model-family bodies currently cover `anthropic_claude`, `meta_llama`, `amazon_titan`, `cohere_command`, and `mistral`.
 - AWS event-stream responses are decoded into event metadata, payload byte counts, and JSON or UTF-8 payloads.
 - `self_check()` abstains from the default AWS control-plane endpoint and requires `control_base_url` for deterministic reachability proof.
@@ -81,7 +84,7 @@ The current AWS Bedrock README slice documents the existing runtime surface:
 
 ## Auth And Scope Boundary
 
-- Authentication mechanism: static AWS access key ID and secret access key, with optional session token.
+- Authentication mechanisms: static AWS access key ID and secret access key, with optional session token, for native Bedrock; explicit `mantle_bearer_token` for Bedrock Mantle.
 - Runtime does not implement AWS SSO, profile loading, EC2/ECS metadata credentials, STS AssumeRole, credential process execution, web identity, Secrets Manager loading, or connector-local credential persistence.
 - Home zone: `z:work`.
 - Allowed source zones: `z:work` and `z:private`.
@@ -102,12 +105,17 @@ The current AWS Bedrock README slice documents the existing runtime surface:
   - `POST /model/{model_id}/invoke`
   - `POST /model/{model_id}/invoke-with-response-stream`
   - `GET /foundation-models`
+- Bedrock Mantle API paths:
+  - `GET /v1/models`
+  - `POST /anthropic/v1/messages`
 - `models.list` supports `byCustomizationType`, `byInferenceType`, `byOutputModality`, and `byProvider` query filters.
+- `models.list` accepts `source = "mantle"` to query Mantle's OpenAI-format model catalog and normalize it into the connector's model summary envelope.
 - `model_id` must be nonblank and must not contain slashes, backslashes, `..`, `%2f`, or `%5c`.
 - Converse request fields are converted to AWS camel-case JSON fields such as `inferenceConfig`, `additionalModelRequestFields`, `additionalModelResponseFieldPaths`, `guardrailConfig`, `performanceConfig`, `promptVariables`, `requestMetadata`, and `toolConfig`.
 - InvokeModel defaults `accept` and `content_type` to `application/json`.
 - InvokeModel applies optional trace, guardrail, performance, and service-tier headers.
 - Event-stream decoding validates prelude CRC and message CRC and returns chunk counts plus total payload bytes.
+- Mantle Anthropic streaming decodes SSE `event:`/`data:` blocks into the same chunk-count and payload metadata envelope without logging streamed text.
 - `401` and `403` map to unauthorized, `404` maps to resource-not-found, and `429` maps to rate limiting with a default retry-after.
 - Retryable API classes include timeouts, throttling, model-not-ready, service-unavailable, 408, 424, 429, and 5xx-style statuses.
 - AWS API response bodies are not persisted by the connector.
@@ -188,7 +196,6 @@ Run these after changing this connector contract:
 git diff --check -- connectors/aws-bedrock/README.md
 ubs connectors/aws-bedrock/README.md
 LC_ALL=C rg -n '[^ -~]' connectors/aws-bedrock/README.md
-rg -n '\bmaster\b' connectors/aws-bedrock/README.md
 ```
 
 For source or behavior changes, use the tracked verification bundle:

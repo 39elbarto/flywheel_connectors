@@ -56,6 +56,10 @@ pub struct BedrockConfig {
     pub runtime_base_url: Option<String>,
     #[serde(default)]
     pub control_base_url: Option<String>,
+    #[serde(default)]
+    pub mantle_bearer_token: Option<String>,
+    #[serde(default)]
+    pub mantle_base_url: Option<String>,
 }
 
 const fn default_timeout_ms() -> u64 {
@@ -89,17 +93,28 @@ impl BedrockConfig {
         self.auth.secret_access_key = self.auth.secret_access_key.trim().to_string();
         let optional_session = &mut self.auth.session_token; // ubs:ignore - caller-supplied optional credential slot
         *optional_session = trim_optional_nonempty(optional_session.take());
+        let mantle_credential = &mut self.mantle_bearer_token; // ubs:ignore - caller-supplied optional credential slot
+        *mantle_credential = trim_optional_nonempty(mantle_credential.take());
         normalize_endpoint_override(&mut self.runtime_base_url);
         normalize_endpoint_override(&mut self.control_base_url);
+        normalize_endpoint_override(&mut self.mantle_base_url);
     }
 
     fn validate(&self) -> Result<(), String> {
         validate_region(&self.region)?;
-        if self.auth.access_key_id.is_empty() {
-            return Err("access_key_id is required".into());
+        let has_access_key = !self.auth.access_key_id.is_empty();
+        let has_secret_key = !self.auth.secret_access_key.is_empty();
+        if has_access_key != has_secret_key {
+            return Err(
+                "access_key_id and secret_access_key must be provided together for SigV4 calls"
+                    .into(),
+            );
         }
-        if self.auth.secret_access_key.is_empty() {
-            return Err("secret_access_key is required".into());
+        if !has_access_key && self.mantle_bearer_token.is_none() {
+            return Err(
+                "either SigV4 access keys or mantle_bearer_token is required for AWS Bedrock"
+                    .into(),
+            );
         }
         if self.request_timeout_ms == 0 {
             return Err("request_timeout_ms must be greater than 0".into());
@@ -109,6 +124,9 @@ impl BedrockConfig {
         }
         if let Some(url) = &self.control_base_url {
             validate_endpoint_override(url, "control_base_url")?;
+        }
+        if let Some(url) = &self.mantle_base_url {
+            validate_endpoint_override(url, "mantle_base_url")?;
         }
         Ok(())
     }
@@ -130,7 +148,13 @@ impl BedrockConfig {
     }
 
     fn auth_mode(&self) -> &'static str {
-        if self.auth.session_token.is_some() {
+        let has_sigv4 = self.auth.has_sigv4_credentials();
+        let has_mantle = self.mantle_bearer_token.is_some();
+        if has_sigv4 && has_mantle {
+            "static_keys_with_mantle_bearer"
+        } else if has_mantle {
+            "mantle_bearer"
+        } else if self.auth.session_token.is_some() {
             "static_keys_with_session_token"
         } else {
             "static_keys"
@@ -144,8 +168,10 @@ impl BedrockConfig {
             request_timeout_ms: self.request_timeout_ms,
             runtime_base_url: self.runtime_base_url.clone(),
             control_base_url: self.control_base_url.clone(),
+            mantle_base_url: self.mantle_base_url.clone(),
             default_control_plane_would_touch_aws: self.control_base_url.is_none(),
-            aws_sigv4_supported: true,
+            aws_sigv4_supported: !self.auth.access_key_id.is_empty(),
+            mantle_bearer_supported: self.mantle_bearer_token.is_some(),
             event_stream_decoder_supported: true,
         }
     }
@@ -214,8 +240,10 @@ pub struct ProvisioningReadiness {
     request_timeout_ms: u64,
     runtime_base_url: Option<String>,
     control_base_url: Option<String>,
+    mantle_base_url: Option<String>,
     default_control_plane_would_touch_aws: bool,
     aws_sigv4_supported: bool,
+    mantle_bearer_supported: bool,
     event_stream_decoder_supported: bool,
 }
 
@@ -232,16 +260,19 @@ fn operator_guidance() -> OperatorGuidance {
     OperatorGuidance {
         prerequisites: vec![
             "Provision Bedrock Runtime credentials scoped to bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream, and bedrock:ListFoundationModels for the intended region.",
+            "For Bedrock Mantle, provide a bearer token from AWS_BEARER_TOKEN_BEDROCK or an IAM bearer-token generator as mantle_bearer_token; this connector does not mint IAM bearer tokens internally.",
             "Use runtime_base_url and control_base_url overrides for deterministic wiremock or signing-proxy verification.",
             "Set AWS_BEDROCK_E2E=1 only in a disposable verification account with cheapest-model smoke settings.",
         ],
         redaction_rules: vec![
             "Never log prompts, completions, AWS keys, session tokens, or full SigV4 signatures.",
+            "Never log Mantle bearer tokens; JSONL evidence should report only auth mode and response metadata.",
             "Only emit model ids, body sizes, token counts, stream chunk counts, HTTP status, and signature prefix hashes in verification artifacts.",
         ],
         limitations: vec![
             "Model ARNs with slash path components are intentionally rejected until the shared SigV4 path canonicalizer supports encoded path parameters without double-encoding.",
             "Bedrock Agents and Knowledge Bases are outside this connector bead.",
+            "IAM credential-chain to Mantle bearer-token minting belongs in provisioning; this connector accepts the resulting bearer token only.",
         ],
         rerun_commands: VERIFY_COMMANDS.to_vec(),
         artifact_root_hint: ARTIFACT_ROOT_HINT,
@@ -356,11 +387,23 @@ impl BedrockConnector {
         if let Some(readiness) = &provisioning {
             checks.push(DoctorCheck {
                 name: "request_signing".into(),
-                passed: readiness.aws_sigv4_supported,
-                message: Some(
-                    "SigV4 signing is active for Bedrock Runtime and control-plane calls".into(),
-                ),
+                passed: readiness.aws_sigv4_supported || readiness.mantle_bearer_supported,
+                message: Some(if readiness.aws_sigv4_supported {
+                    "SigV4 signing is active for Bedrock Runtime and control-plane calls".into()
+                } else {
+                    "SigV4 signing is not configured; only Mantle bearer-token operations are available".into()
+                }),
                 critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "mantle_bearer_auth".into(),
+                passed: readiness.mantle_bearer_supported,
+                message: Some(if readiness.mantle_bearer_supported {
+                    "Bedrock Mantle bearer-token route is configured".into()
+                } else {
+                    "Bedrock Mantle bearer-token route is not configured".into()
+                }),
+                critical: false,
             });
             checks.push(DoctorCheck {
                 name: "event_stream_decoder".into(),
@@ -528,14 +571,23 @@ fn invoke_model_input_schema() -> Value {
         "allOf": [
             {
                 "if": {
-                    "properties": {
-                        "model_family": { "const": "anthropic_claude" }
+                        "properties": {
+                            "model_family": { "const": "anthropic_claude" }
+                        },
+                        "required": ["model_family"]
                     },
-                    "required": ["model_family"]
+                    "then": { "required": ["messages"] }
                 },
-                "then": { "required": ["messages"] }
-            },
-            {
+                {
+                    "if": {
+                        "properties": {
+                            "model_family": { "const": "mantle_anthropic_messages" }
+                        },
+                        "required": ["model_family"]
+                    },
+                    "then": { "required": ["messages"] }
+                },
+                {
                 "if": {
                     "properties": {
                         "model_family": {
@@ -554,6 +606,7 @@ fn invoke_model_input_schema() -> Value {
                 "type": "string",
                 "enum": [
                     "anthropic_claude",
+                    "mantle_anthropic_messages",
                     "meta_llama",
                     "amazon_titan",
                     "cohere_command",
@@ -583,7 +636,31 @@ fn invoke_model_input_schema() -> Value {
             "guardrail_identifier": nonblank_string_schema(),
             "guardrail_version": nonblank_string_schema(),
             "performance_config_latency": nonblank_string_schema(),
-            "service_tier": nonblank_string_schema()
+            "service_tier": nonblank_string_schema(),
+            "stream": {
+                "type": "boolean"
+            },
+            "stop_sequences": optional_string_array_schema(),
+            "tools": json_value_schema(),
+            "tool_choice": json_value_schema(),
+            "metadata": object_value_schema(),
+            "thinking": object_value_schema(),
+            "reasoning_level": {
+                "type": "string",
+                "enum": ["minimal", "low", "medium", "high", "xhigh"]
+            },
+            "thinking_budget_tokens": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": i64::from(u32::MAX)
+            },
+            "model_max_tokens": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": i64::from(u32::MAX)
+            },
+            "anthropic_beta": optional_string_array_schema(),
+            "extra_body": object_value_schema()
         }
     })
 }
@@ -596,7 +673,11 @@ fn list_models_input_schema() -> Value {
             "by_customization_type": nonblank_string_schema(),
             "by_inference_type": nonblank_string_schema(),
             "by_output_modality": nonblank_string_schema(),
-            "by_provider": nonblank_string_schema()
+            "by_provider": nonblank_string_schema(),
+            "source": {
+                "type": "string",
+                "enum": ["native", "mantle"]
+            }
         }
     })
 }
@@ -845,6 +926,8 @@ impl FcpConnector for BedrockConnector {
             cfg.request_timeout_ms,
             cfg.runtime_base_url.clone(),
             cfg.control_base_url.clone(),
+            cfg.mantle_bearer_token.clone(), // ubs:ignore - passes caller-supplied credential to HTTP client
+            cfg.mantle_base_url.clone(),
         )
         .await
         .map_err(|error| FcpError::Internal {

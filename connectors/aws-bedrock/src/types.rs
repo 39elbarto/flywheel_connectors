@@ -3,12 +3,23 @@ use serde::{Deserialize, Serialize};
 use crate::error::{BedrockError, BedrockResult};
 use crate::event_stream::EventStreamMessage;
 
+const DEFAULT_MANTLE_ANTHROPIC_BETA: &str = "fine-grained-tool-streaming-2025-05-14";
+const DEFAULT_MANTLE_MAX_TOKENS: u32 = 4_096;
+
 #[derive(Clone, Deserialize)]
 pub struct BedrockAuth {
+    #[serde(default)]
     pub access_key_id: String,
+    #[serde(default)]
     pub secret_access_key: String,
     #[serde(default)]
     pub session_token: Option<String>,
+}
+
+impl BedrockAuth {
+    pub fn has_sigv4_credentials(&self) -> bool {
+        !self.access_key_id.is_empty() && !self.secret_access_key.is_empty()
+    }
 }
 
 impl std::fmt::Debug for BedrockAuth {
@@ -84,10 +95,32 @@ impl ConverseInput {
 #[serde(rename_all = "snake_case")]
 pub enum InvokeModelFamily {
     AnthropicClaude,
+    MantleAnthropicMessages,
     MetaLlama,
     AmazonTitan,
     CohereCommand,
     Mistral,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MantleReasoningLevel {
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+}
+
+impl MantleReasoningLevel {
+    const fn default_budget_tokens(self) -> u32 {
+        match self {
+            Self::Minimal => 1_024,
+            Self::Low => 2_048,
+            Self::Medium => 8_192,
+            Self::High | Self::Xhigh => 16_384,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -123,6 +156,28 @@ pub struct InvokeModelInput {
     pub performance_config_latency: Option<String>,
     #[serde(default)]
     pub service_tier: Option<String>,
+    #[serde(default)]
+    pub stream: Option<bool>,
+    #[serde(default)]
+    pub stop_sequences: Option<Vec<String>>,
+    #[serde(default)]
+    pub tools: Option<serde_json::Value>,
+    #[serde(default)]
+    pub tool_choice: Option<serde_json::Value>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    pub thinking: Option<serde_json::Value>,
+    #[serde(default)]
+    pub reasoning_level: Option<MantleReasoningLevel>,
+    #[serde(default)]
+    pub thinking_budget_tokens: Option<u32>,
+    #[serde(default)]
+    pub model_max_tokens: Option<u32>,
+    #[serde(default)]
+    pub anthropic_beta: Option<Vec<String>>,
+    #[serde(default)]
+    pub extra_body: Option<serde_json::Value>,
 }
 
 impl InvokeModelInput {
@@ -136,6 +191,97 @@ impl InvokeModelInput {
             ));
         };
         build_invoke_model_body(family, self)
+    }
+
+    pub fn is_mantle_anthropic_messages(&self) -> bool {
+        matches!(
+            self.model_family,
+            Some(InvokeModelFamily::MantleAnthropicMessages)
+        )
+    }
+
+    pub fn mantle_anthropic_body(&self, force_stream: bool) -> BedrockResult<serde_json::Value> {
+        if let Some(body) = &self.body {
+            if !force_stream {
+                return Ok(body.clone());
+            }
+            let mut body = body.clone();
+            let Some(object) = body.as_object_mut() else {
+                return Err(BedrockError::InvalidInput(
+                    "mantle_anthropic_messages streaming body must be a JSON object".into(),
+                ));
+            };
+            object.insert("stream".into(), serde_json::json!(true));
+            return Ok(body);
+        }
+        let messages = self.messages.clone().ok_or_else(|| {
+            BedrockError::InvalidInput("mantle_anthropic_messages requires messages".into())
+        })?;
+        let mut body = serde_json::Map::new();
+        body.insert("model".into(), serde_json::json!(self.model_id));
+        body.insert("messages".into(), serde_json::Value::Array(messages));
+        let mut max_tokens = self.max_tokens.unwrap_or(DEFAULT_MANTLE_MAX_TOKENS);
+        if let Some(system) = &self.system {
+            body.insert("system".into(), system.clone());
+        }
+        if model_allows_sampling(&self.model_id) {
+            insert_optional(&mut body, "temperature", self.temperature);
+            insert_optional(&mut body, "top_p", self.top_p);
+        }
+        insert_optional(&mut body, "stop_sequences", self.stop_sequences.clone());
+        insert_optional(&mut body, "tools", self.tools.clone());
+        insert_optional(&mut body, "tool_choice", self.tool_choice.clone());
+        insert_optional(&mut body, "metadata", self.metadata.clone());
+        if let Some(thinking) = &self.thinking {
+            body.insert("thinking".into(), thinking.clone());
+        } else if let Some(level) = self.reasoning_level {
+            let thinking_budget = self
+                .thinking_budget_tokens
+                .unwrap_or_else(|| level.default_budget_tokens());
+            let model_max = self.model_max_tokens.unwrap_or(u32::MAX);
+            max_tokens = max_tokens.saturating_add(thinking_budget).min(model_max);
+            let adjusted_budget = if max_tokens <= thinking_budget {
+                max_tokens.saturating_sub(1_024)
+            } else {
+                thinking_budget
+            };
+            body.insert(
+                "thinking".into(),
+                serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": adjusted_budget,
+                }),
+            );
+        }
+        body.insert("max_tokens".into(), serde_json::json!(max_tokens));
+        body.insert(
+            "stream".into(),
+            serde_json::json!(force_stream || self.stream.unwrap_or(false)),
+        );
+        if let Some(extra) = &self.extra_body {
+            let Some(extra) = extra.as_object() else {
+                return Err(BedrockError::InvalidInput(
+                    "extra_body must be a JSON object".into(),
+                ));
+            };
+            for (key, value) in extra {
+                body.insert(key.clone(), value.clone());
+            }
+        }
+        Ok(serde_json::Value::Object(body))
+    }
+
+    pub fn mantle_beta_header(&self) -> String {
+        let mut values = vec![DEFAULT_MANTLE_ANTHROPIC_BETA.to_string()];
+        if let Some(configured) = &self.anthropic_beta {
+            for value in configured {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() && !values.iter().any(|existing| existing == trimmed) {
+                    values.push(trimmed.to_string());
+                }
+            }
+        }
+        values.join(",")
     }
 
     pub fn accept(&self) -> &str {
@@ -167,6 +313,7 @@ pub fn build_invoke_model_body(
             insert_generation_config(&mut body, input);
             Ok(body)
         }
+        InvokeModelFamily::MantleAnthropicMessages => input.mantle_anthropic_body(false),
         InvokeModelFamily::MetaLlama => {
             let prompt = required_prompt(input, "meta_llama")?;
             let mut body = serde_json::json!({
@@ -213,6 +360,10 @@ pub fn build_invoke_model_body(
     }
 }
 
+fn model_allows_sampling(model_id: &str) -> bool {
+    !model_id.contains("claude-opus-4-7")
+}
+
 fn required_prompt(input: &InvokeModelInput, family: &str) -> BedrockResult<String> {
     input
         .prompt
@@ -254,6 +405,16 @@ pub struct ListModelsInput {
     pub by_output_modality: Option<String>,
     #[serde(default)]
     pub by_provider: Option<String>,
+    #[serde(default)]
+    pub source: Option<ModelListSource>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelListSource {
+    #[default]
+    Native,
+    Mantle,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -330,6 +491,16 @@ impl BedrockStreamResponse {
             total_payload_bytes,
         }
     }
+
+    pub fn from_events(events: Vec<BedrockStreamEvent>) -> Self {
+        let total_payload_bytes = events.iter().map(|event| event.payload_bytes).sum();
+        let chunk_count = events.len();
+        Self {
+            events,
+            chunk_count,
+            total_payload_bytes,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -367,6 +538,17 @@ mod tests {
             guardrail_version: None,
             performance_config_latency: None,
             service_tier: None,
+            stream: None,
+            stop_sequences: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_level: None,
+            thinking_budget_tokens: None,
+            model_max_tokens: None,
+            anthropic_beta: None,
+            extra_body: None,
         }
     }
 
@@ -434,6 +616,17 @@ mod tests {
             guardrail_version: None,
             performance_config_latency: None,
             service_tier: None,
+            stream: None,
+            stop_sequences: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_level: None,
+            thinking_budget_tokens: None,
+            model_max_tokens: None,
+            anthropic_beta: None,
+            extra_body: None,
         };
 
         let body = input.request_body().unwrap();
@@ -442,6 +635,57 @@ mod tests {
         assert_eq!(body["max_tokens"], 128);
         assert_eq!(body["system"], "answer briefly");
         assert_eq!(body["temperature"], 0.2);
+    }
+
+    #[test]
+    fn invoke_model_builds_mantle_anthropic_body_with_default_beta_and_thinking_budget() {
+        let input = InvokeModelInput {
+            model_id: "anthropic.claude-sonnet-4-5".into(),
+            body: None,
+            model_family: Some(InvokeModelFamily::MantleAnthropicMessages),
+            prompt: None,
+            messages: Some(vec![serde_json::json!({
+                "role": "user",
+                "content": [{"type": "text", "text": "hello"}],
+            })]),
+            system: Some(serde_json::json!("answer briefly")),
+            max_tokens: Some(2_048),
+            temperature: Some(0.2),
+            top_p: None,
+            accept: None,
+            content_type: None,
+            trace: None,
+            guardrail_identifier: None,
+            guardrail_version: None,
+            performance_config_latency: None,
+            service_tier: None,
+            stream: None,
+            stop_sequences: Some(vec!["stop".into()]),
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_level: Some(MantleReasoningLevel::Medium),
+            thinking_budget_tokens: None,
+            model_max_tokens: Some(32_000),
+            anthropic_beta: Some(vec![
+                DEFAULT_MANTLE_ANTHROPIC_BETA.into(),
+                "context-management-2025-06-27".into(),
+            ]),
+            extra_body: None,
+        };
+
+        let body = input.mantle_anthropic_body(false).unwrap();
+
+        assert_eq!(body["model"], "anthropic.claude-sonnet-4-5");
+        assert_eq!(body["max_tokens"], 10_240);
+        assert_eq!(body["thinking"]["budget_tokens"], 8_192);
+        assert_eq!(body["temperature"], 0.2);
+        assert_eq!(body["stream"], false);
+        assert_eq!(
+            input.mantle_beta_header(),
+            "fine-grained-tool-streaming-2025-05-14,context-management-2025-06-27"
+        );
     }
 
     #[test]

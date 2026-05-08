@@ -31,7 +31,7 @@ use fcp_testkit::readiness_helpers::{
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use wiremock::matchers::{body_json, header_exists, method, path};
+use wiremock::matchers::{body_json, header, header_exists, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 const OP_CONVERSE: &str = "aws_bedrock.converse";
@@ -42,6 +42,7 @@ const OP_MODELS_LIST: &str = "aws_bedrock.models.list";
 const OP_HEALTH: &str = "aws_bedrock.health";
 const TEST_ACCESS_KEY_ID: &str = "fcp-test-access-key";
 const TEST_SIGNING_MATERIAL: &str = "fcp-test-signing-material";
+const TEST_MANTLE_TOKEN: &str = "fcp-test-mantle-token";
 
 #[test]
 fn manifest_ai_hints_cover_all_aws_bedrock_operations() {
@@ -208,6 +209,31 @@ async fn setup_connector_with_retry_and_timeout(
     (connector, signing_key)
 }
 
+async fn setup_mantle_connector(mock_url: &str) -> (BedrockConnector, Ed25519SigningKey) {
+    let mut connector = BedrockConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    connector
+        .configure(json!({
+            "region": "us-east-1",
+            "mantle_bearer_token": TEST_MANTLE_TOKEN,
+            "mantle_base_url": mock_url,
+            "retry": {
+                "max_retries": 0,
+                "initial_delay_ms": 1,
+                "max_delay_ms": 1,
+                "jitter_enabled": false
+            },
+            "request_timeout_ms": 5_000
+        }))
+        .await
+        .unwrap();
+    connector
+        .handshake(handshake_req(signing_key.verifying_key().to_bytes()))
+        .await
+        .unwrap();
+    (connector, signing_key)
+}
+
 fn assert_sigv4_headers(request: &wiremock::Request) {
     let authorization = request
         .headers
@@ -224,6 +250,19 @@ fn assert_sigv4_headers(request: &wiremock::Request) {
     assert!(authorization.contains("Signature="));
     assert!(request.headers.get("x-amz-date").is_some());
     assert!(request.headers.get("x-amz-content-sha256").is_some());
+    assert!(request.headers.get("x-aws-access-key-id").is_none());
+    assert!(request.headers.get("x-aws-secret-access-key").is_none());
+}
+
+fn assert_mantle_bearer_headers(request: &wiremock::Request) {
+    let authorization = request
+        .headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .expect("authorization header should be present");
+    assert_eq!(authorization, format!("Bearer {TEST_MANTLE_TOKEN}"));
+    assert!(request.headers.get("x-amz-date").is_none());
+    assert!(request.headers.get("x-amz-content-sha256").is_none());
     assert!(request.headers.get("x-aws-access-key-id").is_none());
     assert!(request.headers.get("x-aws-secret-access-key").is_none());
 }
@@ -553,6 +592,225 @@ async fn list_models_invocation_returns_control_plane_models() {
     let requests = server.received_requests().await.unwrap_or_default();
     assert_eq!(requests.len(), 1);
     assert_sigv4_headers(&requests[0]);
+}
+
+#[fcp_async_core::runtime::test]
+async fn mantle_models_list_uses_bearer_catalog_and_normalizes_models() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header(
+            "Authorization",
+            format!("Bearer {TEST_MANTLE_TOKEN}"),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "id": "anthropic.claude-opus-4-7",
+                    "object": "model",
+                    "owned_by": "anthropic"
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key) = setup_mantle_connector(&server.uri()).await;
+    let response = connector
+        .invoke(invoke_req(
+            OP_MODELS_LIST,
+            json!({"source": "mantle"}),
+            generate_valid_token(
+                &signing_key,
+                connector.instance_id().as_str(),
+                OP_MODELS_LIST,
+            ),
+        ))
+        .await
+        .unwrap();
+
+    let result = response.result.expect("mantle models result");
+    assert_eq!(
+        result["modelSummaries"][0]["modelId"],
+        "anthropic.claude-opus-4-7"
+    );
+    assert_eq!(result["modelSummaries"][0]["providerName"], "anthropic");
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    assert_mantle_bearer_headers(&requests[0]);
+    emit_fixture_jsonl(json!({
+        "event": "bedrock_mantle_models_catalog",
+        "fixture_mode": true,
+        "operation": OP_MODELS_LIST,
+        "route": requests[0].url.path(),
+        "auth_mode": "mantle_bearer",
+        "http_status": 200,
+        "normalized_model_count": result["modelSummaries"].as_array().map_or(0, Vec::len),
+        "token_material_logged": false
+    }));
+}
+
+#[fcp_async_core::runtime::test]
+async fn mantle_anthropic_messages_uses_bearer_auth_and_default_beta_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/anthropic/v1/messages"))
+        .and(header(
+            "Authorization",
+            format!("Bearer {TEST_MANTLE_TOKEN}"),
+        ))
+        .and(header(
+            "anthropic-beta",
+            "fine-grained-tool-streaming-2025-05-14",
+        ))
+        .and(body_json(json!({
+            "model": "anthropic.claude-opus-4-7",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "hello"}]
+            }],
+            "max_tokens": 1024,
+            "stream": false
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "msg_fixture",
+            "type": "message",
+            "role": "assistant",
+            "model": "anthropic.claude-opus-4-7",
+            "content": [{"type": "text", "text": "hi"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        })))
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key) = setup_mantle_connector(&server.uri()).await;
+    let response = connector
+        .invoke(invoke_req(
+            OP_INVOKE_MODEL,
+            json!({
+                "model_id": "anthropic.claude-opus-4-7",
+                "model_family": "mantle_anthropic_messages",
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hello"}]
+                }],
+                "max_tokens": 1024
+            }),
+            generate_valid_token(
+                &signing_key,
+                connector.instance_id().as_str(),
+                OP_INVOKE_MODEL,
+            ),
+        ))
+        .await
+        .unwrap();
+
+    let result = response.result.expect("mantle anthropic result");
+    assert_eq!(result["model"], "anthropic.claude-opus-4-7");
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    assert_mantle_bearer_headers(&requests[0]);
+    let request_text = String::from_utf8_lossy(&requests[0].body);
+    assert!(!request_text.contains(TEST_MANTLE_TOKEN));
+    assert!(!request_text.contains(TEST_SIGNING_MATERIAL));
+    let request_json: serde_json::Value =
+        serde_json::from_slice(&requests[0].body).expect("mantle request body should be JSON");
+    emit_fixture_jsonl(json!({
+        "event": "bedrock_mantle_anthropic_request",
+        "fixture_mode": true,
+        "operation": OP_INVOKE_MODEL,
+        "route": requests[0].url.path(),
+        "auth_mode": "mantle_bearer",
+        "model_id": "anthropic.claude-opus-4-7",
+        "request_body_size": body_size(&request_json),
+        "stream": request_json["stream"].as_bool(),
+        "default_beta_header": true,
+        "http_status": 200,
+        "token_material_logged": false,
+        "prompt_text_logged": false
+    }));
+}
+
+#[fcp_async_core::runtime::test]
+async fn mantle_anthropic_stream_decodes_sse_into_stream_envelope() {
+    let server = MockServer::start().await;
+    let sse = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_fixture\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/anthropic/v1/messages"))
+        .and(header(
+            "Authorization",
+            format!("Bearer {TEST_MANTLE_TOKEN}"),
+        ))
+        .and(body_json(json!({
+            "model": "anthropic.claude-opus-4-7",
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": "hello"}]
+            }],
+            "max_tokens": 1024,
+            "stream": true
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse),
+        )
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key) = setup_mantle_connector(&server.uri()).await;
+    let response = connector
+        .invoke(invoke_req(
+            OP_INVOKE_MODEL_STREAM,
+            json!({
+                "model_id": "anthropic.claude-opus-4-7",
+                "model_family": "mantle_anthropic_messages",
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hello"}]
+                }],
+                "max_tokens": 1024
+            }),
+            generate_valid_token(
+                &signing_key,
+                connector.instance_id().as_str(),
+                OP_INVOKE_MODEL_STREAM,
+            ),
+        ))
+        .await
+        .unwrap();
+
+    let result = response.result.expect("mantle stream result");
+    assert_eq!(result["chunk_count"], 2);
+    assert_eq!(result["events"][0]["event_type"], "message_start");
+    assert_eq!(result["events"][1]["payload_json"]["delta"]["text"], "hi");
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    assert_mantle_bearer_headers(&requests[0]);
+    let request_json: serde_json::Value =
+        serde_json::from_slice(&requests[0].body).expect("mantle stream body should be JSON");
+    emit_fixture_jsonl(json!({
+        "event": "bedrock_mantle_anthropic_sse",
+        "fixture_mode": true,
+        "operation": OP_INVOKE_MODEL_STREAM,
+        "route": requests[0].url.path(),
+        "auth_mode": "mantle_bearer",
+        "model_id": "anthropic.claude-opus-4-7",
+        "request_body_size": body_size(&request_json),
+        "stream": request_json["stream"].as_bool(),
+        "chunk_count": result["chunk_count"],
+        "sse_done_marker_seen": true,
+        "http_status": 200,
+        "token_material_logged": false,
+        "prompt_text_logged": false
+    }));
 }
 
 #[fcp_async_core::runtime::test]

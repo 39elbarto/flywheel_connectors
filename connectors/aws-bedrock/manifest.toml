@@ -11,7 +11,7 @@ interface_hash = "blake3-256:fcp.interface.v2:348f916c7839be0a2ef8e87a61d1b50ebc
 id = "fcp.aws-bedrock"
 name = "AWS Bedrock"
 version = "0.1.0"
-description = "AWS-native Bedrock Runtime connector for Converse, InvokeModel, streaming event-stream decoding, and foundation model discovery"
+description = "AWS-native Bedrock Runtime connector for Converse, InvokeModel, streaming event-stream decoding, foundation model discovery, and Bedrock Mantle Anthropic Messages routing"
 archetypes = ["operational", "streaming"]
 format = "native"
 
@@ -292,6 +292,7 @@ additionalProperties = false
 anyOf = [{ required = ["body"] }, { required = ["model_family"] }]
 allOf = [
     { if = { properties = { model_family = { const = "anthropic_claude" } }, required = ["model_family"] }, then = { required = ["messages"] } },
+    { if = { properties = { model_family = { const = "mantle_anthropic_messages" } }, required = ["model_family"] }, then = { required = ["messages"] } },
     { if = { properties = { model_family = { enum = ["meta_llama", "amazon_titan", "cohere_command", "mistral"] } }, required = ["model_family"] }, then = { required = ["prompt"] } },
 ]
 
@@ -305,7 +306,7 @@ type = ["object", "array", "string", "number", "boolean", "null"]
 
 [provides.operations."aws_bedrock.invoke_model".input_schema.properties.model_family]
 type = "string"
-enum = ["anthropic_claude", "meta_llama", "amazon_titan", "cohere_command", "mistral"]
+enum = ["anthropic_claude", "mantle_anthropic_messages", "meta_llama", "amazon_titan", "cohere_command", "mistral"]
 
 [provides.operations."aws_bedrock.invoke_model".input_schema.properties.prompt]
 type = "string"
@@ -372,12 +373,63 @@ type = "string"
 minLength = 1
 pattern = "\\S"
 
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.stream]
+type = "boolean"
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.stop_sequences]
+type = "array"
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.stop_sequences.items]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.tools]
+type = ["object", "array", "string", "number", "boolean", "null"]
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.tool_choice]
+type = ["object", "array", "string", "number", "boolean", "null"]
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.metadata]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.thinking]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.reasoning_level]
+type = "string"
+enum = ["minimal", "low", "medium", "high", "xhigh"]
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.thinking_budget_tokens]
+type = "integer"
+minimum = 0
+maximum = 4294967295
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.model_max_tokens]
+type = "integer"
+minimum = 1
+maximum = 4294967295
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.anthropic_beta]
+type = "array"
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.anthropic_beta.items]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.invoke_model".input_schema.properties.extra_body]
+type = "object"
+additionalProperties = true
+
 [provides.operations."aws_bedrock.invoke_model".output_schema]
 type = "object"
 additionalProperties = true
 
 [provides.operations."aws_bedrock.invoke_model".network_constraints]
-host_allow = ["bedrock-runtime.us-east-1.amazonaws.com", "bedrock-runtime.us-west-2.amazonaws.com"]
+host_allow = ["bedrock-runtime.us-east-1.amazonaws.com", "bedrock-runtime.us-west-2.amazonaws.com", "bedrock-mantle.us-east-1.api.aws", "bedrock-mantle.us-west-2.api.aws"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -395,15 +447,17 @@ total_timeout_ms = 240000
 max_response_bytes = 25000000
 
 [provides.operations."aws_bedrock.invoke_model".ai_hints]
-when_to_use = "Use for Bedrock models or legacy request shapes that require InvokeModel rather than the Converse API."
+when_to_use = "Use for Bedrock models or legacy request shapes that require InvokeModel rather than the Converse API, or for Bedrock Mantle Claude models with model_family=mantle_anthropic_messages."
 common_mistakes = [
     "Sending Converse messages to invoke_model without selecting a model_family or providing the raw body expected by that Bedrock model.",
-    "Assuming all model families share one JSON payload shape; Anthropic, Titan, Llama, Cohere, and Mistral bodies differ.",
+    "Assuming all model families share one JSON payload shape; native Anthropic, Mantle Anthropic Messages, Titan, Llama, Cohere, and Mistral bodies differ.",
+    "Treating AWS_BEARER_TOKEN_BEDROCK as an Anthropic API key; Mantle uses provider-owned bearer auth against the Bedrock Mantle /anthropic route.",
     "Retrying non-idempotent prompt workflows without considering duplicate model charges or side effects in downstream tool chains.",
 ]
 examples = [
     '{"model_id": "amazon.titan-text-express-v1", "model_family": "titan_text", "prompt": "Write a concise status update.", "max_tokens": 256}',
     '{"model_id": "anthropic.claude-v2", "body": {"prompt": "\\n\\nHuman: Hello\\n\\nAssistant:", "max_tokens_to_sample": 128}}',
+    '{"model_id": "anthropic.claude-opus-4-7", "model_family": "mantle_anthropic_messages", "messages": [{"role": "user", "content": [{"type": "text", "text": "Summarize this incident."}]}], "max_tokens": 1024}',
 ]
 related = [
     "aws_bedrock.invoke_model_stream",
@@ -425,6 +479,7 @@ additionalProperties = false
 anyOf = [{ required = ["body"] }, { required = ["model_family"] }]
 allOf = [
     { if = { properties = { model_family = { const = "anthropic_claude" } }, required = ["model_family"] }, then = { required = ["messages"] } },
+    { if = { properties = { model_family = { const = "mantle_anthropic_messages" } }, required = ["model_family"] }, then = { required = ["messages"] } },
     { if = { properties = { model_family = { enum = ["meta_llama", "amazon_titan", "cohere_command", "mistral"] } }, required = ["model_family"] }, then = { required = ["prompt"] } },
 ]
 
@@ -438,7 +493,7 @@ type = ["object", "array", "string", "number", "boolean", "null"]
 
 [provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.model_family]
 type = "string"
-enum = ["anthropic_claude", "meta_llama", "amazon_titan", "cohere_command", "mistral"]
+enum = ["anthropic_claude", "mantle_anthropic_messages", "meta_llama", "amazon_titan", "cohere_command", "mistral"]
 
 [provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.prompt]
 type = "string"
@@ -505,6 +560,57 @@ type = "string"
 minLength = 1
 pattern = "\\S"
 
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.stream]
+type = "boolean"
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.stop_sequences]
+type = "array"
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.stop_sequences.items]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.tools]
+type = ["object", "array", "string", "number", "boolean", "null"]
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.tool_choice]
+type = ["object", "array", "string", "number", "boolean", "null"]
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.metadata]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.thinking]
+type = "object"
+additionalProperties = true
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.reasoning_level]
+type = "string"
+enum = ["minimal", "low", "medium", "high", "xhigh"]
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.thinking_budget_tokens]
+type = "integer"
+minimum = 0
+maximum = 4294967295
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.model_max_tokens]
+type = "integer"
+minimum = 1
+maximum = 4294967295
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.anthropic_beta]
+type = "array"
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.anthropic_beta.items]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations."aws_bedrock.invoke_model_stream".input_schema.properties.extra_body]
+type = "object"
+additionalProperties = true
+
 [provides.operations."aws_bedrock.invoke_model_stream".output_schema]
 type = "object"
 required = ["events", "chunk_count", "total_payload_bytes"]
@@ -544,7 +650,7 @@ type = "integer"
 minimum = 0
 
 [provides.operations."aws_bedrock.invoke_model_stream".network_constraints]
-host_allow = ["bedrock-runtime.us-east-1.amazonaws.com", "bedrock-runtime.us-west-2.amazonaws.com"]
+host_allow = ["bedrock-runtime.us-east-1.amazonaws.com", "bedrock-runtime.us-west-2.amazonaws.com", "bedrock-mantle.us-east-1.api.aws", "bedrock-mantle.us-west-2.api.aws"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -562,14 +668,16 @@ total_timeout_ms = 240000
 max_response_bytes = 25000000
 
 [provides.operations."aws_bedrock.invoke_model_stream".ai_hints]
-when_to_use = "Use for legacy Bedrock streaming model APIs when the target model does not fit ConverseStream or needs a model-family payload."
+when_to_use = "Use for legacy Bedrock streaming model APIs when the target model does not fit ConverseStream or needs a model-family payload, or for Bedrock Mantle Anthropic Messages SSE streaming."
 common_mistakes = [
     "Using InvokeModelWithResponseStream for models that do not advertise streaming support in models.list.",
+    "Expecting Mantle Anthropic Messages streaming to return AWS event-stream frames; the connector normalizes SSE events into the same stream response envelope.",
     "Assuming event-stream frames contain only text deltas; provider-specific payloads may include metadata and completion reasons.",
     "Dropping partial chunks during cancellation or timeout instead of returning structured evidence about the incomplete stream.",
 ]
 examples = [
     '{"model_id": "amazon.titan-text-express-v1", "model_family": "titan_text", "prompt": "List three test cases.", "max_tokens": 128}',
+    '{"model_id": "anthropic.claude-opus-4-7", "model_family": "mantle_anthropic_messages", "messages": [{"role": "user", "content": [{"type": "text", "text": "Draft a short launch checklist."}]}], "max_tokens": 1024}',
 ]
 related = [
     "aws_bedrock.invoke_model",
@@ -607,6 +715,10 @@ pattern = "\\S"
 type = "string"
 minLength = 1
 pattern = "\\S"
+
+[provides.operations."aws_bedrock.models.list".input_schema.properties.source]
+type = "string"
+enum = ["native", "mantle"]
 
 [provides.operations."aws_bedrock.models.list".output_schema]
 type = "object"
@@ -671,7 +783,7 @@ minLength = 1
 pattern = "\\S"
 
 [provides.operations."aws_bedrock.models.list".network_constraints]
-host_allow = ["bedrock.us-east-1.amazonaws.com", "bedrock.us-west-2.amazonaws.com"]
+host_allow = ["bedrock.us-east-1.amazonaws.com", "bedrock.us-west-2.amazonaws.com", "bedrock-mantle.us-east-1.api.aws", "bedrock-mantle.us-west-2.api.aws"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -689,14 +801,16 @@ total_timeout_ms = 30000
 max_response_bytes = 10485760
 
 [provides.operations."aws_bedrock.models.list".ai_hints]
-when_to_use = "Use before invoking Bedrock when an agent needs to discover available foundation models, modalities, providers, or streaming support in the configured region."
+when_to_use = "Use before invoking Bedrock when an agent needs to discover available foundation models, modalities, providers, streaming support, or Bedrock Mantle catalog entries in the configured region."
 common_mistakes = [
     "Treating the model list as global; Bedrock model availability is region and account dependent.",
     "Assuming a listed model supports every API shape; check streaming and inference metadata before choosing Converse, InvokeModel, or streaming variants.",
+    "Forgetting to set source=mantle when discovering Bedrock Mantle's OpenAI-compatible catalog.",
     "Logging account-specific model access diagnostics with credentials or request signatures attached.",
 ]
 examples = [
     '{}',
+    '{"source": "mantle"}',
 ]
 related = [
     "aws_bedrock.converse",

@@ -54,10 +54,13 @@ impl BedrockError {
                 *status == 408
                     || *status == 424
                     || *status == 429
+                    || *status == 529
                     || matches!(*status, 500 | 502 | 503 | 504)
                     || kind == "ModelNotReadyException"
                     || kind == "ThrottlingException"
                     || kind == "ServiceUnavailableException"
+                    || kind == "overloaded_error"
+                    || kind == "rate_limit_error"
             }
             Self::Json(_)
             | Self::EventStream(_)
@@ -172,6 +175,12 @@ pub fn bedrock_error_from_status(status: u16, body: &str) -> BedrockError {
         .as_ref()
         .and_then(|value| value.get("__type"))
         .or_else(|| parsed.as_ref().and_then(|value| value.get("code")))
+        .or_else(|| {
+            parsed
+                .as_ref()
+                .and_then(|value| value.get("error"))
+                .and_then(|error| error.get("type"))
+        })
         .and_then(serde_json::Value::as_str)
         .map(|value| value.rsplit('#').next().unwrap_or(value).to_string())
         .unwrap_or_else(|| format!("HTTP {status}"));
@@ -179,6 +188,12 @@ pub fn bedrock_error_from_status(status: u16, body: &str) -> BedrockError {
         .as_ref()
         .and_then(|value| value.get("message"))
         .or_else(|| parsed.as_ref().and_then(|value| value.get("Message")))
+        .or_else(|| {
+            parsed
+                .as_ref()
+                .and_then(|value| value.get("error"))
+                .and_then(|error| error.get("message"))
+        })
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| body.to_string());

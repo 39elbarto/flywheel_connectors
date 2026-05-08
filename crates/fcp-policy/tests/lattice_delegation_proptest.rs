@@ -13,7 +13,7 @@
 use std::time::{Duration, Instant};
 
 use fcp_core::{OperationId, PrincipalId, ZoneId};
-use fcp_crypto_pq::LatticeParams;
+use fcp_crypto_pq::{LatticeParams, PublicMatrixMaterial, ZonePeriodPublicKey};
 use fcp_policy::lattice_delegation::{
     DelegationCertificate, DelegationCertificateId, DelegationPeriod, LatticeDelegationError,
     LatticeDelegationVerifier, LatticeDelegationVerifierImpl, LatticeSubToken,
@@ -26,6 +26,14 @@ const fn cert_id(byte: u8) -> DelegationCertificateId {
 
 fn zone() -> ZoneId {
     ZoneId::work()
+}
+
+fn operation() -> OperationId {
+    OperationId::new("op:test").unwrap()
+}
+
+fn principal() -> PrincipalId {
+    PrincipalId::new("agent:test").unwrap()
 }
 
 fn zone_from_kind(kind: u8) -> ZoneId {
@@ -49,12 +57,20 @@ fn cert(
     zone_id: ZoneId,
     period: DelegationPeriod,
 ) -> DelegationCertificate {
+    let hash = [id_byte; 32];
+    let public_key = ZonePeriodPublicKey {
+        hash,
+        public_matrix: PublicMatrixMaterial::fixture_seed_only(hash),
+        zone_id: LatticeDelegationVerifierImpl::zone_to_crypto(&zone_id),
+        period: LatticeDelegationVerifierImpl::period_to_crypto(period),
+        params: LatticeParams::V4_REFERENCE,
+    };
     DelegationCertificate {
         cert_id: cert_id(id_byte),
         zone_id,
         period,
         parent_cert_id: parent.map(cert_id),
-        pub_matrix_seed: [0u8; 32],
+        public_key,
     }
 }
 
@@ -68,11 +84,29 @@ fn sub_token_targeting(leaf: u8) -> LatticeSubToken {
         .expect("reference profile has bounded preimage encoding");
     LatticeSubToken {
         cert_id: cert_id(leaf),
-        op_id: OperationId::new("op:test").unwrap(),
-        principal_id: PrincipalId::new("agent:test").unwrap(),
+        op_id: operation(),
+        principal_id: principal(),
         request_descriptor_hash: [0u8; 32],
         preimage_bytes: vec![0u8; preimage_len],
     }
+}
+
+fn bind_sub_token(
+    verifier: &LatticeDelegationVerifierImpl,
+    leaf: &DelegationCertificate,
+    mut sub_token: LatticeSubToken,
+    request_zone: &ZoneId,
+) -> LatticeSubToken {
+    sub_token.request_descriptor_hash = LatticeDelegationVerifierImpl::request_descriptor_hash(
+        &leaf.cert_id,
+        request_zone,
+        leaf.period,
+        &sub_token.op_id,
+        &sub_token.principal_id,
+        &leaf.public_key.hash,
+        &verifier.trust_set_id(),
+    );
+    sub_token
 }
 
 const fn lean_period_contains(period: DelegationPeriod, now_unix_ms: u64) -> bool {
@@ -114,7 +148,13 @@ fn assert_terminates(verifier: &LatticeDelegationVerifierImpl, sub_token: &Latti
     // visible.
     let start = Instant::now();
     let _result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        verifier.verify_sub_token(sub_token, &zone(), 1_700_000_000_000)
+        verifier.verify_sub_token(
+            sub_token,
+            &zone(),
+            &operation(),
+            &principal(),
+            1_700_000_000_000,
+        )
     }));
     assert!(
         start.elapsed() < Duration::from_millis(500),
@@ -133,7 +173,7 @@ fn lattice_walker_self_reference_bounds_at_depth_param() {
     let sub = sub_token_targeting(1);
     assert_terminates(&v, &sub);
     let err = v
-        .verify_sub_token(&sub, &zone(), 1_700_000_000_000)
+        .verify_sub_token(&sub, &zone(), &operation(), &principal(), 1_700_000_000_000)
         .unwrap_err();
     assert!(
         matches!(err, LatticeDelegationError::ChainTooDeep { .. }),
@@ -151,7 +191,7 @@ fn lattice_walker_two_cycle_bounds_at_depth_param() {
     let sub = sub_token_targeting(1);
     assert_terminates(&v, &sub);
     let err = v
-        .verify_sub_token(&sub, &zone(), 1_700_000_000_000)
+        .verify_sub_token(&sub, &zone(), &operation(), &principal(), 1_700_000_000_000)
         .unwrap_err();
     assert!(matches!(err, LatticeDelegationError::ChainTooDeep { .. }));
 }
@@ -160,7 +200,13 @@ fn lattice_walker_two_cycle_bounds_at_depth_param() {
 fn lattice_walker_unknown_cert_returns_typed_err() {
     let v = verifier_with(vec![]);
     let err = v
-        .verify_sub_token(&sub_token_targeting(99), &zone(), 1_700_000_000_000)
+        .verify_sub_token(
+            &sub_token_targeting(99),
+            &zone(),
+            &operation(),
+            &principal(),
+            1_700_000_000_000,
+        )
         .unwrap_err();
     assert!(matches!(
         err,
@@ -175,7 +221,7 @@ fn lattice_walker_missing_parent_returns_incomplete_chain_err() {
     let sub = sub_token_targeting(1);
     assert_terminates(&v, &sub);
     let err = v
-        .verify_sub_token(&sub, &zone(), 1_700_000_000_000)
+        .verify_sub_token(&sub, &zone(), &operation(), &principal(), 1_700_000_000_000)
         .unwrap_err();
     assert!(matches!(
         err,
@@ -196,7 +242,7 @@ fn lattice_walker_period_zero_zero_rejects_with_outside_period() {
     )]);
     let sub = sub_token_targeting(1);
     let err = v
-        .verify_sub_token(&sub, &zone(), 1_700_000_000_000)
+        .verify_sub_token(&sub, &zone(), &operation(), &principal(), 1_700_000_000_000)
         .unwrap_err();
     assert!(matches!(err, LatticeDelegationError::OutsidePeriod { .. }));
 }
@@ -216,7 +262,7 @@ fn lattice_walker_period_with_start_after_end_does_not_panic() {
     )]);
     let sub = sub_token_targeting(1);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        v.verify_sub_token(&sub, &zone(), 1_700_000_000_000)
+        v.verify_sub_token(&sub, &zone(), &operation(), &principal(), 1_700_000_000_000)
     }));
     assert!(result.is_ok(), "inverted-period must not panic");
     let err = result.unwrap().unwrap_err();
@@ -277,7 +323,7 @@ proptest! {
         // Termination + no-panic.
         let start = Instant::now();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            v.verify_sub_token(&sub, &zone(), now_unix_ms)
+            v.verify_sub_token(&sub, &zone(), &operation(), &principal(), now_unix_ms)
         }));
         prop_assert!(
             start.elapsed() < Duration::from_millis(500),
@@ -302,6 +348,10 @@ proptest! {
                     | LatticeDelegationError::ChainTooDeep { .. }
                     | LatticeDelegationError::PreimageEncodingMismatch { .. }
                     | LatticeDelegationError::ParameterMismatch { .. }
+                    | LatticeDelegationError::OperationMismatch { .. }
+                    | LatticeDelegationError::PrincipalMismatch { .. }
+                    | LatticeDelegationError::CertificatePublicKeyMismatch { .. }
+                    | LatticeDelegationError::RequestBindingMismatch { .. }
                     | LatticeDelegationError::NotImplemented
                     | LatticeDelegationError::VerificationEquationFailed { .. }
                     | LatticeDelegationError::PreimageTooLong { .. }
@@ -323,7 +373,13 @@ proptest! {
         // mismatch path fires deterministically.
         let other_zone = ZoneId::private();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            v.verify_sub_token(&sub, &other_zone, 1_700_000_000_000)
+            v.verify_sub_token(
+                &sub,
+                &other_zone,
+                &operation(),
+                &principal(),
+                1_700_000_000_000,
+            )
         }));
         prop_assert!(result.is_ok(), "verifier panicked on cross-zone request");
     }
@@ -388,8 +444,14 @@ proptest! {
         let expected_accepts =
             lean_accepts_token(&leaf, &certs[1..], &request_zone, now_unix_ms);
         let verifier = verifier_with(certs);
-        let outcome =
-            verifier.verify_sub_token(&sub_token_targeting(1), &request_zone, now_unix_ms);
+        let sub = bind_sub_token(&verifier, &leaf, sub_token_targeting(1), &request_zone);
+        let outcome = verifier.verify_sub_token(
+            &sub,
+            &request_zone,
+            &operation(),
+            &principal(),
+            now_unix_ms,
+        );
 
         if expected_accepts {
             prop_assert!(

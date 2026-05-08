@@ -9,21 +9,14 @@
 //! `docs/post-quantum/lattice_trapdoor_delegation.md` §8 for the
 //! 4-bead implementation roadmap.
 //!
-//! ## Why the stub
+//! ## Why this lives in policy
 //!
-//! Other host-side code (admission gates, audit-event assembly, future
-//! verification pipelines) will need to refer to the
-//! [`LatticeDelegationVerifier`] trait by name long before a concrete
-//! implementation exists. Landing the trait surface in this commit:
-//!
-//! 1. Pins the **API contract** the future cryptographic implementation
-//!    must satisfy.
-//! 2. Lets coordinating beads (audit denial events, dispatch wiring,
-//!    enforcement-pipeline `EnforcementCheckId` additions) reference
-//!    the trait without waiting for the months-long primitive work.
-//! 3. Documents the operational shape (zone + period + op + principal
-//!    quaternary binding) so other agents writing related code don't
-//!    invent incompatible abstractions.
+//! Host-side code (admission gates, audit-event assembly, dispatcher
+//! verification pipelines) needs a stable policy abstraction over the
+//! cryptographic primitives. The crypto crate owns `TrapGen` / `Delegate` /
+//! `SamplePre` / `Verify`; this module composes those primitives with FCP's
+//! certificate trust set, zone/period validity, request binding, and
+//! operator-facing error taxonomy.
 //!
 //! ## Status
 //!
@@ -34,21 +27,10 @@
 //!   on every call. Use this on hosts where V4 is not activated.
 //! - [`LatticeDelegationVerifierImpl`] — the production verifier wired
 //!   to [`fcp_crypto_pq`]. Performs the **full structural check chain**
-//!   (unknown-cert / zone-mismatch / period-bounds / parent-chain walk
-//!   / preimage-encoding) before invoking the cryptographic
-//!   verification equation. Because [`fcp_crypto_pq::verify`] itself
-//!   currently returns
-//!   [`fcp_crypto_pq::LatticePqError::NotImplemented`] (the lattice
-//!   primitives are still stubbed), a happy-path call to
-//!   this verifier still terminates at
-//!   [`LatticeDelegationError::NotImplemented`] — but every cheap
-//!   negative-path check is now load-bearing and end-to-end testable.
-//!
-//! Calling code MUST treat a `NotImplemented` return as "the V4 lattice
-//! path is not active on this host yet — fall back to V3 ML-DSA" rather
-//! than as an operational error. The compatibility ledger
-//! (`docs/post-quantum/v3_v4_compatibility_ledger.md`) describes the
-//! cross-version dispatch rules.
+//!   (unknown-cert / zone-mismatch / operation-principal mismatch /
+//!   period-bounds / parent-chain walk / request-binding hash /
+//!   preimage-encoding) before invoking the cryptographic verification
+//!   equation.
 //!
 //! ## Composition with the rest of the security chain
 //!
@@ -127,15 +109,14 @@ impl DelegationCertificateId {
 /// Public material of one node in the lattice-trapdoor delegation
 /// tree (br-kyopb.1.3 §3.3 layer 1 or layer 2).
 ///
-/// Concrete type is the seed-backed public representation from
-/// `fcp_crypto_pq`. Holds:
+/// Holds:
 ///
 /// - `cert_id` — content-addressed identifier
 /// - `zone_id` — the zone this delegation authorizes for
 /// - `period` — the time window this delegation is valid for
 /// - `parent_cert_id` — `None` for root, `Some(...)` for layers 1+
-/// - `pub_matrix_seed` — 32-byte seed; concrete `A_zp` matrix is
-///   derived via SHAKE256 to keep certificate bytes small
+/// - `public_key` — verifier-computable `A_zp` material from
+///   `fcp_crypto_pq`
 ///
 /// The trapdoor itself (`T_zp`) is held offline by the issuance
 /// node and NEVER appears in this struct.
@@ -150,12 +131,8 @@ pub struct DelegationCertificate {
     /// Parent certificate this one was derived from. `None` only for
     /// the root certificate (the master trapdoor's public companion).
     pub parent_cert_id: Option<DelegationCertificateId>,
-    /// 32-byte seed for the per-certificate public matrix `A_zp`.
-    /// Verifiers expand to the full matrix via SHAKE256 — keeps the
-    /// certificate wire form at 32 bytes instead of the 33,554,432-byte
-    /// expanded `V4_REFERENCE` matrix.
-    #[serde(with = "fcp_core::util::hex_or_bytes")]
-    pub pub_matrix_seed: [u8; 32],
+    /// Verifier-computable public key for this zone/period delegation.
+    pub public_key: pq::ZonePeriodPublicKey,
 }
 
 /// Layer-3 sub-token (br-kyopb.1.3 §3.3).
@@ -203,6 +180,11 @@ pub struct LatticeSubToken {
 pub struct LatticeVerificationReceipt {
     /// Certificate id the verifier reconstructed `A_op` from.
     pub cert_id: DelegationCertificateId,
+    /// Trust-set digest used when checking
+    /// [`LatticeSubToken::request_descriptor_hash`].
+    pub trust_set_id: [u8; 32],
+    /// Hash of the request-binding tuple accepted by the verifier.
+    pub request_descriptor_hash: [u8; 32],
     /// Period the verifier observed at verification time. Useful for
     /// audit consumers that want to log "token was valid at
     /// `verified_at_unix_ms` because `period.contains(verified_at)`."
@@ -281,6 +263,40 @@ pub enum LatticeDelegationError {
         "lattice parameter mismatch: verifier configured for n={verifier_n}, certificate expects n={cert_n}"
     )]
     ParameterMismatch { verifier_n: u32, cert_n: u32 },
+    /// Operation-id mismatch between the presented sub-token and the
+    /// dispatcher request. Hashes are logged rather than raw operation
+    /// names to keep evidence redaction-safe.
+    #[error(
+        "operation mismatch: token operation hash {token_operation_hash} does not match request operation hash {request_operation_hash}"
+    )]
+    OperationMismatch {
+        token_operation_hash: String,
+        request_operation_hash: String,
+    },
+    /// Principal-id mismatch between the presented sub-token and the
+    /// dispatcher request. Hashes are logged rather than raw principal
+    /// identifiers to keep evidence redaction-safe.
+    #[error(
+        "principal mismatch: token principal hash {token_principal_hash} does not match request principal hash {request_principal_hash}"
+    )]
+    PrincipalMismatch {
+        token_principal_hash: String,
+        request_principal_hash: String,
+    },
+    /// Certificate public key does not match the policy-layer
+    /// certificate envelope.
+    #[error("certificate public key mismatch for cert {cert_id}: {reason}")]
+    CertificatePublicKeyMismatch { cert_id: String, reason: String },
+    /// Sub-token request binding does not match the verifier's
+    /// zone/period/operation/principal/certificate/trust-set tuple.
+    #[error(
+        "request binding mismatch for cert {cert_id}: expected request descriptor hash {expected_hash}, got {got_hash}"
+    )]
+    RequestBindingMismatch {
+        cert_id: String,
+        expected_hash: String,
+        got_hash: String,
+    },
 }
 
 /// The policy-layer abstraction over lattice-trapdoor capability
@@ -314,6 +330,8 @@ pub trait LatticeDelegationVerifier: Send + Sync {
         &self,
         sub_token: &LatticeSubToken,
         request_zone: &ZoneId,
+        request_operation: &OperationId,
+        request_principal: &PrincipalId,
         now_unix_ms: u64,
     ) -> Result<LatticeVerificationReceipt, LatticeDelegationError>;
 
@@ -340,6 +358,8 @@ impl LatticeDelegationVerifier for UnimplementedLatticeDelegationVerifier {
         &self,
         _sub_token: &LatticeSubToken,
         _request_zone: &ZoneId,
+        _request_operation: &OperationId,
+        _request_principal: &PrincipalId,
         _now_unix_ms: u64,
     ) -> Result<LatticeVerificationReceipt, LatticeDelegationError> {
         Err(LatticeDelegationError::NotImplemented)
@@ -389,6 +409,7 @@ impl LatticeDelegationVerifier for UnimplementedLatticeDelegationVerifier {
 /// produce precise errors and the positive path terminates at
 /// `NotImplemented` (signalling fall-back-to-V3) instead of a fake
 /// success.
+#[derive(Debug, Clone)]
 pub struct LatticeDelegationVerifierImpl {
     certificates: HashMap<DelegationCertificateId, DelegationCertificate>,
     params: pq::LatticeParams,
@@ -441,6 +462,43 @@ impl LatticeDelegationVerifierImpl {
         self.params
     }
 
+    /// Stable digest of the loaded certificate trust set.
+    ///
+    /// The request-binding hash includes this digest so a sub-token
+    /// minted under one verifier trust set cannot be replayed against a
+    /// verifier with different certificate material.
+    #[must_use]
+    pub fn trust_set_id(&self) -> [u8; 32] {
+        let mut entries = self
+            .certificates
+            .values()
+            .map(|cert| {
+                let mut entry = Vec::with_capacity(96);
+                entry.extend_from_slice(cert.cert_id.as_bytes());
+                entry.extend_from_slice(&cert.public_key.hash);
+                if let Some(parent) = cert.parent_cert_id {
+                    entry.extend_from_slice(parent.as_bytes());
+                } else {
+                    entry.extend_from_slice(&[0_u8; 32]);
+                }
+                entry
+            })
+            .collect::<Vec<_>>();
+        entries.sort();
+
+        let mut h = blake3::Hasher::new();
+        h.update(b"fcp-policy/lattice-trust-set-v1|");
+        h.update(&self.params.n.to_le_bytes());
+        h.update(&self.params.m.to_le_bytes());
+        h.update(&self.params.q.to_le_bytes());
+        h.update(&self.params.depth.to_le_bytes());
+        for entry in entries {
+            h.update(&(entry.len() as u64).to_le_bytes());
+            h.update(&entry);
+        }
+        *h.finalize().as_bytes()
+    }
+
     /// Bridge a policy-layer [`DelegationPeriod`] (Unix ms, inclusive
     /// upper bound) into the crypto-layer
     /// [`pq::DelegationPeriod`] (Unix seconds, exclusive upper bound).
@@ -450,7 +508,7 @@ impl LatticeDelegationVerifierImpl {
     /// `crypto.contains(now_unix_ms / 1000)` (proven by the `+ 1`
     /// after flooring, which lifts the exclusive crypto upper to be
     /// strictly above any flooring of the inclusive policy upper).
-    const fn period_to_crypto(period: DelegationPeriod) -> pq::DelegationPeriod {
+    pub const fn period_to_crypto(period: DelegationPeriod) -> pq::DelegationPeriod {
         pq::DelegationPeriod {
             start_secs: period.start_unix_ms / 1000,
             end_secs: period.end_unix_ms / 1000 + 1,
@@ -462,11 +520,52 @@ impl LatticeDelegationVerifierImpl {
     /// as BLAKE3 over the zone's canonical string form, domain-
     /// separated by a fixed tag so any future hash-input changes to
     /// `operation_hash` won't collide with this projection.
-    fn zone_to_crypto(zone: &ZoneId) -> [u8; 32] {
+    #[must_use]
+    pub fn zone_to_crypto(zone: &ZoneId) -> [u8; 32] {
         let mut h = blake3::Hasher::new();
         h.update(b"fcp-policy/lattice-zone-projection-v0|");
         h.update(zone.as_str().as_bytes());
         *h.finalize().as_bytes()
+    }
+
+    /// Compute the policy-layer request binding a sub-token must carry.
+    ///
+    /// This binds the token to the exact policy tuple the dispatcher is about
+    /// to evaluate. The cryptographic `operation_hash` binds zone/period/op
+    /// and principal to the preimage equation; this policy hash additionally
+    /// binds certificate identity, public-key binding hash, and the verifier's
+    /// trust set.
+    #[must_use]
+    pub fn request_descriptor_hash(
+        cert_id: &DelegationCertificateId,
+        request_zone: &ZoneId,
+        period: DelegationPeriod,
+        request_operation: &OperationId,
+        request_principal: &PrincipalId,
+        public_key_hash: &[u8; 32],
+        trust_set_id: &[u8; 32],
+    ) -> [u8; 32] {
+        let mut h = blake3::Hasher::new();
+        h.update(b"fcp-policy/lattice-request-binding-v1|");
+        h.update(cert_id.as_bytes());
+        h.update(&Self::zone_to_crypto(request_zone));
+        let crypto_period = Self::period_to_crypto(period);
+        h.update(&crypto_period.start_secs.to_le_bytes());
+        h.update(&crypto_period.end_secs.to_le_bytes());
+        h.update(&(request_operation.as_str().len() as u64).to_le_bytes());
+        h.update(request_operation.as_str().as_bytes());
+        h.update(&(request_principal.as_str().len() as u64).to_le_bytes());
+        h.update(request_principal.as_str().as_bytes());
+        h.update(public_key_hash);
+        h.update(trust_set_id);
+        *h.finalize().as_bytes()
+    }
+
+    fn redacted_id_hash(domain: &'static [u8], value: &str) -> String {
+        let mut h = blake3::Hasher::new();
+        h.update(domain);
+        h.update(value.as_bytes());
+        hex::encode(h.finalize().as_bytes())
     }
 
     fn leaf_for_sub_token(
@@ -481,14 +580,36 @@ impl LatticeDelegationVerifierImpl {
     }
 
     fn validate_leaf_request(
+        &self,
         leaf: &DelegationCertificate,
         request_zone: &ZoneId,
+        request_operation: &OperationId,
+        request_principal: &PrincipalId,
         now_unix_ms: u64,
     ) -> Result<(), LatticeDelegationError> {
         if &leaf.zone_id != request_zone {
             return Err(LatticeDelegationError::ZoneMismatch {
                 cert_zone: leaf.zone_id.as_str().to_string(),
                 request_zone: request_zone.as_str().to_string(),
+            });
+        }
+        let _ = (request_operation, request_principal);
+        if leaf.public_key.params != self.params {
+            return Err(LatticeDelegationError::ParameterMismatch {
+                verifier_n: self.params.n,
+                cert_n: leaf.public_key.params.n,
+            });
+        }
+        if leaf.public_key.zone_id != Self::zone_to_crypto(&leaf.zone_id) {
+            return Err(LatticeDelegationError::CertificatePublicKeyMismatch {
+                cert_id: leaf.cert_id.to_hex(),
+                reason: "public key zone projection does not match certificate zone".to_string(),
+            });
+        }
+        if leaf.public_key.period != Self::period_to_crypto(leaf.period) {
+            return Err(LatticeDelegationError::CertificatePublicKeyMismatch {
+                cert_id: leaf.cert_id.to_hex(),
+                reason: "public key period does not match certificate period".to_string(),
             });
         }
         Self::validate_certificate_period(leaf, now_unix_ms)
@@ -534,6 +655,59 @@ impl LatticeDelegationVerifierImpl {
         Ok(())
     }
 
+    fn validate_sub_token_request_binding(
+        &self,
+        leaf: &DelegationCertificate,
+        sub_token: &LatticeSubToken,
+        request_zone: &ZoneId,
+        request_operation: &OperationId,
+        request_principal: &PrincipalId,
+    ) -> Result<[u8; 32], LatticeDelegationError> {
+        if &sub_token.op_id != request_operation {
+            return Err(LatticeDelegationError::OperationMismatch {
+                token_operation_hash: Self::redacted_id_hash(
+                    b"fcp-policy/lattice-token-operation-v1|",
+                    sub_token.op_id.as_str(),
+                ),
+                request_operation_hash: Self::redacted_id_hash(
+                    b"fcp-policy/lattice-request-operation-v1|",
+                    request_operation.as_str(),
+                ),
+            });
+        }
+        if &sub_token.principal_id != request_principal {
+            return Err(LatticeDelegationError::PrincipalMismatch {
+                token_principal_hash: Self::redacted_id_hash(
+                    b"fcp-policy/lattice-token-principal-v1|",
+                    sub_token.principal_id.as_str(),
+                ),
+                request_principal_hash: Self::redacted_id_hash(
+                    b"fcp-policy/lattice-request-principal-v1|",
+                    request_principal.as_str(),
+                ),
+            });
+        }
+
+        let trust_set_id = self.trust_set_id();
+        let expected = Self::request_descriptor_hash(
+            &leaf.cert_id,
+            request_zone,
+            leaf.period,
+            request_operation,
+            request_principal,
+            &leaf.public_key.hash,
+            &trust_set_id,
+        );
+        if sub_token.request_descriptor_hash != expected {
+            return Err(LatticeDelegationError::RequestBindingMismatch {
+                cert_id: leaf.cert_id.to_hex(),
+                expected_hash: hex::encode(expected),
+                got_hash: hex::encode(sub_token.request_descriptor_hash),
+            });
+        }
+        Ok(expected)
+    }
+
     fn preimage_for_sub_token(
         &self,
         sub_token: &LatticeSubToken,
@@ -566,16 +740,10 @@ impl LatticeDelegationVerifierImpl {
         sub_token: &LatticeSubToken,
         preimage: &pq::LatticePreimage,
         now_unix_ms: u64,
+        request_descriptor_hash: [u8; 32],
     ) -> Result<LatticeVerificationReceipt, LatticeDelegationError> {
         let crypto_period = Self::period_to_crypto(leaf.period);
         let crypto_zone = Self::zone_to_crypto(&leaf.zone_id);
-        let zp_pub = pq::ZonePeriodPublicKey {
-            hash: leaf.pub_matrix_seed,
-            public_matrix: pq::PublicMatrixMaterial::fixture_seed_only(leaf.pub_matrix_seed),
-            zone_id: crypto_zone,
-            period: crypto_period,
-            params: self.params,
-        };
         let h = pq::operation_hash(
             &crypto_zone,
             crypto_period,
@@ -584,9 +752,11 @@ impl LatticeDelegationVerifierImpl {
         );
         let now_secs = now_unix_ms / 1000;
 
-        pq::verify(&zp_pub, h, preimage, now_secs, self.params)
+        pq::verify(&leaf.public_key, h, preimage, now_secs, self.params)
             .map(|()| LatticeVerificationReceipt {
                 cert_id: leaf.cert_id,
+                trust_set_id: self.trust_set_id(),
+                request_descriptor_hash,
                 period: leaf.period,
                 verified_at_unix_ms: now_unix_ms,
             })
@@ -661,22 +831,46 @@ impl LatticeDelegationVerifier for LatticeDelegationVerifierImpl {
         &self,
         sub_token: &LatticeSubToken,
         request_zone: &ZoneId,
+        request_operation: &OperationId,
+        request_principal: &PrincipalId,
         now_unix_ms: u64,
     ) -> Result<LatticeVerificationReceipt, LatticeDelegationError> {
         // Step 1 — leaf lookup.
         let leaf = self.leaf_for_sub_token(sub_token)?;
 
-        // Steps 2-3 — zone agreement and leaf-period containment.
-        Self::validate_leaf_request(leaf, request_zone, now_unix_ms)?;
+        // Steps 2-3 — zone agreement, public-key envelope consistency,
+        // and leaf-period containment.
+        self.validate_leaf_request(
+            leaf,
+            request_zone,
+            request_operation,
+            request_principal,
+            now_unix_ms,
+        )?;
 
         // Step 4 — parent-chain walk (depth-bounded).
         self.validate_parent_chain(leaf, now_unix_ms)?;
 
-        // Step 5 — preimage encoding length.
+        // Step 5 — request binding.
+        let request_descriptor_hash = self.validate_sub_token_request_binding(
+            leaf,
+            sub_token,
+            request_zone,
+            request_operation,
+            request_principal,
+        )?;
+
+        // Step 6 — preimage encoding length.
         let preimage = self.preimage_for_sub_token(sub_token, leaf)?;
 
-        // Step 6 — bridge into fcp-crypto-pq + invoke verify.
-        self.verify_crypto_preimage(leaf, sub_token, &preimage, now_unix_ms)
+        // Step 7 — bridge into fcp-crypto-pq + invoke verify.
+        self.verify_crypto_preimage(
+            leaf,
+            sub_token,
+            &preimage,
+            now_unix_ms,
+            request_descriptor_hash,
+        )
     }
 
     fn has_certificate(&self, cert_id: &DelegationCertificateId) -> bool {
@@ -699,11 +893,30 @@ mod tests {
         }
     }
 
+    fn operation() -> OperationId {
+        OperationId::new("op.test").unwrap()
+    }
+
+    fn principal() -> PrincipalId {
+        PrincipalId::new("agent.test").unwrap()
+    }
+
+    fn public_key_for(byte: u8, zone: &ZoneId, period: DelegationPeriod) -> pq::ZonePeriodPublicKey {
+        let hash = [byte; 32];
+        pq::ZonePeriodPublicKey {
+            hash,
+            public_matrix: pq::PublicMatrixMaterial::fixture_seed_only(hash),
+            zone_id: LatticeDelegationVerifierImpl::zone_to_crypto(zone),
+            period: LatticeDelegationVerifierImpl::period_to_crypto(period),
+            params: ref_params(),
+        }
+    }
+
     fn sub_token(cert_id_byte: u8) -> LatticeSubToken {
         LatticeSubToken {
             cert_id: cert_id(cert_id_byte),
-            op_id: OperationId::new("op.test").unwrap(),
-            principal_id: PrincipalId::new("user:test").unwrap(),
+            op_id: operation(),
+            principal_id: principal(),
             request_descriptor_hash: [0_u8; 32],
             preimage_bytes: vec![0_u8; 8],
         }
@@ -744,7 +957,7 @@ mod tests {
         let sub = sub_token(0x01);
         let zone = ZoneId::work();
         let err = verifier
-            .verify_sub_token(&sub, &zone, 1_700_000_000_000)
+            .verify_sub_token(&sub, &zone, &operation(), &principal(), 1_700_000_000_000)
             .expect_err("stub verifier MUST return NotImplemented");
         assert_eq!(err, LatticeDelegationError::NotImplemented);
     }
@@ -809,6 +1022,28 @@ mod tests {
                 },
                 "delegation chain incomplete",
             ),
+            (
+                LatticeDelegationError::OperationMismatch {
+                    token_operation_hash: "hash-a".to_string(),
+                    request_operation_hash: "hash-b".to_string(),
+                },
+                "operation mismatch",
+            ),
+            (
+                LatticeDelegationError::PrincipalMismatch {
+                    token_principal_hash: "hash-a".to_string(),
+                    request_principal_hash: "hash-b".to_string(),
+                },
+                "principal mismatch",
+            ),
+            (
+                LatticeDelegationError::RequestBindingMismatch {
+                    cert_id: "deadbeef".to_string(),
+                    expected_hash: "hash-a".to_string(),
+                    got_hash: "hash-b".to_string(),
+                },
+                "request binding mismatch",
+            ),
         ];
         for (err, expected_substring) in cases {
             let s = err.to_string();
@@ -837,14 +1072,18 @@ mod tests {
             zone_id: ZoneId::work(),
             period: period(1_700_000_000_000, 1_700_003_600_000),
             parent_cert_id: Some(cert_id(0x50)),
-            pub_matrix_seed: [0xAB; 32],
+            public_key: public_key_for(
+                0xAB,
+                &ZoneId::work(),
+                period(1_700_000_000_000, 1_700_003_600_000),
+            ),
         };
         let json = serde_json::to_string(&certificate).unwrap();
         let back: DelegationCertificate = serde_json::from_str(&json).unwrap();
         assert_eq!(certificate, back);
         assert!(
             json.contains("abababab"),
-            "public matrix seed remains explicit public certificate material"
+            "public key hash remains explicit public certificate material"
         );
     }
 
@@ -866,23 +1105,106 @@ mod tests {
         period: DelegationPeriod,
         parent: Option<u8>,
     ) -> DelegationCertificate {
+        let public_key = public_key_for(byte, &zone, period);
         DelegationCertificate {
             cert_id: cert_id(byte),
             zone_id: zone,
             period,
             parent_cert_id: parent.map(cert_id),
-            pub_matrix_seed: [byte; 32],
+            public_key,
         }
     }
 
     fn sub_for(byte: u8) -> LatticeSubToken {
         LatticeSubToken {
             cert_id: cert_id(byte),
-            op_id: OperationId::new("op.test").unwrap(),
-            principal_id: PrincipalId::new("user:alice").unwrap(),
+            op_id: operation(),
+            principal_id: principal(),
             request_descriptor_hash: [0_u8; 32],
             preimage_bytes: vec![0_u8; ref_preimage_bytes()],
         }
+    }
+
+    fn bind_sub(
+        verifier: &LatticeDelegationVerifierImpl,
+        leaf: &DelegationCertificate,
+        mut sub: LatticeSubToken,
+    ) -> LatticeSubToken {
+        sub.request_descriptor_hash = LatticeDelegationVerifierImpl::request_descriptor_hash(
+            &leaf.cert_id,
+            &leaf.zone_id,
+            leaf.period,
+            &sub.op_id,
+            &sub.principal_id,
+            &leaf.public_key.hash,
+            &verifier.trust_set_id(),
+        );
+        sub
+    }
+
+    fn minted_token_fixture(
+        params: pq::LatticeParams,
+    ) -> (
+        LatticeDelegationVerifierImpl,
+        LatticeSubToken,
+        ZoneId,
+        OperationId,
+        PrincipalId,
+        u64,
+    ) {
+        let zone = ZoneId::work();
+        let operation = operation();
+        let principal = principal();
+        let policy_period = period(1_700_000_000_000, 1_700_003_600_000);
+        let crypto_zone = LatticeDelegationVerifierImpl::zone_to_crypto(&zone);
+        let crypto_period = LatticeDelegationVerifierImpl::period_to_crypto(policy_period);
+        let entropy = pq::TrapGenEntropy::from_fixture_seed(
+            b"fcp-policy/lattice-delegation-success-v1",
+            [0x42; 32],
+        );
+        let (master_public, master_trapdoor) =
+            pq::trap_gen_with_entropy(params, &entropy).expect("route TrapGen succeeds");
+        let (public_key, trapdoor) = pq::delegate(
+            &master_public,
+            &master_trapdoor,
+            crypto_zone,
+            crypto_period,
+            params,
+        )
+        .expect("route Delegate succeeds");
+        let h = pq::operation_hash(
+            &crypto_zone,
+            crypto_period,
+            operation.as_str().as_bytes(),
+            principal.as_str().as_bytes(),
+        );
+        let preimage =
+            pq::sample_pre(&public_key, &trapdoor, h, params).expect("route SamplePre succeeds");
+        let leaf = DelegationCertificate {
+            cert_id: cert_id(0x73),
+            zone_id: zone.clone(),
+            period: policy_period,
+            parent_cert_id: None,
+            public_key,
+        };
+        let verifier =
+            LatticeDelegationVerifierImpl::with_certificates(params, [leaf.clone()]);
+        let mut sub = LatticeSubToken {
+            cert_id: leaf.cert_id,
+            op_id: operation.clone(),
+            principal_id: principal.clone(),
+            request_descriptor_hash: [0_u8; 32],
+            preimage_bytes: preimage.as_bytes().to_vec(),
+        };
+        sub = bind_sub(&verifier, &leaf, sub);
+        (
+            verifier,
+            sub,
+            zone,
+            operation,
+            principal,
+            policy_period.start_unix_ms,
+        )
     }
 
     #[test]
@@ -913,7 +1235,13 @@ mod tests {
     fn impl_rejects_unknown_certificate() {
         let v = LatticeDelegationVerifierImpl::empty(ref_params());
         let err = v
-            .verify_sub_token(&sub_for(0xAA), &ZoneId::work(), 1_500_000)
+            .verify_sub_token(
+                &sub_for(0xAA),
+                &ZoneId::work(),
+                &operation(),
+                &principal(),
+                1_500_000,
+            )
             .expect_err("unknown cert MUST be rejected");
         match err {
             LatticeDelegationError::UnknownCertificate { cert_id } => {
@@ -935,7 +1263,13 @@ mod tests {
         );
         let sub = sub_for(0x10);
         let err = v
-            .verify_sub_token(&sub, &ZoneId::public(), 1_500_000)
+            .verify_sub_token(
+                &sub,
+                &ZoneId::public(),
+                &operation(),
+                &principal(),
+                1_500_000,
+            )
             .expect_err("zone mismatch MUST be rejected");
         match err {
             LatticeDelegationError::ZoneMismatch {
@@ -960,7 +1294,13 @@ mod tests {
             [cert(0x10, ZoneId::work(), p, None)],
         );
         let err = v
-            .verify_sub_token(&sub_for(0x10), &ZoneId::work(), 500_000)
+            .verify_sub_token(
+                &sub_for(0x10),
+                &ZoneId::work(),
+                &operation(),
+                &principal(),
+                500_000,
+            )
             .expect_err("now < period.start MUST be rejected");
         match err {
             LatticeDelegationError::OutsidePeriod {
@@ -987,7 +1327,13 @@ mod tests {
             [cert(0x10, ZoneId::work(), p, None)],
         );
         let err = v
-            .verify_sub_token(&sub_for(0x10), &ZoneId::work(), 3_000_000)
+            .verify_sub_token(
+                &sub_for(0x10),
+                &ZoneId::work(),
+                &operation(),
+                &principal(),
+                3_000_000,
+            )
             .expect_err("now > period.end MUST be rejected");
         assert!(matches!(err, LatticeDelegationError::OutsidePeriod { .. }));
     }
@@ -1001,7 +1347,13 @@ mod tests {
             [cert(0xBB, ZoneId::work(), p, Some(0xAA))],
         );
         let err = v
-            .verify_sub_token(&sub_for(0xBB), &ZoneId::work(), 1_500_000)
+            .verify_sub_token(
+                &sub_for(0xBB),
+                &ZoneId::work(),
+                &operation(),
+                &principal(),
+                1_500_000,
+            )
             .expect_err("missing parent MUST be rejected");
         match err {
             LatticeDelegationError::IncompleteDelegationChain { cert_id } => {
@@ -1030,7 +1382,13 @@ mod tests {
         );
         // now is inside the leaf's period but outside the parent's.
         let err = v
-            .verify_sub_token(&sub_for(0xBB), &ZoneId::work(), 1_500_000)
+            .verify_sub_token(
+                &sub_for(0xBB),
+                &ZoneId::work(),
+                &operation(),
+                &principal(),
+                1_500_000,
+            )
             .expect_err("expired ancestor MUST be rejected");
         match err {
             LatticeDelegationError::OutsidePeriod {
@@ -1061,7 +1419,13 @@ mod tests {
         }
         let v = LatticeDelegationVerifierImpl::with_certificates(ref_params(), certs);
         let err = v
-            .verify_sub_token(&sub_for(0x06), &ZoneId::work(), 5_000_000)
+            .verify_sub_token(
+                &sub_for(0x06),
+                &ZoneId::work(),
+                &operation(),
+                &principal(),
+                5_000_000,
+            )
             .expect_err("chain longer than params.depth MUST be rejected");
         match err {
             LatticeDelegationError::ChainTooDeep { observed, max } => {
@@ -1088,9 +1452,11 @@ mod tests {
         for i in 2_u8..=5 {
             certs.push(cert(i, ZoneId::work(), p, Some(i - 1)));
         }
+        let leaf = certs.last().expect("leaf exists").clone();
         let v = LatticeDelegationVerifierImpl::with_certificates(ref_params(), certs);
+        let sub = bind_sub(&v, &leaf, sub_for(0x05));
         let err = v
-            .verify_sub_token(&sub_for(0x05), &ZoneId::work(), 5_000_000)
+            .verify_sub_token(&sub, &ZoneId::work(), &operation(), &principal(), 5_000_000)
             .expect_err("crypto-pq stub MUST surface as NotImplemented");
         assert_eq!(err, LatticeDelegationError::NotImplemented);
     }
@@ -1098,14 +1464,13 @@ mod tests {
     #[test]
     fn impl_rejects_preimage_encoding_length_mismatch() {
         let p = period(0, 10_000_000);
-        let v = LatticeDelegationVerifierImpl::with_certificates(
-            ref_params(),
-            [cert(0x10, ZoneId::work(), p, None)],
-        );
+        let leaf = cert(0x10, ZoneId::work(), p, None);
+        let v = LatticeDelegationVerifierImpl::with_certificates(ref_params(), [leaf.clone()]);
         let mut sub = sub_for(0x10);
+        sub = bind_sub(&v, &leaf, sub);
         sub.preimage_bytes = vec![0_u8; 32]; // Wrong for V4_REFERENCE.
         let err = v
-            .verify_sub_token(&sub, &ZoneId::work(), 5_000_000)
+            .verify_sub_token(&sub, &ZoneId::work(), &operation(), &principal(), 5_000_000)
             .expect_err("wrong-length preimage MUST be rejected");
         match err {
             LatticeDelegationError::PreimageEncodingMismatch {
@@ -1133,12 +1498,11 @@ mod tests {
         // stub returns NotImplemented; the verifier MUST surface that
         // as the policy-layer NotImplemented (signalling V3 fall-back).
         let p = period(1_000_000, 2_000_000);
-        let v = LatticeDelegationVerifierImpl::with_certificates(
-            ref_params(),
-            [cert(0x10, ZoneId::work(), p, None)],
-        );
+        let leaf = cert(0x10, ZoneId::work(), p, None);
+        let v = LatticeDelegationVerifierImpl::with_certificates(ref_params(), [leaf.clone()]);
+        let sub = bind_sub(&v, &leaf, sub_for(0x10));
         let err = v
-            .verify_sub_token(&sub_for(0x10), &ZoneId::work(), 1_500_000)
+            .verify_sub_token(&sub, &ZoneId::work(), &operation(), &principal(), 1_500_000)
             .expect_err("happy path MUST surface as NotImplemented until crypto lands");
         assert_eq!(err, LatticeDelegationError::NotImplemented);
     }
@@ -1200,7 +1564,13 @@ mod tests {
         );
         // Verify the new period is the one used.
         let err = v
-            .verify_sub_token(&sub_for(0x10), &ZoneId::work(), 500_000)
+            .verify_sub_token(
+                &sub_for(0x10),
+                &ZoneId::work(),
+                &operation(),
+                &principal(),
+                500_000,
+            )
             .expect_err("now=500k is in p1 but NOT p2 (which won)");
         match err {
             LatticeDelegationError::OutsidePeriod {

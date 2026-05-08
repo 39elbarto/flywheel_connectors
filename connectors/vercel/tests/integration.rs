@@ -8,7 +8,9 @@
 use std::sync::Once;
 use std::time::Duration;
 
-use fcp_prelude::{ApprovalMode, FcpConnector, IdempotencyClass, RiskLevel, SafetyTier};
+use fcp_prelude::{
+    ApprovalMode, FcpConnector, IdempotencyClass, OperationInfo, RiskLevel, SafetyTier,
+};
 use fcp_sdk::migration::HttpRetryConfig;
 use fcp_vercel::client::VercelClient;
 use fcp_vercel::connector::VercelConnector;
@@ -17,7 +19,7 @@ use fcp_vercel::types::{
     AddDomainRequest, CreateDeploymentRequest, CreateEnvVarRequest, CreateProjectRequest,
     GitSource, TeamScope, VercelAuth,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -113,6 +115,336 @@ fn test_env() -> serde_json::Value {
         "gitBranch": "main",
         "configurationId": "cfg_123"
     })
+}
+
+const SCHEMA_OPERATIONS: [(&str, &str); 15] = [
+    ("health", "vercel.health"),
+    ("deployments_list", "vercel.deployments.list"),
+    ("deployments_get", "vercel.deployments.get"),
+    ("deployments_create", "vercel.deployments.create"),
+    ("deployments_delete", "vercel.deployments.delete"),
+    ("projects_list", "vercel.projects.list"),
+    ("projects_get", "vercel.projects.get"),
+    ("projects_create", "vercel.projects.create"),
+    ("projects_delete", "vercel.projects.delete"),
+    ("domains_list", "vercel.domains.list"),
+    ("domains_add", "vercel.domains.add"),
+    ("domains_remove", "vercel.domains.remove"),
+    ("env_list", "vercel.env.list"),
+    ("env_create", "vercel.env.create"),
+    ("env_delete", "vercel.env.delete"),
+];
+
+fn vercel_manifest() -> toml::Value {
+    toml::from_str(include_str!("../manifest.toml")).expect("Vercel manifest TOML should parse")
+}
+
+fn manifest_operations(manifest: &toml::Value) -> &toml::Table {
+    manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("manifest should contain provides.operations")
+}
+
+fn manifest_operation_schema(
+    manifest: &toml::Value,
+    operation_key: &str,
+    schema_key: &str,
+) -> Value {
+    let schema = manifest_operations(manifest)
+        .get(operation_key)
+        .and_then(|operation| operation.get(schema_key))
+        .expect("operation should define requested schema");
+
+    serde_json::to_value(schema).expect("manifest schema should convert to JSON")
+}
+
+fn runtime_operation<'a>(operations: &'a [OperationInfo], operation_id: &str) -> &'a OperationInfo {
+    operations
+        .iter()
+        .find(|operation| operation.id.as_str() == operation_id)
+        .expect("runtime introspection should include operation")
+}
+
+fn assert_schema_accepts(schema: &Value, payload: &Value) {
+    let validator = jsonschema::validator_for(schema).expect("schema should compile");
+    let errors = validator
+        .iter_errors(payload)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        errors.is_empty(),
+        "schema should accept payload {payload:#}: {errors:#?}"
+    );
+}
+
+fn assert_schema_rejects(schema: &Value, payload: &Value) {
+    let validator = jsonschema::validator_for(schema).expect("schema should compile");
+    let errors = validator
+        .iter_errors(payload)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        !errors.is_empty(),
+        "schema should reject payload {payload:#}"
+    );
+}
+
+fn object_with_field(field: &str, value: Value) -> Value {
+    let mut object = serde_json::Map::new();
+    object.insert(field.to_string(), value);
+    Value::Object(object)
+}
+
+fn assert_manifest_runtime_schema_parity(manifest: &toml::Value, operations: &[OperationInfo]) {
+    let manifest_ops = manifest_operations(manifest);
+    assert_eq!(
+        manifest_ops.len(),
+        SCHEMA_OPERATIONS.len(),
+        "manifest operation count should match schema coverage set"
+    );
+
+    for (operation_key, operation_id) in SCHEMA_OPERATIONS {
+        let operation = runtime_operation(operations, operation_id);
+        let input_schema = manifest_operation_schema(manifest, operation_key, "input_schema");
+        let output_schema = manifest_operation_schema(manifest, operation_key, "output_schema");
+
+        assert_eq!(
+            input_schema, operation.input_schema,
+            "{operation_id} manifest input_schema should match runtime introspection"
+        );
+        assert_eq!(
+            output_schema, operation.output_schema,
+            "{operation_id} manifest output_schema should match runtime introspection"
+        );
+        assert!(
+            jsonschema::validator_for(&input_schema).is_ok(),
+            "{operation_id} manifest input_schema should compile"
+        );
+        assert!(
+            jsonschema::validator_for(&output_schema).is_ok(),
+            "{operation_id} manifest output_schema should compile"
+        );
+    }
+}
+
+fn assert_catalog_input_schema_examples(manifest: &toml::Value) {
+    let health = manifest_operation_schema(manifest, "health", "input_schema");
+    assert_schema_accepts(&health, &json!({}));
+    assert_schema_rejects(&health, &json!({ "unexpected": true }));
+
+    let deployments_list = manifest_operation_schema(manifest, "deployments_list", "input_schema");
+    assert_schema_accepts(&deployments_list, &json!({}));
+    assert_schema_accepts(
+        &deployments_list,
+        &json!({ "project_id": "prj_123", "limit": 20 }),
+    );
+    assert_schema_rejects(&deployments_list, &json!({ "limit": "20" }));
+
+    let deployments_get = manifest_operation_schema(manifest, "deployments_get", "input_schema");
+    assert_schema_accepts(
+        &deployments_get,
+        &json!({ "deployment_id_or_url": "dpl_123" }),
+    );
+    assert_schema_rejects(&deployments_get, &json!({}));
+
+    let deployments_create =
+        manifest_operation_schema(manifest, "deployments_create", "input_schema");
+    assert_schema_accepts(
+        &deployments_create,
+        &json!({
+            "name": "demo-web",
+            "project": "demo",
+            "target": "production",
+            "git_source": {
+                "type": "github",
+                "ref": "main",
+                "repoId": "repo_123"
+            },
+            "meta": {}
+        }),
+    );
+    assert_schema_rejects(&deployments_create, &json!({ "project": "demo" }));
+    assert_schema_rejects(
+        &deployments_create,
+        &json!({ "name": "demo-web", "git_source": { "type": "github" } }),
+    );
+
+    let deployments_delete =
+        manifest_operation_schema(manifest, "deployments_delete", "input_schema");
+    assert_schema_accepts(&deployments_delete, &json!({ "deployment_id": "dpl_123" }));
+    assert_schema_rejects(&deployments_delete, &json!({}));
+
+    let projects_list = manifest_operation_schema(manifest, "projects_list", "input_schema");
+    assert_schema_accepts(&projects_list, &json!({ "limit": 5 }));
+    assert_schema_rejects(&projects_list, &json!({ "limit": "5" }));
+
+    let projects_get = manifest_operation_schema(manifest, "projects_get", "input_schema");
+    assert_schema_accepts(&projects_get, &json!({ "project_id_or_name": "demo" }));
+    assert_schema_rejects(
+        &projects_get,
+        &json!({ "project_id_or_name": "demo", "extra": true }),
+    );
+
+    let projects_create = manifest_operation_schema(manifest, "projects_create", "input_schema");
+    assert_schema_accepts(
+        &projects_create,
+        &json!({
+            "name": "created-demo",
+            "framework": "nextjs",
+            "rootDirectory": "apps/web",
+            "publicSource": false
+        }),
+    );
+    assert_schema_rejects(&projects_create, &json!({ "framework": "nextjs" }));
+
+    let projects_delete = manifest_operation_schema(manifest, "projects_delete", "input_schema");
+    assert_schema_accepts(&projects_delete, &json!({ "project_id_or_name": "demo" }));
+    assert_schema_rejects(&projects_delete, &json!({}));
+
+    let domains_list = manifest_operation_schema(manifest, "domains_list", "input_schema");
+    assert_schema_accepts(&domains_list, &json!({ "project_id_or_name": "demo" }));
+    assert_schema_rejects(&domains_list, &json!({}));
+
+    let domains_add = manifest_operation_schema(manifest, "domains_add", "input_schema");
+    assert_schema_accepts(
+        &domains_add,
+        &json!({
+            "project_id_or_name": "demo",
+            "name": "demo.example.com",
+            "git_branch": "main",
+            "redirect_status_code": 308
+        }),
+    );
+    assert_schema_rejects(&domains_add, &json!({ "project_id_or_name": "demo" }));
+
+    let domains_remove = manifest_operation_schema(manifest, "domains_remove", "input_schema");
+    assert_schema_accepts(
+        &domains_remove,
+        &json!({ "project_id_or_name": "demo", "domain_name": "demo.example.com" }),
+    );
+    assert_schema_rejects(&domains_remove, &json!({ "project_id_or_name": "demo" }));
+
+    let env_list = manifest_operation_schema(manifest, "env_list", "input_schema");
+    assert_schema_accepts(&env_list, &json!({ "project_id_or_name": "demo" }));
+    assert_schema_rejects(&env_list, &json!({}));
+
+    let env_create = manifest_operation_schema(manifest, "env_create", "input_schema");
+    assert_schema_accepts(
+        &env_create,
+        &json!({
+            "project_id_or_name": "demo",
+            "key": "API_KEY",
+            "value": "secret-value",
+            "env_type": "encrypted",
+            "target": ["production"],
+            "git_branch": "main",
+            "custom_environment_ids": ["env_prod"]
+        }),
+    );
+    assert_schema_accepts(
+        &env_create,
+        &json!({
+            "project_id_or_name": "demo",
+            "envs": [{
+                "key": "API_KEY",
+                "value": "secret-value",
+                "type": "encrypted",
+                "target": ["production"],
+                "gitBranch": "main",
+                "customEnvironmentIds": ["env_prod"]
+            }]
+        }),
+    );
+    assert_schema_rejects(
+        &env_create,
+        &json!({ "project_id_or_name": "demo", "key": "API_KEY" }),
+    );
+
+    let env_delete = manifest_operation_schema(manifest, "env_delete", "input_schema");
+    assert_schema_accepts(
+        &env_delete,
+        &json!({ "project_id_or_name": "demo", "environment_variable_id": "env_123" }),
+    );
+    assert_schema_rejects(&env_delete, &json!({ "project_id_or_name": "demo" }));
+}
+
+fn assert_catalog_output_schema_examples(manifest: &toml::Value) {
+    let health = manifest_operation_schema(manifest, "health", "output_schema");
+    assert_schema_accepts(&health, &json!({ "status": "ok" }));
+    assert_schema_rejects(&health, &json!({ "status": "degraded" }));
+
+    for (operation_key, field) in [
+        ("deployments_list", "deployments"),
+        ("projects_list", "projects"),
+        ("domains_list", "domains"),
+        ("env_list", "envs"),
+    ] {
+        let schema = manifest_operation_schema(manifest, operation_key, "output_schema");
+        assert_schema_accepts(&schema, &object_with_field(field, json!([])));
+
+        let mut payload = serde_json::Map::new();
+        payload.insert(field.to_string(), json!([{}]));
+        payload.insert("pagination".into(), json!({}));
+        assert_schema_accepts(&schema, &Value::Object(payload));
+
+        assert_schema_rejects(&schema, &json!({}));
+        assert_schema_rejects(&schema, &json!([]));
+    }
+
+    for operation_key in [
+        "deployments_get",
+        "deployments_create",
+        "projects_get",
+        "projects_create",
+        "domains_add",
+    ] {
+        let schema = manifest_operation_schema(manifest, operation_key, "output_schema");
+        assert_schema_accepts(&schema, &json!({}));
+        assert_schema_accepts(&schema, &json!({ "id": "resource-1" }));
+        assert_schema_rejects(&schema, &json!([]));
+    }
+
+    for operation_key in ["deployments_delete", "domains_remove", "env_delete"] {
+        let schema = manifest_operation_schema(manifest, operation_key, "output_schema");
+        assert_schema_accepts(
+            &schema,
+            &json!({
+                "deleted": true,
+                "resource_id": "resource-1",
+                "status": null,
+                "state": null
+            }),
+        );
+        assert_schema_rejects(&schema, &json!({ "resource_id": "resource-1" }));
+    }
+
+    let projects_delete = manifest_operation_schema(manifest, "projects_delete", "output_schema");
+    assert_schema_accepts(
+        &projects_delete,
+        &json!({ "deleted": true, "project_id_or_name": "demo" }),
+    );
+    assert_schema_rejects(
+        &projects_delete,
+        &json!({ "deleted": false, "project_id_or_name": "demo" }),
+    );
+
+    let env_create = manifest_operation_schema(manifest, "env_create", "output_schema");
+    assert_schema_accepts(&env_create, &json!([]));
+    assert_schema_accepts(&env_create, &json!([{}]));
+    assert_schema_rejects(&env_create, &json!({}));
+}
+
+#[test]
+fn manifest_operation_schemas_compile_and_validate_core_payloads() {
+    init_logging();
+    let manifest = vercel_manifest();
+    let introspection = VercelConnector::new().introspect();
+
+    assert_manifest_runtime_schema_parity(&manifest, &introspection.operations);
+    assert_catalog_input_schema_examples(&manifest);
+    assert_catalog_output_schema_examples(&manifest);
 }
 
 #[fcp_async_core::runtime::test]

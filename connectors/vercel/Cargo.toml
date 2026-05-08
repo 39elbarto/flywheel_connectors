@@ -32,4 +32,6 @@ hex.workspace = true
 percent-encoding.workspace = true
 
 [dev-dependencies]
+jsonschema.workspace = true
+toml.workspace = true
 wiremock.workspace = true

@@ -35,6 +35,8 @@ capability = "vercel.projects.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+input_schema = { type = "object", additionalProperties = false, properties = {} }
+output_schema = { type = "object", required = ["status"], additionalProperties = false, properties = { status = { type = "string", const = "ok", description = "Vercel credential health status" } } }
 
 [provides.operations.health.network_constraints]
 host_allow = ["api.vercel.com"]
@@ -53,6 +55,8 @@ capability = "vercel.deployments.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+input_schema = { type = "object", additionalProperties = false, properties = { project_id = { type = "string", description = "Optional Vercel project ID" }, limit = { type = "integer", description = "Maximum deployments to return" } } }
+output_schema = { type = "object", required = ["deployments"], additionalProperties = false, properties = { deployments = { type = "array", items = { type = "object" }, description = "Vercel deployments" }, pagination = { type = "object" } } }
 
 [provides.operations.deployments_list.network_constraints]
 host_allow = ["api.vercel.com"]
@@ -71,6 +75,8 @@ capability = "vercel.deployments.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+input_schema = { type = "object", required = ["deployment_id_or_url"], additionalProperties = false, properties = { deployment_id_or_url = { type = "string", description = "Vercel deployment ID or URL slug" } } }
+output_schema = { type = "object" }
 
 [provides.operations.deployments_get.network_constraints]
 host_allow = ["api.vercel.com"]
@@ -89,6 +95,8 @@ capability = "vercel.deployments.write"
 risk = "high"
 safety_tier = "risky"
 idempotency = "strict"
+input_schema = { type = "object", required = ["name"], additionalProperties = false, properties = { name = { type = "string", description = "Deployment name" }, project = { type = "string", description = "Optional Vercel project name" }, target = { type = "string", description = "Optional deployment target" }, git_source = { type = "object", required = ["type", "ref"], additionalProperties = false, properties = { type = { type = "string", description = "Git provider type, such as github" }, ref = { type = "string", description = "Git branch, tag, or ref" }, repoId = { type = "string", description = "Git provider repository ID" }, sha = { type = "string", description = "Git commit SHA" }, projectId = { type = "string", description = "Vercel project ID" } } }, meta = { type = "object" } } }
+output_schema = { type = "object" }
 
 [provides.operations.deployments_create.network_constraints]
 host_allow = ["api.vercel.com"]
@@ -107,6 +115,8 @@ capability = "vercel.deployments.write"
 risk = "high"
 safety_tier = "dangerous"
 idempotency = "strict"
+input_schema = { type = "object", required = ["deployment_id"], additionalProperties = false, properties = { deployment_id = { type = "string", description = "Vercel deployment ID to delete" } } }
+output_schema = { type = "object", required = ["deleted"], additionalProperties = false, properties = { deleted = { type = "boolean", description = "Whether the resource was deleted" }, resource_id = { type = ["string", "null"], description = "Deleted Vercel resource ID" }, status = { type = ["string", "null"], description = "Optional provider status" }, state = { type = ["string", "null"], description = "Optional provider state" } } }
 
 [provides.operations.deployments_delete.network_constraints]
 host_allow = ["api.vercel.com"]
@@ -125,6 +135,8 @@ capability = "vercel.projects.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+input_schema = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", description = "Maximum projects to return" } } }
+output_schema = { type = "object", required = ["projects"], additionalProperties = false, properties = { projects = { type = "array", items = { type = "object" }, description = "Vercel projects" }, pagination = { type = "object" } } }
 
 [provides.operations.projects_list.network_constraints]
 host_allow = ["api.vercel.com"]
@@ -143,6 +155,8 @@ capability = "vercel.projects.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+input_schema = { type = "object", required = ["project_id_or_name"], additionalProperties = false, properties = { project_id_or_name = { type = "string", description = "Vercel project ID or name" } } }
+output_schema = { type = "object" }
 
 [provides.operations.projects_get.network_constraints]
 host_allow = ["api.vercel.com"]
@@ -161,6 +175,8 @@ capability = "vercel.projects.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "strict"
+input_schema = { type = "object", required = ["name"], additionalProperties = false, properties = { name = { type = "string", description = "New Vercel project name" }, framework = { type = "string", description = "Optional framework preset" }, rootDirectory = { type = "string", description = "Optional monorepo root directory" }, publicSource = { type = "boolean", description = "Whether source is public" }, buildCommand = { type = "string", description = "Optional build command" }, installCommand = { type = "string", description = "Optional install command" }, outputDirectory = { type = "string", description = "Optional output directory" }, devCommand = { type = "string", description = "Optional dev command" } } }
+output_schema = { type = "object" }
 
 [provides.operations.projects_create.network_constraints]
 host_allow = ["api.vercel.com"]
@@ -179,6 +195,8 @@ capability = "vercel.projects.write"
 risk = "critical"
 safety_tier = "dangerous"
 idempotency = "strict"
+input_schema = { type = "object", required = ["project_id_or_name"], additionalProperties = false, properties = { project_id_or_name = { type = "string", description = "Vercel project ID or name to delete" } } }
+output_schema = { type = "object", required = ["deleted", "project_id_or_name"], additionalProperties = false, properties = { deleted = { type = "boolean", const = true }, project_id_or_name = { type = "string", description = "Deleted Vercel project ID or name" } } }
 
 [provides.operations.projects_delete.network_constraints]
 host_allow = ["api.vercel.com"]
@@ -197,6 +215,8 @@ capability = "vercel.domains.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+input_schema = { type = "object", required = ["project_id_or_name"], additionalProperties = false, properties = { project_id_or_name = { type = "string", description = "Vercel project ID or name" } } }
+output_schema = { type = "object", required = ["domains"], additionalProperties = false, properties = { domains = { type = "array", items = { type = "object" }, description = "Vercel project domains" }, pagination = { type = "object" } } }
 
 [provides.operations.domains_list.network_constraints]
 host_allow = ["api.vercel.com"]
@@ -215,6 +235,8 @@ capability = "vercel.domains.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "strict"
+input_schema = { type = "object", required = ["project_id_or_name", "name"], additionalProperties = false, properties = { project_id_or_name = { type = "string", description = "Vercel project ID or name" }, name = { type = "string", description = "Domain name to attach" }, git_branch = { type = "string", description = "Optional Git branch scope" }, redirect = { type = "string", description = "Optional redirect target" }, redirect_status_code = { type = "integer", description = "Optional redirect status code" } } }
+output_schema = { type = "object" }
 
 [provides.operations.domains_add.network_constraints]
 host_allow = ["api.vercel.com"]
@@ -233,6 +255,8 @@ capability = "vercel.domains.write"
 risk = "high"
 safety_tier = "dangerous"
 idempotency = "strict"
+input_schema = { type = "object", required = ["project_id_or_name", "domain_name"], additionalProperties = false, properties = { project_id_or_name = { type = "string", description = "Vercel project ID or name" }, domain_name = { type = "string", description = "Domain name to remove" } } }
+output_schema = { type = "object", required = ["deleted"], additionalProperties = false, properties = { deleted = { type = "boolean", description = "Whether the resource was deleted" }, resource_id = { type = ["string", "null"], description = "Deleted Vercel resource ID" }, status = { type = ["string", "null"], description = "Optional provider status" }, state = { type = ["string", "null"], description = "Optional provider state" } } }
 
 [provides.operations.domains_remove.network_constraints]
 host_allow = ["api.vercel.com"]
@@ -251,6 +275,8 @@ capability = "vercel.env.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+input_schema = { type = "object", required = ["project_id_or_name"], additionalProperties = false, properties = { project_id_or_name = { type = "string", description = "Vercel project ID or name" } } }
+output_schema = { type = "object", required = ["envs"], additionalProperties = false, properties = { envs = { type = "array", items = { type = "object" }, description = "Vercel project environment variables" }, pagination = { type = "object" } } }
 
 [provides.operations.env_list.network_constraints]
 host_allow = ["api.vercel.com"]
@@ -269,6 +295,8 @@ capability = "vercel.env.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "strict"
+input_schema = { type = "object", required = ["project_id_or_name"], oneOf = [{ required = ["project_id_or_name", "envs"] }, { required = ["project_id_or_name", "key", "value", "env_type"] }], additionalProperties = false, properties = { project_id_or_name = { type = "string", description = "Vercel project ID or name" }, envs = { type = "array", items = { type = "object", required = ["key", "value", "type"], additionalProperties = false, properties = { key = { type = "string", description = "Environment variable key" }, value = { type = "string", description = "Environment variable value" }, type = { type = "string", description = "Vercel environment variable type" }, target = { type = "array", items = { type = "string" }, description = "Deployment targets, such as production or preview" }, gitBranch = { type = "string", description = "Optional Git branch scope" }, customEnvironmentIds = { type = "array", items = { type = "string" }, description = "Custom Vercel environment IDs" } } } }, key = { type = "string", description = "Environment variable key" }, value = { type = "string", description = "Environment variable value" }, env_type = { type = "string", description = "Vercel environment variable type" }, target = { type = "array", items = { type = "string" }, description = "Deployment targets, such as production or preview" }, git_branch = { type = "string", description = "Optional Git branch scope" }, custom_environment_ids = { type = "array", items = { type = "string" }, description = "Custom Vercel environment IDs" } } }
+output_schema = { type = "array", items = { type = "object" } }
 
 [provides.operations.env_create.network_constraints]
 host_allow = ["api.vercel.com"]
@@ -287,6 +315,8 @@ capability = "vercel.env.write"
 risk = "high"
 safety_tier = "dangerous"
 idempotency = "strict"
+input_schema = { type = "object", required = ["project_id_or_name", "environment_variable_id"], additionalProperties = false, properties = { project_id_or_name = { type = "string", description = "Vercel project ID or name" }, environment_variable_id = { type = "string", description = "Environment variable ID to delete" } } }
+output_schema = { type = "object", required = ["deleted"], additionalProperties = false, properties = { deleted = { type = "boolean", description = "Whether the resource was deleted" }, resource_id = { type = ["string", "null"], description = "Deleted Vercel resource ID" }, status = { type = ["string", "null"], description = "Optional provider status" }, state = { type = ["string", "null"], description = "Optional provider state" } } }
 
 [provides.operations.env_delete.network_constraints]
 host_allow = ["api.vercel.com"]

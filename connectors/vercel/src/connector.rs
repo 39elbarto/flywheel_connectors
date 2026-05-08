@@ -13,7 +13,7 @@ use fcp_prelude::{
 };
 use fcp_sdk::migration::HttpRetryConfig;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -308,16 +308,178 @@ impl Default for VercelConnector {
     }
 }
 
-fn schema(required: &[&str]) -> serde_json::Value {
-    if required.is_empty() {
-        json!({ "type": "object" })
-    } else {
-        json!({ "type": "object", "required": required })
-    }
+fn string_property(description: &str) -> Value {
+    json!({"type": "string", "description": description})
 }
 
-fn array_schema() -> serde_json::Value {
-    json!({ "type": "array" })
+fn integer_property(description: &str) -> Value {
+    json!({"type": "integer", "description": description})
+}
+
+fn boolean_property(description: &str) -> Value {
+    json!({"type": "boolean", "description": description})
+}
+
+fn string_array_property(description: &str) -> Value {
+    json!({"type": "array", "items": {"type": "string"}, "description": description})
+}
+
+fn object_schema(required: &[&str], properties: Vec<(&str, Value)>) -> Value {
+    let properties = properties
+        .into_iter()
+        .map(|(name, schema)| (name.to_string(), schema))
+        .collect::<Map<String, Value>>();
+    let mut schema = Map::new();
+    schema.insert("type".into(), Value::String("object".into()));
+    if !required.is_empty() {
+        schema.insert("required".into(), json!(required));
+    }
+    schema.insert("additionalProperties".into(), Value::Bool(false));
+    schema.insert("properties".into(), Value::Object(properties));
+    Value::Object(schema)
+}
+
+fn no_input_schema() -> Value {
+    object_schema(&[], Vec::new())
+}
+
+fn object_output_schema() -> Value {
+    json!({"type": "object"})
+}
+
+fn list_output_schema(field: &str, description: &str) -> Value {
+    object_schema(
+        &[field],
+        vec![
+            (
+                field,
+                json!({"type": "array", "items": {"type": "object"}, "description": description}),
+            ),
+            ("pagination", object_output_schema()),
+        ],
+    )
+}
+
+fn delete_status_output_schema() -> Value {
+    object_schema(
+        &["deleted"],
+        vec![
+            (
+                "deleted",
+                boolean_property("Whether the resource was deleted"),
+            ),
+            (
+                "resource_id",
+                json!({"type": ["string", "null"], "description": "Deleted Vercel resource ID"}),
+            ),
+            (
+                "status",
+                json!({"type": ["string", "null"], "description": "Optional provider status"}),
+            ),
+            (
+                "state",
+                json!({"type": ["string", "null"], "description": "Optional provider state"}),
+            ),
+        ],
+    )
+}
+
+fn project_delete_output_schema() -> Value {
+    object_schema(
+        &["deleted", "project_id_or_name"],
+        vec![
+            ("deleted", json!({"type": "boolean", "const": true})),
+            (
+                "project_id_or_name",
+                string_property("Deleted Vercel project ID or name"),
+            ),
+        ],
+    )
+}
+
+fn health_output_schema() -> Value {
+    object_schema(
+        &["status"],
+        vec![(
+            "status",
+            json!({"type": "string", "const": "ok", "description": "Vercel credential health status"}),
+        )],
+    )
+}
+
+fn git_source_schema() -> Value {
+    object_schema(
+        &["type", "ref"],
+        vec![
+            ("type", string_property("Git provider type, such as github")),
+            ("ref", string_property("Git branch, tag, or ref")),
+            ("repoId", string_property("Git provider repository ID")),
+            ("sha", string_property("Git commit SHA")),
+            ("projectId", string_property("Vercel project ID")),
+        ],
+    )
+}
+
+fn create_env_var_batch_schema() -> Value {
+    object_schema(
+        &["key", "value", "type"],
+        vec![
+            ("key", string_property("Environment variable key")),
+            ("value", string_property("Environment variable value")),
+            ("type", string_property("Vercel environment variable type")),
+            (
+                "target",
+                string_array_property("Deployment targets, such as production or preview"),
+            ),
+            ("gitBranch", string_property("Optional Git branch scope")),
+            (
+                "customEnvironmentIds",
+                string_array_property("Custom Vercel environment IDs"),
+            ),
+        ],
+    )
+}
+
+fn env_create_input_schema() -> Value {
+    let mut schema = object_schema(
+        &["project_id_or_name"],
+        vec![
+            (
+                "project_id_or_name",
+                string_property("Vercel project ID or name"),
+            ),
+            (
+                "envs",
+                json!({"type": "array", "items": create_env_var_batch_schema()}),
+            ),
+            ("key", string_property("Environment variable key")),
+            ("value", string_property("Environment variable value")),
+            (
+                "env_type",
+                string_property("Vercel environment variable type"),
+            ),
+            (
+                "target",
+                string_array_property("Deployment targets, such as production or preview"),
+            ),
+            ("git_branch", string_property("Optional Git branch scope")),
+            (
+                "custom_environment_ids",
+                string_array_property("Custom Vercel environment IDs"),
+            ),
+        ],
+    );
+
+    if let Some(object) = schema.as_object_mut() {
+        object.insert(
+            "oneOf".into(),
+            json!([
+                {"required": ["project_id_or_name", "envs"]},
+                {"required": ["project_id_or_name", "key", "value", "env_type"]}
+            ]),
+        );
+    }
+    schema
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -363,8 +525,8 @@ fn operations_info() -> Vec<OperationInfo> {
             RiskLevel::Low,
             SafetyTier::Safe,
             IdempotencyClass::Strict,
-            schema(&[]),
-            schema(&[]),
+            no_input_schema(),
+            health_output_schema(),
             "Verify the configured Vercel token before performing work",
             None,
         ),
@@ -375,8 +537,14 @@ fn operations_info() -> Vec<OperationInfo> {
             RiskLevel::Low,
             SafetyTier::Safe,
             IdempotencyClass::None,
-            schema(&[]),
-            schema(&[]),
+            object_schema(
+                &[],
+                vec![
+                    ("project_id", string_property("Optional Vercel project ID")),
+                    ("limit", integer_property("Maximum deployments to return")),
+                ],
+            ),
+            list_output_schema("deployments", "Vercel deployments"),
             "Review recent deployments for a project or account",
             None,
         ),
@@ -387,8 +555,14 @@ fn operations_info() -> Vec<OperationInfo> {
             RiskLevel::Low,
             SafetyTier::Safe,
             IdempotencyClass::None,
-            schema(&["deployment_id_or_url"]),
-            schema(&[]),
+            object_schema(
+                &["deployment_id_or_url"],
+                vec![(
+                    "deployment_id_or_url",
+                    string_property("Vercel deployment ID or URL slug"),
+                )],
+            ),
+            object_output_schema(),
             "Inspect deployment readiness or metadata for a specific deployment",
             None,
         ),
@@ -399,8 +573,17 @@ fn operations_info() -> Vec<OperationInfo> {
             RiskLevel::High,
             SafetyTier::Risky,
             IdempotencyClass::Strict,
-            schema(&["name"]),
-            schema(&[]),
+            object_schema(
+                &["name"],
+                vec![
+                    ("name", string_property("Deployment name")),
+                    ("project", string_property("Optional Vercel project name")),
+                    ("target", string_property("Optional deployment target")),
+                    ("git_source", git_source_schema()),
+                    ("meta", object_output_schema()),
+                ],
+            ),
+            object_output_schema(),
             "Trigger a new deployment from a Vercel project or Git source",
             None,
         ),
@@ -411,8 +594,14 @@ fn operations_info() -> Vec<OperationInfo> {
             RiskLevel::High,
             SafetyTier::Dangerous,
             IdempotencyClass::Strict,
-            schema(&["deployment_id"]),
-            schema(&[]),
+            object_schema(
+                &["deployment_id"],
+                vec![(
+                    "deployment_id",
+                    string_property("Vercel deployment ID to delete"),
+                )],
+            ),
+            delete_status_output_schema(),
             "Remove a deployment that should no longer be accessible",
             Some(ApprovalMode::Interactive),
         ),
@@ -423,8 +612,11 @@ fn operations_info() -> Vec<OperationInfo> {
             RiskLevel::Low,
             SafetyTier::Safe,
             IdempotencyClass::None,
-            schema(&[]),
-            schema(&[]),
+            object_schema(
+                &[],
+                vec![("limit", integer_property("Maximum projects to return"))],
+            ),
+            list_output_schema("projects", "Vercel projects"),
             "Enumerate Vercel projects available to the configured account",
             None,
         ),
@@ -435,8 +627,14 @@ fn operations_info() -> Vec<OperationInfo> {
             RiskLevel::Low,
             SafetyTier::Safe,
             IdempotencyClass::None,
-            schema(&["project_id_or_name"]),
-            schema(&[]),
+            object_schema(
+                &["project_id_or_name"],
+                vec![(
+                    "project_id_or_name",
+                    string_property("Vercel project ID or name"),
+                )],
+            ),
+            object_output_schema(),
             "Inspect framework, root directory, or metadata for a specific project",
             None,
         ),
@@ -447,8 +645,29 @@ fn operations_info() -> Vec<OperationInfo> {
             RiskLevel::Medium,
             SafetyTier::Risky,
             IdempotencyClass::Strict,
-            schema(&["name"]),
-            schema(&[]),
+            object_schema(
+                &["name"],
+                vec![
+                    ("name", string_property("New Vercel project name")),
+                    ("framework", string_property("Optional framework preset")),
+                    (
+                        "rootDirectory",
+                        string_property("Optional monorepo root directory"),
+                    ),
+                    ("publicSource", boolean_property("Whether source is public")),
+                    ("buildCommand", string_property("Optional build command")),
+                    (
+                        "installCommand",
+                        string_property("Optional install command"),
+                    ),
+                    (
+                        "outputDirectory",
+                        string_property("Optional output directory"),
+                    ),
+                    ("devCommand", string_property("Optional dev command")),
+                ],
+            ),
+            object_output_schema(),
             "Provision a new Vercel project",
             None,
         ),
@@ -459,8 +678,14 @@ fn operations_info() -> Vec<OperationInfo> {
             RiskLevel::Critical,
             SafetyTier::Dangerous,
             IdempotencyClass::Strict,
-            schema(&["project_id_or_name"]),
-            schema(&[]),
+            object_schema(
+                &["project_id_or_name"],
+                vec![(
+                    "project_id_or_name",
+                    string_property("Vercel project ID or name to delete"),
+                )],
+            ),
+            project_delete_output_schema(),
             "Permanently remove a project and its deployment surface",
             Some(ApprovalMode::Interactive),
         ),
@@ -471,8 +696,14 @@ fn operations_info() -> Vec<OperationInfo> {
             RiskLevel::Low,
             SafetyTier::Safe,
             IdempotencyClass::None,
-            schema(&["project_id_or_name"]),
-            schema(&[]),
+            object_schema(
+                &["project_id_or_name"],
+                vec![(
+                    "project_id_or_name",
+                    string_property("Vercel project ID or name"),
+                )],
+            ),
+            list_output_schema("domains", "Vercel project domains"),
             "Inspect the custom domains assigned to a project",
             None,
         ),
@@ -483,8 +714,23 @@ fn operations_info() -> Vec<OperationInfo> {
             RiskLevel::Medium,
             SafetyTier::Risky,
             IdempotencyClass::Strict,
-            schema(&["project_id_or_name", "name"]),
-            schema(&[]),
+            object_schema(
+                &["project_id_or_name", "name"],
+                vec![
+                    (
+                        "project_id_or_name",
+                        string_property("Vercel project ID or name"),
+                    ),
+                    ("name", string_property("Domain name to attach")),
+                    ("git_branch", string_property("Optional Git branch scope")),
+                    ("redirect", string_property("Optional redirect target")),
+                    (
+                        "redirect_status_code",
+                        integer_property("Optional redirect status code"),
+                    ),
+                ],
+            ),
+            object_output_schema(),
             "Attach a custom domain to a Vercel project",
             None,
         ),
@@ -495,8 +741,17 @@ fn operations_info() -> Vec<OperationInfo> {
             RiskLevel::High,
             SafetyTier::Dangerous,
             IdempotencyClass::Strict,
-            schema(&["project_id_or_name", "domain_name"]),
-            schema(&[]),
+            object_schema(
+                &["project_id_or_name", "domain_name"],
+                vec![
+                    (
+                        "project_id_or_name",
+                        string_property("Vercel project ID or name"),
+                    ),
+                    ("domain_name", string_property("Domain name to remove")),
+                ],
+            ),
+            delete_status_output_schema(),
             "Detach a custom domain from a project",
             Some(ApprovalMode::Interactive),
         ),
@@ -507,8 +762,14 @@ fn operations_info() -> Vec<OperationInfo> {
             RiskLevel::Low,
             SafetyTier::Safe,
             IdempotencyClass::None,
-            schema(&["project_id_or_name"]),
-            schema(&[]),
+            object_schema(
+                &["project_id_or_name"],
+                vec![(
+                    "project_id_or_name",
+                    string_property("Vercel project ID or name"),
+                )],
+            ),
+            list_output_schema("envs", "Vercel project environment variables"),
             "Inspect configured environment variables for a project",
             None,
         ),
@@ -519,8 +780,8 @@ fn operations_info() -> Vec<OperationInfo> {
             RiskLevel::Medium,
             SafetyTier::Risky,
             IdempotencyClass::Strict,
-            schema(&["project_id_or_name"]),
-            array_schema(),
+            env_create_input_schema(),
+            json!({"type": "array", "items": {"type": "object"}}),
             "Add one or more environment variables to a project",
             None,
         ),
@@ -531,8 +792,20 @@ fn operations_info() -> Vec<OperationInfo> {
             RiskLevel::High,
             SafetyTier::Dangerous,
             IdempotencyClass::Strict,
-            schema(&["project_id_or_name", "environment_variable_id"]),
-            schema(&[]),
+            object_schema(
+                &["project_id_or_name", "environment_variable_id"],
+                vec![
+                    (
+                        "project_id_or_name",
+                        string_property("Vercel project ID or name"),
+                    ),
+                    (
+                        "environment_variable_id",
+                        string_property("Environment variable ID to delete"),
+                    ),
+                ],
+            ),
+            delete_status_output_schema(),
             "Remove an environment variable from a project",
             Some(ApprovalMode::Interactive),
         ),

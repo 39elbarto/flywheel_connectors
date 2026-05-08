@@ -583,58 +583,73 @@ impl LatticeDelegationVerifierImpl {
         );
         let now_secs = now_unix_ms / 1000;
 
-        match pq::verify(&zp_pub, h, preimage, now_secs, self.params) {
-            Ok(()) => Ok(LatticeVerificationReceipt {
+        pq::verify(&zp_pub, h, preimage, now_secs, self.params)
+            .map(|()| LatticeVerificationReceipt {
                 cert_id: leaf.cert_id,
                 period: leaf.period,
                 verified_at_unix_ms: now_unix_ms,
-            }),
-            Err(pq::LatticePqError::NotImplemented { .. }) => {
-                Err(LatticeDelegationError::NotImplemented)
+            })
+            .map_err(|err| self.map_crypto_error(leaf, &err))
+    }
+
+    fn map_crypto_error(
+        &self,
+        leaf: &DelegationCertificate,
+        err: &pq::LatticePqError,
+    ) -> LatticeDelegationError {
+        match err {
+            pq::LatticePqError::NotImplemented { .. }
+            | pq::LatticePqError::UnsupportedPrimitiveRoute { .. } => {
+                LatticeDelegationError::NotImplemented
             }
-            Err(pq::LatticePqError::VerificationEquationFailed) => {
-                Err(LatticeDelegationError::VerificationEquationFailed {
+            pq::LatticePqError::VerificationEquationFailed => {
+                LatticeDelegationError::VerificationEquationFailed {
                     cert_id: leaf.cert_id.to_hex(),
-                })
+                }
             }
-            Err(pq::LatticePqError::PreimageNormTooLarge { .. }) => {
-                Err(LatticeDelegationError::PreimageTooLong {
+            pq::LatticePqError::PreimageNormTooLarge { .. } => {
+                LatticeDelegationError::PreimageTooLong {
                     cert_id: leaf.cert_id.to_hex(),
-                })
+                }
             }
-            Err(pq::LatticePqError::OutsidePeriod {
+            pq::LatticePqError::OutsidePeriod {
                 now_secs: ns,
                 start_secs,
                 end_secs,
-            }) => Err(LatticeDelegationError::OutsidePeriod {
+            } => LatticeDelegationError::OutsidePeriod {
                 now_unix_ms: ns.saturating_mul(1000),
                 start_unix_ms: start_secs.saturating_mul(1000),
                 end_unix_ms: end_secs.saturating_mul(1000),
-            }),
-            Err(pq::LatticePqError::ParameterMismatch { caller, key }) => {
-                Err(LatticeDelegationError::ParameterMismatch {
+            },
+            pq::LatticePqError::ParameterMismatch { caller, key } => {
+                LatticeDelegationError::ParameterMismatch {
                     verifier_n: caller.n,
                     cert_n: key.n,
-                })
+                }
             }
-            Err(pq::LatticePqError::InvalidEncodingLength { expected, got, .. }) => {
-                Err(LatticeDelegationError::PreimageEncodingMismatch {
+            pq::LatticePqError::InvalidEncodingLength { expected, got, .. } => {
+                LatticeDelegationError::PreimageEncodingMismatch {
                     cert_id: leaf.cert_id.to_hex(),
-                    expected,
-                    got,
-                })
+                    expected: *expected,
+                    got: *got,
+                }
             }
-            Err(
-                pq::LatticePqError::InvalidParameter { .. }
-                | pq::LatticePqError::RepresentationTooLarge { .. },
-            ) => Err(LatticeDelegationError::ParameterMismatch {
-                verifier_n: self.params.n,
-                cert_n: self.params.n,
-            }),
-            Err(pq::LatticePqError::InvalidPeriod { .. }) => {
-                Err(LatticeDelegationError::IncompleteDelegationChain {
+            // Secret-bearing trapdoor representation failures should never
+            // expose material names or rejection reasons through the policy
+            // verifier surface. Classify them with the same config/profile
+            // bucket as malformed public representation parameters.
+            pq::LatticePqError::InvalidTrapdoorSecret { .. }
+            | pq::LatticePqError::InvalidParameter { .. }
+            | pq::LatticePqError::RepresentationTooLarge { .. } => {
+                LatticeDelegationError::ParameterMismatch {
+                    verifier_n: self.params.n,
+                    cert_n: self.params.n,
+                }
+            }
+            pq::LatticePqError::InvalidPeriod { .. } => {
+                LatticeDelegationError::IncompleteDelegationChain {
                     cert_id: leaf.cert_id.to_hex(),
-                })
+                }
             }
         }
     }
@@ -1124,6 +1139,48 @@ mod tests {
         let err = v
             .verify_sub_token(&sub_for(0x10), &ZoneId::work(), 1_500_000)
             .expect_err("happy path MUST surface as NotImplemented until crypto lands");
+        assert_eq!(err, LatticeDelegationError::NotImplemented);
+    }
+
+    #[test]
+    fn impl_maps_invalid_trapdoor_secret_without_leaking_secret_context() {
+        let v = LatticeDelegationVerifierImpl::empty(ref_params());
+        let leaf = cert(0x10, ZoneId::work(), period(0, 10_000), None);
+        let err = v.map_crypto_error(
+            &leaf,
+            &pq::LatticePqError::InvalidTrapdoorSecret {
+                material: "basis-envelope coefficients",
+                reason: "raw secret coefficient storage rejected",
+            },
+        );
+
+        assert_eq!(
+            err,
+            LatticeDelegationError::ParameterMismatch {
+                verifier_n: ref_params().n,
+                cert_n: ref_params().n,
+            }
+        );
+        let rendered = err.to_string();
+        assert!(!rendered.contains("basis-envelope"));
+        assert!(!rendered.contains("secret"));
+        assert!(!rendered.contains("coefficient"));
+    }
+
+    #[test]
+    fn impl_maps_unsupported_primitive_route_to_fallback() {
+        let v = LatticeDelegationVerifierImpl::empty(ref_params());
+        let leaf = cert(0x10, ZoneId::work(), period(0, 10_000), None);
+        let err = v.map_crypto_error(
+            &leaf,
+            &pq::LatticePqError::UnsupportedPrimitiveRoute {
+                primitive: "TrapGen",
+                route_id: "fcp-pq/internal-route",
+                profile: "V4_REFERENCE",
+                reason: "larger profiles stay fail-closed",
+            },
+        );
+
         assert_eq!(err, LatticeDelegationError::NotImplemented);
     }
 

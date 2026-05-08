@@ -280,6 +280,20 @@ type = "object"
 [provides.operations."anthropic.auth.list_methods".output_schema]
 type = "object"
 
+[provides.operations."anthropic.auth.list_methods".ai_hints]
+when_to_use = "Use when an agent needs to discover which Anthropic credential modes this connector supports and which one is currently configured."
+common_mistakes = [
+    "Treating this as a credential validation call; it reports supported and active methods without proving that a remote Anthropic request will succeed.",
+    "Using the active method as permission to call model operations without a matching capability token.",
+]
+examples = [
+    '{}',
+]
+related = [
+    "anthropic.auth.refresh_oauth",
+    "anthropic.message",
+]
+
 [provides.operations."anthropic.auth.refresh_oauth"]
 description = "Report whether the configured Claude Code OAuth credential path is refreshable by the host"
 capability = "anthropic.auth"
@@ -294,6 +308,21 @@ type = "object"
 
 [provides.operations."anthropic.auth.refresh_oauth".output_schema]
 type = "object"
+
+[provides.operations."anthropic.auth.refresh_oauth".ai_hints]
+when_to_use = "Use when an agent needs to check whether the host can refresh the configured Claude Code OAuth credential instead of using a static API key."
+common_mistakes = [
+    "Expecting the connector to mint or persist OAuth tokens; refresh is host-owned and this operation only reports refreshability.",
+    "Calling refresh_oauth for API-key setups where no Claude Code OAuth credential path is configured.",
+    "Logging credential paths or token material while diagnosing refresh status.",
+]
+examples = [
+    '{}',
+]
+related = [
+    "anthropic.auth.list_methods",
+    "anthropic.message",
+]
 
 [provides.operations."anthropic.models.normalize"]
 description = "Normalize an Anthropic model alias to the connector's canonical Claude API model ID"
@@ -314,6 +343,22 @@ type = "string"
 
 [provides.operations."anthropic.models.normalize".output_schema]
 type = "object"
+
+[provides.operations."anthropic.models.normalize".ai_hints]
+when_to_use = "Use before invoking Claude when an agent has a user-facing model alias and needs the connector's canonical Anthropic model ID."
+common_mistakes = [
+    "Assuming normalization checks model availability or account entitlements; it only maps known aliases to canonical IDs.",
+    "Passing provider names such as openai or vertex instead of Anthropic model IDs or aliases.",
+    "Skipping normalization when accepting free-form model input from users or plans.",
+]
+examples = [
+    '{"model": "sonnet"}',
+    '{"model": "claude-sonnet-4-6"}',
+]
+related = [
+    "anthropic.chat",
+    "anthropic.message",
+]
 
 [provides.operations."anthropic.message"]
 description = "Send a structured message request to Claude models with optional tools"

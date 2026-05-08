@@ -71,18 +71,14 @@ const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
     "zalo",
 ];
 const EXPECTED_AI_HINT_GAPS: &[&str] = &[
-    "anthropic",
-    "aws-bedrock",
     "dingtalk",
-    "email-generic",
-    "firebase",
     "google-people",
     "google-workspace-events",
     "mastodon",
     "mattermost",
     "nostr",
-    "plivo",
     "qq",
+    "sonos",
     "telnyx",
     "wecom",
 ];

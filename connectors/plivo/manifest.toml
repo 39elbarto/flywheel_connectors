@@ -88,10 +88,18 @@ total_timeout_ms = 30000
 max_response_bytes = 1048576
 
 [provides.operations."plivo.call.continue".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this to move an active Plivo call to fresh XML control after the call UUID and next control URL are known."
+common_mistakes = [
+    "Using a phone number instead of the Plivo call_uuid; provider control APIs require the call UUID.",
+    "Passing a non-HTTPS or untrusted xml_url; Plivo will fetch this URL to control the live call.",
+    "Using continue to start a new call; plivo.call.initiate creates outbound calls.",
+]
+examples = ['{"call_uuid":"call-uuid-123","xml_url":"https://voice.example.com/plivo/next.xml"}']
+related = [
+    "plivo.call.status",
+    "plivo.call.speak",
+    "plivo.call.transfer",
+]
 
 [provides.operations."plivo.call.end"]
 description = "Hang up a Plivo call"
@@ -127,10 +135,17 @@ total_timeout_ms = 30000
 max_response_bytes = 1048576
 
 [provides.operations."plivo.call.end".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this after policy approval to hang up a known active Plivo call by call_uuid."
+common_mistakes = [
+    "Treating retries as harmless; a successful first attempt may already have disconnected the call.",
+    "Supplying a phone number or session id instead of the Plivo call_uuid.",
+    "Ending a call before checking whether transfer, speak, or gather work is still pending.",
+]
+examples = ['{"call_uuid":"call-uuid-123"}']
+related = [
+    "plivo.call.status",
+    "plivo.call.initiate",
+]
 
 [provides.operations."plivo.call.gather"]
 description = "Generate Plivo GetDigits XML for DTMF collection"
@@ -151,10 +166,17 @@ type = "object"
 type = "object"
 
 [provides.operations."plivo.call.gather".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this to generate GetDigits XML for an IVR prompt that Plivo will fetch during call flow control."
+common_mistakes = [
+    "Expecting this local XML generator to collect digits itself; Plivo collects digits after the XML is hosted and fetched.",
+    "Using an action_url that Plivo cannot reach or that lacks call-auth/session validation.",
+    "Putting secrets or full caller data in prompt text that can appear in call logs.",
+]
+examples = ['{"prompt":"Press 1 for support or 2 for billing.","action_url":"https://voice.example.com/plivo/digits"}']
+related = [
+    "plivo.call.continue",
+    "plivo.call.initiate",
+]
 
 [provides.operations."plivo.call.initiate"]
 description = "Initiate an outbound Plivo voice call with FCP callback/session binding"
@@ -194,10 +216,18 @@ total_timeout_ms = 30000
 max_response_bytes = 1048576
 
 [provides.operations."plivo.call.initiate".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this only when a task is approved to place an outbound Plivo call from an authorized sender to a destination."
+common_mistakes = [
+    "Retrying after a timeout without an idempotency guard; this operation can place duplicate calls.",
+    "Using an answer_url that is not public HTTPS or does not include the expected FCP callback binding.",
+    "Initiating calls without confirming the from number is provisioned on the Plivo account.",
+]
+examples = ['{"to":"+15551234567","from":"+15559876543","answer_url":"https://voice.example.com/plivo/answer.xml"}']
+related = [
+    "plivo.call.status",
+    "plivo.call.end",
+    "plivo.call.gather",
+]
 
 [provides.operations."plivo.call.speak"]
 description = "Speak text into a Plivo call"
@@ -236,10 +266,18 @@ total_timeout_ms = 30000
 max_response_bytes = 1048576
 
 [provides.operations."plivo.call.speak".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this to inject a short spoken prompt into an active Plivo call after the target call_uuid is known."
+common_mistakes = [
+    "Sending long or sensitive text that will be spoken to a real person and may be logged.",
+    "Using speak as a replacement for full call-flow XML; use gather or continue for branching IVR flows.",
+    "Retrying blindly; repeated speaks may replay audio to the caller.",
+]
+examples = ['{"call_uuid":"call-uuid-123","text":"Please hold while I connect you."}']
+related = [
+    "plivo.call.status",
+    "plivo.call.gather",
+    "plivo.call.end",
+]
 
 [provides.operations."plivo.call.status"]
 description = "Retrieve Plivo call status"
@@ -275,10 +313,18 @@ total_timeout_ms = 30000
 max_response_bytes = 1048576
 
 [provides.operations."plivo.call.status".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this to read provider status and metadata for a known Plivo call_uuid before deciding whether to speak, transfer, or end it."
+common_mistakes = [
+    "Polling too aggressively and exhausting account rate limits.",
+    "Using status to validate a webhook; plivo.webhook.validate_signature covers webhook authenticity.",
+    "Assuming a missing call is safe to retry as a new call without checking prior initiate results.",
+]
+examples = ['{"call_uuid":"call-uuid-123"}']
+related = [
+    "plivo.call.initiate",
+    "plivo.call.end",
+    "plivo.call.transfer",
+]
 
 [provides.operations."plivo.call.transfer"]
 description = "Transfer a Plivo call leg to another XML URL"
@@ -317,10 +363,18 @@ total_timeout_ms = 30000
 max_response_bytes = 1048576
 
 [provides.operations."plivo.call.transfer".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this only after approval to redirect one or both live call legs to a new Plivo XML URL."
+common_mistakes = [
+    "Setting legs to aleg, bleg, or both without providing the matching transfer URL field.",
+    "Confusing transfer with continue; continue moves call control, transfer redirects call legs.",
+    "Using an untrusted XML URL that can take over live call behavior.",
+]
+examples = ['{"call_uuid":"call-uuid-123","legs":"aleg","aleg_url":"https://voice.example.com/plivo/agent.xml"}']
+related = [
+    "plivo.call.status",
+    "plivo.call.continue",
+    "plivo.call.end",
+]
 
 [provides.operations."plivo.webhook.evaluate_inbound_policy"]
 description = "Evaluate Plivo inbound caller policy"
@@ -341,10 +395,18 @@ type = "object"
 type = "object"
 
 [provides.operations."plivo.webhook.evaluate_inbound_policy".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this after signature validation to decide whether an inbound Plivo webhook caller should be accepted by the configured policy."
+common_mistakes = [
+    "Applying caller allowlists before plivo.webhook.validate_signature passes.",
+    "Using partial phone-number matching instead of exact E.164 allowlist entries.",
+    "Treating missing From values as allowed callers.",
+]
+examples = ['{"body":{"From":"+15551234567","To":"+15559876543","CallUUID":"call-uuid-123"},"inbound_policy":"allowlist","allowed_from":["+15551234567"]}']
+related = [
+    "plivo.webhook.validate_signature",
+    "plivo.webhook.ingest_request",
+    "plivo.webhook.parse_event",
+]
 
 [provides.operations."plivo.webhook.ingest_request"]
 description = "Ingest a Plivo webhook request through the connector boundary"
@@ -366,10 +428,18 @@ type = "object"
 type = "object"
 
 [provides.operations."plivo.webhook.ingest_request".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this for a Plivo webhook forwarded by the FCP host so the connector can verify signature/replay, parse the event, and apply inbound policy."
+common_mistakes = [
+    "Letting the connector open a network listener; webhooks must be forwarded through the host boundary.",
+    "Parsing or emitting events before signature and replay checks pass.",
+    "Forgetting to include the exact URL and headers Plivo signed.",
+]
+examples = ['{"url":"https://voice.example.com/plivo/webhook","headers":{"X-Plivo-Signature-V3":"signature","X-Plivo-Signature-V3-Nonce":"nonce"},"body":{"CallUUID":"call-uuid-123","From":"+15551234567"},"inbound_policy":"allowlist","allowed_from":["+15551234567"]}']
+related = [
+    "plivo.webhook.validate_signature",
+    "plivo.webhook.evaluate_inbound_policy",
+    "plivo.webhook.parse_event",
+]
 
 [provides.operations."plivo.webhook.parse_event"]
 description = "Parse a verified Plivo webhook event"
@@ -387,10 +457,17 @@ type = "object"
 type = "object"
 
 [provides.operations."plivo.webhook.parse_event".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this local parser only after a Plivo webhook has been authenticated and replay-checked."
+common_mistakes = [
+    "Parsing unauthenticated webhook bodies and trusting caller-supplied fields.",
+    "Logging full From, To, or CallUUID fields instead of masked or hashed fields from the parsed output.",
+    "Expecting parse_event to verify signatures; plivo.webhook.validate_signature does that.",
+]
+examples = ['{"body":{"CallUUID":"call-uuid-123","CallStatus":"answer","From":"+15551234567","To":"+15559876543"}}']
+related = [
+    "plivo.webhook.validate_signature",
+    "plivo.webhook.ingest_request",
+]
 
 [provides.operations."plivo.webhook.validate_signature"]
 description = "Validate Plivo HMAC-SHA256 V3 webhook headers with V2 fallback"
@@ -412,10 +489,18 @@ type = "object"
 type = "object"
 
 [provides.operations."plivo.webhook.validate_signature".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this before trusting any Plivo webhook body to verify V3/V2 HMAC headers, replay state, and signed URL material."
+common_mistakes = [
+    "Reconstructing the URL differently from the public URL Plivo signed, including scheme or query changes.",
+    "Using Twilio-style signature logic; Plivo V3 uses Plivo HMAC header and nonce material.",
+    "Dropping repeated body parameters before signature verification.",
+]
+examples = ['{"url":"https://voice.example.com/plivo/webhook","headers":{"X-Plivo-Signature-V3":"signature","X-Plivo-Signature-V3-Nonce":"nonce"},"body":{"CallUUID":"call-uuid-123"}}']
+related = [
+    "plivo.webhook.ingest_request",
+    "plivo.webhook.parse_event",
+    "plivo.webhook.evaluate_inbound_policy",
+]
 
 [sandbox]
 profile = "strict"

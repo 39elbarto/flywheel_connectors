@@ -122,6 +122,21 @@ connect_timeout_ms = 10000
 total_timeout_ms = 240000
 max_response_bytes = 25000000
 
+[provides.operations."aws_bedrock.converse".ai_hints]
+when_to_use = "Use for Bedrock chat requests that can use the unified Converse API message format across supported foundation models."
+common_mistakes = [
+    "Passing a raw InvokeModel body to converse; use messages and model_id for Converse or aws_bedrock.invoke_model for raw model-family payloads.",
+    "Logging prompts, completions, AWS credentials, session tokens, or SigV4 signatures while debugging Bedrock requests.",
+    "Using a model or region that Bedrock does not expose on the configured account.",
+]
+examples = [
+    '{"model_id": "anthropic.claude-3-haiku-20240307-v1:0", "messages": [{"role": "user", "content": [{"text": "Summarize this incident report."}]}]}',
+]
+related = [
+    "aws_bedrock.converse_stream",
+    "aws_bedrock.models.list",
+]
+
 [provides.operations."aws_bedrock.converse_stream"]
 description = "Invoke the Bedrock ConverseStream API and decode AWS event-stream frames."
 capability = "aws_bedrock.chat"
@@ -247,6 +262,21 @@ connect_timeout_ms = 10000
 total_timeout_ms = 240000
 max_response_bytes = 25000000
 
+[provides.operations."aws_bedrock.converse_stream".ai_hints]
+when_to_use = "Use when an agent needs lower time-to-first-token from Bedrock and can consume decoded AWS event-stream chunks."
+common_mistakes = [
+    "Treating each stream chunk as a complete final answer; stream output must be accumulated or handled incrementally.",
+    "Using this operation for models that only support non-streaming InvokeModel or Converse calls.",
+    "Forgetting that the connector still enforces normal capability, region, and network constraints before opening the stream.",
+]
+examples = [
+    '{"model_id": "anthropic.claude-3-haiku-20240307-v1:0", "messages": [{"role": "user", "content": [{"text": "Draft a short launch checklist."}]}]}',
+]
+related = [
+    "aws_bedrock.converse",
+    "aws_bedrock.invoke_model_stream",
+]
+
 [provides.operations."aws_bedrock.invoke_model"]
 description = "Invoke legacy Bedrock InvokeModel with either raw JSON body or connector-built model-family body."
 capability = "aws_bedrock.chat"
@@ -363,6 +393,22 @@ max_redirects = 0
 connect_timeout_ms = 10000
 total_timeout_ms = 240000
 max_response_bytes = 25000000
+
+[provides.operations."aws_bedrock.invoke_model".ai_hints]
+when_to_use = "Use for Bedrock models or legacy request shapes that require InvokeModel rather than the Converse API."
+common_mistakes = [
+    "Sending Converse messages to invoke_model without selecting a model_family or providing the raw body expected by that Bedrock model.",
+    "Assuming all model families share one JSON payload shape; Anthropic, Titan, Llama, Cohere, and Mistral bodies differ.",
+    "Retrying non-idempotent prompt workflows without considering duplicate model charges or side effects in downstream tool chains.",
+]
+examples = [
+    '{"model_id": "amazon.titan-text-express-v1", "model_family": "titan_text", "prompt": "Write a concise status update.", "max_tokens": 256}',
+    '{"model_id": "anthropic.claude-v2", "body": {"prompt": "\\n\\nHuman: Hello\\n\\nAssistant:", "max_tokens_to_sample": 128}}',
+]
+related = [
+    "aws_bedrock.invoke_model_stream",
+    "aws_bedrock.converse",
+]
 
 [provides.operations."aws_bedrock.invoke_model_stream"]
 description = "Invoke legacy Bedrock InvokeModelWithResponseStream and decode AWS event-stream frames."
@@ -515,6 +561,21 @@ connect_timeout_ms = 10000
 total_timeout_ms = 240000
 max_response_bytes = 25000000
 
+[provides.operations."aws_bedrock.invoke_model_stream".ai_hints]
+when_to_use = "Use for legacy Bedrock streaming model APIs when the target model does not fit ConverseStream or needs a model-family payload."
+common_mistakes = [
+    "Using InvokeModelWithResponseStream for models that do not advertise streaming support in models.list.",
+    "Assuming event-stream frames contain only text deltas; provider-specific payloads may include metadata and completion reasons.",
+    "Dropping partial chunks during cancellation or timeout instead of returning structured evidence about the incomplete stream.",
+]
+examples = [
+    '{"model_id": "amazon.titan-text-express-v1", "model_family": "titan_text", "prompt": "List three test cases.", "max_tokens": 128}',
+]
+related = [
+    "aws_bedrock.invoke_model",
+    "aws_bedrock.converse_stream",
+]
+
 [provides.operations."aws_bedrock.models.list"]
 description = "List Bedrock foundation models on the control-plane Bedrock endpoint."
 capability = "aws_bedrock.models.read"
@@ -627,6 +688,21 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 10485760
 
+[provides.operations."aws_bedrock.models.list".ai_hints]
+when_to_use = "Use before invoking Bedrock when an agent needs to discover available foundation models, modalities, providers, or streaming support in the configured region."
+common_mistakes = [
+    "Treating the model list as global; Bedrock model availability is region and account dependent.",
+    "Assuming a listed model supports every API shape; check streaming and inference metadata before choosing Converse, InvokeModel, or streaming variants.",
+    "Logging account-specific model access diagnostics with credentials or request signatures attached.",
+]
+examples = [
+    '{}',
+]
+related = [
+    "aws_bedrock.converse",
+    "aws_bedrock.invoke_model",
+]
+
 [provides.operations."aws_bedrock.health"]
 description = "Check configured Bedrock control-plane connectivity using foundation model discovery."
 capability = "aws_bedrock.models.read"
@@ -669,6 +745,20 @@ max_redirects = 0
 connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 10485760
+
+[provides.operations."aws_bedrock.health".ai_hints]
+when_to_use = "Use during setup or diagnostics to verify the configured region, endpoint, credentials, and control-plane Bedrock access are usable."
+common_mistakes = [
+    "Running health before configure; an unconfigured connector reports readiness guidance rather than live AWS status.",
+    "Treating a healthy control-plane probe as proof that a specific runtime model invocation will succeed.",
+    "Using health as a hot-path heartbeat for every request instead of reserving it for readiness and troubleshooting.",
+]
+examples = [
+    '{}',
+]
+related = [
+    "aws_bedrock.models.list",
+]
 
 [sandbox]
 profile = "strict"

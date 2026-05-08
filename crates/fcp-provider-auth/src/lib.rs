@@ -1,9 +1,9 @@
-//! Shared provider authentication primitives for FCP connectors.
+//! Provider authentication profiles and method selection for FCP connectors.
 //!
-//! This crate is the common layer above raw credential leases and below
-//! connector-specific clients. It keeps credential material redaction-safe while
-//! giving connectors a uniform way to apply API keys, setup tokens, cached JWTs,
-//! and later OAuth profile state to outbound requests.
+//! This crate owns the provider/profile layer above raw credential leasing and
+//! OAuth primitives. Host admin routes, CLI helpers, provider-specific imports,
+//! and credential-pool integration are intentionally kept outside this crate's
+//! core primitives.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
@@ -11,431 +11,585 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::fmt::Write as _;
+use std::sync::Arc;
+use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, TimeDelta, Utc};
-use fcp_async_core::http::{HttpClient, HttpClientBuilder, Method};
-use fcp_async_core::time;
-use fcp_oauth::{
-    OAuth2Client, OAuth2Config, OAuthTokens as FcpOAuthTokens, Pkce, PkceMethod, TokenResponse,
-};
-use serde::Deserialize;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use hmac::{Hmac, Mac};
+use parking_lot::RwLock;
+use rand::RngCore;
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+use url::Url;
+use zeroize::Zeroizing;
 
-const DEFAULT_AUTHORIZATION_HEADER: &str = "Authorization";
-const DEFAULT_BEARER_PREFIX: &str = "Bearer ";
-const DEFAULT_SETUP_TOKEN_PREFIX: &str = "Setup ";
-const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
-const JSON_CONTENT_TYPE: &str = "application/json";
-const DEFAULT_OAUTH_TIMEOUT: Duration = Duration::from_secs(30);
-const DEFAULT_DEVICE_CODE_INTERVAL: Duration = Duration::from_secs(5);
-const REDACTED: &str = "[REDACTED]";
+type HmacSha256 = Hmac<Sha256>;
+
+/// AWS `SigV4` algorithm label.
+pub const SIGV4_ALGORITHM: &str = "AWS4-HMAC-SHA256";
+
+/// `SigV4` payload sentinel for services that permit unsigned payloads.
+pub const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
+
+/// SHA-256 hash of an empty payload.
+pub const EMPTY_PAYLOAD_SHA256: &str =
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 /// Result type for provider-auth operations.
 pub type AuthResult<T> = Result<T, AuthError>;
 
-/// Secret string material that redacts in all formatted output and zeroizes on
-/// drop.
-#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
-pub struct SecretString(String);
-
-impl SecretString {
-    /// Wrap credential material.
-    #[must_use]
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    /// Expose the raw material to code that is about to place it on an outbound
-    /// authenticated request.
-    #[must_use]
-    pub fn expose_material(&self) -> &str {
-        &self.0
-    }
-
-    /// Return whether this material has no bytes.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Return a bounded operator-safe preview for audit messages.
-    #[must_use]
-    pub fn redacted_preview(&self) -> String {
-        if self.0.is_empty() {
-            return REDACTED.to_owned();
-        }
-
-        let mut preview: String = self.0.chars().take(8).collect();
-        preview.push_str("...");
-        preview
-    }
-}
-
-impl From<String> for SecretString {
-    fn from(value: String) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&str> for SecretString {
-    fn from(value: &str) -> Self {
-        Self::new(value)
-    }
-}
-
-impl fmt::Debug for SecretString {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(REDACTED)
-    }
-}
-
-impl fmt::Display for SecretString {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(REDACTED)
-    }
-}
-
-/// Redaction-safe outbound authentication envelope.
-#[derive(Clone, Default, PartialEq, Eq)]
-pub struct AuthRequest {
-    headers: BTreeMap<String, SecretString>,
-}
-
-impl AuthRequest {
-    /// Create an empty auth request envelope.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Insert a credential header value.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the header name is empty or contains invalid
-    /// characters, or when the header value contains newline characters.
-    pub fn insert_material_header(
-        &mut self,
-        name: impl Into<String>,
-        value: SecretString,
-    ) -> AuthResult<()> {
-        let name = name.into();
-        validate_header_name(&name)?;
-        validate_header_value(value.expose_material(), "header_value")?;
-        self.headers.insert(name, value);
-        Ok(())
-    }
-
-    /// Return a credential header value by case-sensitive name.
-    #[must_use]
-    pub fn header_value(&self, name: &str) -> Option<&SecretString> {
-        self.headers.get(name)
-    }
-
-    /// Return the number of credential auth headers in this envelope.
-    #[must_use]
-    pub fn header_count(&self) -> usize {
-        self.headers.len()
-    }
-
-    /// Iterate over auth headers.
-    pub fn headers(&self) -> impl Iterator<Item = (&str, &SecretString)> {
-        self.headers
-            .iter()
-            .map(|(name, value)| (name.as_str(), value))
-    }
-}
-
-impl fmt::Debug for AuthRequest {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let redacted_headers: BTreeMap<&str, &str> = self
-            .headers
-            .keys()
-            .map(|name| (name.as_str(), REDACTED))
-            .collect();
-
-        f.debug_struct("AuthRequest")
-            .field("headers", &redacted_headers)
-            .finish()
-    }
-}
-
-/// Redaction-safe provider authentication errors.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// Provider-auth errors. All variants are safe to render in logs.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AuthError {
-    /// Configuration was invalid before any outbound request was made.
+    /// Caller supplied an invalid static configuration value.
     #[error("invalid auth configuration for {field}: {reason}")]
     InvalidConfig {
-        /// Configuration field name.
+        /// Field name.
         field: &'static str,
-        /// Redaction-safe reason.
+        /// Redaction-safe validation reason.
         reason: String,
     },
-    /// Authentication material is missing for a method that requires it.
-    #[error("{method} auth material is missing")]
-    MissingMaterial {
-        /// Auth method identifier.
+
+    /// A request header name or value contained invalid bytes.
+    #[error("invalid auth header {field}: {reason}")]
+    InvalidHeader {
+        /// Header field being validated.
+        field: &'static str,
+        /// Redaction-safe validation reason.
+        reason: String,
+    },
+
+    /// The auth method cannot build request auth without token material.
+    #[error("auth method {method} has no usable token material")]
+    MissingToken {
+        /// Auth method id.
         method: &'static str,
     },
-    /// Authentication material has expired.
-    #[error("{method} auth material expired at {expires_at}")]
+
+    /// The auth method needs request-signing fields that were not supplied.
+    #[error("auth method {method} needs request signing context")]
+    MissingSigningContext {
+        /// Auth method id.
+        method: &'static str,
+    },
+
+    /// The auth method's token material has expired.
+    #[error("auth method {method} token expired at {expires_at}")]
     Expired {
-        /// Auth method identifier.
+        /// Auth method id.
         method: &'static str,
         /// Expiration timestamp.
         expires_at: DateTime<Utc>,
     },
-    /// A profile was not found in the store.
-    #[error("auth profile not found for provider {provider}: {profile_id}")]
+
+    /// The requested provider profile does not exist.
+    #[error("auth profile {profile_id} for provider {provider} not found")]
     ProfileNotFound {
-        /// Provider name.
+        /// Canonical provider id.
         provider: String,
-        /// Opaque profile identifier.
+        /// Profile id.
         profile_id: String,
     },
-    /// No profiles exist for a provider.
-    #[error("no auth profiles configured for provider {provider}")]
-    NoProfiles {
-        /// Provider name.
+
+    /// No profiles exist for the requested provider.
+    #[error("provider {provider} has no auth profiles")]
+    ProviderNotFound {
+        /// Canonical provider id.
         provider: String,
     },
-    /// A method exists but this first slice has not wired the requested
-    /// operation yet.
-    #[error("{method} auth does not support {operation} yet")]
+
+    /// Method surface is declared but intentionally deferred to a later slice.
+    #[error("auth method {method} does not support {operation} in this slice")]
     UnsupportedMethod {
-        /// Auth method identifier.
+        /// Auth method id.
         method: &'static str,
         /// Operation name.
         operation: &'static str,
     },
-    /// Internal shared state was poisoned.
-    #[error("auth state unavailable: {reason}")]
-    StateUnavailable {
-        /// Redaction-safe reason.
+
+    /// Provider returned a terminal OAuth error.
+    #[error("auth method {method} rejected by provider with {code}: {reason}")]
+    ProviderRejected {
+        /// Auth method id.
+        method: &'static str,
+        /// Provider error code.
+        code: String,
+        /// Redaction-safe provider reason.
         reason: String,
     },
-    /// OAuth flow state is pending and should be polled again later.
-    #[error("oauth device-code authorization is still pending; poll again after {retry_after:?}")]
-    AuthorizationPending {
-        /// Provider-directed retry interval.
-        retry_after: Duration,
-    },
-    /// OAuth flow failed with a redaction-safe reason.
-    #[error("oauth {operation} failed: {reason}")]
-    OAuthFlow {
-        /// OAuth operation being performed.
-        operation: &'static str,
-        /// Redaction-safe reason.
+
+    /// Provider response was missing a field required by the OAuth state machine.
+    #[error("auth method {method} got invalid provider response: {reason}")]
+    InvalidProviderResponse {
+        /// Auth method id.
+        method: &'static str,
+        /// Redaction-safe response validation reason.
         reason: String,
     },
 }
 
-impl AuthError {
-    fn invalid_config(field: &'static str, reason: impl Into<String>) -> Self {
-        Self::InvalidConfig {
+fn invalid_config(field: &'static str, reason: impl Into<String>) -> AuthError {
+    AuthError::InvalidConfig {
+        field,
+        reason: reason.into(),
+    }
+}
+
+fn validate_non_empty(value: &str, field: &'static str) -> AuthResult<()> {
+    if value.trim().is_empty() {
+        return Err(invalid_config(field, "must not be empty"));
+    }
+    Ok(())
+}
+
+fn canonical_provider(provider: &str) -> AuthResult<String> {
+    validate_non_empty(provider, "provider")?;
+    Ok(provider.trim().to_ascii_lowercase())
+}
+
+fn validate_header_name(name: &str) -> AuthResult<()> {
+    validate_non_empty(name, "header_name")?;
+    if name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        Ok(())
+    } else {
+        Err(AuthError::InvalidHeader {
+            field: "header_name",
+            reason: "only ASCII alphanumeric characters and '-' are allowed".to_string(),
+        })
+    }
+}
+
+fn validate_header_value(value: &str) -> AuthResult<()> {
+    if value.contains('\r') || value.contains('\n') {
+        return Err(AuthError::InvalidHeader {
+            field: "header_value",
+            reason: "CR/LF bytes are not allowed".to_string(),
+        });
+    }
+    validate_non_empty(value, "header_value")
+}
+
+fn validate_no_crlf(value: &str, field: &'static str) -> AuthResult<()> {
+    if value.contains('\r') || value.contains('\n') {
+        return Err(AuthError::InvalidConfig {
             field,
-            reason: reason.into(),
+            reason: "CR/LF bytes are not allowed".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_payload_hash(value: &str) -> AuthResult<()> {
+    if value == UNSIGNED_PAYLOAD {
+        return Ok(());
+    }
+    if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(invalid_config(
+            "payload_hash",
+            "must be a SHA-256 hex digest or UNSIGNED-PAYLOAD",
+        ))
+    }
+}
+
+fn validate_oauth_endpoint(value: &str, field: &'static str) -> AuthResult<()> {
+    validate_non_empty(value, field)?;
+    validate_no_crlf(value, field)
+}
+
+fn parse_oauth_url(value: &str, field: &'static str) -> AuthResult<Url> {
+    validate_oauth_endpoint(value, field)?;
+    let parsed = Url::parse(value).map_err(|error| invalid_config(field, error.to_string()))?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(parsed),
+        _ => Err(invalid_config(field, "must use http or https scheme")),
+    }
+}
+
+fn validate_oauth_error(code: &str, reason: &str) -> AuthResult<()> {
+    validate_non_empty(code, "oauth_error_code")?;
+    validate_no_crlf(code, "oauth_error_code")?;
+    validate_non_empty(reason, "oauth_error_reason")?;
+    validate_no_crlf(reason, "oauth_error_reason")
+}
+
+fn validate_oauth_state(state: &str) -> AuthResult<()> {
+    validate_non_empty(state, "state")?;
+    validate_no_crlf(state, "state")
+}
+
+fn validate_pkce_verifier(verifier: &str) -> AuthResult<()> {
+    if !(43..=128).contains(&verifier.len()) {
+        return Err(invalid_config("pkce_verifier", "must be 43-128 characters"));
+    }
+    if verifier
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+    {
+        Ok(())
+    } else {
+        Err(invalid_config(
+            "pkce_verifier",
+            "must contain only RFC 7636 unreserved characters",
+        ))
+    }
+}
+
+fn pkce_s256_challenge(verifier: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(verifier.as_bytes());
+    URL_SAFE_NO_PAD.encode(hasher.finalize())
+}
+
+fn generate_url_safe_secret() -> String {
+    let mut bytes = [0_u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn build_authorization_request(
+    config: &OAuthAuthCodeConfig,
+    state: RedactedSecret,
+    pkce: Option<OAuthPkce>,
+) -> AuthResult<OAuthAuthCodeRequest> {
+    let mut url = parse_oauth_url(&config.authorize_url, "authorize_url")?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("response_type", "code");
+        query.append_pair("client_id", &config.client_id);
+        query.append_pair("redirect_uri", &config.redirect_uri);
+        if !config.scope.trim().is_empty() {
+            query.append_pair("scope", &config.scope);
+        }
+        query.append_pair("state", state.expose_secret());
+        if let Some(pkce) = pkce.as_ref() {
+            query.append_pair("code_challenge", &pkce.challenge);
+            query.append_pair("code_challenge_method", &pkce.method.to_string());
+        }
+        for (name, value) in &config.extra_authorize_params {
+            query.append_pair(name, value);
+        }
+    }
+    Ok(OAuthAuthCodeRequest {
+        authorization_url: url.to_string(),
+        state,
+        pkce,
+    })
+}
+
+fn std_duration_until(expires_at: DateTime<Utc>) -> StdDuration {
+    let remaining = expires_at.signed_duration_since(Utc::now());
+    remaining.to_std().unwrap_or(StdDuration::ZERO)
+}
+
+fn chrono_duration(duration: StdDuration) -> AuthResult<TimeDelta> {
+    TimeDelta::from_std(duration)
+        .map_err(|_| invalid_config("ttl", "duration is outside chrono range"))
+}
+
+/// Secret string wrapper that redacts every formatting path and zeroizes on drop.
+#[derive(Eq)]
+pub struct RedactedSecret(Zeroizing<String>);
+
+impl RedactedSecret {
+    /// Construct a non-empty secret wrapper.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when the secret is empty.
+    pub fn new(material: impl Into<String>) -> AuthResult<Self> {
+        let material = material.into();
+        validate_non_empty(&material, "credential_material")?;
+        Ok(Self(Zeroizing::new(material)))
+    }
+
+    /// Borrow the raw secret for the narrow boundary that applies auth.
+    #[must_use]
+    pub fn expose_secret(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Return a redaction-safe stable hint for diagnostics.
+    #[must_use]
+    pub fn redacted_token_first8(&self) -> String {
+        let prefix: String = self.expose_secret().chars().take(8).collect();
+        if prefix.is_empty() {
+            "[REDACTED]".to_string()
+        } else {
+            format!("{prefix}...")
         }
     }
 }
 
-/// Redaction-safe OAuth token material returned by provider-auth flows.
-#[derive(Clone, PartialEq, Eq)]
-pub struct OAuthTokenSet {
-    access_token: SecretString,
-    token_type: String,
-    expires_at: Option<DateTime<Utc>>,
-    refresh_token: Option<SecretString>,
-    scopes: Vec<String>,
+impl Clone for RedactedSecret {
+    fn clone(&self) -> Self {
+        Self(Zeroizing::new(self.expose_secret().to_string()))
+    }
 }
 
-impl OAuthTokenSet {
-    /// Build a provider-auth token set from parsed OAuth token material.
+impl PartialEq for RedactedSecret {
+    fn eq(&self, other: &Self) -> bool {
+        self.expose_secret() == other.expose_secret()
+    }
+}
+
+impl fmt::Debug for RedactedSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RedactedSecret([REDACTED])")
+    }
+}
+
+impl fmt::Display for RedactedSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+/// Signable request context for AWS `SigV4` auth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SigV4SigningContext {
+    /// HTTP method such as `GET` or `POST`.
+    pub method: String,
+    /// Absolute path component. Empty paths are canonicalized to `/`.
+    pub uri_path: String,
+    /// Query parameters before `SigV4` URI encoding.
+    pub query_params: BTreeMap<String, String>,
+    /// SHA-256 payload hash or [`UNSIGNED_PAYLOAD`].
+    pub payload_hash: String,
+    /// Optional fixed timestamp for deterministic tests.
+    pub signing_time: Option<DateTime<Utc>>,
+}
+
+impl SigV4SigningContext {
+    /// Construct a `SigV4` signing context without query parameters.
     ///
     /// # Errors
     ///
-    /// Returns a redaction-safe error if the token material is incomplete.
+    /// Returns [`AuthError::InvalidConfig`] for invalid method, path, or payload hash.
     pub fn new(
-        access_token: impl Into<SecretString>,
-        token_type: impl Into<String>,
-        expires_at: Option<DateTime<Utc>>,
-        refresh_token: Option<SecretString>,
-        scopes: Vec<String>,
+        method: impl Into<String>,
+        uri_path: impl Into<String>,
+        payload_hash: impl Into<String>,
     ) -> AuthResult<Self> {
-        let access_material = access_token.into();
-        let token_type = token_type.into();
-        if access_material.is_empty() {
-            return Err(AuthError::MissingMaterial {
-                method: "oauth_token",
-            });
+        let method = method.into().trim().to_ascii_uppercase();
+        let mut uri_path = uri_path.into();
+        let payload_hash = payload_hash.into();
+        validate_non_empty(&method, "method")?;
+        validate_no_crlf(&method, "method")?;
+        validate_no_crlf(&uri_path, "uri_path")?;
+        validate_payload_hash(&payload_hash)?;
+        if uri_path.is_empty() {
+            uri_path.push('/');
         }
-        validate_non_empty("token_type", &token_type)?;
+        let payload_hash = if payload_hash == UNSIGNED_PAYLOAD {
+            payload_hash
+        } else {
+            payload_hash.to_ascii_lowercase()
+        };
         Ok(Self {
-            access_token: access_material,
-            token_type,
-            expires_at,
-            refresh_token,
-            scopes,
+            method,
+            uri_path,
+            query_params: BTreeMap::new(),
+            payload_hash,
+            signing_time: None,
         })
     }
 
-    /// Access-token material.
-    #[must_use]
-    pub const fn access_token(&self) -> &SecretString {
-        &self.access_token
-    }
-
-    /// OAuth token type, usually `Bearer`.
-    #[must_use]
-    pub fn token_type(&self) -> &str {
-        &self.token_type
-    }
-
-    /// Access-token expiration, when the provider supplied one.
-    #[must_use]
-    pub const fn expires_at(&self) -> Option<DateTime<Utc>> {
-        self.expires_at
-    }
-
-    /// Refresh-token material, when present.
-    #[must_use]
-    pub const fn refresh_token(&self) -> Option<&SecretString> {
-        self.refresh_token.as_ref()
-    }
-
-    /// Granted OAuth scopes.
-    #[must_use]
-    pub fn scopes(&self) -> &[String] {
-        &self.scopes
-    }
-
-    fn into_refresh_update(self) -> (SecretString, Option<SecretString>, Option<DateTime<Utc>>) {
-        (self.access_token, self.refresh_token, self.expires_at)
-    }
-
-    /// Build an authorization header from the stored token.
+    /// Add a query parameter to this signing context.
     ///
     /// # Errors
     ///
-    /// Returns a redaction-safe error if the token is missing required material.
-    pub fn authorization_header(&self) -> AuthResult<SecretString> {
-        if self.access_token.is_empty() {
-            return Err(AuthError::MissingMaterial {
-                method: "oauth_token",
-            });
+    /// Returns [`AuthError::InvalidConfig`] if the key is empty or either field contains CR/LF.
+    pub fn with_query_param(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> AuthResult<Self> {
+        let key = key.into();
+        let value = value.into();
+        validate_non_empty(&key, "query_param")?;
+        validate_no_crlf(&key, "query_param")?;
+        validate_no_crlf(&value, "query_value")?;
+        self.query_params.insert(key, value);
+        Ok(self)
+    }
+
+    /// Use a deterministic signing timestamp.
+    #[must_use]
+    pub const fn with_signing_time(mut self, signing_time: DateTime<Utc>) -> Self {
+        self.signing_time = Some(signing_time);
+        self
+    }
+}
+
+/// Minimal request-auth target used by connector clients and tests.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuthRequest {
+    headers: BTreeMap<String, String>,
+    sigv4_context: Option<SigV4SigningContext>,
+}
+
+impl AuthRequest {
+    /// Construct an empty request-auth target.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            headers: BTreeMap::new(),
+            sigv4_context: None,
         }
-        validate_header_value(&self.token_type, "token_type")?;
-        Ok(SecretString::new(format!(
-            "{} {}",
-            self.token_type,
-            self.access_token.expose_material()
-        )))
     }
 
-    fn from_fcp_oauth(tokens: &FcpOAuthTokens) -> AuthResult<Self> {
-        let expires_at = tokens
-            .time_until_expiry()
-            .map(|remaining| Utc::now() + chrono_duration(remaining));
-        Self::new(
-            SecretString::new(tokens.access_token()),
-            tokens.token_type().to_owned(),
-            expires_at,
-            tokens.refresh_token().map(SecretString::new),
-            tokens.scopes().to_vec(),
-        )
+    /// Set a validated header.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidHeader`] when the header name or value is
+    /// empty or contains bytes unsafe for outbound HTTP headers.
+    pub fn set_header(
+        &mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> AuthResult<()> {
+        let name = name.into();
+        let value = value.into();
+        validate_header_name(&name)?;
+        validate_header_value(&value)?;
+        self.headers.insert(name, value);
+        Ok(())
+    }
+
+    /// Read a header value by exact name.
+    #[must_use]
+    pub fn value_for(&self, name: &str) -> Option<&str> {
+        self.headers.get(name).map(String::as_str)
+    }
+
+    /// Borrow all request auth headers.
+    #[must_use]
+    pub const fn headers(&self) -> &BTreeMap<String, String> {
+        &self.headers
+    }
+
+    /// Attach `SigV4` signing context for methods that need full request details.
+    pub fn set_sigv4_context(&mut self, context: SigV4SigningContext) {
+        self.sigv4_context = Some(context);
+    }
+
+    /// Borrow `SigV4` signing context, if present.
+    #[must_use]
+    pub const fn sigv4_context(&self) -> Option<&SigV4SigningContext> {
+        self.sigv4_context.as_ref()
     }
 }
 
-impl fmt::Debug for OAuthTokenSet {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OAuthTokenSet")
-            .field("access_token", &REDACTED)
-            .field("token_type", &self.token_type)
-            .field("expires_at", &self.expires_at)
-            .field(
-                "refresh_token",
-                &self.refresh_token.as_ref().map(|_| REDACTED),
-            )
-            .field("scopes", &self.scopes)
-            .finish()
-    }
-}
-
-/// Uniform authentication method interface for connector request builders.
+/// Shared behavior for provider auth methods.
 #[async_trait]
 pub trait AuthMethod: Send + Sync {
-    /// Stable method identifier.
+    /// Stable method id, for example `api_key` or `oauth_device`.
     fn id(&self) -> &'static str;
 
-    /// Validate local configuration and currently held auth material.
+    /// Validate method configuration and current token state.
     ///
     /// # Errors
     ///
-    /// Returns a redaction-safe [`AuthError`] if configuration is incomplete,
-    /// malformed, expired, or unsupported for this slice.
+    /// Returns an [`AuthError`] when the method cannot be used safely.
     async fn validate(&self, cx: &fcp_async_core::Cx) -> AuthResult<()>;
 
-    /// Apply this method's request authentication.
+    /// Apply auth material to a request.
     ///
     /// # Errors
     ///
-    /// Returns a redaction-safe [`AuthError`] if the method cannot currently
-    /// build request authentication.
+    /// Returns an [`AuthError`] when the method is missing token material,
+    /// expired, unsupported in this slice, or would produce an unsafe header.
     async fn build_request_auth(
         &self,
         cx: &fcp_async_core::Cx,
         request: &mut AuthRequest,
     ) -> AuthResult<()>;
 
-    /// Time until this method next requires refresh, if it is TTL-bounded.
-    fn requires_refresh_in(&self) -> Option<Duration>;
+    /// Return time until refresh is needed, if this method is TTL-bounded.
+    fn requires_refresh_in(&self) -> Option<StdDuration>;
 
-    /// Refresh auth material.
+    /// Refresh token material.
     ///
     /// # Errors
     ///
-    /// Returns a redaction-safe [`AuthError`] if refresh is unsupported or
-    /// fails.
-    async fn refresh(&self, cx: &fcp_async_core::Cx) -> AuthResult<()>;
+    /// The default implementation returns [`AuthError::UnsupportedMethod`].
+    async fn refresh(&mut self, _cx: &fcp_async_core::Cx) -> AuthResult<()> {
+        Err(AuthError::UnsupportedMethod {
+            method: self.id(),
+            operation: "refresh",
+        })
+    }
 }
 
 /// Static API-key authentication.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ApiKeyAuth {
     /// Secret API key.
-    pub key: SecretString,
-    /// Header name, defaulting to `Authorization`.
+    pub key: RedactedSecret,
+    /// Header that receives the credential.
     pub header_name: String,
-    /// Header value prefix, defaulting to `Bearer `.
-    pub value_prefix: String,
+    /// Optional value prefix such as `Bearer`.
+    pub value_prefix: Option<String>,
 }
 
 impl ApiKeyAuth {
-    /// Create default Bearer-token API-key auth.
-    #[must_use]
-    pub fn new(key: impl Into<SecretString>) -> Self {
-        Self {
-            key: key.into(),
-            header_name: DEFAULT_AUTHORIZATION_HEADER.to_owned(),
-            value_prefix: DEFAULT_BEARER_PREFIX.to_owned(),
+    /// Construct bearer-token API-key auth using the `Authorization` header.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when the key is empty.
+    pub fn bearer(key: impl Into<String>) -> AuthResult<Self> {
+        Self::new(key, "Authorization", Some("Bearer"))
+    }
+
+    /// Construct API-key auth with a custom header and optional value prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] when the key, header name, or prefix is invalid.
+    pub fn new(
+        key: impl Into<String>,
+        header_name: impl Into<String>,
+        value_prefix: Option<impl Into<String>>,
+    ) -> AuthResult<Self> {
+        let header_name = header_name.into();
+        validate_header_name(&header_name)?;
+        let value_prefix = value_prefix.map(Into::into);
+        if let Some(prefix) = value_prefix.as_deref() {
+            validate_non_empty(prefix, "value_prefix")?;
+            validate_header_value(prefix)?;
         }
+        Ok(Self {
+            key: RedactedSecret::new(key)?,
+            header_name,
+            value_prefix,
+        })
     }
 
-    /// Override the outbound header name.
-    #[must_use]
-    pub fn with_header_name(mut self, header_name: impl Into<String>) -> Self {
-        self.header_name = header_name.into();
-        self
+    fn header_value(&self) -> String {
+        self.value_prefix.as_deref().map_or_else(
+            || self.key.expose_secret().to_string(),
+            |prefix| format!("{prefix} {}", self.key.expose_secret()),
+        )
     }
+}
 
-    /// Override the outbound header value prefix.
-    #[must_use]
-    pub fn with_value_prefix(mut self, value_prefix: impl Into<String>) -> Self {
-        self.value_prefix = value_prefix.into();
-        self
+impl fmt::Debug for ApiKeyAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ApiKeyAuth")
+            .field("key", &self.key)
+            .field("header_name", &self.header_name)
+            .field("value_prefix", &self.value_prefix)
+            .finish()
     }
 }
 
@@ -446,11 +600,8 @@ impl AuthMethod for ApiKeyAuth {
     }
 
     async fn validate(&self, _cx: &fcp_async_core::Cx) -> AuthResult<()> {
-        if self.key.is_empty() {
-            return Err(AuthError::MissingMaterial { method: self.id() });
-        }
         validate_header_name(&self.header_name)?;
-        validate_header_value(&self.value_prefix, "value_prefix")
+        validate_header_value(&self.header_value())
     }
 
     async fn build_request_auth(
@@ -459,361 +610,166 @@ impl AuthMethod for ApiKeyAuth {
         request: &mut AuthRequest,
     ) -> AuthResult<()> {
         self.validate(cx).await?;
-        let prefix = &self.value_prefix;
-        let credential_material = self.key.expose_material();
-        request.insert_material_header(
-            self.header_name.clone(),
-            SecretString::new(format!("{prefix}{credential_material}")),
-        )
+        request.set_header(self.header_name.clone(), self.header_value())
     }
 
-    fn requires_refresh_in(&self) -> Option<Duration> {
+    fn requires_refresh_in(&self) -> Option<StdDuration> {
         None
     }
-
-    async fn refresh(&self, _cx: &fcp_async_core::Cx) -> AuthResult<()> {
-        Err(AuthError::UnsupportedMethod {
-            method: self.id(),
-            operation: "refresh",
-        })
-    }
 }
 
-/// Short-lived first-run setup token authentication.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SetupTokenAuth {
-    /// Secret setup token.
-    pub token: SecretString,
-    /// Token expiration.
-    pub expires_at: DateTime<Utc>,
-    /// Header name, defaulting to `Authorization`.
-    pub header_name: String,
-    /// Header value prefix, defaulting to `Setup `.
-    pub value_prefix: String,
-}
-
-impl SetupTokenAuth {
-    /// Create setup-token auth with the default header shape.
-    #[must_use]
-    pub fn new(token: impl Into<SecretString>, expires_at: DateTime<Utc>) -> Self {
-        Self {
-            token: token.into(),
-            expires_at,
-            header_name: DEFAULT_AUTHORIZATION_HEADER.to_owned(),
-            value_prefix: DEFAULT_SETUP_TOKEN_PREFIX.to_owned(),
-        }
-    }
-}
-
-#[async_trait]
-impl AuthMethod for SetupTokenAuth {
-    fn id(&self) -> &'static str {
-        "setup_token"
-    }
-
-    async fn validate(&self, _cx: &fcp_async_core::Cx) -> AuthResult<()> {
-        if self.token.is_empty() {
-            return Err(AuthError::MissingMaterial { method: self.id() });
-        }
-        validate_header_name(&self.header_name)?;
-        validate_header_value(&self.value_prefix, "value_prefix")?;
-        ensure_not_expired(self.id(), self.expires_at)
-    }
-
-    async fn build_request_auth(
-        &self,
-        cx: &fcp_async_core::Cx,
-        request: &mut AuthRequest,
-    ) -> AuthResult<()> {
-        self.validate(cx).await?;
-        let prefix = &self.value_prefix;
-        let setup_material = self.token.expose_material();
-        request.insert_material_header(
-            self.header_name.clone(),
-            SecretString::new(format!("{prefix}{setup_material}")),
-        )
-    }
-
-    fn requires_refresh_in(&self) -> Option<Duration> {
-        duration_until(self.expires_at)
-    }
-
-    async fn refresh(&self, _cx: &fcp_async_core::Cx) -> AuthResult<()> {
-        Err(AuthError::UnsupportedMethod {
-            method: self.id(),
-            operation: "refresh",
-        })
-    }
-}
-
-/// OAuth device-code method state.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// OAuth device-code auth state.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthDeviceCodeAuth {
-    /// OAuth client identifier.
+    /// OAuth client id.
     pub client_id: String,
     /// Device-code endpoint URL.
     pub device_code_url: String,
     /// Token endpoint URL.
     pub token_url: String,
-    /// Space-delimited OAuth scopes.
+    /// Requested scope string.
     pub scope: String,
-    /// Current access token, if one has already been acquired.
-    pub access_token: Option<SecretString>,
-    /// Refresh token, if the provider issued one.
-    pub refresh_token: Option<SecretString>,
-    /// Access-token expiration.
+    /// Current access token, if the flow has completed.
+    pub access_token: Option<RedactedSecret>,
+    /// Current refresh token, if the provider issued one.
+    pub refresh_token: Option<RedactedSecret>,
+    /// Access-token expiration time.
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-/// OAuth device-code flow configuration.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OAuthDeviceCodeConfig {
-    /// OAuth client identifier.
-    pub client_id: String,
-    /// Device-code endpoint URL.
-    pub device_code_url: String,
-    /// Token endpoint URL.
-    pub token_url: String,
-    /// Space-delimited OAuth scopes.
-    pub scope: String,
-    /// HTTP request timeout for device-code endpoints.
-    pub timeout: Duration,
-    /// Default polling interval when the provider omits one.
-    pub poll_interval: Duration,
-}
-
-impl OAuthDeviceCodeConfig {
-    /// Build a device-code config from profile state.
-    #[must_use]
-    pub fn from_auth(method: &OAuthDeviceCodeAuth) -> Self {
-        Self {
-            client_id: method.client_id.clone(),
-            device_code_url: method.device_code_url.clone(),
-            token_url: method.token_url.clone(),
-            scope: method.scope.clone(),
-            timeout: DEFAULT_OAUTH_TIMEOUT,
-            poll_interval: DEFAULT_DEVICE_CODE_INTERVAL,
-        }
-    }
-
-    fn validate(&self) -> AuthResult<()> {
-        validate_non_empty("client_id", &self.client_id)?;
-        validate_auth_endpoint_url("device_code_url", &self.device_code_url)?;
-        validate_auth_endpoint_url("token_url", &self.token_url)?;
-        if self.timeout.is_zero() {
-            return Err(AuthError::invalid_config(
-                "timeout",
-                "OAuth device-code timeout must be greater than zero",
-            ));
-        }
-        if self.poll_interval.is_zero() {
-            return Err(AuthError::invalid_config(
-                "poll_interval",
-                "OAuth device-code poll interval must be greater than zero",
-            ));
-        }
-        Ok(())
-    }
-}
-
 impl OAuthDeviceCodeAuth {
-    /// Refresh access-token material with the stored refresh token.
+    /// Construct OAuth device-code auth state without token material.
     ///
     /// # Errors
     ///
-    /// Returns a redaction-safe error when the refresh token is missing, local
-    /// configuration is invalid, or the provider refresh request fails.
-    pub async fn refresh_token_set(
-        &self,
-        cx: &fcp_async_core::Cx,
-        timeout: Duration,
-    ) -> AuthResult<OAuthTokenSet> {
-        cx.checkpoint().map_err(|error| AuthError::OAuthFlow {
-            operation: "oauth_device_refresh",
-            reason: error.to_string(),
-        })?;
-        let refresh_material = self
-            .refresh_token
-            .as_ref()
-            .ok_or(AuthError::MissingMaterial {
-                method: "oauth_device_code",
-            })?;
-        let client = oauth2_client_from_device_refresh(self, timeout)?;
-        let tokens = client
-            .refresh_tokens(refresh_material.expose_material())
-            .await
-            .map_err(|error| oauth_error("oauth_device_refresh", &error))?;
-        OAuthTokenSet::from_fcp_oauth(&tokens)
+    /// Returns [`AuthError::InvalidConfig`] when required OAuth fields are empty
+    /// or contain bytes unsafe for logs/HTTP form fields.
+    pub fn new(
+        client_id: impl Into<String>,
+        device_code_url: impl Into<String>,
+        token_url: impl Into<String>,
+        scope: impl Into<String>,
+    ) -> AuthResult<Self> {
+        let config = OAuthDeviceCodeConfig::new(client_id, device_code_url, token_url, scope)?;
+        Ok(Self::from_config(config))
     }
 
-    fn apply_refreshed_token_set(&mut self, tokens: OAuthTokenSet) {
-        let (access_material, refresh_material, expires_at) = tokens.into_refresh_update();
-        self.access_token.replace(access_material);
-        if let Some(rotated_material) = refresh_material {
-            self.refresh_token.replace(rotated_material);
+    /// Construct auth state from a validated flow config.
+    #[must_use]
+    pub fn from_config(config: OAuthDeviceCodeConfig) -> Self {
+        Self {
+            client_id: config.client_id,
+            device_code_url: config.device_code_url,
+            token_url: config.token_url,
+            scope: config.scope,
+            access_token: None,
+            refresh_token: None,
+            expires_at: None,
+        }
+    }
+
+    /// Replace cached token material after a completed device-code flow.
+    pub fn apply_tokens(&mut self, tokens: OAuthTokens) {
+        let OAuthTokens {
+            access_token,
+            refresh_token,
+            expires_at,
+            ..
+        } = tokens;
+        let access_slot = &mut self.access_token;
+        *access_slot = Some(access_token);
+        let refresh_slot = &mut self.refresh_token;
+        *refresh_slot = refresh_token;
+        self.expires_at = expires_at;
+    }
+
+    /// Build refresh-token flow configuration from this auth state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when stored OAuth fields are invalid.
+    pub fn refresh_config(&self) -> AuthResult<OAuthRefreshTokenConfig> {
+        let scope = if self.scope.is_empty() {
+            None
+        } else {
+            Some(self.scope.clone())
+        };
+        OAuthRefreshTokenConfig::public_client(
+            self.client_id.clone(),
+            self.token_url.clone(),
+            scope,
+        )
+    }
+
+    /// Build a refresh-token grant from cached refresh-token material.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::MissingToken`] when the provider has not issued a refresh token.
+    pub fn refresh_grant(&self) -> AuthResult<OAuthRefreshTokenGrant> {
+        let Some(refresh_token) = &self.refresh_token else {
+            return Err(AuthError::MissingToken {
+                method: "oauth_device",
+            });
+        };
+        OAuthRefreshTokenGrant::new(refresh_token.expose_secret().to_string())
+    }
+
+    /// Refresh cached bearer tokens through an injectable refresh-token transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for invalid stored config, missing refresh-token
+    /// material, transport failures, provider rejections, or malformed refreshed tokens.
+    pub async fn refresh_with_transport<T>(
+        &mut self,
+        cx: &fcp_async_core::Cx,
+        transport: &T,
+    ) -> AuthResult<()>
+    where
+        T: OAuthRefreshTokenTransport + ?Sized,
+    {
+        self.validate_config()?;
+        let config = self.refresh_config()?;
+        let grant = self.refresh_grant()?;
+        let tokens = OAuthRefreshTokenFlow::refresh(cx, &config, &grant, transport).await?;
+        self.apply_refreshed_tokens(tokens);
+        Ok(())
+    }
+
+    fn apply_refreshed_tokens(&mut self, tokens: OAuthTokens) {
+        let OAuthTokens {
+            access_token: fresh_access,
+            refresh_token: fresh_refresh,
+            expires_at,
+            ..
+        } = tokens;
+        let access_slot = &mut self.access_token;
+        *access_slot = Some(fresh_access);
+        if let Some(material) = fresh_refresh {
+            let refresh_slot = &mut self.refresh_token;
+            *refresh_slot = Some(material);
         }
         self.expires_at = expires_at;
     }
-}
 
-/// Provider-issued device-code challenge.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DeviceCodeChallenge {
-    /// Device code sent only to the token endpoint.
-    pub device_code: SecretString,
-    /// User-facing code the operator enters at the verification URI.
-    pub user_code: String,
-    /// Verification URL the operator should open.
-    pub verification_uri: String,
-    /// Optional complete verification URL.
-    pub verification_uri_complete: Option<String>,
-    /// Challenge expiration.
-    pub expires_at: DateTime<Utc>,
-    /// Provider-directed polling interval.
-    pub interval: Duration,
-}
-
-/// OAuth device-code flow state machine.
-#[derive(Clone)]
-pub struct OAuthDeviceCodeFlow {
-    config: OAuthDeviceCodeConfig,
-    challenge: DeviceCodeChallenge,
-    http_client: Arc<HttpClient>,
-}
-
-impl fmt::Debug for OAuthDeviceCodeFlow {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OAuthDeviceCodeFlow")
-            .field("config", &self.config)
-            .field("challenge", &self.challenge)
-            .field("http_client", &"HttpClient(..)")
-            .finish()
-    }
-}
-
-impl OAuthDeviceCodeFlow {
-    /// Start a device-code flow and return the state machine with its challenge.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redaction-safe error when configuration is invalid, transport
-    /// fails, or the provider response is malformed.
-    pub async fn start(cx: &fcp_async_core::Cx, config: OAuthDeviceCodeConfig) -> AuthResult<Self> {
-        config.validate()?;
-        let http_client = Arc::new(
-            HttpClientBuilder::new()
-                .user_agent("fcp-provider-auth/0.1.0")
-                .build(),
-        );
-        let response = send_oauth_form(
-            cx,
-            &http_client,
-            &config.device_code_url,
-            &[
-                ("client_id", config.client_id.as_str()),
-                ("scope", &config.scope),
-            ],
-            config.timeout,
-            "device_code_start",
-        )
-        .await?;
-
-        if !response.is_success() {
-            return Err(oauth_flow_status_error(
-                "device_code_start",
-                response.status,
-            ));
-        }
-        let started_at = Utc::now();
-        let response: DeviceCodeStartResponse = response
-            .json()
-            .map_err(|error| invalid_oauth_response("device_code_start", &error))?;
-        let challenge = response.into_challenge(started_at, config.poll_interval)?;
-
-        Ok(Self {
-            config,
-            challenge,
-            http_client,
-        })
-    }
-
-    /// Current device-code challenge.
-    #[must_use]
-    pub const fn challenge(&self) -> &DeviceCodeChallenge {
-        &self.challenge
-    }
-
-    /// Poll the token endpoint once.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AuthError::AuthorizationPending`] when the provider says the
-    /// operator has not completed authorization yet. Callers should wait for
-    /// the included retry interval and poll again.
-    pub async fn poll(&mut self, cx: &fcp_async_core::Cx) -> AuthResult<OAuthTokenSet> {
-        ensure_not_expired("oauth_device_code", self.challenge.expires_at)?;
-        let device_code = self.challenge.device_code.expose_material();
-        let grant_type = fcp_oauth::GrantType::DeviceCode.to_string();
-        let response = send_oauth_form(
-            cx,
-            &self.http_client,
-            &self.config.token_url,
-            &[
-                ("grant_type", grant_type.as_str()),
-                ("device_code", device_code),
-                ("client_id", self.config.client_id.as_str()),
-            ],
-            self.config.timeout,
-            "device_code_poll",
-        )
-        .await?;
-        let status = response.status;
-        let response: DeviceCodePollResponse = response
-            .json()
-            .map_err(|error| invalid_oauth_response("device_code_poll", &error))?;
-        if let Some(error) = response.error.as_deref() {
-            return self.handle_device_poll_error(error);
-        }
-        if !(200..300).contains(&status) {
-            return Err(oauth_flow_status_error("device_code_poll", status));
-        }
-        response.into_token_set()
-    }
-
-    fn handle_device_poll_error(&mut self, error: &str) -> AuthResult<OAuthTokenSet> {
-        match error {
-            "authorization_pending" => Err(AuthError::AuthorizationPending {
-                retry_after: self.challenge.interval,
-            }),
-            "slow_down" => {
-                let next = self.challenge.interval.as_secs().saturating_add(5).max(1);
-                self.challenge.interval = Duration::from_secs(next);
-                Err(AuthError::AuthorizationPending {
-                    retry_after: self.challenge.interval,
-                })
-            }
-            code => Err(AuthError::OAuthFlow {
-                operation: "device_code_poll",
-                reason: format!("provider returned terminal error `{code}`"),
-            }),
-        }
+    fn validate_config(&self) -> AuthResult<()> {
+        validate_non_empty(&self.client_id, "client_id")?;
+        validate_no_crlf(&self.client_id, "client_id")?;
+        validate_oauth_endpoint(&self.device_code_url, "device_code_url")?;
+        validate_oauth_endpoint(&self.token_url, "token_url")?;
+        validate_no_crlf(&self.scope, "scope")
     }
 }
 
 #[async_trait]
 impl AuthMethod for OAuthDeviceCodeAuth {
     fn id(&self) -> &'static str {
-        "oauth_device_code"
+        "oauth_device"
     }
 
     async fn validate(&self, _cx: &fcp_async_core::Cx) -> AuthResult<()> {
-        validate_non_empty("client_id", &self.client_id)?;
-        validate_auth_endpoint_url("device_code_url", &self.device_code_url)?;
-        validate_auth_endpoint_url("token_url", &self.token_url)?;
-        if let Some(expires_at) = self.expires_at {
-            ensure_not_expired(self.id(), expires_at)?;
-        }
-        Ok(())
+        self.validate_config()
     }
 
     async fn build_request_auth(
@@ -822,257 +778,805 @@ impl AuthMethod for OAuthDeviceCodeAuth {
         request: &mut AuthRequest,
     ) -> AuthResult<()> {
         self.validate(cx).await?;
-        insert_bearer_material(self.id(), self.access_token.as_ref(), request)
+        apply_bearer_token(
+            self.id(),
+            self.access_token.as_ref(),
+            self.expires_at,
+            request,
+        )
     }
 
-    fn requires_refresh_in(&self) -> Option<Duration> {
-        self.expires_at.and_then(duration_until)
+    fn requires_refresh_in(&self) -> Option<StdDuration> {
+        self.expires_at.map(std_duration_until)
     }
+}
 
-    async fn refresh(&self, _cx: &fcp_async_core::Cx) -> AuthResult<()> {
-        Err(AuthError::UnsupportedMethod {
-            method: self.id(),
-            operation: "refresh",
+/// OAuth device-code flow configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthDeviceCodeConfig {
+    /// OAuth client id.
+    pub client_id: String,
+    /// Device-code endpoint URL.
+    pub device_code_url: String,
+    /// Token endpoint URL.
+    pub token_url: String,
+    /// Requested scope string. Empty scope is allowed for providers that infer defaults.
+    pub scope: String,
+    /// Initial provider polling interval.
+    pub default_poll_interval: StdDuration,
+}
+
+impl OAuthDeviceCodeConfig {
+    /// Construct device-code flow configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when required fields are empty or unsafe.
+    pub fn new(
+        client_id: impl Into<String>,
+        device_code_url: impl Into<String>,
+        token_url: impl Into<String>,
+        scope: impl Into<String>,
+    ) -> AuthResult<Self> {
+        let client_id = client_id.into();
+        let device_code_url = device_code_url.into();
+        let token_url = token_url.into();
+        let scope = scope.into();
+        validate_non_empty(&client_id, "client_id")?;
+        validate_no_crlf(&client_id, "client_id")?;
+        validate_oauth_endpoint(&device_code_url, "device_code_url")?;
+        validate_oauth_endpoint(&token_url, "token_url")?;
+        validate_no_crlf(&scope, "scope")?;
+        Ok(Self {
+            client_id,
+            device_code_url,
+            token_url,
+            scope,
+            default_poll_interval: StdDuration::from_secs(5),
         })
     }
-}
 
-/// OAuth authorization-code method state.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OAuthAuthCodeAuth {
-    /// OAuth client identifier.
-    pub client_id: String,
-    /// OAuth client secret, when the provider requires one.
-    pub client_secret: Option<SecretString>,
-    /// Authorization endpoint URL.
-    pub authorize_url: String,
-    /// Token endpoint URL.
-    pub token_url: String,
-    /// Redirect URI registered with the provider.
-    pub redirect_uri: String,
-    /// Space-delimited OAuth scopes.
-    pub scope: String,
-    /// Whether PKCE is required for this profile.
-    pub use_pkce: bool,
-    /// Current access token, if one has already been acquired.
-    pub access_token: Option<SecretString>,
-    /// Refresh token, if the provider issued one.
-    pub refresh_token: Option<SecretString>,
-    /// Access-token expiration.
-    pub expires_at: Option<DateTime<Utc>>,
-}
-
-/// OAuth authorization-code flow configuration.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OAuthAuthCodeConfig {
-    /// OAuth client identifier.
-    pub client_id: String,
-    /// OAuth client secret, if required by the provider.
-    pub client_secret: Option<SecretString>,
-    /// Authorization endpoint URL.
-    pub authorize_url: String,
-    /// Token endpoint URL.
-    pub token_url: String,
-    /// Redirect URI registered with the provider.
-    pub redirect_uri: String,
-    /// Space-delimited OAuth scopes.
-    pub scope: String,
-    /// Whether PKCE is required.
-    pub use_pkce: bool,
-    /// HTTP request timeout for token exchange.
-    pub timeout: Duration,
-}
-
-impl OAuthAuthCodeConfig {
-    /// Build an authorization-code config from profile state.
-    #[must_use]
-    pub fn from_auth(method: &OAuthAuthCodeAuth) -> Self {
-        Self {
-            client_id: method.client_id.clone(),
-            client_secret: method.client_secret.clone(),
-            authorize_url: method.authorize_url.clone(),
-            token_url: method.token_url.clone(),
-            redirect_uri: method.redirect_uri.clone(),
-            scope: method.scope.clone(),
-            use_pkce: method.use_pkce,
-            timeout: DEFAULT_OAUTH_TIMEOUT,
+    /// Override the provider polling interval used before a challenge is issued.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when the interval is zero.
+    pub fn with_default_poll_interval(mut self, interval: StdDuration) -> AuthResult<Self> {
+        if interval.is_zero() {
+            return Err(invalid_config(
+                "default_poll_interval",
+                "must be greater than zero",
+            ));
         }
+        self.default_poll_interval = interval;
+        Ok(self)
     }
 
     fn validate(&self) -> AuthResult<()> {
-        validate_non_empty("client_id", &self.client_id)?;
-        validate_auth_endpoint_url("authorize_url", &self.authorize_url)?;
-        validate_auth_endpoint_url("token_url", &self.token_url)?;
-        validate_auth_endpoint_url("redirect_uri", &self.redirect_uri)?;
-        if self.timeout.is_zero() {
-            return Err(AuthError::invalid_config(
-                "timeout",
-                "OAuth authorization-code timeout must be greater than zero",
+        validate_non_empty(&self.client_id, "client_id")?;
+        validate_no_crlf(&self.client_id, "client_id")?;
+        validate_oauth_endpoint(&self.device_code_url, "device_code_url")?;
+        validate_oauth_endpoint(&self.token_url, "token_url")?;
+        validate_no_crlf(&self.scope, "scope")?;
+        if self.default_poll_interval.is_zero() {
+            return Err(invalid_config(
+                "default_poll_interval",
+                "must be greater than zero",
             ));
         }
         Ok(())
     }
 }
 
-/// PKCE verifier owned by provider-auth so `fcp-oauth` types do not leak into
-/// connector-facing APIs.
+/// Device-code challenge returned by an OAuth provider.
 #[derive(Clone, PartialEq, Eq)]
-pub struct PkceVerifier {
-    inner: Pkce,
+pub struct OAuthDeviceCodeChallenge {
+    /// Provider device code. Treated as secret because it authorizes polling.
+    pub device_code: RedactedSecret,
+    /// User-facing short code to enter in a browser.
+    pub user_code: String,
+    /// Browser verification URL.
+    pub verification_uri: String,
+    /// Optional complete verification URL with the user code embedded.
+    pub verification_uri_complete: Option<String>,
+    /// Challenge expiration timestamp.
+    pub expires_at: DateTime<Utc>,
+    /// Provider-requested polling interval.
+    pub interval: StdDuration,
 }
 
-impl PkceVerifier {
-    /// Redaction-safe code challenge.
-    #[must_use]
-    pub fn code_challenge(&self) -> &str {
-        self.inner.challenge()
-    }
-
-    /// PKCE challenge method.
-    #[must_use]
-    pub const fn method(&self) -> PkceMethod {
-        self.inner.method()
-    }
-}
-
-impl fmt::Debug for PkceVerifier {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PkceVerifier")
-            .field("verifier", &REDACTED)
-            .field("challenge", &REDACTED)
-            .field("method", &self.inner.method())
-            .finish()
-    }
-}
-
-/// Authorization-code challenge returned to the operator/UI layer.
-#[derive(Clone, PartialEq, Eq)]
-pub struct AuthorizationCodeChallenge {
-    /// Redaction-safe URL containing state and PKCE challenge query params.
-    pub authorize_url: url::Url,
-    /// CSRF state; send it to callback validation but keep it out of logs.
-    pub state: SecretString,
-    /// PKCE verifier for the token exchange, when PKCE is enabled.
-    pub pkce: Option<PkceVerifier>,
-}
-
-impl fmt::Debug for AuthorizationCodeChallenge {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut redacted_url = self.authorize_url.clone();
-        redacted_url.set_query(None);
-        redacted_url.set_fragment(None);
-        f.debug_struct("AuthorizationCodeChallenge")
-            .field("authorize_url", &redacted_url.as_str())
-            .field("state", &REDACTED)
-            .field("pkce", &self.pkce)
-            .finish()
-    }
-}
-
-/// OAuth authorization-code flow helpers.
-#[derive(Clone, Debug, Default)]
-pub struct OAuthAuthCodeFlow;
-
-impl OAuthAuthCodeFlow {
-    /// Build an authorization URL plus one-time CSRF/PKCE state.
+impl OAuthDeviceCodeChallenge {
+    /// Construct a device-code challenge.
     ///
     /// # Errors
     ///
-    /// Returns a redaction-safe error when configuration is invalid.
-    pub fn build_authorize_url(
-        config: &OAuthAuthCodeConfig,
-    ) -> AuthResult<AuthorizationCodeChallenge> {
-        config.validate()?;
-        let client = oauth2_client_from_auth_code_config(config)?;
-        let scopes = split_scopes(&config.scope);
-        let session = if config.use_pkce {
-            client.authorization_session_with_pkce(&scopes)
-        } else {
-            client.authorization_session(&scopes)
+    /// Returns [`AuthError::InvalidConfig`] when required fields are empty or unsafe.
+    pub fn new(
+        device_code: impl Into<String>,
+        user_code: impl Into<String>,
+        verification_uri: impl Into<String>,
+        verification_uri_complete: Option<impl Into<String>>,
+        expires_at: DateTime<Utc>,
+        interval: StdDuration,
+    ) -> AuthResult<Self> {
+        let challenge = Self {
+            device_code: RedactedSecret::new(device_code)?,
+            user_code: user_code.into(),
+            verification_uri: verification_uri.into(),
+            verification_uri_complete: verification_uri_complete.map(Into::into),
+            expires_at,
+            interval,
+        };
+        challenge.validate()?;
+        Ok(challenge)
+    }
+
+    fn validate(&self) -> AuthResult<()> {
+        validate_no_crlf(self.device_code.expose_secret(), "device_code")?;
+        validate_non_empty(&self.user_code, "user_code")?;
+        validate_no_crlf(&self.user_code, "user_code")?;
+        validate_oauth_endpoint(&self.verification_uri, "verification_uri")?;
+        if let Some(uri) = self.verification_uri_complete.as_deref() {
+            validate_oauth_endpoint(uri, "verification_uri_complete")?;
         }
-        .map_err(|error| oauth_error("authorization_url", &error))?;
-        let authorize_url =
-            url::Url::parse(session.authorization_url()).map_err(|error| AuthError::OAuthFlow {
-                operation: "authorization_url",
-                reason: error.to_string(),
-            })?;
-        Ok(AuthorizationCodeChallenge {
-            authorize_url,
-            state: SecretString::new(session.state()),
-            pkce: session.pkce().cloned().map(|inner| PkceVerifier { inner }),
+        if self.interval.is_zero() {
+            return Err(invalid_config("interval", "must be greater than zero"));
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for OAuthDeviceCodeChallenge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthDeviceCodeChallenge")
+            .field("device_code", &self.device_code)
+            .field("user_code", &self.user_code)
+            .field("verification_uri", &self.verification_uri)
+            .field("verification_uri_complete", &self.verification_uri_complete)
+            .field("expires_at", &self.expires_at)
+            .field("interval", &self.interval)
+            .finish()
+    }
+}
+
+/// OAuth token set returned by a completed flow.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthTokens {
+    /// Access token used for bearer request auth.
+    pub access_token: RedactedSecret,
+    /// Token type. This slice supports bearer tokens.
+    pub token_type: String,
+    /// Optional refresh token.
+    pub refresh_token: Option<RedactedSecret>,
+    /// Optional expiration timestamp.
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Optional granted scope.
+    pub scope: Option<String>,
+}
+
+impl OAuthTokens {
+    /// Construct a bearer token set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when token fields are empty or unsafe.
+    pub fn bearer(
+        access_token: impl Into<String>,
+        expires_in: Option<StdDuration>,
+        refresh_token: Option<impl Into<String>>,
+        scope: Option<impl Into<String>>,
+    ) -> AuthResult<Self> {
+        let scope = scope.map(Into::into);
+        if let Some(scope) = scope.as_deref() {
+            validate_no_crlf(scope, "scope")?;
+        }
+        Ok(Self {
+            access_token: RedactedSecret::new(access_token)?,
+            token_type: "Bearer".to_string(),
+            refresh_token: refresh_token.map(RedactedSecret::new).transpose()?,
+            expires_at: expires_in
+                .map(chrono_duration)
+                .transpose()?
+                .map(|duration| Utc::now() + duration),
+            scope,
         })
     }
 
-    /// Exchange an authorization code for tokens.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redaction-safe error when configuration is invalid, PKCE is
-    /// missing for a PKCE profile, or token exchange fails.
-    pub async fn exchange_code(
-        cx: &fcp_async_core::Cx,
-        config: &OAuthAuthCodeConfig,
-        code: &str,
-        pkce: Option<&PkceVerifier>,
-    ) -> AuthResult<OAuthTokenSet> {
-        cx.checkpoint().map_err(|error| AuthError::OAuthFlow {
-            operation: "authorization_code_exchange",
-            reason: error.to_string(),
-        })?;
-        config.validate()?;
-        let client = oauth2_client_from_auth_code_config(config)?;
-        let tokens = if config.use_pkce {
-            let verifier = pkce.ok_or_else(|| {
-                AuthError::invalid_config("pkce", "PKCE verifier is required for this profile")
-            })?;
-            client.exchange_code_with_pkce(code, &verifier.inner).await
-        } else {
-            client.exchange_code(code).await
+    fn validate(&self) -> AuthResult<()> {
+        validate_non_empty(&self.token_type, "token_type")?;
+        validate_no_crlf(&self.token_type, "token_type")?;
+        if !self.token_type.eq_ignore_ascii_case("bearer") {
+            return Err(invalid_config(
+                "token_type",
+                "only bearer tokens are supported in this slice",
+            ));
         }
-        .map_err(|error| oauth_error("authorization_code_exchange", &error))?;
-        OAuthTokenSet::from_fcp_oauth(&tokens)
+        if let Some(scope) = self.scope.as_deref() {
+            validate_no_crlf(scope, "scope")?;
+        }
+        Ok(())
     }
 }
 
-impl OAuthAuthCodeAuth {
-    /// Refresh access-token material with the stored refresh token.
+impl fmt::Debug for OAuthTokens {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthTokens")
+            .field("access_token", &self.access_token)
+            .field("token_type", &self.token_type)
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("expires_at", &self.expires_at)
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
+
+/// OAuth refresh-token grant configuration.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthRefreshTokenConfig {
+    /// OAuth client id.
+    pub client_id: String,
+    /// Optional client secret for confidential clients.
+    pub client_secret: Option<RedactedSecret>,
+    /// Token endpoint URL.
+    pub token_url: String,
+    /// Optional requested scope for providers that require scope on refresh.
+    pub scope: Option<String>,
+}
+
+impl OAuthRefreshTokenConfig {
+    /// Construct public-client refresh-token configuration.
     ///
     /// # Errors
     ///
-    /// Returns a redaction-safe error when the refresh token is missing, local
-    /// configuration is invalid, or the provider refresh request fails.
-    pub async fn refresh_token_set(
-        &self,
-        cx: &fcp_async_core::Cx,
-        timeout: Duration,
-    ) -> AuthResult<OAuthTokenSet> {
-        cx.checkpoint().map_err(|error| AuthError::OAuthFlow {
-            operation: "oauth_auth_code_refresh",
-            reason: error.to_string(),
-        })?;
-        let refresh_material = self
-            .refresh_token
-            .as_ref()
-            .ok_or(AuthError::MissingMaterial {
-                method: "oauth_auth_code",
-            })?;
-        let mut config = OAuthAuthCodeConfig::from_auth(self);
-        config.timeout = timeout;
-        let client = oauth2_client_from_auth_code_config(&config)?;
-        let tokens = client
-            .refresh_tokens(refresh_material.expose_material())
-            .await
-            .map_err(|error| oauth_error("oauth_auth_code_refresh", &error))?;
-        OAuthTokenSet::from_fcp_oauth(&tokens)
+    /// Returns [`AuthError::InvalidConfig`] when required fields are empty or unsafe.
+    pub fn public_client(
+        client_id: impl Into<String>,
+        token_url: impl Into<String>,
+        scope: Option<impl Into<String>>,
+    ) -> AuthResult<Self> {
+        Self::new(client_id, Option::<String>::None, token_url, scope)
     }
 
-    fn apply_refreshed_token_set(&mut self, tokens: OAuthTokenSet) {
-        let (access_material, refresh_material, expires_at) = tokens.into_refresh_update();
-        self.access_token.replace(access_material);
-        if let Some(rotated_material) = refresh_material {
-            self.refresh_token.replace(rotated_material);
+    /// Construct confidential-client refresh-token configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when required fields are empty or unsafe.
+    pub fn confidential_client(
+        client_id: impl Into<String>,
+        client_secret: impl Into<String>,
+        token_url: impl Into<String>,
+        scope: Option<impl Into<String>>,
+    ) -> AuthResult<Self> {
+        Self::new(client_id, Some(client_secret.into()), token_url, scope)
+    }
+
+    /// Construct refresh-token configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when required fields are empty or unsafe.
+    pub fn new(
+        client_id: impl Into<String>,
+        client_secret: Option<impl Into<String>>,
+        token_url: impl Into<String>,
+        scope: Option<impl Into<String>>,
+    ) -> AuthResult<Self> {
+        let config = Self {
+            client_id: client_id.into(),
+            client_secret: client_secret.map(RedactedSecret::new).transpose()?,
+            token_url: token_url.into(),
+            scope: scope.map(Into::into),
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> AuthResult<()> {
+        validate_non_empty(&self.client_id, "client_id")?;
+        validate_no_crlf(&self.client_id, "client_id")?;
+        if let Some(secret) = &self.client_secret {
+            validate_no_crlf(secret.expose_secret(), "client_secret")?;
+        }
+        parse_oauth_url(&self.token_url, "token_url")?;
+        if let Some(scope) = self.scope.as_deref() {
+            validate_non_empty(scope, "scope")?;
+            validate_no_crlf(scope, "scope")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for OAuthRefreshTokenConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthRefreshTokenConfig")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("token_url", &self.token_url)
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
+
+/// OAuth refresh-token grant.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthRefreshTokenGrant {
+    /// Refresh token presented to the provider token endpoint.
+    pub refresh_token: RedactedSecret,
+}
+
+impl OAuthRefreshTokenGrant {
+    /// Construct a refresh-token grant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when refresh-token material is empty or unsafe.
+    pub fn new(refresh_token: impl Into<String>) -> AuthResult<Self> {
+        let grant = Self {
+            refresh_token: RedactedSecret::new(refresh_token)?,
+        };
+        grant.validate()?;
+        Ok(grant)
+    }
+
+    fn validate(&self) -> AuthResult<()> {
+        validate_no_crlf(self.refresh_token.expose_secret(), "refresh_token")
+    }
+}
+
+impl fmt::Debug for OAuthRefreshTokenGrant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthRefreshTokenGrant")
+            .field("refresh_token", &self.refresh_token)
+            .finish()
+    }
+}
+
+/// Provider response returned by a refresh-token request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OAuthRefreshProviderResponse {
+    /// Refresh succeeded and returned a new token set.
+    Authorized(OAuthTokens),
+    /// Refresh failed with a terminal provider error.
+    Rejected {
+        /// Provider error code.
+        code: String,
+        /// Redaction-safe provider reason.
+        reason: String,
+    },
+}
+
+/// Transport boundary for OAuth refresh-token providers.
+#[async_trait]
+pub trait OAuthRefreshTokenTransport: Send + Sync {
+    /// Exchange a refresh token for a fresh provider token set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for transport failures or invalid provider responses.
+    async fn refresh(
+        &self,
+        config: &OAuthRefreshTokenConfig,
+        grant: &OAuthRefreshTokenGrant,
+    ) -> AuthResult<OAuthRefreshProviderResponse>;
+}
+
+/// OAuth refresh-token flow primitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OAuthRefreshTokenFlow;
+
+impl OAuthRefreshTokenFlow {
+    /// Exchange a refresh-token grant for fresh bearer tokens.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for invalid config/grant data, transport failures,
+    /// provider rejections, or malformed refreshed tokens.
+    pub async fn refresh<T>(
+        cx: &fcp_async_core::Cx,
+        config: &OAuthRefreshTokenConfig,
+        grant: &OAuthRefreshTokenGrant,
+        transport: &T,
+    ) -> AuthResult<OAuthTokens>
+    where
+        T: OAuthRefreshTokenTransport + ?Sized,
+    {
+        let _ = cx;
+        config.validate()?;
+        grant.validate()?;
+        match transport.refresh(config, grant).await? {
+            OAuthRefreshProviderResponse::Authorized(tokens) => {
+                tokens.validate()?;
+                Ok(tokens)
+            }
+            OAuthRefreshProviderResponse::Rejected { code, reason } => {
+                validate_oauth_error(&code, &reason)?;
+                Err(AuthError::ProviderRejected {
+                    method: "oauth_refresh",
+                    code,
+                    reason,
+                })
+            }
+        }
+    }
+}
+
+/// Provider status returned when polling a device-code token endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OAuthDeviceCodeProviderResponse {
+    /// User has not completed browser authorization yet.
+    AuthorizationPending,
+    /// Provider asked the client to increase the polling interval.
+    SlowDown,
+    /// User completed authorization and the provider returned tokens.
+    Authorized(OAuthTokens),
+    /// User denied authorization.
+    AccessDenied {
+        /// Redaction-safe denial reason.
+        reason: String,
+    },
+    /// Device code expired before authorization completed.
+    ExpiredToken {
+        /// Redaction-safe expiry reason.
+        reason: String,
+    },
+}
+
+/// Public polling result returned by [`OAuthDeviceCodeFlow::poll`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OAuthDeviceCodePoll {
+    /// Authorization is still pending. Caller should wait `retry_after`.
+    Pending {
+        /// Current retry interval.
+        retry_after: StdDuration,
+    },
+    /// Authorization succeeded.
+    Authorized(OAuthTokens),
+}
+
+/// Transport boundary for OAuth device-code providers.
+#[async_trait]
+pub trait OAuthDeviceCodeTransport: Send + Sync {
+    /// Start a provider device-code flow.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for transport failures or invalid provider responses.
+    async fn start(&self, config: &OAuthDeviceCodeConfig) -> AuthResult<OAuthDeviceCodeChallenge>;
+
+    /// Poll a provider token endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for transport failures or invalid provider responses.
+    async fn poll(
+        &self,
+        config: &OAuthDeviceCodeConfig,
+        challenge: &OAuthDeviceCodeChallenge,
+    ) -> AuthResult<OAuthDeviceCodeProviderResponse>;
+}
+
+/// OAuth device-code state machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthDeviceCodeFlow {
+    config: OAuthDeviceCodeConfig,
+    challenge: OAuthDeviceCodeChallenge,
+    poll_interval: StdDuration,
+}
+
+impl OAuthDeviceCodeFlow {
+    /// Start a device-code flow through the supplied transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] when static config is invalid or the provider
+    /// returns an invalid challenge.
+    pub async fn start<T>(
+        cx: &fcp_async_core::Cx,
+        config: OAuthDeviceCodeConfig,
+        transport: &T,
+    ) -> AuthResult<Self>
+    where
+        T: OAuthDeviceCodeTransport + ?Sized,
+    {
+        let _ = cx;
+        config.validate()?;
+        let challenge = transport.start(&config).await?;
+        challenge
+            .validate()
+            .map_err(|error| AuthError::InvalidProviderResponse {
+                method: "oauth_device",
+                reason: error.to_string(),
+            })?;
+        if Utc::now() >= challenge.expires_at {
+            return Err(AuthError::Expired {
+                method: "oauth_device",
+                expires_at: challenge.expires_at,
+            });
+        }
+        Ok(Self {
+            poll_interval: challenge.interval,
+            config,
+            challenge,
+        })
+    }
+
+    /// Borrow the user-facing challenge.
+    #[must_use]
+    pub const fn challenge(&self) -> &OAuthDeviceCodeChallenge {
+        &self.challenge
+    }
+
+    /// Return the current polling interval.
+    #[must_use]
+    pub const fn poll_interval(&self) -> StdDuration {
+        self.poll_interval
+    }
+
+    /// Poll for authorization completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for terminal provider failures, expired
+    /// challenges, or malformed token responses.
+    pub async fn poll<T>(
+        &mut self,
+        cx: &fcp_async_core::Cx,
+        transport: &T,
+    ) -> AuthResult<OAuthDeviceCodePoll>
+    where
+        T: OAuthDeviceCodeTransport + ?Sized,
+    {
+        let _ = cx;
+        if Utc::now() >= self.challenge.expires_at {
+            return Err(AuthError::Expired {
+                method: "oauth_device",
+                expires_at: self.challenge.expires_at,
+            });
+        }
+        match transport.poll(&self.config, &self.challenge).await? {
+            OAuthDeviceCodeProviderResponse::AuthorizationPending => {
+                Ok(OAuthDeviceCodePoll::Pending {
+                    retry_after: self.poll_interval,
+                })
+            }
+            OAuthDeviceCodeProviderResponse::SlowDown => {
+                self.poll_interval = self
+                    .poll_interval
+                    .checked_add(StdDuration::from_secs(5))
+                    .unwrap_or(StdDuration::MAX);
+                Ok(OAuthDeviceCodePoll::Pending {
+                    retry_after: self.poll_interval,
+                })
+            }
+            OAuthDeviceCodeProviderResponse::Authorized(tokens) => {
+                tokens.validate()?;
+                Ok(OAuthDeviceCodePoll::Authorized(tokens))
+            }
+            OAuthDeviceCodeProviderResponse::AccessDenied { reason } => {
+                validate_oauth_error("access_denied", &reason)?;
+                Err(AuthError::ProviderRejected {
+                    method: "oauth_device",
+                    code: "access_denied".to_string(),
+                    reason,
+                })
+            }
+            OAuthDeviceCodeProviderResponse::ExpiredToken { reason } => {
+                validate_oauth_error("expired_token", &reason)?;
+                Err(AuthError::ProviderRejected {
+                    method: "oauth_device",
+                    code: "expired_token".to_string(),
+                    reason,
+                })
+            }
+        }
+    }
+}
+
+/// OAuth authorization-code auth state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthAuthCodeAuth {
+    /// OAuth client id.
+    pub client_id: String,
+    /// Optional client secret for confidential clients.
+    pub client_secret: Option<RedactedSecret>,
+    /// Authorization endpoint URL.
+    pub authorize_url: String,
+    /// Token endpoint URL.
+    pub token_url: String,
+    /// Registered redirect URI.
+    pub redirect_uri: String,
+    /// Requested scope string.
+    pub scope: String,
+    /// Whether PKCE must be used.
+    pub use_pkce: bool,
+    /// Extra provider-specific authorization URL parameters.
+    pub extra_authorize_params: BTreeMap<String, String>,
+    /// Current access token, if the flow has completed.
+    pub access_token: Option<RedactedSecret>,
+    /// Current refresh token, if the provider issued one.
+    pub refresh_token: Option<RedactedSecret>,
+    /// Access-token expiration time.
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl OAuthAuthCodeAuth {
+    /// Construct public-client OAuth authorization-code auth state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when OAuth fields are empty or unsafe.
+    pub fn public_client(
+        client_id: impl Into<String>,
+        authorize_url: impl Into<String>,
+        token_url: impl Into<String>,
+        redirect_uri: impl Into<String>,
+        scope: impl Into<String>,
+        use_pkce: bool,
+    ) -> AuthResult<Self> {
+        let config = OAuthAuthCodeConfig::public_client(
+            client_id,
+            authorize_url,
+            token_url,
+            redirect_uri,
+            scope,
+            use_pkce,
+        )?;
+        Ok(Self::from_config(config))
+    }
+
+    /// Construct confidential-client OAuth authorization-code auth state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when OAuth fields are empty or unsafe.
+    pub fn confidential_client(
+        client_id: impl Into<String>,
+        client_secret: impl Into<String>,
+        authorize_url: impl Into<String>,
+        token_url: impl Into<String>,
+        redirect_uri: impl Into<String>,
+        scope: impl Into<String>,
+        use_pkce: bool,
+    ) -> AuthResult<Self> {
+        let config = OAuthAuthCodeConfig::confidential_client(
+            client_id,
+            client_secret,
+            authorize_url,
+            token_url,
+            redirect_uri,
+            scope,
+            use_pkce,
+        )?;
+        Ok(Self::from_config(config))
+    }
+
+    /// Construct auth state from a validated flow config.
+    #[must_use]
+    pub fn from_config(config: OAuthAuthCodeConfig) -> Self {
+        Self {
+            client_id: config.client_id,
+            client_secret: config.client_secret,
+            authorize_url: config.authorize_url,
+            token_url: config.token_url,
+            redirect_uri: config.redirect_uri,
+            scope: config.scope,
+            use_pkce: config.use_pkce,
+            extra_authorize_params: config.extra_authorize_params,
+            access_token: None,
+            refresh_token: None,
+            expires_at: None,
+        }
+    }
+
+    /// Replace cached token material after a completed auth-code exchange.
+    pub fn apply_tokens(&mut self, tokens: OAuthTokens) {
+        let OAuthTokens {
+            access_token,
+            refresh_token,
+            expires_at,
+            ..
+        } = tokens;
+        let access_slot = &mut self.access_token;
+        *access_slot = Some(access_token);
+        let refresh_slot = &mut self.refresh_token;
+        *refresh_slot = refresh_token;
+        self.expires_at = expires_at;
+    }
+
+    /// Build refresh-token flow configuration from this auth state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when stored OAuth fields are invalid.
+    pub fn refresh_config(&self) -> AuthResult<OAuthRefreshTokenConfig> {
+        let scope = if self.scope.is_empty() {
+            None
+        } else {
+            Some(self.scope.clone())
+        };
+        let secret_material = self
+            .client_secret
+            .as_ref()
+            .map(|secret| secret.expose_secret().to_string());
+        OAuthRefreshTokenConfig::new(
+            self.client_id.clone(),
+            secret_material,
+            self.token_url.clone(),
+            scope,
+        )
+    }
+
+    /// Build a refresh-token grant from cached refresh-token material.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::MissingToken`] when the provider has not issued a refresh token.
+    pub fn refresh_grant(&self) -> AuthResult<OAuthRefreshTokenGrant> {
+        let Some(refresh_token) = &self.refresh_token else {
+            return Err(AuthError::MissingToken {
+                method: "oauth_auth_code",
+            });
+        };
+        OAuthRefreshTokenGrant::new(refresh_token.expose_secret().to_string())
+    }
+
+    /// Refresh cached bearer tokens through an injectable refresh-token transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for invalid stored config, missing refresh-token
+    /// material, transport failures, provider rejections, or malformed refreshed tokens.
+    pub async fn refresh_with_transport<T>(
+        &mut self,
+        cx: &fcp_async_core::Cx,
+        transport: &T,
+    ) -> AuthResult<()>
+    where
+        T: OAuthRefreshTokenTransport + ?Sized,
+    {
+        self.validate_config()?;
+        let config = self.refresh_config()?;
+        let grant = self.refresh_grant()?;
+        let tokens = OAuthRefreshTokenFlow::refresh(cx, &config, &grant, transport).await?;
+        self.apply_refreshed_tokens(tokens);
+        Ok(())
+    }
+
+    fn apply_refreshed_tokens(&mut self, tokens: OAuthTokens) {
+        let OAuthTokens {
+            access_token: fresh_access,
+            refresh_token: fresh_refresh,
+            expires_at,
+            ..
+        } = tokens;
+        let access_slot = &mut self.access_token;
+        *access_slot = Some(fresh_access);
+        if let Some(material) = fresh_refresh {
+            let refresh_slot = &mut self.refresh_token;
+            *refresh_slot = Some(material);
         }
         self.expires_at = expires_at;
+    }
+
+    fn validate_config(&self) -> AuthResult<()> {
+        let config = OAuthAuthCodeConfig {
+            client_id: self.client_id.clone(),
+            client_secret: self.client_secret.clone(),
+            authorize_url: self.authorize_url.clone(),
+            token_url: self.token_url.clone(),
+            redirect_uri: self.redirect_uri.clone(),
+            scope: self.scope.clone(),
+            use_pkce: self.use_pkce,
+            extra_authorize_params: self.extra_authorize_params.clone(),
+        };
+        config.validate()
     }
 }
 
@@ -1083,12 +1587,762 @@ impl AuthMethod for OAuthAuthCodeAuth {
     }
 
     async fn validate(&self, _cx: &fcp_async_core::Cx) -> AuthResult<()> {
-        validate_non_empty("client_id", &self.client_id)?;
-        validate_auth_endpoint_url("authorize_url", &self.authorize_url)?;
-        validate_auth_endpoint_url("token_url", &self.token_url)?;
-        validate_auth_endpoint_url("redirect_uri", &self.redirect_uri)?;
-        if let Some(expires_at) = self.expires_at {
-            ensure_not_expired(self.id(), expires_at)?;
+        self.validate_config()
+    }
+
+    async fn build_request_auth(
+        &self,
+        cx: &fcp_async_core::Cx,
+        request: &mut AuthRequest,
+    ) -> AuthResult<()> {
+        self.validate(cx).await?;
+        apply_bearer_token(
+            self.id(),
+            self.access_token.as_ref(),
+            self.expires_at,
+            request,
+        )
+    }
+
+    fn requires_refresh_in(&self) -> Option<StdDuration> {
+        self.expires_at.map(std_duration_until)
+    }
+}
+
+/// OAuth authorization-code flow configuration.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthAuthCodeConfig {
+    /// OAuth client id.
+    pub client_id: String,
+    /// Optional client secret for confidential clients.
+    pub client_secret: Option<RedactedSecret>,
+    /// Authorization endpoint URL.
+    pub authorize_url: String,
+    /// Token endpoint URL.
+    pub token_url: String,
+    /// Registered redirect URI.
+    pub redirect_uri: String,
+    /// Requested scope string. Empty scope is allowed for provider defaults.
+    pub scope: String,
+    /// Whether to include S256 PKCE in the authorization request and exchange.
+    pub use_pkce: bool,
+    /// Extra provider-specific authorization URL parameters.
+    pub extra_authorize_params: BTreeMap<String, String>,
+}
+
+impl OAuthAuthCodeConfig {
+    /// Construct public-client authorization-code flow configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when required fields are empty or unsafe.
+    pub fn public_client(
+        client_id: impl Into<String>,
+        authorize_url: impl Into<String>,
+        token_url: impl Into<String>,
+        redirect_uri: impl Into<String>,
+        scope: impl Into<String>,
+        use_pkce: bool,
+    ) -> AuthResult<Self> {
+        Self::new(
+            client_id,
+            Option::<String>::None,
+            authorize_url,
+            token_url,
+            redirect_uri,
+            scope,
+            use_pkce,
+        )
+    }
+
+    /// Construct confidential-client authorization-code flow configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when required fields are empty or unsafe.
+    pub fn confidential_client(
+        client_id: impl Into<String>,
+        client_secret: impl Into<String>,
+        authorize_url: impl Into<String>,
+        token_url: impl Into<String>,
+        redirect_uri: impl Into<String>,
+        scope: impl Into<String>,
+        use_pkce: bool,
+    ) -> AuthResult<Self> {
+        Self::new(
+            client_id,
+            Some(client_secret.into()),
+            authorize_url,
+            token_url,
+            redirect_uri,
+            scope,
+            use_pkce,
+        )
+    }
+
+    /// Construct authorization-code flow configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when required fields are empty or unsafe.
+    pub fn new(
+        client_id: impl Into<String>,
+        client_secret: Option<impl Into<String>>,
+        authorize_url: impl Into<String>,
+        token_url: impl Into<String>,
+        redirect_uri: impl Into<String>,
+        scope: impl Into<String>,
+        use_pkce: bool,
+    ) -> AuthResult<Self> {
+        let config = Self {
+            client_id: client_id.into(),
+            client_secret: client_secret.map(RedactedSecret::new).transpose()?,
+            authorize_url: authorize_url.into(),
+            token_url: token_url.into(),
+            redirect_uri: redirect_uri.into(),
+            scope: scope.into(),
+            use_pkce,
+            extra_authorize_params: BTreeMap::new(),
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Add one provider-specific authorization URL parameter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when the parameter is empty, unsafe,
+    /// or attempts to override a standard OAuth field owned by this config.
+    pub fn with_authorize_param(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> AuthResult<Self> {
+        let name = name.into();
+        let value = value.into();
+        validate_authorize_param(&name, &value)?;
+        self.extra_authorize_params.insert(name, value);
+        Ok(self)
+    }
+
+    fn validate(&self) -> AuthResult<()> {
+        validate_non_empty(&self.client_id, "client_id")?;
+        validate_no_crlf(&self.client_id, "client_id")?;
+        if let Some(secret) = &self.client_secret {
+            validate_no_crlf(secret.expose_secret(), "client_secret")?;
+        }
+        parse_oauth_url(&self.authorize_url, "authorize_url")?;
+        parse_oauth_url(&self.token_url, "token_url")?;
+        parse_oauth_url(&self.redirect_uri, "redirect_uri")?;
+        validate_no_crlf(&self.scope, "scope")?;
+        for (name, value) in &self.extra_authorize_params {
+            validate_authorize_param(name, value)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_authorize_param(name: &str, value: &str) -> AuthResult<()> {
+    validate_non_empty(name, "authorize_param")?;
+    validate_no_crlf(name, "authorize_param")?;
+    validate_non_empty(value, "authorize_param")?;
+    validate_no_crlf(value, "authorize_param")?;
+    match name {
+        "response_type"
+        | "client_id"
+        | "redirect_uri"
+        | "scope"
+        | "state"
+        | "code_challenge"
+        | "code_challenge_method" => Err(invalid_config(
+            "authorize_param",
+            "must not override standard OAuth authorization parameters",
+        )),
+        _ => Ok(()),
+    }
+}
+
+impl fmt::Debug for OAuthAuthCodeConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthAuthCodeConfig")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("authorize_url", &self.authorize_url)
+            .field("token_url", &self.token_url)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("scope", &self.scope)
+            .field("use_pkce", &self.use_pkce)
+            .field("extra_authorize_params", &self.extra_authorize_params)
+            .finish()
+    }
+}
+
+/// PKCE code-challenge method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthPkceChallengeMethod {
+    /// SHA-256 based `S256` challenge.
+    S256,
+}
+
+impl fmt::Display for OAuthPkceChallengeMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::S256 => f.write_str("S256"),
+        }
+    }
+}
+
+/// Redaction-safe PKCE verifier/challenge pair.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthPkce {
+    /// Secret code verifier used at token exchange.
+    pub verifier: RedactedSecret,
+    /// Public code challenge sent in the authorization URL.
+    pub challenge: String,
+    /// Challenge method.
+    pub method: OAuthPkceChallengeMethod,
+}
+
+impl OAuthPkce {
+    /// Generate a random S256 PKCE verifier and challenge.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] if generated material fails validation.
+    pub fn generate() -> AuthResult<Self> {
+        let mut bytes = [0_u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        Self::from_verifier(URL_SAFE_NO_PAD.encode(bytes))
+    }
+
+    /// Build S256 PKCE material from an existing verifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when the verifier violates RFC 7636
+    /// length or character constraints.
+    pub fn from_verifier(verifier: impl Into<String>) -> AuthResult<Self> {
+        let verifier = verifier.into();
+        validate_pkce_verifier(&verifier)?;
+        let challenge = pkce_s256_challenge(&verifier);
+        Ok(Self {
+            verifier: RedactedSecret::new(verifier)?,
+            challenge,
+            method: OAuthPkceChallengeMethod::S256,
+        })
+    }
+}
+
+impl fmt::Debug for OAuthPkce {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthPkce")
+            .field("verifier", &self.verifier)
+            .field("challenge", &self.challenge)
+            .field("method", &self.method)
+            .finish()
+    }
+}
+
+/// Authorization URL plus callback validation state.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthAuthCodeRequest {
+    authorization_url: String,
+    state: RedactedSecret,
+    pkce: Option<OAuthPkce>,
+}
+
+impl OAuthAuthCodeRequest {
+    /// Borrow the user-facing authorization URL.
+    #[must_use]
+    pub fn authorization_url(&self) -> &str {
+        &self.authorization_url
+    }
+
+    /// Borrow the expected callback state.
+    #[must_use]
+    pub const fn state(&self) -> &RedactedSecret {
+        &self.state
+    }
+
+    /// Borrow PKCE material, when enabled.
+    #[must_use]
+    pub const fn pkce(&self) -> Option<&OAuthPkce> {
+        self.pkce.as_ref()
+    }
+}
+
+impl fmt::Debug for OAuthAuthCodeRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthAuthCodeRequest")
+            .field("authorization_url", &"[REDACTED]")
+            .field("state", &self.state)
+            .field("pkce", &self.pkce.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+/// OAuth authorization-code callback payload.
+#[derive(Clone, PartialEq, Eq)]
+pub enum OAuthAuthCodeCallback {
+    /// Provider returned an authorization code.
+    Authorized {
+        /// Secret authorization code.
+        code: RedactedSecret,
+        /// Callback state.
+        state: String,
+    },
+    /// Provider returned an OAuth error.
+    Rejected {
+        /// Provider error code.
+        error: String,
+        /// Optional redaction-safe error description.
+        description: Option<String>,
+        /// Optional callback state.
+        state: Option<String>,
+    },
+}
+
+impl OAuthAuthCodeCallback {
+    /// Construct an authorized callback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when the code or state is empty or unsafe.
+    pub fn authorized(code: impl Into<String>, state: impl Into<String>) -> AuthResult<Self> {
+        let state = state.into();
+        validate_oauth_state(&state)?;
+        Ok(Self::Authorized {
+            code: RedactedSecret::new(code)?,
+            state,
+        })
+    }
+
+    /// Construct a rejected callback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when provider fields are empty or unsafe.
+    pub fn rejected(
+        error: impl Into<String>,
+        description: Option<impl Into<String>>,
+        state: Option<impl Into<String>>,
+    ) -> AuthResult<Self> {
+        let error = error.into();
+        validate_non_empty(&error, "oauth_error_code")?;
+        validate_no_crlf(&error, "oauth_error_code")?;
+        let description = description.map(Into::into);
+        if let Some(description) = description.as_deref() {
+            validate_no_crlf(description, "oauth_error_reason")?;
+        }
+        let state = state.map(Into::into);
+        if let Some(state) = state.as_deref() {
+            validate_oauth_state(state)?;
+        }
+        Ok(Self::Rejected {
+            error,
+            description,
+            state,
+        })
+    }
+}
+
+impl fmt::Debug for OAuthAuthCodeCallback {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Authorized { code, state: _ } => f
+                .debug_struct("OAuthAuthCodeCallback::Authorized")
+                .field("code", code)
+                .field("state", &"[REDACTED]")
+                .finish(),
+            Self::Rejected {
+                error,
+                description,
+                state,
+            } => f
+                .debug_struct("OAuthAuthCodeCallback::Rejected")
+                .field("error", error)
+                .field("description", description)
+                .field("state", &state.as_ref().map(|_| "[REDACTED]"))
+                .finish(),
+        }
+    }
+}
+
+/// Validated authorization code ready for token exchange.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthAuthCodeGrant {
+    /// Secret authorization code.
+    pub code: RedactedSecret,
+    /// Callback state that matched the request state.
+    pub state: RedactedSecret,
+}
+
+impl fmt::Debug for OAuthAuthCodeGrant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthAuthCodeGrant")
+            .field("code", &self.code)
+            .field("state", &self.state)
+            .finish()
+    }
+}
+
+/// Provider response returned by an authorization-code token endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OAuthAuthCodeProviderResponse {
+    /// Token exchange succeeded.
+    Authorized(OAuthTokens),
+    /// Token exchange failed with a terminal provider error.
+    Rejected {
+        /// Provider error code.
+        code: String,
+        /// Redaction-safe provider reason.
+        reason: String,
+    },
+}
+
+/// Transport boundary for OAuth authorization-code providers.
+#[async_trait]
+pub trait OAuthAuthCodeTransport: Send + Sync {
+    /// Exchange an authorization code for tokens.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for transport failures or invalid provider responses.
+    async fn exchange(
+        &self,
+        config: &OAuthAuthCodeConfig,
+        grant: &OAuthAuthCodeGrant,
+        pkce: Option<&OAuthPkce>,
+    ) -> AuthResult<OAuthAuthCodeProviderResponse>;
+}
+
+/// OAuth authorization-code state machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthAuthCodeFlow {
+    config: OAuthAuthCodeConfig,
+    request: OAuthAuthCodeRequest,
+}
+
+impl OAuthAuthCodeFlow {
+    /// Start an authorization-code flow with generated state and optional PKCE.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] when static config or generated PKCE material is invalid.
+    pub fn start(config: OAuthAuthCodeConfig) -> AuthResult<Self> {
+        Self::start_with_state(config, generate_url_safe_secret())
+    }
+
+    /// Start an authorization-code flow with caller-supplied state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] when static config, state, or generated PKCE material is invalid.
+    pub fn start_with_state(
+        config: OAuthAuthCodeConfig,
+        state: impl Into<String>,
+    ) -> AuthResult<Self> {
+        let pkce = if config.use_pkce {
+            Some(OAuthPkce::generate()?)
+        } else {
+            None
+        };
+        Self::start_with_state_and_pkce(config, state, pkce)
+    }
+
+    /// Start an authorization-code flow with caller-supplied state and PKCE material.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] when static config, state, or PKCE state is invalid.
+    pub fn start_with_state_and_pkce(
+        config: OAuthAuthCodeConfig,
+        state: impl Into<String>,
+        pkce: Option<OAuthPkce>,
+    ) -> AuthResult<Self> {
+        config.validate()?;
+        if config.use_pkce && pkce.is_none() {
+            return Err(invalid_config("pkce", "PKCE material is required"));
+        }
+        if !config.use_pkce && pkce.is_some() {
+            return Err(invalid_config(
+                "pkce",
+                "PKCE material supplied while PKCE is disabled",
+            ));
+        }
+        let state = state.into();
+        validate_oauth_state(&state)?;
+        let request = build_authorization_request(&config, RedactedSecret::new(state)?, pkce)?;
+        Ok(Self { config, request })
+    }
+
+    /// Borrow the authorization request.
+    #[must_use]
+    pub const fn request(&self) -> &OAuthAuthCodeRequest {
+        &self.request
+    }
+
+    /// Validate a provider callback and extract the authorization grant.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for provider rejection, state mismatch, or unsafe callback fields.
+    pub fn complete_callback(
+        &self,
+        callback: OAuthAuthCodeCallback,
+    ) -> AuthResult<OAuthAuthCodeGrant> {
+        match callback {
+            OAuthAuthCodeCallback::Authorized { code, state } => {
+                self.ensure_state_matches(Some(&state))?;
+                validate_no_crlf(code.expose_secret(), "authorization_code")?;
+                Ok(OAuthAuthCodeGrant {
+                    code,
+                    state: RedactedSecret::new(state)?,
+                })
+            }
+            OAuthAuthCodeCallback::Rejected {
+                error,
+                description,
+                state,
+            } => {
+                self.ensure_state_matches(state.as_deref())?;
+                let reason = description.unwrap_or_else(|| error.clone());
+                validate_oauth_error(&error, &reason)?;
+                Err(AuthError::ProviderRejected {
+                    method: "oauth_auth_code",
+                    code: error,
+                    reason,
+                })
+            }
+        }
+    }
+
+    /// Exchange an authorization grant for tokens.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for transport failures, provider rejections, or malformed tokens.
+    pub async fn exchange<T>(
+        &self,
+        cx: &fcp_async_core::Cx,
+        transport: &T,
+        grant: &OAuthAuthCodeGrant,
+    ) -> AuthResult<OAuthTokens>
+    where
+        T: OAuthAuthCodeTransport + ?Sized,
+    {
+        let _ = cx;
+        match transport
+            .exchange(&self.config, grant, self.request.pkce())
+            .await?
+        {
+            OAuthAuthCodeProviderResponse::Authorized(tokens) => {
+                tokens.validate()?;
+                Ok(tokens)
+            }
+            OAuthAuthCodeProviderResponse::Rejected { code, reason } => {
+                validate_oauth_error(&code, &reason)?;
+                Err(AuthError::ProviderRejected {
+                    method: "oauth_auth_code",
+                    code,
+                    reason,
+                })
+            }
+        }
+    }
+
+    fn ensure_state_matches(&self, state: Option<&str>) -> AuthResult<()> {
+        let Some(state) = state else {
+            return Err(AuthError::InvalidProviderResponse {
+                method: "oauth_auth_code",
+                reason: "callback state missing".to_string(),
+            });
+        };
+        validate_oauth_state(state)?;
+        if state != self.request.state.expose_secret() {
+            return Err(AuthError::InvalidProviderResponse {
+                method: "oauth_auth_code",
+                reason: "callback state mismatch".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Short-lived setup-token auth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupTokenAuth {
+    /// Setup token.
+    pub token: RedactedSecret,
+    /// Expiration timestamp.
+    pub expires_at: DateTime<Utc>,
+    /// Header that receives the token.
+    pub header_name: String,
+}
+
+impl SetupTokenAuth {
+    /// Construct setup-token auth using bearer `Authorization`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when the token or header is invalid.
+    pub fn bearer(token: impl Into<String>, expires_at: DateTime<Utc>) -> AuthResult<Self> {
+        Self::new(token, expires_at, "Authorization")
+    }
+
+    /// Construct setup-token auth with a custom header.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when the token or header is invalid.
+    pub fn new(
+        token: impl Into<String>,
+        expires_at: DateTime<Utc>,
+        header_name: impl Into<String>,
+    ) -> AuthResult<Self> {
+        let header_name = header_name.into();
+        validate_header_name(&header_name)?;
+        Ok(Self {
+            token: RedactedSecret::new(token)?,
+            expires_at,
+            header_name,
+        })
+    }
+
+    fn ensure_live(&self) -> AuthResult<()> {
+        if Utc::now() >= self.expires_at {
+            return Err(AuthError::Expired {
+                method: "setup_token",
+                expires_at: self.expires_at,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl AuthMethod for SetupTokenAuth {
+    fn id(&self) -> &'static str {
+        "setup_token"
+    }
+
+    async fn validate(&self, _cx: &fcp_async_core::Cx) -> AuthResult<()> {
+        self.ensure_live()
+    }
+
+    async fn build_request_auth(
+        &self,
+        cx: &fcp_async_core::Cx,
+        request: &mut AuthRequest,
+    ) -> AuthResult<()> {
+        self.validate(cx).await?;
+        request.set_header(
+            self.header_name.clone(),
+            format!("Bearer {}", self.token.expose_secret()),
+        )
+    }
+
+    fn requires_refresh_in(&self) -> Option<StdDuration> {
+        Some(std_duration_until(self.expires_at))
+    }
+}
+
+/// Cached JWT token plus expiration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JwtCachedToken {
+    /// Generated JWT.
+    pub token: RedactedSecret,
+    /// Expiration timestamp.
+    pub expires_at: DateTime<Utc>,
+}
+
+/// JWT generator auth.
+#[derive(Clone)]
+pub struct JwtAuth {
+    /// Stable method id suffix for diagnostics.
+    pub id: String,
+    /// Token TTL.
+    pub ttl: StdDuration,
+    generator: Arc<dyn Fn() -> AuthResult<String> + Send + Sync>,
+    cached_token: Arc<RwLock<Option<JwtCachedToken>>>,
+}
+
+impl JwtAuth {
+    /// Construct a JWT auth method from a token generator.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when `id` is empty or `ttl` is zero.
+    pub fn new(
+        id: impl Into<String>,
+        ttl: StdDuration,
+        generator: impl Fn() -> AuthResult<String> + Send + Sync + 'static,
+    ) -> AuthResult<Self> {
+        let id = id.into();
+        validate_non_empty(&id, "jwt_id")?;
+        if ttl.is_zero() {
+            return Err(invalid_config("ttl", "must be greater than zero"));
+        }
+        Ok(Self {
+            id,
+            ttl,
+            generator: Arc::new(generator),
+            cached_token: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    /// Return the cached token snapshot, if present.
+    #[must_use]
+    pub fn cached_token(&self) -> Option<JwtCachedToken> {
+        self.cached_token.read().clone()
+    }
+
+    fn regenerate_jwt(&self) -> AuthResult<JwtCachedToken> {
+        let jwt = RedactedSecret::new((self.generator)()?)?;
+        let expires_at = Utc::now() + chrono_duration(self.ttl)?;
+        let cached = JwtCachedToken {
+            token: jwt,
+            expires_at,
+        };
+        *self.cached_token.write() = Some(cached.clone());
+        Ok(cached)
+    }
+
+    fn jwt_material(&self) -> AuthResult<RedactedSecret> {
+        if let Some(cached) = self.cached_token.read().as_ref() {
+            if Utc::now() < cached.expires_at {
+                return Ok(cached.token.clone());
+            }
+        }
+
+        Ok(self.regenerate_jwt()?.token)
+    }
+}
+
+impl fmt::Debug for JwtAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JwtAuth")
+            .field("id", &self.id)
+            .field("ttl", &self.ttl)
+            .field("cached_token", &self.cached_token())
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl AuthMethod for JwtAuth {
+    fn id(&self) -> &'static str {
+        "jwt"
+    }
+
+    async fn validate(&self, _cx: &fcp_async_core::Cx) -> AuthResult<()> {
+        validate_non_empty(&self.id, "jwt_id")?;
+        if self.ttl.is_zero() {
+            return Err(invalid_config("ttl", "must be greater than zero"));
         }
         Ok(())
     }
@@ -1099,168 +2353,157 @@ impl AuthMethod for OAuthAuthCodeAuth {
         request: &mut AuthRequest,
     ) -> AuthResult<()> {
         self.validate(cx).await?;
-        insert_bearer_material(self.id(), self.access_token.as_ref(), request)
+        let jwt = self.jwt_material()?;
+        request.set_header("Authorization", format!("Bearer {}", jwt.expose_secret()))
     }
 
-    fn requires_refresh_in(&self) -> Option<Duration> {
-        self.expires_at.and_then(duration_until)
+    fn requires_refresh_in(&self) -> Option<StdDuration> {
+        self.cached_token()
+            .map(|cached| std_duration_until(cached.expires_at))
     }
 
-    async fn refresh(&self, _cx: &fcp_async_core::Cx) -> AuthResult<()> {
-        Err(AuthError::UnsupportedMethod {
-            method: self.id(),
-            operation: "refresh",
-        })
+    async fn refresh(&mut self, cx: &fcp_async_core::Cx) -> AuthResult<()> {
+        self.validate(cx).await?;
+        self.regenerate_jwt()?;
+        Ok(())
     }
 }
 
-/// Cached JWT-token authentication.
-#[derive(Clone)]
-pub struct JwtAuth {
-    generator: Arc<dyn Fn() -> AuthResult<SecretString> + Send + Sync>,
-    cached_token: Arc<Mutex<Option<CachedJwtToken>>>,
-    /// Token time-to-live.
-    pub ttl: Duration,
-    /// Header name, defaulting to `Authorization`.
-    pub header_name: String,
-    /// Header value prefix, defaulting to `Bearer `.
-    pub value_prefix: String,
+/// Result of applying AWS `SigV4` signing to request headers.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SigV4SignedAuth {
+    /// Authorization header value.
+    pub authorization: String,
+    /// Timestamp used for `x-amz-date`.
+    pub x_amz_date: String,
+    /// Payload hash used for `x-amz-content-sha256`.
+    pub x_amz_content_sha256: String,
+    /// Optional temporary-security session token header.
+    pub x_amz_security_token: Option<String>,
+    /// Semicolon-separated canonical signed header names.
+    pub signed_headers: String,
 }
 
-impl fmt::Debug for JwtAuth {
+impl fmt::Debug for SigV4SignedAuth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let cache_state = match self.cached_token.lock() {
-            Ok(cache) if cache.is_some() => "present",
-            Ok(_) => "empty",
-            Err(_) => "unavailable",
-        };
-
-        f.debug_struct("JwtAuth")
-            .field("generator", &"JwtGenerator(..)")
-            .field("cached_token", &cache_state)
-            .field("ttl", &self.ttl)
-            .field("header_name", &self.header_name)
-            .field("value_prefix", &self.value_prefix)
+        f.debug_struct("SigV4SignedAuth")
+            .field("authorization", &self.authorization)
+            .field("x_amz_date", &self.x_amz_date)
+            .field("x_amz_content_sha256", &self.x_amz_content_sha256)
+            .field(
+                "x_amz_security_token",
+                &self.x_amz_security_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("signed_headers", &self.signed_headers)
             .finish()
     }
 }
 
-impl JwtAuth {
-    /// Create JWT auth from a redaction-safe token generator.
-    #[must_use]
+/// AWS `SigV4` auth configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SigV4Auth {
+    /// Access key id.
+    pub access_key: RedactedSecret,
+    /// Secret access key.
+    pub secret_key: RedactedSecret,
+    /// Optional session token.
+    pub session_token: Option<RedactedSecret>,
+    /// AWS region.
+    pub region: String,
+    /// AWS service id.
+    pub service: String,
+}
+
+impl SigV4Auth {
+    /// Construct `SigV4` auth configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when any required field is empty.
     pub fn new(
-        generator: impl Fn() -> AuthResult<SecretString> + Send + Sync + 'static,
-        ttl: Duration,
-    ) -> Self {
-        Self {
-            generator: Arc::new(generator),
-            cached_token: Arc::new(Mutex::new(None)),
-            ttl,
-            header_name: DEFAULT_AUTHORIZATION_HEADER.to_owned(),
-            value_prefix: DEFAULT_BEARER_PREFIX.to_owned(),
-        }
-    }
-
-    fn cache(&self) -> AuthResult<MutexGuard<'_, Option<CachedJwtToken>>> {
-        self.cached_token
-            .lock()
-            .map_err(|_| AuthError::StateUnavailable {
-                reason: "jwt token cache poisoned".to_owned(),
-            })
-    }
-
-    fn generate_and_cache(&self) -> AuthResult<SecretString> {
-        let generated_material = (self.generator)()?;
-        if generated_material.is_empty() {
-            return Err(AuthError::MissingMaterial { method: self.id() });
-        }
-
-        let expires_at = Utc::now() + chrono_duration(self.ttl);
-        *self.cache()? = Some(CachedJwtToken {
-            material: generated_material.clone(),
-            expires_at,
-        });
-        Ok(generated_material)
-    }
-}
-
-#[derive(Clone, Debug)]
-struct CachedJwtToken {
-    material: SecretString,
-    expires_at: DateTime<Utc>,
-}
-
-#[async_trait]
-impl AuthMethod for JwtAuth {
-    fn id(&self) -> &'static str {
-        "jwt"
-    }
-
-    async fn validate(&self, _cx: &fcp_async_core::Cx) -> AuthResult<()> {
-        if self.ttl.is_zero() {
-            return Err(AuthError::invalid_config(
-                "ttl",
-                "JWT token TTL must be greater than zero",
-            ));
-        }
-        validate_header_name(&self.header_name)?;
-        validate_header_value(&self.value_prefix, "value_prefix")
-    }
-
-    async fn build_request_auth(
-        &self,
-        cx: &fcp_async_core::Cx,
-        request: &mut AuthRequest,
-    ) -> AuthResult<()> {
-        self.validate(cx).await?;
-
-        let cached = {
-            let cache = self.cache()?;
-            cache
-                .as_ref()
-                .filter(|cached| Utc::now() < cached.expires_at)
-                .map(|cached| cached.material.clone())
-        };
-        let jwt_material = match cached {
-            Some(cached_material) => cached_material,
-            None => self.generate_and_cache()?,
-        };
-        let prefix = &self.value_prefix;
-        let jwt_material = jwt_material.expose_material();
-
-        request.insert_material_header(
-            self.header_name.clone(),
-            SecretString::new(format!("{prefix}{jwt_material}")),
-        )
-    }
-
-    fn requires_refresh_in(&self) -> Option<Duration> {
-        self.cache().ok().and_then(|cache| {
-            cache
-                .as_ref()
-                .and_then(|cached| duration_until(cached.expires_at))
+        access_key: impl Into<String>,
+        signing_key: impl Into<String>,
+        session_token: Option<impl Into<String>>,
+        region: impl Into<String>,
+        service: impl Into<String>,
+    ) -> AuthResult<Self> {
+        let region = region.into();
+        let service = service.into();
+        validate_non_empty(&region, "region")?;
+        validate_non_empty(&service, "service")?;
+        Ok(Self {
+            access_key: RedactedSecret::new(access_key)?,
+            secret_key: RedactedSecret::new(signing_key)?,
+            session_token: session_token.map(RedactedSecret::new).transpose()?,
+            region: region.to_ascii_lowercase(),
+            service: service.to_ascii_lowercase(),
         })
     }
 
-    async fn refresh(&self, cx: &fcp_async_core::Cx) -> AuthResult<()> {
-        self.validate(cx).await?;
-        self.generate_and_cache().map(|_| ())
-    }
-}
+    /// Sign a request context and return the headers `SigV4` must apply.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] when required request context or headers are invalid.
+    pub fn sign(
+        &self,
+        context: &SigV4SigningContext,
+        request_headers: &BTreeMap<String, String>,
+    ) -> AuthResult<SigV4SignedAuth> {
+        validate_non_empty(&self.region, "region")?;
+        validate_non_empty(&self.service, "service")?;
+        let signing_time = context.signing_time.unwrap_or_else(Utc::now);
+        let date_stamp = signing_time.format("%Y%m%d").to_string();
+        let amz_date = signing_time.format("%Y%m%dT%H%M%SZ").to_string();
+        let credential_scope =
+            format!("{date_stamp}/{}/{}/aws4_request", self.region, self.service);
 
-/// AWS Signature Version 4 credential material.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SigV4Auth {
-    /// AWS access key identifier.
-    pub access_key: SecretString,
-    /// AWS secret access key.
-    pub secret_key: SecretString,
-    /// Optional AWS session token.
-    pub session_token: Option<SecretString>,
-    /// AWS region.
-    pub region: String,
-    /// AWS service name.
-    pub service: String,
+        let mut headers = request_headers.clone();
+        headers.insert("x-amz-date".to_string(), amz_date.clone());
+        headers.insert(
+            "x-amz-content-sha256".to_string(),
+            context.payload_hash.clone(),
+        );
+        if let Some(session_token) = &self.session_token {
+            headers.insert(
+                "x-amz-security-token".to_string(),
+                session_token.expose_secret().to_string(),
+            );
+        }
+
+        let (canonical_headers, signed_headers) = canonical_headers(&headers)?;
+        let canonical_request = canonical_request(context, &canonical_headers, &signed_headers);
+        let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
+        let string_to_sign =
+            format!("{SIGV4_ALGORITHM}\n{amz_date}\n{credential_scope}\n{canonical_hash}");
+        let signing_key = self.derive_signing_key(&date_stamp);
+        let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
+        let authorization = format!(
+            "{SIGV4_ALGORITHM} Credential={}/{credential_scope},SignedHeaders={signed_headers},Signature={signature}",
+            self.access_key.expose_secret(),
+        );
+
+        Ok(SigV4SignedAuth {
+            authorization,
+            x_amz_date: amz_date,
+            x_amz_content_sha256: context.payload_hash.clone(),
+            x_amz_security_token: self
+                .session_token
+                .as_ref()
+                .map(|token| token.expose_secret().to_string()),
+            signed_headers,
+        })
+    }
+
+    fn derive_signing_key(&self, date_stamp: &str) -> Vec<u8> {
+        let key_for_date = hmac_sha256(
+            format!("AWS4{}", self.secret_key.expose_secret()).as_bytes(),
+            date_stamp.as_bytes(),
+        );
+        let key_for_region = hmac_sha256(&key_for_date, self.region.as_bytes());
+        let key_for_service = hmac_sha256(&key_for_region, self.service.as_bytes());
+        hmac_sha256(&key_for_service, b"aws4_request")
+    }
 }
 
 #[async_trait]
@@ -1270,51 +2513,624 @@ impl AuthMethod for SigV4Auth {
     }
 
     async fn validate(&self, _cx: &fcp_async_core::Cx) -> AuthResult<()> {
-        if self.access_key.is_empty() || self.secret_key.is_empty() {
-            return Err(AuthError::MissingMaterial { method: self.id() });
-        }
-        validate_non_empty("region", &self.region)?;
-        validate_non_empty("service", &self.service)
+        validate_non_empty(&self.region, "region")?;
+        validate_non_empty(&self.service, "service")
     }
 
     async fn build_request_auth(
         &self,
-        cx: &fcp_async_core::Cx,
-        _request: &mut AuthRequest,
+        _cx: &fcp_async_core::Cx,
+        request: &mut AuthRequest,
     ) -> AuthResult<()> {
-        self.validate(cx).await?;
-        Err(AuthError::UnsupportedMethod {
-            method: self.id(),
-            operation: "canonical request signing",
-        })
+        let context = request
+            .sigv4_context()
+            .ok_or_else(|| AuthError::MissingSigningContext { method: self.id() })?;
+        let signed = self.sign(context, request.headers())?;
+        request.set_header("x-amz-date", signed.x_amz_date)?;
+        request.set_header("x-amz-content-sha256", signed.x_amz_content_sha256)?;
+        if let Some(session_token) = signed.x_amz_security_token {
+            request.set_header("x-amz-security-token", session_token)?;
+        }
+        request.set_header("Authorization", signed.authorization)
     }
 
-    fn requires_refresh_in(&self) -> Option<Duration> {
+    fn requires_refresh_in(&self) -> Option<StdDuration> {
         None
-    }
-
-    async fn refresh(&self, _cx: &fcp_async_core::Cx) -> AuthResult<()> {
-        Err(AuthError::UnsupportedMethod {
-            method: self.id(),
-            operation: "refresh",
-        })
     }
 }
 
-/// Concrete multi-method auth enum used in provider profiles.
-#[derive(Clone, Debug)]
+/// Hash request payload bytes as lowercase SHA-256 hex.
+#[must_use]
+pub fn sha256_payload_hex(payload: &[u8]) -> String {
+    hex::encode(Sha256::digest(payload))
+}
+
+/// Provider-specific constructors for common auth profile shapes.
+///
+/// These helpers compose the core auth primitives without performing network
+/// I/O or reading provider-local credential files.
+pub mod providers {
+    use std::time::Duration as StdDuration;
+
+    use super::{
+        ApiKeyAuth, AuthMethodKind, AuthProfile, AuthResult, JwtAuth, OAuthAuthCodeAuth,
+        OAuthAuthCodeConfig, OAuthDeviceCodeAuth, OAuthDeviceCodeConfig, RedactedSecret, SigV4Auth,
+    };
+
+    fn profile(
+        provider: &'static str,
+        profile_id: impl Into<String>,
+        method: AuthMethodKind,
+        label: impl Into<String>,
+        priority: i32,
+    ) -> AuthResult<AuthProfile> {
+        AuthProfile::new(profile_id, provider, method, label, priority)
+    }
+
+    /// Anthropic provider helpers.
+    pub mod anthropic {
+        use super::{
+            ApiKeyAuth, AuthMethodKind, AuthProfile, AuthResult, OAuthDeviceCodeAuth,
+            OAuthDeviceCodeConfig, profile,
+        };
+
+        /// Canonical provider id for Anthropic profiles.
+        pub const PROVIDER_ID: &str = "anthropic";
+        /// Anthropic API-key header.
+        pub const API_KEY_HEADER: &str = "x-api-key";
+
+        /// Build an Anthropic API-key method.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when API-key material or headers are invalid.
+        pub fn api_key_method(api_key: impl Into<String>) -> AuthResult<AuthMethodKind> {
+            Ok(AuthMethodKind::ApiKey(ApiKeyAuth::new(
+                api_key,
+                API_KEY_HEADER,
+                Option::<String>::None,
+            )?))
+        }
+
+        /// Build an Anthropic API-key auth profile.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when profile or API-key fields are invalid.
+        pub fn api_key_profile(
+            profile_id: impl Into<String>,
+            label: impl Into<String>,
+            priority: i32,
+            api_key: impl Into<String>,
+        ) -> AuthResult<AuthProfile> {
+            profile(
+                PROVIDER_ID,
+                profile_id,
+                api_key_method(api_key)?,
+                label,
+                priority,
+            )
+        }
+
+        /// Build Anthropic device-code flow config from caller-supplied endpoints.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when OAuth config fields are invalid.
+        pub fn device_code_config(
+            client_id: impl Into<String>,
+            device_code_url: impl Into<String>,
+            token_url: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<OAuthDeviceCodeConfig> {
+            OAuthDeviceCodeConfig::new(client_id, device_code_url, token_url, scope)
+        }
+
+        /// Build an Anthropic OAuth device-code method.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when OAuth config fields are invalid.
+        pub fn device_code_method(
+            client_id: impl Into<String>,
+            device_code_url: impl Into<String>,
+            token_url: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<AuthMethodKind> {
+            Ok(AuthMethodKind::OAuthDeviceCode(
+                OAuthDeviceCodeAuth::from_config(device_code_config(
+                    client_id,
+                    device_code_url,
+                    token_url,
+                    scope,
+                )?),
+            ))
+        }
+
+        /// Build an Anthropic OAuth device-code auth profile.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when profile or OAuth fields are invalid.
+        pub fn device_code_profile(
+            profile_id: impl Into<String>,
+            label: impl Into<String>,
+            priority: i32,
+            client_id: impl Into<String>,
+            device_code_url: impl Into<String>,
+            token_url: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<AuthProfile> {
+            profile(
+                PROVIDER_ID,
+                profile_id,
+                device_code_method(client_id, device_code_url, token_url, scope)?,
+                label,
+                priority,
+            )
+        }
+    }
+
+    /// `OpenAI` Codex provider helpers.
+    pub mod openai_codex {
+        use super::{
+            ApiKeyAuth, AuthMethodKind, AuthProfile, AuthResult, OAuthDeviceCodeAuth,
+            OAuthDeviceCodeConfig, profile,
+        };
+
+        /// Canonical provider id for `OpenAI` profiles.
+        pub const PROVIDER_ID: &str = "openai";
+
+        /// Build an `OpenAI` API-key method.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when API-key material is invalid.
+        pub fn api_key_method(api_key: impl Into<String>) -> AuthResult<AuthMethodKind> {
+            Ok(AuthMethodKind::ApiKey(ApiKeyAuth::bearer(api_key)?))
+        }
+
+        /// Build an `OpenAI` API-key auth profile.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when profile or API-key fields are invalid.
+        pub fn api_key_profile(
+            profile_id: impl Into<String>,
+            label: impl Into<String>,
+            priority: i32,
+            api_key: impl Into<String>,
+        ) -> AuthResult<AuthProfile> {
+            profile(
+                PROVIDER_ID,
+                profile_id,
+                api_key_method(api_key)?,
+                label,
+                priority,
+            )
+        }
+
+        /// Build `OpenAI` Codex device-code flow config from caller-supplied endpoints.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when OAuth config fields are invalid.
+        pub fn device_code_config(
+            client_id: impl Into<String>,
+            device_code_url: impl Into<String>,
+            token_url: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<OAuthDeviceCodeConfig> {
+            OAuthDeviceCodeConfig::new(client_id, device_code_url, token_url, scope)
+        }
+
+        /// Build an `OpenAI` Codex OAuth device-code method.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when OAuth config fields are invalid.
+        pub fn device_code_method(
+            client_id: impl Into<String>,
+            device_code_url: impl Into<String>,
+            token_url: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<AuthMethodKind> {
+            Ok(AuthMethodKind::OAuthDeviceCode(
+                OAuthDeviceCodeAuth::from_config(device_code_config(
+                    client_id,
+                    device_code_url,
+                    token_url,
+                    scope,
+                )?),
+            ))
+        }
+
+        /// Build an `OpenAI` Codex OAuth device-code auth profile.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when profile or OAuth fields are invalid.
+        pub fn device_code_profile(
+            profile_id: impl Into<String>,
+            label: impl Into<String>,
+            priority: i32,
+            client_id: impl Into<String>,
+            device_code_url: impl Into<String>,
+            token_url: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<AuthProfile> {
+            profile(
+                PROVIDER_ID,
+                profile_id,
+                device_code_method(client_id, device_code_url, token_url, scope)?,
+                label,
+                priority,
+            )
+        }
+    }
+
+    /// Google OAuth provider helpers.
+    pub mod google {
+        use super::{
+            AuthMethodKind, AuthProfile, AuthResult, OAuthAuthCodeAuth, OAuthAuthCodeConfig,
+            profile,
+        };
+
+        /// Canonical provider id for Google profiles.
+        pub const PROVIDER_ID: &str = "google";
+        /// Google OAuth authorization endpoint.
+        pub const AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+        /// Google OAuth token endpoint.
+        pub const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+
+        /// Build Google public-client auth-code config with offline access.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when OAuth config fields are invalid.
+        pub fn offline_public_auth_code_config(
+            client_id: impl Into<String>,
+            redirect_uri: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<OAuthAuthCodeConfig> {
+            OAuthAuthCodeConfig::public_client(
+                client_id,
+                AUTHORIZE_URL,
+                TOKEN_URL,
+                redirect_uri,
+                scope,
+                true,
+            )?
+            .with_authorize_param("access_type", "offline")?
+            .with_authorize_param("prompt", "consent")
+        }
+
+        /// Build Google confidential-client auth-code config with offline access.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when OAuth config fields are invalid.
+        pub fn offline_confidential_auth_code_config(
+            client_id: impl Into<String>,
+            client_secret: impl Into<String>,
+            redirect_uri: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<OAuthAuthCodeConfig> {
+            OAuthAuthCodeConfig::confidential_client(
+                client_id,
+                client_secret,
+                AUTHORIZE_URL,
+                TOKEN_URL,
+                redirect_uri,
+                scope,
+                true,
+            )?
+            .with_authorize_param("access_type", "offline")?
+            .with_authorize_param("prompt", "consent")
+        }
+
+        /// Build a Google public-client OAuth auth-code method.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when OAuth config fields are invalid.
+        pub fn offline_public_auth_code_method(
+            client_id: impl Into<String>,
+            redirect_uri: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<AuthMethodKind> {
+            Ok(AuthMethodKind::OAuthAuthCode(
+                OAuthAuthCodeAuth::from_config(offline_public_auth_code_config(
+                    client_id,
+                    redirect_uri,
+                    scope,
+                )?),
+            ))
+        }
+
+        /// Build a Google confidential-client OAuth auth-code method.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when OAuth config fields are invalid.
+        pub fn offline_confidential_auth_code_method(
+            client_id: impl Into<String>,
+            client_secret: impl Into<String>,
+            redirect_uri: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<AuthMethodKind> {
+            Ok(AuthMethodKind::OAuthAuthCode(
+                OAuthAuthCodeAuth::from_config(offline_confidential_auth_code_config(
+                    client_id,
+                    client_secret,
+                    redirect_uri,
+                    scope,
+                )?),
+            ))
+        }
+
+        /// Build a Google public-client OAuth auth-code profile.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when profile or OAuth fields are invalid.
+        pub fn offline_public_auth_code_profile(
+            profile_id: impl Into<String>,
+            label: impl Into<String>,
+            priority: i32,
+            client_id: impl Into<String>,
+            redirect_uri: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<AuthProfile> {
+            profile(
+                PROVIDER_ID,
+                profile_id,
+                offline_public_auth_code_method(client_id, redirect_uri, scope)?,
+                label,
+                priority,
+            )
+        }
+    }
+
+    /// AWS provider helpers.
+    pub mod aws {
+        use super::{AuthMethodKind, AuthProfile, AuthResult, SigV4Auth, profile};
+
+        /// Canonical provider id for AWS profiles.
+        pub const PROVIDER_ID: &str = "aws";
+
+        /// Build AWS `SigV4` auth config.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when signing fields are invalid.
+        pub fn sigv4_auth(
+            access_key: impl Into<String>,
+            signing_key: impl Into<String>,
+            session_token: Option<impl Into<String>>,
+            region: impl Into<String>,
+            service: impl Into<String>,
+        ) -> AuthResult<SigV4Auth> {
+            SigV4Auth::new(access_key, signing_key, session_token, region, service)
+        }
+
+        /// Build an AWS `SigV4` method.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when signing fields are invalid.
+        pub fn sigv4_method(
+            access_key: impl Into<String>,
+            signing_key: impl Into<String>,
+            session_token: Option<impl Into<String>>,
+            region: impl Into<String>,
+            service: impl Into<String>,
+        ) -> AuthResult<AuthMethodKind> {
+            Ok(AuthMethodKind::SigV4(sigv4_auth(
+                access_key,
+                signing_key,
+                session_token,
+                region,
+                service,
+            )?))
+        }
+
+        /// Build an AWS `SigV4` auth profile.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when profile fields are invalid.
+        pub fn sigv4_profile(
+            profile_id: impl Into<String>,
+            label: impl Into<String>,
+            priority: i32,
+            auth: SigV4Auth,
+        ) -> AuthResult<AuthProfile> {
+            profile(
+                PROVIDER_ID,
+                profile_id,
+                AuthMethodKind::SigV4(auth),
+                label,
+                priority,
+            )
+        }
+    }
+
+    /// GLM/Zhipu provider helpers.
+    pub mod glm {
+        use super::{AuthMethodKind, AuthProfile, AuthResult, JwtAuth, StdDuration, profile};
+
+        /// Canonical provider id for GLM profiles.
+        pub const PROVIDER_ID: &str = "glm";
+
+        /// Build a GLM JWT method from a caller-supplied generator.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when JWT metadata is invalid.
+        pub fn jwt_method(
+            ttl: StdDuration,
+            generator: impl Fn() -> AuthResult<String> + Send + Sync + 'static,
+        ) -> AuthResult<AuthMethodKind> {
+            Ok(AuthMethodKind::Jwt(JwtAuth::new(
+                PROVIDER_ID,
+                ttl,
+                generator,
+            )?))
+        }
+
+        /// Build a GLM JWT auth profile.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when profile or JWT metadata is invalid.
+        pub fn jwt_profile(
+            profile_id: impl Into<String>,
+            label: impl Into<String>,
+            priority: i32,
+            ttl: StdDuration,
+            generator: impl Fn() -> AuthResult<String> + Send + Sync + 'static,
+        ) -> AuthResult<AuthProfile> {
+            profile(
+                PROVIDER_ID,
+                profile_id,
+                jwt_method(ttl, generator)?,
+                label,
+                priority,
+            )
+        }
+    }
+
+    /// Build a redacted token from provider helper callers that need direct material.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::AuthError`] when token material is empty.
+    pub fn redacted_secret(material: impl Into<String>) -> AuthResult<RedactedSecret> {
+        RedactedSecret::new(material)
+    }
+}
+
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
+    mac.update(data);
+    mac.finalize().into_bytes().to_vec()
+}
+
+fn canonical_request(
+    context: &SigV4SigningContext,
+    canonical_headers: &str,
+    signed_headers: &str,
+) -> String {
+    format!(
+        "{}\n{}\n{}\n{}\n{signed_headers}\n{}",
+        context.method,
+        canonical_uri(&context.uri_path),
+        canonical_query(&context.query_params),
+        canonical_headers,
+        context.payload_hash,
+    )
+}
+
+fn canonical_headers(headers: &BTreeMap<String, String>) -> AuthResult<(String, String)> {
+    let mut normalized = BTreeMap::new();
+    for (name, value) in headers {
+        let name = name.to_ascii_lowercase();
+        if name == "authorization" {
+            continue;
+        }
+        validate_header_name(&name)?;
+        validate_header_value(value)?;
+        normalized.insert(name, normalize_header_value(value));
+    }
+    if !normalized.contains_key("host") {
+        return Err(invalid_config("host_header", "SigV4 signing requires host"));
+    }
+
+    let mut canonical = String::new();
+    for (name, value) in &normalized {
+        let _ = writeln!(&mut canonical, "{name}:{value}");
+    }
+    let signed = normalized.keys().cloned().collect::<Vec<_>>().join(";");
+    Ok((canonical, signed))
+}
+
+fn normalize_header_value(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn canonical_query(params: &BTreeMap<String, String>) -> String {
+    let mut encoded = params
+        .iter()
+        .map(|(key, value)| (uri_encode(key), uri_encode(value)))
+        .collect::<Vec<_>>();
+    encoded.sort();
+    encoded
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn canonical_uri(path: &str) -> String {
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    path.split('/')
+        .map(uri_encode)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn uri_encode(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(char::from(byte));
+            }
+            _ => {
+                let _ = write!(&mut encoded, "%{byte:02X}");
+            }
+        }
+    }
+    encoded
+}
+
+fn apply_bearer_token(
+    method: &'static str,
+    access_token: Option<&RedactedSecret>,
+    expires_at: Option<DateTime<Utc>>,
+    request: &mut AuthRequest,
+) -> AuthResult<()> {
+    if let Some(expires_at) = expires_at {
+        if Utc::now() >= expires_at {
+            return Err(AuthError::Expired { method, expires_at });
+        }
+    }
+    let bearer_material = access_token.ok_or(AuthError::MissingToken { method })?;
+    request.set_header(
+        "Authorization",
+        format!("Bearer {}", bearer_material.expose_secret()),
+    )
+}
+
+/// Supported auth method variants.
+#[derive(Debug, Clone)]
 pub enum AuthMethodKind {
-    /// API-key Bearer-token auth.
+    /// Static API-key auth.
     ApiKey(ApiKeyAuth),
-    /// OAuth device-code profile state.
+    /// OAuth device-code auth.
     OAuthDeviceCode(OAuthDeviceCodeAuth),
-    /// OAuth authorization-code profile state.
+    /// OAuth authorization-code auth.
     OAuthAuthCode(OAuthAuthCodeAuth),
-    /// Short-lived setup token.
+    /// Short-lived setup-token auth.
     SetupToken(SetupTokenAuth),
-    /// Cached JWT-token auth.
+    /// JWT generator auth.
     Jwt(JwtAuth),
-    /// AWS Signature Version 4 auth material.
+    /// AWS `SigV4` auth config.
     SigV4(SigV4Auth),
 }
 
@@ -1323,8 +3139,8 @@ impl AuthMethod for AuthMethodKind {
     fn id(&self) -> &'static str {
         match self {
             Self::ApiKey(method) => method.id(),
-            Self::OAuthDeviceCode(method) => method.id(),
-            Self::OAuthAuthCode(method) => method.id(),
+            Self::OAuthDeviceCode(_) => "oauth_device",
+            Self::OAuthAuthCode(_) => "oauth_auth_code",
             Self::SetupToken(method) => method.id(),
             Self::Jwt(method) => method.id(),
             Self::SigV4(method) => method.id(),
@@ -1347,6 +3163,7 @@ impl AuthMethod for AuthMethodKind {
         cx: &fcp_async_core::Cx,
         request: &mut AuthRequest,
     ) -> AuthResult<()> {
+        self.validate(cx).await?;
         match self {
             Self::ApiKey(method) => method.build_request_auth(cx, request).await,
             Self::OAuthDeviceCode(method) => method.build_request_auth(cx, request).await,
@@ -1357,7 +3174,7 @@ impl AuthMethod for AuthMethodKind {
         }
     }
 
-    fn requires_refresh_in(&self) -> Option<Duration> {
+    fn requires_refresh_in(&self) -> Option<StdDuration> {
         match self {
             Self::ApiKey(method) => method.requires_refresh_in(),
             Self::OAuthDeviceCode(method) => method.requires_refresh_in(),
@@ -1368,7 +3185,7 @@ impl AuthMethod for AuthMethodKind {
         }
     }
 
-    async fn refresh(&self, cx: &fcp_async_core::Cx) -> AuthResult<()> {
+    async fn refresh(&mut self, cx: &fcp_async_core::Cx) -> AuthResult<()> {
         match self {
             Self::ApiKey(method) => method.refresh(cx).await,
             Self::OAuthDeviceCode(method) => method.refresh(cx).await,
@@ -1380,1375 +3197,1764 @@ impl AuthMethod for AuthMethodKind {
     }
 }
 
-/// Stored provider authentication profile.
-#[derive(Clone, Debug)]
+/// One provider auth profile.
+#[derive(Debug, Clone)]
 pub struct AuthProfile {
-    /// Opaque profile identifier.
+    /// Opaque profile id.
     pub id: String,
-    /// Provider identifier, for example `anthropic` or `openai`.
+    /// Canonical provider id.
     pub provider: String,
-    /// Concrete authentication method.
+    /// Concrete auth method.
     pub method: AuthMethodKind,
-    /// Human-readable profile label.
+    /// Redaction-safe operator label.
     pub label: String,
-    /// Lower values are preferred when resolving the active profile.
+    /// Lower values are preferred.
     pub priority: i32,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
-    /// Last successful use timestamp.
+    /// Last use timestamp.
     pub last_used_at: Option<DateTime<Utc>>,
 }
 
 impl AuthProfile {
-    /// Create a provider auth profile.
-    #[must_use]
+    /// Construct an auth profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when id, provider, or label is empty.
     pub fn new(
         id: impl Into<String>,
         provider: impl Into<String>,
         method: AuthMethodKind,
         label: impl Into<String>,
         priority: i32,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            provider: provider.into(),
+    ) -> AuthResult<Self> {
+        let id = id.into();
+        let provider = canonical_provider(&provider.into())?;
+        let label = label.into();
+        validate_non_empty(&id, "profile_id")?;
+        validate_non_empty(&label, "label")?;
+        Ok(Self {
+            id,
+            provider,
             method,
-            label: label.into(),
+            label,
             priority,
             created_at: Utc::now(),
             last_used_at: None,
-        }
-    }
-}
-
-/// Async store for provider auth profiles.
-#[async_trait]
-pub trait AuthProfileStore: Send + Sync {
-    /// List profiles for a provider in resolution order.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redaction-safe [`AuthError`] if the backing store is
-    /// unavailable.
-    async fn list_profiles(&self, provider: &str) -> AuthResult<Vec<AuthProfile>>;
-
-    /// Get one profile by provider and profile identifier.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AuthError::ProfileNotFound`] when no profile exists.
-    async fn get_profile(&self, provider: &str, profile_id: &str) -> AuthResult<AuthProfile>;
-
-    /// Save or replace one profile.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redaction-safe [`AuthError`] when the profile shape is invalid
-    /// or the backing store is unavailable.
-    async fn save_profile(&self, profile: AuthProfile) -> AuthResult<()>;
-
-    /// Delete one profile.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AuthError::ProfileNotFound`] when no profile exists.
-    async fn delete_profile(&self, provider: &str, profile_id: &str) -> AuthResult<()>;
-
-    /// Pick the active profile for a provider.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AuthError::NoProfiles`] when the provider has no profiles.
-    async fn pick_active(&self, provider: &str) -> AuthResult<AuthProfile>;
-}
-
-/// In-memory auth profile store for tests and ephemeral connector harnesses.
-#[derive(Debug, Default)]
-pub struct InMemoryAuthProfileStore {
-    profiles: Mutex<BTreeMap<(String, String), AuthProfile>>,
-}
-
-impl InMemoryAuthProfileStore {
-    /// Create an empty in-memory profile store.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn profiles(&self) -> AuthResult<MutexGuard<'_, BTreeMap<(String, String), AuthProfile>>> {
-        self.profiles
-            .lock()
-            .map_err(|_| AuthError::StateUnavailable {
-                reason: "profile store lock poisoned".to_owned(),
-            })
-    }
-}
-
-#[async_trait]
-impl AuthProfileStore for InMemoryAuthProfileStore {
-    async fn list_profiles(&self, provider: &str) -> AuthResult<Vec<AuthProfile>> {
-        validate_non_empty("provider", provider)?;
-
-        let mut profiles: Vec<_> = self
-            .profiles()?
-            .values()
-            .filter(|profile| profile.provider == provider)
-            .cloned()
-            .collect();
-        profiles.sort_by(|left, right| {
-            left.priority
-                .cmp(&right.priority)
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        Ok(profiles)
-    }
-
-    async fn get_profile(&self, provider: &str, profile_id: &str) -> AuthResult<AuthProfile> {
-        validate_non_empty("provider", provider)?;
-        validate_non_empty("profile_id", profile_id)?;
-
-        self.profiles()?
-            .get(&(provider.to_owned(), profile_id.to_owned()))
-            .cloned()
-            .ok_or_else(|| AuthError::ProfileNotFound {
-                provider: provider.to_owned(),
-                profile_id: profile_id.to_owned(),
-            })
-    }
-
-    async fn save_profile(&self, profile: AuthProfile) -> AuthResult<()> {
-        validate_profile_shape(&profile)?;
-        self.profiles()?
-            .insert((profile.provider.clone(), profile.id.clone()), profile);
-        Ok(())
-    }
-
-    async fn delete_profile(&self, provider: &str, profile_id: &str) -> AuthResult<()> {
-        validate_non_empty("provider", provider)?;
-        validate_non_empty("profile_id", profile_id)?;
-
-        let removed = self
-            .profiles()?
-            .remove(&(provider.to_owned(), profile_id.to_owned()));
-        match removed {
-            Some(_) => Ok(()),
-            None => Err(AuthError::ProfileNotFound {
-                provider: provider.to_owned(),
-                profile_id: profile_id.to_owned(),
-            }),
-        }
-    }
-
-    async fn pick_active(&self, provider: &str) -> AuthResult<AuthProfile> {
-        self.list_profiles(provider)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| AuthError::NoProfiles {
-                provider: provider.to_owned(),
-            })
-    }
-}
-
-/// Configuration for profile refresh sweeps.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TokenRefreshConfig {
-    /// Refresh profiles with less than this duration remaining.
-    pub refresh_before: Duration,
-    /// Timeout for provider refresh token requests.
-    pub request_timeout: Duration,
-}
-
-impl TokenRefreshConfig {
-    /// Create token-refresh configuration.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if either duration is zero.
-    pub fn new(refresh_before: Duration, request_timeout: Duration) -> AuthResult<Self> {
-        if refresh_before.is_zero() {
-            return Err(AuthError::invalid_config(
-                "refresh_before",
-                "refresh lead time must be greater than zero",
-            ));
-        }
-        if request_timeout.is_zero() {
-            return Err(AuthError::invalid_config(
-                "request_timeout",
-                "refresh request timeout must be greater than zero",
-            ));
-        }
-        Ok(Self {
-            refresh_before,
-            request_timeout,
         })
     }
 }
 
-impl Default for TokenRefreshConfig {
-    fn default() -> Self {
-        Self {
-            refresh_before: Duration::from_secs(300),
-            request_timeout: DEFAULT_OAUTH_TIMEOUT,
-        }
-    }
+/// Refresh scheduling policy for TTL-bounded auth methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenRefreshPolicy {
+    /// Refresh a token when its remaining lifetime is less than or equal to this duration.
+    pub refresh_before: StdDuration,
 }
 
-/// Redaction-safe outcome of a profile refresh attempt.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TokenRefreshOutcome {
-    /// Provider identifier.
-    pub provider: String,
-    /// Opaque profile identifier.
-    pub profile_id: String,
-    /// Auth method identifier.
-    pub method: &'static str,
-    /// Whether this sweep refreshed and saved the profile.
-    pub refreshed: bool,
-    /// Time remaining after the sweep, when the method reports one.
-    pub refresh_in: Option<Duration>,
-}
-
-/// Profile-store backed refresh actor for TTL-bounded auth methods.
-#[derive(Clone)]
-pub struct TokenRefreshActor<S> {
-    store: Arc<S>,
-    config: TokenRefreshConfig,
-}
-
-impl<S> fmt::Debug for TokenRefreshActor<S> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TokenRefreshActor")
-            .field("store", &"AuthProfileStore(..)")
-            .field("config", &self.config)
-            .finish()
-    }
-}
-
-impl<S: AuthProfileStore> TokenRefreshActor<S> {
-    /// Build an actor with the default refresh configuration.
+impl TokenRefreshPolicy {
+    /// Construct a refresh policy.
     #[must_use]
-    pub fn new(store: Arc<S>) -> Self {
+    pub const fn new(refresh_before: StdDuration) -> Self {
+        Self { refresh_before }
+    }
+
+    fn decide(self, refresh_in: Option<StdDuration>) -> TokenRefreshAction {
+        match refresh_in {
+            None => TokenRefreshAction::NotRefreshable,
+            Some(remaining) if remaining.is_zero() => TokenRefreshAction::Expired,
+            Some(remaining) if remaining <= self.refresh_before => TokenRefreshAction::Due,
+            Some(_) => TokenRefreshAction::Fresh,
+        }
+    }
+}
+
+impl Default for TokenRefreshPolicy {
+    fn default() -> Self {
+        Self::new(StdDuration::from_secs(300))
+    }
+}
+
+/// Refresh decision for one provider profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenRefreshDecision {
+    /// Canonical provider id.
+    pub provider: String,
+    /// Opaque profile id.
+    pub profile_id: String,
+    /// Auth method id.
+    pub method: &'static str,
+    /// Remaining token lifetime, if the method is TTL-bounded.
+    pub refresh_in: Option<StdDuration>,
+    /// Action selected by the refresh policy.
+    pub action: TokenRefreshAction,
+}
+
+impl TokenRefreshDecision {
+    /// Build a refresh decision for one profile.
+    #[must_use]
+    pub fn for_profile(profile: &AuthProfile, policy: TokenRefreshPolicy) -> Self {
+        let refresh_in = profile.method.requires_refresh_in();
         Self {
-            store,
-            config: TokenRefreshConfig::default(),
+            provider: profile.provider.clone(),
+            profile_id: profile.id.clone(),
+            method: profile.method.id(),
+            refresh_in,
+            action: policy.decide(refresh_in),
         }
     }
 
-    /// Build an actor with explicit refresh configuration.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the refresh configuration contains zero
-    /// durations.
-    pub fn with_config(store: Arc<S>, config: TokenRefreshConfig) -> AuthResult<Self> {
-        TokenRefreshConfig::new(config.refresh_before, config.request_timeout)
-            .map(|config| Self { store, config })
+    /// Return true when the profile should be refreshed now.
+    #[must_use]
+    pub const fn should_refresh(&self) -> bool {
+        self.action.should_refresh()
+    }
+}
+
+/// Refresh action selected by [`TokenRefreshPolicy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenRefreshAction {
+    /// Method has no TTL metadata.
+    NotRefreshable,
+    /// Token is TTL-bounded but outside the proactive refresh window.
+    Fresh,
+    /// Token is inside the proactive refresh window.
+    Due,
+    /// Token has no remaining lifetime.
+    Expired,
+}
+
+impl TokenRefreshAction {
+    /// Return true when this action requires a refresh attempt.
+    #[must_use]
+    pub const fn should_refresh(self) -> bool {
+        matches!(self, Self::Due | Self::Expired)
+    }
+}
+
+/// Result of refreshing or skipping one profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenRefreshOutcome {
+    /// Profile refresh succeeded and was persisted through the profile store.
+    Refreshed(TokenRefreshDecision),
+    /// Profile did not require a refresh attempt.
+    Skipped(TokenRefreshDecision),
+    /// Profile needed refresh but the refresh or persistence failed.
+    Failed {
+        /// Refresh decision that led to the attempt.
+        decision: TokenRefreshDecision,
+        /// Redaction-safe error from refresh or persistence.
+        error: AuthError,
+    },
+}
+
+impl TokenRefreshOutcome {
+    /// Borrow the decision associated with this outcome.
+    #[must_use]
+    pub const fn decision(&self) -> &TokenRefreshDecision {
+        match self {
+            Self::Refreshed(decision) | Self::Skipped(decision) | Self::Failed { decision, .. } => {
+                decision
+            }
+        }
+    }
+}
+
+/// Batch refresh report for one provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TokenRefreshReport {
+    /// Per-profile refresh outcomes.
+    pub outcomes: Vec<TokenRefreshOutcome>,
+}
+
+impl TokenRefreshReport {
+    fn push(&mut self, outcome: TokenRefreshOutcome) {
+        self.outcomes.push(outcome);
     }
 
-    /// Refresh one profile if it is due.
+    /// Count successful refreshes.
+    #[must_use]
+    pub fn refreshed_count(&self) -> usize {
+        self.outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, TokenRefreshOutcome::Refreshed(_)))
+            .count()
+    }
+
+    /// Count skipped profiles.
+    #[must_use]
+    pub fn skipped_count(&self) -> usize {
+        self.outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, TokenRefreshOutcome::Skipped(_)))
+            .count()
+    }
+
+    /// Count failed refresh attempts.
+    #[must_use]
+    pub fn failed_count(&self) -> usize {
+        self.outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, TokenRefreshOutcome::Failed { .. }))
+            .count()
+    }
+}
+
+/// Storage boundary for provider auth profiles.
+#[async_trait]
+pub trait AuthProfileStore: Send + Sync {
+    /// List provider profiles in active-selection order.
     ///
     /// # Errors
     ///
-    /// Returns a redaction-safe error if the profile cannot be loaded, the
-    /// method is due but unsupported, refresh fails, or the refreshed profile
-    /// cannot be saved.
-    pub async fn refresh_profile_if_due(
+    /// Returns an [`AuthError`] when the provider id is invalid.
+    async fn list_profiles(&self, provider: &str) -> AuthResult<Vec<AuthProfile>>;
+
+    /// Get one provider profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::ProfileNotFound`] when no matching profile exists.
+    async fn get_profile(&self, provider: &str, profile_id: &str) -> AuthResult<AuthProfile>;
+
+    /// Save or replace a provider profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] when profile identity fields are invalid.
+    async fn save_profile(&self, profile: AuthProfile) -> AuthResult<()>;
+
+    /// Delete one provider profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::ProfileNotFound`] when no matching profile exists.
+    async fn delete_profile(&self, provider: &str, profile_id: &str) -> AuthResult<()>;
+
+    /// Pick the active provider profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::ProviderNotFound`] when the provider has no profiles.
+    async fn pick_active(&self, provider: &str) -> AuthResult<AuthProfile>;
+}
+
+/// Store-backed token refresh runner for provider profiles.
+pub struct TokenRefreshActor<S: AuthProfileStore + ?Sized> {
+    store: Arc<S>,
+    policy: TokenRefreshPolicy,
+}
+
+impl<S> TokenRefreshActor<S>
+where
+    S: AuthProfileStore,
+{
+    /// Construct a token refresh actor over an auth profile store.
+    #[must_use]
+    pub const fn new(store: Arc<S>, policy: TokenRefreshPolicy) -> Self {
+        Self { store, policy }
+    }
+}
+
+impl<S> TokenRefreshActor<S>
+where
+    S: AuthProfileStore + ?Sized,
+{
+    /// Borrow the refresh policy.
+    #[must_use]
+    pub const fn policy(&self) -> TokenRefreshPolicy {
+        self.policy
+    }
+
+    /// Borrow the backing profile store.
+    #[must_use]
+    pub const fn store(&self) -> &Arc<S> {
+        &self.store
+    }
+
+    /// Refresh every due profile for a provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] when the provider id is invalid or profiles cannot be listed.
+    pub async fn refresh_provider(
+        &self,
+        cx: &fcp_async_core::Cx,
+        provider: &str,
+    ) -> AuthResult<TokenRefreshReport> {
+        let profiles = self.store.list_profiles(provider).await?;
+        let mut report = TokenRefreshReport::default();
+        for profile in profiles {
+            report.push(self.refresh_profile_snapshot(cx, profile).await);
+        }
+        Ok(report)
+    }
+
+    /// Refresh one profile when the policy says it is due.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] when the provider/profile id is invalid or the profile is missing.
+    pub async fn refresh_profile(
         &self,
         cx: &fcp_async_core::Cx,
         provider: &str,
         profile_id: &str,
     ) -> AuthResult<TokenRefreshOutcome> {
-        let mut profile = self.store.get_profile(provider, profile_id).await?;
-        let method = profile.method.id();
-        if !method_refresh_is_due(&profile.method, self.config.refresh_before) {
-            return Ok(TokenRefreshOutcome {
-                provider: profile.provider,
-                profile_id: profile.id,
-                method,
-                refreshed: false,
-                refresh_in: profile.method.requires_refresh_in(),
-            });
-        }
-
-        refresh_method_tokens(cx, &mut profile.method, self.config.request_timeout).await?;
-        profile.last_used_at = Some(Utc::now());
-        let outcome = TokenRefreshOutcome {
-            provider: profile.provider.clone(),
-            profile_id: profile.id.clone(),
-            method,
-            refreshed: true,
-            refresh_in: profile.method.requires_refresh_in(),
-        };
-        self.store.save_profile(profile).await?;
-        Ok(outcome)
+        let profile = self.store.get_profile(provider, profile_id).await?;
+        Ok(self.refresh_profile_snapshot(cx, profile).await)
     }
 
-    /// Refresh all due profiles for a provider.
-    ///
-    /// # Errors
-    ///
-    /// Returns a redaction-safe error if listing profiles fails, or any due
-    /// profile cannot be refreshed and saved.
-    pub async fn refresh_provider_if_due(
+    async fn refresh_profile_snapshot(
         &self,
         cx: &fcp_async_core::Cx,
-        provider: &str,
-    ) -> AuthResult<Vec<TokenRefreshOutcome>> {
-        let profiles = self.store.list_profiles(provider).await?;
-        let mut outcomes = Vec::with_capacity(profiles.len());
-        for profile in profiles {
-            outcomes.push(
-                self.refresh_profile_if_due(cx, provider, &profile.id)
-                    .await?,
-            );
+        mut profile: AuthProfile,
+    ) -> TokenRefreshOutcome {
+        let decision = TokenRefreshDecision::for_profile(&profile, self.policy);
+        if !decision.should_refresh() {
+            return TokenRefreshOutcome::Skipped(decision);
         }
-        Ok(outcomes)
+
+        if let Err(error) = profile.method.refresh(cx).await {
+            return TokenRefreshOutcome::Failed { decision, error };
+        }
+
+        match self.store.save_profile(profile).await {
+            Ok(()) => TokenRefreshOutcome::Refreshed(decision),
+            Err(error) => TokenRefreshOutcome::Failed { decision, error },
+        }
     }
 }
 
-fn validate_profile_shape(profile: &AuthProfile) -> AuthResult<()> {
-    validate_non_empty("id", &profile.id)?;
-    validate_non_empty("provider", &profile.provider)?;
-    validate_non_empty("label", &profile.label)
-}
-
-fn validate_non_empty(field: &'static str, value: &str) -> AuthResult<()> {
-    if value.trim().is_empty() {
-        return Err(AuthError::invalid_config(field, "value cannot be empty"));
-    }
-    Ok(())
-}
-
-fn validate_header_name(header_name: &str) -> AuthResult<()> {
-    validate_non_empty("header_name", header_name)?;
-    if !header_name
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    {
-        return Err(AuthError::invalid_config(
-            "header_name",
-            "header name must contain only ASCII letters, digits, and '-'",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_header_value(value: &str, field: &'static str) -> AuthResult<()> {
-    if value.bytes().any(|byte| matches!(byte, b'\r' | b'\n')) {
-        return Err(AuthError::invalid_config(
-            field,
-            "header values cannot contain newlines",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_auth_endpoint_url(field: &'static str, raw_url: &str) -> AuthResult<()> {
-    validate_non_empty(field, raw_url)?;
-    let url = url::Url::parse(raw_url)
-        .map_err(|error| AuthError::invalid_config(field, error.to_string()))?;
-
-    match url.scheme() {
-        "https" => Ok(()),
-        "http" if url.host_str().is_some_and(is_loopback_host) => Ok(()),
-        _ => Err(AuthError::invalid_config(
-            field,
-            "URL must use https, except http loopback URLs for local tests",
-        )),
+impl<S> Clone for TokenRefreshActor<S>
+where
+    S: AuthProfileStore + ?Sized,
+{
+    fn clone(&self) -> Self {
+        Self {
+            store: Arc::clone(&self.store),
+            policy: self.policy,
+        }
     }
 }
 
-fn is_loopback_host(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
-}
-
-fn ensure_not_expired(method: &'static str, expires_at: DateTime<Utc>) -> AuthResult<()> {
-    if Utc::now() >= expires_at {
-        return Err(AuthError::Expired { method, expires_at });
-    }
-    Ok(())
-}
-
-fn duration_until(expires_at: DateTime<Utc>) -> Option<Duration> {
-    expires_at.signed_duration_since(Utc::now()).to_std().ok()
-}
-
-fn chrono_duration(duration: Duration) -> TimeDelta {
-    TimeDelta::from_std(duration).unwrap_or(TimeDelta::MAX)
-}
-
-fn split_scopes(scope: &str) -> Vec<&str> {
-    scope.split_whitespace().collect()
-}
-
-fn oauth_error(operation: &'static str, error: &fcp_oauth::OAuthError) -> AuthError {
-    AuthError::OAuthFlow {
-        operation,
-        reason: error.to_string(),
+impl<S> fmt::Debug for TokenRefreshActor<S>
+where
+    S: AuthProfileStore + ?Sized,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TokenRefreshActor")
+            .field("policy", &self.policy)
+            .finish_non_exhaustive()
     }
 }
 
-fn oauth_flow_status_error(operation: &'static str, status: u16) -> AuthError {
-    AuthError::OAuthFlow {
-        operation,
-        reason: format!("provider endpoint returned unsuccessful status {status}"),
+/// Concurrency-safe in-memory auth profile store.
+#[derive(Debug, Default)]
+pub struct InMemoryAuthProfileStore {
+    profiles: RwLock<BTreeMap<(String, String), AuthProfile>>,
+}
+
+impl InMemoryAuthProfileStore {
+    /// Construct an empty in-memory profile store.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            profiles: RwLock::new(BTreeMap::new()),
+        }
     }
 }
 
-fn invalid_oauth_response(operation: &'static str, error: &serde_json::Error) -> AuthError {
-    AuthError::OAuthFlow {
-        operation,
-        reason: format!("invalid provider JSON response: {error}"),
-    }
+fn profile_sort_key(profile: &AuthProfile) -> (i32, &str, DateTime<Utc>) {
+    (profile.priority, profile.id.as_str(), profile.created_at)
 }
 
-fn oauth2_client_from_auth_code_config(config: &OAuthAuthCodeConfig) -> AuthResult<OAuth2Client> {
-    let mut oauth_config = config
-        .client_secret
-        .as_ref()
-        .map_or_else(
-            || {
-                OAuth2Config::public_client(
-                    config.client_id.clone(),
-                    config.authorize_url.clone(),
-                    config.token_url.clone(),
-                )
-            },
-            |secret| {
-                OAuth2Config::new(
-                    config.client_id.clone(),
-                    secret.expose_material().to_owned(),
-                    config.authorize_url.clone(),
-                    config.token_url.clone(),
-                )
-            },
-        )
-        .with_redirect_uri(config.redirect_uri.clone())
-        .with_scopes(
-            split_scopes(&config.scope)
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-        )
-        .with_pkce(config.use_pkce)
-        .with_pkce_method(PkceMethod::S256)
-        .with_timeout(config.timeout);
-
-    if config.client_secret.is_some() {
-        oauth_config = oauth_config.with_auth_style(fcp_oauth::AuthStyle::Post);
+#[async_trait]
+impl AuthProfileStore for InMemoryAuthProfileStore {
+    async fn list_profiles(&self, provider: &str) -> AuthResult<Vec<AuthProfile>> {
+        let provider = canonical_provider(provider)?;
+        let mut profiles = self
+            .profiles
+            .read()
+            .values()
+            .filter(|profile| profile.provider == provider)
+            .cloned()
+            .collect::<Vec<_>>();
+        profiles.sort_by(|left, right| profile_sort_key(left).cmp(&profile_sort_key(right)));
+        Ok(profiles)
     }
 
-    OAuth2Client::new(oauth_config).map_err(|error| oauth_error("oauth2_client", &error))
-}
-
-fn oauth2_client_from_device_refresh(
-    method: &OAuthDeviceCodeAuth,
-    timeout: Duration,
-) -> AuthResult<OAuth2Client> {
-    validate_non_empty("client_id", &method.client_id)?;
-    validate_auth_endpoint_url("token_url", &method.token_url)?;
-    if timeout.is_zero() {
-        return Err(AuthError::invalid_config(
-            "timeout",
-            "OAuth refresh timeout must be greater than zero",
-        ));
+    async fn get_profile(&self, provider: &str, profile_id: &str) -> AuthResult<AuthProfile> {
+        let provider = canonical_provider(provider)?;
+        validate_non_empty(profile_id, "profile_id")?;
+        self.profiles
+            .read()
+            .get(&(provider.clone(), profile_id.to_string()))
+            .cloned()
+            .ok_or_else(|| AuthError::ProfileNotFound {
+                provider,
+                profile_id: profile_id.to_string(),
+            })
     }
-    let oauth_config = OAuth2Config::public_client(
-        method.client_id.clone(),
-        method.token_url.clone(),
-        method.token_url.clone(),
-    )
-    .with_scopes(
-        split_scopes(&method.scope)
+
+    async fn save_profile(&self, mut profile: AuthProfile) -> AuthResult<()> {
+        validate_non_empty(&profile.id, "profile_id")?;
+        validate_non_empty(&profile.label, "label")?;
+        profile.provider = canonical_provider(&profile.provider)?;
+        self.profiles
+            .write()
+            .insert((profile.provider.clone(), profile.id.clone()), profile);
+        Ok(())
+    }
+
+    async fn delete_profile(&self, provider: &str, profile_id: &str) -> AuthResult<()> {
+        let provider = canonical_provider(provider)?;
+        validate_non_empty(profile_id, "profile_id")?;
+        let removed = self
+            .profiles
+            .write()
+            .remove(&(provider.clone(), profile_id.to_string()));
+        if removed.is_some() {
+            Ok(())
+        } else {
+            Err(AuthError::ProfileNotFound {
+                provider,
+                profile_id: profile_id.to_string(),
+            })
+        }
+    }
+
+    async fn pick_active(&self, provider: &str) -> AuthResult<AuthProfile> {
+        let provider = canonical_provider(provider)?;
+        self.list_profiles(&provider)
+            .await?
             .into_iter()
-            .map(str::to_owned)
-            .collect(),
-    )
-    .with_pkce(false)
-    .with_timeout(timeout);
-
-    OAuth2Client::new(oauth_config).map_err(|error| oauth_error("oauth2_client", &error))
-}
-
-fn method_refresh_is_due(method: &AuthMethodKind, refresh_before: Duration) -> bool {
-    match method {
-        AuthMethodKind::OAuthDeviceCode(method) => method.expires_at.is_some_and(|expires_at| {
-            duration_until(expires_at).is_none_or(|left| left <= refresh_before)
-        }),
-        AuthMethodKind::OAuthAuthCode(method) => method.expires_at.is_some_and(|expires_at| {
-            duration_until(expires_at).is_none_or(|left| left <= refresh_before)
-        }),
-        AuthMethodKind::Jwt(method) => method
-            .requires_refresh_in()
-            .is_none_or(|left| left <= refresh_before),
-        AuthMethodKind::SetupToken(method) => method
-            .requires_refresh_in()
-            .is_some_and(|left| left <= refresh_before),
-        AuthMethodKind::ApiKey(_) | AuthMethodKind::SigV4(_) => false,
+            .next()
+            .ok_or(AuthError::ProviderNotFound { provider })
     }
-}
-
-async fn refresh_method_tokens(
-    cx: &fcp_async_core::Cx,
-    method: &mut AuthMethodKind,
-    timeout: Duration,
-) -> AuthResult<()> {
-    match method {
-        AuthMethodKind::OAuthDeviceCode(method) => {
-            let tokens = method.refresh_token_set(cx, timeout).await?;
-            method.apply_refreshed_token_set(tokens);
-            Ok(())
-        }
-        AuthMethodKind::OAuthAuthCode(method) => {
-            let tokens = method.refresh_token_set(cx, timeout).await?;
-            method.apply_refreshed_token_set(tokens);
-            Ok(())
-        }
-        AuthMethodKind::Jwt(method) => method.refresh(cx).await,
-        AuthMethodKind::SetupToken(method) => method.refresh(cx).await,
-        AuthMethodKind::ApiKey(method) => method.refresh(cx).await,
-        AuthMethodKind::SigV4(method) => method.refresh(cx).await,
-    }
-}
-
-async fn send_oauth_form(
-    cx: &fcp_async_core::Cx,
-    http_client: &HttpClient,
-    url: &str,
-    pairs: &[(&str, &str)],
-    timeout: Duration,
-    operation: &'static str,
-) -> AuthResult<fcp_async_core::http::HttpResponse> {
-    let body = encode_form_pairs(pairs);
-    let headers = vec![
-        ("Content-Type".to_owned(), FORM_CONTENT_TYPE.to_owned()),
-        ("Accept".to_owned(), JSON_CONTENT_TYPE.to_owned()),
-    ];
-    match time::timeout(
-        timeout,
-        http_client.request(cx, Method::Post, url, headers, body),
-    )
-    .await
-    {
-        Ok(Ok(response)) => Ok(response),
-        Ok(Err(error)) => Err(AuthError::OAuthFlow {
-            operation,
-            reason: error.to_string(),
-        }),
-        Err(error) => Err(AuthError::OAuthFlow {
-            operation,
-            reason: format!("request failed: {error}"),
-        }),
-    }
-}
-
-fn encode_form_pairs(pairs: &[(&str, &str)]) -> Vec<u8> {
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    for (key, value) in pairs {
-        if !value.is_empty() {
-            serializer.append_pair(key, value);
-        }
-    }
-    serializer.finish().into_bytes()
-}
-
-#[derive(Debug, Deserialize)]
-struct DeviceCodeStartResponse {
-    device_code: String,
-    user_code: String,
-    #[serde(alias = "verification_url")]
-    verification_uri: String,
-    #[serde(default)]
-    verification_uri_complete: Option<String>,
-    expires_in: u64,
-    #[serde(default)]
-    interval: Option<u64>,
-}
-
-impl DeviceCodeStartResponse {
-    fn into_challenge(
-        self,
-        started_at: DateTime<Utc>,
-        default_interval: Duration,
-    ) -> AuthResult<DeviceCodeChallenge> {
-        validate_non_empty("device_code", &self.device_code)?;
-        validate_non_empty("user_code", &self.user_code)?;
-        validate_auth_endpoint_url("verification_uri", &self.verification_uri)?;
-        if self.expires_in == 0 {
-            return Err(AuthError::invalid_config(
-                "expires_in",
-                "device-code challenge must have a positive expiration",
-            ));
-        }
-        let interval = self
-            .interval
-            .filter(|interval| *interval > 0)
-            .map_or(default_interval, Duration::from_secs);
-        Ok(DeviceCodeChallenge {
-            device_code: SecretString::new(self.device_code),
-            user_code: self.user_code,
-            verification_uri: self.verification_uri,
-            verification_uri_complete: self.verification_uri_complete,
-            expires_at: started_at + chrono_duration(Duration::from_secs(self.expires_in)),
-            interval,
-        })
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct DeviceCodePollResponse {
-    #[serde(default)]
-    access_token: Option<String>,
-    #[serde(default)]
-    token_type: Option<String>,
-    #[serde(default)]
-    expires_in: Option<u64>,
-    #[serde(default)]
-    refresh_token: Option<String>,
-    #[serde(default)]
-    scope: Option<String>,
-    #[serde(default)]
-    error: Option<String>,
-}
-
-impl DeviceCodePollResponse {
-    fn into_token_set(self) -> AuthResult<OAuthTokenSet> {
-        let response = TokenResponse {
-            access_token: self.access_token.ok_or_else(|| AuthError::OAuthFlow {
-                operation: "device_code_poll",
-                reason: "provider response omitted access_token".to_owned(),
-            })?,
-            token_type: self.token_type.ok_or_else(|| AuthError::OAuthFlow {
-                operation: "device_code_poll",
-                reason: "provider response omitted token_type".to_owned(),
-            })?,
-            expires_in: self.expires_in,
-            refresh_token: self.refresh_token,
-            scope: self.scope,
-            id_token: None,
-        };
-        let tokens = FcpOAuthTokens::from_response(response)
-            .map_err(|error| oauth_error("device_code_poll", &error))?;
-        OAuthTokenSet::from_fcp_oauth(&tokens)
-    }
-}
-
-fn insert_bearer_material(
-    method: &'static str,
-    material: Option<&SecretString>,
-    request: &mut AuthRequest,
-) -> AuthResult<()> {
-    let material = material.ok_or(AuthError::MissingMaterial { method })?;
-    if material.is_empty() {
-        return Err(AuthError::MissingMaterial { method });
-    }
-    request.insert_material_header(
-        DEFAULT_AUTHORIZATION_HEADER,
-        SecretString::new(format!(
-            "{DEFAULT_BEARER_PREFIX}{}",
-            material.expose_material()
-        )),
-    )
 }
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
-    use std::io::{Read, Write};
-    use std::net::{SocketAddr, TcpListener, TcpStream};
-    use std::thread;
-
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[derive(Clone, Debug)]
-    struct ParsedHttpRequest {
-        path: String,
-        body: String,
-    }
+    use parking_lot::Mutex;
 
     fn cx() -> fcp_async_core::Cx {
         fcp_async_core::Cx::for_testing()
     }
 
-    fn block_on<T>(future: impl Future<Output = AuthResult<T>>) -> AuthResult<T> {
+    fn sigv4_time() -> DateTime<Utc> {
+        "2013-05-24T00:00:00Z".parse().unwrap()
+    }
+
+    fn aws_example_access_key() -> String {
+        ["AKIAIOSFODNN7", "EXAMPLE"].concat()
+    }
+
+    fn sigv4_auth(session_token: Option<&str>) -> SigV4Auth {
+        SigV4Auth::new(
+            aws_example_access_key(),
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            session_token.map(str::to_string),
+            "us-east-1",
+            "s3",
+        )
+        .unwrap()
+    }
+
+    fn run<T>(future: impl std::future::Future<Output = T>) -> T {
         fcp_async_core::runtime::block_on_sync(future).unwrap()
     }
 
-    fn future_time() -> DateTime<Utc> {
-        Utc::now() + TimeDelta::seconds(60)
+    fn api_profile(id: &str, provider: &str, priority: i32) -> AuthProfile {
+        AuthProfile::new(
+            id,
+            provider,
+            AuthMethodKind::ApiKey(ApiKeyAuth::bearer(format!("fixture-{id}")).unwrap()),
+            id,
+            priority,
+        )
+        .unwrap()
     }
 
-    fn past_time() -> DateTime<Utc> {
-        Utc::now() - TimeDelta::seconds(60)
+    fn oauth_config() -> OAuthDeviceCodeConfig {
+        OAuthDeviceCodeConfig::new(
+            "fixture-client",
+            "https://auth.example.test/device",
+            "https://auth.example.test/token",
+            "chat messages",
+        )
+        .unwrap()
     }
 
-    fn read_http_request(stream: &mut TcpStream) -> ParsedHttpRequest {
-        let mut raw = Vec::new();
-        let mut buf = [0_u8; 1024];
-        let header_end = loop {
-            let read = stream.read(&mut buf).expect("read HTTP request");
-            assert!(read > 0, "client closed before request headers");
-            raw.extend_from_slice(&buf[..read]);
-            if let Some(index) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
-                break index + 4;
+    fn oauth_challenge() -> OAuthDeviceCodeChallenge {
+        OAuthDeviceCodeChallenge::new(
+            "fixture-device-code",
+            "ABCD-EFGH",
+            "https://auth.example.test/verify",
+            Some("https://auth.example.test/verify?user_code=ABCD-EFGH"),
+            Utc::now() + TimeDelta::minutes(5),
+            StdDuration::from_secs(5),
+        )
+        .unwrap()
+    }
+
+    fn oauth_tokens() -> OAuthTokens {
+        OAuthTokens::bearer(
+            "fixture-access-token",
+            Some(StdDuration::from_secs(3_600)),
+            Some("fixture-refresh-token"),
+            Some("chat messages"),
+        )
+        .unwrap()
+    }
+
+    fn auth_code_config() -> OAuthAuthCodeConfig {
+        OAuthAuthCodeConfig::public_client(
+            "fixture-client",
+            "https://auth.example.test/authorize",
+            "https://auth.example.test/token",
+            "https://agent.example.test/oauth/callback",
+            "chat messages",
+            true,
+        )
+        .unwrap()
+    }
+
+    fn auth_code_pkce() -> OAuthPkce {
+        OAuthPkce::from_verifier("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk").unwrap()
+    }
+
+    #[derive(Debug)]
+    struct ScriptedDeviceTransport {
+        challenge: OAuthDeviceCodeChallenge,
+        responses: Mutex<VecDeque<OAuthDeviceCodeProviderResponse>>,
+    }
+
+    impl ScriptedDeviceTransport {
+        fn new(responses: impl IntoIterator<Item = OAuthDeviceCodeProviderResponse>) -> Self {
+            Self {
+                challenge: oauth_challenge(),
+                responses: Mutex::new(responses.into_iter().collect()),
             }
-        };
-
-        let headers_text = String::from_utf8_lossy(&raw[..header_end]);
-        let mut lines = headers_text.lines();
-        let request_line = lines.next().expect("request line");
-        let path = request_line
-            .split_whitespace()
-            .nth(1)
-            .expect("request path")
-            .to_owned();
-        let content_length = lines
-            .filter_map(|line| line.split_once(':'))
-            .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
-            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-            .unwrap_or(0);
-
-        let mut body = raw[header_end..].to_vec();
-        while body.len() < content_length {
-            let read = stream.read(&mut buf).expect("read HTTP body");
-            assert!(read > 0, "client closed before request body");
-            body.extend_from_slice(&buf[..read]);
         }
-        body.truncate(content_length);
 
-        ParsedHttpRequest {
-            path,
-            body: String::from_utf8(body).expect("form body utf8"),
+        fn with_challenge(mut self, challenge: OAuthDeviceCodeChallenge) -> Self {
+            self.challenge = challenge;
+            self
         }
     }
 
-    fn write_json(stream: &mut TcpStream, status: u16, body: &str) {
-        let reason = if status == 200 { "OK" } else { "Bad Request" };
-        let response = format!(
-            "HTTP/1.1 {status} {reason}\r\n\
-             Content-Type: application/json\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             \r\n\
-             {body}",
-            body.len()
-        );
-        stream
-            .write_all(response.as_bytes())
-            .expect("write HTTP response");
-        stream.flush().expect("flush HTTP response");
+    #[async_trait]
+    impl OAuthDeviceCodeTransport for ScriptedDeviceTransport {
+        async fn start(
+            &self,
+            _config: &OAuthDeviceCodeConfig,
+        ) -> AuthResult<OAuthDeviceCodeChallenge> {
+            Ok(self.challenge.clone())
+        }
+
+        async fn poll(
+            &self,
+            _config: &OAuthDeviceCodeConfig,
+            _challenge: &OAuthDeviceCodeChallenge,
+        ) -> AuthResult<OAuthDeviceCodeProviderResponse> {
+            self.responses
+                .lock()
+                .pop_front()
+                .ok_or_else(|| AuthError::InvalidProviderResponse {
+                    method: "oauth_device",
+                    reason: "scripted transport had no response".to_string(),
+                })
+        }
     }
 
-    fn spawn_json_sequence_server(
-        responses: Vec<(u16, String)>,
-    ) -> (
-        SocketAddr,
-        Arc<Mutex<Vec<ParsedHttpRequest>>>,
-        thread::JoinHandle<()>,
-    ) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test HTTP server");
-        let address = listener.local_addr().expect("test HTTP server address");
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let requests_for_thread = Arc::clone(&requests);
-        let handle = thread::spawn(move || {
-            for (status, body) in responses {
-                let (mut stream, _) = listener.accept().expect("accept test HTTP request");
-                let request = read_http_request(&mut stream);
-                requests_for_thread
-                    .lock()
-                    .expect("requests lock")
-                    .push(request);
-                write_json(&mut stream, status, &body);
+    #[derive(Debug)]
+    struct ScriptedAuthCodeTransport {
+        responses: Mutex<VecDeque<OAuthAuthCodeProviderResponse>>,
+        seen_pkce_challenges: Mutex<Vec<Option<String>>>,
+    }
+
+    impl ScriptedAuthCodeTransport {
+        fn new(responses: impl IntoIterator<Item = OAuthAuthCodeProviderResponse>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+                seen_pkce_challenges: Mutex::new(Vec::new()),
             }
-        });
-        (address, requests, handle)
+        }
+    }
+
+    #[async_trait]
+    impl OAuthAuthCodeTransport for ScriptedAuthCodeTransport {
+        async fn exchange(
+            &self,
+            config: &OAuthAuthCodeConfig,
+            grant: &OAuthAuthCodeGrant,
+            pkce: Option<&OAuthPkce>,
+        ) -> AuthResult<OAuthAuthCodeProviderResponse> {
+            assert_eq!(config.client_id, "fixture-client");
+            assert_eq!(grant.code.expose_secret(), "fixture-auth-code");
+            self.seen_pkce_challenges
+                .lock()
+                .push(pkce.map(|pkce| pkce.challenge.clone()));
+            self.responses
+                .lock()
+                .pop_front()
+                .ok_or_else(|| AuthError::InvalidProviderResponse {
+                    method: "oauth_auth_code",
+                    reason: "scripted transport had no response".to_string(),
+                })
+        }
+    }
+
+    #[derive(Debug)]
+    struct ScriptedRefreshTransport {
+        responses: Mutex<VecDeque<OAuthRefreshProviderResponse>>,
+        seen_client_secrets: Mutex<Vec<bool>>,
+        seen_refresh_tokens: Mutex<Vec<String>>,
+    }
+
+    impl ScriptedRefreshTransport {
+        fn new(responses: impl IntoIterator<Item = OAuthRefreshProviderResponse>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+                seen_client_secrets: Mutex::new(Vec::new()),
+                seen_refresh_tokens: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl OAuthRefreshTokenTransport for ScriptedRefreshTransport {
+        async fn refresh(
+            &self,
+            config: &OAuthRefreshTokenConfig,
+            grant: &OAuthRefreshTokenGrant,
+        ) -> AuthResult<OAuthRefreshProviderResponse> {
+            assert_eq!(config.client_id, "fixture-client");
+            assert_eq!(config.token_url, "https://auth.example.test/token");
+            self.seen_client_secrets
+                .lock()
+                .push(config.client_secret.is_some());
+            self.seen_refresh_tokens
+                .lock()
+                .push(grant.refresh_token.expose_secret().to_string());
+            self.responses
+                .lock()
+                .pop_front()
+                .ok_or_else(|| AuthError::InvalidProviderResponse {
+                    method: "oauth_refresh",
+                    reason: "scripted transport had no response".to_string(),
+                })
+        }
     }
 
     #[test]
-    fn secret_string_and_auth_request_debug_redact_raw_values() {
-        let mut request = AuthRequest::new();
-        request
-            .insert_material_header("Authorization", SecretString::new("Bearer alpha-material"))
-            .unwrap();
-
-        let material_debug = format!("{:?}", SecretString::new("alpha-material"));
-        let request_debug = format!("{request:?}");
-
-        assert_eq!(material_debug, REDACTED);
-        assert!(!request_debug.contains("alpha-material"));
-        assert!(!request_debug.contains("Bearer alpha-material"));
-        assert!(request_debug.contains(REDACTED));
-    }
-
-    #[test]
-    fn api_key_auth_sets_default_authorization_header() {
-        let cx = cx();
-        let auth = ApiKeyAuth::new("provider-material");
+    fn api_key_auth_sets_bearer_header_and_redacts_debug() {
+        let auth = ApiKeyAuth::bearer("fixture-api-key-value").unwrap();
         let mut request = AuthRequest::new();
 
-        block_on(auth.build_request_auth(&cx, &mut request)).unwrap();
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
 
-        assert_eq!(request.header_count(), 1);
         assert_eq!(
-            request
-                .header_value(DEFAULT_AUTHORIZATION_HEADER)
-                .unwrap()
-                .expose_material(),
-            "Bearer provider-material"
+            request.value_for("Authorization"),
+            Some("Bearer fixture-api-key-value")
         );
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("fixture-api-key-value"));
     }
 
     #[test]
-    fn api_key_auth_rejects_empty_key_and_invalid_header() {
-        let cx = cx();
-        let empty = ApiKeyAuth::new("");
-        let invalid_header = ApiKeyAuth::new("material").with_header_name("Bad Header");
+    fn auth_request_rejects_header_injection() {
+        let mut request = AuthRequest::new();
+
+        let error = request
+            .set_header("Authorization", "Bearer good\nX-Injected: bad")
+            .unwrap_err();
 
         assert!(matches!(
-            block_on(empty.validate(&cx)),
-            Err(AuthError::MissingMaterial { method: "api_key" })
-        ));
-        assert!(matches!(
-            block_on(invalid_header.validate(&cx)),
-            Err(AuthError::InvalidConfig {
-                field: "header_name",
+            error,
+            AuthError::InvalidHeader {
+                field: "header_value",
                 ..
-            })
+            }
         ));
     }
 
     #[test]
-    fn setup_token_respects_expiration() {
-        let cx = cx();
-        let live = SetupTokenAuth::new("setup-material", future_time());
-        let expired = SetupTokenAuth::new("setup-material", past_time());
+    fn setup_token_refuses_expired_token() {
+        let auth =
+            SetupTokenAuth::bearer("setup-token", Utc::now() - TimeDelta::seconds(1)).unwrap();
         let mut request = AuthRequest::new();
 
-        block_on(live.build_request_auth(&cx, &mut request)).unwrap();
-        assert_eq!(
-            request
-                .header_value(DEFAULT_AUTHORIZATION_HEADER)
-                .unwrap()
-                .expose_material(),
-            "Setup setup-material"
-        );
+        let error = run(auth.build_request_auth(&cx(), &mut request)).unwrap_err();
+
         assert!(matches!(
-            block_on(expired.validate(&cx)),
-            Err(AuthError::Expired {
+            error,
+            AuthError::Expired {
                 method: "setup_token",
                 ..
-            })
+            }
         ));
+        assert!(request.headers().is_empty());
     }
 
     #[test]
-    fn oauth_profiles_can_apply_existing_access_tokens() {
-        let cx = cx();
-        let device = OAuthDeviceCodeAuth {
-            client_id: "client".to_owned(),
-            device_code_url: "https://auth.example.com/device".to_owned(),
-            token_url: "https://auth.example.com/token".to_owned(),
-            scope: "read write".to_owned(),
-            access_token: Some(SecretString::new("oauth-material")),
-            refresh_token: Some(SecretString::new("refresh-material")),
-            expires_at: Some(future_time()),
-        };
+    fn method_kind_delegates_api_key_auth() {
+        let auth = AuthMethodKind::ApiKey(ApiKeyAuth::bearer("fixture-kind").unwrap());
         let mut request = AuthRequest::new();
 
-        block_on(device.build_request_auth(&cx, &mut request)).unwrap();
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
 
+        assert_eq!(auth.id(), "api_key");
         assert_eq!(
-            request
-                .header_value(DEFAULT_AUTHORIZATION_HEADER)
-                .unwrap()
-                .expose_material(),
-            "Bearer oauth-material"
+            request.value_for("Authorization"),
+            Some("Bearer fixture-kind")
         );
     }
 
     #[test]
-    fn auth_code_profile_rejects_insecure_non_loopback_urls() {
-        let cx = cx();
-        let method = OAuthAuthCodeAuth {
-            client_id: "client".to_owned(),
-            client_secret: None,
-            authorize_url: "http://auth.example.com/authorize".to_owned(),
-            token_url: "https://auth.example.com/token".to_owned(),
-            redirect_uri: "http://localhost:8090/callback".to_owned(),
-            scope: "read".to_owned(),
-            use_pkce: true,
-            access_token: Some(SecretString::new("access")),
-            refresh_token: None,
-            expires_at: Some(future_time()),
-        };
+    fn provider_helpers_build_api_key_profiles_with_provider_headers() {
+        let anthropic = providers::anthropic::api_key_profile(
+            "personal",
+            "Personal Claude",
+            10,
+            "fixture-anthropic-key",
+        )
+        .unwrap();
+        let openai =
+            providers::openai_codex::api_key_profile("codex", "Codex", 20, "fixture-openai-key")
+                .unwrap();
+
+        assert_eq!(anthropic.provider, providers::anthropic::PROVIDER_ID);
+        assert_eq!(anthropic.label, "Personal Claude");
+        assert_eq!(anthropic.priority, 10);
+        assert_eq!(openai.provider, providers::openai_codex::PROVIDER_ID);
+
+        let mut anthropic_request = AuthRequest::new();
+        run(anthropic
+            .method
+            .build_request_auth(&cx(), &mut anthropic_request))
+        .unwrap();
+        assert_eq!(
+            anthropic_request.value_for(providers::anthropic::API_KEY_HEADER),
+            Some("fixture-anthropic-key")
+        );
+
+        let mut openai_request = AuthRequest::new();
+        run(openai.method.build_request_auth(&cx(), &mut openai_request)).unwrap();
+        assert_eq!(
+            openai_request.value_for("Authorization"),
+            Some("Bearer fixture-openai-key")
+        );
+        assert!(!format!("{:?}", anthropic.method).contains("fixture-anthropic-key"));
+        assert!(!format!("{:?}", openai.method).contains("fixture-openai-key"));
+    }
+
+    #[test]
+    fn provider_helpers_build_device_code_profiles_and_validate_inputs() {
+        let anthropic = providers::anthropic::device_code_profile(
+            "work",
+            "Work Claude",
+            0,
+            "anthropic-client",
+            "https://auth.anthropic.example/device",
+            "https://auth.anthropic.example/token",
+            "claude-code",
+        )
+        .unwrap();
+        let openai = providers::openai_codex::device_code_profile(
+            "codex",
+            "Codex",
+            5,
+            "openai-client",
+            "https://auth.openai.example/device",
+            "https://auth.openai.example/token",
+            "codex",
+        )
+        .unwrap();
 
         assert!(matches!(
-            block_on(method.validate(&cx)),
-            Err(AuthError::InvalidConfig {
-                field: "authorize_url",
-                ..
-            })
+            anthropic.method,
+            AuthMethodKind::OAuthDeviceCode(_)
         ));
+        let AuthMethodKind::OAuthDeviceCode(anthropic_method) = anthropic.method else {
+            return;
+        };
+        assert_eq!(anthropic_method.client_id, "anthropic-client");
+        assert_eq!(anthropic_method.scope, "claude-code");
+
+        assert!(matches!(openai.method, AuthMethodKind::OAuthDeviceCode(_)));
+        let AuthMethodKind::OAuthDeviceCode(openai_method) = openai.method else {
+            return;
+        };
+        assert_eq!(openai_method.client_id, "openai-client");
+        assert_eq!(openai_method.scope, "codex");
+
+        let error = providers::openai_codex::device_code_config(
+            "bad\nclient",
+            "https://auth.openai.example/device",
+            "https://auth.openai.example/token",
+            "codex",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            AuthError::InvalidConfig {
+                field: "client_id",
+                reason: "CR/LF bytes are not allowed".to_string()
+            }
+        );
     }
 
     #[test]
-    fn auth_code_flow_builds_pkce_url_and_exchanges_tokens() {
-        let cx = cx();
-        let (address, requests, server) = spawn_json_sequence_server(vec![(
-            200,
-            r#"{"access_token":"access-token","token_type":"Bearer","expires_in":3600,"refresh_token":"refresh-token","scope":"read write"}"#
-                .to_owned(),
-        )]);
-        let config = OAuthAuthCodeConfig {
-            client_id: "client".to_owned(),
-            client_secret: None,
-            authorize_url: format!("http://{address}/authorize"),
-            token_url: format!("http://{address}/token"),
-            redirect_uri: "http://127.0.0.1/callback".to_owned(),
-            scope: "read write".to_owned(),
-            use_pkce: true,
-            timeout: Duration::from_secs(5),
-        };
-
-        let challenge = OAuthAuthCodeFlow::build_authorize_url(&config).unwrap();
-        assert_eq!(challenge.authorize_url.path(), "/authorize");
-        assert!(
-            challenge
-                .authorize_url
-                .query()
-                .expect("authorization query")
-                .contains("code_challenge=")
+    fn google_helper_adds_offline_authorization_params() {
+        let config = providers::google::offline_confidential_auth_code_config(
+            "google-client",
+            "google-client-secret",
+            "https://agent.example.test/google/callback",
+            "openid email profile",
+        )
+        .unwrap();
+        assert_eq!(config.authorize_url, providers::google::AUTHORIZE_URL);
+        assert_eq!(config.token_url, providers::google::TOKEN_URL);
+        assert_eq!(
+            config
+                .extra_authorize_params
+                .get("access_type")
+                .map(String::as_str),
+            Some("offline")
         );
-        let debug = format!("{challenge:?}");
-        assert!(!debug.contains(challenge.state.expose_material()));
-        assert!(debug.contains(REDACTED));
+        assert_eq!(
+            config
+                .extra_authorize_params
+                .get("prompt")
+                .map(String::as_str),
+            Some("consent")
+        );
+        assert!(!format!("{config:?}").contains("google-client-secret"));
 
-        let tokens = block_on(OAuthAuthCodeFlow::exchange_code(
-            &cx,
-            &config,
-            "auth-code",
-            challenge.pkce.as_ref(),
+        let flow = OAuthAuthCodeFlow::start_with_state(config, "fixed-google-state").unwrap();
+        let url = Url::parse(flow.request().authorization_url()).unwrap();
+        let params = url
+            .query_pairs()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            url.as_str().split('?').next(),
+            Some(providers::google::AUTHORIZE_URL)
+        );
+        assert_eq!(
+            params.get("access_type").map(String::as_str),
+            Some("offline")
+        );
+        assert_eq!(params.get("prompt").map(String::as_str), Some("consent"));
+        assert_eq!(
+            params.get("scope").map(String::as_str),
+            Some("openid email profile")
+        );
+    }
+
+    #[test]
+    fn auth_code_config_rejects_reserved_or_unsafe_extra_params() {
+        let reserved = auth_code_config()
+            .with_authorize_param("state", "malicious-state")
+            .unwrap_err();
+        assert_eq!(
+            reserved,
+            AuthError::InvalidConfig {
+                field: "authorize_param",
+                reason: "must not override standard OAuth authorization parameters".to_string()
+            }
+        );
+
+        let unsafe_value = auth_code_config()
+            .with_authorize_param("prompt", "consent\nadmin")
+            .unwrap_err();
+        assert_eq!(
+            unsafe_value,
+            AuthError::InvalidConfig {
+                field: "authorize_param",
+                reason: "CR/LF bytes are not allowed".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn aws_and_glm_helpers_build_redaction_safe_methods() {
+        let aws_auth = providers::aws::sigv4_auth(
+            aws_example_access_key(),
+            "fixture-aws-secret",
+            Some("fixture-session-token"),
+            "US-EAST-1",
+            "Bedrock",
+        )
+        .unwrap();
+        let aws = providers::aws::sigv4_profile("bedrock", "Bedrock", 0, aws_auth).unwrap();
+        assert_eq!(aws.provider, providers::aws::PROVIDER_ID);
+        assert!(matches!(aws.method, AuthMethodKind::SigV4(_)));
+        let AuthMethodKind::SigV4(method) = aws.method else {
+            return;
+        };
+        assert_eq!(method.region, "us-east-1");
+        assert_eq!(method.service, "bedrock");
+        let debug = format!("{method:?}");
+        assert!(!debug.contains("fixture-aws-secret"));
+        assert!(!debug.contains("fixture-session-token"));
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let generator_counter = Arc::clone(&counter);
+        let glm = providers::glm::jwt_profile(
+            "glm-work",
+            "GLM Work",
+            0,
+            StdDuration::from_secs(60),
+            move || {
+                Ok(format!(
+                    "fixture-glm-jwt-{}",
+                    generator_counter.fetch_add(1, Ordering::SeqCst)
+                ))
+            },
+        )
+        .unwrap();
+        assert_eq!(glm.provider, providers::glm::PROVIDER_ID);
+
+        let mut request = AuthRequest::new();
+        run(glm.method.build_request_auth(&cx(), &mut request)).unwrap();
+        assert_eq!(
+            request.value_for("Authorization"),
+            Some("Bearer fixture-glm-jwt-0")
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert!(!format!("{:?}", glm.method).contains("fixture-glm-jwt-0"));
+    }
+
+    #[test]
+    fn oauth_device_flow_handles_pending_slow_down_and_success() {
+        let expected_tokens = oauth_tokens();
+        let transport = ScriptedDeviceTransport::new([
+            OAuthDeviceCodeProviderResponse::AuthorizationPending,
+            OAuthDeviceCodeProviderResponse::SlowDown,
+            OAuthDeviceCodeProviderResponse::Authorized(expected_tokens.clone()),
+        ]);
+        let mut flow = run(OAuthDeviceCodeFlow::start(
+            &cx(),
+            oauth_config(),
+            &transport,
         ))
         .unwrap();
 
-        assert_eq!(tokens.access_token().expose_material(), "access-token");
-        assert_eq!(
-            tokens.refresh_token().unwrap().expose_material(),
-            "refresh-token"
-        );
-        assert_eq!(tokens.scopes(), &["read".to_owned(), "write".to_owned()]);
-        server.join().expect("token server");
-        let requests = requests.lock().expect("requests lock").clone();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].path, "/token");
-        assert!(requests[0].body.contains("grant_type=authorization_code"));
-        assert!(requests[0].body.contains("code=auth-code"));
-        assert!(requests[0].body.contains("code_verifier="));
-    }
-
-    #[test]
-    fn device_code_flow_handles_pending_and_success() {
-        let cx = cx();
-        let (address, requests, server) = spawn_json_sequence_server(vec![
-            (
-                200,
-                r#"{"device_code":"device-secret","user_code":"ABCD-EFGH","verification_uri":"http://127.0.0.1/verify","expires_in":600,"interval":2}"#
-                    .to_owned(),
-            ),
-            (400, r#"{"error":"authorization_pending"}"#.to_owned()),
-            (
-                200,
-                r#"{"access_token":"device-access","token_type":"Bearer","expires_in":3600,"refresh_token":"device-refresh","scope":"bot send"}"#
-                    .to_owned(),
-            ),
-        ]);
-        let config = OAuthDeviceCodeConfig {
-            client_id: "client".to_owned(),
-            device_code_url: format!("http://{address}/device"),
-            token_url: format!("http://{address}/token"),
-            scope: "bot send".to_owned(),
-            timeout: Duration::from_secs(5),
-            poll_interval: Duration::from_secs(5),
-        };
-
-        let mut flow = block_on(OAuthDeviceCodeFlow::start(&cx, config)).unwrap();
         assert_eq!(flow.challenge().user_code, "ABCD-EFGH");
-        assert_eq!(flow.challenge().interval, Duration::from_secs(2));
-        assert!(matches!(
-            block_on(flow.poll(&cx)),
-            Err(AuthError::AuthorizationPending {
-                retry_after
-            }) if retry_after == Duration::from_secs(2)
-        ));
-        let tokens = block_on(flow.poll(&cx)).unwrap();
+        assert_eq!(flow.poll_interval(), StdDuration::from_secs(5));
+        assert_eq!(
+            run(flow.poll(&cx(), &transport)).unwrap(),
+            OAuthDeviceCodePoll::Pending {
+                retry_after: StdDuration::from_secs(5)
+            }
+        );
+        assert_eq!(
+            run(flow.poll(&cx(), &transport)).unwrap(),
+            OAuthDeviceCodePoll::Pending {
+                retry_after: StdDuration::from_secs(10)
+            }
+        );
 
-        assert_eq!(tokens.access_token().expose_material(), "device-access");
         assert_eq!(
-            tokens.refresh_token().unwrap().expose_material(),
-            "device-refresh"
+            run(flow.poll(&cx(), &transport)).unwrap(),
+            OAuthDeviceCodePoll::Authorized(expected_tokens.clone())
         );
-        server.join().expect("device-code server");
-        let requests = requests.lock().expect("requests lock").clone();
         assert_eq!(
-            requests
-                .iter()
-                .map(|request| request.path.as_str())
-                .collect::<Vec<_>>(),
-            vec!["/device", "/token", "/token"]
+            expected_tokens.access_token.expose_secret(),
+            "fixture-access-token"
         );
-        assert!(requests[0].body.contains("client_id=client"));
-        assert!(requests[1].body.contains("device_code=device-secret"));
-        assert!(requests[2].body.contains("device_code=device-secret"));
+        assert_eq!(
+            expected_tokens
+                .refresh_token
+                .as_ref()
+                .map(RedactedSecret::expose_secret),
+            Some("fixture-refresh-token")
+        );
     }
 
     #[test]
-    fn token_refresh_actor_refreshes_due_auth_code_profile_and_saves_rotation() {
-        let cx = cx();
-        let (address, requests, server) = spawn_json_sequence_server(vec![(
-            200,
-            r#"{"access_token":"refreshed-access","token_type":"Bearer","expires_in":3600,"refresh_token":"rotated-refresh","scope":"read write"}"#
-                .to_owned(),
-        )]);
-        let store = Arc::new(InMemoryAuthProfileStore::new());
-        let profile = AuthProfile::new(
-            "work",
-            "anthropic",
-            AuthMethodKind::OAuthAuthCode(OAuthAuthCodeAuth {
-                client_id: "client".to_owned(),
-                client_secret: None,
-                authorize_url: format!("http://{address}/authorize"),
-                token_url: format!("http://{address}/token"),
-                redirect_uri: "http://127.0.0.1/callback".to_owned(),
-                scope: "read write".to_owned(),
-                use_pkce: true,
-                access_token: Some(SecretString::new("old-access")),
-                refresh_token: Some(SecretString::new("old-refresh")),
-                expires_at: Some(Utc::now() + TimeDelta::seconds(1)),
-            }),
-            "work",
-            0,
+    fn oauth_device_flow_maps_denied_and_expired_responses() {
+        let denied =
+            ScriptedDeviceTransport::new([OAuthDeviceCodeProviderResponse::AccessDenied {
+                reason: "operator denied browser authorization".to_string(),
+            }]);
+        let mut denied_flow =
+            run(OAuthDeviceCodeFlow::start(&cx(), oauth_config(), &denied)).unwrap();
+
+        let denied_error = run(denied_flow.poll(&cx(), &denied)).unwrap_err();
+        assert_eq!(
+            denied_error,
+            AuthError::ProviderRejected {
+                method: "oauth_device",
+                code: "access_denied".to_string(),
+                reason: "operator denied browser authorization".to_string(),
+            }
         );
-        block_on(store.save_profile(profile)).unwrap();
-        let actor = TokenRefreshActor::with_config(
-            Arc::clone(&store),
-            TokenRefreshConfig::new(Duration::from_secs(30), Duration::from_secs(5)).unwrap(),
+
+        let expired =
+            ScriptedDeviceTransport::new([OAuthDeviceCodeProviderResponse::ExpiredToken {
+                reason: "device code expired".to_string(),
+            }]);
+        let mut expired_flow =
+            run(OAuthDeviceCodeFlow::start(&cx(), oauth_config(), &expired)).unwrap();
+
+        let expired_error = run(expired_flow.poll(&cx(), &expired)).unwrap_err();
+        assert_eq!(
+            expired_error,
+            AuthError::ProviderRejected {
+                method: "oauth_device",
+                code: "expired_token".to_string(),
+                reason: "device code expired".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn oauth_device_flow_rejects_malformed_provider_challenge() {
+        let mut challenge = oauth_challenge();
+        challenge.interval = StdDuration::ZERO;
+        let transport = ScriptedDeviceTransport::new([]).with_challenge(challenge);
+
+        let error = run(OAuthDeviceCodeFlow::start(
+            &cx(),
+            oauth_config(),
+            &transport,
+        ))
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            AuthError::InvalidProviderResponse {
+                method: "oauth_device",
+                reason: "invalid auth configuration for interval: must be greater than zero"
+                    .to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn oauth_device_auth_builds_bearer_header_and_redacts_debug() {
+        let mut auth = OAuthDeviceCodeAuth::new(
+            "fixture-client",
+            "https://auth.example.test/device",
+            "https://auth.example.test/token",
+            "chat messages",
         )
         .unwrap();
-
-        let outcome = block_on(actor.refresh_profile_if_due(&cx, "anthropic", "work")).unwrap();
-
-        assert!(outcome.refreshed);
-        assert_eq!(outcome.method, "oauth_auth_code");
-        assert!(outcome.refresh_in.is_some());
-        server.join().expect("refresh token server");
-        let requests = requests.lock().expect("requests lock").clone();
-        assert_eq!(requests.len(), 1);
-        assert!(requests[0].body.contains("grant_type=refresh_token"));
-        let expected_rotation_param =
-            ["refresh", "_", "token", "=", "old", "-", "refresh"].concat();
-        assert!(requests[0].body.contains(&expected_rotation_param));
-        assert!(requests[0].body.contains("client_id=client"));
-
-        let saved = block_on(store.get_profile("anthropic", "work")).unwrap();
-        match saved.method {
-            AuthMethodKind::OAuthAuthCode(method) => {
-                assert_eq!(
-                    method.access_token.unwrap().expose_material(),
-                    "refreshed-access"
-                );
-                assert_eq!(
-                    method.refresh_token.unwrap().expose_material(),
-                    "rotated-refresh"
-                );
-                assert!(
-                    method
-                        .expires_at
-                        .is_some_and(|expires_at| expires_at > Utc::now())
-                );
-            }
-            other => assert!(
-                matches!(other, AuthMethodKind::OAuthAuthCode(_)),
-                "unexpected method after refresh"
-            ),
-        }
-        assert!(saved.last_used_at.is_some());
-    }
-
-    #[test]
-    fn token_refresh_actor_skips_profile_that_is_not_due() {
-        let cx = cx();
-        let store = Arc::new(InMemoryAuthProfileStore::new());
-        let profile = AuthProfile::new(
-            "default",
-            "openai",
-            AuthMethodKind::OAuthDeviceCode(OAuthDeviceCodeAuth {
-                client_id: "client".to_owned(),
-                device_code_url: "https://auth.example.com/device".to_owned(),
-                token_url: "https://auth.example.com/token".to_owned(),
-                scope: "read".to_owned(),
-                access_token: Some(SecretString::new("steady-access")),
-                refresh_token: Some(SecretString::new("steady-refresh")),
-                expires_at: Some(Utc::now() + TimeDelta::hours(1)),
-            }),
-            "default",
-            0,
-        );
-        block_on(store.save_profile(profile)).unwrap();
-        let actor = TokenRefreshActor::with_config(
-            Arc::clone(&store),
-            TokenRefreshConfig::new(Duration::from_secs(30), Duration::from_secs(5)).unwrap(),
-        )
-        .unwrap();
-
-        let outcome = block_on(actor.refresh_profile_if_due(&cx, "openai", "default")).unwrap();
-
-        assert!(!outcome.refreshed);
-        assert_eq!(outcome.method, "oauth_device_code");
-        let saved = block_on(store.get_profile("openai", "default")).unwrap();
-        match saved.method {
-            AuthMethodKind::OAuthDeviceCode(method) => {
-                assert_eq!(
-                    method.access_token.unwrap().expose_material(),
-                    "steady-access"
-                );
-                assert_eq!(
-                    method.refresh_token.unwrap().expose_material(),
-                    "steady-refresh"
-                );
-            }
-            other => assert!(
-                matches!(other, AuthMethodKind::OAuthDeviceCode(_)),
-                "unexpected method after skipped refresh"
-            ),
-        }
-        assert!(saved.last_used_at.is_none());
-    }
-
-    #[test]
-    fn token_refresh_actor_generates_due_jwt_profile_once() {
-        let cx = cx();
-        let calls = Arc::new(Mutex::new(0_u32));
-        let calls_for_generator = Arc::clone(&calls);
-        let store = Arc::new(InMemoryAuthProfileStore::new());
-        let profile = AuthProfile::new(
-            "default",
-            "glm",
-            AuthMethodKind::Jwt(JwtAuth::new(
-                move || {
-                    let mut calls = calls_for_generator.lock().unwrap();
-                    *calls += 1;
-                    let next_call = *calls;
-                    drop(calls);
-                    Ok(SecretString::new(format!("jwt-material-{next_call}")))
-                },
-                Duration::from_secs(60),
-            )),
-            "default",
-            0,
-        );
-        block_on(store.save_profile(profile)).unwrap();
-        let actor = TokenRefreshActor::new(Arc::clone(&store));
-
-        let outcome = block_on(actor.refresh_profile_if_due(&cx, "glm", "default")).unwrap();
-
-        assert!(outcome.refreshed);
-        assert_eq!(*calls.lock().unwrap(), 1);
-        let saved = block_on(store.get_profile("glm", "default")).unwrap();
+        auth.apply_tokens(oauth_tokens());
         let mut request = AuthRequest::new();
-        block_on(saved.method.build_request_auth(&cx, &mut request)).unwrap();
+
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+
         assert_eq!(
-            request
-                .header_value(DEFAULT_AUTHORIZATION_HEADER)
-                .unwrap()
-                .expose_material(),
-            "Bearer jwt-material-1"
+            request.value_for("Authorization"),
+            Some("Bearer fixture-access-token")
         );
-        assert_eq!(*calls.lock().unwrap(), 1);
+        assert!(auth.requires_refresh_in().is_some());
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("fixture-access-token"));
+        assert!(!debug.contains("fixture-refresh-token"));
     }
 
     #[test]
-    fn jwt_auth_generates_once_and_reuses_cache_until_refresh() {
-        let cx = cx();
-        let calls = Arc::new(Mutex::new(0_u32));
-        let calls_for_generator = Arc::clone(&calls);
-        let auth = JwtAuth::new(
-            move || {
-                let next_call = {
-                    let mut calls = calls_for_generator.lock().unwrap();
-                    *calls += 1;
-                    *calls
-                };
-                Ok(SecretString::new(format!("jwt-material-{next_call}")))
-            },
-            Duration::from_secs(60),
-        );
-        let mut first = AuthRequest::new();
-        let mut second = AuthRequest::new();
-        let mut refreshed = AuthRequest::new();
+    fn oauth_device_debug_redacts_polling_device_code() {
+        let challenge = oauth_challenge();
+        let tokens = oauth_tokens();
 
-        block_on(auth.build_request_auth(&cx, &mut first)).unwrap();
-        block_on(auth.build_request_auth(&cx, &mut second)).unwrap();
-        block_on(auth.refresh(&cx)).unwrap();
-        block_on(auth.build_request_auth(&cx, &mut refreshed)).unwrap();
+        let challenge_debug = format!("{challenge:?}");
+        let tokens_debug = format!("{tokens:?}");
 
-        assert_eq!(
-            first
-                .header_value(DEFAULT_AUTHORIZATION_HEADER)
-                .unwrap()
-                .expose_material(),
-            "Bearer jwt-material-1"
-        );
-        assert_eq!(
-            second
-                .header_value(DEFAULT_AUTHORIZATION_HEADER)
-                .unwrap()
-                .expose_material(),
-            "Bearer jwt-material-1"
-        );
-        assert_eq!(
-            refreshed
-                .header_value(DEFAULT_AUTHORIZATION_HEADER)
-                .unwrap()
-                .expose_material(),
-            "Bearer jwt-material-2"
-        );
-        assert_eq!(*calls.lock().unwrap(), 2);
+        assert!(challenge_debug.contains("ABCD-EFGH"));
+        assert!(!challenge_debug.contains("fixture-device-code"));
+        assert!(!tokens_debug.contains("fixture-access-token"));
+        assert!(!tokens_debug.contains("fixture-refresh-token"));
     }
 
     #[test]
-    fn sigv4_validates_material_without_faking_a_signature() {
-        let cx = cx();
-        let sigv4 = SigV4Auth {
-            access_key: SecretString::new("akid"),
-            secret_key: SecretString::new("aws-private-material"),
-            session_token: Some(SecretString::new("session-material")),
-            region: "us-east-1".to_owned(),
-            service: "bedrock".to_owned(),
+    fn auth_code_flow_builds_authorize_url_with_pkce_vector() {
+        let pkce = auth_code_pkce();
+        let flow = OAuthAuthCodeFlow::start_with_state_and_pkce(
+            auth_code_config(),
+            "fixed-state",
+            Some(pkce),
+        )
+        .unwrap();
+        let url = Url::parse(flow.request().authorization_url()).unwrap();
+        let params = url
+            .query_pairs()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            url.as_str().split('?').next(),
+            Some("https://auth.example.test/authorize")
+        );
+        assert_eq!(
+            params.get("response_type").map(String::as_str),
+            Some("code")
+        );
+        assert_eq!(
+            params.get("client_id").map(String::as_str),
+            Some("fixture-client")
+        );
+        assert_eq!(
+            params.get("redirect_uri").map(String::as_str),
+            Some("https://agent.example.test/oauth/callback")
+        );
+        assert_eq!(
+            params.get("scope").map(String::as_str),
+            Some("chat messages")
+        );
+        assert_eq!(params.get("state").map(String::as_str), Some("fixed-state"));
+        assert_eq!(
+            params.get("code_challenge").map(String::as_str),
+            Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+        );
+        assert_eq!(
+            params.get("code_challenge_method").map(String::as_str),
+            Some("S256")
+        );
+
+        let debug = format!("{:?}", flow.request());
+        assert!(!debug.contains("fixed-state"));
+        assert!(!debug.contains("dBjftJeZ4"));
+    }
+
+    #[test]
+    fn auth_code_flow_validates_callback_state_and_provider_error() {
+        let flow = OAuthAuthCodeFlow::start_with_state_and_pkce(
+            auth_code_config(),
+            "fixed-state",
+            Some(auth_code_pkce()),
+        )
+        .unwrap();
+
+        let mismatch = flow
+            .complete_callback(
+                OAuthAuthCodeCallback::authorized("fixture-auth-code", "wrong-state").unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            mismatch,
+            AuthError::InvalidProviderResponse {
+                method: "oauth_auth_code",
+                reason: "callback state mismatch".to_string(),
+            }
+        );
+
+        let denied = flow
+            .complete_callback(
+                OAuthAuthCodeCallback::rejected(
+                    "access_denied",
+                    Some("operator denied browser authorization"),
+                    Some("fixed-state"),
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            denied,
+            AuthError::ProviderRejected {
+                method: "oauth_auth_code",
+                code: "access_denied".to_string(),
+                reason: "operator denied browser authorization".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn auth_code_flow_exchanges_grant_for_tokens() {
+        let expected_tokens = oauth_tokens();
+        let flow = OAuthAuthCodeFlow::start_with_state_and_pkce(
+            auth_code_config(),
+            "fixed-state",
+            Some(auth_code_pkce()),
+        )
+        .unwrap();
+        let grant = flow
+            .complete_callback(
+                OAuthAuthCodeCallback::authorized("fixture-auth-code", "fixed-state").unwrap(),
+            )
+            .unwrap();
+        let transport =
+            ScriptedAuthCodeTransport::new([OAuthAuthCodeProviderResponse::Authorized(
+                expected_tokens.clone(),
+            )]);
+
+        let tokens = run(flow.exchange(&cx(), &transport, &grant)).unwrap();
+
+        assert_eq!(tokens, expected_tokens);
+        assert_eq!(
+            transport.seen_pkce_challenges.lock().as_slice(),
+            &[Some(
+                "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn auth_code_flow_maps_exchange_rejection_and_malformed_token() {
+        let flow = OAuthAuthCodeFlow::start_with_state_and_pkce(
+            auth_code_config(),
+            "fixed-state",
+            Some(auth_code_pkce()),
+        )
+        .unwrap();
+        let grant = flow
+            .complete_callback(
+                OAuthAuthCodeCallback::authorized("fixture-auth-code", "fixed-state").unwrap(),
+            )
+            .unwrap();
+        let rejected = ScriptedAuthCodeTransport::new([OAuthAuthCodeProviderResponse::Rejected {
+            code: "invalid_grant".to_string(),
+            reason: "authorization code expired".to_string(),
+        }]);
+
+        let error = run(flow.exchange(&cx(), &rejected, &grant)).unwrap_err();
+        assert_eq!(
+            error,
+            AuthError::ProviderRejected {
+                method: "oauth_auth_code",
+                code: "invalid_grant".to_string(),
+                reason: "authorization code expired".to_string(),
+            }
+        );
+
+        let bad_tokens = OAuthTokens {
+            access_token: RedactedSecret::new("fixture-access-token").unwrap(),
+            token_type: "mac".to_string(),
+            refresh_token: None,
+            expires_at: None,
+            scope: None,
         };
+        let malformed =
+            ScriptedAuthCodeTransport::new([OAuthAuthCodeProviderResponse::Authorized(bad_tokens)]);
+
+        let error = run(flow.exchange(&cx(), &malformed, &grant)).unwrap_err();
+        assert_eq!(
+            error,
+            AuthError::InvalidConfig {
+                field: "token_type",
+                reason: "only bearer tokens are supported in this slice".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn auth_code_auth_builds_bearer_header_and_redacts_debug() {
+        let mut auth = OAuthAuthCodeAuth::confidential_client(
+            "fixture-client",
+            "fixture-client-secret",
+            "https://auth.example.test/authorize",
+            "https://auth.example.test/token",
+            "https://agent.example.test/oauth/callback",
+            "chat messages",
+            true,
+        )
+        .unwrap();
+        auth.apply_tokens(oauth_tokens());
         let mut request = AuthRequest::new();
 
-        assert!(matches!(
-            block_on(sigv4.build_request_auth(&cx, &mut request)),
-            Err(AuthError::UnsupportedMethod {
-                method: "sigv4",
-                operation: "canonical request signing",
-            })
-        ));
-        assert_eq!(request.header_count(), 0);
-        let debug = format!("{sigv4:?}");
-        assert!(!debug.contains("aws-private-material"));
-        assert!(!debug.contains("session-material"));
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+
+        assert_eq!(
+            request.value_for("Authorization"),
+            Some("Bearer fixture-access-token")
+        );
+        assert!(auth.requires_refresh_in().is_some());
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("fixture-client-secret"));
+        assert!(!debug.contains("fixture-access-token"));
+        assert!(!debug.contains("fixture-refresh-token"));
     }
 
     #[test]
-    fn profile_store_sorts_by_priority_then_profile_id() {
-        let store = InMemoryAuthProfileStore::new();
-        let low = AuthProfile::new(
-            "work",
-            "anthropic",
-            AuthMethodKind::ApiKey(ApiKeyAuth::new("work-key")),
-            "work",
-            10,
-        );
-        let preferred = AuthProfile::new(
-            "personal",
-            "anthropic",
-            AuthMethodKind::SetupToken(SetupTokenAuth::new("setup", future_time())),
-            "personal",
-            1,
-        );
+    fn oauth_device_refresh_preserves_existing_refresh_token_without_rotation() {
+        let mut auth = OAuthDeviceCodeAuth::from_config(oauth_config());
+        auth.apply_tokens(oauth_tokens());
+        let transport = ScriptedRefreshTransport::new([OAuthRefreshProviderResponse::Authorized(
+            OAuthTokens::bearer(
+                "refreshed-access-token",
+                Some(StdDuration::from_secs(7_200)),
+                Option::<String>::None,
+                Some("chat messages".to_string()),
+            )
+            .unwrap(),
+        )]);
 
-        block_on(store.save_profile(low)).unwrap();
-        block_on(store.save_profile(preferred)).unwrap();
+        run(auth.refresh_with_transport(&cx(), &transport)).unwrap();
 
-        let listed = block_on(store.list_profiles("anthropic")).unwrap();
-        let active = block_on(store.pick_active("anthropic")).unwrap();
-
+        let mut request = AuthRequest::new();
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
         assert_eq!(
-            listed
-                .iter()
-                .map(|profile| profile.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["personal", "work"]
+            request.value_for("Authorization"),
+            Some("Bearer refreshed-access-token")
         );
-        assert_eq!(active.id, "personal");
+        assert_eq!(
+            auth.refresh_grant().unwrap().refresh_token.expose_secret(),
+            "fixture-refresh-token"
+        );
+        assert_eq!(transport.seen_client_secrets.lock().as_slice(), &[false]);
+        assert_eq!(
+            transport.seen_refresh_tokens.lock().as_slice(),
+            &["fixture-refresh-token".to_string()]
+        );
     }
 
     #[test]
-    fn profile_store_get_delete_and_empty_pick_are_typed() {
-        let store = InMemoryAuthProfileStore::new();
-        let profile = AuthProfile::new(
-            "profile",
-            "openai",
-            AuthMethodKind::ApiKey(ApiKeyAuth::new("openai-material")),
-            "default",
-            0,
-        );
+    fn oauth_auth_code_refresh_rotates_refresh_token_and_redacts_config_debug() {
+        let mut auth = OAuthAuthCodeAuth::confidential_client(
+            "fixture-client",
+            "fixture-client-secret",
+            "https://auth.example.test/authorize",
+            "https://auth.example.test/token",
+            "https://agent.example.test/oauth/callback",
+            "chat messages",
+            true,
+        )
+        .unwrap();
+        auth.apply_tokens(oauth_tokens());
+        let refresh_config = auth.refresh_config().unwrap();
+        let debug = format!("{refresh_config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("fixture-client-secret"));
+        let transport = ScriptedRefreshTransport::new([OAuthRefreshProviderResponse::Authorized(
+            OAuthTokens::bearer(
+                "refreshed-access-token",
+                Some(StdDuration::from_secs(7_200)),
+                Some("rotated-refresh-token"),
+                Some("chat messages"),
+            )
+            .unwrap(),
+        )]);
 
-        block_on(store.save_profile(profile)).unwrap();
+        run(auth.refresh_with_transport(&cx(), &transport)).unwrap();
+
+        let mut request = AuthRequest::new();
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
         assert_eq!(
-            block_on(store.get_profile("openai", "profile")).unwrap().id,
-            "profile"
+            request.value_for("Authorization"),
+            Some("Bearer refreshed-access-token")
         );
-        block_on(store.delete_profile("openai", "profile")).unwrap();
+        assert_eq!(
+            auth.refresh_grant().unwrap().refresh_token.expose_secret(),
+            "rotated-refresh-token"
+        );
+        assert_eq!(transport.seen_client_secrets.lock().as_slice(), &[true]);
+        assert_eq!(
+            transport.seen_refresh_tokens.lock().as_slice(),
+            &["fixture-refresh-token".to_string()]
+        );
+    }
 
+    #[test]
+    fn oauth_refresh_flow_maps_provider_rejection_and_malformed_token() {
+        let config = OAuthRefreshTokenConfig::public_client(
+            "fixture-client",
+            "https://auth.example.test/token",
+            Some("chat messages"),
+        )
+        .unwrap();
+        let grant = OAuthRefreshTokenGrant::new("fixture-refresh-token").unwrap();
+        let rejected = ScriptedRefreshTransport::new([OAuthRefreshProviderResponse::Rejected {
+            code: "invalid_grant".to_string(),
+            reason: "refresh token expired".to_string(),
+        }]);
+
+        let error = run(OAuthRefreshTokenFlow::refresh(
+            &cx(),
+            &config,
+            &grant,
+            &rejected,
+        ))
+        .unwrap_err();
+        assert_eq!(
+            error,
+            AuthError::ProviderRejected {
+                method: "oauth_refresh",
+                code: "invalid_grant".to_string(),
+                reason: "refresh token expired".to_string(),
+            }
+        );
+
+        let bad_tokens = OAuthTokens {
+            access_token: RedactedSecret::new("fixture-access-token").unwrap(),
+            token_type: "mac".to_string(),
+            refresh_token: None,
+            expires_at: None,
+            scope: None,
+        };
+        let malformed =
+            ScriptedRefreshTransport::new([OAuthRefreshProviderResponse::Authorized(bad_tokens)]);
+
+        let error = run(OAuthRefreshTokenFlow::refresh(
+            &cx(),
+            &config,
+            &grant,
+            &malformed,
+        ))
+        .unwrap_err();
+        assert_eq!(
+            error,
+            AuthError::InvalidConfig {
+                field: "token_type",
+                reason: "only bearer tokens are supported in this slice".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn oauth_refresh_requires_cached_refresh_token() {
+        let mut auth = OAuthDeviceCodeAuth::from_config(oauth_config());
+        let transport = ScriptedRefreshTransport::new([]);
+
+        let error = run(auth.refresh_with_transport(&cx(), &transport)).unwrap_err();
+
+        assert_eq!(
+            error,
+            AuthError::MissingToken {
+                method: "oauth_device"
+            }
+        );
+        assert!(transport.seen_refresh_tokens.lock().is_empty());
+    }
+
+    #[test]
+    fn jwt_auth_caches_generated_token() {
+        let auth = JwtAuth::new("glm", StdDuration::from_secs(60), || {
+            Ok("fixture-jwt-value".to_string())
+        })
+        .unwrap();
+        let mut request = AuthRequest::new();
+
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+
+        assert_eq!(
+            request.value_for("Authorization"),
+            Some("Bearer fixture-jwt-value")
+        );
+        assert!(auth.cached_token().is_some());
+        assert!(!format!("{auth:?}").contains("fixture-jwt-value"));
+    }
+
+    #[test]
+    fn jwt_refresh_regenerates_cached_token() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let generator_counter = Arc::clone(&counter);
+        let mut auth = JwtAuth::new("glm", StdDuration::from_secs(60), move || {
+            Ok(format!(
+                "fixture-jwt-{}",
+                generator_counter.fetch_add(1, Ordering::SeqCst)
+            ))
+        })
+        .unwrap();
+        let mut request = AuthRequest::new();
+
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        assert_eq!(
+            request.value_for("Authorization"),
+            Some("Bearer fixture-jwt-0")
+        );
+
+        run(auth.refresh(&cx())).unwrap();
+        let cached = auth.cached_token().unwrap();
+        assert_eq!(cached.token.expose_secret(), "fixture-jwt-1");
+        assert!(auth.requires_refresh_in().is_some());
+
+        let mut refreshed_request = AuthRequest::new();
+        run(auth.build_request_auth(&cx(), &mut refreshed_request)).unwrap();
+        assert_eq!(
+            refreshed_request.value_for("Authorization"),
+            Some("Bearer fixture-jwt-1")
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn sigv4_signs_aws_get_bucket_lifecycle_vector() {
+        let auth = sigv4_auth(None);
+        let context = SigV4SigningContext::new("GET", "/", EMPTY_PAYLOAD_SHA256)
+            .unwrap()
+            .with_query_param("lifecycle", "")
+            .unwrap()
+            .with_signing_time(sigv4_time());
+        let mut request = AuthRequest::new();
+        request
+            .set_header("Host", "examplebucket.s3.amazonaws.com")
+            .unwrap();
+        request.set_sigv4_context(context);
+
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+
+        assert_eq!(request.value_for("x-amz-date"), Some("20130524T000000Z"));
+        assert_eq!(
+            request.value_for("x-amz-content-sha256"),
+            Some(EMPTY_PAYLOAD_SHA256)
+        );
+        let expected_authorization = format!(
+            "AWS4-HMAC-SHA256 Credential={}/20130524/us-east-1/s3/aws4_request,SignedHeaders=host;x-amz-content-sha256;x-amz-date,Signature=fea454ca298b7da1c68078a5d1bdbfbbe0d65c699e0f91ac7a200a0136783543",
+            aws_example_access_key()
+        );
+        assert_eq!(
+            request.value_for("Authorization"),
+            Some(expected_authorization.as_str())
+        );
+    }
+
+    #[test]
+    fn sigv4_includes_session_token_and_redacts_debug() {
+        let auth = sigv4_auth(Some("fixture-session-token"));
+        let context = SigV4SigningContext::new("POST", "/model/invoke", sha256_payload_hex(b"{}"))
+            .unwrap()
+            .with_signing_time(sigv4_time());
+        let mut request = AuthRequest::new();
+        request.set_header("Host", "bedrock.amazonaws.com").unwrap();
+        request.set_sigv4_context(context);
+
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+
+        assert_eq!(
+            request.value_for("x-amz-security-token"),
+            Some("fixture-session-token")
+        );
+        assert!(
+            request
+                .value_for("Authorization")
+                .unwrap()
+                .contains("x-amz-security-token")
+        );
+        assert!(!format!("{auth:?}").contains("fixture-session-token"));
+        let signed = auth
+            .sign(request.sigv4_context().unwrap(), request.headers())
+            .unwrap();
+        assert!(!format!("{signed:?}").contains("fixture-session-token"));
+    }
+
+    #[test]
+    fn sigv4_requires_signing_context() {
+        let auth = sigv4_auth(None);
+        let mut request = AuthRequest::new();
+        request
+            .set_header("Host", "examplebucket.s3.amazonaws.com")
+            .unwrap();
+
+        let error = run(auth.build_request_auth(&cx(), &mut request)).unwrap_err();
+
+        assert_eq!(error, AuthError::MissingSigningContext { method: "sigv4" });
+    }
+
+    #[test]
+    fn profile_store_orders_by_priority_then_id() {
+        let store = InMemoryAuthProfileStore::new();
+        let later = api_profile("later", "Anthropic", 20);
+        let tie_b = api_profile("tie-b", "anthropic", 10);
+        let tie_a = api_profile("tie-a", "anthropic", 10);
+
+        run(store.save_profile(later)).unwrap();
+        run(store.save_profile(tie_b)).unwrap();
+        run(store.save_profile(tie_a)).unwrap();
+
+        let profiles = run(store.list_profiles("ANTHROPIC")).unwrap();
+        let ids = profiles
+            .iter()
+            .map(|profile| profile.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["tie-a", "tie-b", "later"]);
+
+        let active = run(store.pick_active("anthropic")).unwrap();
+        assert_eq!(active.id, "tie-a");
+    }
+
+    #[test]
+    fn profile_store_reports_missing_provider_and_profile() {
+        let store = InMemoryAuthProfileStore::new();
+
+        let missing_provider = run(store.pick_active("openai")).unwrap_err();
+        assert_eq!(
+            missing_provider,
+            AuthError::ProviderNotFound {
+                provider: "openai".to_string()
+            }
+        );
+
+        let missing_profile = run(store.get_profile("openai", "work")).unwrap_err();
+        assert_eq!(
+            missing_profile,
+            AuthError::ProfileNotFound {
+                provider: "openai".to_string(),
+                profile_id: "work".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn profile_store_delete_removes_profile() {
+        let store = InMemoryAuthProfileStore::new();
+
+        run(store.save_profile(api_profile("work", "openai", 0))).unwrap();
+        run(store.delete_profile("openai", "work")).unwrap();
+
+        let error = run(store.get_profile("openai", "work")).unwrap_err();
+        assert!(matches!(error, AuthError::ProfileNotFound { .. }));
+    }
+
+    #[test]
+    fn token_refresh_actor_refreshes_due_jwt_profile_and_persists_it() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let generator_counter = Arc::clone(&counter);
+        let auth = JwtAuth::new("glm", StdDuration::from_secs(3_600), move || {
+            Ok(format!(
+                "fixture-jwt-{}",
+                generator_counter.fetch_add(1, Ordering::SeqCst)
+            ))
+        })
+        .unwrap();
+        let mut request = AuthRequest::new();
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        assert_eq!(
+            request.value_for("Authorization"),
+            Some("Bearer fixture-jwt-0")
+        );
+        let profile =
+            AuthProfile::new("work", "glm", AuthMethodKind::Jwt(auth), "work", 0).unwrap();
+        let store = Arc::new(InMemoryAuthProfileStore::new());
+        run(store.save_profile(profile)).unwrap();
+        let actor = TokenRefreshActor::new(
+            Arc::clone(&store),
+            TokenRefreshPolicy::new(StdDuration::from_secs(7_200)),
+        );
+
+        let report = run(actor.refresh_provider(&cx(), "GLM")).unwrap();
+
+        assert_eq!(report.refreshed_count(), 1);
+        assert_eq!(report.skipped_count(), 0);
+        assert_eq!(report.failed_count(), 0);
         assert!(matches!(
-            block_on(store.get_profile("openai", "profile")),
-            Err(AuthError::ProfileNotFound {
+            report.outcomes.as_slice(),
+            [TokenRefreshOutcome::Refreshed(TokenRefreshDecision {
                 provider,
-                profile_id
-            }) if provider == "openai" && profile_id == "profile"
+                profile_id,
+                method: "jwt",
+                action: TokenRefreshAction::Due,
+                ..
+            })] if provider == "glm" && profile_id == "work"
         ));
+        let refreshed = run(store.get_profile("glm", "work")).unwrap();
+        let mut refreshed_request = AuthRequest::new();
+        run(refreshed
+            .method
+            .build_request_auth(&cx(), &mut refreshed_request))
+        .unwrap();
+        assert_eq!(
+            refreshed_request.value_for("Authorization"),
+            Some("Bearer fixture-jwt-1")
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn token_refresh_actor_skips_static_and_fresh_profiles() {
+        let auth = JwtAuth::new("glm", StdDuration::from_secs(3_600), || {
+            Ok("fixture-jwt-value".to_string())
+        })
+        .unwrap();
+        let mut request = AuthRequest::new();
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        let jwt_profile =
+            AuthProfile::new("fresh", "glm", AuthMethodKind::Jwt(auth), "fresh", 10).unwrap();
+        let api_profile = api_profile("static", "glm", 0);
+        let store = Arc::new(InMemoryAuthProfileStore::new());
+        run(store.save_profile(jwt_profile)).unwrap();
+        run(store.save_profile(api_profile)).unwrap();
+        let actor = TokenRefreshActor::new(
+            Arc::clone(&store),
+            TokenRefreshPolicy::new(StdDuration::from_secs(1)),
+        );
+
+        let report = run(actor.refresh_provider(&cx(), "glm")).unwrap();
+
+        assert_eq!(report.refreshed_count(), 0);
+        assert_eq!(report.skipped_count(), 2);
+        assert_eq!(report.failed_count(), 0);
+        let actions = report
+            .outcomes
+            .iter()
+            .map(TokenRefreshOutcome::decision)
+            .map(|decision| (decision.profile_id.as_str(), decision.action))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actions,
+            [
+                ("static", TokenRefreshAction::NotRefreshable),
+                ("fresh", TokenRefreshAction::Fresh)
+            ]
+        );
+    }
+
+    #[test]
+    fn token_refresh_actor_reports_unsupported_refresh_failure() {
+        let profile = AuthProfile::new(
+            "setup",
+            "bootstrap",
+            AuthMethodKind::SetupToken(
+                SetupTokenAuth::bearer("setup-token", Utc::now() + TimeDelta::minutes(1)).unwrap(),
+            ),
+            "setup",
+            0,
+        )
+        .unwrap();
+        let store = Arc::new(InMemoryAuthProfileStore::new());
+        run(store.save_profile(profile)).unwrap();
+        let actor = TokenRefreshActor::new(
+            Arc::clone(&store),
+            TokenRefreshPolicy::new(StdDuration::from_secs(3_600)),
+        );
+
+        let outcome = run(actor.refresh_profile(&cx(), "bootstrap", "setup")).unwrap();
+
         assert!(matches!(
-            block_on(store.pick_active("openai")),
-            Err(AuthError::NoProfiles { provider }) if provider == "openai"
+            outcome,
+            TokenRefreshOutcome::Failed {
+                decision: TokenRefreshDecision {
+                    provider,
+                    profile_id,
+                    method: "setup_token",
+                    action: TokenRefreshAction::Due,
+                    ..
+                },
+                error: AuthError::UnsupportedMethod {
+                    method: "setup_token",
+                    operation: "refresh"
+                }
+            } if provider == "bootstrap" && profile_id == "setup"
         ));
     }
 
     #[test]
-    fn auth_method_kind_delegates_all_variants() {
-        let cx = cx();
-        let methods = vec![
-            AuthMethodKind::ApiKey(ApiKeyAuth::new("api-key")),
-            AuthMethodKind::OAuthDeviceCode(OAuthDeviceCodeAuth {
-                client_id: "client".to_owned(),
-                device_code_url: "https://auth.example.com/device".to_owned(),
-                token_url: "https://auth.example.com/token".to_owned(),
-                scope: "read".to_owned(),
-                access_token: Some(SecretString::new("device-material")),
-                refresh_token: None,
-                expires_at: Some(future_time()),
-            }),
-            AuthMethodKind::OAuthAuthCode(OAuthAuthCodeAuth {
-                client_id: "client".to_owned(),
-                client_secret: None,
-                authorize_url: "https://auth.example.com/authorize".to_owned(),
-                token_url: "https://auth.example.com/token".to_owned(),
-                redirect_uri: "http://127.0.0.1:8080/callback".to_owned(),
-                scope: "read".to_owned(),
-                use_pkce: true,
-                access_token: Some(SecretString::new("auth-code-material")),
-                refresh_token: None,
-                expires_at: Some(future_time()),
-            }),
-            AuthMethodKind::SetupToken(SetupTokenAuth::new("setup", future_time())),
-            AuthMethodKind::Jwt(JwtAuth::new(
-                || Ok(SecretString::new("jwt-material")),
-                Duration::from_secs(60),
-            )),
-            AuthMethodKind::SigV4(SigV4Auth {
-                access_key: SecretString::new("akid"),
-                secret_key: SecretString::new("sigv4-material"),
-                session_token: None,
-                region: "us-west-2".to_owned(),
-                service: "execute-api".to_owned(),
-            }),
-        ];
+    fn token_refresh_actor_reports_missing_profile_before_refresh() {
+        let store = Arc::new(InMemoryAuthProfileStore::new());
+        let actor = TokenRefreshActor::new(Arc::clone(&store), TokenRefreshPolicy::default());
 
-        for method in methods {
-            block_on(method.validate(&cx)).unwrap();
-            assert!(!method.id().is_empty());
-        }
+        let error = run(actor.refresh_profile(&cx(), "openai", "work")).unwrap_err();
+
+        assert_eq!(
+            error,
+            AuthError::ProfileNotFound {
+                provider: "openai".to_string(),
+                profile_id: "work".to_string(),
+            }
+        );
     }
 }

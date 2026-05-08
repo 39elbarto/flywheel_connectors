@@ -89,10 +89,14 @@ total_timeout_ms = 120000
 max_response_bytes = 33554432
 
 [provides.operations."firebase.firestore.batch_write".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this to apply multiple Firestore writes when per-write status visibility matters or a caller already has raw Firestore write objects."
+common_mistakes = [
+    "Including more than one write for the same document in a batch, which Firestore rejects.",
+    "Using batch_write for simple single-document edits instead of create, update, or delete, which are easier to audit.",
+    "Retrying after a partial status response without reconciling which writes already succeeded.",
+]
+examples = ['{"writes":[{"delete":"projects/demo/databases/(default)/documents/users/alice"}]}']
+related = ["firebase.firestore.update", "firebase.firestore.delete"]
 
 [provides.operations."firebase.firestore.create"]
 description = "Create a Firestore document"
@@ -143,10 +147,14 @@ total_timeout_ms = 120000
 max_response_bytes = 16777216
 
 [provides.operations."firebase.firestore.create".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this to create a new Firestore document under a known collection path, optionally with a caller-selected document_id."
+common_mistakes = [
+    "Passing a document path where Firestore expects a collection_path.",
+    "Sending a non-object document payload.",
+    "Creating duplicate records after a retry when the document_id was omitted and the service generated a new id.",
+]
+examples = ['{"collection_path":"users","document_id":"alice","document":{"displayName":"Alice"}}']
+related = ["firebase.firestore.get", "firebase.firestore.update"]
 
 [provides.operations."firebase.firestore.delete"]
 description = "Delete a Firestore document"
@@ -191,10 +199,14 @@ total_timeout_ms = 120000
 max_response_bytes = 16777216
 
 [provides.operations."firebase.firestore.delete".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this only when the user or policy explicitly authorizes deleting one Firestore document by relative document path."
+common_mistakes = [
+    "Passing a collection path, which Firestore will reject.",
+    "Skipping current_exists or current_update_time preconditions when avoiding stale deletes matters.",
+    "Treating delete as reversible; recovery depends on external backups or audit artifacts.",
+]
+examples = ['{"document_path":"users/alice","current_exists":true}']
+related = ["firebase.firestore.get", "firebase.firestore.batch_write"]
 
 [provides.operations."firebase.firestore.get"]
 description = "Get a Firestore document"
@@ -236,10 +248,14 @@ total_timeout_ms = 120000
 max_response_bytes = 16777216
 
 [provides.operations."firebase.firestore.get".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this to read one Firestore document by relative document path before deciding whether to update or delete it."
+common_mistakes = [
+    "Using a collection path instead of a document path.",
+    "Assuming a successful read proves write access to the same document.",
+    "Requesting a mask that omits fields needed by the follow-up operation.",
+]
+examples = ['{"document_path":"users/alice","mask":["displayName","updatedAt"]}']
+related = ["firebase.firestore.list", "firebase.firestore.update"]
 
 [provides.operations."firebase.firestore.list"]
 description = "List Firestore documents in a collection"
@@ -293,10 +309,14 @@ total_timeout_ms = 120000
 max_response_bytes = 16777216
 
 [provides.operations."firebase.firestore.list".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this to browse documents directly under a Firestore collection path with optional paging, ordering, and field masks."
+common_mistakes = [
+    "Passing a document path instead of a collection path.",
+    "Assuming an empty page means the collection is absent when a page_token or mask could have narrowed the result.",
+    "Using list for server-side filtering that belongs in firebase.firestore.query.",
+]
+examples = ['{"collection_path":"rooms/alpha/messages","page_size":25}']
+related = ["firebase.firestore.get", "firebase.firestore.query"]
 
 [provides.operations."firebase.firestore.query"]
 description = "Run a Firestore structured query"
@@ -338,10 +358,14 @@ total_timeout_ms = 120000
 max_response_bytes = 33554432
 
 [provides.operations."firebase.firestore.query".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this for Firestore server-side filtering, ordering, and projection that cannot be expressed as a simple collection listing."
+common_mistakes = [
+    "Supplying query JSON under the wrong top-level key; pass only structured_query.",
+    "Running broad unbounded queries when a collection_path plus page_size would be safer.",
+    "Assuming Firestore index errors are connector failures instead of query/index configuration issues.",
+]
+examples = ['{"structured_query":{"from":[{"collectionId":"users"}],"limit":10}}']
+related = ["firebase.firestore.list", "firebase.firestore.get"]
 
 [provides.operations."firebase.firestore.update"]
 description = "Update a Firestore document"
@@ -398,10 +422,14 @@ total_timeout_ms = 120000
 max_response_bytes = 16777216
 
 [provides.operations."firebase.firestore.update".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this to patch a Firestore document with explicit field paths and optional write preconditions."
+common_mistakes = [
+    "Using a collection path instead of a document path.",
+    "Omitting update_mask when only part of the document should change.",
+    "Updating from stale state without current_update_time when concurrent writes are possible.",
+]
+examples = ['{"document_path":"users/alice","document":{"displayName":"Alice A."},"update_mask":["displayName"]}']
+related = ["firebase.firestore.get", "firebase.firestore.create"]
 
 [provides.operations."firebase.health"]
 description = "Check Firestore metadata reachability"
@@ -436,10 +464,13 @@ total_timeout_ms = 120000
 max_response_bytes = 16777216
 
 [provides.operations."firebase.health".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this before Firebase read or write work to verify the configured project and Firestore database metadata are reachable."
+common_mistakes = [
+    "Assuming a successful health check proves every Firestore collection or Realtime Database rule is accessible.",
+    "Using health to validate destructive write permissions; it is a read-side reachability check.",
+]
+examples = ['{}']
+related = ["firebase.firestore.get", "firebase.rtdb.get"]
 
 [provides.operations."firebase.rtdb.delete"]
 description = "Delete JSON from Realtime Database"
@@ -484,10 +515,14 @@ total_timeout_ms = 120000
 max_response_bytes = 33554432
 
 [provides.operations."firebase.rtdb.delete".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this only when the user or policy explicitly authorizes deleting a JSON subtree from Realtime Database."
+common_mistakes = [
+    "Deleting a parent path that contains more data than intended.",
+    "Assuming silent=true makes the operation safe; it only changes Firebase event notification behavior.",
+    "Treating delete as reversible without an external backup or prior read snapshot.",
+]
+examples = ['{"path":"presence/alice","silent":true}']
+related = ["firebase.rtdb.get", "firebase.rtdb.set"]
 
 [provides.operations."firebase.rtdb.get"]
 description = "Read JSON from Realtime Database"
@@ -549,10 +584,14 @@ total_timeout_ms = 120000
 max_response_bytes = 33554432
 
 [provides.operations."firebase.rtdb.get".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this to read JSON data from Realtime Database, optionally with server-side query parameters."
+common_mistakes = [
+    "Forgetting that order_by must target an indexed child or special key.",
+    "Assuming a missing value means the database is unreachable instead of checking health and rules.",
+    "Using shallow=true when the caller needs nested data.",
+]
+examples = ['{"path":"presence/alice"}']
+related = ["firebase.rtdb.set", "firebase.rtdb.delete"]
 
 [provides.operations."firebase.rtdb.set"]
 description = "Write JSON into Realtime Database"
@@ -603,10 +642,14 @@ total_timeout_ms = 120000
 max_response_bytes = 33554432
 
 [provides.operations."firebase.rtdb.set".ai_hints]
-when_to_use = ""
-common_mistakes = []
-examples = []
-related = []
+when_to_use = "Use this to replace a JSON value at a Realtime Database path after confirming the exact subtree that should change."
+common_mistakes = [
+    "Overwriting a whole subtree when a narrower path was intended.",
+    "Writing user-visible or sensitive values without confirming they belong in the configured Firebase project.",
+    "Retrying non-idempotent application-level writes without first reading the current value.",
+]
+examples = ['{"path":"presence/alice","value":{"online":true}}']
+related = ["firebase.rtdb.get", "firebase.rtdb.delete"]
 
 [sandbox]
 profile = "strict"

@@ -10,7 +10,7 @@ use std::path::Path as FsPath;
 use std::path::{Path as StdPath, PathBuf};
 use std::pin::pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::{
@@ -95,8 +95,9 @@ use fcp_kernel::{
     RequestId, SelfCheckReport, SimulateRequest, SimulateResponse,
 };
 use fcp_manifest::{
-    HostEgressContext, HostEgressDecisionMetadata, HostEgressHttpHeader, HostEgressHttpRequest,
-    HostEgressHttpResponse, HostEgressTcpRequest, HostEgressTcpResponse, NetworkConstraints,
+    ConnectorManifest, HostEgressContext, HostEgressDecisionMetadata, HostEgressHttpHeader,
+    HostEgressHttpRequest, HostEgressHttpResponse, HostEgressTcpRequest, HostEgressTcpResponse,
+    NetworkConstraints,
 };
 use fcp_policy::{
     CapabilityConstraintEnforcer, ConstraintEvaluation, DefaultConstraintEnforcer,
@@ -113,6 +114,16 @@ use fcp_prelude::{
 };
 #[cfg(test)]
 use fcp_prelude::{DecisionReceiptPolicy, ObjectHeader, Provenance, ZoneTransportPolicy};
+use fcp_provider_auth::{
+    ApiKeyAuth, AuthError, AuthMethod, AuthMethodKind, AuthProfile, AuthProfileStore,
+    InMemoryAuthProfileStore, OAuthAuthCodeAuth, OAuthAuthCodeCallback, OAuthAuthCodeConfig,
+    OAuthAuthCodeFlow, OAuthAuthCodeGrant, OAuthAuthCodeProviderResponse, OAuthAuthCodeTransport,
+    OAuthDeviceCodeAuth, OAuthDeviceCodeChallenge, OAuthDeviceCodeConfig, OAuthDeviceCodeFlow,
+    OAuthDeviceCodePoll, OAuthDeviceCodeProviderResponse, OAuthDeviceCodeTransport,
+    OAuthRefreshProviderResponse, OAuthRefreshTokenConfig, OAuthRefreshTokenGrant,
+    OAuthRefreshTokenTransport, OAuthTokens, TokenRefreshDecision, TokenRefreshOutcome,
+    TokenRefreshPolicy,
+};
 use fcp_ratelimit::{BackpressureThresholds, TokenBucket};
 use fcp_sandbox::{
     CredentialInjector, DefaultTlsVerifier, EgressError, EgressGuard, EgressHttpRequest,
@@ -177,6 +188,21 @@ const DEFAULT_TELEGRAM_WEBHOOK_INGRESS_CONNECTOR_ID: &str = "fcp.telegram";
 const DEFAULT_TELEGRAM_WEBHOOK_INGRESS_ZONE_ID: &str = "z:community";
 const DEFAULT_TELEGRAM_WEBHOOK_INGRESS_MAX_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_TELEGRAM_WEBHOOK_INGRESS_TIMEOUT_MS: u64 = 5_000;
+
+static AUTH_PROFILE_STORE: OnceLock<Arc<InMemoryAuthProfileStore>> = OnceLock::new();
+static AUTH_OAUTH_PENDING_STORE: OnceLock<Arc<Mutex<AuthOAuthPendingStore>>> = OnceLock::new();
+static AUTH_OAUTH_LOGIN_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn auth_profile_store() -> Arc<InMemoryAuthProfileStore> {
+    Arc::clone(AUTH_PROFILE_STORE.get_or_init(|| Arc::new(InMemoryAuthProfileStore::new())))
+}
+
+fn auth_oauth_pending_store() -> Arc<Mutex<AuthOAuthPendingStore>> {
+    Arc::clone(
+        AUTH_OAUTH_PENDING_STORE
+            .get_or_init(|| Arc::new(Mutex::new(AuthOAuthPendingStore::default()))),
+    )
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HybridOwnerInvokeEvidence {
@@ -978,18 +1004,94 @@ struct SubprocessRegistry {
 struct RegistryEntry {
     config: ConnectorConfig,
     connector: ConnectorRuntime,
+    manifest_constraints: ManifestOperationConstraintCatalog,
 }
 
 /// br-l9tt6: atomic snapshot of a connector's allow-list governance
-/// fields. Captured under a single registry read-lock so the
-/// `allowed_zones`, `allowed_operations`, and `enforce_empty_allow_lists`
-/// values are guaranteed to come from the SAME admin-state generation.
+/// fields. Captured under a single registry read-lock so allow-list fields
+/// and manifest-derived operation network constraints are guaranteed to come
+/// from the SAME admin-state generation.
 /// See `SubprocessRegistry::allow_list_snapshot`.
 #[derive(Debug, Clone)]
 struct AllowListSnapshot {
     allowed_zones: Vec<String>,
     allowed_operations: Vec<String>,
+    enforce_operation_network_constraints: bool,
     enforce_empty_allow_lists: bool,
+    manifest_constraints: ManifestOperationConstraintCatalog,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ManifestOperationConstraintCatalog {
+    source: Option<String>,
+    declared_operations: HashSet<String>,
+    network_constraints: HashMap<String, NetworkConstraints>,
+}
+
+impl ManifestOperationConstraintCatalog {
+    fn from_manifest(manifest: &ConnectorManifest, source: impl Into<String>) -> Self {
+        let declared_operations = manifest
+            .provides
+            .operations
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let network_constraints = manifest
+            .provides
+            .operations
+            .iter()
+            .filter_map(|(operation, section)| {
+                section
+                    .network_constraints
+                    .clone()
+                    .map(|constraints| (operation.clone(), constraints))
+            })
+            .collect::<HashMap<_, _>>();
+        Self {
+            source: Some(source.into()),
+            declared_operations,
+            network_constraints,
+        }
+    }
+}
+
+fn load_manifest_operation_constraints(
+    config: &ConnectorConfig,
+) -> HostResult<ManifestOperationConstraintCatalog> {
+    let Some(path) = config.manifest_path.as_deref() else {
+        return Ok(ManifestOperationConstraintCatalog::default());
+    };
+    let raw = std::fs::read_to_string(path).map_err(|err| {
+        HostError::Internal(format!(
+            "failed to read manifest for connector '{}' from '{}': {err}",
+            config.id, path
+        ))
+    })?;
+    let manifest = ConnectorManifest::parse_str(&raw).map_err(|err| {
+        HostError::InvalidFilter(format!(
+            "invalid manifest for connector '{}' at '{}': {err}",
+            config.id, path
+        ))
+    })?;
+    Ok(ManifestOperationConstraintCatalog::from_manifest(
+        &manifest,
+        path.to_string(),
+    ))
+}
+
+async fn build_registry_entry(
+    config: ConnectorConfig,
+    resilience: Arc<ResilienceLayer>,
+    capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+) -> HostResult<RegistryEntry> {
+    let manifest_constraints = load_manifest_operation_constraints(&config)?;
+    let connector =
+        ConnectorRuntime::spawn(config.clone(), resilience, capability_verifying_key).await?;
+    Ok(RegistryEntry {
+        config,
+        connector,
+        manifest_constraints,
+    })
 }
 
 /// Host-owned runtime network policy snapshot for one connector operation.
@@ -1118,13 +1220,10 @@ impl SubprocessRegistry {
                     "duplicate connector id in managed inventory: {connector_id}"
                 )));
             }
-            let connector = ConnectorRuntime::spawn(
-                config.clone(),
-                Arc::clone(&resilience),
-                capability_verifying_key,
-            )
-            .await?;
-            map.insert(connector_id, RegistryEntry { config, connector });
+            let entry =
+                build_registry_entry(config, Arc::clone(&resilience), capability_verifying_key)
+                    .await?;
+            map.insert(connector_id, entry);
         }
         Ok(Self {
             state: Arc::new(RwLock::new(RegistryState { connectors: map })),
@@ -1180,35 +1279,23 @@ impl SubprocessRegistry {
                     unchanged.push(connector_id.to_string());
                 }
                 Some(_) => {
-                    let connector = ConnectorRuntime::spawn(
+                    let entry = build_registry_entry(
                         config.clone(),
                         Arc::clone(&self.resilience),
                         self.capability_verifying_key,
-                    );
-                    let connector = connector.await?;
-                    replacement_entries.insert(
-                        connector_id.clone(),
-                        RegistryEntry {
-                            config: config.clone(),
-                            connector,
-                        },
-                    );
+                    )
+                    .await?;
+                    replacement_entries.insert(connector_id.clone(), entry);
                     updated.push(connector_id.to_string());
                 }
                 None => {
-                    let connector = ConnectorRuntime::spawn(
+                    let entry = build_registry_entry(
                         config.clone(),
                         Arc::clone(&self.resilience),
                         self.capability_verifying_key,
-                    );
-                    let connector = connector.await?;
-                    replacement_entries.insert(
-                        connector_id.clone(),
-                        RegistryEntry {
-                            config: config.clone(),
-                            connector,
-                        },
-                    );
+                    )
+                    .await?;
+                    replacement_entries.insert(connector_id.clone(), entry);
                     added.push(connector_id.to_string());
                 }
             }
@@ -1285,13 +1372,13 @@ impl SubprocessRegistry {
         connector.invoke(request).await
     }
 
-    /// br-l9tt6: snapshot the three allow-list governance fields
-    /// (`allowed_zones`, `allowed_operations`, `enforce_empty_allow_lists`)
+    /// br-l9tt6: snapshot connector governance fields
+    /// (`allowed_zones`, `allowed_operations`, `enforce_empty_allow_lists`,
+    /// and manifest-derived operation network constraints)
     /// under a SINGLE read-lock acquisition.
     ///
-    /// Each individual accessor (`allowed_zones`, `allowed_operations`,
-    /// `enforce_empty_allow_lists`) takes its own `state.read().await`,
-    /// so callers that needed all three were exposed to a TOCTOU race
+    /// Earlier individual accessors took their own `state.read().await`,
+    /// so callers that needed multiple fields were exposed to a TOCTOU race
     /// between reads: a concurrent admin-state writer could update the
     /// connector entry between the two awaits, letting a request gate
     /// mix a STALE allow-list snapshot with a FRESH `enforce_empty`
@@ -1311,7 +1398,9 @@ impl SubprocessRegistry {
             AllowListSnapshot {
                 allowed_zones: cfg.allowed_zones.clone(),
                 allowed_operations: cfg.allowed_operations.clone(),
+                enforce_operation_network_constraints: cfg.enforce_operation_network_constraints,
                 enforce_empty_allow_lists: cfg.enforce_empty_allow_lists,
+                manifest_constraints: entry.manifest_constraints.clone(),
             }
         })
     }
@@ -3678,6 +3767,65 @@ const CANCEL_SELF_CONNECTOR_ID: &str = "fcp.host.cancel-self:test:1.0.0";
 const CANCEL_SELF_CAPABILITY_ID: &str = "host.cancel-self";
 const CANCEL_SELF_OPERATION_ID: &str = "host.cancel-self";
 
+fn enforce_operation_network_constraint_dispatch(
+    snapshot: &AllowListSnapshot,
+    request: &InvokeRequest,
+) -> HostResult<()> {
+    if !snapshot.enforce_operation_network_constraints {
+        return Ok(());
+    }
+
+    let Some(source) = snapshot.manifest_constraints.source.as_deref() else {
+        return Err(HostError::PreflightFailed(format!(
+            "connector `{}` has enforce_operation_network_constraints=true but no `manifest_path` was configured; deny-all",
+            request.connector_id
+        )));
+    };
+    let operation = request.operation.as_str();
+    if !snapshot
+        .manifest_constraints
+        .declared_operations
+        .contains(operation)
+    {
+        return Err(HostError::PreflightFailed(format!(
+            "connector `{}` manifest `{source}` does not declare operation `{operation}`; deny-all",
+            request.connector_id
+        )));
+    }
+    let Some(constraints) = snapshot
+        .manifest_constraints
+        .network_constraints
+        .get(operation)
+    else {
+        return Err(HostError::PreflightFailed(format!(
+            "connector `{}` operation `{operation}` has no manifest `network_constraints` in `{source}`; deny-all",
+            request.connector_id
+        )));
+    };
+
+    let correlation_id = request
+        .correlation_id
+        .as_ref()
+        .map(std::string::ToString::to_string);
+    tracing::warn!(
+        connector_id = %request.connector_id,
+        operation,
+        zone_id = %request.zone_id,
+        correlation_id = correlation_id.as_deref().unwrap_or(""),
+        constraint_source = source,
+        allowed_host_count = constraints.host_allow.len(),
+        allowed_port_count = constraints.port_allow.len(),
+        connect_timeout_ms = constraints.connect_timeout_ms,
+        total_timeout_ms = constraints.total_timeout_ms,
+        max_response_bytes = constraints.max_response_bytes,
+        "refusing native subprocess invoke because no host-mediated egress guard is wired for selected operation network constraints"
+    );
+    Err(HostError::PreflightFailed(format!(
+        "connector `{}` operation `{operation}` selected manifest network_constraints from `{source}`, but native subprocess dispatch has no host-mediated egress guard; refusing direct egress",
+        request.connector_id
+    )))
+}
+
 async fn verify_live_request(
     state: &AppState,
     request: &InvokeRequest,
@@ -3775,6 +3923,9 @@ async fn verify_live_request(
         }
     }
 
+    if let Some(snapshot) = &allow_snapshot {
+        enforce_operation_network_constraint_dispatch(snapshot, request)?;
+    }
     state
         .registry
         .enforce_runtime_network_policy(request)
@@ -5004,6 +5155,42 @@ async fn async_main() -> HostResult<()> {
             "/rpc/admin/credentials/pools/{provider}/{zone_id}/credentials/{credential_id}/cooldown",
             post(credential_pool_cooldown_handler),
         )
+        .route(
+            "/rpc/admin/auth/profiles/{provider}",
+            get(auth_profile_list_handler).post(auth_profile_upsert_handler),
+        )
+        .route(
+            "/rpc/admin/auth/profiles/{provider}/refresh",
+            post(auth_profile_refresh_provider_handler),
+        )
+        .route(
+            "/rpc/admin/auth/profiles/{provider}/{profile_id}",
+            get(auth_profile_get_handler).delete(auth_profile_delete_handler),
+        )
+        .route(
+            "/rpc/admin/auth/profiles/{provider}/{profile_id}/priority",
+            post(auth_profile_priority_handler),
+        )
+        .route(
+            "/rpc/admin/auth/profiles/{provider}/{profile_id}/refresh",
+            post(auth_profile_refresh_one_handler),
+        )
+        .route(
+            "/rpc/admin/auth/profiles/{provider}/{profile_id}/oauth/device/start",
+            post(auth_profile_oauth_device_start_handler),
+        )
+        .route(
+            "/rpc/admin/auth/profiles/{provider}/{profile_id}/oauth/device/poll",
+            post(auth_profile_oauth_device_poll_handler),
+        )
+        .route(
+            "/rpc/admin/auth/profiles/{provider}/{profile_id}/oauth/auth-code/start",
+            post(auth_profile_oauth_auth_code_start_handler),
+        )
+        .route(
+            "/rpc/admin/auth/profiles/{provider}/{profile_id}/oauth/auth-code/complete",
+            post(auth_profile_oauth_auth_code_complete_handler),
+        )
         .route("/rpc/budget/report", post(budget_report_handler))
         // br-71lku: /rpc/cancel and /rpc/operations/cancel were
         // previously mounted on the public app router below, where
@@ -5505,6 +5692,1111 @@ async fn credential_pool_cooldown_handler(
         .redacted_view(&key, Utc::now())
         .map_err(map_credential_pool_error)?;
     Ok(Json(CredentialPoolResponse { pool }))
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthProfileUpsertRequest {
+    profile_id: String,
+    label: String,
+    #[serde(default)]
+    priority: i32,
+    #[serde(flatten)]
+    method: AuthProfileMethodRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "method", rename_all = "snake_case")]
+enum AuthProfileMethodRequest {
+    ApiKey {
+        api_key: String,
+        #[serde(default)]
+        header_name: Option<String>,
+        #[serde(default)]
+        value_prefix: Option<String>,
+    },
+    #[serde(rename = "oauth_device")]
+    OAuthDevice {
+        client_id: String,
+        device_code_url: String,
+        token_url: String,
+        scope: String,
+    },
+    #[serde(rename = "oauth_auth_code")]
+    OAuthAuthCode {
+        client_id: String,
+        #[serde(default)]
+        client_secret: Option<String>,
+        authorize_url: String,
+        token_url: String,
+        redirect_uri: String,
+        scope: String,
+        #[serde(default = "default_auth_code_pkce")]
+        use_pkce: bool,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthProfilePriorityRequest {
+    priority: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthProfileView {
+    provider: String,
+    profile_id: String,
+    method: &'static str,
+    label: String,
+    priority: i32,
+    created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_used_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthProfileListResponse {
+    provider: String,
+    profiles: Vec<AuthProfileView>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthProfileResponse {
+    profile: AuthProfileView,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthProfileDeleteResponse {
+    provider: String,
+    profile_id: String,
+    deleted: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthProfileRefreshResponse {
+    provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile_id: Option<String>,
+    outcomes: Vec<AuthProfileRefreshOutcomeView>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthProfileRefreshOutcomeView {
+    provider: String,
+    profile_id: String,
+    method: &'static str,
+    action: &'static str,
+    outcome: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_in_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct AuthOAuthPendingStore {
+    device: BTreeMap<String, PendingDeviceCodeLogin>,
+    auth_code: BTreeMap<String, PendingAuthCodeLogin>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingDeviceCodeLogin {
+    provider: String,
+    profile_id: String,
+    flow: OAuthDeviceCodeFlow,
+}
+
+#[derive(Debug, Clone)]
+struct PendingAuthCodeLogin {
+    provider: String,
+    profile_id: String,
+    flow: OAuthAuthCodeFlow,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthOAuthPollRequest {
+    login_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthOAuthAuthCodeCompleteRequest {
+    login_id: String,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    error_description: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthOAuthDeviceStartResponse {
+    provider: String,
+    profile_id: String,
+    login_id: String,
+    method: &'static str,
+    user_code: String,
+    verification_uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification_uri_complete: Option<String>,
+    expires_at: DateTime<Utc>,
+    interval_secs: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthOAuthDevicePollResponse {
+    provider: String,
+    profile_id: String,
+    login_id: String,
+    method: &'static str,
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<AuthProfileView>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthOAuthAuthCodeStartResponse {
+    provider: String,
+    profile_id: String,
+    login_id: String,
+    method: &'static str,
+    authorization_url: String,
+    redirect_uri: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthOAuthAuthCodeCompleteResponse {
+    provider: String,
+    profile_id: String,
+    login_id: String,
+    method: &'static str,
+    status: &'static str,
+    profile: AuthProfileView,
+}
+
+#[derive(Debug, Clone)]
+struct BlockingOAuthTransport {
+    client: reqwest::blocking::Client,
+}
+
+const fn default_auth_code_pkce() -> bool {
+    true
+}
+
+fn next_auth_oauth_login_id(prefix: &str) -> String {
+    let next = AUTH_OAUTH_LOGIN_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{next}")
+}
+
+fn invalid_auth_config(field: &'static str, reason: impl Into<String>) -> AuthError {
+    AuthError::InvalidConfig {
+        field,
+        reason: reason.into(),
+    }
+}
+
+fn invalid_oauth_provider_response(method: &'static str, reason: impl Into<String>) -> AuthError {
+    AuthError::InvalidProviderResponse {
+        method,
+        reason: reason.into(),
+    }
+}
+
+fn oauth_safe_text(value: impl AsRef<str>) -> String {
+    let value = value.as_ref();
+    let mut safe = value
+        .chars()
+        .filter(|character| !matches!(character, '\r' | '\n'))
+        .take(512)
+        .collect::<String>();
+    if safe.trim().is_empty() {
+        safe = "provider returned an empty error".to_owned();
+    }
+    safe
+}
+
+fn oauth_required_string(
+    value: &Value,
+    field: &'static str,
+    method: &'static str,
+) -> Result<String, AuthError> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| invalid_oauth_provider_response(method, format!("missing `{field}`")))
+}
+
+fn oauth_required_string_any(
+    value: &Value,
+    fields: &[&'static str],
+    method: &'static str,
+) -> Result<String, AuthError> {
+    for field in fields {
+        if let Some(value) = value.get(field).and_then(Value::as_str) {
+            return Ok(value.to_owned());
+        }
+    }
+    Err(invalid_oauth_provider_response(
+        method,
+        format!("missing one of `{}`", fields.join("`, `")),
+    ))
+}
+
+fn oauth_optional_string(
+    value: &Value,
+    field: &'static str,
+    method: &'static str,
+) -> Result<Option<String>, AuthError> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(invalid_oauth_provider_response(
+            method,
+            format!("`{field}` must be a string"),
+        )),
+    }
+}
+
+fn oauth_duration_field(
+    value: &Value,
+    field: &'static str,
+    method: &'static str,
+) -> Result<Option<Duration>, AuthError> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .map(Duration::from_secs)
+            .map(Some)
+            .ok_or_else(|| {
+                invalid_oauth_provider_response(method, format!("`{field}` must be a u64"))
+            }),
+        Some(Value::String(value)) => value
+            .parse::<u64>()
+            .map(Duration::from_secs)
+            .map(Some)
+            .map_err(|error| {
+                invalid_oauth_provider_response(method, format!("`{field}` must be a u64: {error}"))
+            }),
+        Some(_) => Err(invalid_oauth_provider_response(
+            method,
+            format!("`{field}` must be a u64"),
+        )),
+    }
+}
+
+fn oauth_provider_error_parts(value: &Value, status: Option<StatusCode>) -> (String, String) {
+    let code = value
+        .get("error")
+        .and_then(Value::as_str)
+        .map(oauth_safe_text)
+        .unwrap_or_else(|| {
+            status.map_or_else(
+                || "provider_error".to_owned(),
+                |status| format!("http_{}", status.as_u16()),
+            )
+        });
+    let reason = value
+        .get("error_description")
+        .or_else(|| value.get("error_uri"))
+        .or_else(|| value.get("error"))
+        .and_then(Value::as_str)
+        .map(oauth_safe_text)
+        .unwrap_or_else(|| code.clone());
+    (code, reason)
+}
+
+fn oauth_provider_rejection(
+    method: &'static str,
+    value: &Value,
+    status: Option<StatusCode>,
+) -> AuthError {
+    let (code, reason) = oauth_provider_error_parts(value, status);
+    AuthError::ProviderRejected {
+        method,
+        code,
+        reason,
+    }
+}
+
+fn oauth_tokens_from_value(method: &'static str, value: &Value) -> Result<OAuthTokens, AuthError> {
+    let token_type = oauth_optional_string(value, "token_type", method)?;
+    if let Some(token_type) = token_type.as_deref()
+        && !token_type.eq_ignore_ascii_case("bearer")
+    {
+        return Err(invalid_oauth_provider_response(
+            method,
+            "only bearer token responses are supported",
+        ));
+    }
+    OAuthTokens::bearer(
+        oauth_required_string(value, "access_token", method)?,
+        oauth_duration_field(value, "expires_in", method)?,
+        oauth_optional_string(value, "refresh_token", method)?,
+        oauth_optional_string(value, "scope", method)?,
+    )
+}
+
+fn oauth_challenge_from_value(
+    config: &OAuthDeviceCodeConfig,
+    value: &Value,
+) -> Result<OAuthDeviceCodeChallenge, AuthError> {
+    let expires_in = oauth_duration_field(value, "expires_in", "oauth_device")?
+        .ok_or_else(|| invalid_oauth_provider_response("oauth_device", "missing `expires_in`"))?;
+    let expires_delta = chrono::TimeDelta::from_std(expires_in)
+        .map_err(|error| invalid_oauth_provider_response("oauth_device", error.to_string()))?;
+    OAuthDeviceCodeChallenge::new(
+        oauth_required_string(value, "device_code", "oauth_device")?,
+        oauth_required_string(value, "user_code", "oauth_device")?,
+        oauth_required_string_any(
+            value,
+            &["verification_uri", "verification_url"],
+            "oauth_device",
+        )?,
+        oauth_optional_string(value, "verification_uri_complete", "oauth_device")?,
+        Utc::now() + expires_delta,
+        oauth_duration_field(value, "interval", "oauth_device")?
+            .unwrap_or(config.default_poll_interval),
+    )
+    .map_err(|error| invalid_oauth_provider_response("oauth_device", error.to_string()))
+}
+
+impl BlockingOAuthTransport {
+    fn new() -> Result<Self, AuthError> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|error| invalid_oauth_provider_response("oauth_http", error.to_string()))?;
+        Ok(Self { client })
+    }
+
+    fn post_form_json(
+        &self,
+        method: &'static str,
+        url: &str,
+        form: &[(String, String)],
+    ) -> Result<Value, AuthError> {
+        let response = self
+            .client
+            .post(url)
+            .form(form)
+            .send()
+            .map_err(|error| invalid_oauth_provider_response(method, error.to_string()))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .map_err(|error| invalid_oauth_provider_response(method, error.to_string()))?;
+        let value = serde_json::from_str::<Value>(&body).map_err(|error| {
+            invalid_oauth_provider_response(method, format!("invalid JSON response: {error}"))
+        })?;
+        if !status.is_success() && value.get("error").is_none() {
+            return Err(invalid_oauth_provider_response(
+                method,
+                format!("provider endpoint returned HTTP {status}"),
+            ));
+        }
+        Ok(value)
+    }
+}
+
+#[async_trait::async_trait]
+impl OAuthDeviceCodeTransport for BlockingOAuthTransport {
+    async fn start(
+        &self,
+        config: &OAuthDeviceCodeConfig,
+    ) -> Result<OAuthDeviceCodeChallenge, AuthError> {
+        let mut form = vec![("client_id".to_owned(), config.client_id.clone())];
+        if !config.scope.trim().is_empty() {
+            form.push(("scope".to_owned(), config.scope.clone()));
+        }
+        let value = self.post_form_json("oauth_device", &config.device_code_url, &form)?;
+        if value.get("error").is_some() {
+            return Err(oauth_provider_rejection("oauth_device", &value, None));
+        }
+        oauth_challenge_from_value(config, &value)
+    }
+
+    async fn poll(
+        &self,
+        config: &OAuthDeviceCodeConfig,
+        challenge: &OAuthDeviceCodeChallenge,
+    ) -> Result<OAuthDeviceCodeProviderResponse, AuthError> {
+        let form = vec![
+            (
+                "grant_type".to_owned(),
+                "urn:ietf:params:oauth:grant-type:device_code".to_owned(),
+            ),
+            (
+                "device_code".to_owned(),
+                challenge.device_code.expose_secret().to_owned(),
+            ),
+            ("client_id".to_owned(), config.client_id.clone()),
+        ];
+        let value = self.post_form_json("oauth_device", &config.token_url, &form)?;
+        if value.get("error").is_some() {
+            let (code, reason) = oauth_provider_error_parts(&value, None);
+            return match code.as_str() {
+                "authorization_pending" => {
+                    Ok(OAuthDeviceCodeProviderResponse::AuthorizationPending)
+                }
+                "slow_down" => Ok(OAuthDeviceCodeProviderResponse::SlowDown),
+                "access_denied" => Ok(OAuthDeviceCodeProviderResponse::AccessDenied { reason }),
+                "expired_token" => Ok(OAuthDeviceCodeProviderResponse::ExpiredToken { reason }),
+                _ => Err(AuthError::ProviderRejected {
+                    method: "oauth_device",
+                    code,
+                    reason,
+                }),
+            };
+        }
+        Ok(OAuthDeviceCodeProviderResponse::Authorized(
+            oauth_tokens_from_value("oauth_device", &value)?,
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl OAuthAuthCodeTransport for BlockingOAuthTransport {
+    async fn exchange(
+        &self,
+        config: &OAuthAuthCodeConfig,
+        grant: &OAuthAuthCodeGrant,
+        pkce: Option<&fcp_provider_auth::OAuthPkce>,
+    ) -> Result<OAuthAuthCodeProviderResponse, AuthError> {
+        let mut form = vec![
+            ("grant_type".to_owned(), "authorization_code".to_owned()),
+            ("code".to_owned(), grant.code.expose_secret().to_owned()),
+            ("redirect_uri".to_owned(), config.redirect_uri.clone()),
+            ("client_id".to_owned(), config.client_id.clone()),
+        ];
+        if let Some(client_secret) = &config.client_secret {
+            form.push((
+                "client_secret".to_owned(),
+                client_secret.expose_secret().to_owned(),
+            ));
+        }
+        if let Some(pkce) = pkce {
+            form.push((
+                "code_verifier".to_owned(),
+                pkce.verifier.expose_secret().to_owned(),
+            ));
+        }
+        let value = self.post_form_json("oauth_auth_code", &config.token_url, &form)?;
+        if value.get("error").is_some() {
+            let (code, reason) = oauth_provider_error_parts(&value, None);
+            return Ok(OAuthAuthCodeProviderResponse::Rejected { code, reason });
+        }
+        Ok(OAuthAuthCodeProviderResponse::Authorized(
+            oauth_tokens_from_value("oauth_auth_code", &value)?,
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl OAuthRefreshTokenTransport for BlockingOAuthTransport {
+    async fn refresh(
+        &self,
+        config: &OAuthRefreshTokenConfig,
+        grant: &OAuthRefreshTokenGrant,
+    ) -> Result<OAuthRefreshProviderResponse, AuthError> {
+        let mut form = vec![
+            ("grant_type".to_owned(), "refresh_token".to_owned()),
+            (
+                "refresh_token".to_owned(),
+                grant.refresh_token.expose_secret().to_owned(),
+            ),
+            ("client_id".to_owned(), config.client_id.clone()),
+        ];
+        if let Some(client_secret) = &config.client_secret {
+            form.push((
+                "client_secret".to_owned(),
+                client_secret.expose_secret().to_owned(),
+            ));
+        }
+        if let Some(scope) = &config.scope {
+            form.push(("scope".to_owned(), scope.clone()));
+        }
+        let value = self.post_form_json("oauth_refresh", &config.token_url, &form)?;
+        if value.get("error").is_some() {
+            let (code, reason) = oauth_provider_error_parts(&value, None);
+            return Ok(OAuthRefreshProviderResponse::Rejected { code, reason });
+        }
+        Ok(OAuthRefreshProviderResponse::Authorized(
+            oauth_tokens_from_value("oauth_refresh", &value)?,
+        ))
+    }
+}
+
+fn map_auth_profile_error(error: AuthError) -> (StatusCode, String) {
+    let status = match error {
+        AuthError::ProfileNotFound { .. } | AuthError::ProviderNotFound { .. } => {
+            StatusCode::NOT_FOUND
+        }
+        AuthError::UnsupportedMethod { .. }
+        | AuthError::Expired { .. }
+        | AuthError::ProviderRejected { .. } => StatusCode::CONFLICT,
+        AuthError::InvalidConfig { .. }
+        | AuthError::InvalidHeader { .. }
+        | AuthError::InvalidProviderResponse { .. }
+        | AuthError::MissingToken { .. }
+        | AuthError::MissingSigningContext { .. } => StatusCode::BAD_REQUEST,
+    };
+    (status, error.to_string())
+}
+
+fn auth_profile_view(profile: AuthProfile) -> AuthProfileView {
+    AuthProfileView {
+        provider: profile.provider,
+        profile_id: profile.id,
+        method: profile.method.id(),
+        label: profile.label,
+        priority: profile.priority,
+        created_at: profile.created_at,
+        last_used_at: profile.last_used_at,
+    }
+}
+
+fn auth_profile_method_from_request(
+    request: AuthProfileMethodRequest,
+) -> Result<AuthMethodKind, AuthError> {
+    match request {
+        AuthProfileMethodRequest::ApiKey {
+            api_key,
+            header_name,
+            value_prefix,
+        } => {
+            let method = match header_name {
+                Some(header_name) => ApiKeyAuth::new(api_key, header_name, value_prefix)?,
+                None => ApiKeyAuth::bearer(api_key)?,
+            };
+            Ok(AuthMethodKind::ApiKey(method))
+        }
+        AuthProfileMethodRequest::OAuthDevice {
+            client_id,
+            device_code_url,
+            token_url,
+            scope,
+        } => Ok(AuthMethodKind::OAuthDeviceCode(OAuthDeviceCodeAuth::new(
+            client_id,
+            device_code_url,
+            token_url,
+            scope,
+        )?)),
+        AuthProfileMethodRequest::OAuthAuthCode {
+            client_id,
+            client_secret,
+            authorize_url,
+            token_url,
+            redirect_uri,
+            scope,
+            use_pkce,
+        } => {
+            let method = match client_secret {
+                Some(client_secret) => OAuthAuthCodeAuth::confidential_client(
+                    client_id,
+                    client_secret,
+                    authorize_url,
+                    token_url,
+                    redirect_uri,
+                    scope,
+                    use_pkce,
+                )?,
+                None => OAuthAuthCodeAuth::public_client(
+                    client_id,
+                    authorize_url,
+                    token_url,
+                    redirect_uri,
+                    scope,
+                    use_pkce,
+                )?,
+            };
+            Ok(AuthMethodKind::OAuthAuthCode(method))
+        }
+    }
+}
+
+fn oauth_device_config_from_profile(
+    profile: &AuthProfile,
+) -> Result<OAuthDeviceCodeConfig, AuthError> {
+    let AuthMethodKind::OAuthDeviceCode(method) = &profile.method else {
+        return Err(AuthError::UnsupportedMethod {
+            method: profile.method.id(),
+            operation: "oauth_device_start",
+        });
+    };
+    OAuthDeviceCodeConfig::new(
+        method.client_id.clone(),
+        method.device_code_url.clone(),
+        method.token_url.clone(),
+        method.scope.clone(),
+    )
+}
+
+fn oauth_auth_code_config_from_profile(
+    profile: &AuthProfile,
+) -> Result<OAuthAuthCodeConfig, AuthError> {
+    let AuthMethodKind::OAuthAuthCode(method) = &profile.method else {
+        return Err(AuthError::UnsupportedMethod {
+            method: profile.method.id(),
+            operation: "oauth_auth_code_start",
+        });
+    };
+    let mut config = match &method.client_secret {
+        Some(client_secret) => OAuthAuthCodeConfig::confidential_client(
+            method.client_id.clone(),
+            client_secret.expose_secret().to_owned(),
+            method.authorize_url.clone(),
+            method.token_url.clone(),
+            method.redirect_uri.clone(),
+            method.scope.clone(),
+            method.use_pkce,
+        )?,
+        None => OAuthAuthCodeConfig::public_client(
+            method.client_id.clone(),
+            method.authorize_url.clone(),
+            method.token_url.clone(),
+            method.redirect_uri.clone(),
+            method.scope.clone(),
+            method.use_pkce,
+        )?,
+    };
+    for (name, value) in &method.extra_authorize_params {
+        config = config.with_authorize_param(name.clone(), value.clone())?;
+    }
+    Ok(config)
+}
+
+fn auth_refresh_action_name(decision: &TokenRefreshDecision) -> &'static str {
+    match decision.action {
+        fcp_provider_auth::TokenRefreshAction::NotRefreshable => "not_refreshable",
+        fcp_provider_auth::TokenRefreshAction::Fresh => "fresh",
+        fcp_provider_auth::TokenRefreshAction::Due => "due",
+        fcp_provider_auth::TokenRefreshAction::Expired => "expired",
+    }
+}
+
+fn auth_refresh_outcome_view(outcome: TokenRefreshOutcome) -> AuthProfileRefreshOutcomeView {
+    let decision = outcome.decision().clone();
+    let action = auth_refresh_action_name(&decision);
+    let (outcome_name, error) = match outcome {
+        TokenRefreshOutcome::Refreshed(_) => ("refreshed", None),
+        TokenRefreshOutcome::Skipped(_) => ("skipped", None),
+        TokenRefreshOutcome::Failed { error, .. } => ("failed", Some(error.to_string())),
+    };
+    AuthProfileRefreshOutcomeView {
+        provider: decision.provider,
+        profile_id: decision.profile_id,
+        method: decision.method,
+        action,
+        outcome: outcome_name,
+        refresh_in_secs: decision.refresh_in.map(|duration| duration.as_secs()),
+        error,
+    }
+}
+
+async fn auth_refresh_profile_snapshot_with_transport(
+    store: &Arc<InMemoryAuthProfileStore>,
+    mut profile: AuthProfile,
+) -> TokenRefreshOutcome {
+    let policy = TokenRefreshPolicy::default();
+    let decision = TokenRefreshDecision::for_profile(&profile, policy);
+    if !decision.should_refresh() {
+        return TokenRefreshOutcome::Skipped(decision);
+    }
+
+    let transport = match BlockingOAuthTransport::new() {
+        Ok(transport) => transport,
+        Err(error) => return TokenRefreshOutcome::Failed { decision, error },
+    };
+    let cx = fcp_async_core::Cx::for_testing();
+    let refresh_result = match &mut profile.method {
+        AuthMethodKind::OAuthDeviceCode(method) => {
+            method.refresh_with_transport(&cx, &transport).await
+        }
+        AuthMethodKind::OAuthAuthCode(method) => {
+            method.refresh_with_transport(&cx, &transport).await
+        }
+        _ => profile.method.refresh(&cx).await,
+    };
+    if let Err(error) = refresh_result {
+        return TokenRefreshOutcome::Failed { decision, error };
+    }
+
+    match store.save_profile(profile).await {
+        Ok(()) => TokenRefreshOutcome::Refreshed(decision),
+        Err(error) => TokenRefreshOutcome::Failed { decision, error },
+    }
+}
+
+async fn auth_profile_list_handler(
+    Path(provider): Path<String>,
+) -> Result<Json<AuthProfileListResponse>, (StatusCode, String)> {
+    let store = auth_profile_store();
+    let profiles = store
+        .list_profiles(&provider)
+        .await
+        .map_err(map_auth_profile_error)?;
+    let provider = profiles
+        .first()
+        .map(|profile| profile.provider.clone())
+        .unwrap_or(provider);
+    Ok(Json(AuthProfileListResponse {
+        provider,
+        profiles: profiles.into_iter().map(auth_profile_view).collect(),
+    }))
+}
+
+async fn auth_profile_get_handler(
+    Path((provider, profile_id)): Path<(String, String)>,
+) -> Result<Json<AuthProfileResponse>, (StatusCode, String)> {
+    let store = auth_profile_store();
+    let profile = store
+        .get_profile(&provider, &profile_id)
+        .await
+        .map_err(map_auth_profile_error)?;
+    Ok(Json(AuthProfileResponse {
+        profile: auth_profile_view(profile),
+    }))
+}
+
+async fn auth_profile_upsert_handler(
+    Path(provider): Path<String>,
+    Json(request): Json<AuthProfileUpsertRequest>,
+) -> Result<Json<AuthProfileResponse>, (StatusCode, String)> {
+    let method =
+        auth_profile_method_from_request(request.method).map_err(map_auth_profile_error)?;
+    let profile = AuthProfile::new(
+        request.profile_id,
+        provider,
+        method,
+        request.label,
+        request.priority,
+    )
+    .map_err(map_auth_profile_error)?;
+    profile
+        .method
+        .validate(&fcp_async_core::Cx::for_testing())
+        .await
+        .map_err(map_auth_profile_error)?;
+    let store = auth_profile_store();
+    store
+        .save_profile(profile.clone())
+        .await
+        .map_err(map_auth_profile_error)?;
+    Ok(Json(AuthProfileResponse {
+        profile: auth_profile_view(profile),
+    }))
+}
+
+async fn auth_profile_delete_handler(
+    Path((provider, profile_id)): Path<(String, String)>,
+) -> Result<Json<AuthProfileDeleteResponse>, (StatusCode, String)> {
+    let store = auth_profile_store();
+    store
+        .delete_profile(&provider, &profile_id)
+        .await
+        .map_err(map_auth_profile_error)?;
+    Ok(Json(AuthProfileDeleteResponse {
+        provider,
+        profile_id,
+        deleted: true,
+    }))
+}
+
+async fn auth_profile_priority_handler(
+    Path((provider, profile_id)): Path<(String, String)>,
+    Json(request): Json<AuthProfilePriorityRequest>,
+) -> Result<Json<AuthProfileResponse>, (StatusCode, String)> {
+    let store = auth_profile_store();
+    let mut profile = store
+        .get_profile(&provider, &profile_id)
+        .await
+        .map_err(map_auth_profile_error)?;
+    profile.priority = request.priority;
+    store
+        .save_profile(profile.clone())
+        .await
+        .map_err(map_auth_profile_error)?;
+    Ok(Json(AuthProfileResponse {
+        profile: auth_profile_view(profile),
+    }))
+}
+
+async fn auth_profile_refresh_provider_handler(
+    Path(provider): Path<String>,
+) -> Result<Json<AuthProfileRefreshResponse>, (StatusCode, String)> {
+    let store = auth_profile_store();
+    let profiles = store
+        .list_profiles(&provider)
+        .await
+        .map_err(map_auth_profile_error)?;
+    let mut outcomes = Vec::with_capacity(profiles.len());
+    for profile in profiles {
+        outcomes.push(auth_refresh_profile_snapshot_with_transport(&store, profile).await);
+    }
+    Ok(Json(AuthProfileRefreshResponse {
+        provider,
+        profile_id: None,
+        outcomes: outcomes
+            .into_iter()
+            .map(auth_refresh_outcome_view)
+            .collect(),
+    }))
+}
+
+async fn auth_profile_refresh_one_handler(
+    Path((provider, profile_id)): Path<(String, String)>,
+) -> Result<Json<AuthProfileRefreshResponse>, (StatusCode, String)> {
+    let store = auth_profile_store();
+    let profile = store
+        .get_profile(&provider, &profile_id)
+        .await
+        .map_err(map_auth_profile_error)?;
+    let outcome = auth_refresh_profile_snapshot_with_transport(&store, profile).await;
+    Ok(Json(AuthProfileRefreshResponse {
+        provider,
+        profile_id: Some(profile_id),
+        outcomes: vec![auth_refresh_outcome_view(outcome)],
+    }))
+}
+
+async fn auth_profile_oauth_device_start_handler(
+    Path((provider, profile_id)): Path<(String, String)>,
+) -> Result<Json<AuthOAuthDeviceStartResponse>, (StatusCode, String)> {
+    let store = auth_profile_store();
+    let profile = store
+        .get_profile(&provider, &profile_id)
+        .await
+        .map_err(map_auth_profile_error)?;
+    let config = oauth_device_config_from_profile(&profile).map_err(map_auth_profile_error)?;
+    let transport = BlockingOAuthTransport::new().map_err(map_auth_profile_error)?;
+    let flow = OAuthDeviceCodeFlow::start(&fcp_async_core::Cx::for_testing(), config, &transport)
+        .await
+        .map_err(map_auth_profile_error)?;
+    let challenge = flow.challenge().clone();
+    let login_id = next_auth_oauth_login_id("oauth-device");
+    let pending = PendingDeviceCodeLogin {
+        provider: profile.provider.clone(),
+        profile_id: profile.id.clone(),
+        flow,
+    };
+    auth_oauth_pending_store()
+        .lock()
+        .await
+        .device
+        .insert(login_id.clone(), pending);
+    Ok(Json(AuthOAuthDeviceStartResponse {
+        provider: profile.provider,
+        profile_id: profile.id,
+        login_id,
+        method: "oauth_device",
+        user_code: challenge.user_code,
+        verification_uri: challenge.verification_uri,
+        verification_uri_complete: challenge.verification_uri_complete,
+        expires_at: challenge.expires_at,
+        interval_secs: challenge.interval.as_secs(),
+    }))
+}
+
+async fn auth_profile_oauth_device_poll_handler(
+    Path((provider, profile_id)): Path<(String, String)>,
+    Json(request): Json<AuthOAuthPollRequest>,
+) -> Result<Json<AuthOAuthDevicePollResponse>, (StatusCode, String)> {
+    let pending_store = auth_oauth_pending_store();
+    let Some(mut pending) = pending_store
+        .lock()
+        .await
+        .device
+        .get(&request.login_id)
+        .cloned()
+    else {
+        return Err(map_auth_profile_error(invalid_auth_config(
+            "login_id",
+            "device-code login was not found",
+        )));
+    };
+    if pending.provider != provider || pending.profile_id != profile_id {
+        return Err(map_auth_profile_error(invalid_auth_config(
+            "login_id",
+            "device-code login does not match provider/profile",
+        )));
+    }
+
+    let transport = BlockingOAuthTransport::new().map_err(map_auth_profile_error)?;
+    let poll = pending
+        .flow
+        .poll(&fcp_async_core::Cx::for_testing(), &transport)
+        .await;
+    match poll {
+        Ok(OAuthDeviceCodePoll::Pending { retry_after }) => {
+            pending_store
+                .lock()
+                .await
+                .device
+                .insert(request.login_id.clone(), pending);
+            Ok(Json(AuthOAuthDevicePollResponse {
+                provider,
+                profile_id,
+                login_id: request.login_id,
+                method: "oauth_device",
+                status: "pending",
+                retry_after_secs: Some(retry_after.as_secs()),
+                profile: None,
+            }))
+        }
+        Ok(OAuthDeviceCodePoll::Authorized(tokens)) => {
+            pending_store.lock().await.device.remove(&request.login_id);
+            let store = auth_profile_store();
+            let mut profile = store
+                .get_profile(&provider, &profile_id)
+                .await
+                .map_err(map_auth_profile_error)?;
+            let AuthMethodKind::OAuthDeviceCode(method) = &mut profile.method else {
+                return Err(map_auth_profile_error(AuthError::UnsupportedMethod {
+                    method: profile.method.id(),
+                    operation: "oauth_device_poll",
+                }));
+            };
+            method.apply_tokens(tokens);
+            store
+                .save_profile(profile.clone())
+                .await
+                .map_err(map_auth_profile_error)?;
+            Ok(Json(AuthOAuthDevicePollResponse {
+                provider: profile.provider.clone(),
+                profile_id: profile.id.clone(),
+                login_id: request.login_id,
+                method: "oauth_device",
+                status: "authorized",
+                retry_after_secs: None,
+                profile: Some(auth_profile_view(profile)),
+            }))
+        }
+        Err(error) => {
+            pending_store.lock().await.device.remove(&request.login_id);
+            Err(map_auth_profile_error(error))
+        }
+    }
+}
+
+async fn auth_profile_oauth_auth_code_start_handler(
+    Path((provider, profile_id)): Path<(String, String)>,
+) -> Result<Json<AuthOAuthAuthCodeStartResponse>, (StatusCode, String)> {
+    let store = auth_profile_store();
+    let profile = store
+        .get_profile(&provider, &profile_id)
+        .await
+        .map_err(map_auth_profile_error)?;
+    let config = oauth_auth_code_config_from_profile(&profile).map_err(map_auth_profile_error)?;
+    let redirect_uri = config.redirect_uri.clone();
+    let flow = OAuthAuthCodeFlow::start(config).map_err(map_auth_profile_error)?;
+    let request = flow.request().clone();
+    let login_id = next_auth_oauth_login_id("oauth-auth-code");
+    let pending = PendingAuthCodeLogin {
+        provider: profile.provider.clone(),
+        profile_id: profile.id.clone(),
+        flow,
+    };
+    auth_oauth_pending_store()
+        .lock()
+        .await
+        .auth_code
+        .insert(login_id.clone(), pending);
+    Ok(Json(AuthOAuthAuthCodeStartResponse {
+        provider: profile.provider,
+        profile_id: profile.id,
+        login_id,
+        method: "oauth_auth_code",
+        authorization_url: request.authorization_url().to_owned(),
+        redirect_uri,
+    }))
+}
+
+async fn auth_profile_oauth_auth_code_complete_handler(
+    Path((provider, profile_id)): Path<(String, String)>,
+    Json(request): Json<AuthOAuthAuthCodeCompleteRequest>,
+) -> Result<Json<AuthOAuthAuthCodeCompleteResponse>, (StatusCode, String)> {
+    let pending_store = auth_oauth_pending_store();
+    let Some(pending) = pending_store
+        .lock()
+        .await
+        .auth_code
+        .get(&request.login_id)
+        .cloned()
+    else {
+        return Err(map_auth_profile_error(invalid_auth_config(
+            "login_id",
+            "authorization-code login was not found",
+        )));
+    };
+    if pending.provider != provider || pending.profile_id != profile_id {
+        return Err(map_auth_profile_error(invalid_auth_config(
+            "login_id",
+            "authorization-code login does not match provider/profile",
+        )));
+    }
+
+    let callback = if let Some(error) = request.error {
+        OAuthAuthCodeCallback::rejected(error, request.error_description, request.state)
+    } else {
+        let code = request
+            .code
+            .ok_or_else(|| {
+                invalid_auth_config("code", "authorization-code completion requires `code`")
+            })
+            .map_err(map_auth_profile_error)?;
+        let state = request
+            .state
+            .ok_or_else(|| {
+                invalid_auth_config("state", "authorization-code completion requires `state`")
+            })
+            .map_err(map_auth_profile_error)?;
+        OAuthAuthCodeCallback::authorized(code, state)
+    }
+    .map_err(map_auth_profile_error)?;
+    let grant = pending
+        .flow
+        .complete_callback(callback)
+        .map_err(map_auth_profile_error)?;
+    let transport = BlockingOAuthTransport::new().map_err(map_auth_profile_error)?;
+    let tokens = pending
+        .flow
+        .exchange(&fcp_async_core::Cx::for_testing(), &transport, &grant)
+        .await
+        .map_err(map_auth_profile_error)?;
+
+    let store = auth_profile_store();
+    let mut profile = store
+        .get_profile(&provider, &profile_id)
+        .await
+        .map_err(map_auth_profile_error)?;
+    let AuthMethodKind::OAuthAuthCode(method) = &mut profile.method else {
+        return Err(map_auth_profile_error(AuthError::UnsupportedMethod {
+            method: profile.method.id(),
+            operation: "oauth_auth_code_complete",
+        }));
+    };
+    method.apply_tokens(tokens);
+    store
+        .save_profile(profile.clone())
+        .await
+        .map_err(map_auth_profile_error)?;
+    pending_store
+        .lock()
+        .await
+        .auth_code
+        .remove(&request.login_id);
+    Ok(Json(AuthOAuthAuthCodeCompleteResponse {
+        provider: profile.provider.clone(),
+        profile_id: profile.id.clone(),
+        login_id: request.login_id,
+        method: "oauth_auth_code",
+        status: "authorized",
+        profile: auth_profile_view(profile),
+    }))
 }
 
 async fn budget_report_handler(
@@ -7909,7 +9201,11 @@ impl HostCredentialInjector {
                 "credential `{credential_id}` does not match leased credential"
             )));
         }
-        Ok(&lease.payload)
+        lease.payload.as_raw_json().ok_or_else(|| {
+            EgressError::CredentialError(format!(
+                "credential `{credential_id}` does not expose legacy host-egress JSON material"
+            ))
+        })
     }
 
     fn payload_host_allow(payload: &Value) -> Vec<String> {
@@ -10202,6 +11498,7 @@ fn map_host_error(err: HostError) -> (StatusCode, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::io::{Read, Write};
     use std::net::{TcpListener as StdTcpListener, TcpStream as StdTcpStream};
     use std::sync::atomic::AtomicBool;
@@ -10248,6 +11545,7 @@ mod tests {
         ConnectorConfig {
             id: connector_id.to_string(),
             binary: compiled_test_connector_binary().display().to_string(),
+            manifest_path: None,
             name: Some("Test Connector".to_string()),
             description: Some("Subprocess test connector".to_string()),
             args: Vec::new(),
@@ -10260,6 +11558,7 @@ mod tests {
             version: None,
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
+            enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
             operation_network_constraints: BTreeMap::new(),
@@ -10271,6 +11570,7 @@ mod tests {
         let existing = ConnectorConfig {
             id: "fcp.test.replace:utility:1.0.0".to_string(),
             binary: "/old/bin".to_string(),
+            manifest_path: None,
             name: Some("Old Name".to_string()),
             description: Some("old description".to_string()),
             args: vec!["--old".to_string()],
@@ -10280,6 +11580,7 @@ mod tests {
             version: Some("1.0.0".to_string()),
             allowed_zones: vec!["z:work".to_string()],
             allowed_operations: Vec::new(),
+            enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
             operation_network_constraints: BTreeMap::new(),
@@ -10287,6 +11588,7 @@ mod tests {
         let incoming = ConnectorConfig {
             id: existing.id.clone(),
             binary: "/new/bin".to_string(),
+            manifest_path: None,
             name: None,
             description: None,
             args: Vec::new(),
@@ -10296,6 +11598,7 @@ mod tests {
             version: None,
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
+            enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
             operation_network_constraints: BTreeMap::new(),
@@ -10312,7 +11615,194 @@ mod tests {
         assert!(updated.config.is_none());
         assert!(updated.categories.is_empty());
         assert!(updated.version.is_none());
+        assert!(updated.manifest_path.is_none());
         assert!(updated.allowed_zones.is_empty());
+    }
+
+    fn two_operation_network_manifest() -> ConnectorManifest {
+        let raw = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = ["fcps.aead.xchacha20poly1305"]
+max_datagram_bytes = 1200
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.test"
+name = "Test Connector"
+version = "2026.1.0"
+description = "Test connector"
+archetypes = ["operational"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.egress"]
+optional = []
+forbidden = []
+
+[provides.operations."op.a"]
+description = "Operation A"
+capability = "test.network"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api-a.example"], port_allow = [443], require_sni = true }
+
+[provides.operations."op.b"]
+description = "Operation B"
+capability = "test.network"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api-b.example"], port_allow = [8443], require_sni = true }
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = []
+fs_writable_paths = []
+deny_exec = true
+deny_ptrace = true
+"#;
+        ConnectorManifest::parse_str_unchecked(raw).expect("test manifest should parse")
+    }
+
+    fn operation_network_snapshot(
+        enforce: bool,
+        manifest_constraints: ManifestOperationConstraintCatalog,
+    ) -> AllowListSnapshot {
+        AllowListSnapshot {
+            allowed_zones: Vec::new(),
+            allowed_operations: Vec::new(),
+            enforce_operation_network_constraints: enforce,
+            enforce_empty_allow_lists: false,
+            manifest_constraints,
+        }
+    }
+
+    fn operation_network_request(operation_id: &'static str) -> InvokeRequest {
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: ConnectorId::from_static("fcp.test:network:1.0.0"),
+            operation: OperationId::from_static(operation_id),
+            zone_id: ZoneId::work(),
+            input: json!({}),
+            capability_token: test_capability_token(
+                &signing_key,
+                "test.network",
+                operation_id,
+                ZoneId::work().as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn manifest_operation_constraint_catalog_keeps_per_operation_constraints() {
+        let manifest = two_operation_network_manifest();
+        let catalog = ManifestOperationConstraintCatalog::from_manifest(
+            &manifest,
+            "inline-test-manifest".to_string(),
+        );
+
+        let op_a = catalog
+            .network_constraints
+            .get("op.a")
+            .expect("op.a constraints");
+        let op_b = catalog
+            .network_constraints
+            .get("op.b")
+            .expect("op.b constraints");
+
+        assert_eq!(op_a.host_allow, vec!["api-a.example"]);
+        assert_eq!(op_a.port_allow, vec![443]);
+        assert_eq!(op_b.host_allow, vec!["api-b.example"]);
+        assert_eq!(op_b.port_allow, vec![8443]);
+    }
+
+    #[test]
+    fn operation_network_constraint_dispatch_rejects_missing_manifest_path_when_enforced() {
+        let snapshot =
+            operation_network_snapshot(true, ManifestOperationConstraintCatalog::default());
+        let request = operation_network_request("op.a");
+
+        let error = enforce_operation_network_constraint_dispatch(&snapshot, &request)
+            .expect_err("enforced mode without manifest path must deny all");
+
+        assert!(error.to_string().contains("no `manifest_path`"), "{error}");
+    }
+
+    #[test]
+    fn operation_network_constraint_dispatch_rejects_missing_operation_constraints() {
+        let manifest = two_operation_network_manifest();
+        let mut catalog = ManifestOperationConstraintCatalog::from_manifest(
+            &manifest,
+            "inline-test-manifest".to_string(),
+        );
+        catalog.network_constraints.remove("op.b");
+        let snapshot = operation_network_snapshot(true, catalog);
+        let request = operation_network_request("op.b");
+
+        let error = enforce_operation_network_constraint_dispatch(&snapshot, &request)
+            .expect_err("declared operation without network constraints must deny all");
+
+        assert!(
+            error
+                .to_string()
+                .contains("has no manifest `network_constraints`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn operation_network_constraint_dispatch_denies_native_subprocess_direct_egress() {
+        let manifest = two_operation_network_manifest();
+        let catalog = ManifestOperationConstraintCatalog::from_manifest(
+            &manifest,
+            "inline-test-manifest".to_string(),
+        );
+        let snapshot = operation_network_snapshot(true, catalog);
+        let request = operation_network_request("op.b");
+
+        let error = enforce_operation_network_constraint_dispatch(&snapshot, &request)
+            .expect_err("native subprocess path must deny strict network enforcement");
+
+        let message = error.to_string();
+        assert!(message.contains("operation `op.b`"), "{message}");
+        assert!(
+            message.contains("native subprocess dispatch has no host-mediated egress guard"),
+            "{message}"
+        );
     }
 
     fn subprocess_test_connector_config_requiring_handshake(connector_id: &str) -> ConnectorConfig {
@@ -10385,6 +11875,7 @@ mod tests {
             RegistryEntry {
                 config,
                 connector: ConnectorRuntime::Native(connector),
+                manifest_constraints: ManifestOperationConstraintCatalog::default(),
             },
         );
         Arc::new(SubprocessRegistry {
@@ -10406,6 +11897,7 @@ mod tests {
                 RegistryEntry {
                     config,
                     connector: ConnectorRuntime::Native(connector),
+                    manifest_constraints: ManifestOperationConstraintCatalog::default(),
                 },
             );
         }
@@ -10504,6 +11996,7 @@ mod tests {
         ConnectorConfig {
             id: connector_id.to_string(),
             binary: "dispatcher-test".to_string(),
+            manifest_path: None,
             name: Some(format!("{connector_id} test connector")),
             description: None,
             args: Vec::new(),
@@ -10513,6 +12006,7 @@ mod tests {
             version: None,
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
+            enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
             operation_network_constraints: BTreeMap::new(),
@@ -11866,6 +13360,7 @@ mod tests {
         let initial_config = ConnectorConfig {
             id: connector_id.to_string(),
             binary: "dispatcher-test".to_string(),
+            manifest_path: None,
             name: Some("l9tt6 snapshot race fixture".to_string()),
             description: None,
             args: Vec::new(),
@@ -11875,6 +13370,7 @@ mod tests {
             version: None,
             allowed_zones: vec!["z:work".to_string()],
             allowed_operations: vec!["op.a".to_string()],
+            enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
             operation_network_constraints: BTreeMap::new(),
@@ -14915,6 +16411,7 @@ mod tests {
             ConnectorConfig {
                 id: connector_id.to_string(),
                 binary: "dispatcher-test".to_string(),
+                manifest_path: None,
                 name: Some("HRW Lease Refuse Test Connector".to_string()),
                 description: None,
                 args: Vec::new(),
@@ -14924,6 +16421,7 @@ mod tests {
                 version: None,
                 allowed_zones: Vec::new(),
                 allowed_operations: Vec::new(),
+                enforce_operation_network_constraints: false,
                 enforce_empty_allow_lists: false,
                 runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
                 operation_network_constraints: BTreeMap::new(),
@@ -15074,6 +16572,7 @@ mod tests {
                 config: ConnectorConfig {
                     id: connector_id.to_string(),
                     binary: "dispatcher-test".to_string(),
+                    manifest_path: None,
                     name: Some("Admit Safety Test Connector".to_string()),
                     description: None,
                     args: Vec::new(),
@@ -15083,11 +16582,13 @@ mod tests {
                     version: None,
                     allowed_zones: Vec::new(),
                     allowed_operations: Vec::new(),
+                    enforce_operation_network_constraints: false,
                     enforce_empty_allow_lists: false,
                     runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
                     operation_network_constraints: BTreeMap::new(),
                 },
                 connector: ConnectorRuntime::Native(connector),
+                manifest_constraints: ManifestOperationConstraintCatalog::default(),
             },
         );
         let registry = Arc::new(SubprocessRegistry {
@@ -15269,6 +16770,7 @@ mod tests {
             ConnectorConfig {
                 id: connector_id.to_string(),
                 binary: "dispatcher-test".to_string(),
+                manifest_path: None,
                 name: Some("Invoke Token Bucket Test Connector".to_string()),
                 description: None,
                 args: Vec::new(),
@@ -15278,6 +16780,7 @@ mod tests {
                 version: None,
                 allowed_zones: Vec::new(),
                 allowed_operations: Vec::new(),
+                enforce_operation_network_constraints: false,
                 enforce_empty_allow_lists: false,
                 runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
                 operation_network_constraints: BTreeMap::new(),
@@ -15461,6 +16964,7 @@ mod tests {
                 config: ConnectorConfig {
                     id: connector_id.to_string(),
                     binary: "dispatcher-test".to_string(),
+                    manifest_path: None,
                     name: Some("Cascade Caller Test Connector".to_string()),
                     description: None,
                     args: Vec::new(),
@@ -15470,11 +16974,13 @@ mod tests {
                     version: None,
                     allowed_zones: Vec::new(),
                     allowed_operations: Vec::new(),
+                    enforce_operation_network_constraints: false,
                     enforce_empty_allow_lists: false,
                     runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
                     operation_network_constraints: BTreeMap::new(),
                 },
                 connector: ConnectorRuntime::Native(connector),
+                manifest_constraints: ManifestOperationConstraintCatalog::default(),
             },
         );
         let registry = Arc::new(SubprocessRegistry {
@@ -15607,6 +17113,7 @@ mod tests {
             ConnectorConfig {
                 id: connector_id.to_string(),
                 binary: "dispatcher-test".to_string(),
+                manifest_path: None,
                 name: Some("Hybrid Owner Production Test Connector".to_string()),
                 description: None,
                 args: Vec::new(),
@@ -15616,6 +17123,7 @@ mod tests {
                 version: None,
                 allowed_zones: Vec::new(),
                 allowed_operations: Vec::new(),
+                enforce_operation_network_constraints: false,
                 enforce_empty_allow_lists: false,
                 runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
                 operation_network_constraints: BTreeMap::new(),
@@ -18779,6 +20287,7 @@ done"#;
         let connector_config = ConnectorConfig {
             id: connector_id.to_string(),
             binary: "in-process-telegram-test".to_string(),
+            manifest_path: None,
             name: Some("Telegram".to_string()),
             description: Some("Telegram webhook ingress test connector".to_string()),
             args: Vec::new(),
@@ -18788,6 +20297,7 @@ done"#;
             version: Some("1.0.0".to_string()),
             allowed_zones: vec![zone_id.to_string()],
             allowed_operations: vec![TELEGRAM_WEBHOOK_INGRESS_OPERATION.to_string()],
+            enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: true,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
             operation_network_constraints: BTreeMap::new(),
@@ -19756,6 +21266,7 @@ done"#;
         let config = ConnectorConfig {
             id: "fcp.test:echo:1.0.0".to_string(),
             binary: "/bin/echo".to_string(),
+            manifest_path: None,
             name: None,
             description: None,
             args: vec![],
@@ -19765,6 +21276,7 @@ done"#;
             version: None,
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
+            enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
             operation_network_constraints: BTreeMap::new(),
@@ -20174,6 +21686,42 @@ done"#;
                 "/rpc/admin/credentials/pools/{provider}/{zone_id}/credentials/{credential_id}/cooldown",
                 post(credential_pool_cooldown_handler),
             )
+            .route(
+                "/rpc/admin/auth/profiles/{provider}",
+                get(auth_profile_list_handler).post(auth_profile_upsert_handler),
+            )
+            .route(
+                "/rpc/admin/auth/profiles/{provider}/refresh",
+                post(auth_profile_refresh_provider_handler),
+            )
+            .route(
+                "/rpc/admin/auth/profiles/{provider}/{profile_id}",
+                get(auth_profile_get_handler).delete(auth_profile_delete_handler),
+            )
+            .route(
+                "/rpc/admin/auth/profiles/{provider}/{profile_id}/priority",
+                post(auth_profile_priority_handler),
+            )
+            .route(
+                "/rpc/admin/auth/profiles/{provider}/{profile_id}/refresh",
+                post(auth_profile_refresh_one_handler),
+            )
+            .route(
+                "/rpc/admin/auth/profiles/{provider}/{profile_id}/oauth/device/start",
+                post(auth_profile_oauth_device_start_handler),
+            )
+            .route(
+                "/rpc/admin/auth/profiles/{provider}/{profile_id}/oauth/device/poll",
+                post(auth_profile_oauth_device_poll_handler),
+            )
+            .route(
+                "/rpc/admin/auth/profiles/{provider}/{profile_id}/oauth/auth-code/start",
+                post(auth_profile_oauth_auth_code_start_handler),
+            )
+            .route(
+                "/rpc/admin/auth/profiles/{provider}/{profile_id}/oauth/auth-code/complete",
+                post(auth_profile_oauth_auth_code_complete_handler),
+            )
             .route_layer(axum::middleware::from_fn_with_state(
                 Arc::clone(&state),
                 admin_auth_middleware,
@@ -20240,6 +21788,143 @@ done"#;
             .await
             .map_err(Box::<dyn std::error::Error + Send + Sync>::from)?;
         serde_json::from_slice(&bytes).map_err(Box::<dyn std::error::Error + Send + Sync>::from)
+    }
+
+    struct HostOAuthLoopbackExpectedRequest {
+        method: &'static str,
+        path: &'static str,
+        body_contains: Vec<&'static str>,
+        response: Value,
+    }
+
+    struct HostOAuthLoopbackServer {
+        base_url: String,
+        handle: thread::JoinHandle<()>,
+        observed: Arc<StdMutex<Vec<(String, String)>>>,
+    }
+
+    impl HostOAuthLoopbackServer {
+        fn start(expected: Vec<HostOAuthLoopbackExpectedRequest>) -> Self {
+            let listener =
+                StdTcpListener::bind("127.0.0.1:0").expect("bind host OAuth loopback server");
+            listener
+                .set_nonblocking(true)
+                .expect("host OAuth loopback nonblocking listener");
+            let addr = listener.local_addr().expect("host OAuth loopback address");
+            let observed = Arc::new(StdMutex::new(Vec::new()));
+            let thread_observed = Arc::clone(&observed);
+            let expected_count = expected.len();
+            let handle = thread::spawn(move || {
+                let mut expected = VecDeque::from(expected);
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut served = 0usize;
+
+                while served < expected_count && Instant::now() < deadline {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(connection) => connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(10));
+                            continue;
+                        }
+                        Err(error) => panic!("host OAuth loopback accept failed: {error}"),
+                    };
+                    let Some((method, path, body)) = read_host_oauth_loopback_request(&mut stream)
+                    else {
+                        continue;
+                    };
+                    let expected = expected
+                        .pop_front()
+                        .expect("expected OAuth loopback request");
+                    assert_eq!(method, expected.method);
+                    assert_eq!(path, expected.path);
+                    for needle in &expected.body_contains {
+                        assert!(
+                            body.contains(needle),
+                            "OAuth loopback body `{body}` missing `{needle}`"
+                        );
+                    }
+                    thread_observed
+                        .lock()
+                        .expect("OAuth loopback observed lock")
+                        .push((format!("{method} {path}"), body));
+                    write_host_telegram_loopback_response(&mut stream, &expected.response);
+                    served += 1;
+                }
+
+                assert_eq!(
+                    served, expected_count,
+                    "host OAuth loopback served {served} request(s), expected {expected_count}"
+                );
+            });
+
+            Self {
+                base_url: format!("http://{addr}"),
+                handle,
+                observed,
+            }
+        }
+
+        fn join(self) -> Vec<(String, String)> {
+            self.handle
+                .join()
+                .expect("host OAuth loopback thread joins");
+            self.observed
+                .lock()
+                .expect("OAuth loopback observed lock")
+                .clone()
+        }
+    }
+
+    fn read_host_oauth_loopback_request(
+        stream: &mut StdTcpStream,
+    ) -> Option<(String, String, String)> {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 1024];
+        let header_end = loop {
+            let read = stream.read(&mut chunk).ok()?;
+            if read == 0 {
+                return None;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            if let Some(position) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                break position + 4;
+            }
+            if buffer.len() > 16 * 1024 {
+                return None;
+            }
+        };
+
+        let headers = String::from_utf8_lossy(&buffer[..header_end]);
+        let request_line = headers.lines().next()?;
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next()?.to_string();
+        let path = parts.next()?.to_string();
+        let content_length = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        });
+        let content_length = content_length.unwrap_or(0);
+        while buffer.len().saturating_sub(header_end) < content_length {
+            let read = stream.read(&mut chunk).ok()?;
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+        }
+        let body_end = header_end + content_length.min(buffer.len().saturating_sub(header_end));
+        let body = String::from_utf8_lossy(&buffer[header_end..body_end]).to_string();
+        Some((method, path, body))
+    }
+
+    fn host_oauth_query_value(url: &str, field: &str) -> Option<String> {
+        let query = url.split_once('?')?.1;
+        query.split('&').find_map(|pair| {
+            let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (name == field).then(|| value.to_owned())
+        })
     }
 
     async fn post_cancel_with_headers(
@@ -20529,6 +22214,405 @@ done"#;
         assert!(!audit_text.contains("sk-live-primary"));
         assert!(!audit_text.contains("sk-duplicate"));
         assert!(!audit_text.contains("sk-rotated"));
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn auth_profile_admin_routes_reject_unauthenticated_requests()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let state = cancel_route_test_state();
+        let app = credential_pool_admin_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::POST,
+            "/rpc/admin/auth/profiles/test-auth-profile-denied",
+            json!({
+                "profile_id": "primary",
+                "method": "api_key",
+                "label": "primary",
+                "api_key": "sk-denied"
+            }),
+            &[],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn auth_profile_admin_routes_crud_refresh_and_redact_profiles()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let state = cancel_route_test_state();
+        let app = credential_pool_admin_test_app(Arc::clone(&state));
+        let auth = [
+            ("Authorization", "Bearer topsecret"),
+            (ADMIN_ZONE_HEADER, "z:owner"),
+        ];
+        let provider = "test-auth-profile-crud";
+        let profile_id = "primary";
+        let backup_profile_id = "backup";
+        let profile_path = format!("/rpc/admin/auth/profiles/{provider}/{profile_id}");
+
+        let upserted = send_json_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!("/rpc/admin/auth/profiles/{provider}"),
+            json!({
+                "profile_id": profile_id,
+                "method": "api_key",
+                "label": "primary",
+                "priority": 10,
+                "api_key": "sk-live-primary"
+            }),
+            &auth,
+        )
+        .await?;
+        assert_eq!(upserted.status(), axum::http::StatusCode::OK);
+        let upserted_body = response_body_json(upserted).await?;
+        assert_eq!(upserted_body["profile"]["provider"], provider);
+        assert_eq!(upserted_body["profile"]["profile_id"], profile_id);
+        assert_eq!(upserted_body["profile"]["method"], "api_key");
+        assert_eq!(upserted_body["profile"]["priority"], 10);
+        let upserted_profile = upserted_body["profile"]
+            .as_object()
+            .expect("profile should be a JSON object");
+        assert!(!upserted_profile.contains_key("api_key"));
+        let upserted_text = upserted_body.to_string();
+        assert!(!upserted_text.contains("sk-live-primary"));
+
+        let backup = send_json_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!("/rpc/admin/auth/profiles/{provider}"),
+            json!({
+                "profile_id": backup_profile_id,
+                "method": "api_key",
+                "label": "backup",
+                "priority": 20,
+                "api_key": "sk-live-backup"
+            }),
+            &auth,
+        )
+        .await?;
+        assert_eq!(backup.status(), axum::http::StatusCode::OK);
+        assert!(
+            !response_body_json(backup)
+                .await?
+                .to_string()
+                .contains("sk-live-backup")
+        );
+
+        let reprioritized = send_json_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!("{profile_path}/priority"),
+            json!({ "priority": -5 }),
+            &auth,
+        )
+        .await?;
+        assert_eq!(reprioritized.status(), axum::http::StatusCode::OK);
+        let reprioritized_body = response_body_json(reprioritized).await?;
+        assert_eq!(reprioritized_body["profile"]["priority"], -5);
+        assert!(!reprioritized_body.to_string().contains("sk-live-primary"));
+
+        let listed = send_json_request(
+            app.clone(),
+            axum::http::Method::GET,
+            &format!("/rpc/admin/auth/profiles/{provider}"),
+            json!({}),
+            &auth,
+        )
+        .await?;
+        assert_eq!(listed.status(), axum::http::StatusCode::OK);
+        let listed_body = response_body_json(listed).await?;
+        assert_eq!(listed_body["provider"], provider);
+        assert_eq!(listed_body["profiles"].as_array().map(Vec::len), Some(2));
+        assert_eq!(listed_body["profiles"][0]["profile_id"], profile_id);
+        assert_eq!(listed_body["profiles"][0]["priority"], -5);
+        assert_eq!(listed_body["profiles"][1]["profile_id"], backup_profile_id);
+        assert_eq!(listed_body["profiles"][1]["priority"], 20);
+
+        let shown = send_json_request(
+            app.clone(),
+            axum::http::Method::GET,
+            &profile_path,
+            json!({}),
+            &auth,
+        )
+        .await?;
+        assert_eq!(shown.status(), axum::http::StatusCode::OK);
+        let shown_body = response_body_json(shown).await?;
+        assert_eq!(shown_body["profile"]["profile_id"], profile_id);
+
+        let refreshed = send_json_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!("{profile_path}/refresh"),
+            json!({}),
+            &auth,
+        )
+        .await?;
+        assert_eq!(refreshed.status(), axum::http::StatusCode::OK);
+        let refreshed_body = response_body_json(refreshed).await?;
+        assert_eq!(refreshed_body["provider"], provider);
+        assert_eq!(refreshed_body["profile_id"], profile_id);
+        assert_eq!(refreshed_body["outcomes"][0]["action"], "not_refreshable");
+        assert_eq!(refreshed_body["outcomes"][0]["outcome"], "skipped");
+
+        let deleted = send_json_request(
+            app.clone(),
+            axum::http::Method::DELETE,
+            &profile_path,
+            json!({}),
+            &auth,
+        )
+        .await?;
+        assert_eq!(deleted.status(), axum::http::StatusCode::OK);
+        let deleted_body = response_body_json(deleted).await?;
+        assert_eq!(deleted_body["deleted"], true);
+
+        let missing = send_json_request(
+            app,
+            axum::http::Method::GET,
+            &profile_path,
+            json!({}),
+            &auth,
+        )
+        .await?;
+        assert_eq!(missing.status(), axum::http::StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn auth_profile_oauth_device_routes_use_loopback_provider_and_refresh()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let oauth = HostOAuthLoopbackServer::start(vec![
+            HostOAuthLoopbackExpectedRequest {
+                method: "POST",
+                path: "/device",
+                body_contains: vec!["client_id=client-device", "scope=repo"],
+                response: json!({
+                    "device_code": "device-code-123",
+                    "user_code": "USER-123",
+                    "verification_uri": "https://provider.example/device",
+                    "verification_uri_complete": "https://provider.example/device?user_code=USER-123",
+                    "expires_in": 600,
+                    "interval": 1
+                }),
+            },
+            HostOAuthLoopbackExpectedRequest {
+                method: "POST",
+                path: "/token",
+                body_contains: vec![
+                    "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code",
+                    "device_code=device-code-123",
+                    "client_id=client-device",
+                ],
+                response: json!({
+                    "access_token": "access-device-123",
+                    "token_type": "Bearer",
+                    "expires_in": 1,
+                    "refresh_token": "refresh-device-123",
+                    "scope": "repo"
+                }),
+            },
+            HostOAuthLoopbackExpectedRequest {
+                method: "POST",
+                path: "/token",
+                body_contains: vec![
+                    "grant_type=refresh_token",
+                    "refresh_token=refresh-device-123",
+                    "client_id=client-device",
+                ],
+                response: json!({
+                    "access_token": "access-device-456",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                    "refresh_token": "refresh-device-456",
+                    "scope": "repo"
+                }),
+            },
+        ]);
+        let state = cancel_route_test_state();
+        let app = credential_pool_admin_test_app(Arc::clone(&state));
+        let auth = [
+            ("Authorization", "Bearer topsecret"),
+            (ADMIN_ZONE_HEADER, "z:owner"),
+        ];
+        let provider = "test-auth-oauth-device";
+        let profile_id = "primary";
+        let profile_path = format!("/rpc/admin/auth/profiles/{provider}/{profile_id}");
+
+        let upserted = send_json_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!("/rpc/admin/auth/profiles/{provider}"),
+            json!({
+                "profile_id": profile_id,
+                "method": "oauth_device",
+                "label": "primary",
+                "client_id": "client-device",
+                "device_code_url": format!("{}/device", oauth.base_url),
+                "token_url": format!("{}/token", oauth.base_url),
+                "scope": "repo"
+            }),
+            &auth,
+        )
+        .await?;
+        assert_eq!(upserted.status(), axum::http::StatusCode::OK);
+
+        let started = send_json_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!("{profile_path}/oauth/device/start"),
+            json!({}),
+            &auth,
+        )
+        .await?;
+        assert_eq!(started.status(), axum::http::StatusCode::OK);
+        let started_body = response_body_json(started).await?;
+        assert_eq!(started_body["method"], "oauth_device");
+        assert_eq!(started_body["user_code"], "USER-123");
+        let login_id = started_body["login_id"]
+            .as_str()
+            .expect("device login id")
+            .to_owned();
+
+        let polled = send_json_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!("{profile_path}/oauth/device/poll"),
+            json!({ "login_id": login_id }),
+            &auth,
+        )
+        .await?;
+        assert_eq!(polled.status(), axum::http::StatusCode::OK);
+        let polled_body = response_body_json(polled).await?;
+        assert_eq!(polled_body["status"], "authorized");
+        assert_eq!(polled_body["profile"]["method"], "oauth_device");
+        let polled_text = polled_body.to_string();
+        assert!(!polled_text.contains("access-device-123"));
+        assert!(!polled_text.contains("refresh-device-123"));
+
+        let refreshed = send_json_request(
+            app,
+            axum::http::Method::POST,
+            &format!("{profile_path}/refresh"),
+            json!({}),
+            &auth,
+        )
+        .await?;
+        assert_eq!(refreshed.status(), axum::http::StatusCode::OK);
+        let refreshed_body = response_body_json(refreshed).await?;
+        assert_eq!(refreshed_body["outcomes"][0]["action"], "due");
+        assert_eq!(refreshed_body["outcomes"][0]["outcome"], "refreshed");
+        assert!(!refreshed_body.to_string().contains("access-device-456"));
+
+        let observed = oauth.join();
+        assert_eq!(observed.len(), 3);
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn auth_profile_oauth_auth_code_routes_complete_against_loopback_provider()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let oauth = HostOAuthLoopbackServer::start(vec![HostOAuthLoopbackExpectedRequest {
+            method: "POST",
+            path: "/token",
+            body_contains: vec![
+                "grant_type=authorization_code",
+                "code=auth-code-123",
+                "client_id=client-auth-code",
+                "client_secret=client-secret-123",
+            ],
+            response: json!({
+                "access_token": "access-auth-code-123",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "refresh_token": "refresh-auth-code-123",
+                "scope": "repo"
+            }),
+        }]);
+        let state = cancel_route_test_state();
+        let app = credential_pool_admin_test_app(Arc::clone(&state));
+        let auth = [
+            ("Authorization", "Bearer topsecret"),
+            (ADMIN_ZONE_HEADER, "z:owner"),
+        ];
+        let provider = "test-auth-oauth-auth-code";
+        let profile_id = "primary";
+        let profile_path = format!("/rpc/admin/auth/profiles/{provider}/{profile_id}");
+
+        let upserted = send_json_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!("/rpc/admin/auth/profiles/{provider}"),
+            json!({
+                "profile_id": profile_id,
+                "method": "oauth_auth_code",
+                "label": "primary",
+                "client_id": "client-auth-code",
+                "client_secret": "client-secret-123",
+                "authorize_url": "https://provider.example/authorize",
+                "token_url": format!("{}/token", oauth.base_url),
+                "redirect_uri": "http://127.0.0.1/callback",
+                "scope": "repo",
+                "use_pkce": false
+            }),
+            &auth,
+        )
+        .await?;
+        assert_eq!(upserted.status(), axum::http::StatusCode::OK);
+        let upserted_body = response_body_json(upserted).await?;
+        assert!(!upserted_body.to_string().contains("client-secret-123"));
+
+        let started = send_json_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!("{profile_path}/oauth/auth-code/start"),
+            json!({}),
+            &auth,
+        )
+        .await?;
+        assert_eq!(started.status(), axum::http::StatusCode::OK);
+        let started_body = response_body_json(started).await?;
+        assert_eq!(started_body["method"], "oauth_auth_code");
+        let login_id = started_body["login_id"]
+            .as_str()
+            .expect("auth-code login id")
+            .to_owned();
+        let authorization_url = started_body["authorization_url"]
+            .as_str()
+            .expect("authorization URL");
+        let state_value =
+            host_oauth_query_value(authorization_url, "state").expect("authorization state");
+
+        let completed = send_json_request(
+            app,
+            axum::http::Method::POST,
+            &format!("{profile_path}/oauth/auth-code/complete"),
+            json!({
+                "login_id": login_id,
+                "code": "auth-code-123",
+                "state": state_value
+            }),
+            &auth,
+        )
+        .await?;
+        assert_eq!(completed.status(), axum::http::StatusCode::OK);
+        let completed_body = response_body_json(completed).await?;
+        assert_eq!(completed_body["status"], "authorized");
+        assert_eq!(completed_body["profile"]["method"], "oauth_auth_code");
+        let completed_text = completed_body.to_string();
+        assert!(!completed_text.contains("auth-code-123"));
+        assert!(!completed_text.contains("client-secret-123"));
+        assert!(!completed_text.contains("access-auth-code-123"));
+        assert!(!completed_text.contains("refresh-auth-code-123"));
+
+        let observed = oauth.join();
+        assert_eq!(observed.len(), 1);
         Ok(())
     }
 

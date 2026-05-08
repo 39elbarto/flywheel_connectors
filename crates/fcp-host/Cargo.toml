@@ -19,10 +19,11 @@ fcp-core = { path = "../fcp-core" }
 fcp-prelude = { path = "../fcp-prelude" }
 fcp-evidence = { path = "../fcp-evidence" }
 fcp-kernel = { path = "../fcp-kernel" }
-fcp-manifest = { workspace = true }
+fcp-manifest = { path = "../fcp-manifest" }
 fcp-mesh = { path = "../fcp-mesh" }
 fcp-policy = { path = "../fcp-policy" }
 fcp-async-core = { path = "../fcp-async-core" }
+fcp-provider-auth = { path = "../fcp-provider-auth" }
 fcp-cbor = { path = "../fcp-cbor" }
 fcp-crypto = { path = "../fcp-crypto" }
 fcp-ratelimit = { path = "../fcp-ratelimit" }
@@ -60,7 +61,7 @@ semver = { version = "1", features = ["serde"] }
 axum = { version = "0.8", features = ["json"] }
 hyper = "1.8.1"
 hyper-util = { version = "0.1.20", features = ["server", "service", "http1", "http2"] }
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["blocking", "form"] }
 rustls = { version = "0.23.38", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pemfile = "2.2.0"
 rustls-platform-verifier = "0.6.2"

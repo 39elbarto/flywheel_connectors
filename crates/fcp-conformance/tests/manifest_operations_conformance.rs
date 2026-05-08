@@ -861,18 +861,14 @@ fn expected_network_constraints_gap_connectors() -> Vec<String> {
 
 fn expected_ai_hints_gap_connectors() -> Vec<String> {
     connector_names(&[
-        "anthropic",
-        "aws-bedrock",
         "dingtalk",
-        "email-generic",
-        "firebase",
         "google-people",
         "google-workspace-events",
         "mastodon",
         "mattermost",
         "nostr",
-        "plivo",
         "qq",
+        "sonos",
         "telnyx",
         "wecom",
     ])

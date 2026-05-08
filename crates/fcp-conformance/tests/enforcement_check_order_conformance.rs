@@ -1,4 +1,4 @@
-//! `EnforcementCheckOrder` canonical 11-stage pipeline +
+//! `EnforcementCheckOrder` canonical 14-stage pipeline +
 //! `CheckOutcome` predicate conformance.
 //!
 //! `fcp_core::EnforcementCheckOrder::canonical_order` is the NORMATIVE
@@ -11,12 +11,13 @@
 //!
 //! Properties pinned (NORMATIVE):
 //!
-//! 1. **Canonical sequence** — exactly 11 entries in the documented
+//! 1. **Canonical sequence** — exactly 14 entries in the documented
 //!    order: CanonicalDecode → ZoneMembership → CapabilityVerify →
-//!    HolderProof → CheckpointFreshness → RevocationFreshness →
-//!    TaintApproval → PolicyCeiling → ConnectorManifest → Budget →
-//!    RateLimit.
-//! 2. **`COUNT` matches the array length** (= 11).
+//!    RevocationCascade → DeploymentTier → HolderProof →
+//!    CheckpointFreshness → RevocationFreshness → TaintApproval →
+//!    PolicyCeiling → CapabilityConstraints → ConnectorManifest →
+//!    Budget → RateLimit.
+//! 2. **`COUNT` matches the array length** (= 14).
 //! 3. **`index_of` agrees with array position** for every variant.
 //! 4. **`runs_before` is the < relation on indices.**
 //! 5. **`as_str` snake_case wire form** for each variant.
@@ -32,25 +33,28 @@
 use fcp_prelude::{CheckOutcome, EnforcementCheckId, EnforcementCheckOrder};
 
 #[test]
-fn canonical_order_returns_documented_eleven_check_sequence() {
+fn canonical_order_returns_documented_fourteen_check_sequence() {
     let order = EnforcementCheckOrder::canonical_order();
-    assert_eq!(order.len(), 11);
+    assert_eq!(order.len(), 14);
     assert_eq!(
         order,
         [
             EnforcementCheckId::CanonicalDecode,
             EnforcementCheckId::ZoneMembership,
             EnforcementCheckId::CapabilityVerify,
+            EnforcementCheckId::RevocationCascade,
+            EnforcementCheckId::DeploymentTier,
             EnforcementCheckId::HolderProof,
             EnforcementCheckId::CheckpointFreshness,
             EnforcementCheckId::RevocationFreshness,
             EnforcementCheckId::TaintApproval,
             EnforcementCheckId::PolicyCeiling,
+            EnforcementCheckId::CapabilityConstraints,
             EnforcementCheckId::ConnectorManifest,
             EnforcementCheckId::Budget,
             EnforcementCheckId::RateLimit,
         ],
-        "canonical_order MUST return the documented 11-check sequence — drift here \
+        "canonical_order MUST return the documented 14-check sequence — drift here \
          would change which check fails first across runtimes"
     );
 }
@@ -62,7 +66,7 @@ fn count_constant_matches_canonical_order_length() {
         EnforcementCheckOrder::canonical_order().len(),
         "COUNT constant MUST equal the canonical array length"
     );
-    assert_eq!(EnforcementCheckOrder::COUNT, 11);
+    assert_eq!(EnforcementCheckOrder::COUNT, 14);
 }
 
 #[test]
@@ -109,6 +113,8 @@ fn as_str_matches_snake_case_wire_form_for_each_variant() {
         (EnforcementCheckId::CanonicalDecode, "canonical_decode"),
         (EnforcementCheckId::ZoneMembership, "zone_membership"),
         (EnforcementCheckId::CapabilityVerify, "capability_verify"),
+        (EnforcementCheckId::RevocationCascade, "revocation_cascade"),
+        (EnforcementCheckId::DeploymentTier, "deployment_tier"),
         (EnforcementCheckId::HolderProof, "holder_proof"),
         (
             EnforcementCheckId::CheckpointFreshness,
@@ -120,6 +126,10 @@ fn as_str_matches_snake_case_wire_form_for_each_variant() {
         ),
         (EnforcementCheckId::TaintApproval, "taint_approval"),
         (EnforcementCheckId::PolicyCeiling, "policy_ceiling"),
+        (
+            EnforcementCheckId::CapabilityConstraints,
+            "capability_constraints",
+        ),
         (EnforcementCheckId::ConnectorManifest, "connector_manifest"),
         (EnforcementCheckId::Budget, "budget"),
         (EnforcementCheckId::RateLimit, "rate_limit"),

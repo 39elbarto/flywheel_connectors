@@ -26,6 +26,7 @@ use crate::{
     },
 };
 
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const FIRESTORE_GET_OP: &str = "firebase.firestore.get";
 const FIRESTORE_LIST_OP: &str = "firebase.firestore.list";
 const FIRESTORE_CREATE_OP: &str = "firebase.firestore.create";
@@ -1477,6 +1478,53 @@ mod tests {
                 .any(|op| op.id.as_str() == FIRESTORE_GET_OP)
         );
         assert!(operations.iter().any(|op| op.id.as_str() == RTDB_SET_OP));
+    }
+
+    #[test]
+    fn manifest_declares_agent_actionable_ai_hints() {
+        for operation in typed_operations_info() {
+            let operation_id = operation.id.as_str();
+            let marker = format!("[provides.operations.\"{operation_id}\".ai_hints]");
+            let maybe_block = MANIFEST_TOML.split_once(&marker).map(|(_, remainder)| {
+                remainder
+                    .split_once("\n[provides.operations.")
+                    .map_or(remainder, |(block, _)| block)
+            });
+            assert!(
+                maybe_block.is_some(),
+                "{operation_id} missing manifest ai_hints block"
+            );
+            let block = maybe_block.unwrap_or_default();
+
+            assert!(
+                block.contains("when_to_use = "),
+                "{operation_id} missing when_to_use"
+            );
+            assert!(
+                !block.contains("when_to_use = \"\""),
+                "{operation_id} has empty when_to_use"
+            );
+            assert!(
+                block.contains("common_mistakes = ["),
+                "{operation_id} missing common_mistakes"
+            );
+            assert!(
+                !block.contains("common_mistakes = []"),
+                "{operation_id} has empty common_mistakes"
+            );
+            assert!(
+                block.contains("examples = ["),
+                "{operation_id} missing examples"
+            );
+            assert!(
+                !block.contains("examples = []"),
+                "{operation_id} has empty examples"
+            );
+            assert!(
+                !block.contains("related = []"),
+                "{operation_id} has empty related hints"
+            );
+        }
     }
 
     #[fcp_async_core::runtime::test]

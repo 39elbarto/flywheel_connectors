@@ -2512,6 +2512,8 @@ async fn scenario_lease_contention() {
         connector_id: connector_id.parse().expect("valid connector ID"),
         min_connector_version: None,
         min_memory_mb: None,
+        resource_pool_class: None,
+        requested_cpu_cores: None,
         requires_gpu: false,
         requires_tpu: false,
         preferred_symbols: Vec::new(),

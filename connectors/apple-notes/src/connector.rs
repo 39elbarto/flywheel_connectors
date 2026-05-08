@@ -103,16 +103,30 @@ impl AppleNotesConnector {
                 id: OperationId::from_static(OP_HEALTH),
                 summary: "Report Apple Notes health".into(),
                 description: Some("Report platform support and connector configuration.".into()),
-                input_schema: json!({ "type": "object" }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: json!({ "type": "object", "properties": {} }),
+                output_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "status": { "type": "string" },
+                        "platform": { "type": "string" },
+                        "manifest_hash": { "type": "string" }
+                    }
+                }),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
                 idempotency: IdempotencyClass::Strict,
                 ai_hints: AgentHint {
-                    when_to_use: "Use this before note operations on a new host.".into(),
-                    common_mistakes: vec![],
-                    examples: vec!["{}".into()],
+                    when_to_use:
+                        "Use this before Apple Notes operations on a new macOS host or when diagnosing a failed Notes automation request."
+                            .into(),
+                    common_mistakes: vec![
+                        "Treating connector health as proof that Notes.app Automation permission has already been granted."
+                            .into(),
+                        "Running this on a non-macOS host and treating the platform failure as a note-data problem."
+                            .into(),
+                    ],
+                    examples: vec!["{\"check\":\"platform-and-configuration\"}".into()],
                     related: vec![CapabilityId::from_static(OP_LIST_NOTES)],
                 },
                 rate_limit: None,
@@ -128,15 +142,37 @@ impl AppleNotesConnector {
                         "folder": { "type": "string" }
                     }
                 }),
-                output_schema: json!({ "type": "object" }),
+                output_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "notes": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": { "type": "string" },
+                                    "title": { "type": "string" },
+                                    "folder": { "type": "string" }
+                                }
+                            }
+                        }
+                    }
+                }),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
                 idempotency: IdempotencyClass::Strict,
                 ai_hints: AgentHint {
-                    when_to_use: "Use this to browse notes before reading a specific note.".into(),
-                    common_mistakes: vec![],
-                    examples: vec!["{\"folder\":\"Inbox\"}".into()],
+                    when_to_use:
+                        "Use this when an agent needs a browseable inventory of Apple Notes before choosing a specific note to read."
+                            .into(),
+                    common_mistakes: vec![
+                        "Assuming summaries include full note bodies; use apple_notes.get_note after selecting a note identifier."
+                            .into(),
+                        "Using a display folder name that does not exist in the local Notes app and treating the empty result as global absence."
+                            .into(),
+                    ],
+                    examples: vec!["{\"folder\":\"Project Plans\"}".into()],
                     related: vec![CapabilityId::from_static(OP_GET_NOTE)],
                 },
                 rate_limit: None,
@@ -153,15 +189,37 @@ impl AppleNotesConnector {
                         "query": { "type": "string" }
                     }
                 }),
-                output_schema: json!({ "type": "object" }),
+                output_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "notes": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": { "type": "string" },
+                                    "title": { "type": "string" },
+                                    "folder": { "type": "string" }
+                                }
+                            }
+                        }
+                    }
+                }),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
                 idempotency: IdempotencyClass::Strict,
                 ai_hints: AgentHint {
-                    when_to_use: "Use this to locate notes by keyword before reading them.".into(),
-                    common_mistakes: vec![],
-                    examples: vec!["{\"query\":\"deploy\"}".into()],
+                    when_to_use:
+                        "Use this when the user gives a keyword, topic, or phrase and the agent needs candidate Apple Notes before reading one."
+                            .into(),
+                    common_mistakes: vec![
+                        "Sending an empty or whitespace query; the connector rejects empty search text."
+                            .into(),
+                        "Assuming substring search has semantic ranking; inspect candidate titles and folders before acting on a result."
+                            .into(),
+                    ],
+                    examples: vec!["{\"query\":\"release checklist\"}".into()],
                     related: vec![CapabilityId::from_static(OP_GET_NOTE)],
                 },
                 rate_limit: None,
@@ -178,15 +236,29 @@ impl AppleNotesConnector {
                         "note_id": { "type": "string" }
                     }
                 }),
-                output_schema: json!({ "type": "object" }),
+                output_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "title": { "type": "string" },
+                        "folder": { "type": "string" },
+                        "body": { "type": "string" }
+                    }
+                }),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
                 idempotency: IdempotencyClass::Strict,
                 ai_hints: AgentHint {
-                    when_to_use: "Use this after obtaining a note identifier from list/search."
-                        .into(),
-                    common_mistakes: vec![],
+                    when_to_use:
+                        "Use this after list_notes or search_notes returns a note identifier and the agent needs the full note body."
+                            .into(),
+                    common_mistakes: vec![
+                        "Passing a note title instead of the stable note identifier returned by list_notes or search_notes."
+                            .into(),
+                        "Logging or forwarding the returned body without considering that Apple Notes content may be private user data."
+                            .into(),
+                    ],
                     examples: vec!["{\"note_id\":\"x-coredata://...\"}".into()],
                     related: vec![CapabilityId::from_static(OP_LIST_NOTES)],
                 },
@@ -206,23 +278,36 @@ impl AppleNotesConnector {
                         "folder": { "type": "string" }
                     }
                 }),
-                output_schema: json!({ "type": "object" }),
+                output_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "title": { "type": "string" },
+                        "folder": { "type": "string" }
+                    }
+                }),
                 capability: CapabilityId::from_static(CAP_WRITE),
                 risk_level: RiskLevel::Medium,
                 safety_tier: SafetyTier::Risky,
                 idempotency: IdempotencyClass::None,
                 ai_hints: AgentHint {
-                    when_to_use: "Use this to create a new note in Apple Notes.".into(),
+                    when_to_use:
+                        "Use this when the user explicitly wants a new Apple Notes note created from agent-generated or user-provided content."
+                            .into(),
                     common_mistakes: vec![
-                        "Apple Notes automation requires Automation permission on macOS.".into(),
+                        "Creating notes without policy approval or clear user intent; this is a write operation in the owner/private zone."
+                            .into(),
+                        "Using an empty title; the connector rejects blank note titles.".into(),
+                        "Embedding secrets or access tokens in example or audit payloads.".into(),
                     ],
                     examples: vec![
-                        "{\"title\":\"Deploy checklist\",\"body\":\"- verify logs\"}".into(),
+                        "{\"title\":\"Release checklist\",\"body\":\"- Review conformance logs\\n- Confirm rollback plan\",\"folder\":\"Project Plans\"}"
+                            .into(),
                     ],
                     related: vec![CapabilityId::from_static(OP_LIST_NOTES)],
                 },
                 rate_limit: None,
-                requires_approval: Some(ApprovalMode::None),
+                requires_approval: Some(ApprovalMode::Policy),
             },
         ]
     }
@@ -342,18 +427,29 @@ impl FcpConnector for AppleNotesConnector {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        let HandshakeRequest {
+            host_public_key,
+            zone,
+            capabilities_requested,
+            nonce,
+            requested_instance_id,
+            ..
+        } = req;
+        if let Some(requested_instance_id) = requested_instance_id {
+            self.base.instance_id = requested_instance_id;
+        }
         self.base.set_handshaken(true);
         self.verifier = Some(CapabilityVerifier::new(
-            req.host_public_key,
-            req.zone.clone(),
+            host_public_key,
+            zone,
             self.base.instance_id.clone(),
         ));
         Ok(HandshakeResponse {
             status: "accepted".into(),
-            capabilities_granted: granted_capabilities(req.capabilities_requested),
+            capabilities_granted: granted_capabilities(capabilities_requested),
             session_id: SessionId::new(),
             manifest_hash: Self::manifest_hash(),
-            nonce: req.nonce,
+            nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
                 replay: false,

@@ -382,8 +382,28 @@ mod tests {
                 "command": "rch exec -- cargo test -p fcp-apple-notes osascript_e2e -- --nocapture"
             }
         });
+        let line = payload.to_string();
+        for forbidden in [
+            "/Users/",
+            "/tmp/fcp-apple-notes",
+            title_marker(),
+            body_marker(),
+        ] {
+            assert!(
+                !line.contains(forbidden),
+                "Apple Notes e2e log leaked forbidden marker: {forbidden}"
+            );
+        }
         println!("{payload}");
         payload
+    }
+
+    fn title_marker() -> &'static str {
+        "Title; exec -a alias python3 -c 'oops'"
+    }
+
+    fn body_marker() -> &'static str {
+        "body with \"quotes\"\n$(command source) && `not evaluated`"
     }
 
     #[cfg(unix)]
@@ -519,7 +539,7 @@ esac
     #[test]
     fn osascript_e2e_rejects_wrapper_carrier_config_with_log() {
         let correlation_id = Uuid::new_v4().to_string();
-        let mut rejected = Vec::new();
+        let mut rejected_count = 0;
         for path in [
             "/usr/bin/env",
             "/usr/bin/sudo",
@@ -536,7 +556,7 @@ esac
         ] {
             let result = AppleNotesConfig::from_value(json!({ "osascript_path": path }));
             assert!(result.is_err(), "{path} should be rejected");
-            rejected.push(path);
+            rejected_count += 1;
         }
 
         let log = emit_e2e_log(
@@ -544,7 +564,10 @@ esac
             &correlation_id,
             "configure",
             "pass",
-            &json!({ "rejected_paths": rejected }),
+            &json!({
+                "rejected_path_count": rejected_count,
+                "rejected_classes": ["carrier", "relative", "multi-token"]
+            }),
         );
         assert_eq!(log["correlation_id"], correlation_id);
         assert!(
@@ -595,7 +618,13 @@ esac
             &correlation_id,
             "configure",
             "pass",
-            &json!({ "osascript_path": config.osascript_path }),
+            &json!({
+                "osascript_path_policy": if config.osascript_path == crate::types::DEFAULT_OSASCRIPT_PATH {
+                    "canonical-only"
+                } else {
+                    "rejected"
+                }
+            }),
         );
 
         let title = "Title; exec -a alias python3 -c 'oops'";
@@ -619,8 +648,8 @@ esac
             "invoke",
             "pass",
             &json!({
-                "argv_log": argv_log.display().to_string(),
-                "stdout": stdout,
+                "argv_record_count": argv.lines().count(),
+                "stdout_shape": if stdout.contains('\t') { "tab-delimited-note-summary" } else { "unexpected" },
                 "malicious_payload_inert": true,
             }),
         );
@@ -636,7 +665,7 @@ esac
             &correlation_id,
             "shutdown",
             "pass",
-            &json!({ "fake_osascript": fake_osascript.display().to_string() }),
+            &json!({ "fake_osascript": "omitted-local-path" }),
         );
     }
 
@@ -714,7 +743,7 @@ esac
             &correlation_id,
             "shutdown",
             "pass",
-            &json!({ "fake_osascript": fake_osascript.display().to_string() }),
+            &json!({ "fake_osascript": "omitted-local-path" }),
         );
     }
 
@@ -734,16 +763,17 @@ esac
     #[test]
     fn parse_note_summaries_single_line() {
         let value = AppleNotesClient::parse_note_summaries("id-1\tTitle\tInbox\n");
-        assert_eq!(value["notes"][0]["id"], "id-1");
-        assert_eq!(value["notes"][0]["title"], "Title");
-        assert_eq!(value["notes"][0]["folder"], "Inbox");
+        let notes = note_array(&value);
+        assert_eq!(notes[0]["id"], "id-1");
+        assert_eq!(notes[0]["title"], "Title");
+        assert_eq!(notes[0]["folder"], "Inbox");
     }
 
     #[test]
     fn parse_note_summaries_multiple_lines() {
         let value =
             AppleNotesClient::parse_note_summaries("id-1\tNote A\tInbox\nid-2\tNote B\tWork\n");
-        let notes = value["notes"].as_array().unwrap();
+        let notes = note_array(&value);
         assert_eq!(notes.len(), 2);
         assert_eq!(notes[1]["title"], "Note B");
     }
@@ -751,15 +781,22 @@ esac
     #[test]
     fn parse_note_summaries_empty_input() {
         let value = AppleNotesClient::parse_note_summaries("");
-        let notes = value["notes"].as_array().unwrap();
+        let notes = note_array(&value);
         assert!(notes.is_empty());
     }
 
     #[test]
     fn parse_note_summaries_skips_blank_lines() {
         let value = AppleNotesClient::parse_note_summaries("id-1\tA\tB\n\n\nid-2\tC\tD\n");
-        let notes = value["notes"].as_array().unwrap();
+        let notes = note_array(&value);
         assert_eq!(notes.len(), 2);
+    }
+
+    fn note_array(value: &Value) -> &[Value] {
+        value
+            .get("notes")
+            .and_then(Value::as_array)
+            .expect("parse_note_summaries should return a notes array")
     }
 
     #[test]

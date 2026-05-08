@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:34429cb074351c9ad5dc5cb14f06c40dc08f03614dc2101e4ac09756b0066a5a"
+interface_hash = "blake3-256:fcp.interface.v2:a52489d5e27b1f103b7f2dd7972fb3c1dd771a5cc7112b3588da057de9b1b781"
 
 [connector]
 id = "fcp.apple-notes"
@@ -43,9 +43,19 @@ idempotency = "strict"
 
 [provides.operations."apple_notes.health".input_schema]
 type = "object"
+properties = {}
 
 [provides.operations."apple_notes.health".output_schema]
 type = "object"
+
+[provides.operations."apple_notes.health".output_schema.properties.status]
+type = "string"
+
+[provides.operations."apple_notes.health".output_schema.properties.platform]
+type = "string"
+
+[provides.operations."apple_notes.health".output_schema.properties.manifest_hash]
+type = "string"
 
 [provides.operations."apple_notes.health".ai_hints]
 when_to_use = "Use this before Apple Notes operations on a new macOS host or when diagnosing a failed Notes automation request."
@@ -75,6 +85,18 @@ type = "object"
 
 [provides.operations."apple_notes.list_notes".output_schema.properties.notes]
 type = "array"
+
+[provides.operations."apple_notes.list_notes".output_schema.properties.notes.items]
+type = "object"
+
+[provides.operations."apple_notes.list_notes".output_schema.properties.notes.items.properties.id]
+type = "string"
+
+[provides.operations."apple_notes.list_notes".output_schema.properties.notes.items.properties.title]
+type = "string"
+
+[provides.operations."apple_notes.list_notes".output_schema.properties.notes.items.properties.folder]
+type = "string"
 
 [provides.operations."apple_notes.list_notes".ai_hints]
 when_to_use = "Use this when an agent needs a browseable inventory of Apple Notes before choosing a specific note to read."
@@ -106,6 +128,18 @@ type = "object"
 [provides.operations."apple_notes.search_notes".output_schema.properties.notes]
 type = "array"
 
+[provides.operations."apple_notes.search_notes".output_schema.properties.notes.items]
+type = "object"
+
+[provides.operations."apple_notes.search_notes".output_schema.properties.notes.items.properties.id]
+type = "string"
+
+[provides.operations."apple_notes.search_notes".output_schema.properties.notes.items.properties.title]
+type = "string"
+
+[provides.operations."apple_notes.search_notes".output_schema.properties.notes.items.properties.folder]
+type = "string"
+
 [provides.operations."apple_notes.search_notes".ai_hints]
 when_to_use = "Use this when the user gives a keyword, topic, or phrase and the agent needs candidate Apple Notes before reading one."
 common_mistakes = [
@@ -133,8 +167,17 @@ type = "string"
 [provides.operations."apple_notes.get_note".output_schema]
 type = "object"
 
-[provides.operations."apple_notes.get_note".output_schema.properties.note]
-type = "object"
+[provides.operations."apple_notes.get_note".output_schema.properties.id]
+type = "string"
+
+[provides.operations."apple_notes.get_note".output_schema.properties.title]
+type = "string"
+
+[provides.operations."apple_notes.get_note".output_schema.properties.folder]
+type = "string"
+
+[provides.operations."apple_notes.get_note".output_schema.properties.body]
+type = "string"
 
 [provides.operations."apple_notes.get_note".ai_hints]
 when_to_use = "Use this after list_notes or search_notes returns a note identifier and the agent needs the full note body."
@@ -169,8 +212,14 @@ type = "string"
 [provides.operations."apple_notes.create_note".output_schema]
 type = "object"
 
-[provides.operations."apple_notes.create_note".output_schema.properties.note]
-type = "object"
+[provides.operations."apple_notes.create_note".output_schema.properties.id]
+type = "string"
+
+[provides.operations."apple_notes.create_note".output_schema.properties.title]
+type = "string"
+
+[provides.operations."apple_notes.create_note".output_schema.properties.folder]
+type = "string"
 
 [provides.operations."apple_notes.create_note".ai_hints]
 when_to_use = "Use this when the user explicitly wants a new Apple Notes note created from agent-generated or user-provided content."

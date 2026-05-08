@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn api_error_5xx_retryable_via_fcp() {
+    fn api_error_5xx_retryable_via_fcp() -> Result<(), String> {
         let err = MattermostError::Api {
             status_code: 502,
             message: "bad gateway".into(),
@@ -254,12 +254,13 @@ mod tests {
         let fcp = err.to_fcp_error();
         match fcp {
             FcpError::External { retryable, .. } => assert!(retryable),
-            other => panic!("expected External, got {other:?}"),
+            other => return Err(format!("expected External, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
-    fn api_error_4xx_not_retryable_via_fcp() {
+    fn api_error_4xx_not_retryable_via_fcp() -> Result<(), String> {
         let err = MattermostError::Api {
             status_code: 400,
             message: "bad request".into(),
@@ -268,8 +269,9 @@ mod tests {
         let fcp = err.to_fcp_error();
         match fcp {
             FcpError::External { retryable, .. } => assert!(!retryable),
-            other => panic!("expected External, got {other:?}"),
+            other => return Err(format!("expected External, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
@@ -294,14 +296,15 @@ mod tests {
     }
 
     #[test]
-    fn rate_limited_maps_to_fcp_rate_limited() {
+    fn rate_limited_maps_to_fcp_rate_limited() -> Result<(), String> {
         let err = MattermostError::RateLimited {
             retry_after_ms: 3000,
         };
         match err.to_fcp_error() {
             FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 3000),
-            other => panic!("expected RateLimited, got {other:?}"),
+            other => return Err(format!("expected RateLimited, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
@@ -361,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn from_api_response_429() {
+    fn from_api_response_429() -> Result<(), String> {
         let err = MattermostError::from_api_response(
             429,
             r#"{"message":"Too many requests","retry_after_ms":3000}"#,
@@ -371,12 +374,13 @@ mod tests {
             MattermostError::RateLimited { retry_after_ms } => {
                 assert_eq!(retry_after_ms, 3000);
             }
-            other => panic!("expected RateLimited, got {other:?}"),
+            other => return Err(format!("expected RateLimited, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
-    fn from_api_response_500() {
+    fn from_api_response_500() -> Result<(), String> {
         let err = MattermostError::from_api_response(
             500,
             r#"{"message":"Internal server error"}"#,
@@ -391,8 +395,9 @@ mod tests {
                 assert_eq!(status_code, 500);
                 assert_eq!(request_id.as_deref(), Some("req_abc"));
             }
-            other => panic!("expected Api, got {other:?}"),
+            other => return Err(format!("expected Api, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]

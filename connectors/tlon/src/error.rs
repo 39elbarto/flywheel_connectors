@@ -178,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn rate_limited_maps_to_fcp_rate_limited() {
+    fn rate_limited_maps_to_fcp_rate_limited() -> Result<(), String> {
         let err = TlonError::RateLimited {
             retry_after_ms: 3_000,
         };
@@ -191,22 +191,24 @@ mod tests {
                 assert_eq!(retry_after_ms, 3_000);
                 assert!(violation.is_none());
             }
-            other => panic!("Expected RateLimited, got {other:?}"),
+            other => return Err(format!("Expected RateLimited, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
-    fn ship_not_found_maps_to_resource_not_found() {
+    fn ship_not_found_maps_to_resource_not_found() -> Result<(), String> {
         let err = TlonError::ShipNotFound("~zod".into());
         let fcp = err.to_fcp_error();
         match fcp {
             FcpError::ResourceNotFound { resource } => assert_eq!(resource, "~zod"),
-            other => panic!("Expected ResourceNotFound, got {other:?}"),
+            other => return Err(format!("Expected ResourceNotFound, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]
-    fn not_configured_maps_to_invalid_request() {
+    fn not_configured_maps_to_invalid_request() -> Result<(), String> {
         let err = TlonError::NotConfigured("missing ship url".into());
         let fcp = err.to_fcp_error();
         match fcp {
@@ -214,8 +216,9 @@ mod tests {
                 assert_eq!(code, 1001);
                 assert!(message.contains("missing ship url"));
             }
-            other => panic!("Expected InvalidRequest, got {other:?}"),
+            other => return Err(format!("Expected InvalidRequest, got {other:?}")),
         }
+        Ok(())
     }
 
     #[test]

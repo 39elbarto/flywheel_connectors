@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use reqwest::Url;
+
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
@@ -44,6 +46,9 @@ impl ZendeskConfig {
             .get("base_url")
             .and_then(|v| v.as_str())
             .map(String::from);
+        if let Some(ref url) = base_url {
+            reject_base_url_qfu(url)?;
+        }
 
         let auth = match (email, api_token, credential_id_raw) {
             (Some(e), Some(t), None) => ZendeskAuth::Token {
@@ -1149,6 +1154,38 @@ impl Default for ZendeskConnector {
     }
 }
 
+/// Reject base_url overrides with userinfo, query, or fragment. The
+/// ZendeskClient concatenates via format!("{}/tickets.json",
+/// self.base_url) and similar in every request method
+/// (client.rs:172/201/209/219/226/244). Without this check, a
+/// base_url like `https://acme.zendesk.com/api/v2?leak=x` would leak
+/// attacker-chosen query values on every request and put the endpoint
+/// path after the `?` boundary. Userinfo would bake into every
+/// request URL and silently override the HTTP Basic Auth header that
+/// the email+api_token auth mode sets. Matches the hygiene in
+/// airtable / asana / gmail / notion / hubspot / whatsapp / linear /
+/// clickup / monday / bitbucket / intercom / dropbox / mailchimp /
+/// algolia.
+fn reject_base_url_qfu(base_url: &str) -> FcpResult<()> {
+    let parsed = Url::parse(base_url).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("base_url could not be parsed: {error}"),
+    })?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
+    Ok(())
+}
+
 fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
     input
         .get(field)
@@ -2073,5 +2110,82 @@ mod tests {
         let result = connector.handle_health().await.unwrap();
         assert_eq!(result["metrics"]["requests_total"], 0);
         assert_eq!(result["metrics"]["requests_error"], 0);
+    }
+
+    #[test]
+    fn from_params_accepts_clean_base_url() {
+        let config = ZendeskConfig::from_params(&json!({
+            "subdomain": "acme",
+            "email": "ops@acme.com",
+            "api_token": "tok",
+            "base_url": "https://acme.zendesk.com/api/v2",
+        }))
+        .unwrap();
+        assert_eq!(
+            config.base_url.as_deref(),
+            Some("https://acme.zendesk.com/api/v2")
+        );
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_query_string() {
+        let result = ZendeskConfig::from_params(&json!({
+            "subdomain": "acme",
+            "email": "ops@acme.com",
+            "api_token": "tok",
+            "base_url": "https://acme.zendesk.com/api/v2?leak=x",
+        }));
+        match result {
+            Ok(_) => panic!("expected InvalidRequest for query-string base_url"),
+            Err(FcpError::InvalidRequest { message, .. }) => {
+                assert!(message.contains("query"), "got: {message}");
+            }
+            Err(other) => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_fragment() {
+        let result = ZendeskConfig::from_params(&json!({
+            "subdomain": "acme",
+            "email": "ops@acme.com",
+            "api_token": "tok",
+            "base_url": "https://acme.zendesk.com/api/v2#frag",
+        }));
+        assert!(matches!(
+            result.err(),
+            Some(FcpError::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_userinfo() {
+        let result = ZendeskConfig::from_params(&json!({
+            "subdomain": "acme",
+            "email": "ops@acme.com",
+            "api_token": "tok",
+            "base_url": "https://attacker:pw@acme.zendesk.com/api/v2",
+        }));
+        match result {
+            Ok(_) => panic!("expected InvalidRequest for userinfo base_url"),
+            Err(FcpError::InvalidRequest { message, .. }) => {
+                assert!(message.contains("userinfo"), "got: {message}");
+            }
+            Err(other) => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_unparseable() {
+        let result = ZendeskConfig::from_params(&json!({
+            "subdomain": "acme",
+            "email": "ops@acme.com",
+            "api_token": "tok",
+            "base_url": "not a url",
+        }));
+        assert!(matches!(
+            result.err(),
+            Some(FcpError::InvalidRequest { .. })
+        ));
     }
 }

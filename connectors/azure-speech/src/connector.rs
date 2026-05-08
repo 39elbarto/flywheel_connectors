@@ -24,6 +24,10 @@ const DOC_STT_REST_OVERVIEW: &str =
     "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/rest-speech-to-text";
 const DOC_STT_TRANSCRIBE: &str = "https://learn.microsoft.com/en-us/rest/api/speechtotext/transcriptions/transcribe?view=rest-speechtotext-2025-10-15";
 const DOC_STT_BATCH_SUBMIT: &str = "https://learn.microsoft.com/en-us/rest/api/speechtotext/transcriptions/submit?view=rest-speechtotext-2025-10-15";
+const DOC_TTS_REST_AUTH: &str = "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/rest-text-to-speech#authentication";
+const DOC_ENTRA_AUTH: &str = "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-configure-azure-ad-auth";
+const DOC_LLM_SPEECH_AUTH: &str =
+    "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/llm-speech";
 const DOC_TTS_TEXT_STREAMING: &str = "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-lower-speech-synthesis-latency#how-to-use-text-streaming";
 const DOC_STT_REALTIME: &str =
     "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-recognize-speech";
@@ -37,7 +41,7 @@ const OPERATION_ORDER: [&str; 6] = [
     "azure.speech.stt.batch.get",
     "azure.speech.stt.batch.files",
 ];
-const BOUNDARY: &str = "This connector exposes Azure Speech REST token exchange, regional voice discovery, REST text-to-speech synthesis, and Speech-to-text 2025-10-15 fast transcription plus batch submit/status/files surfaces. Realtime WebSocket streaming is blocked until Microsoft documents a direct STT/TTS wire protocol or FCP adopts an equivalent SDK-compatible framing; custom speech projects/models and Entra auth remain separate follow-up surfaces.";
+const BOUNDARY: &str = "This connector exposes Azure Speech REST token exchange, Microsoft Entra bearer-token handoff, regional voice discovery, REST text-to-speech synthesis, and Speech-to-text 2025-10-15 fast transcription plus batch submit/status/files surfaces. Realtime WebSocket streaming is blocked until Microsoft documents a direct STT/TTS wire protocol or FCP adopts an equivalent SDK-compatible framing; custom speech projects/models and connector-local IMDS/MSAL token acquisition remain separate follow-up surfaces.";
 const STREAMING_BLOCKER_REASON: &str = "Current Microsoft Learn documentation exposes TTS text streaming through Speech SDK TextStream on the WebSocket v2 endpoint, and realtime STT through Speech SDK SpeechRecognizer/AudioConfig push-stream APIs. It does not publish a direct WebSocket frame protocol for a standalone Rust connector, so this connector must not guess or reverse-engineer the live wire format.";
 const DEFAULT_REQUEST_TIMEOUT_MS: usize = 60_000;
 const DEFAULT_INLINE_AUDIO_MAX_BYTES: usize = 1_048_576;
@@ -99,7 +103,17 @@ const STT_CONTENT_TYPES: &[&str] = &[
 #[derive(Clone)]
 enum Auth {
     SubscriptionKey(HeaderValue),
-    CredentialId { _id: String },
+    EntraAccessToken {
+        authorization: HeaderValue,
+        resource_id_hash: Option<String>,
+        token_source: EntraTokenSource,
+        token_format: EntraTokenFormat,
+        expires_at: Option<Instant>,
+    },
+    CredentialId {
+        id: HeaderValue,
+        redacted_id: String,
+    },
 }
 
 impl std::fmt::Debug for Auth {
@@ -109,9 +123,24 @@ impl std::fmt::Debug for Auth {
                 .debug_tuple("SubscriptionKey")
                 .field(&"[REDACTED]")
                 .finish(),
-            Self::CredentialId { _id: id } => {
-                f.debug_struct("CredentialId").field("_id", id).finish()
-            }
+            Self::EntraAccessToken {
+                resource_id_hash,
+                token_source,
+                token_format,
+                expires_at,
+                ..
+            } => f
+                .debug_struct("EntraAccessToken")
+                .field("authorization", &"[REDACTED]")
+                .field("resource_id_hash", resource_id_hash)
+                .field("token_source", token_source)
+                .field("token_format", token_format)
+                .field("expires_at", &expires_at.map(|_| "[REDACTED_INSTANT]"))
+                .finish(),
+            Self::CredentialId { redacted_id, .. } => f
+                .debug_struct("CredentialId")
+                .field("id", redacted_id)
+                .finish(),
         }
     }
 }
@@ -120,6 +149,7 @@ impl Auth {
     const fn redacted_label(&self) -> &'static str {
         match self {
             Self::SubscriptionKey(_) => "subscription_key",
+            Self::EntraAccessToken { .. } => "entra_access_token",
             Self::CredentialId { .. } => "credential_id",
         }
     }
@@ -128,13 +158,202 @@ impl Auth {
         matches!(self, Self::CredentialId { .. })
     }
 
+    const fn direct_live_auth_supported(&self) -> bool {
+        !self.is_secretless()
+    }
+
+    fn resource_id_hash(&self) -> Option<&str> {
+        match self {
+            Self::EntraAccessToken {
+                resource_id_hash, ..
+            } => resource_id_hash.as_deref(),
+            Self::SubscriptionKey(_) | Self::CredentialId { .. } => None,
+        }
+    }
+
+    const fn token_source(&self) -> Option<&'static str> {
+        match self {
+            Self::EntraAccessToken { token_source, .. } => Some(token_source.as_str()),
+            Self::SubscriptionKey(_) | Self::CredentialId { .. } => None,
+        }
+    }
+
+    const fn token_format(&self) -> Option<&'static str> {
+        match self {
+            Self::EntraAccessToken { token_format, .. } => Some(token_format.as_str()),
+            Self::SubscriptionKey(_) | Self::CredentialId { .. } => None,
+        }
+    }
+
+    fn ensure_current(&self) -> FcpResult<()> {
+        if let Self::EntraAccessToken {
+            expires_at: Some(expires_at),
+            ..
+        } = self
+            && Instant::now() >= *expires_at
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Microsoft Entra access token is expired; refresh it through the host credential flow and reconfigure".into(),
+            });
+        }
+        Ok(())
+    }
+
     fn subscription_key(&self) -> FcpResult<&HeaderValue> {
         match self {
             Self::SubscriptionKey(value) => Ok(value),
+            Self::EntraAccessToken { .. } => Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "subscription-key token exchange is not available for Microsoft Entra access-token mode".into(),
+            }),
             Self::CredentialId { .. } => Err(FcpError::InvalidRequest {
                 code: 1003,
                 message: "credential_id mode requires host-side credential injection, which this connector slice does not implement".into(),
             }),
+        }
+    }
+
+    fn direct_header(&self) -> FcpResult<(HeaderName, HeaderValue)> {
+        self.ensure_current()?;
+        match self {
+            Self::SubscriptionKey(value) => Ok((
+                HeaderName::from_static("ocp-apim-subscription-key"),
+                value.clone(),
+            )),
+            Self::EntraAccessToken { authorization, .. } => {
+                Ok((AUTHORIZATION, authorization.clone()))
+            }
+            Self::CredentialId { id, .. } => {
+                Ok((HeaderName::from_static("x-fcp-credential-id"), id.clone()))
+            }
+        }
+    }
+
+    fn from_params(params: &Value) -> FcpResult<Self> {
+        let subscription_key = optional_config_string(params, "subscription_key")
+            .or_else(|| optional_config_string(params, "api_key"));
+        let credential_id = optional_config_string(params, "credential_id");
+        let entra_access_token = optional_config_string(params, "entra_access_token")
+            .or_else(|| optional_config_string(params, "aad_access_token"));
+        let configured_modes = [
+            subscription_key.is_some(),
+            credential_id.is_some(),
+            entra_access_token.is_some(),
+        ]
+        .into_iter()
+        .filter(|configured| *configured)
+        .count();
+        if configured_modes != 1 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Provide exactly one auth source: subscription_key/api_key, entra_access_token/aad_access_token, or credential_id".into(),
+            });
+        }
+        if let Some(key) = subscription_key {
+            return Ok(Self::SubscriptionKey(safe_header_value(
+                "subscription_key",
+                &key,
+            )?));
+        }
+        if let Some(id) = credential_id {
+            let header = safe_header_value("credential_id", &id)?;
+            return Ok(Self::CredentialId {
+                id: header,
+                redacted_id: redact_identifier(&id),
+            });
+        }
+        let access_token =
+            entra_access_token.expect("exactly one auth mode means token is present here");
+        let resource_id = optional_config_string(params, "entra_resource_id")
+            .or_else(|| optional_config_string(params, "azure_resource_id"));
+        let token_format = EntraTokenFormat::from_params(params, resource_id.is_some())?;
+        let token_source = EntraTokenSource::from_params(params)?;
+        let authorization_token = match token_format {
+            EntraTokenFormat::AadResourceToken => {
+                let resource_id = resource_id.as_deref().ok_or_else(|| {
+                    FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "entra_resource_id is required when entra_token_format is aad_resource_token".into(),
+                    }
+                })?;
+                validate_azure_resource_id(resource_id)?;
+                format!("aad#{resource_id}#{access_token}")
+            }
+            EntraTokenFormat::BearerToken => access_token,
+        };
+        Ok(Self::EntraAccessToken {
+            authorization: bearer_header(&authorization_token)?,
+            resource_id_hash: resource_id
+                .as_deref()
+                .map(validate_azure_resource_id)
+                .transpose()?
+                .map(|resource_id| sha256_hex(resource_id.as_bytes())),
+            token_source,
+            token_format,
+            expires_at: entra_token_expires_at(params)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntraTokenSource {
+    ExternalToken,
+    ManagedIdentity,
+}
+
+impl EntraTokenSource {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExternalToken => "external_token",
+            Self::ManagedIdentity => "managed_identity",
+        }
+    }
+
+    fn from_params(params: &Value) -> FcpResult<Self> {
+        match params
+            .get("entra_token_source")
+            .and_then(Value::as_str)
+            .unwrap_or("external_token")
+        {
+            "external_token" | "external" => Ok(Self::ExternalToken),
+            "managed_identity" | "managed-identity" => Ok(Self::ManagedIdentity),
+            other => Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "unsupported entra_token_source {other:?}; expected external_token or managed_identity"
+                ),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntraTokenFormat {
+    AadResourceToken,
+    BearerToken,
+}
+
+impl EntraTokenFormat {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::AadResourceToken => "aad_resource_token",
+            Self::BearerToken => "bearer_token",
+        }
+    }
+
+    fn from_params(params: &Value, has_resource_id: bool) -> FcpResult<Self> {
+        match params.get("entra_token_format").and_then(Value::as_str) {
+            Some("aad_resource_token" | "aad-resource-token" | "aad") => Ok(Self::AadResourceToken),
+            Some("bearer_token" | "bearer-token" | "bearer") => Ok(Self::BearerToken),
+            Some(other) => Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "unsupported entra_token_format {other:?}; expected aad_resource_token or bearer_token"
+                ),
+            }),
+            None if has_resource_id => Ok(Self::AadResourceToken),
+            None => Ok(Self::BearerToken),
         }
     }
 }
@@ -172,38 +391,7 @@ impl std::fmt::Debug for AzureSpeechConfig {
 
 impl AzureSpeechConfig {
     fn from_params(params: &Value) -> FcpResult<Self> {
-        let subscription_key = params
-            .get("subscription_key")
-            .or_else(|| params.get("api_key"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned);
-        let credential_id = params
-            .get("credential_id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned);
-        let auth = match (subscription_key, credential_id) {
-            (Some(key), None) => {
-                Auth::SubscriptionKey(safe_header_value("subscription_key", &key)?)
-            }
-            (None, Some(credential_id)) => Auth::CredentialId { _id: credential_id },
-            (Some(_), Some(_)) => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Provide exactly one of subscription_key/api_key or credential_id"
-                        .into(),
-                });
-            }
-            (None, None) => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing subscription_key/api_key or credential_id".into(),
-                });
-            }
-        };
+        let auth = Auth::from_params(params)?;
         let region = params
             .get("region")
             .and_then(Value::as_str)
@@ -447,15 +635,27 @@ impl AzureSpeechClient {
         Ok(header)
     }
 
+    async fn auth_header(
+        &self,
+        issue_token_for_subscription_key: bool,
+    ) -> FcpResult<(HeaderName, HeaderValue)> {
+        if issue_token_for_subscription_key && matches!(self.config.auth, Auth::SubscriptionKey(_))
+        {
+            Ok((AUTHORIZATION, self.bearer_token().await?))
+        } else {
+            self.config.auth.direct_header()
+        }
+    }
+
     async fn voices_list(&self) -> FcpResult<Value> {
-        let token = self.bearer_token().await?;
+        let (auth_name, auth_value) = self.auth_header(true).await?;
         let url = format!("{}/cognitiveservices/voices/list", self.config.tts_base_url);
         let response = self
             .send_with_retry(|| {
                 with_header(
                     self.http.get(&url).header(USER_AGENT, USER_AGENT_VALUE),
-                    AUTHORIZATION,
-                    &token,
+                    auth_name.clone(),
+                    &auth_value,
                 )
             })
             .await?;
@@ -474,7 +674,7 @@ impl AzureSpeechClient {
 
     async fn synthesize(&self, input: &Value) -> FcpResult<Value> {
         let request = TtsRequest::from_input(input, self.config.inline_audio_max_bytes)?;
-        let token = self.bearer_token().await?;
+        let (auth_name, auth_value) = self.auth_header(true).await?;
         let url = format!("{}/cognitiveservices/v1", self.config.tts_base_url);
         let response = self
             .send_with_retry(|| {
@@ -485,8 +685,8 @@ impl AzureSpeechClient {
                         .header("x-microsoft-outputformat", &request.output_format)
                         .header(USER_AGENT, USER_AGENT_VALUE)
                         .body(request.ssml.clone()),
-                    AUTHORIZATION,
-                    &token,
+                    auth_name.clone(),
+                    &auth_value,
                 )
             })
             .await?;
@@ -539,7 +739,7 @@ impl AzureSpeechClient {
 
     async fn transcribe_fast(&self, input: &Value) -> FcpResult<Value> {
         let request = SttRequest::from_input(input, self.config.stt_max_audio_bytes)?;
-        let key = self.config.auth.subscription_key()?;
+        let (auth_name, auth_value) = self.auth_header(false).await?;
         let definition =
             serde_json::to_string(&request.definition).map_err(|error| FcpError::Internal {
                 message: format!(
@@ -564,8 +764,8 @@ impl AzureSpeechClient {
                         .post(&url)
                         .header(USER_AGENT, USER_AGENT_VALUE)
                         .multipart(form),
-                    HeaderName::from_static("ocp-apim-subscription-key"),
-                    key,
+                    auth_name.clone(),
+                    &auth_value,
                 )
             })
             .await?;
@@ -579,7 +779,7 @@ impl AzureSpeechClient {
 
     async fn batch_submit(&self, input: &Value) -> FcpResult<Value> {
         let request = BatchSubmitRequest::from_input(input)?;
-        let key = self.config.auth.subscription_key()?;
+        let (auth_name, auth_value) = self.auth_header(false).await?;
         let url = format!(
             "{}/speechtotext/transcriptions:submit?api-version={STT_API_VERSION}",
             self.config.stt_base_url
@@ -591,8 +791,8 @@ impl AzureSpeechClient {
                         .post(&url)
                         .header(USER_AGENT, USER_AGENT_VALUE)
                         .json(&request.body),
-                    HeaderName::from_static("ocp-apim-subscription-key"),
-                    key,
+                    auth_name.clone(),
+                    &auth_value,
                 )
             })
             .await?;
@@ -620,15 +820,15 @@ impl AzureSpeechClient {
 
     async fn batch_get(&self, input: &Value) -> FcpResult<Value> {
         let url = BatchResourceRequest::from_input(input, &self.config.stt_base_url)?.status_url;
-        let key = self.config.auth.subscription_key()?;
+        let (auth_name, auth_value) = self.auth_header(false).await?;
         let response = self
             .send_with_retry(|| {
                 with_header(
                     self.http
                         .get(url.as_str())
                         .header(USER_AGENT, USER_AGENT_VALUE),
-                    HeaderName::from_static("ocp-apim-subscription-key"),
-                    key,
+                    auth_name.clone(),
+                    &auth_value,
                 )
             })
             .await?;
@@ -649,15 +849,15 @@ impl AzureSpeechClient {
     async fn batch_files(&self, input: &Value) -> FcpResult<Value> {
         let url =
             BatchResourceRequest::from_input(input, &self.config.stt_base_url)?.files_url(input)?;
-        let key = self.config.auth.subscription_key()?;
+        let (auth_name, auth_value) = self.auth_header(false).await?;
         let response = self
             .send_with_retry(|| {
                 with_header(
                     self.http
                         .get(url.as_str())
                         .header(USER_AGENT, USER_AGENT_VALUE),
-                    HeaderName::from_static("ocp-apim-subscription-key"),
-                    key,
+                    auth_name.clone(),
+                    &auth_value,
                 )
             })
             .await?;
@@ -937,6 +1137,9 @@ impl AzureSpeechConnector {
             "connector_id": CONNECTOR_ID,
             "configured": true,
             "auth_mode": config.auth.redacted_label(),
+            "auth_token_source": config.auth.token_source(),
+            "auth_token_format": config.auth.token_format(),
+            "entra_resource_id_hash": config.auth.resource_id_hash(),
             "region": config.region,
             "cloud": format!("{:?}", config.cloud).to_ascii_lowercase(),
             "host_allow": config.host_allowlist(),
@@ -963,12 +1166,12 @@ impl AzureSpeechConnector {
     }
 
     pub async fn handle_health(&self) -> FcpResult<Value> {
-        let live_requests_supported = self
+        let direct_live_auth_supported = self
             .config
             .as_ref()
-            .is_some_and(|config| !config.auth.is_secretless());
+            .is_some_and(|config| config.auth.direct_live_auth_supported());
         Ok(json!({
-            "status": if self.config.is_some() && self.handshaken && live_requests_supported {
+            "status": if self.config.is_some() && self.handshaken && direct_live_auth_supported {
                 "healthy"
             } else if self.config.is_some() {
                 "degraded"
@@ -977,7 +1180,8 @@ impl AzureSpeechConnector {
             },
             "configured": self.config.is_some(),
             "handshaken": self.handshaken,
-            "live_requests_supported": live_requests_supported,
+            "live_requests_supported": self.config.is_some(),
+            "direct_live_auth_supported": direct_live_auth_supported,
             "requests": self.request_count.load(Ordering::Relaxed),
             "errors": self.error_count.load(Ordering::Relaxed),
             "host_allow": self.config.as_ref().map(AzureSpeechConfig::host_allowlist),
@@ -985,15 +1189,15 @@ impl AzureSpeechConnector {
     }
 
     pub async fn handle_doctor(&self) -> FcpResult<Value> {
-        let live_requests_supported = self
+        let direct_live_auth_supported = self
             .config
             .as_ref()
-            .is_some_and(|config| !config.auth.is_secretless());
+            .is_some_and(|config| config.auth.direct_live_auth_supported());
         Ok(json!({
             "status": if self.config.is_some()
                 && self.client.is_some()
                 && self.handshaken
-                && live_requests_supported
+                && direct_live_auth_supported
             {
                 "healthy"
             } else if self.config.is_some() && self.client.is_some() {
@@ -1006,12 +1210,12 @@ impl AzureSpeechConnector {
                 { "name": "client_initialized", "passed": self.client.is_some(), "critical": true },
                 {
                     "name": "credential_injection",
-                    "passed": live_requests_supported,
+                    "passed": direct_live_auth_supported,
                     "critical": false,
-                    "message": if live_requests_supported {
+                    "message": if direct_live_auth_supported {
                         Value::Null
                     } else {
-                        json!("credential_id mode requires host-side credential injection, which this connector slice does not implement.")
+                        json!("credential_id mode requires host-side credential injection before live Microsoft endpoints can authenticate.")
                     }
                 },
                 { "name": "handshake", "passed": self.handshaken, "critical": false },
@@ -1039,9 +1243,13 @@ impl AzureSpeechConnector {
                 "message": "Azure Speech is not configured."
             }));
         };
-        match client.bearer_token().await {
+        match client.auth_header(true).await {
             Ok(_) => Ok(json!({
                 "status": "ok",
+                "auth_mode": client.config.auth.redacted_label(),
+                "auth_token_source": client.config.auth.token_source(),
+                "auth_token_format": client.config.auth.token_format(),
+                "entra_resource_id_hash": client.config.auth.resource_id_hash(),
                 "surface_boundary": BOUNDARY,
             })),
             Err(error) => Ok(json!({
@@ -1065,6 +1273,9 @@ impl AzureSpeechConnector {
                 "stt_rest_overview": DOC_STT_REST_OVERVIEW,
                 "stt_fast_2025_10_15": DOC_STT_TRANSCRIBE,
                 "stt_batch_submit_2025_10_15": DOC_STT_BATCH_SUBMIT,
+                "tts_rest_auth": DOC_TTS_REST_AUTH,
+                "entra_auth": DOC_ENTRA_AUTH,
+                "llm_speech_keyless_auth": DOC_LLM_SPEECH_AUTH,
                 "tts_text_streaming_sdk": DOC_TTS_TEXT_STREAMING,
                 "stt_realtime_sdk": DOC_STT_REALTIME,
                 "sdk_connection_reuse": DOC_SDK_CONNECTIONS
@@ -1077,16 +1288,6 @@ impl AzureSpeechConnector {
         let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
             message: "Azure Speech client not initialized".into(),
         })?;
-        if self
-            .config
-            .as_ref()
-            .is_some_and(|config| config.auth.is_secretless())
-        {
-            return Err(FcpError::InvalidRequest {
-                code: 1003,
-                message: "credential_id mode requires host-side credential injection, which this connector slice does not implement".into(),
-            });
-        }
         let operation = params
             .get("operation_id")
             .or_else(|| params.get("operation"))
@@ -1128,9 +1329,9 @@ impl AzureSpeechConnector {
                 .as_ref()
                 .is_some_and(|config| config.auth.is_secretless());
         Ok(json!({
-            "allowed": supported && !blocked_by_secretless_auth,
+            "allowed": supported,
             "reason": if blocked_by_secretless_auth {
-                "credential_id mode requires host-side credential injection, which this connector slice does not implement."
+                "Supported through host-side credential injection; direct live Microsoft endpoints require the host to materialize credentials."
             } else if supported {
                 "Supported operation."
             } else {
@@ -1244,12 +1445,6 @@ fn deferred_operations_info() -> Vec<Value> {
             "summary": "Azure Speech custom speech project, dataset, model training, and endpoint lifecycle",
             "outcome": "deferred_to_custom_speech_slice",
             "rationale": "The direct REST coverage here includes fast transcription and batch job submit/status/files. Custom speech project/model training and deployment endpoints are a separate lifecycle surface with different data retention and review requirements."
-        }),
-        json!({
-            "id": "azure.speech.entra.managed_identity",
-            "summary": "Microsoft Entra and managed identity authentication",
-            "outcome": "deferred_to_auth_slice",
-            "rationale": "This core REST slice supports subscription-key token exchange and host credential references only."
         }),
     ]
 }
@@ -1801,6 +1996,15 @@ fn required_string<'a>(input: &'a Value, field: &str) -> FcpResult<&'a str> {
         })
 }
 
+fn optional_config_string(input: &Value, field: &str) -> Option<String> {
+    input
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn bounded_usize(
     value: Option<&Value>,
     label: &str,
@@ -1837,6 +2041,17 @@ fn request_timeout_ms(params: &Value) -> FcpResult<u64> {
         300_000,
     )?;
     Ok(u64::try_from(value).expect("bounded request timeout fits in u64"))
+}
+
+fn entra_token_expires_at(params: &Value) -> FcpResult<Option<Instant>> {
+    let Some(value) = params.get("entra_token_expires_in_seconds") else {
+        return Ok(None);
+    };
+    let seconds = value.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "entra_token_expires_in_seconds must be an integer".into(),
+    })?;
+    Ok(Some(Instant::now() + Duration::from_secs(seconds)))
 }
 
 fn normalize_base_url<F>(
@@ -1929,6 +2144,45 @@ fn safe_header_value(label: &str, value: &str) -> FcpResult<HeaderValue> {
         code: 1003,
         message: format!("{label} cannot be represented as a safe HTTP header: {error}"),
     })
+}
+
+fn validate_azure_resource_id(resource_id: &str) -> FcpResult<&str> {
+    let normalized = resource_id.trim();
+    if normalized != resource_id || normalized.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "entra_resource_id must be a non-empty trimmed Azure resource ID".into(),
+        });
+    }
+    if resource_id.contains('\r') || resource_id.contains('\n') {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "entra_resource_id must not contain control newlines".into(),
+        });
+    }
+    let lower = resource_id.to_ascii_lowercase();
+    if !lower.starts_with("/subscriptions/")
+        || !lower.contains("/resourcegroups/")
+        || !lower.contains("/providers/microsoft.cognitiveservices/accounts/")
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message:
+                "entra_resource_id must identify a Microsoft.CognitiveServices account resource"
+                    .into(),
+        });
+    }
+    Ok(resource_id)
+}
+
+fn redact_identifier(value: &str) -> String {
+    let mut chars = value.chars();
+    let prefix: String = chars.by_ref().take(8).collect();
+    if chars.next().is_some() {
+        format!("{prefix}...")
+    } else {
+        "[REDACTED]".into()
+    }
 }
 
 fn bearer_header(token: &str) -> FcpResult<HeaderValue> {
@@ -2026,6 +2280,8 @@ fn xml_escape(value: &str) -> String {
 mod tests {
     use super::*;
 
+    const TEST_RESOURCE_ID: &str = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg/providers/Microsoft.CognitiveServices/accounts/speech";
+
     #[test]
     fn region_validation_rejects_url_like_values() {
         assert!(validate_region("eastus").is_ok());
@@ -2053,6 +2309,51 @@ mod tests {
     }
 
     #[test]
+    fn config_builds_entra_aad_auth_without_secret_leakage() {
+        let config = AzureSpeechConfig::from_params(&json!({
+            "entra_access_token": "secret-aad-token",
+            "entra_resource_id": TEST_RESOURCE_ID,
+            "entra_token_source": "managed_identity",
+            "region": "eastus",
+        }))
+        .expect("config should parse");
+        assert_eq!(config.auth.redacted_label(), "entra_access_token");
+        assert_eq!(config.auth.token_source(), Some("managed_identity"));
+        assert_eq!(config.auth.token_format(), Some("aad_resource_token"));
+        assert_eq!(
+            config.auth.resource_id_hash(),
+            Some(sha256_hex(TEST_RESOURCE_ID.as_bytes()).as_str())
+        );
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("secret-aad-token"));
+        assert!(!debug.contains(TEST_RESOURCE_ID));
+    }
+
+    #[test]
+    fn config_rejects_ambiguous_or_invalid_enterprise_auth() {
+        let both = AzureSpeechConfig::from_params(&json!({
+            "subscription_key": "secret-key",
+            "entra_access_token": "secret-aad-token",
+            "region": "eastus",
+        }));
+        assert!(both.is_err());
+
+        let missing_resource = AzureSpeechConfig::from_params(&json!({
+            "entra_access_token": "secret-aad-token",
+            "entra_token_format": "aad_resource_token",
+            "region": "eastus",
+        }));
+        assert!(missing_resource.is_err());
+
+        let invalid_resource = AzureSpeechConfig::from_params(&json!({
+            "entra_access_token": "secret-aad-token",
+            "entra_resource_id": "/subscriptions/not-a-speech-resource",
+            "region": "eastus",
+        }));
+        assert!(invalid_resource.is_err());
+    }
+
+    #[test]
     fn token_cache_refreshes_after_nine_minutes() {
         let cache = TokenCache::default();
         let issued_at = Instant::now();
@@ -2067,6 +2368,22 @@ mod tests {
                 .get_fresh_at(issued_at + Duration::from_secs(9 * 60 + 1))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn expired_entra_token_requires_host_refresh() {
+        let config = AzureSpeechConfig::from_params(&json!({
+            "entra_access_token": "expired-token",
+            "entra_token_format": "bearer_token",
+            "entra_token_expires_in_seconds": 0,
+            "region": "eastus",
+        }))
+        .expect("expired token config should parse so invoke can report refresh guidance");
+        let error = config
+            .auth
+            .direct_header()
+            .expect_err("expired token should not produce an auth header");
+        assert!(error.to_string().contains("expired"));
     }
 
     #[test]

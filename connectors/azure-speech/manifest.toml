@@ -11,7 +11,7 @@ interface_hash = "blake3-256:fcp.interface.v2:ffd32fa3b46916b215ccd5751eab6fc0b8
 id = "fcp.azure-speech"
 name = "Azure Speech"
 version = "0.1.0"
-description = "Azure Speech REST connector for regional voice discovery, text-to-speech synthesis, and 2025-10-15 fast plus batch transcription"
+description = "Azure Speech REST connector for regional voice discovery, text-to-speech synthesis, Microsoft Entra handoff, and 2025-10-15 fast plus batch transcription"
 archetypes = [
     "operational",
     "streaming",
@@ -21,7 +21,7 @@ format = "native"
 [connector.state]
 model = "stateless"
 state_schema_version = "1"
-migration_hint = "This slice supports REST token exchange, voices.list, REST TTS synthesis, fast STT transcription, and 2025-10-15 batch STT submit/status/files. Realtime WebSocket, custom speech project/model lifecycle, and Entra/managed identity authentication remain explicit follow-up surfaces."
+migration_hint = "This slice supports REST token exchange, Microsoft Entra external-token handoff, host credential references, voices.list, REST TTS synthesis, fast STT transcription, and 2025-10-15 batch STT submit/status/files. Realtime WebSocket, custom speech project/model lifecycle, and connector-local IMDS/MSAL token acquisition remain explicit follow-up surfaces."
 
 [zones]
 home = "z:work"
@@ -118,6 +118,7 @@ when_to_use = "Use after batch.get reports completion to list transcription/resu
 common_mistakes = [
     "Do not log contentUrl values returned by Azure; runtime output replaces them with URL descriptors.",
     "Use sas_validity_seconds only when a short-lived provider file URL is actually needed.",
+    "For Entra mode, pass either an aad_resource_token with an Azure Cognitive Services resource ID or a documented raw bearer token path.",
 ]
 examples = ['{"transcription_id":"ba7ea6f5-3065-40b7-b49a-a90f48584683","sas_validity_seconds":300}']
 related = [
@@ -179,6 +180,7 @@ when_to_use = "Use to poll a submitted Azure Speech batch transcription job with
 common_mistakes = [
     "Do not pass retired v3.x transcription URLs.",
     "Prefer transcription_id when available; transcription_url must use the configured STT host and api-version 2025-10-15.",
+    "Do not log Entra bearer tokens, resource IDs, or SAS-bearing provider links.",
 ]
 examples = ['{"transcription_id":"ba7ea6f5-3065-40b7-b49a-a90f48584683"}']
 related = [
@@ -294,6 +296,7 @@ when_to_use = "Use for storage-backed Azure Speech batch transcription jobs with
 common_mistakes = [
     "Do not pass raw audio bytes; batch transcription reads storage URLs.",
     "Do not log SAS URLs. Runtime output returns URL hashes/descriptors instead of raw provider URLs.",
+    "Do not mix subscription_key and entra_access_token auth modes in one connector configuration.",
     "Use batch.get and batch.files to poll status and retrieve redacted result-file metadata.",
 ]
 examples = ['{"display_name":"nightly-support-calls","locale":"en-US","content_urls":["https://storage.example/audio.wav?sig=<redacted>"],"time_to_live_hours":48}']
@@ -376,6 +379,7 @@ when_to_use = "Use for a bounded one-file Azure Speech fast transcription reques
 common_mistakes = [
     "Do not use this for realtime streaming or batch storage-backed jobs.",
     "Do not send audio above the configured max_audio_bytes cap.",
+    "Use bearer_token Entra format only for endpoints whose current docs explicitly support keyless bearer auth.",
     "The operation preserves provider phrase/channel/word confidence details in provider_result.",
 ]
 examples = ['{"audio_base64":"<base64 wav>","content_type":"audio/wav","locale":"en-US"}']
@@ -457,6 +461,7 @@ when_to_use = "Use when the caller needs bounded Azure Speech audio synthesis fr
 common_mistakes = [
     "Do not inline large audio blindly; results above inline_audio_max_bytes are returned as host artifact metadata only.",
     "Validate SSML before invoking.",
+    "For Entra auth against legacy TTS REST paths, use the documented aad#resource#token bearer payload.",
     "Use voices.list to pick a valid Azure voice name for the configured region.",
 ]
 examples = ['{"text":"Hello","voice":"en-US-ChristopherNeural","locale":"en-US","output_format":"riff-24khz-16bit-mono-pcm"}']
@@ -505,7 +510,7 @@ max_response_bytes = 2097152
 when_to_use = "Use to discover Azure Speech voice names and locales before synthesizing speech in the configured region."
 common_mistakes = [
     "Do not use a Speech key from a different region.",
-    "Do not log subscription keys, issued bearer tokens, or full provider error bodies that might echo credentials.",
+    "Do not log subscription keys, issued bearer tokens, Entra access tokens, resource IDs, or full provider error bodies that might echo credentials.",
 ]
 examples = ["{}"]
 related = ["azure.speech.tts.synthesize"]

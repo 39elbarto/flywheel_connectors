@@ -146,6 +146,25 @@ async fn azure_speech_manifest_operations_match_runtime_introspection() {
                 .as_str()
                 .is_some_and(|doc| doc.contains("text-streaming")))
     );
+    assert_eq!(
+        introspection["provider_docs_rechecked"]["entra_auth"],
+        "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-configure-azure-ad-auth"
+    );
+    assert!(
+        introspection["provider_docs_rechecked"]["llm_speech_keyless_auth"]
+            .as_str()
+            .expect("LLM speech auth doc should be present")
+            .contains("llm-speech")
+    );
+    assert!(
+        !introspection
+            .get("deferred_operations")
+            .and_then(Value::as_array)
+            .expect("deferred operations should be an array")
+            .iter()
+            .any(|operation| operation.get("id").and_then(Value::as_str)
+                == Some("azure.speech.entra.managed_identity"))
+    );
 }
 
 #[test]

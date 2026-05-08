@@ -428,6 +428,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["to", "text"],
+                "additionalProperties": false,
                 "properties": {
                     "to": { "type": "string", "description": "Recipient phone number (E.164 format)" },
                     "text": { "type": "string", "description": "Message text (max 4096 chars)" },
@@ -436,6 +437,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["message_id", "wa_id"],
+                "additionalProperties": false,
                 "properties": {
                     "message_id": { "type": "string" },
                     "wa_id": { "type": "string" }
@@ -465,6 +468,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["to", "template_name"],
+                "additionalProperties": false,
                 "properties": {
                     "to": { "type": "string", "description": "Recipient phone number (E.164)" },
                     "template_name": { "type": "string", "description": "Approved template name" },
@@ -474,6 +478,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["message_id", "wa_id"],
+                "additionalProperties": false,
                 "properties": {
                     "message_id": { "type": "string" },
                     "wa_id": { "type": "string" }
@@ -499,9 +505,10 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_GET_PROFILE),
             summary: "Get WhatsApp Business profile".into(),
             description: Some("Retrieves the business profile for the configured phone number".into()),
-            input_schema: json!({ "type": "object" }),
+            input_schema: json!({ "type": "object", "additionalProperties": false }),
             output_schema: json!({
                 "type": "object",
+                "additionalProperties": false,
                 "properties": {
                     "about": { "type": "string" },
                     "description": { "type": "string" },
@@ -529,6 +536,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["hub_mode", "hub_verify_token", "hub_challenge"],
+                "additionalProperties": false,
                 "properties": {
                     "hub_mode": { "type": "string", "description": "Must be 'subscribe'" },
                     "hub_verify_token": { "type": "string", "description": "Token to verify" },
@@ -537,6 +545,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["challenge"],
+                "additionalProperties": false,
                 "properties": {
                     "challenge": { "type": "string", "description": "Echoed challenge for Meta" }
                 }
@@ -564,6 +574,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["headers", "body"],
+                "additionalProperties": false,
                 "properties": {
                     "headers": {
                         "type": "object",
@@ -575,6 +586,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             }),
             output_schema: json!({
                 "type": "object",
+                "additionalProperties": false,
                 "properties": {
                     "events": {
                         "type": "array",

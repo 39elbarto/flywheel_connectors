@@ -39,4 +39,6 @@ chrono.workspace = true
 fcp-e2e = { path = "../../crates/fcp-e2e" }
 fcp-crypto.workspace = true
 fcp-testkit.workspace = true
+jsonschema.workspace = true
+toml.workspace = true
 wiremock.workspace = true

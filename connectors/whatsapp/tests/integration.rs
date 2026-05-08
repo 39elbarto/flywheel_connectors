@@ -25,7 +25,7 @@ use wiremock::{
     matchers::{body_json, header, method, path, query_param},
 };
 
-use fcp_whatsapp::connector::WhatsAppConnector;
+use fcp_whatsapp::connector::{WhatsAppConnector, operations_info};
 
 const PHONE_NUMBER_ID: &str = "123456789";
 const ACCESS_TOKEN: &str = "test_access_token_xyz";
@@ -41,8 +41,241 @@ const OP_WEBHOOK_RECEIVE: &str = "whatsapp.webhook_receive";
 const CAP_SEND: &str = "whatsapp.send";
 const CAP_READ: &str = "whatsapp.read";
 const CAP_WEBHOOK: &str = "whatsapp.webhook";
+const EXPECTED_MANIFEST_SCHEMA_OPS: [(&str, &str); 5] = [
+    ("send_text", OP_SEND_TEXT),
+    ("send_template", OP_SEND_TEMPLATE),
+    ("get_profile", OP_GET_PROFILE),
+    ("webhook_verify", OP_WEBHOOK_VERIFY),
+    ("webhook_receive", OP_WEBHOOK_RECEIVE),
+];
 
 type HmacSha256 = Hmac<Sha256>;
+
+fn whatsapp_manifest() -> toml::Value {
+    toml::from_str(include_str!("../manifest.toml")).expect("WhatsApp manifest TOML should parse")
+}
+
+fn manifest_operations(manifest: &toml::Value) -> &toml::Table {
+    manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("manifest should contain provides.operations")
+}
+
+fn operation_schema(manifest: &toml::Value, operation_key: &str, schema_key: &str) -> Value {
+    let schema = manifest_operations(manifest)
+        .get(operation_key)
+        .and_then(|operation| operation.get(schema_key))
+        .expect("operation should define requested schema");
+
+    serde_json::to_value(schema).expect("manifest schema should convert to JSON")
+}
+
+fn assert_schema_accepts(schema: &Value, payload: &Value) {
+    let validator = jsonschema::validator_for(schema).expect("schema should compile");
+    let errors = validator
+        .iter_errors(payload)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        errors.is_empty(),
+        "schema should accept payload {payload:#}: {errors:#?}"
+    );
+}
+
+fn assert_schema_rejects(schema: &Value, payload: &Value) {
+    let validator = jsonschema::validator_for(schema).expect("schema should compile");
+    let errors = validator
+        .iter_errors(payload)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        !errors.is_empty(),
+        "schema should reject payload {payload:#}"
+    );
+}
+
+fn assert_manifest_schema_catalog_matches_runtime(manifest: &toml::Value) {
+    let operations = operations_info();
+    assert_eq!(
+        operations.len(),
+        EXPECTED_MANIFEST_SCHEMA_OPS.len(),
+        "runtime operation catalog should stay aligned with manifest schema coverage"
+    );
+
+    for (manifest_key, operation_id) in EXPECTED_MANIFEST_SCHEMA_OPS {
+        let operation = operations
+            .iter()
+            .find(|entry| entry.id.as_str() == operation_id)
+            .expect("runtime catalog should include manifest operation");
+        let input_schema = operation_schema(manifest, manifest_key, "input_schema");
+        let output_schema = operation_schema(manifest, manifest_key, "output_schema");
+
+        assert_eq!(
+            input_schema, operation.input_schema,
+            "{operation_id} manifest input_schema should match runtime OperationInfo"
+        );
+        assert_eq!(
+            output_schema, operation.output_schema,
+            "{operation_id} manifest output_schema should match runtime OperationInfo"
+        );
+        assert!(
+            jsonschema::validator_for(&input_schema).is_ok(),
+            "{operation_id} manifest input_schema should compile"
+        );
+        assert!(
+            jsonschema::validator_for(&output_schema).is_ok(),
+            "{operation_id} manifest output_schema should compile"
+        );
+    }
+}
+
+fn assert_input_schema_examples(manifest: &toml::Value) {
+    let send_text = operation_schema(manifest, "send_text", "input_schema");
+    assert_schema_accepts(
+        &send_text,
+        &json!({ "to": "15559876543", "text": "hello", "preview_url": false }),
+    );
+    assert_schema_rejects(&send_text, &json!({ "to": "15559876543" }));
+    assert_schema_rejects(
+        &send_text,
+        &json!({ "to": "15559876543", "text": "hello", "unexpected": true }),
+    );
+
+    let send_template = operation_schema(manifest, "send_template", "input_schema");
+    assert_schema_accepts(
+        &send_template,
+        &json!({
+            "to": "15559876543",
+            "template_name": "shipping_update",
+            "language_code": "en_US",
+            "components": [{ "type": "body", "parameters": [] }]
+        }),
+    );
+    assert_schema_rejects(
+        &send_template,
+        &json!({ "template_name": "shipping_update" }),
+    );
+    assert_schema_rejects(
+        &send_template,
+        &json!({ "to": "15559876543", "template_name": "shipping_update", "extra": "blocked" }),
+    );
+
+    let get_profile = operation_schema(manifest, "get_profile", "input_schema");
+    assert_schema_accepts(&get_profile, &json!({}));
+    assert_schema_rejects(&get_profile, &json!({ "phone_number_id": PHONE_NUMBER_ID }));
+
+    let webhook_verify = operation_schema(manifest, "webhook_verify", "input_schema");
+    assert_schema_accepts(
+        &webhook_verify,
+        &json!({
+            "hub_mode": "subscribe",
+            "hub_verify_token": VERIFY_TOKEN,
+            "hub_challenge": "challenge-1"
+        }),
+    );
+    assert_schema_rejects(
+        &webhook_verify,
+        &json!({ "hub_mode": "subscribe", "hub_verify_token": VERIFY_TOKEN }),
+    );
+
+    let webhook_receive = operation_schema(manifest, "webhook_receive", "input_schema");
+    assert_schema_accepts(
+        &webhook_receive,
+        &json!({
+            "headers": { "X-Hub-Signature-256": "sha256=abc" },
+            "body": sample_text_notification().to_string()
+        }),
+    );
+    assert_schema_rejects(
+        &webhook_receive,
+        &json!({
+            "headers": { "X-Hub-Signature-256": ["sha256=abc"] },
+            "body": sample_text_notification().to_string()
+        }),
+    );
+    assert_schema_rejects(
+        &webhook_receive,
+        &json!({
+            "headers": { "X-Hub-Signature-256": "sha256=abc" },
+            "body": sample_text_notification()
+        }),
+    );
+}
+
+fn assert_output_schema_examples(manifest: &toml::Value) {
+    let send_output = json!({ "message_id": "wamid.1", "wa_id": "15559876543" });
+
+    let send_text = operation_schema(manifest, "send_text", "output_schema");
+    assert_schema_accepts(&send_text, &send_output);
+    assert_schema_rejects(&send_text, &json!({ "message_id": "wamid.1" }));
+
+    let send_template = operation_schema(manifest, "send_template", "output_schema");
+    assert_schema_accepts(&send_template, &send_output);
+    assert_schema_rejects(
+        &send_template,
+        &json!({ "message_id": "wamid.1", "wa_id": 42 }),
+    );
+
+    let get_profile = operation_schema(manifest, "get_profile", "output_schema");
+    assert_schema_accepts(
+        &get_profile,
+        &json!({
+            "about": "Business updates",
+            "description": "Customer care",
+            "address": "1 Market St",
+            "vertical": "PROF_SERVICES"
+        }),
+    );
+    assert_schema_accepts(&get_profile, &json!({}));
+    assert_schema_rejects(&get_profile, &json!({ "about": "Business", "extra": true }));
+
+    let webhook_verify = operation_schema(manifest, "webhook_verify", "output_schema");
+    assert_schema_accepts(&webhook_verify, &json!({ "challenge": "challenge-1" }));
+    assert_schema_rejects(&webhook_verify, &json!({ "challenge": 1 }));
+
+    let webhook_receive = operation_schema(manifest, "webhook_receive", "output_schema");
+    assert_schema_accepts(
+        &webhook_receive,
+        &json!({
+            "events": [{
+                "id": "wamid.1",
+                "event_type": "message",
+                "event_kind": "message",
+                "agent_turn_eligible": true,
+                "payload": {},
+                "policy": {}
+            }],
+            "event_count": 1,
+            "dropped_event_count": 0,
+            "replay_dropped_count": 0,
+            "policy_decisions": [],
+            "connector_scope": "whatsapp_business_cloud_api",
+            "personal_bridge_supported": false
+        }),
+    );
+    assert_schema_rejects(
+        &webhook_receive,
+        &json!({
+            "events": [],
+            "event_count": 0,
+            "dropped_event_count": 0,
+            "replay_dropped_count": 0,
+            "policy_decisions": [],
+            "connector_scope": "personal_bridge",
+            "personal_bridge_supported": false
+        }),
+    );
+}
+
+#[test]
+fn manifest_operation_schemas_compile_and_validate_core_payloads() {
+    let manifest = whatsapp_manifest();
+    assert_manifest_schema_catalog_matches_runtime(&manifest);
+    assert_input_schema_examples(&manifest);
+    assert_output_schema_examples(&manifest);
+}
 
 fn generate_valid_token(
     signing_key: &Ed25519SigningKey,

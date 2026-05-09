@@ -1268,7 +1268,7 @@ impl SlackConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let channel = require_str(&input, "channel")?;
         let text = require_str(&input, "text")?;
-        let thread_ts = input.get("thread_ts").and_then(|v| v.as_str());
+        let thread_ts = optional_slack_thread_ts(&input, "thread_ts")?;
         let coordination = self
             .claim_before_slack_send(zone_id, channel, thread_ts, claimant_agent_id.clone())
             .await;
@@ -1312,7 +1312,7 @@ impl SlackConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let channel = require_str(&input, "channel")?;
         let text = require_str(&input, "text")?;
-        let thread_ts = require_str(&input, "thread_ts")?;
+        let thread_ts = require_slack_thread_ts(&input, "thread_ts")?;
         let coordination = self
             .claim_before_slack_send(zone_id, channel, Some(thread_ts), claimant_agent_id.clone())
             .await;
@@ -1385,13 +1385,13 @@ impl SlackConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let draft_id = require_progress_draft_id(&input)?;
         let channel = require_str(&input, "channel")?;
+        let thread_ts = optional_slack_thread_ts(&input, "thread_ts")?;
         let action = SlackProgressDraftAction::parse(
             input
                 .get("action")
                 .and_then(Value::as_str)
                 .unwrap_or("update"),
         )?;
-        let thread_ts = input.get("thread_ts").and_then(Value::as_str);
 
         match action {
             SlackProgressDraftAction::Clear => {
@@ -1657,7 +1657,7 @@ impl SlackConnector {
         let source_object_id = require_object_id_str(&input, "content_object_id")?;
         let content = require_str(&input, "resolved_content")?;
         let filename = input.get("filename").and_then(|v| v.as_str());
-        let thread_ts = input.get("thread_ts").and_then(|v| v.as_str());
+        let thread_ts = optional_slack_thread_ts(&input, "thread_ts")?;
         let coordination = if let Some(thread_ts) = thread_ts {
             let channel = require_single_threaded_upload_channel(channels)?;
             let coordination = self
@@ -3023,6 +3023,7 @@ fn socket_payload_thread_info(payload: &Value) -> Option<ThreadInfo> {
                 .and_then(Value::as_str)
         })?;
 
+    let thread_ts = normalize_slack_thread_ts(thread_ts, "thread_ts").ok()?;
     Some(ThreadInfo::from_slack_thread(thread_ts, None))
 }
 
@@ -3104,15 +3105,17 @@ fn validate_simulate_input(operation: &str, input: &serde_json::Value) -> FcpRes
         "slack.post_message" => {
             require_str(input, "channel")?;
             require_str(input, "text")?;
+            optional_slack_thread_ts(input, "thread_ts")?;
         }
         "slack.reply_thread" => {
             require_str(input, "channel")?;
             require_str(input, "text")?;
-            require_str(input, "thread_ts")?;
+            require_slack_thread_ts(input, "thread_ts")?;
         }
         "slack.update_progress_draft" => {
             require_progress_draft_id(input)?;
             require_str(input, "channel")?;
+            optional_slack_thread_ts(input, "thread_ts")?;
             let action = input
                 .get("action")
                 .and_then(Value::as_str)
@@ -3147,7 +3150,7 @@ fn validate_simulate_input(operation: &str, input: &serde_json::Value) -> FcpRes
             require_str(input, "channels")?;
             require_object_id_str(input, "content_object_id")?;
             require_str(input, "resolved_content")?;
-            if input.get("thread_ts").and_then(|v| v.as_str()).is_some() {
+            if optional_slack_thread_ts(input, "thread_ts")?.is_some() {
                 require_single_threaded_upload_channel(require_str(input, "channels")?)?;
             }
         }
@@ -3185,13 +3188,13 @@ fn resource_uris_for_operation(
         "slack.post_message" => {
             let channel = require_str(input, "channel")?;
             push_unique(format!("slack:channel:{channel}"));
-            if let Some(thread_ts) = input.get("thread_ts").and_then(|v| v.as_str()) {
+            if let Some(thread_ts) = optional_slack_thread_ts(input, "thread_ts")? {
                 push_unique(format!("slack:thread:{channel}:{thread_ts}"));
             }
         }
         "slack.reply_thread" => {
             let channel = require_str(input, "channel")?;
-            let thread_ts = require_str(input, "thread_ts")?;
+            let thread_ts = require_slack_thread_ts(input, "thread_ts")?;
             push_unique(format!("slack:channel:{channel}"));
             push_unique(format!("slack:thread:{channel}:{thread_ts}"));
         }
@@ -3200,7 +3203,7 @@ fn resource_uris_for_operation(
             let channel = require_str(input, "channel")?;
             push_unique(format!("slack:channel:{channel}"));
             push_unique(format!("slack:draft:{draft_id}"));
-            if let Some(thread_ts) = input.get("thread_ts").and_then(Value::as_str) {
+            if let Some(thread_ts) = optional_slack_thread_ts(input, "thread_ts")? {
                 push_unique(format!("slack:thread:{channel}:{thread_ts}"));
             }
         }
@@ -3215,7 +3218,7 @@ fn resource_uris_for_operation(
         "slack.upload_file" => {
             let channels = require_str(input, "channels")?;
             let upload_channels = parse_upload_channels(channels);
-            let thread_ts = input.get("thread_ts").and_then(|v| v.as_str());
+            let thread_ts = optional_slack_thread_ts(input, "thread_ts")?;
             if thread_ts.is_some() && upload_channels.len() != 1 {
                 return Err(FcpError::InvalidRequest {
                     code: 1003,
@@ -3254,6 +3257,46 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
             code: 1003,
             message: format!("Missing required field: {field}"),
         })
+}
+
+fn optional_slack_thread_ts<'a>(
+    input: &'a serde_json::Value,
+    field: &str,
+) -> FcpResult<Option<&'a str>> {
+    match input.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(raw)) => normalize_slack_thread_ts(raw, field).map(Some),
+        Some(_) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Field `{field}` must be a Slack thread timestamp string"),
+        }),
+    }
+}
+
+fn require_slack_thread_ts<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
+    normalize_slack_thread_ts(require_str(input, field)?, field)
+}
+
+fn normalize_slack_thread_ts<'a>(raw: &'a str, field: &str) -> FcpResult<&'a str> {
+    let thread_ts = raw.trim();
+    if is_valid_slack_thread_ts(thread_ts) {
+        return Ok(thread_ts);
+    }
+    Err(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Field `{field}` must be a Slack timestamp formatted as digits.digits"),
+    })
+}
+
+fn is_valid_slack_thread_ts(thread_ts: &str) -> bool {
+    let Some((seconds, fraction)) = thread_ts.split_once('.') else {
+        return false;
+    };
+    !seconds.is_empty()
+        && !fraction.is_empty()
+        && !fraction.contains('.')
+        && seconds.bytes().all(|byte| byte.is_ascii_digit())
+        && fraction.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn require_object_id_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
@@ -3481,6 +3524,23 @@ mod tests {
     #[test]
     fn test_resource_uris_for_operation_bind_slack_targets() {
         let uris = resource_uris_for_operation(
+            "slack.post_message",
+            &json!({
+                "channel": "C123",
+                "text": "threaded",
+                "thread_ts": " 171234.5678 "
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            uris,
+            vec![
+                "slack:channel:C123".to_string(),
+                "slack:thread:C123:171234.5678".to_string()
+            ]
+        );
+
+        let uris = resource_uris_for_operation(
             "slack.reply_thread",
             &json!({
                 "channel": "C123",
@@ -3545,6 +3605,37 @@ mod tests {
             err,
             FcpError::InvalidRequest { ref message, .. }
                 if message.contains("thread_ts requires exactly one channel")
+        ));
+
+        let err = resource_uris_for_operation(
+            "slack.post_message",
+            &json!({
+                "channel": "C123",
+                "text": "bad thread",
+                "thread_ts": "not-a-slack-ts"
+            }),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            FcpError::InvalidRequest { ref message, .. }
+                if message.contains("thread_ts")
+        ));
+
+        let err = resource_uris_for_operation(
+            "slack.upload_file",
+            &json!({
+                "channels": "C111",
+                "content_object_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "resolved_content": "hello",
+                "thread_ts": "   "
+            }),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            FcpError::InvalidRequest { ref message, .. }
+                if message.contains("thread_ts")
         ));
     }
 
@@ -5142,6 +5233,33 @@ mod tests {
             event.data.thread_info,
             Some(ThreadInfo::from_slack_thread("1700000000.000100", None))
         );
+    }
+
+    #[test]
+    fn test_socket_frame_to_event_ignores_invalid_thread_ts() {
+        let connector_id = ConnectorId::from_static("slack");
+        let instance_id = fcp_core::InstanceId::new();
+        let payload = json!({
+            "event": {
+                "type": "message",
+                "user": "U12345",
+                "channel": "C12345",
+                "thread_ts": "not-a-slack-ts",
+                "text": "reply"
+            },
+            "team_id": "T12345"
+        });
+
+        let event = socket_frame_to_event(
+            "events_api",
+            Some("env-1"),
+            &payload,
+            &connector_id,
+            &instance_id,
+            9,
+        );
+
+        assert_eq!(event.data.thread_info, None);
     }
 
     // ── Shutdown test ────────────────────────────────────────────

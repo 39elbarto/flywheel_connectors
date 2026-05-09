@@ -484,6 +484,173 @@ async fn post_message_happy_path() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn post_message_threaded_denies_duplicate_owner_before_http_send() {
+    let _ctx = AsyncTestContext::for_scenario("slack.post_message.coordination.deny_duplicate");
+    let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/chat.postMessage");
+        let body: serde_json::Value =
+            serde_json::from_slice(&request.body).expect("slack post body json");
+        assert_eq!(body["channel"], "C01234567");
+        assert_eq!(body["thread_ts"], "1234567890.123456");
+        assert_eq!(body["text"], "agent A threaded post");
+        StructuredHttpResponse::json(
+            200,
+            &json!({
+                "ok": true,
+                "channel": "C01234567",
+                "ts": "1234567890.654321",
+                "message": {
+                    "type": "message",
+                    "user": "U01234567",
+                    "text": "agent A threaded post",
+                    "ts": "1234567890.654321",
+                    "thread_ts": "1234567890.123456"
+                }
+            }),
+        )
+    });
+    let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+    let mut first = SlackConnector::new()
+        .with_thread_ownership_checker(checker.clone(), ChatCoordinationBackend::InMemory);
+    let mut second = SlackConnector::new()
+        .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+    let first_key = setup_handshake(&mut first, &["slack.post_message"]).await;
+    let second_key = setup_handshake(&mut second, &["slack.post_message"]).await;
+    setup_configure(&mut first, fake_server.url()).await;
+    setup_configure(&mut second, fake_server.url()).await;
+
+    let first_cap = generate_valid_token_for_principal(
+        &first_key,
+        "slack.post_message",
+        "slack.post_message",
+        "agent:a",
+    );
+    let first_result = first
+        .handle_invoke(json!({
+            "operation": "slack.post_message",
+            "input": {
+                "channel": "C01234567",
+                "text": "agent A threaded post",
+                "thread_ts": " 1234567890.123456 "
+            },
+            "capability_token": first_cap
+        }))
+        .await
+        .expect("first owner should send");
+    assert_eq!(first_result["coordination"][0]["event"], "claim_attempt");
+    assert_eq!(first_result["coordination"][2]["event"], "send_executed");
+
+    let second_cap = generate_valid_token_for_principal(
+        &second_key,
+        "slack.post_message",
+        "slack.post_message",
+        "agent:b",
+    );
+    let second_error = second
+        .handle_invoke(json!({
+            "operation": "slack.post_message",
+            "input": {
+                "channel": "C01234567",
+                "text": "agent B threaded post",
+                "thread_ts": "1234567890.123456"
+            },
+            "capability_token": second_cap
+        }))
+        .await
+        .expect_err("second owner should be denied");
+
+    assert!(matches!(
+        second_error,
+        fcp_core::FcpError::Unauthorized {
+            code: 4090,
+            ref message
+        } if message == "thread_owned_by_peer:agent:a"
+    ));
+    assert_eq!(fake_server.requests().len(), 1);
+}
+
+#[fcp_async_core::runtime::test]
+async fn post_message_rejects_invalid_thread_ts_before_coordination_or_http() {
+    let _ctx = AsyncTestContext::for_scenario("slack.post_message.validation.invalid_thread_ts");
+    let fake_server = StructuredFakeHttpServer::spawn(0, |_idx, _request| {
+        unreachable!("invalid thread_ts must be rejected before HTTP")
+    });
+    let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+    let mut connector = SlackConnector::new()
+        .with_thread_ownership_checker(checker.clone(), ChatCoordinationBackend::InMemory);
+    let key = setup_handshake(&mut connector, &["slack.post_message"]).await;
+    setup_configure(&mut connector, fake_server.url()).await;
+
+    let cap = generate_valid_token_for_principal(
+        &key,
+        "slack.post_message",
+        "slack.post_message",
+        "agent:a",
+    );
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "slack.post_message",
+            "input": {
+                "channel": "C01234567",
+                "text": "should not send",
+                "thread_ts": "   "
+            },
+            "capability_token": cap
+        }))
+        .await;
+    assert_invalid_request_contains(result, "thread_ts");
+    assert_eq!(checker.active_len(std::time::Instant::now()), 0);
+    assert_eq!(fake_server.requests().len(), 0);
+}
+
+#[fcp_async_core::runtime::test]
+async fn post_message_threaded_slack_api_failure_returns_no_coordination_success() {
+    let _ctx = AsyncTestContext::for_scenario("slack.post_message.coordination.slack_failure");
+    let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/chat.postMessage");
+        let body: serde_json::Value =
+            serde_json::from_slice(&request.body).expect("slack post body json");
+        assert_eq!(body["thread_ts"], "1234567890.123456");
+        StructuredHttpResponse::json(
+            200,
+            &json!({
+                "ok": false,
+                "error": "channel_not_found"
+            }),
+        )
+    });
+    let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+    let mut connector = SlackConnector::new()
+        .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+    let key = setup_handshake(&mut connector, &["slack.post_message"]).await;
+    setup_configure(&mut connector, fake_server.url()).await;
+
+    let cap = generate_valid_token_for_principal(
+        &key,
+        "slack.post_message",
+        "slack.post_message",
+        "agent:a",
+    );
+    let error = connector
+        .handle_invoke(json!({
+            "operation": "slack.post_message",
+            "input": {
+                "channel": "C01234567",
+                "text": "will fail",
+                "thread_ts": "1234567890.123456"
+            },
+            "capability_token": cap
+        }))
+        .await
+        .expect_err("Slack API failure should not return send_executed evidence");
+
+    assert!(matches!(error, fcp_core::FcpError::ResourceNotFound { .. }));
+    assert_eq!(fake_server.requests().len(), 1);
+}
+
+#[fcp_async_core::runtime::test]
 async fn reply_thread_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("slack.reply_thread.happy_path");
     let mock_server = MockServer::start().await;

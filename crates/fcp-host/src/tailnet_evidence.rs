@@ -195,6 +195,8 @@ pub struct TailnetInvokeHarnessObservation {
     pub online_peer_count: usize,
     /// Whether the runner can prove the requested route mode from live telemetry.
     pub route_telemetry_available: bool,
+    /// Redaction-safe detail explaining the route telemetry decision.
+    pub route_telemetry_detail: String,
     /// Whether production invoke is wired through the mesh/tailscale boundary.
     pub production_mesh_invoke_transport_available: bool,
     /// Redaction-safe detail from the `LocalAPI` probe.
@@ -210,6 +212,7 @@ impl TailnetInvokeHarnessObservation {
             tailscale_connected: false,
             online_peer_count: 0,
             route_telemetry_available: false,
+            route_telemetry_detail: "LocalAPI status unavailable".to_string(),
             production_mesh_invoke_transport_available: false,
             localapi_detail: "set --localapi-url or FCP_TAILSCALE_LOCALAPI_URL".to_string(),
         }
@@ -249,7 +252,7 @@ impl TailnetInvokeHarnessObservation {
             TailnetInvokePrerequisite::new(
                 route_name,
                 self.route_telemetry_available,
-                "LocalAPI status does not prove direct-vs-DERP invoke route telemetry",
+                self.route_telemetry_detail.clone(),
             ),
             TailnetInvokePrerequisite::new(
                 "production-mesh-invoke-transport",
@@ -529,6 +532,7 @@ mod tests {
             tailscale_connected: true,
             online_peer_count: 1,
             route_telemetry_available: false,
+            route_telemetry_detail: "no active direct route".to_string(),
             production_mesh_invoke_transport_available: false,
             localapi_detail: "backend_state=Running".to_string(),
         };

@@ -7,9 +7,16 @@
 
 use std::env;
 use std::process::{Command, ExitCode};
+use std::time::Duration;
 
+use fcp_async_core::{
+    compatibility_cx,
+    http::{HttpClientBuilder, Method},
+    time,
+};
 use fcp_host::{TailnetInvokeHarnessObservation, TailnetInvokeRouteMode};
-use fcp_tailscale::{LocalApiClient, TailscaleClient};
+use fcp_tailscale::TailscaleStatus;
+use serde_json::Value;
 
 const USAGE: &str = "\
 Usage: fcp-tailnet-invoke-evidence [OPTIONS]
@@ -68,7 +75,7 @@ fn main() -> ExitCode {
         .clone()
         .or_else(|| env::var("FCP_TAILNET_EVIDENCE_GIT_REVISION").ok())
         .unwrap_or_else(detect_git_revision);
-    let observation = observe_tailnet(localapi_url.as_deref());
+    let observation = observe_tailnet(localapi_url.as_deref(), cli.route_mode);
     let record = observation.structured_skip_record(
         cli.route_mode,
         command_line,
@@ -154,24 +161,28 @@ fn parse_cli(args: &[String]) -> Result<Option<Cli>, String> {
     Ok(Some(cli))
 }
 
-fn observe_tailnet(localapi_url: Option<&str>) -> TailnetInvokeHarnessObservation {
+fn observe_tailnet(
+    localapi_url: Option<&str>,
+    route_mode: TailnetInvokeRouteMode,
+) -> TailnetInvokeHarnessObservation {
     let Some(localapi_url) = localapi_url else {
         return TailnetInvokeHarnessObservation::localapi_not_configured();
     };
 
-    let status = fcp_async_core::runtime::block_on_sync(async {
-        LocalApiClient::with_http(localapi_url).status().await
-    });
+    let status =
+        fcp_async_core::runtime::block_on_sync(async { read_tailnet_status(localapi_url).await });
 
     match status {
-        Ok(Ok(status)) => {
+        Ok(Ok((status, status_json))) => {
             let online_peer_count = status.peer.values().filter(|peer| peer.online).count();
             let tailscale_connected = status.backend_state == "Running" && status.self_node.online;
+            let route_telemetry = observe_route_telemetry(&status_json, route_mode);
             TailnetInvokeHarnessObservation {
                 localapi_configured: true,
                 tailscale_connected,
                 online_peer_count,
-                route_telemetry_available: false,
+                route_telemetry_available: route_telemetry.available,
+                route_telemetry_detail: route_telemetry.detail,
                 production_mesh_invoke_transport_available: false,
                 localapi_detail: format!("backend_state={}", status.backend_state),
             }
@@ -181,17 +192,131 @@ fn observe_tailnet(localapi_url: Option<&str>) -> TailnetInvokeHarnessObservatio
             tailscale_connected: false,
             online_peer_count: 0,
             route_telemetry_available: false,
+            route_telemetry_detail: "LocalAPI status unavailable".to_string(),
             production_mesh_invoke_transport_available: false,
-            localapi_detail: format!("localapi_error:{error}"),
+            localapi_detail: format!("localapi_error:{}", redact_sensitive_text(&error)),
         },
-        Err(error) => TailnetInvokeHarnessObservation {
-            localapi_configured: true,
-            tailscale_connected: false,
-            online_peer_count: 0,
-            route_telemetry_available: false,
-            production_mesh_invoke_transport_available: false,
-            localapi_detail: format!("runtime_error:{error}"),
-        },
+        Err(error) => {
+            let error = error.to_string();
+            TailnetInvokeHarnessObservation {
+                localapi_configured: true,
+                tailscale_connected: false,
+                online_peer_count: 0,
+                route_telemetry_available: false,
+                route_telemetry_detail: "LocalAPI status unavailable".to_string(),
+                production_mesh_invoke_transport_available: false,
+                localapi_detail: format!("runtime_error:{}", redact_sensitive_text(&error)),
+            }
+        }
+    }
+}
+
+async fn read_tailnet_status(base_url: &str) -> Result<(TailscaleStatus, Value), String> {
+    let base_url = base_url.trim_end_matches('/');
+    let url = format!("{base_url}/localapi/v0/status");
+    let cx = compatibility_cx();
+    let client = HttpClientBuilder::new()
+        .user_agent("fcp-tailnet-invoke-evidence/0.1.0")
+        .build();
+
+    let response = match time::timeout(
+        Duration::from_secs(30),
+        client.request(&cx, Method::Get, &url, Vec::new(), Vec::new()),
+    )
+    .await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => return Err(format!("request_failed:{error}")),
+        Err(error) => return Err(format!("request_timeout:{error}")),
+    };
+
+    if !response.is_success() {
+        let status = format!("{} {}", response.status, response.reason);
+        return Err(format!("http_status:{status}"));
+    }
+
+    let status_json: Value = response
+        .json()
+        .map_err(|error| format!("parse_json:{error}"))?;
+    let status = serde_json::from_value(status_json.clone())
+        .map_err(|error| format!("parse_status:{error}"))?;
+    Ok((status, status_json))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RouteTelemetryObservation {
+    available: bool,
+    detail: String,
+}
+
+fn observe_route_telemetry(
+    status_json: &Value,
+    route_mode: TailnetInvokeRouteMode,
+) -> RouteTelemetryObservation {
+    let Some(peers) = status_json.get("Peer").and_then(Value::as_object) else {
+        return RouteTelemetryObservation {
+            available: false,
+            detail: "peer_map=missing".to_string(),
+        };
+    };
+
+    let mut active_online_peers = 0usize;
+    let mut direct_candidates = 0usize;
+    let mut derp_candidates = 0usize;
+
+    for peer in peers.values().filter_map(Value::as_object) {
+        let online = peer.get("Online").and_then(Value::as_bool).unwrap_or(false);
+        let active = peer.get("Active").and_then(Value::as_bool).unwrap_or(false);
+        if !(online && active) {
+            continue;
+        }
+
+        active_online_peers += 1;
+        let cur_addr = non_empty_string(peer.get("CurAddr"));
+        let relay = non_empty_string(peer.get("Relay"));
+        let peer_relay = non_empty_string(peer.get("PeerRelay"));
+        if cur_addr && !relay && !peer_relay {
+            direct_candidates += 1;
+        }
+        if relay || peer_relay {
+            derp_candidates += 1;
+        }
+    }
+
+    let available = match route_mode {
+        TailnetInvokeRouteMode::DirectLan => direct_candidates > 0,
+        TailnetInvokeRouteMode::DerpFallback => derp_candidates > 0,
+    };
+    RouteTelemetryObservation {
+        available,
+        detail: format!(
+            "active_online_peers={active_online_peers},direct_candidates={direct_candidates},derp_candidates={derp_candidates}"
+        ),
+    }
+}
+
+fn non_empty_string(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn redact_sensitive_text(input: &str) -> String {
+    let lower = input.to_ascii_lowercase();
+    if [
+        "token",
+        "secret",
+        "password",
+        "credential",
+        "bearer",
+        "api_key",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        "[REDACTED]".to_string()
+    } else {
+        input.to_string()
     }
 }
 
@@ -260,7 +385,7 @@ mod tests {
 
     #[test]
     fn observe_tailnet_without_localapi_is_conservative() {
-        let observation = observe_tailnet(None);
+        let observation = observe_tailnet(None, TailnetInvokeRouteMode::DirectLan);
         let record = observation.structured_skip_record(
             TailnetInvokeRouteMode::DirectLan,
             args(&["fcp-tailnet-invoke-evidence"]),
@@ -278,5 +403,74 @@ mod tests {
                 .missing_prerequisites
                 .contains(&"production-mesh-invoke-transport".to_string())
         );
+    }
+
+    #[test]
+    fn route_telemetry_detects_direct_active_peer_without_relay() {
+        let status = serde_json::json!({
+            "Peer": {
+                "node-peer1": {
+                    "Online": true,
+                    "Active": true,
+                    "CurAddr": "203.0.113.10:41641"
+                }
+            }
+        });
+
+        let observation = observe_route_telemetry(&status, TailnetInvokeRouteMode::DirectLan);
+        assert!(observation.available);
+        assert!(observation.detail.contains("direct_candidates=1"));
+
+        let derp = observe_route_telemetry(&status, TailnetInvokeRouteMode::DerpFallback);
+        assert!(!derp.available);
+        assert!(derp.detail.contains("derp_candidates=0"));
+    }
+
+    #[test]
+    fn route_telemetry_detects_derp_active_peer() {
+        let status = serde_json::json!({
+            "Peer": {
+                "node-peer1": {
+                    "Online": true,
+                    "Active": true,
+                    "Relay": "nyc"
+                },
+                "node-peer2": {
+                    "Online": true,
+                    "Active": true,
+                    "PeerRelay": "relay.example.invalid:41641"
+                }
+            }
+        });
+
+        let observation = observe_route_telemetry(&status, TailnetInvokeRouteMode::DerpFallback);
+        assert!(observation.available);
+        assert!(observation.detail.contains("derp_candidates=2"));
+
+        let direct = observe_route_telemetry(&status, TailnetInvokeRouteMode::DirectLan);
+        assert!(!direct.available);
+        assert!(direct.detail.contains("direct_candidates=0"));
+    }
+
+    #[test]
+    fn route_telemetry_ignores_idle_or_offline_peers() {
+        let status = serde_json::json!({
+            "Peer": {
+                "idle": {
+                    "Online": true,
+                    "Active": false,
+                    "CurAddr": "203.0.113.10:41641"
+                },
+                "offline": {
+                    "Online": false,
+                    "Active": true,
+                    "Relay": "nyc"
+                }
+            }
+        });
+
+        let observation = observe_route_telemetry(&status, TailnetInvokeRouteMode::DirectLan);
+        assert!(!observation.available);
+        assert!(observation.detail.contains("active_online_peers=0"));
     }
 }

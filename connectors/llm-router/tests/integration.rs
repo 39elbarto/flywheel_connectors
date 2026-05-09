@@ -79,6 +79,47 @@ async fn configured_connector() -> LlmRouterConnector {
     c
 }
 
+fn microsoft_foundry_config() -> serde_json::Value {
+    json!({
+        "providers": [
+            {
+                "name": "microsoft-foundry",
+                "base_url": "https://prod-resource.openai.azure.com/openai/v1/",
+                "credential_id": "foundry-work-zone-credential-secret",
+                "tenant_id": "tenant-secret-value",
+                "region": "eastus",
+                "resource": "prod-resource",
+                "priority": 1,
+                "models": [
+                    {
+                        "id": "gpt-4o-prod",
+                        "deployment_aliases": ["gpt-4o", "primary-gpt4o"],
+                        "capabilities": ["responses", "chat", "streaming", "embeddings", "tool_use"],
+                        "context_window": 128000,
+                        "cost_per_input_token": 0.000005,
+                        "cost_per_output_token": 0.000015
+                    }
+                ]
+            },
+            {
+                "name": "openrouter",
+                "api_key": "openrouter-key-that-must-not-leak",
+                "priority": 2,
+                "models": [
+                    {
+                        "id": "openai/gpt-4o",
+                        "capabilities": ["chat", "streaming", "embeddings"],
+                        "context_window": 128000,
+                        "cost_per_input_token": 0.000001,
+                        "cost_per_output_token": 0.000002
+                    }
+                ]
+            }
+        ],
+        "default_strategy": "fallback"
+    })
+}
+
 fn operation_by_id<'a>(introspection: &'a Value, id: &str) -> Option<&'a Value> {
     introspection
         .get("operations")
@@ -1228,6 +1269,251 @@ async fn configure_long_tail_fixed_provider_catalog_entries() {
         .find(|p| p["name"] == "kimi-coding")
         .unwrap();
     assert_eq!(kimi["models"][0]["id"], "kimi-k2.5");
+}
+
+#[fcp_async_core::runtime::test]
+async fn configure_microsoft_foundry_descriptor_preserves_credential_boundary() {
+    let mut connector = LlmRouterConnector::new();
+    let result = connector
+        .handle_configure(microsoft_foundry_config())
+        .await
+        .unwrap();
+
+    let provisioning = result["provisioning"].as_array().unwrap();
+    let foundry = provisioning
+        .iter()
+        .find(|provider| provider["name"] == "microsoft-foundry")
+        .unwrap();
+    assert_eq!(foundry["auth_mode"], "credential_id");
+    assert_eq!(foundry["network_ok"], true);
+    assert_eq!(foundry["model_count"], 1);
+
+    let providers = connector
+        .handle_invoke(json!({
+            "operation": "llm-router.list_providers",
+            "capability_token": "test",
+            "input": {"include_models": true}
+        }))
+        .await
+        .unwrap();
+    let provider = providers["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["name"] == "microsoft-foundry")
+        .unwrap();
+    assert_eq!(provider["connector_id"], "fcp.microsoft-foundry");
+    assert_eq!(provider["endpoint_class"], "microsoft_foundry_openai_v1");
+    assert_eq!(provider["auth_policy"], "credential_id");
+    assert!(provider["credential_reference_hash"].as_str().is_some());
+    assert_eq!(provider["region"], "eastus");
+    assert_eq!(provider["models"][0]["deployment_aliases"][0], "gpt-4o");
+
+    let serialized = serde_json::to_string(&providers).unwrap();
+    assert!(!serialized.contains("foundry-work-zone-credential-secret"));
+    assert!(!serialized.contains("tenant-secret-value"));
+    assert!(!serialized.contains("prod-resource\""));
+    assert!(!serialized.contains("openrouter-key-that-must-not-leak"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn route_microsoft_foundry_prefers_responses_and_matches_deployment_alias_and_constraints() {
+    let mut connector = LlmRouterConnector::new();
+    connector
+        .handle_configure(microsoft_foundry_config())
+        .await
+        .unwrap();
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "llm-router.route",
+            "capability_token": "test",
+            "input": {
+                "messages": [{"role": "user", "content": "Summarize the incident."}],
+                "preferred_provider": "microsoft-foundry",
+                "preferred_model": "gpt-4o",
+                "api_family": "responses",
+                "region": "eastus",
+                "tenant_id": "tenant-secret-value",
+                "resource": "prod-resource",
+                "fallback_policy": "none"
+            }
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["provider"], "microsoft-foundry");
+    assert_eq!(result["model"], "gpt-4o-prod");
+    assert_eq!(result["selected_api_family"], "responses");
+    assert_eq!(
+        result["dispatch"]["operation"],
+        "microsoft_foundry.responses.create"
+    );
+    assert_eq!(result["dispatch"]["connector_id"], "fcp.microsoft-foundry");
+    assert_eq!(result["dispatch"]["auth_policy"], "credential_id");
+    assert_eq!(result["endpoint_class"], "microsoft_foundry_openai_v1");
+    assert_eq!(result["dispatch"]["openrouter_fallback_allowed"], false);
+
+    let serialized = serde_json::to_string(&result).unwrap();
+    assert!(!serialized.contains("tenant-secret-value"));
+    assert!(!serialized.contains("foundry-work-zone-credential-secret"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn route_microsoft_foundry_api_family_gates_chat_streaming_and_embeddings() {
+    let mut connector = LlmRouterConnector::new();
+    connector
+        .handle_configure(microsoft_foundry_config())
+        .await
+        .unwrap();
+
+    for (family, operation) in [
+        ("chat", "microsoft_foundry.chat.completions"),
+        ("streaming", "microsoft_foundry.chat.completions_stream"),
+        ("embeddings", "microsoft_foundry.embeddings.create"),
+    ] {
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "llm-router.route",
+                "capability_token": "test",
+                "input": {
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "preferred_provider": "microsoft-foundry",
+                    "api_family": family,
+                    "fallback_policy": "none"
+                }
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["provider"], "microsoft-foundry");
+        assert_eq!(result["selected_api_family"], family);
+        assert_eq!(result["dispatch"]["operation"], operation);
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn route_microsoft_foundry_no_openrouter_fallback_is_explicit() {
+    let mut config = microsoft_foundry_config();
+    config["providers"][0]["models"][0]["capabilities"] = json!(["chat"]);
+
+    let mut connector = LlmRouterConnector::new();
+    connector.handle_configure(config).await.unwrap();
+
+    let denied = connector
+        .handle_invoke(json!({
+            "operation": "llm-router.route",
+            "capability_token": "test",
+            "input": {
+                "messages": [{"role": "user", "content": "embed"}],
+                "preferred_provider": "microsoft-foundry",
+                "api_family": "embeddings",
+                "fallback_policy": "none",
+                "allow_openrouter_fallback": false
+            }
+        }))
+        .await;
+    assert!(denied.is_err());
+
+    let allowed = connector
+        .handle_invoke(json!({
+            "operation": "llm-router.route",
+            "capability_token": "test",
+            "input": {
+                "messages": [{"role": "user", "content": "embed"}],
+                "api_family": "embeddings",
+                "allow_openrouter_fallback": true
+            }
+        }))
+        .await
+        .unwrap();
+    assert_eq!(allowed["provider"], "openrouter");
+    assert_eq!(allowed["selected_api_family"], "embeddings");
+}
+
+#[fcp_async_core::runtime::test]
+async fn configure_microsoft_foundry_rejects_router_owned_auth_and_bad_endpoints() {
+    for provider in [
+        json!({
+            "name": "microsoft-foundry",
+            "base_url": "https://prod-resource.openai.azure.com/openai/v1",
+            "api_key": "foundry-api-key-that-must-not-leak",
+            "models": []
+        }),
+        json!({
+            "name": "microsoft-foundry",
+            "base_url": "https://prod-resource.openai.azure.com",
+            "credential_id": "foundry-credential",
+            "models": []
+        }),
+        json!({
+            "name": "microsoft-foundry",
+            "base_url": "https://evil.example.com/openai/v1",
+            "credential_id": "foundry-credential",
+            "models": []
+        }),
+        json!({
+            "name": "custom",
+            "base_url": "https://prod-resource.openai.azure.com/openai/v1",
+            "api_key": "custom-key-that-must-not-leak",
+            "models": []
+        }),
+    ] {
+        let mut connector = LlmRouterConnector::new();
+        let error = connector
+            .handle_configure(json!({ "providers": [provider] }))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("foundry-api-key-that-must-not-leak"));
+        assert!(!error.contains("custom-key-that-must-not-leak"));
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn microsoft_foundry_router_loopback_e2e_scenarios() {
+    let mut connector = LlmRouterConnector::new();
+    connector
+        .handle_configure(microsoft_foundry_config())
+        .await
+        .unwrap();
+
+    let scenarios = [
+        (
+            "responses_route",
+            "responses",
+            "microsoft_foundry.responses.create",
+        ),
+        ("chat_route", "chat", "microsoft_foundry.chat.completions"),
+        (
+            "streaming_route",
+            "streaming",
+            "microsoft_foundry.chat.completions_stream",
+        ),
+        (
+            "embeddings_route",
+            "embeddings",
+            "microsoft_foundry.embeddings.create",
+        ),
+    ];
+
+    for (scenario, family, operation) in scenarios {
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "llm-router.route",
+                "capability_token": "test",
+                "input": {
+                    "messages": [{"role": "user", "content": scenario}],
+                    "preferred_provider": "microsoft-foundry",
+                    "api_family": family,
+                    "fallback_policy": "none"
+                }
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["provider"], "microsoft-foundry");
+        assert_eq!(result["selected_api_family"], family);
+        assert_eq!(result["dispatch"]["operation"], operation);
+    }
 }
 
 #[fcp_async_core::runtime::test]

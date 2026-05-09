@@ -52,24 +52,70 @@ pub enum ProviderStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelCapability {
+    Responses,
+    Chat,
     Vision,
     ToolUse,
     LongContext,
     Code,
     Math,
     Streaming,
+    Embeddings,
 }
 
 impl ModelCapability {
     pub fn from_str_opt(s: &str) -> Option<Self> {
         match s {
+            "responses" => Some(Self::Responses),
+            "chat" => Some(Self::Chat),
             "vision" => Some(Self::Vision),
             "tool_use" => Some(Self::ToolUse),
             "long_context" => Some(Self::LongContext),
             "code" => Some(Self::Code),
             "math" => Some(Self::Math),
             "streaming" => Some(Self::Streaming),
+            "embeddings" => Some(Self::Embeddings),
             _ => None,
+        }
+    }
+}
+
+/// Provider API family selected by the router for dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderApiFamily {
+    Responses,
+    Chat,
+    Streaming,
+    Embeddings,
+}
+
+impl ProviderApiFamily {
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s {
+            "responses" => Some(Self::Responses),
+            "chat" | "chat_completions" => Some(Self::Chat),
+            "streaming" | "chat_streaming" => Some(Self::Streaming),
+            "embeddings" => Some(Self::Embeddings),
+            _ => None,
+        }
+    }
+
+    pub const fn capability(self) -> ModelCapability {
+        match self {
+            Self::Responses => ModelCapability::Responses,
+            Self::Chat => ModelCapability::Chat,
+            Self::Streaming => ModelCapability::Streaming,
+            Self::Embeddings => ModelCapability::Embeddings,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Responses => "responses",
+            Self::Chat => "chat",
+            Self::Streaming => "streaming",
+            Self::Embeddings => "embeddings",
         }
     }
 }
@@ -207,6 +253,8 @@ pub enum GatewayEndpoint {
     },
     /// Operator-configured OpenAI-compatible gateway with no static host admission.
     OperatorConfiguredOpenAiCompatible,
+    /// Microsoft Foundry `/openai/v1` endpoint on an Azure-owned resource host.
+    MicrosoftFoundryOpenAiV1,
 }
 
 impl GatewayEndpoint {
@@ -215,23 +263,25 @@ impl GatewayEndpoint {
             Self::FixedOpenAiCompatible { host, .. } | Self::CloudflareAiGateway { host, .. } => {
                 Some(host)
             }
-            Self::OperatorConfiguredOpenAiCompatible => None,
+            Self::OperatorConfiguredOpenAiCompatible | Self::MicrosoftFoundryOpenAiV1 => None,
         }
     }
 
     pub const fn fixed_base_url(self) -> Option<&'static str> {
         match self {
             Self::FixedOpenAiCompatible { base_url, .. } => Some(base_url),
-            Self::CloudflareAiGateway { .. } | Self::OperatorConfiguredOpenAiCompatible => None,
+            Self::CloudflareAiGateway { .. }
+            | Self::OperatorConfiguredOpenAiCompatible
+            | Self::MicrosoftFoundryOpenAiV1 => None,
         }
     }
 
     pub const fn api_path_mode(self) -> ProviderApiPathMode {
         match self {
             Self::FixedOpenAiCompatible { api_path_mode, .. } => api_path_mode,
-            Self::CloudflareAiGateway { .. } | Self::OperatorConfiguredOpenAiCompatible => {
-                ProviderApiPathMode::OpenAiCompatibleBase
-            }
+            Self::CloudflareAiGateway { .. }
+            | Self::OperatorConfiguredOpenAiCompatible
+            | Self::MicrosoftFoundryOpenAiV1 => ProviderApiPathMode::OpenAiCompatibleBase,
         }
     }
 
@@ -378,6 +428,17 @@ const STANDARD_BEARER_AUTH_HEADERS: &[GatewayAuthHeader] =
     &[GatewayAuthHeader::AuthorizationBearer];
 
 const BUILT_IN_GATEWAY_PROVIDER_DESCRIPTORS: &[GatewayProviderDescriptor] = &[
+    GatewayProviderDescriptor {
+        id: "microsoft-foundry",
+        display_name: "Microsoft Foundry",
+        auth_env_vars: &["MICROSOFT_FOUNDRY_API_KEY", "AZURE_OPENAI_API_KEY"],
+        auth_choice_id: "microsoft-foundry-credential",
+        endpoint: GatewayEndpoint::MicrosoftFoundryOpenAiV1,
+        auth_headers: STANDARD_BEARER_AUTH_HEADERS,
+        aliases: &[],
+        passthrough_provider_models: false,
+        image_generation_provider: false,
+    },
     GatewayProviderDescriptor {
         id: "cloudflare-ai-gateway",
         display_name: "Cloudflare AI Gateway",
@@ -699,6 +760,12 @@ pub struct ProviderConfig {
     pub base_url: String,
     pub auth: ProviderAuth,
     pub api_path_mode: ProviderApiPathMode,
+    pub connector_id: Option<String>,
+    pub endpoint_class: String,
+    pub tenant_id: Option<String>,
+    pub region: Option<String>,
+    pub resource: Option<String>,
+    pub allow_openrouter_fallback: bool,
     pub extra_headers: Vec<ProviderHttpHeader>,
     pub models: Vec<ModelInfo>,
     pub priority: u32,
@@ -721,6 +788,8 @@ pub struct ProviderReadiness {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub id: String,
+    #[serde(default)]
+    pub deployment_aliases: Vec<String>,
     pub capabilities: Vec<ModelCapability>,
     pub context_window: u32,
     pub cost_per_input_token: f64,
@@ -1021,6 +1090,25 @@ mod tests {
         assert_eq!(descriptor.auth_choice_id, "litellm-api-key");
         assert_eq!(descriptor.auth_headers, STANDARD_BEARER_AUTH_HEADERS);
         assert!(descriptor.aliases.is_empty());
+    }
+
+    #[test]
+    fn microsoft_foundry_descriptor_is_dynamic_first_party_provider() {
+        let descriptor = gateway_provider_descriptor("microsoft-foundry").unwrap();
+        assert_eq!(descriptor.display_name, "Microsoft Foundry");
+        assert_eq!(descriptor.endpoint.static_host(), None);
+        assert_eq!(descriptor.endpoint.fixed_base_url(), None);
+        assert_eq!(
+            descriptor.endpoint.api_path_mode(),
+            ProviderApiPathMode::OpenAiCompatibleBase
+        );
+        assert_eq!(
+            descriptor.auth_env_vars,
+            &["MICROSOFT_FOUNDRY_API_KEY", "AZURE_OPENAI_API_KEY"]
+        );
+        assert_eq!(descriptor.auth_choice_id, "microsoft-foundry-credential");
+        assert!(!descriptor.passthrough_provider_models);
+        assert!(!descriptor.image_generation_provider);
     }
 
     #[test]
@@ -1328,6 +1416,7 @@ mod tests {
     fn model_info_serde_roundtrip() {
         let model = ModelInfo {
             id: "gpt-4o".into(),
+            deployment_aliases: Vec::new(),
             capabilities: vec![ModelCapability::Vision, ModelCapability::Code],
             context_window: 128_000,
             cost_per_input_token: 0.000005,
@@ -1607,6 +1696,12 @@ mod tests {
             base_url: "https://api.openai.com".into(),
             auth: ProviderAuth::ApiKey("sk-test-123456789".into()),
             api_path_mode: ProviderApiPathMode::AppendV1,
+            connector_id: None,
+            endpoint_class: "legacy_openai_compatible".into(),
+            tenant_id: None,
+            region: None,
+            resource: None,
+            allow_openrouter_fallback: false,
             extra_headers: Vec::new(),
             models: vec![],
             priority: 1,
@@ -1625,6 +1720,12 @@ mod tests {
             base_url: "https://api.anthropic.com".into(),
             auth: ProviderAuth::CredentialId("cred-1".into()),
             api_path_mode: ProviderApiPathMode::AppendV1,
+            connector_id: None,
+            endpoint_class: "legacy_openai_compatible".into(),
+            tenant_id: None,
+            region: None,
+            resource: None,
+            allow_openrouter_fallback: false,
             extra_headers: Vec::new(),
             models: vec![],
             priority: 2,
@@ -1644,6 +1745,12 @@ mod tests {
             base_url: "http://localhost".into(),
             auth: ProviderAuth::ApiKey("key123456789".into()),
             api_path_mode: ProviderApiPathMode::AppendV1,
+            connector_id: None,
+            endpoint_class: "legacy_openai_compatible".into(),
+            tenant_id: None,
+            region: None,
+            resource: None,
+            allow_openrouter_fallback: false,
             extra_headers: Vec::new(),
             models: vec![],
             priority: 0,
@@ -1711,6 +1818,7 @@ mod tests {
     fn model_info_clone() {
         let model = ModelInfo {
             id: "claude-3".into(),
+            deployment_aliases: Vec::new(),
             capabilities: vec![ModelCapability::Vision],
             context_window: 200_000,
             cost_per_input_token: 0.000003,
@@ -1725,6 +1833,7 @@ mod tests {
     fn model_info_debug() {
         let model = ModelInfo {
             id: "gpt-4".into(),
+            deployment_aliases: Vec::new(),
             capabilities: vec![],
             context_window: 8192,
             cost_per_input_token: 0.00003,
@@ -1739,6 +1848,7 @@ mod tests {
     fn model_info_empty_capabilities() {
         let model = ModelInfo {
             id: "basic-model".into(),
+            deployment_aliases: Vec::new(),
             capabilities: vec![],
             context_window: 4096,
             cost_per_input_token: 0.0001,
@@ -1752,6 +1862,7 @@ mod tests {
     fn model_info_zero_costs() {
         let model = ModelInfo {
             id: "free-model".into(),
+            deployment_aliases: Vec::new(),
             capabilities: vec![ModelCapability::Code],
             context_window: 2048,
             cost_per_input_token: 0.0,
@@ -2004,28 +2115,33 @@ mod tests {
     fn model_info_all_capabilities() {
         let model = ModelInfo {
             id: "all-caps".into(),
+            deployment_aliases: Vec::new(),
             capabilities: vec![
+                ModelCapability::Responses,
+                ModelCapability::Chat,
                 ModelCapability::Vision,
                 ModelCapability::ToolUse,
                 ModelCapability::LongContext,
                 ModelCapability::Code,
                 ModelCapability::Math,
                 ModelCapability::Streaming,
+                ModelCapability::Embeddings,
             ],
             context_window: 1_000_000,
             cost_per_input_token: 0.001,
             cost_per_output_token: 0.002,
         };
-        assert_eq!(model.capabilities.len(), 6);
+        assert_eq!(model.capabilities.len(), 9);
         let json = serde_json::to_value(&model).unwrap();
         let caps = json["capabilities"].as_array().unwrap();
-        assert_eq!(caps.len(), 6);
+        assert_eq!(caps.len(), 9);
     }
 
     #[test]
     fn model_info_large_context_window() {
         let model = ModelInfo {
             id: "huge".into(),
+            deployment_aliases: Vec::new(),
             capabilities: vec![],
             context_window: u32::MAX,
             cost_per_input_token: 0.0,

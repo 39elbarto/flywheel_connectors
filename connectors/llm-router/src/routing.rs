@@ -67,7 +67,13 @@ pub fn select_candidate(
     }
 
     if let Some(pref_model) = preferred_model {
-        if let Some((idx, _)) = eligible.iter().find(|(_, c)| c.model.id == pref_model) {
+        if let Some((idx, _)) = eligible.iter().find(|(_, c)| {
+            c.model.id == pref_model
+                || c.model
+                    .deployment_aliases
+                    .iter()
+                    .any(|alias| alias == pref_model)
+        }) {
             if strategy == RoutingStrategy::Fallback {
                 return Ok((*idx, format!("preferred model '{pref_model}' available")));
             }
@@ -192,6 +198,7 @@ mod tests {
     fn test_model(id: &str, cost_in: f64, cost_out: f64, caps: &[ModelCapability]) -> ModelInfo {
         ModelInfo {
             id: id.into(),
+            deployment_aliases: Vec::new(),
             capabilities: caps.to_vec(),
             context_window: 128_000,
             cost_per_input_token: cost_in,
@@ -398,6 +405,12 @@ mod tests {
             base_url: "http://localhost".into(),
             auth: crate::types::ProviderAuth::ApiKey("key123456789".into()),
             api_path_mode: crate::types::ProviderApiPathMode::AppendV1,
+            connector_id: None,
+            endpoint_class: "legacy_openai_compatible".into(),
+            tenant_id: None,
+            region: None,
+            resource: None,
+            allow_openrouter_fallback: false,
             extra_headers: Vec::new(),
             models: vec![],
             priority: 1,
@@ -415,6 +428,12 @@ mod tests {
             base_url: "http://localhost".into(),
             auth: crate::types::ProviderAuth::ApiKey("key123456789".into()),
             api_path_mode: crate::types::ProviderApiPathMode::AppendV1,
+            connector_id: None,
+            endpoint_class: "legacy_openai_compatible".into(),
+            tenant_id: None,
+            region: None,
+            resource: None,
+            allow_openrouter_fallback: false,
             extra_headers: Vec::new(),
             models: vec![test_model("gpt-4", 0.001, 0.002, &[])],
             priority: 1,
@@ -435,6 +454,12 @@ mod tests {
             base_url: "http://localhost".into(),
             auth: crate::types::ProviderAuth::ApiKey("key123456789".into()),
             api_path_mode: crate::types::ProviderApiPathMode::AppendV1,
+            connector_id: None,
+            endpoint_class: "legacy_openai_compatible".into(),
+            tenant_id: None,
+            region: None,
+            resource: None,
+            allow_openrouter_fallback: false,
             extra_headers: Vec::new(),
             models: vec![test_model("m1", 0.001, 0.002, &[])],
             priority: 5,

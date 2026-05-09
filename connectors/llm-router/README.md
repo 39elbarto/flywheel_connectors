@@ -72,6 +72,7 @@ It also has built-in OpenAI-compatible gateway/provider descriptors:
 | Provider name | Base URL source | Auth fields | Notes |
 |---------------|-----------------|-------------|-------|
 | `cloudflare-ai-gateway` | Built from `account_id` and `gateway_id` | `api_key`, optional `cloudflare_gateway_api_key` | Uses `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai`; optional gateway key becomes `cf-aig-authorization`. |
+| `microsoft-foundry` | Operator-provided Azure resource URL | `credential_id` | Uses `https://<resource>.openai.azure.com/openai/v1` or `https://<resource>.services.ai.azure.com/openai/v1`; routes to the `fcp.microsoft-foundry` connector and never reads Foundry API keys or bearer tokens. |
 | `vercel-ai-gateway` | Fixed descriptor | `api_key` or `credential_id` | Uses `https://ai-gateway.vercel.sh/v1`; normalizes bare Claude aliases to provider-prefixed model IDs. |
 | `litellm` | Operator-configured | `api_key` or `credential_id` | Requires an HTTPS public DNS URL on port 443, path empty or `/v1`, and no userinfo, query, fragment, IP literal, single-label, `.local`, localhost, or private host. |
 | `deepseek` | Fixed descriptor | `api_key` or `credential_id` | Uses `https://api.deepseek.com` and appends `/v1`. |
@@ -84,7 +85,7 @@ It also has built-in OpenAI-compatible gateway/provider descriptors:
 | `qwen` | Fixed descriptor | `api_key` or `credential_id` | Uses `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`. |
 | `together` | Fixed descriptor | `api_key` or `credential_id` | Uses `https://api.together.xyz/v1`. |
 
-Fixed descriptors reject `base_url` overrides unless the provided URL normalizes to the descriptor URL. Gateway hosts are reserved for their descriptor names, so a custom provider cannot claim `gateway.ai.cloudflare.com`, `ai-gateway.vercel.sh`, or the other fixed descriptor hosts.
+Fixed descriptors reject `base_url` overrides unless the provided URL normalizes to the descriptor URL. Gateway hosts are reserved for their descriptor names, so a custom provider cannot claim `gateway.ai.cloudflare.com`, `ai-gateway.vercel.sh`, Microsoft Foundry resource hosts, or the other fixed descriptor hosts.
 
 ## Drift Visible In This Checkout
 
@@ -104,6 +105,7 @@ This README documents runtime truth and keeps current drift visible:
 - Runtime `health` and `doctor` do not perform a live provider probe.
 - Runtime provider latency and health are initialized statically and do not change through normal route calls.
 - Runtime shutdown does not reset lifecycle state or clear in-memory usage and budget counters.
+- `microsoft-foundry` routing is descriptor-only. The router selects deployment/API family and returns a `dispatch` object for `fcp.microsoft-foundry`; it does not perform Foundry auth, HTTP calls, streaming, embeddings, or Responses API execution itself.
 
 A follow-up parity bead should decide whether the router remains selection-only or gains provider dispatch, wire capability-token verification to reject unverifiable real tokens, align simulation with invoke policy, validate models strictly, clarify `credential_id` shape, make health probes explicit, and make shutdown reset state if the connector lifecycle expects it.
 
@@ -137,6 +139,7 @@ The current LLM Router README slice documents the existing runtime surface:
 - Provider URLs must be HTTPS on port 443.
 - Runtime rejects userinfo, query strings, fragments, non-HTTPS schemes, wrong ports, unknown hosts, localhost, private ranges, tailnet ranges, and IP literals for built-in live providers.
 - Operator-configured `litellm` URLs must be HTTPS public DNS names on port 443 with path empty or `/v1`.
+- Microsoft Foundry URLs must be HTTPS Azure resource DNS names ending in `.openai.azure.com` or `.services.ai.azure.com` with path `/openai/v1`.
 - Cloudflare AI Gateway URLs are constructed from path-safe `account_id` and `gateway_id`; caller-provided `base_url` is rejected.
 - Fixed gateway descriptors reject mismatched `base_url` overrides.
 - Manifest live-operation network policy requires TLS/SNI, denies localhost, private ranges, tailnet ranges, and IP literals, and allows only the configured provider host set on port 443.
@@ -235,6 +238,7 @@ The verification surface captures:
 - Use `litellm` only with a public HTTPS gateway URL that passes the runtime policy.
 - Use `cloudflare-ai-gateway` with `account_id` and `gateway_id`; omit `base_url`.
 - Use `vercel-ai-gateway` with provider-prefixed model IDs unless relying on the built-in Claude aliases.
+- Use `microsoft-foundry` with `credential_id`, explicit deployment IDs, optional `deployment_aliases`, and `api_family` values `responses`, `chat`, `streaming`, or `embeddings`. Use `fallback_policy = "none"` when a request must stay inside the Azure enterprise boundary.
 - Treat route output as a plan, not as provider output.
 
 **Redaction rules**:
@@ -248,6 +252,7 @@ The verification surface captures:
 - If provider auth fails, provide exactly one of `api_key` or `credential_id`.
 - If Cloudflare AI Gateway configuration fails, remove `base_url` and provide path-safe `account_id` and `gateway_id`.
 - If a fixed provider rejects `base_url`, omit the override or use the descriptor's exact URL.
+- If Microsoft Foundry configuration fails, ensure `base_url` ends `/openai/v1`, uses an Azure Foundry/OpenAI resource host, and uses `credential_id` rather than a raw API key.
 - If `litellm` rejects a URL, use HTTPS public DNS on port 443 with no userinfo, query, fragment, IP literal, private host, `.local` host, or custom path other than `/v1`.
 - If route fails for capability requirements, call `llm-router.list_providers` with `include_models = true` and verify each model's capabilities.
 - If route appears to succeed but no generated content is returned, dispatch the selected provider/model through the appropriate provider connector.

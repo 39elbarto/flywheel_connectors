@@ -17,8 +17,8 @@ use crate::error::RouterError;
 use crate::routing;
 use crate::types::{
     BudgetConfig, BudgetEnforcement, GatewayEndpoint, ModelCapability, ModelInfo,
-    ProviderApiPathMode, ProviderAuth, ProviderConfig, ProviderHttpHeader, ProviderReadiness,
-    ProviderStatus, ProviderUsage, RoutingDecision, RoutingStrategy,
+    ProviderApiFamily, ProviderApiPathMode, ProviderAuth, ProviderConfig, ProviderHttpHeader,
+    ProviderReadiness, ProviderStatus, ProviderUsage, RoutingDecision, RoutingStrategy,
     built_in_gateway_provider_descriptors, gateway_provider_descriptor, llm_router_host_is_allowed,
 };
 
@@ -818,6 +818,22 @@ impl LlmRouterConnector {
                     .collect()
             })
             .unwrap_or_default();
+        let requested_api_family = Self::requested_api_family(&input)?;
+        let mut required_caps = required_caps;
+        if let Some(api_family) = requested_api_family {
+            required_caps.push(api_family.capability());
+        }
+        let requested_region = input.get("region").and_then(|v| v.as_str());
+        let requested_tenant = input.get("tenant_id").and_then(|v| v.as_str());
+        let requested_resource = input.get("resource").and_then(|v| v.as_str());
+        let fallback_policy = input
+            .get("fallback_policy")
+            .and_then(|v| v.as_str())
+            .unwrap_or("configured");
+        let allow_openrouter_fallback = input
+            .get("allow_openrouter_fallback")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         // Check budget enforcement
         if config.budget.enforcement == BudgetEnforcement::Hard {
@@ -839,12 +855,30 @@ impl LlmRouterConnector {
             .sum();
 
         // Build candidates and select
-        let candidates = routing::build_candidates(
+        let mut candidates = routing::build_candidates(
             &config.providers,
             &self.provider_status,
             input_tokens,
             max_tokens,
         );
+        candidates.retain(|candidate| {
+            let Some(provider) = config
+                .providers
+                .iter()
+                .find(|provider| provider.name == candidate.provider_name)
+            else {
+                return false;
+            };
+            Self::candidate_matches_route_constraints(
+                provider,
+                preferred_provider,
+                fallback_policy,
+                allow_openrouter_fallback,
+                requested_region,
+                requested_tenant,
+                requested_resource,
+            )
+        });
 
         let (selected_idx, reason) = routing::select_candidate(
             &candidates,
@@ -859,6 +893,16 @@ impl LlmRouterConnector {
         let selected = &candidates[selected_idx];
         let provider_name = &selected.provider_name;
         let model_id = &selected.model.id;
+        let provider = config
+            .providers
+            .iter()
+            .find(|provider| provider.name == *provider_name)
+            .ok_or_else(|| FcpError::Internal {
+                message: format!("selected provider '{provider_name}' missing from config"),
+            })?;
+        let selected_api_family =
+            Self::select_api_family(provider, &selected.model, requested_api_family);
+        let dispatch_operation = Self::dispatch_operation(provider, selected_api_family);
 
         info!(
             provider = %provider_name,
@@ -894,11 +938,23 @@ impl LlmRouterConnector {
         Ok(json!({
             "dispatch_required": true,
             "dispatch_instruction": format!(
-                "Invoke {provider_name}.chat_completion with model={model_id} to get the actual LLM response. \
+                "Invoke {dispatch_operation} with provider={provider_name} and model={model_id} to get the actual LLM response. \
                  This routing decision does not contain inference output."
             ),
             "provider": provider_name,
             "model": model_id,
+            "selected_api_family": selected_api_family.as_str(),
+            "endpoint_class": provider.endpoint_class,
+            "dispatch": {
+                "connector_id": provider.connector_id,
+                "operation": dispatch_operation,
+                "credential_reference_hash": Self::credential_reference_hash(&provider.auth),
+                "auth_policy": Self::auth_policy_label(&provider.auth),
+                "region": provider.region,
+                "tenant_id_hash": provider.tenant_id.as_deref().map(Self::short_hash),
+                "resource_hash": provider.resource.as_deref().map(Self::short_hash),
+                "openrouter_fallback_allowed": allow_openrouter_fallback || provider.allow_openrouter_fallback,
+            },
             "usage": {
                 "input_tokens": input_tokens,
                 "output_tokens": max_tokens
@@ -914,6 +970,117 @@ impl LlmRouterConnector {
                 "taint": ["AI_GENERATED"]
             }
         }))
+    }
+
+    fn requested_api_family(input: &serde_json::Value) -> FcpResult<Option<ProviderApiFamily>> {
+        let Some(value) = input.get("api_family").and_then(|v| v.as_str()) else {
+            return Ok(None);
+        };
+        ProviderApiFamily::from_str_opt(value).map(Some).ok_or_else(|| {
+            FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "unsupported api_family '{value}'; expected responses, chat, streaming, or embeddings"
+                ),
+            }
+        })
+    }
+
+    fn candidate_matches_route_constraints(
+        provider: &ProviderConfig,
+        preferred_provider: Option<&str>,
+        fallback_policy: &str,
+        allow_openrouter_fallback: bool,
+        requested_region: Option<&str>,
+        requested_tenant: Option<&str>,
+        requested_resource: Option<&str>,
+    ) -> bool {
+        if matches!(fallback_policy, "none" | "disabled" | "no_fallback")
+            && preferred_provider.is_some_and(|preferred| provider.name != preferred)
+        {
+            return false;
+        }
+        if provider.name == "openrouter"
+            && preferred_provider != Some("openrouter")
+            && !allow_openrouter_fallback
+            && !provider.allow_openrouter_fallback
+        {
+            return false;
+        }
+        Self::optional_constraint_matches(provider.region.as_deref(), requested_region)
+            && Self::optional_constraint_matches(provider.tenant_id.as_deref(), requested_tenant)
+            && Self::optional_constraint_matches(provider.resource.as_deref(), requested_resource)
+    }
+
+    fn optional_constraint_matches(configured: Option<&str>, requested: Option<&str>) -> bool {
+        requested.is_none_or(|requested| configured == Some(requested))
+    }
+
+    fn select_api_family(
+        provider: &ProviderConfig,
+        model: &ModelInfo,
+        requested: Option<ProviderApiFamily>,
+    ) -> ProviderApiFamily {
+        if let Some(requested) = requested {
+            return requested;
+        }
+        if provider.name == "microsoft-foundry"
+            && model.capabilities.contains(&ModelCapability::Responses)
+        {
+            return ProviderApiFamily::Responses;
+        }
+        if model.capabilities.contains(&ModelCapability::Chat) {
+            ProviderApiFamily::Chat
+        } else if model.capabilities.contains(&ModelCapability::Streaming) {
+            ProviderApiFamily::Streaming
+        } else if model.capabilities.contains(&ModelCapability::Embeddings) {
+            ProviderApiFamily::Embeddings
+        } else {
+            ProviderApiFamily::Chat
+        }
+    }
+
+    fn dispatch_operation(
+        provider: &ProviderConfig,
+        api_family: ProviderApiFamily,
+    ) -> &'static str {
+        if provider.name == "microsoft-foundry" {
+            match api_family {
+                ProviderApiFamily::Responses => "microsoft_foundry.responses.create",
+                ProviderApiFamily::Chat => "microsoft_foundry.chat.completions",
+                ProviderApiFamily::Streaming => "microsoft_foundry.chat.completions_stream",
+                ProviderApiFamily::Embeddings => "microsoft_foundry.embeddings.create",
+            }
+        } else {
+            match api_family {
+                ProviderApiFamily::Responses => "provider.responses_create",
+                ProviderApiFamily::Chat => "provider.chat_completion",
+                ProviderApiFamily::Streaming => "provider.chat_completion_stream",
+                ProviderApiFamily::Embeddings => "provider.embeddings_create",
+            }
+        }
+    }
+
+    fn auth_policy_label(auth: &ProviderAuth) -> &'static str {
+        match auth {
+            ProviderAuth::ApiKey(_) => "api_key",
+            ProviderAuth::CredentialId(_) => "credential_id",
+        }
+    }
+
+    fn credential_reference_hash(auth: &ProviderAuth) -> Option<String> {
+        match auth {
+            ProviderAuth::ApiKey(_) => None,
+            ProviderAuth::CredentialId(id) => Some(Self::short_hash(id)),
+        }
+    }
+
+    fn short_hash(value: &str) -> String {
+        blake3::hash(value.as_bytes())
+            .to_hex()
+            .chars()
+            .take(16)
+            .collect()
     }
 
     async fn invoke_estimate_cost(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -1037,6 +1204,14 @@ impl LlmRouterConnector {
                     "status": status,
                     "capabilities": capabilities,
                     "latency_p50_ms": latency,
+                    "connector_id": p.connector_id,
+                    "endpoint_class": p.endpoint_class,
+                    "auth_policy": Self::auth_policy_label(&p.auth),
+                    "credential_reference_hash": Self::credential_reference_hash(&p.auth),
+                    "region": p.region,
+                    "tenant_id_hash": p.tenant_id.as_deref().map(Self::short_hash),
+                    "resource_hash": p.resource.as_deref().map(Self::short_hash),
+                    "openrouter_fallback_allowed": p.allow_openrouter_fallback,
                     "passthrough_provider_models": p.passthrough_provider_models,
                     "image_generation_provider": p.image_generation_provider,
                 });
@@ -1048,6 +1223,7 @@ impl LlmRouterConnector {
                         .map(|m| {
                             json!({
                                 "id": m.id,
+                                "deployment_aliases": m.deployment_aliases,
                                 "context_window": m.context_window,
                                 "capabilities": m.capabilities,
                                 "cost_per_input_token": m.cost_per_input_token,
@@ -1192,14 +1368,36 @@ impl LlmRouterConnector {
                     });
                 }
             };
+            if name == "microsoft-foundry" && !auth.is_secretless() {
+                return Err(Self::provider_config_error(
+                    idx,
+                    &name,
+                    "must use credential_id so the router references the provider connector credential without reading Foundry API keys or bearer tokens",
+                ));
+            }
 
             let (
                 base_url,
                 api_path_mode,
+                connector_id,
+                endpoint_class,
                 extra_headers,
                 passthrough_provider_models,
                 image_generation_provider,
             ) = match descriptor.map(|d| d.endpoint) {
+                Some(GatewayEndpoint::MicrosoftFoundryOpenAiV1) => {
+                    let raw_base_url = Self::required_provider_string(pv, idx, &name, "base_url")?;
+                    let descriptor = descriptor.expect("descriptor present for endpoint match");
+                    (
+                        Self::microsoft_foundry_base_url(raw_base_url, idx, &name)?,
+                        ProviderApiPathMode::OpenAiCompatibleBase,
+                        Some("fcp.microsoft-foundry".to_string()),
+                        "microsoft_foundry_openai_v1".to_string(),
+                        Vec::new(),
+                        descriptor.passthrough_provider_models,
+                        descriptor.image_generation_provider,
+                    )
+                }
                 Some(GatewayEndpoint::CloudflareAiGateway { provider_path, .. }) => {
                     if pv
                         .get("base_url")
@@ -1245,6 +1443,8 @@ impl LlmRouterConnector {
                     (
                         base_url,
                         ProviderApiPathMode::OpenAiCompatibleBase,
+                        None,
+                        "cloudflare_ai_gateway".to_string(),
                         Self::cloudflare_gateway_headers(pv, idx, &name)?,
                         descriptor.passthrough_provider_models,
                         descriptor.image_generation_provider,
@@ -1274,6 +1474,8 @@ impl LlmRouterConnector {
                     (
                         base_url.to_string(),
                         api_path_mode,
+                        None,
+                        "fixed_openai_compatible".to_string(),
                         Vec::new(),
                         descriptor.passthrough_provider_models,
                         descriptor.image_generation_provider,
@@ -1286,6 +1488,8 @@ impl LlmRouterConnector {
                     (
                         base_url,
                         api_path_mode,
+                        None,
+                        "operator_openai_compatible".to_string(),
                         Vec::new(),
                         descriptor.passthrough_provider_models,
                         descriptor.image_generation_provider,
@@ -1306,6 +1510,8 @@ impl LlmRouterConnector {
                             .unwrap_or("")
                             .to_string(),
                         ProviderApiPathMode::AppendV1,
+                        None,
+                        "legacy_openai_compatible".to_string(),
                         Vec::new(),
                         descriptor_metadata.0,
                         descriptor_metadata.1,
@@ -1339,6 +1545,15 @@ impl LlmRouterConnector {
                 base_url,
                 auth,
                 api_path_mode,
+                connector_id,
+                endpoint_class,
+                tenant_id: Self::optional_provider_string(pv, "tenant_id"),
+                region: Self::optional_provider_string(pv, "region"),
+                resource: Self::optional_provider_string(pv, "resource"),
+                allow_openrouter_fallback: pv
+                    .get("allow_openrouter_fallback")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
                 extra_headers,
                 models,
                 priority,
@@ -1369,6 +1584,68 @@ impl LlmRouterConnector {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| Self::provider_config_error(idx, name, format!("missing {field}")))
+    }
+
+    fn optional_provider_string(
+        provider: &serde_json::Value,
+        field: &'static str,
+    ) -> Option<String> {
+        provider
+            .get(field)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(String::from)
+    }
+
+    fn microsoft_foundry_base_url(raw_base_url: &str, idx: usize, name: &str) -> FcpResult<String> {
+        let normalized = raw_base_url.trim().trim_end_matches('/');
+        let parsed = Url::parse(normalized).map_err(|error| {
+            Self::provider_config_error(
+                idx,
+                name,
+                format!("Microsoft Foundry base_url is not a valid URL: {error}"),
+            )
+        })?;
+
+        if parsed.scheme() != "https"
+            || parsed.port_or_known_default() != Some(443)
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(Self::provider_config_error(
+                idx,
+                name,
+                "Microsoft Foundry base_url must be an HTTPS URL on port 443 with no userinfo, query, or fragment",
+            ));
+        }
+
+        let Some(Host::Domain(host)) = parsed.host() else {
+            return Err(Self::provider_config_error(
+                idx,
+                name,
+                "Microsoft Foundry base_url must use an Azure resource DNS host, not an IP literal",
+            ));
+        };
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        if !Self::microsoft_foundry_host_allowed(&host) {
+            return Err(Self::provider_config_error(
+                idx,
+                name,
+                "Microsoft Foundry base_url host must end with .openai.azure.com or .services.ai.azure.com",
+            ));
+        }
+        if parsed.path().trim_end_matches('/') != "/openai/v1" {
+            return Err(Self::provider_config_error(
+                idx,
+                name,
+                "Microsoft Foundry base_url path must be /openai/v1",
+            ));
+        }
+
+        Ok(normalized.to_string())
     }
 
     fn cloudflare_gateway_headers(
@@ -1540,6 +1817,28 @@ impl LlmRouterConnector {
         if gateway_provider_descriptor(&provider.name).is_some_and(|descriptor| {
             matches!(
                 descriptor.endpoint,
+                GatewayEndpoint::MicrosoftFoundryOpenAiV1
+            )
+        }) {
+            let Ok(parsed) = Url::parse(provider.base_url.trim()) else {
+                return false;
+            };
+            let Some(Host::Domain(host)) = parsed.host() else {
+                return false;
+            };
+            return parsed.scheme() == "https"
+                && parsed.port_or_known_default() == Some(443)
+                && parsed.path().trim_end_matches('/') == "/openai/v1"
+                && parsed.query().is_none()
+                && parsed.fragment().is_none()
+                && parsed.username().is_empty()
+                && parsed.password().is_none()
+                && Self::microsoft_foundry_host_allowed(host);
+        }
+
+        if gateway_provider_descriptor(&provider.name).is_some_and(|descriptor| {
+            matches!(
+                descriptor.endpoint,
                 GatewayEndpoint::OperatorConfiguredOpenAiCompatible
             )
         }) {
@@ -1587,6 +1886,11 @@ impl LlmRouterConnector {
         }
     }
 
+    fn microsoft_foundry_host_allowed(host: &str) -> bool {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        host.ends_with(".openai.azure.com") || host.ends_with(".services.ai.azure.com")
+    }
+
     fn diagnostic_base_url(base_url: &str) -> String {
         let Ok(mut parsed) = Url::parse(base_url.trim()) else {
             return "<invalid base_url>".into();
@@ -1623,7 +1927,7 @@ impl LlmRouterConnector {
         }) else {
             return Vec::new();
         };
-        built_in_gateway_provider_descriptors()
+        let mut owners: Vec<_> = built_in_gateway_provider_descriptors()
             .iter()
             .filter(|descriptor| {
                 descriptor
@@ -1632,7 +1936,11 @@ impl LlmRouterConnector {
                     .is_some_and(|allowed| allowed == host.as_str())
             })
             .map(|descriptor| descriptor.id)
-            .collect()
+            .collect();
+        if Self::microsoft_foundry_host_allowed(&host) {
+            owners.push("microsoft-foundry");
+        }
+        owners
     }
 
     /// Build per-provider provisioning readiness.
@@ -2366,9 +2674,16 @@ mod tests {
             base_url: base_url.into(),
             auth: ProviderAuth::ApiKey("key".into()),
             api_path_mode: ProviderApiPathMode::AppendV1,
+            connector_id: None,
+            endpoint_class: "operator_openai_compatible".into(),
+            tenant_id: None,
+            region: None,
+            resource: None,
+            allow_openrouter_fallback: false,
             extra_headers: Vec::new(),
             models: vec![ModelInfo {
                 id: "openai/gpt-4o".into(),
+                deployment_aliases: Vec::new(),
                 capabilities: vec![ModelCapability::Code],
                 context_window: 128000,
                 cost_per_input_token: 0.000005,

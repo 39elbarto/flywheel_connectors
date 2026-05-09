@@ -32,8 +32,8 @@ optional = []
 forbidden = ["system.exec", "system.privileged", "network.listen"]
 
 # Synology Chat deployments are operator-configured and may live on public,
-# private, or tailnet addresses, so host-level constraints are intentionally
-# left to runtime configuration instead of being hardcoded here.
+# private, or tailnet addresses. Per-operation egress uses the runtime webhook
+# host placeholder, with LAN/tailnet/IP-literal allowances scoped to that host.
 
 [provides.operations.send_message]
 description = "Send a Synology Chat message through an incoming webhook"
@@ -42,6 +42,24 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "none"
+
+[provides.operations.send_message.network_constraints]
+host_allow = ["${synology_chat_webhook_host}"]
+port_allow = [80, 443, 5000, 5001]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
 
 [provides.operations.send_message.ai_hints]
 when_to_use = "When you need to deliver a chat message into a Synology Chat webhook target"
@@ -97,6 +115,24 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "none"
+
+[provides.operations.send_file_url.network_constraints]
+host_allow = ["${synology_chat_webhook_host}"]
+port_allow = [80, 443, 5000, 5001]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
 
 [provides.operations.send_file_url.ai_hints]
 when_to_use = "When you need Synology Chat to fetch a media or file URL and want the connector to enforce URL SSRF policy before dispatch"
@@ -184,6 +220,24 @@ safety_tier = "risky"
 requires_approval = "none"
 idempotency = "none"
 
+[provides.operations.send_payload.network_constraints]
+host_allow = ["${synology_chat_webhook_host}"]
+port_allow = [80, 443, 5000, 5001]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
 [provides.operations.send_payload.ai_hints]
 when_to_use = "When you need advanced webhook payload control for cards or attachments and intentionally accept unchecked provider-specific passthrough"
 
@@ -224,6 +278,24 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations.ingest_outgoing_webhook.network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
 
 [provides.operations.ingest_outgoing_webhook.ai_hints]
 when_to_use = "When fcp-host forwards an outgoing-webhook payload and you need stable channel, thread, sender, attachment, and ingress-policy metadata"
@@ -375,6 +447,24 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
+[provides.operations.webhook_normalize.network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
+
 [provides.operations.webhook_normalize.ai_hints]
 when_to_use = "When you need to normalize any inbound Synology Chat webhook payload into a stable event shape with optional token verification"
 
@@ -476,6 +566,24 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations.health.network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
 
 [provides.operations.health.ai_hints]
 when_to_use = "When you need to confirm the Synology Chat connector is configured"

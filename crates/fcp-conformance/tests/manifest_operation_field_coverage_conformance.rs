@@ -37,7 +37,6 @@ const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
     "plivo",
     "qq",
     "sonos",
-    "synology-chat",
     "teams",
     "telnyx",
     "tlon",

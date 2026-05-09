@@ -41,6 +41,9 @@ const EXPECTED_MANIFEST_SCHEMA_OPS: [(&str, &str); 6] = [
     ("webhook_normalize", OP_WEBHOOK_NORMALIZE),
     ("health", OP_HEALTH),
 ];
+const WEBHOOK_EGRESS_MANIFEST_OPS: [&str; 3] = ["send_message", "send_file_url", "send_payload"];
+const NO_EGRESS_MANIFEST_OPS: [&str; 3] =
+    ["ingest_outgoing_webhook", "webhook_normalize", "health"];
 
 fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
     HandshakeRequest {
@@ -387,6 +390,116 @@ fn operation_schema(manifest: &toml::Value, operation_key: &str, schema_key: &st
     serde_json::to_value(schema).expect("manifest schema should convert to JSON")
 }
 
+fn operation_network_constraints<'a>(
+    manifest: &'a toml::Value,
+    operation_key: &str,
+) -> &'a toml::Table {
+    manifest_operations(manifest)
+        .get(operation_key)
+        .and_then(|operation| operation.get("network_constraints"))
+        .and_then(toml::Value::as_table)
+        .unwrap_or_else(|| panic!("{operation_key} should define network_constraints"))
+}
+
+fn network_string_list<'a>(constraints: &'a toml::Table, key: &str) -> Vec<&'a str> {
+    constraints
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .unwrap_or_else(|| panic!("{key} should be an array"))
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} entries should be strings"))
+        })
+        .collect()
+}
+
+fn network_integer_list(constraints: &toml::Table, key: &str) -> Vec<i64> {
+    constraints
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .unwrap_or_else(|| panic!("{key} should be an array"))
+        .iter()
+        .map(|value| {
+            value
+                .as_integer()
+                .unwrap_or_else(|| panic!("{key} entries should be integers"))
+        })
+        .collect()
+}
+
+fn network_bool_field(constraints: &toml::Table, key: &str) -> bool {
+    constraints
+        .get(key)
+        .and_then(toml::Value::as_bool)
+        .unwrap_or_else(|| panic!("{key} should be a boolean"))
+}
+
+fn network_integer_field(constraints: &toml::Table, key: &str) -> i64 {
+    constraints
+        .get(key)
+        .and_then(toml::Value::as_integer)
+        .unwrap_or_else(|| panic!("{key} should be an integer"))
+}
+
+fn assert_webhook_egress_constraints(constraints: &toml::Table) {
+    assert_eq!(
+        network_string_list(constraints, "host_allow"),
+        ["${synology_chat_webhook_host}"]
+    );
+    assert_eq!(
+        network_integer_list(constraints, "port_allow"),
+        [80, 443, 5000, 5001]
+    );
+    assert!(network_bool_field(constraints, "deny_localhost"));
+    assert!(!network_bool_field(constraints, "deny_private_ranges"));
+    assert!(!network_bool_field(constraints, "deny_tailnet_ranges"));
+    assert!(!network_bool_field(constraints, "require_sni"));
+    assert!(!network_bool_field(constraints, "deny_ip_literals"));
+    assert!(network_bool_field(
+        constraints,
+        "require_host_canonicalization"
+    ));
+    assert_eq!(network_integer_field(constraints, "dns_max_ips"), 16);
+    assert_eq!(network_integer_field(constraints, "max_redirects"), 0);
+    assert_eq!(
+        network_integer_field(constraints, "connect_timeout_ms"),
+        10_000
+    );
+    assert_eq!(
+        network_integer_field(constraints, "total_timeout_ms"),
+        60_000
+    );
+}
+
+fn assert_no_egress_constraints(constraints: &toml::Table) {
+    assert_eq!(
+        network_string_list(constraints, "host_allow"),
+        ["none.invalid"]
+    );
+    assert_eq!(network_integer_list(constraints, "port_allow"), [0]);
+    assert!(network_bool_field(constraints, "deny_localhost"));
+    assert!(network_bool_field(constraints, "deny_private_ranges"));
+    assert!(network_bool_field(constraints, "deny_tailnet_ranges"));
+    assert!(!network_bool_field(constraints, "require_sni"));
+    assert!(network_bool_field(constraints, "deny_ip_literals"));
+    assert!(network_bool_field(
+        constraints,
+        "require_host_canonicalization"
+    ));
+    assert_eq!(network_integer_field(constraints, "dns_max_ips"), 0);
+    assert_eq!(network_integer_field(constraints, "max_redirects"), 0);
+    assert_eq!(
+        network_integer_field(constraints, "connect_timeout_ms"),
+        10_000
+    );
+    assert_eq!(
+        network_integer_field(constraints, "total_timeout_ms"),
+        30_000
+    );
+}
+
 fn assert_schema_accepts(schema: &Value, payload: &Value) {
     let validator = jsonschema::validator_for(schema).expect("schema should compile");
     let errors = validator
@@ -721,6 +834,28 @@ fn manifest_operation_schemas_compile_and_validate_core_payloads() {
     assert_manifest_schema_catalog_matches_runtime(&manifest);
     assert_input_schema_examples(&manifest);
     assert_output_schema_examples(&manifest);
+}
+
+#[test]
+fn manifest_declares_runtime_scoped_network_constraints() {
+    let manifest = synology_chat_manifest();
+    let operations = manifest_operations(&manifest);
+    for (operation_key, _operation_id) in EXPECTED_MANIFEST_SCHEMA_OPS {
+        assert!(
+            operations
+                .get(operation_key)
+                .and_then(|operation| operation.get("network_constraints"))
+                .and_then(toml::Value::as_table)
+                .is_some(),
+            "{operation_key} should define network_constraints"
+        );
+    }
+    for operation_key in WEBHOOK_EGRESS_MANIFEST_OPS {
+        assert_webhook_egress_constraints(operation_network_constraints(&manifest, operation_key));
+    }
+    for operation_key in NO_EGRESS_MANIFEST_OPS {
+        assert_no_egress_constraints(operation_network_constraints(&manifest, operation_key));
+    }
 }
 
 #[fcp_async_core::runtime::test]

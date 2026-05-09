@@ -14,10 +14,13 @@ use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, HandshakeRequest, InstanceId, ZoneId,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TEST_RESOURCE_ID: &str = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg/providers/Microsoft.CognitiveServices/accounts/speech";
+const TEST_ENTRA_RESOURCE: &str = "https://cognitiveservices.azure.com/";
+const TEST_MANAGED_IDENTITY_CLIENT_ID: &str = "11111111-2222-3333-4444-555555555555";
 const CONNECTOR_ID: &str = "fcp.azure-speech";
 const OP_VOICES: &str = "azure.speech.voices.list";
 const OP_TTS: &str = "azure.speech.tts.synthesize";
@@ -218,6 +221,10 @@ fn e2e_git_revision() -> String {
     std::env::var("AZURE_SPEECH_E2E_GIT_REVISION").unwrap_or_else(|_| "unknown".into())
 }
 
+fn test_sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
 fn append_e2e_record(records: &mut Vec<Value>, record: Value) {
     if let Some(path) = e2e_log_path() {
         if let Some(parent) = path.parent() {
@@ -271,6 +278,8 @@ fn e2e_record(
         "region_class": "public",
         "endpoint_class": if fixture_or_live_mode == "live" { "microsoft_public" } else { "loopback" },
         "auth_mode": auth_mode,
+        "token_source_class": "not_applicable",
+        "resource_id_hash": "n/a",
         "voice_id": voice_id,
         "language_id": language_id,
         "model_id": model_id,
@@ -291,6 +300,45 @@ fn e2e_record(
     })
 }
 
+fn with_identity_metadata(
+    mut record: Value,
+    token_source_class: &str,
+    resource_id_hash: &str,
+) -> Value {
+    record["token_source_class"] = json!(token_source_class);
+    record["resource_id_hash"] = json!(resource_id_hash);
+    record
+}
+
+fn connector_local_identity_skip_record(scenario: &str, fcp_error_mapping: &str) -> Value {
+    with_identity_metadata(
+        e2e_record(
+            scenario,
+            "azure.speech.auth.connector_local_identity",
+            "azure.speech.auth",
+            "connector_local_identity",
+            "fixture",
+            0,
+            "not_started",
+            fcp_error_mapping,
+            0,
+            "skipped",
+            "not_started",
+            "host_token_broker_required",
+            "n/a",
+            "n/a",
+            "n/a",
+            "application/json",
+            0,
+            0,
+            0,
+            0,
+        ),
+        "connector_local_imds_policy_blocked",
+        &test_sha256_hex(TEST_ENTRA_RESOURCE.as_bytes()),
+    )
+}
+
 fn assert_jsonl_is_redacted(records: &[Value]) {
     let jsonl = records
         .iter()
@@ -309,6 +357,7 @@ fn assert_jsonl_is_redacted(records: &[Value]) {
         "raw-audio",
         "transcript text",
         "should-not-leak",
+        TEST_MANAGED_IDENTITY_CLIENT_ID,
     ] {
         assert!(
             !jsonl.contains(forbidden),
@@ -1005,6 +1054,87 @@ async fn azure_speech_loopback_e2e_jsonl_matrix() {
         ),
     );
 
+    let identity_server = MockServer::start().await;
+    let expected_authorization = format!("Bearer aad#{TEST_RESOURCE_ID}#aad-secret");
+    Mock::given(method("GET"))
+        .and(path("/cognitiveservices/voices/list"))
+        .and(header("authorization", expected_authorization.as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"Name": "en-US-AvaNeural", "Locale": "en-US"}
+        ])))
+        .expect(1)
+        .mount(&identity_server)
+        .await;
+    let (identity_connector, identity_key) =
+        configured_entra_connector(&identity_server, "aad_resource_token").await;
+    let started = Instant::now();
+    let identity_voices = invoke(
+        &identity_connector,
+        &identity_key,
+        OP_VOICES,
+        CAP_VOICES,
+        json!({}),
+    )
+    .await
+    .expect("host-brokered managed identity handoff should authenticate");
+    assert_eq!(identity_voices["voices"][0]["Name"], "en-US-AvaNeural");
+    append_e2e_record(
+        &mut records,
+        with_identity_metadata(
+            e2e_record(
+                "managed_identity_host_token_handoff",
+                OP_VOICES,
+                CAP_VOICES,
+                "entra_access_token",
+                "fixture",
+                200,
+                "not_retried",
+                "none",
+                started.elapsed().as_millis(),
+                "passed",
+                "not_started",
+                "not_skipped",
+                "en-US-AvaNeural",
+                "en-US",
+                "n/a",
+                "application/json",
+                0,
+                0,
+                0,
+                0,
+            ),
+            "managed_identity_host_broker",
+            &test_sha256_hex(TEST_RESOURCE_ID.as_bytes()),
+        ),
+    );
+
+    let mut connector_local_identity = AzureSpeechConnector::new();
+    let connector_local_error = connector_local_identity
+        .handle_configure(json!({
+            "connector_local_identity": true,
+            "managed_identity_client_id": TEST_MANAGED_IDENTITY_CLIENT_ID,
+            "region": "eastus",
+        }))
+        .await
+        .expect_err("connector-local IMDS must be blocked by host-policy guidance");
+    let connector_local_message = connector_local_error.to_string();
+    assert!(connector_local_message.contains("host-provided entra_access_token"));
+    assert!(!connector_local_message.contains(TEST_MANAGED_IDENTITY_CLIENT_ID));
+    for scenario in [
+        "connector_local_imds_policy_skip",
+        "imds_token_success_skip",
+        "imds_expired_refresh_skip",
+        "imds_missing_permission_skip",
+        "imds_tenant_resource_mismatch_skip",
+        "imds_timeout_skip",
+        "imds_provider_auth_failure_skip",
+    ] {
+        append_e2e_record(
+            &mut records,
+            connector_local_identity_skip_record(scenario, "host_token_broker_required"),
+        );
+    }
+
     let retry_server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/speechtotext/transcriptions:transcribe"))
@@ -1527,7 +1657,7 @@ async fn azure_speech_loopback_e2e_jsonl_matrix() {
             .iter()
             .filter(|record| record["record_type"] == "azure_speech_connector_e2e")
             .count()
-            >= 16
+            >= 25
     );
     assert!(
         records
@@ -1543,6 +1673,16 @@ async fn azure_speech_loopback_e2e_jsonl_matrix() {
         records
             .iter()
             .any(|record| record["scenario"] == "harness_cancellation")
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record["scenario"] == "managed_identity_host_token_handoff")
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record["scenario"] == "connector_local_imds_policy_skip")
     );
     assert!(
         records

@@ -30,6 +30,7 @@ const DOC_STT_TRANSCRIBE: &str = "https://learn.microsoft.com/en-us/rest/api/spe
 const DOC_STT_BATCH_SUBMIT: &str = "https://learn.microsoft.com/en-us/rest/api/speechtotext/transcriptions/submit?view=rest-speechtotext-2025-10-15";
 const DOC_TTS_REST_AUTH: &str = "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/rest-text-to-speech#authentication";
 const DOC_ENTRA_AUTH: &str = "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-configure-azure-ad-auth";
+const DOC_MANAGED_IDENTITY_VM_TOKEN: &str = "https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/how-to-use-vm-token";
 const DOC_LLM_SPEECH_AUTH: &str =
     "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/llm-speech";
 const DOC_TTS_TEXT_STREAMING: &str = "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-lower-speech-synthesis-latency#how-to-use-text-streaming";
@@ -45,7 +46,7 @@ const OPERATION_ORDER: [&str; 6] = [
     "azure.speech.stt.batch.get",
     "azure.speech.stt.batch.files",
 ];
-const BOUNDARY: &str = "This connector exposes Azure Speech REST token exchange, Microsoft Entra bearer-token handoff, regional voice discovery, REST text-to-speech synthesis, and Speech-to-text 2025-10-15 fast transcription plus batch submit/status/files surfaces. Realtime WebSocket streaming is blocked until Microsoft documents a direct STT/TTS wire protocol or FCP adopts an equivalent SDK-compatible framing; custom speech projects/models and connector-local IMDS/MSAL token acquisition remain separate follow-up surfaces tracked by flywheel_connectors-4kw5f.2.9.6.1.2, flywheel_connectors-4kw5f.2.9.6.2, and flywheel_connectors-4kw5f.2.9.6.3.";
+const BOUNDARY: &str = "This connector exposes Azure Speech REST token exchange, Microsoft Entra bearer-token handoff, regional voice discovery, REST text-to-speech synthesis, and Speech-to-text 2025-10-15 fast transcription plus batch submit/status/files surfaces. Realtime WebSocket streaming is blocked until Microsoft documents a direct STT/TTS wire protocol or FCP adopts an equivalent SDK-compatible framing; custom speech projects/models remain a separate follow-up surface tracked by flywheel_connectors-4kw5f.2.9.6.2. Connector-local IMDS/MSAL acquisition is formally retained as host-token-broker-only under flywheel_connectors-4kw5f.2.9.6.3 because FCP runtime network policy cannot safely mix link-local IMDS egress and Azure Speech provider egress inside the same runtime-enforced operation.";
 const STREAMING_BLOCKER_REASON: &str = "Current Microsoft Learn documentation exposes TTS text streaming through Speech SDK TextStream on the WebSocket v2 endpoint, and realtime STT through Speech SDK SpeechRecognizer/AudioConfig push-stream APIs. It does not publish a direct WebSocket frame protocol for a standalone Rust connector, so this connector must not guess or reverse-engineer the live wire format.";
 const DEFAULT_REQUEST_TIMEOUT_MS: usize = 60_000;
 const DEFAULT_INLINE_AUDIO_MAX_BYTES: usize = 1_048_576;
@@ -53,6 +54,10 @@ const DEFAULT_TTS_MAX_AUDIO_BYTES: usize = 16 * 1_024 * 1_024;
 const DEFAULT_STT_MAX_AUDIO_BYTES: usize = 250 * 1_024 * 1_024;
 const ACCESS_TOKEN_TTL: Duration = Duration::from_secs(10 * 60);
 const ACCESS_TOKEN_REFRESH_AFTER: Duration = Duration::from_secs(9 * 60);
+const IMDS_TOKEN_ENDPOINT: &str = "http://169.254.169.254/metadata/identity/oauth2/token";
+const IMDS_HOST: &str = "169.254.169.254";
+const IMDS_API_VERSION: &str = "2018-02-01";
+const COGNITIVE_SERVICES_ENTRA_RESOURCE: &str = "https://cognitiveservices.azure.com/";
 const USER_AGENT_VALUE: &str = "fcp-azure-speech/0.1.0";
 const STT_API_VERSION: &str = "2025-10-15";
 const DEFAULT_TTS_OUTPUT_FORMAT: &str = "riff-24khz-16bit-mono-pcm";
@@ -240,10 +245,12 @@ impl Auth {
         let credential_id = optional_config_string(params, "credential_id");
         let entra_bearer_config = optional_config_string(params, "entra_access_token")
             .or_else(|| optional_config_string(params, "aad_access_token"));
+        let connector_local_identity = ConnectorLocalIdentityRequest::from_params(params)?;
         let configured_modes = [
             subscription_key.is_some(),
             credential_id.is_some(),
             entra_bearer_config.is_some(),
+            connector_local_identity.is_some(),
         ]
         .into_iter()
         .filter(|configured| *configured)
@@ -251,7 +258,7 @@ impl Auth {
         if configured_modes != 1 {
             return Err(FcpError::InvalidRequest {
                 code: 1003,
-                message: "Provide exactly one auth source: subscription_key/api_key, entra_access_token/aad_access_token, or credential_id".into(),
+                message: "Provide exactly one auth source: subscription_key/api_key, entra_access_token/aad_access_token, credential_id, or connector_local_identity".into(),
             });
         }
         if let Some(key) = subscription_key {
@@ -266,6 +273,9 @@ impl Auth {
                 id: header,
                 redacted_id: redact_identifier(&id),
             });
+        }
+        if let Some(identity) = connector_local_identity {
+            return Err(identity.unsupported_error());
         }
         let entra_bearer =
             entra_bearer_config.expect("exactly one auth mode means Entra bearer is present here");
@@ -358,6 +368,173 @@ impl EntraTokenFormat {
             }),
             None if has_resource_id => Ok(Self::AadResource),
             None => Ok(Self::Bearer),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ConnectorLocalIdentityRequest {
+    endpoint: Url,
+    resource: String,
+    selector: ManagedIdentitySelector,
+}
+
+impl std::fmt::Debug for ConnectorLocalIdentityRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectorLocalIdentityRequest")
+            .field("endpoint_host", &host(&self.endpoint))
+            .field("api_version", &IMDS_API_VERSION)
+            .field("resource_hash", &sha256_hex(self.resource.as_bytes()))
+            .field("selector", &self.selector)
+            .finish()
+    }
+}
+
+impl ConnectorLocalIdentityRequest {
+    fn from_params(params: &Value) -> FcpResult<Option<Self>> {
+        let requested = optional_config_bool(params, "connector_local_identity")?.unwrap_or(false)
+            || optional_config_bool(params, "managed_identity")?.unwrap_or(false)
+            || connector_local_identity_source_requested(params)
+            || optional_config_string(params, "managed_identity_client_id").is_some()
+            || optional_config_string(params, "managed_identity_object_id").is_some()
+            || optional_config_string(params, "managed_identity_msi_res_id").is_some();
+        if !requested {
+            return Ok(None);
+        }
+
+        let endpoint = Url::parse(IMDS_TOKEN_ENDPOINT).map_err(|error| FcpError::Internal {
+            message: format!("embedded Azure IMDS endpoint is invalid: {error}"),
+        })?;
+        let resource = optional_config_string(params, "managed_identity_resource")
+            .or_else(|| optional_config_string(params, "imds_resource"))
+            .unwrap_or_else(|| COGNITIVE_SERVICES_ENTRA_RESOURCE.to_owned());
+        validate_managed_identity_resource(&resource)?;
+        let selector = ManagedIdentitySelector::from_params(params)?;
+        Ok(Some(Self {
+            endpoint,
+            resource,
+            selector,
+        }))
+    }
+
+    #[cfg(test)]
+    fn request_url(&self) -> Url {
+        let mut url = self.endpoint.clone();
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("api-version", IMDS_API_VERSION);
+            query.append_pair("resource", &self.resource);
+            if let Some((key, value)) = self.selector.query_pair() {
+                query.append_pair(key, value);
+            }
+        }
+        url
+    }
+
+    fn host_allowlist(&self) -> Vec<String> {
+        vec![host(&self.endpoint).to_owned()]
+    }
+
+    fn resource_id_hash(&self) -> String {
+        sha256_hex(self.resource.as_bytes())
+    }
+
+    const fn selector_class(&self) -> &'static str {
+        self.selector.class()
+    }
+
+    fn unsupported_error(&self) -> FcpError {
+        FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "connector-local Azure managed identity acquisition is disabled for Azure Speech; use host-provided entra_access_token/aad_access_token or credential_id. IMDS requires {} on {} over link-local HTTP with Metadata:true, while FCP runtime network policy cannot safely combine that local/LAN exception with Azure Speech provider egress in one runtime-enforced operation. selector_class={}, resource_id_hash={}",
+                IMDS_API_VERSION,
+                self.host_allowlist().join(","),
+                self.selector_class(),
+                self.resource_id_hash()
+            ),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum ManagedIdentitySelector {
+    SystemAssigned,
+    ClientId(String),
+    ObjectId(String),
+    MsiResourceId(String),
+}
+
+impl std::fmt::Debug for ManagedIdentitySelector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SystemAssigned => f.write_str("SystemAssigned"),
+            Self::ClientId(value) => f
+                .debug_struct("ClientId")
+                .field("sha256", &sha256_hex(value.as_bytes()))
+                .finish(),
+            Self::ObjectId(value) => f
+                .debug_struct("ObjectId")
+                .field("sha256", &sha256_hex(value.as_bytes()))
+                .finish(),
+            Self::MsiResourceId(value) => f
+                .debug_struct("MsiResourceId")
+                .field("sha256", &sha256_hex(value.as_bytes()))
+                .finish(),
+        }
+    }
+}
+
+impl ManagedIdentitySelector {
+    fn from_params(params: &Value) -> FcpResult<Self> {
+        let client_id = optional_config_string(params, "managed_identity_client_id");
+        let object_id = optional_config_string(params, "managed_identity_object_id");
+        let msi_res_id = optional_config_string(params, "managed_identity_msi_res_id");
+        let configured = [
+            client_id.is_some(),
+            object_id.is_some(),
+            msi_res_id.is_some(),
+        ]
+        .into_iter()
+        .filter(|value| *value)
+        .count();
+        if configured > 1 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Configure at most one managed identity selector: managed_identity_client_id, managed_identity_object_id, or managed_identity_msi_res_id".into(),
+            });
+        }
+        if let Some(value) = client_id {
+            validate_managed_identity_selector("managed_identity_client_id", &value)?;
+            return Ok(Self::ClientId(value));
+        }
+        if let Some(value) = object_id {
+            validate_managed_identity_selector("managed_identity_object_id", &value)?;
+            return Ok(Self::ObjectId(value));
+        }
+        if let Some(value) = msi_res_id {
+            validate_managed_identity_selector("managed_identity_msi_res_id", &value)?;
+            return Ok(Self::MsiResourceId(value));
+        }
+        Ok(Self::SystemAssigned)
+    }
+
+    #[cfg(test)]
+    fn query_pair(&self) -> Option<(&'static str, &str)> {
+        match self {
+            Self::SystemAssigned => None,
+            Self::ClientId(value) => Some(("client_id", value)),
+            Self::ObjectId(value) => Some(("object_id", value)),
+            Self::MsiResourceId(value) => Some(("msi_res_id", value)),
+        }
+    }
+
+    const fn class(&self) -> &'static str {
+        match self {
+            Self::SystemAssigned => "system_assigned",
+            Self::ClientId(_) => "client_id",
+            Self::ObjectId(_) => "object_id",
+            Self::MsiResourceId(_) => "msi_res_id",
         }
     }
 }
@@ -1153,6 +1330,7 @@ impl AzureSpeechConnector {
             "auth_token_source": config.auth.token_source(),
             "auth_token_format": config.auth.token_format(),
             "entra_resource_id_hash": config.auth.resource_id_hash(),
+            "connector_local_identity_acquisition": connector_local_identity_policy_info(),
             "region": config.region,
             "cloud": format!("{:?}", config.cloud).to_ascii_lowercase(),
             "host_allow": config.host_allowlist(),
@@ -1262,6 +1440,12 @@ impl AzureSpeechConnector {
                     }
                 },
                 { "name": "handshake", "passed": self.handshaken, "critical": false },
+                {
+                    "name": "connector_local_identity",
+                    "passed": true,
+                    "critical": false,
+                    "message": connector_local_identity_policy_info()
+                },
                 { "name": "surface_boundary", "passed": true, "critical": false, "message": BOUNDARY }
             ],
             "streaming_blocker": streaming_blocker_info(),
@@ -1319,11 +1503,13 @@ impl AzureSpeechConnector {
                 "stt_batch_submit_2025_10_15": DOC_STT_BATCH_SUBMIT,
                 "tts_rest_auth": DOC_TTS_REST_AUTH,
                 "entra_auth": DOC_ENTRA_AUTH,
+                "managed_identity_vm_token": DOC_MANAGED_IDENTITY_VM_TOKEN,
                 "llm_speech_keyless_auth": DOC_LLM_SPEECH_AUTH,
                 "tts_text_streaming_sdk": DOC_TTS_TEXT_STREAMING,
                 "stt_realtime_sdk": DOC_STT_REALTIME,
                 "sdk_connection_reuse": DOC_SDK_CONNECTIONS
-            }
+            },
+            "connector_local_identity_acquisition": connector_local_identity_policy_info()
         }))
     }
 
@@ -1531,11 +1717,31 @@ fn deferred_operations_info() -> Vec<Value> {
         json!({
             "id": "azure.speech.auth.connector_local_identity",
             "summary": "Connector-local Azure IMDS/MSAL-equivalent identity acquisition",
-            "outcome": "deferred_to_identity_acquisition_slice",
+            "outcome": "host_token_broker_required",
             "tracking_bead": "flywheel_connectors-4kw5f.2.9.6.3",
-            "rationale": "This connector accepts host-supplied Entra bearer tokens and credential identifiers today. Direct connector-local IMDS/MSAL-equivalent token acquisition is a separate host-policy-sensitive surface that must be implemented without interpreted runtimes or opaque SDK assumptions."
+            "rationale": "Current Microsoft managed identity docs require link-local IMDS HTTP egress to 169.254.169.254 with Metadata:true. FCP runtime network policy only allows local/LAN exceptions as all-local operation policies; Azure Speech operations also require external Microsoft Speech hosts. The safe boundary is therefore host-token-broker acquisition with connector Entra token handoff, not direct connector-local IMDS.",
+            "official_docs": [DOC_MANAGED_IDENTITY_VM_TOKEN, DOC_ENTRA_AUTH],
+            "implementation_gate": "Do not perform connector-local IMDS/MSAL token acquisition from this connector process unless FCP gains an auth preflight/host-token-broker operation with a separate all-local network policy."
         }),
     ]
+}
+
+fn connector_local_identity_policy_info() -> Value {
+    json!({
+        "status": "host_token_broker_required",
+        "tracking_bead": "flywheel_connectors-4kw5f.2.9.6.3",
+        "official_docs": [DOC_MANAGED_IDENTITY_VM_TOKEN, DOC_ENTRA_AUTH],
+        "imds": {
+            "endpoint_class": "azure_imds_link_local",
+            "host_allow": [IMDS_HOST],
+            "port_allow": [80],
+            "api_version": IMDS_API_VERSION,
+            "metadata_header_required": true,
+            "target_resource": COGNITIVE_SERVICES_ENTRA_RESOURCE,
+        },
+        "supported_boundary": "host-provided entra_access_token/aad_access_token or credential_id",
+        "host_policy_reason": "Runtime-enforced Azure Speech operations need external Microsoft Speech hosts. Direct IMDS requires a link-local HTTP local/LAN exception, and FCP treats that as a separate all-local policy shape rather than something to mix into every provider operation.",
+    })
 }
 
 fn streaming_blocker_info() -> Value {
@@ -2144,6 +2350,47 @@ fn optional_config_string(input: &Value, field: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn optional_config_bool(input: &Value, field: &str) -> FcpResult<Option<bool>> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+    match value {
+        Value::Bool(flag) => Ok(Some(*flag)),
+        Value::String(text) => match text.trim() {
+            "true" | "1" | "yes" => Ok(Some(true)),
+            "false" | "0" | "no" => Ok(Some(false)),
+            _ => Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("{field} must be a boolean"),
+            }),
+        },
+        _ => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must be a boolean"),
+        }),
+    }
+}
+
+fn connector_local_identity_source_requested(params: &Value) -> bool {
+    let source = params
+        .get("entra_token_source")
+        .and_then(Value::as_str)
+        .map(str::trim);
+    match source {
+        Some("connector_local_managed_identity" | "connector-local-managed-identity" | "imds") => {
+            true
+        }
+        Some("managed_identity" | "managed-identity")
+            if optional_config_string(params, "entra_access_token")
+                .or_else(|| optional_config_string(params, "aad_access_token"))
+                .is_none() =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
 fn bounded_usize(
     value: Option<&Value>,
     label: &str,
@@ -2314,6 +2561,50 @@ fn validate_azure_resource_id(resource_id: &str) -> FcpResult<&str> {
     Ok(resource_id)
 }
 
+fn validate_managed_identity_resource(resource: &str) -> FcpResult<()> {
+    let normalized = resource.trim();
+    if normalized != resource || normalized.is_empty() || resource.contains(['\r', '\n']) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "managed_identity_resource must be a non-empty trimmed URI without newlines"
+                .into(),
+        });
+    }
+    let parsed = Url::parse(resource).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("managed_identity_resource must be an absolute URI: {error}"),
+    })?;
+    if parsed.scheme() != "https" {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "managed_identity_resource must use https".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "managed_identity_resource must not include query or fragment".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_managed_identity_selector(label: &str, value: &str) -> FcpResult<()> {
+    if value.trim() != value || value.is_empty() || value.len() > 512 {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label} must be non-empty, trimmed, and at most 512 bytes"),
+        });
+    }
+    if value.contains(['\r', '\n']) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label} must not contain control newlines"),
+        });
+    }
+    Ok(())
+}
+
 fn redact_identifier(value: &str) -> String {
     let mut chars = value.chars();
     let prefix: String = chars.by_ref().take(8).collect();
@@ -2468,6 +2759,57 @@ mod tests {
     }
 
     #[test]
+    fn connector_local_identity_request_builds_imds_url_without_leakage() {
+        let request = ConnectorLocalIdentityRequest::from_params(&json!({
+            "connector_local_identity": true,
+            "managed_identity_client_id": "11111111-2222-3333-4444-555555555555",
+            "managed_identity_resource": COGNITIVE_SERVICES_ENTRA_RESOURCE,
+            "region": "eastus",
+        }))
+        .expect("request parsing should succeed")
+        .expect("connector-local identity should be requested");
+
+        assert_eq!(request.host_allowlist(), vec![IMDS_HOST.to_string()]);
+        assert_eq!(request.selector_class(), "client_id");
+        assert_eq!(
+            request.resource_id_hash(),
+            sha256_hex(COGNITIVE_SERVICES_ENTRA_RESOURCE.as_bytes())
+        );
+        let url = request.request_url();
+        assert_eq!(url.scheme(), "http");
+        assert_eq!(url.host_str(), Some(IMDS_HOST));
+        let pairs = url.query_pairs().collect::<Vec<_>>();
+        assert!(
+            pairs
+                .iter()
+                .any(|(key, value)| { key == "api-version" && value == IMDS_API_VERSION })
+        );
+        assert!(pairs.iter().any(|(key, value)| {
+            key == "resource" && value == COGNITIVE_SERVICES_ENTRA_RESOURCE
+        }));
+        assert!(pairs.iter().any(|(key, value)| {
+            key == "client_id" && value == "11111111-2222-3333-4444-555555555555"
+        }));
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("11111111-2222-3333-4444-555555555555"));
+        assert!(!debug.contains(COGNITIVE_SERVICES_ENTRA_RESOURCE));
+    }
+
+    #[test]
+    fn config_rejects_connector_local_identity_with_host_policy_guidance() {
+        let error = AzureSpeechConfig::from_params(&json!({
+            "connector_local_identity": true,
+            "managed_identity_client_id": "11111111-2222-3333-4444-555555555555",
+            "region": "eastus",
+        }))
+        .expect_err("connector-local IMDS should be rejected by policy");
+        let message = error.to_string();
+        assert!(message.contains("host-provided entra_access_token"));
+        assert!(message.contains("runtime network policy"));
+        assert!(!message.contains("11111111-2222-3333-4444-555555555555"));
+    }
+
+    #[test]
     fn config_rejects_ambiguous_or_invalid_enterprise_auth() {
         let both = AzureSpeechConfig::from_params(&json!({
             "subscription_key": "secret-key",
@@ -2489,6 +2831,13 @@ mod tests {
             "region": "eastus",
         }));
         assert!(invalid_resource.is_err());
+
+        let ambiguous_connector_local = AzureSpeechConfig::from_params(&json!({
+            "entra_access_token": "secret-aad-token",
+            "connector_local_identity": true,
+            "region": "eastus",
+        }));
+        assert!(ambiguous_connector_local.is_err());
     }
 
     #[test]
@@ -2639,6 +2988,15 @@ mod tests {
         assert!(deferred_ids.contains(&"azure.speech.stt.realtime.websocket"));
         assert!(deferred_ids.contains(&"azure.speech.stt.custom_speech.projects"));
         assert!(deferred_ids.contains(&"azure.speech.auth.connector_local_identity"));
+        let identity = connector_local_identity_policy_info();
+        assert_eq!(identity["status"], "host_token_broker_required");
+        assert_eq!(identity["imds"]["host_allow"][0], IMDS_HOST);
+        assert!(
+            identity["host_policy_reason"]
+                .as_str()
+                .expect("host policy reason should be a string")
+                .contains("Runtime-enforced Azure Speech operations")
+        );
         for operation in deferred.iter().filter(|operation| {
             operation.get("outcome").and_then(Value::as_str)
                 == Some("blocked_official_sdk_only_protocol")

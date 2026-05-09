@@ -8,17 +8,19 @@ This connector implements the core Azure Speech REST surface for FCP:
 - REST text-to-speech synthesis through `/cognitiveservices/v1`
 - Speech-to-text fast and batch transcription through `2025-10-15`
 
-Realtime WebSocket sessions, custom speech project/model lifecycle, and connector-local IMDS/MSAL token acquisition are intentionally separate follow-up surfaces: `flywheel_connectors-4kw5f.2.9.6.1.2`, `flywheel_connectors-4kw5f.2.9.6.2`, and `flywheel_connectors-4kw5f.2.9.6.3`.
+Realtime WebSocket sessions and custom speech project/model lifecycle are intentionally separate follow-up surfaces: `flywheel_connectors-4kw5f.2.9.6.1.2` and `flywheel_connectors-4kw5f.2.9.6.2`. Connector-local IMDS/MSAL token acquisition was reviewed under `flywheel_connectors-4kw5f.2.9.6.3` and is retained as a host-token-broker-only boundary.
 
 ## Enterprise Auth Status
 
 `flywheel_connectors-4kw5f.2.9.6.1.4` supports three auth modes without writing secrets to disk:
 
 - `subscription_key` / `api_key`: the connector preserves the existing key path. TTS and voices exchange the key for an issued Speech bearer token; 2025-10-15 STT operations send `Ocp-Apim-Subscription-Key` because the REST reference declares that security scheme.
-- `entra_access_token`: the host supplies a current Microsoft Entra access token. When `entra_resource_id` is present, the connector constructs the documented `aad#<resource-id>#<token>` bearer payload and returns only the resource-id hash. When `entra_token_format = "bearer_token"`, the connector sends the raw bearer token for current keyless speech endpoints that document standard Entra bearer auth.
+- `entra_access_token`: the host supplies a current Microsoft Entra access token. When `entra_resource_id` is present, the connector constructs the documented `aad#<resource-id>#<token>` bearer payload and returns only the resource-id hash. When `entra_token_format = "bearer_token"`, the connector sends the raw bearer token for current keyless speech endpoints that document standard Entra bearer auth. `entra_token_source = "managed_identity"` means the host token broker obtained the token from managed identity; the connector does not contact IMDS itself.
 - `credential_id`: the connector emits `X-FCP-Credential-ID` for host/egress credential injection. Direct live self-check remains degraded because Microsoft endpoints require the host to materialize a concrete bearer token before egress.
 
 The connector validates Azure Cognitive Services resource IDs, tracks optional `entra_token_expires_in_seconds`, refuses expired Entra tokens with refresh guidance, and redacts access tokens, subscription keys, tenant/resource identifiers, and provider SAS URLs from connector outputs.
+
+Connector-local managed identity acquisition is intentionally rejected with structured guidance. Current Microsoft IMDS docs require a local HTTP request to `169.254.169.254/metadata/identity/oauth2/token` with `Metadata: true`, `api-version=2018-02-01`, a target resource such as `https://cognitiveservices.azure.com/`, and optional identity selectors. FCP runtime network policy treats local/LAN exceptions as all-local operation policies, while Azure Speech operations also need external Microsoft Speech hosts. Mixing both in every provider operation would broaden the runtime network claim, so the supported production shape is host-token-broker acquisition plus `entra_access_token` or `credential_id` handoff.
 
 All invoke paths require a bound FCP capability token after handshake. The connector verifies the token zone, target instance, operation, capability, and resource constraints before any provider request is built, so a wrong-zone or wrong-instance grant is denied without contacting Azure.
 
@@ -41,10 +43,11 @@ Current docs:
 - <https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-control-connections>
 - <https://learn.microsoft.com/en-us/azure/ai-services/speech-service/rest-text-to-speech#authentication>
 - <https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-configure-azure-ad-auth>
+- <https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/how-to-use-vm-token>
 - <https://learn.microsoft.com/en-us/azure/ai-services/speech-service/llm-speech>
 
 ## Verification
 
-The closeout proof lane is `scripts/e2e/azure_speech_connector_verification.sh`. It runs the no-live-credential loopback matrix through the production connector boundary and emits redacted JSONL records for token issue, voices.list, TTS synth, STT fast transcription, batch submit/get/files, provider error redaction, rate-limit retry, timeout, malformed input, unsupported format, oversized audio, capability-token zone and instance denial, harness cancellation, streaming blocker disposition, shutdown cleanup, and optional live-smoke skip/pass state.
+The closeout proof lane is `scripts/e2e/azure_speech_connector_verification.sh`. It runs the no-live-credential loopback matrix through the production connector boundary and emits redacted JSONL records for token issue, voices.list, TTS synth, STT fast transcription, batch submit/get/files, host-brokered managed-identity token handoff, connector-local IMDS policy skips, provider error redaction, rate-limit retry, timeout, malformed input, unsupported format, oversized audio, capability-token zone and instance denial, harness cancellation, streaming blocker disposition, shutdown cleanup, and optional live-smoke skip/pass state.
 
-The JSONL contract records command line, git revision, connector id, operation id, capability, zone, instance id, fixture/live mode, region and endpoint class, auth mode, voice/language/model id, content type, audio byte counts, transcript length only, stream chunk count, HTTP status, retry/backoff decision, FCP error mapping, latency, result, audit receipt id, cleanup result, and skip reason. It deliberately rejects keys, bearer tokens, tenant/resource IDs, SAS URLs, SSML/text content, transcripts, raw audio bytes, provider bodies, local absolute paths, and PII.
+The JSONL contract records command line, git revision, connector id, operation id, capability, zone, instance id, fixture/live mode, region and endpoint class, auth mode, token source class, resource id hash, voice/language/model id, content type, audio byte counts, transcript length only, stream chunk count, HTTP status, retry/backoff decision, FCP error mapping, latency, result, audit receipt id, cleanup result, and skip reason. It deliberately rejects keys, bearer tokens, raw tenant/resource IDs, SAS URLs, SSML/text content, transcripts, raw audio bytes, provider bodies, local absolute paths, and PII.

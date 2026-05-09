@@ -46,6 +46,14 @@ required_scenarios=(
   batch_submit
   batch_get
   batch_files
+  managed_identity_host_token_handoff
+  connector_local_imds_policy_skip
+  imds_token_success_skip
+  imds_expired_refresh_skip
+  imds_missing_permission_skip
+  imds_tenant_resource_mismatch_skip
+  imds_timeout_skip
+  imds_provider_auth_failure_skip
   rate_limit_retry
   provider_error_401
   provider_timeout
@@ -84,6 +92,8 @@ jq -e '
       .region_class,
       .endpoint_class,
       .auth_mode,
+      .token_source_class,
+      .resource_id_hash,
       .voice_id,
       .language_id,
       .model_id,
@@ -104,7 +114,7 @@ jq -e '
   | all(. != null)
 ' "${LOG_JSONL}" >/dev/null
 
-if grep -aE 'loopback-secret|aad-secret|Bearer|/subscriptions/|sig=SECRET|Weather|hello|nightly support calls|should-not-leak|transcript text|raw-audio' "${LOG_JSONL}" >/dev/null; then
+if grep -aE 'loopback-secret|aad-secret|Bearer|/subscriptions/|11111111-2222-3333-4444-555555555555|sig=SECRET|Weather|hello|nightly support calls|should-not-leak|transcript text|raw-audio' "${LOG_JSONL}" >/dev/null; then
   echo "Azure Speech e2e JSONL leaked a forbidden secret, transcript, provider URL, or content fragment" >&2
   exit 1
 fi

@@ -29,6 +29,7 @@ safety_tier = "risky"
 idempotency = "none"
 input_schema = { type = "object", required = ["channel_id", "content"], additionalProperties = false, properties = { channel_id = { type = "string", minLength = 1, pattern = "^[^/\\\\]+$", not = { pattern = "\\.\\.|%2[fFeE]|%5[cC]" } }, content = { type = "string", minLength = 1, pattern = "\\S" }, msg_id = { type = "string" } } }
 output_schema = { type = "object", additionalProperties = true, properties = { id = { type = "string" }, timestamp = { type = "string" } } }
+network_constraints = { host_allow = ["api.sgroup.qq.com", "bots.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.messages_send_group]
 summary = "Send a QQ group message"
@@ -38,6 +39,7 @@ safety_tier = "risky"
 idempotency = "none"
 input_schema = { type = "object", required = ["group_openid", "content"], additionalProperties = false, properties = { group_openid = { type = "string", minLength = 1, pattern = "^[^/\\\\]+$", not = { pattern = "\\.\\.|%2[fFeE]|%5[cC]" } }, content = { type = "string", minLength = 1, pattern = "\\S" }, msg_id = { type = "string" } } }
 output_schema = { type = "object", additionalProperties = true, properties = { id = { type = "string" }, timestamp = { type = "string" } } }
+network_constraints = { host_allow = ["api.sgroup.qq.com", "bots.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.messages_send_c2c]
 summary = "Send a QQ direct C2C message"
@@ -47,6 +49,7 @@ safety_tier = "risky"
 idempotency = "none"
 input_schema = { type = "object", required = ["openid", "content"], additionalProperties = false, properties = { openid = { type = "string", minLength = 1, pattern = "^[^/\\\\]+$", not = { pattern = "\\.\\.|%2[fFeE]|%5[cC]" } }, content = { type = "string", minLength = 1, pattern = "\\S" }, msg_id = { type = "string" } } }
 output_schema = { type = "object", additionalProperties = true, properties = { id = { type = "string" }, timestamp = { type = "string" } } }
+network_constraints = { host_allow = ["api.sgroup.qq.com", "bots.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.gateway_get]
 summary = "Get the QQ gateway websocket URL"
@@ -56,6 +59,7 @@ safety_tier = "safe"
 idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["url"], additionalProperties = true, properties = { url = { type = "string", format = "uri" } } }
+network_constraints = { host_allow = ["api.sgroup.qq.com", "bots.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.events_normalize]
 summary = "Normalize a QQ gateway message event"
@@ -65,6 +69,7 @@ safety_tier = "safe"
 idempotency = "strict"
 input_schema = { type = "object", required = ["event"], additionalProperties = false, properties = { event = { type = "object", required = ["op"], additionalProperties = false, properties = { op = { type = "integer", minimum = 0, maximum = 255 }, s = { type = ["integer", "null"], minimum = 0 }, t = { type = ["string", "null"], maxLength = 64, pattern = "^[A-Z0-9_]+$" }, d = { type = ["object", "null"], additionalProperties = true }, id = { type = ["string", "null"], maxLength = 256 } } } } }
 output_schema = { type = "object", required = ["event_type", "message_id", "channel_id", "guild_id", "group_id", "sender_id", "sender_name", "text", "timestamp", "is_reply", "reply_to", "has_attachments", "routing", "raw"], additionalProperties = false, properties = { event_type = { type = "string" }, message_id = { type = ["string", "null"] }, channel_id = { type = ["string", "null"] }, guild_id = { type = ["string", "null"] }, group_id = { type = ["string", "null"] }, sender_id = { type = ["string", "null"] }, sender_name = { type = ["string", "null"] }, text = { type = ["string", "null"] }, timestamp = { type = ["string", "null"] }, is_reply = { type = "boolean" }, reply_to = { type = ["string", "null"] }, has_attachments = { type = "boolean" }, routing = { type = "string", enum = ["channel", "group", "c2c"] }, raw = { type = ["object", "null"], additionalProperties = true } } }
+network_constraints = { host_allow = ["none.invalid"], port_allow = [0], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 0, max_redirects = 0, connect_timeout_ms = 1000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.gateway_project_event]
 summary = "Project a QQ gateway event through sequence, replay, and inbound policy state"
@@ -74,6 +79,7 @@ safety_tier = "safe"
 idempotency = "strict"
 input_schema = { type = "object", required = ["event"], additionalProperties = false, properties = { event = { type = "object", required = ["op"], additionalProperties = false, properties = { op = { type = "integer", minimum = 0, maximum = 255 }, s = { type = ["integer", "null"], minimum = 0 }, t = { type = ["string", "null"], maxLength = 64, pattern = "^[A-Z0-9_]+$" }, d = { type = ["object", "null"], additionalProperties = true }, id = { type = ["string", "null"], maxLength = 256 } } } } }
 output_schema = { type = "object", required = ["accepted", "topic", "reason_code", "sequence", "event_id", "normalized", "policy", "runtime"], additionalProperties = false, properties = { accepted = { type = "boolean" }, topic = { type = "string", enum = ["qq.message.authorized", "qq.event.dropped"] }, reason_code = { type = "string" }, sequence = { type = ["integer", "null"], minimum = 0 }, event_id = { type = ["string", "null"] }, normalized = { anyOf = [{ type = "object", required = ["event_type", "message_id", "channel_id", "guild_id", "group_id", "sender_id", "sender_name", "text", "timestamp", "is_reply", "reply_to", "has_attachments", "routing", "raw"], additionalProperties = false, properties = { event_type = { type = "string" }, message_id = { type = ["string", "null"] }, channel_id = { type = ["string", "null"] }, guild_id = { type = ["string", "null"] }, group_id = { type = ["string", "null"] }, sender_id = { type = ["string", "null"] }, sender_name = { type = ["string", "null"] }, text = { type = ["string", "null"] }, timestamp = { type = ["string", "null"] }, is_reply = { type = "boolean" }, reply_to = { type = ["string", "null"] }, has_attachments = { type = "boolean" }, routing = { type = "string", enum = ["channel", "group", "c2c"] }, raw = { type = ["object", "null"], additionalProperties = true } } }, { type = "null" }] }, policy = { anyOf = [{ type = "object", required = ["allowed", "reason_code", "routing", "sender_id", "target_id", "mentioned_bot"], additionalProperties = false, properties = { allowed = { type = "boolean" }, reason_code = { type = "string" }, routing = { type = "string", enum = ["channel", "group", "c2c"] }, sender_id = { type = ["string", "null"] }, target_id = { type = ["string", "null"] }, mentioned_bot = { type = "boolean" } } }, { type = "null" }] }, runtime = { type = "object", required = ["enabled", "session_id", "last_sequence", "heartbeat_interval_ms", "heartbeat_sent_count", "heartbeat_ack_count", "reconnect_attempts", "max_reconnect_attempts", "reconnect_backoff_ms", "queue_depth", "max_queue_depth", "dedupe_size", "dedupe_window_size", "accepted_events", "dropped_events", "duplicate_events", "stale_sequence_events"], additionalProperties = false, properties = { enabled = { type = "boolean" }, session_id = { type = ["string", "null"] }, last_sequence = { type = "integer", minimum = 0 }, heartbeat_interval_ms = { type = "integer", minimum = 0 }, heartbeat_sent_count = { type = "integer", minimum = 0 }, heartbeat_ack_count = { type = "integer", minimum = 0 }, reconnect_attempts = { type = "integer", minimum = 0 }, max_reconnect_attempts = { type = "integer", minimum = 0 }, reconnect_backoff_ms = { type = "integer", minimum = 0 }, queue_depth = { type = "integer", minimum = 0 }, max_queue_depth = { type = "integer", minimum = 0 }, dedupe_size = { type = "integer", minimum = 0 }, dedupe_window_size = { type = "integer", minimum = 0 }, accepted_events = { type = "integer", minimum = 0 }, dropped_events = { type = "integer", minimum = 0 }, duplicate_events = { type = "integer", minimum = 0 }, stale_sequence_events = { type = "integer", minimum = 0 } } } } }
+network_constraints = { host_allow = ["none.invalid"], port_allow = [0], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 0, max_redirects = 0, connect_timeout_ms = 1000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.health]
 summary = "Verify QQ credentials and gateway discovery"
@@ -83,6 +89,7 @@ safety_tier = "safe"
 idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["status", "base_url", "gateway", "manifest_hash"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, base_url = { type = "string", format = "uri" }, gateway = { type = ["string", "null"], format = "uri" }, manifest_hash = { type = "string", pattern = "^sha256:[0-9a-f]{64}$" } } }
+network_constraints = { host_allow = ["api.sgroup.qq.com", "bots.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [sandbox]
 profile = "strict"

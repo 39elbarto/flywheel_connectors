@@ -129,7 +129,9 @@ The projection operation does not log `client_secret`, access tokens, or raw tra
 - Production token host: `bots.qq.com`
 - Port: `443`
 - TLS + SNI required for live traffic
-- `localhost` and `127.0.0.1` are accepted only for deterministic tests or local harnesses
+- Send, gateway-discovery, and health operations declare per-operation egress only to `api.sgroup.qq.com` and `bots.qq.com`
+- Gateway event normalization and gateway event projection are connector-local and declare a no-egress sentinel
+- `localhost` and `127.0.0.1` remain accepted only in connector configuration for deterministic tests or local harnesses, not in production manifest egress constraints
 - The runtime remains request-response at the transport boundary
 - No inbound listener, webhook server, websocket read loop, or durable connector-local state is part of this slice
 - Gateway projection state is in-memory only and intentionally bounded by `gateway.dedupe_window_size` and `gateway.max_queue_depth`

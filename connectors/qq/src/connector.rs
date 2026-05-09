@@ -1098,6 +1098,51 @@ mod tests {
             .map_err(|err| format!("{operation_key}.{field} should convert to JSON: {err}"))
     }
 
+    fn operation_network_constraints<'a>(
+        manifest: &'a toml::Value,
+        operation_key: &str,
+    ) -> Result<&'a toml::map::Map<String, toml::Value>, String> {
+        manifest_operations(manifest)?
+            .get(operation_key)
+            .and_then(toml::Value::as_table)
+            .and_then(|operation| operation.get("network_constraints"))
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| format!("{operation_key} should declare network_constraints"))
+    }
+
+    fn string_array(
+        table: &toml::map::Map<String, toml::Value>,
+        key: &str,
+    ) -> Result<Vec<String>, String> {
+        table
+            .get(key)
+            .and_then(toml::Value::as_array)
+            .ok_or_else(|| format!("{key} should be an array"))?
+            .iter()
+            .map(|item| {
+                item.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("{key} entries should be strings"))
+            })
+            .collect()
+    }
+
+    fn integer_array(
+        table: &toml::map::Map<String, toml::Value>,
+        key: &str,
+    ) -> Result<Vec<i64>, String> {
+        table
+            .get(key)
+            .and_then(toml::Value::as_array)
+            .ok_or_else(|| format!("{key} should be an array"))?
+            .iter()
+            .map(|item| {
+                item.as_integer()
+                    .ok_or_else(|| format!("{key} entries should be integers"))
+            })
+            .collect()
+    }
+
     fn validator_for(schema: &serde_json::Value) -> Result<jsonschema::Validator, String> {
         jsonschema::Validator::new(schema)
             .map_err(|err| format!("manifest operation schema should compile: {err}"))
@@ -1431,6 +1476,86 @@ mod tests {
                 "runtime": sample_runtime_snapshot()
             }),
         )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_declares_strict_per_operation_network_constraints() -> Result<(), String> {
+        let manifest = qq_manifest()?;
+        let operations = manifest_operations(&manifest)?;
+        let api_operations = [
+            "messages_send_channel",
+            "messages_send_group",
+            "messages_send_c2c",
+            "gateway_get",
+            "health",
+        ];
+        let local_only_operations = ["events_normalize", "gateway_project_event"];
+
+        for operation_key in api_operations {
+            let constraints = operation_network_constraints(&manifest, operation_key)?;
+            assert_eq!(
+                string_array(constraints, "host_allow")?,
+                vec!["api.sgroup.qq.com".to_owned(), "bots.qq.com".to_owned()],
+                "{operation_key} should only allow QQ API and token hosts"
+            );
+            assert_eq!(integer_array(constraints, "port_allow")?, vec![443]);
+            assert_eq!(constraints["require_sni"].as_bool(), Some(true));
+            assert_eq!(constraints["deny_localhost"].as_bool(), Some(true));
+            assert_eq!(constraints["deny_private_ranges"].as_bool(), Some(true));
+            assert_eq!(constraints["deny_tailnet_ranges"].as_bool(), Some(true));
+            assert_eq!(constraints["deny_ip_literals"].as_bool(), Some(true));
+            assert_eq!(
+                constraints["require_host_canonicalization"].as_bool(),
+                Some(true)
+            );
+            assert_eq!(constraints["dns_max_ips"].as_integer(), Some(16));
+            assert_eq!(constraints["max_redirects"].as_integer(), Some(0));
+            assert_eq!(constraints["connect_timeout_ms"].as_integer(), Some(10_000));
+            assert_eq!(constraints["total_timeout_ms"].as_integer(), Some(30_000));
+            assert_eq!(
+                constraints["max_response_bytes"].as_integer(),
+                Some(1_048_576)
+            );
+        }
+
+        for operation_key in local_only_operations {
+            let constraints = operation_network_constraints(&manifest, operation_key)?;
+            assert_eq!(
+                string_array(constraints, "host_allow")?,
+                vec!["none.invalid".to_owned()],
+                "{operation_key} should use the no-egress sentinel"
+            );
+            assert_eq!(integer_array(constraints, "port_allow")?, vec![0]);
+            assert_eq!(constraints["require_sni"].as_bool(), Some(false));
+            assert_eq!(constraints["deny_localhost"].as_bool(), Some(true));
+            assert_eq!(constraints["deny_private_ranges"].as_bool(), Some(true));
+            assert_eq!(constraints["deny_tailnet_ranges"].as_bool(), Some(true));
+            assert_eq!(constraints["deny_ip_literals"].as_bool(), Some(true));
+            assert_eq!(
+                constraints["require_host_canonicalization"].as_bool(),
+                Some(true)
+            );
+            assert_eq!(constraints["dns_max_ips"].as_integer(), Some(0));
+            assert_eq!(constraints["max_redirects"].as_integer(), Some(0));
+            assert_eq!(constraints["connect_timeout_ms"].as_integer(), Some(1_000));
+            assert_eq!(constraints["total_timeout_ms"].as_integer(), Some(30_000));
+            assert_eq!(
+                constraints["max_response_bytes"].as_integer(),
+                Some(1_048_576)
+            );
+        }
+
+        for (operation_key, operation) in operations {
+            assert!(
+                operation
+                    .as_table()
+                    .and_then(|table| table.get("network_constraints"))
+                    .is_some(),
+                "{operation_key} should declare per-operation network_constraints"
+            );
+        }
 
         Ok(())
     }

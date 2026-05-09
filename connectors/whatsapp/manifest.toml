@@ -33,13 +33,21 @@ output_schema = { type = "object", required = ["message_id", "wa_id"], additiona
 [provides.operations.send_text.network_constraints]
 host_allow = ["graph.facebook.com"]
 port_allow = [443]
+ip_allow = []
+cidr_deny = []
 require_tls = true
 require_sni = true
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
+spki_pins = []
 deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations.send_text.ai_hints]
 when_to_use = "When you need to send a plain text message to a WhatsApp user"
@@ -56,13 +64,21 @@ output_schema = { type = "object", required = ["message_id", "wa_id"], additiona
 [provides.operations.send_template.network_constraints]
 host_allow = ["graph.facebook.com"]
 port_allow = [443]
+ip_allow = []
+cidr_deny = []
 require_tls = true
 require_sni = true
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
+spki_pins = []
 deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations.send_template.ai_hints]
 when_to_use = "When sending business-initiated messages outside the 24h conversation window"
@@ -79,13 +95,21 @@ output_schema = { type = "object", additionalProperties = false, properties = { 
 [provides.operations.get_profile.network_constraints]
 host_allow = ["graph.facebook.com"]
 port_allow = [443]
+ip_allow = []
+cidr_deny = []
 require_tls = true
 require_sni = true
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
+spki_pins = []
 deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
 max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations.get_profile.ai_hints]
 when_to_use = "When you need to check or display the business profile"
@@ -99,6 +123,24 @@ idempotency = "strict"
 input_schema = { type = "object", required = ["hub_mode", "hub_verify_token", "hub_challenge"], additionalProperties = false, properties = { hub_mode = { type = "string", description = "Must be 'subscribe'" }, hub_verify_token = { type = "string", description = "Token to verify" }, hub_challenge = { type = "string", description = "Challenge string to echo back" } } }
 output_schema = { type = "object", required = ["challenge"], additionalProperties = false, properties = { challenge = { type = "string", description = "Echoed challenge for Meta" } } }
 
+[provides.operations.webhook_verify.network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations.webhook_verify.ai_hints]
 when_to_use = "When Meta sends a Cloud API webhook verification challenge through host-managed ingress"
 
@@ -110,6 +152,24 @@ safety_tier = "safe"
 idempotency = "strict"
 input_schema = { type = "object", required = ["headers", "body"], additionalProperties = false, properties = { headers = { type = "object", description = "HTTP headers including X-Hub-Signature-256", additionalProperties = { type = "string" } }, body = { type = "string", description = "Raw request body (JSON string)" } } }
 output_schema = { type = "object", additionalProperties = false, properties = { events = { type = "array", items = { type = "object", properties = { id = { type = "string" }, event_type = { type = "string" }, event_kind = { type = "string", enum = ["message", "status", "unknown"] }, agent_turn_eligible = { type = "boolean" }, payload = { type = "object" }, policy = { type = "object" } } } }, event_count = { type = "integer" }, dropped_event_count = { type = "integer" }, replay_dropped_count = { type = "integer" }, policy_decisions = { type = "array", items = { type = "object" } }, connector_scope = { type = "string", const = "whatsapp_business_cloud_api" }, personal_bridge_supported = { type = "boolean", const = false } } }
+
+[provides.operations.webhook_receive.network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations.webhook_receive.ai_hints]
 when_to_use = "When host ingress forwards a signed WhatsApp Cloud API webhook body for signature, replay, and sender-policy checks"

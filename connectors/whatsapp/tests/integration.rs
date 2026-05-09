@@ -48,6 +48,8 @@ const EXPECTED_MANIFEST_SCHEMA_OPS: [(&str, &str); 5] = [
     ("webhook_verify", OP_WEBHOOK_VERIFY),
     ("webhook_receive", OP_WEBHOOK_RECEIVE),
 ];
+const WHATSAPP_API_EGRESS_OPERATION_KEYS: [&str; 3] = ["send_text", "send_template", "get_profile"];
+const NO_CONNECTOR_EGRESS_OPERATION_KEYS: [&str; 2] = ["webhook_verify", "webhook_receive"];
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -70,6 +72,59 @@ fn operation_schema(manifest: &toml::Value, operation_key: &str, schema_key: &st
         .expect("operation should define requested schema");
 
     serde_json::to_value(schema).expect("manifest schema should convert to JSON")
+}
+
+fn operation_network_constraints<'a>(
+    manifest: &'a toml::Value,
+    operation_key: &str,
+) -> &'a toml::Table {
+    manifest_operations(manifest)
+        .get(operation_key)
+        .and_then(|operation| operation.get("network_constraints"))
+        .and_then(toml::Value::as_table)
+        .expect("operation should define network_constraints")
+}
+
+fn string_array_field<'a>(table: &'a toml::Table, key: &str) -> Vec<&'a str> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .unwrap_or_else(|| panic!("network_constraints.{key} should be an array"))
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .unwrap_or_else(|| panic!("network_constraints.{key} entries should be strings"))
+        })
+        .collect()
+}
+
+fn integer_array_field(table: &toml::Table, key: &str) -> Vec<i64> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .unwrap_or_else(|| panic!("network_constraints.{key} should be an array"))
+        .iter()
+        .map(|value| {
+            value
+                .as_integer()
+                .unwrap_or_else(|| panic!("network_constraints.{key} entries should be integers"))
+        })
+        .collect()
+}
+
+fn bool_field(table: &toml::Table, key: &str) -> bool {
+    table
+        .get(key)
+        .and_then(toml::Value::as_bool)
+        .unwrap_or_else(|| panic!("network_constraints.{key} should be a bool"))
+}
+
+fn integer_field(table: &toml::Table, key: &str) -> i64 {
+    table
+        .get(key)
+        .and_then(toml::Value::as_integer)
+        .unwrap_or_else(|| panic!("network_constraints.{key} should be an integer"))
 }
 
 fn assert_schema_accepts(schema: &Value, payload: &Value) {
@@ -269,12 +324,78 @@ fn assert_output_schema_examples(manifest: &toml::Value) {
     );
 }
 
+fn assert_whatsapp_api_network_constraints(network: &toml::Table) {
+    assert_eq!(
+        string_array_field(network, "host_allow"),
+        ["graph.facebook.com"]
+    );
+    assert_eq!(integer_array_field(network, "port_allow"), [443]);
+    assert!(string_array_field(network, "ip_allow").is_empty());
+    assert!(string_array_field(network, "cidr_deny").is_empty());
+    assert!(bool_field(network, "require_tls"));
+    assert!(bool_field(network, "require_sni"));
+    assert!(bool_field(network, "deny_localhost"));
+    assert!(bool_field(network, "deny_private_ranges"));
+    assert!(bool_field(network, "deny_tailnet_ranges"));
+    assert!(string_array_field(network, "spki_pins").is_empty());
+    assert!(bool_field(network, "deny_ip_literals"));
+    assert!(bool_field(network, "require_host_canonicalization"));
+    assert_eq!(integer_field(network, "dns_max_ips"), 16);
+    assert_eq!(integer_field(network, "max_redirects"), 0);
+    assert_eq!(integer_field(network, "connect_timeout_ms"), 10_000);
+    assert_eq!(integer_field(network, "total_timeout_ms"), 30_000);
+    assert_eq!(integer_field(network, "max_response_bytes"), 1_048_576);
+}
+
+fn assert_no_connector_egress_network_constraints(network: &toml::Table) {
+    assert_eq!(string_array_field(network, "host_allow"), ["none.invalid"]);
+    assert_eq!(integer_array_field(network, "port_allow"), [0]);
+    assert!(string_array_field(network, "ip_allow").is_empty());
+    assert!(string_array_field(network, "cidr_deny").is_empty());
+    assert!(bool_field(network, "deny_localhost"));
+    assert!(bool_field(network, "deny_private_ranges"));
+    assert!(bool_field(network, "deny_tailnet_ranges"));
+    assert!(!bool_field(network, "require_sni"));
+    assert!(string_array_field(network, "spki_pins").is_empty());
+    assert!(bool_field(network, "deny_ip_literals"));
+    assert!(bool_field(network, "require_host_canonicalization"));
+    assert_eq!(integer_field(network, "dns_max_ips"), 0);
+    assert_eq!(integer_field(network, "max_redirects"), 0);
+    assert_eq!(integer_field(network, "connect_timeout_ms"), 1_000);
+    assert_eq!(integer_field(network, "total_timeout_ms"), 30_000);
+    assert_eq!(integer_field(network, "max_response_bytes"), 1_048_576);
+}
+
 #[test]
 fn manifest_operation_schemas_compile_and_validate_core_payloads() {
     let manifest = whatsapp_manifest();
     assert_manifest_schema_catalog_matches_runtime(&manifest);
     assert_input_schema_examples(&manifest);
     assert_output_schema_examples(&manifest);
+}
+
+#[test]
+fn manifest_declares_strict_per_operation_network_constraints() {
+    let manifest = whatsapp_manifest();
+    let operations = manifest_operations(&manifest);
+    assert_eq!(
+        operations.len(),
+        EXPECTED_MANIFEST_SCHEMA_OPS.len(),
+        "manifest operation count should stay aligned with network-constraint coverage"
+    );
+
+    for operation_key in WHATSAPP_API_EGRESS_OPERATION_KEYS {
+        assert_whatsapp_api_network_constraints(operation_network_constraints(
+            &manifest,
+            operation_key,
+        ));
+    }
+    for operation_key in NO_CONNECTOR_EGRESS_OPERATION_KEYS {
+        assert_no_connector_egress_network_constraints(operation_network_constraints(
+            &manifest,
+            operation_key,
+        ));
+    }
 }
 
 fn generate_valid_token(

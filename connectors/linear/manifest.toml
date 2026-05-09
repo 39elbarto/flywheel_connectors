@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:3afcdebfb498b635c056407f598f5abf7795f301f35ecc1d57de7c310761901d"
+interface_hash = "blake3-256:fcp.interface.v2:9b9fb4db5a63d80d8b8d6a8c8506fb4939d4bfc60ca86235659c5144f2e514d6"
 
 [connector]
 id = "fcp.linear"
@@ -411,15 +411,18 @@ type = "object"
 type = "object"
 
 [provides.operations."linear.plan_sync".network_constraints]
-host_allow = ["api.linear.app"]
-port_allow = [443]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
-require_sni = true
+require_sni = false
+spki_pins = []
 deny_ip_literals = true
 require_host_canonicalization = true
-dns_max_ips = 16
+dns_max_ips = 0
 max_redirects = 0
 connect_timeout_ms = 10000
 total_timeout_ms = 30000
@@ -456,6 +459,24 @@ required = ["event"]
 type = "object"
 [provides.operations."linear.process_webhook".output_schema.properties.event]
 type = "object"
+
+[provides.operations."linear.process_webhook".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
 
 [provides.operations."linear.process_webhook".ai_hints]
 when_to_use = "Process a pre-verified Linear webhook payload forwarded by fcp-host."

@@ -1436,7 +1436,7 @@ mod tests {
     use chrono::{Duration, Utc};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
-    use fcp_manifest::ConnectorManifest;
+    use fcp_manifest::{ConnectorManifest, OperationSection};
     use fcp_prelude::CapabilityConstraints;
     use std::path::PathBuf;
 
@@ -2188,6 +2188,104 @@ mod tests {
                 assert_eq!(resource, "linear://issue/issue-1");
             }
             other => panic!("Expected ResourceNotAllowed, got: {other:?}"),
+        }
+    }
+
+    fn manifest_from_file() -> ConnectorManifest {
+        let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
+        let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
+        ConnectorManifest::parse_str(&raw).expect("manifest should validate")
+    }
+
+    fn assert_linear_api_network_constraints(id: &str, operation: &OperationSection) {
+        let constraints = operation
+            .network_constraints
+            .as_ref()
+            .unwrap_or_else(|| panic!("{id} should declare network_constraints"));
+        assert_eq!(
+            constraints.host_allow,
+            ["api.linear.app"],
+            "{id} should only allow the Linear GraphQL API host"
+        );
+        assert_eq!(constraints.port_allow, [443], "{id}");
+        assert!(constraints.require_sni, "{id} should require SNI");
+        assert!(constraints.deny_localhost, "{id} should deny localhost");
+        assert!(
+            constraints.deny_private_ranges,
+            "{id} should deny private ranges"
+        );
+        assert!(
+            constraints.deny_tailnet_ranges,
+            "{id} should deny tailnet ranges"
+        );
+        assert!(constraints.deny_ip_literals, "{id} should deny IP literals");
+        assert!(
+            constraints.require_host_canonicalization,
+            "{id} should require canonical host matching"
+        );
+        assert_eq!(constraints.dns_max_ips, 16, "{id}");
+        assert_eq!(constraints.max_redirects, 0, "{id}");
+    }
+
+    fn assert_no_connector_egress_network_constraints(id: &str, operation: &OperationSection) {
+        let constraints = operation
+            .network_constraints
+            .as_ref()
+            .unwrap_or_else(|| panic!("{id} should declare network_constraints"));
+        assert_eq!(
+            constraints.host_allow,
+            ["none.invalid"],
+            "{id} should advertise no connector-owned egress"
+        );
+        assert_eq!(constraints.port_allow, [0], "{id}");
+        assert!(
+            !constraints.require_sni,
+            "{id} should not require SNI for a no-egress sentinel"
+        );
+        assert!(constraints.deny_localhost, "{id} should deny localhost");
+        assert!(
+            constraints.deny_private_ranges,
+            "{id} should deny private ranges"
+        );
+        assert!(
+            constraints.deny_tailnet_ranges,
+            "{id} should deny tailnet ranges"
+        );
+        assert!(constraints.deny_ip_literals, "{id} should deny IP literals");
+        assert_eq!(constraints.dns_max_ips, 0, "{id}");
+        assert_eq!(constraints.max_redirects, 0, "{id}");
+        assert_eq!(constraints.max_response_bytes, 65_536, "{id}");
+    }
+
+    #[test]
+    fn manifest_declares_per_operation_network_constraints() {
+        let manifest = manifest_from_file();
+
+        for operation_id in [
+            "linear.create_issue",
+            "linear.get_issue",
+            "linear.update_issue",
+            "linear.search_issues",
+            "linear.list_teams",
+            "linear.list_cycles",
+            "linear.add_comment",
+            "linear.list_projects",
+        ] {
+            let operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .expect("operation should exist");
+            assert_linear_api_network_constraints(operation_id, operation);
+        }
+
+        for operation_id in ["linear.plan_sync", "linear.process_webhook"] {
+            let operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .expect("operation should exist");
+            assert_no_connector_egress_network_constraints(operation_id, operation);
         }
     }
 

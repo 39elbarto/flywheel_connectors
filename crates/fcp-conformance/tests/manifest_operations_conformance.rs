@@ -821,7 +821,6 @@ fn expected_network_constraints_gap_connectors() -> Vec<String> {
         "hue",
         "inworld",
         "irc",
-        "linear",
         "llm-router",
         "mastodon",
         "mattermost",

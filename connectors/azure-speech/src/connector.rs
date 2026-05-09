@@ -28,6 +28,16 @@ const DOC_STT_REST_OVERVIEW: &str =
     "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/rest-speech-to-text";
 const DOC_STT_TRANSCRIBE: &str = "https://learn.microsoft.com/en-us/rest/api/speechtotext/transcriptions/transcribe?view=rest-speechtotext-2025-10-15";
 const DOC_STT_BATCH_SUBMIT: &str = "https://learn.microsoft.com/en-us/rest/api/speechtotext/transcriptions/submit?view=rest-speechtotext-2025-10-15";
+const DOC_STT_2025_MIGRATION: &str =
+    "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/migrate-2025-10-15";
+const DOC_CUSTOM_SPEECH_PROJECT: &str = "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-custom-speech-create-project";
+const DOC_CUSTOM_SPEECH_DATASET: &str = "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-custom-speech-upload-data";
+const DOC_CUSTOM_SPEECH_MODEL: &str = "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-custom-speech-train-model";
+const DOC_CUSTOM_SPEECH_ENDPOINT: &str = "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-custom-speech-deploy-model";
+const DOC_CUSTOM_PROJECTS_API: &str = "https://learn.microsoft.com/en-us/rest/api/speechtotext/projects?view=rest-speechtotext-2025-10-15";
+const DOC_CUSTOM_DATASETS_API: &str = "https://learn.microsoft.com/en-us/rest/api/speechtotext/datasets?view=rest-speechtotext-2025-10-15";
+const DOC_CUSTOM_MODELS_API: &str = "https://learn.microsoft.com/en-us/rest/api/speechtotext/models?view=rest-speechtotext-2025-10-15";
+const DOC_CUSTOM_ENDPOINTS_API: &str = "https://learn.microsoft.com/en-us/rest/api/speechtotext/endpoints?view=rest-speechtotext-2025-10-15";
 const DOC_TTS_REST_AUTH: &str = "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/rest-text-to-speech#authentication";
 const DOC_ENTRA_AUTH: &str = "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-configure-azure-ad-auth";
 const DOC_MANAGED_IDENTITY_VM_TOKEN: &str = "https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/how-to-use-vm-token";
@@ -38,15 +48,53 @@ const DOC_STT_REALTIME: &str =
     "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-recognize-speech";
 const DOC_SDK_CONNECTIONS: &str =
     "https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-control-connections";
-const OPERATION_ORDER: [&str; 6] = [
+const OP_VOICES_LIST: &str = "azure.speech.voices.list";
+const OP_TTS_SYNTHESIZE: &str = "azure.speech.tts.synthesize";
+const OP_STT_TRANSCRIBE_FAST: &str = "azure.speech.stt.transcribe_fast";
+const OP_STT_BATCH_SUBMIT: &str = "azure.speech.stt.batch.submit";
+const OP_STT_BATCH_GET: &str = "azure.speech.stt.batch.get";
+const OP_STT_BATCH_FILES: &str = "azure.speech.stt.batch.files";
+const OP_CUSTOM_PROJECTS_CREATE: &str = "azure.speech.stt.custom.projects.create";
+const OP_CUSTOM_PROJECTS_LIST: &str = "azure.speech.stt.custom.projects.list";
+const OP_CUSTOM_PROJECTS_GET: &str = "azure.speech.stt.custom.projects.get";
+const OP_CUSTOM_PROJECTS_DELETE: &str = "azure.speech.stt.custom.projects.delete";
+const OP_CUSTOM_DATASETS_CREATE: &str = "azure.speech.stt.custom.datasets.create";
+const OP_CUSTOM_DATASETS_LIST: &str = "azure.speech.stt.custom.datasets.list";
+const OP_CUSTOM_DATASETS_GET: &str = "azure.speech.stt.custom.datasets.get";
+const OP_CUSTOM_DATASETS_DELETE: &str = "azure.speech.stt.custom.datasets.delete";
+const OP_CUSTOM_MODELS_CREATE: &str = "azure.speech.stt.custom.models.create";
+const OP_CUSTOM_MODELS_LIST: &str = "azure.speech.stt.custom.models.list";
+const OP_CUSTOM_MODELS_GET: &str = "azure.speech.stt.custom.models.get";
+const OP_CUSTOM_MODELS_DELETE: &str = "azure.speech.stt.custom.models.delete";
+const OP_CUSTOM_ENDPOINTS_CREATE: &str = "azure.speech.stt.custom.endpoints.create";
+const OP_CUSTOM_ENDPOINTS_LIST: &str = "azure.speech.stt.custom.endpoints.list";
+const OP_CUSTOM_ENDPOINTS_GET: &str = "azure.speech.stt.custom.endpoints.get";
+const OP_CUSTOM_ENDPOINTS_DELETE: &str = "azure.speech.stt.custom.endpoints.delete";
+const OPERATION_ORDER: [&str; 22] = [
     "azure.speech.voices.list",
     "azure.speech.tts.synthesize",
     "azure.speech.stt.transcribe_fast",
     "azure.speech.stt.batch.submit",
     "azure.speech.stt.batch.get",
     "azure.speech.stt.batch.files",
+    "azure.speech.stt.custom.projects.create",
+    "azure.speech.stt.custom.projects.list",
+    "azure.speech.stt.custom.projects.get",
+    "azure.speech.stt.custom.projects.delete",
+    "azure.speech.stt.custom.datasets.create",
+    "azure.speech.stt.custom.datasets.list",
+    "azure.speech.stt.custom.datasets.get",
+    "azure.speech.stt.custom.datasets.delete",
+    "azure.speech.stt.custom.models.create",
+    "azure.speech.stt.custom.models.list",
+    "azure.speech.stt.custom.models.get",
+    "azure.speech.stt.custom.models.delete",
+    "azure.speech.stt.custom.endpoints.create",
+    "azure.speech.stt.custom.endpoints.list",
+    "azure.speech.stt.custom.endpoints.get",
+    "azure.speech.stt.custom.endpoints.delete",
 ];
-const BOUNDARY: &str = "This connector exposes Azure Speech REST token exchange, Microsoft Entra bearer-token handoff, regional voice discovery, REST text-to-speech synthesis, and Speech-to-text 2025-10-15 fast transcription plus batch submit/status/files surfaces. Realtime WebSocket streaming is blocked until Microsoft documents a direct STT/TTS wire protocol or FCP adopts an equivalent SDK-compatible framing; custom speech projects/models remain a separate follow-up surface tracked by flywheel_connectors-4kw5f.2.9.6.2. Connector-local IMDS/MSAL acquisition is formally retained as host-token-broker-only under flywheel_connectors-4kw5f.2.9.6.3 because FCP runtime network policy cannot safely mix link-local IMDS egress and Azure Speech provider egress inside the same runtime-enforced operation.";
+const BOUNDARY: &str = "This connector exposes Azure Speech REST token exchange, Microsoft Entra bearer-token handoff, regional voice discovery, REST text-to-speech synthesis, Speech-to-text 2025-10-15 fast transcription, batch submit/status/files, and 2025-10-15 custom speech project/dataset/model/endpoint create/list/get/delete lifecycle surfaces. Realtime WebSocket streaming is blocked until Microsoft documents a direct STT/TTS wire protocol or FCP adopts an equivalent SDK-compatible framing. Connector-local IMDS/MSAL acquisition is formally retained as host-token-broker-only under flywheel_connectors-4kw5f.2.9.6.3 because FCP runtime network policy cannot safely mix link-local IMDS egress and Azure Speech provider egress inside the same runtime-enforced operation.";
 const STREAMING_BLOCKER_REASON: &str = "Current Microsoft Learn documentation exposes TTS text streaming through Speech SDK TextStream on the WebSocket v2 endpoint, and realtime STT through Speech SDK SpeechRecognizer/AudioConfig push-stream APIs. It does not publish a direct WebSocket frame protocol for a standalone Rust connector, so this connector must not guess or reverse-engineer the live wire format.";
 const DEFAULT_REQUEST_TIMEOUT_MS: usize = 60_000;
 const DEFAULT_INLINE_AUDIO_MAX_BYTES: usize = 1_048_576;
@@ -959,7 +1007,7 @@ impl AzureSpeechClient {
     }
 
     async fn batch_submit(&self, input: &Value) -> FcpResult<Value> {
-        let request = BatchSubmitRequest::from_input(input)?;
+        let request = BatchSubmitRequest::from_input(input, &self.config.stt_base_url)?;
         let (auth_name, auth_value) = self.auth_header(false).await?;
         let url = format!(
             "{}/speechtotext/transcriptions:submit?api-version={STT_API_VERSION}",
@@ -996,6 +1044,65 @@ impl AzureSpeechClient {
             "transcription_id_hash": transcription_id_hash,
             "location": location,
             "transcription": sanitize_provider_urls(&value),
+        }))
+    }
+
+    async fn custom_speech(&self, operation: &str, input: &Value) -> FcpResult<Value> {
+        let route = CustomSpeechRoute::from_operation(operation).ok_or_else(|| {
+            FcpError::InvalidRequest {
+                code: 1002,
+                message: format!("Unknown operation: {operation}"),
+            }
+        })?;
+        let request = CustomSpeechRequest::from_input(input, &self.config.stt_base_url, route)?;
+        let (auth_name, auth_value) = self.auth_header(false).await?;
+        let response = self
+            .send_with_retry(|| {
+                let builder = match route.action {
+                    CustomSpeechAction::Create => self.http.post(request.url.as_str()),
+                    CustomSpeechAction::List | CustomSpeechAction::Get => {
+                        self.http.get(request.url.as_str())
+                    }
+                    CustomSpeechAction::Delete => self.http.delete(request.url.as_str()),
+                }
+                .header(USER_AGENT, USER_AGENT_VALUE);
+                let builder = if let Some(body) = &request.body {
+                    builder.json(body)
+                } else {
+                    builder
+                };
+                with_header(builder, auth_name.clone(), &auth_value)
+            })
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(provider_error(
+                route.provider_operation(),
+                status,
+                &response,
+            ));
+        }
+        let location = response
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok())
+            .map(url_descriptor);
+        let provider_value = if status == StatusCode::NO_CONTENT {
+            Value::Null
+        } else {
+            response.json().await.map_err(|error| map_reqwest(&error))?
+        };
+        Ok(json!({
+            "operation": operation,
+            "api_version": STT_API_VERSION,
+            "resource_kind": route.kind.as_str(),
+            "action": route.action.as_str(),
+            "status_code": status.as_u16(),
+            "resource_id_hash": resource_id_hash_from_value(&provider_value),
+            "model_id_hash": model_id_hash_for_result(route.kind, &provider_value),
+            "project_id_hash": project_id_hash_for_result(route.kind, &provider_value),
+            "location": location,
+            "resource": sanitize_provider_urls(&provider_value),
         }))
     }
 
@@ -1200,8 +1307,217 @@ enum BatchContentSourceInput<'a> {
     ContainerUrl(&'a str),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CustomSpeechResourceKind {
+    Project,
+    Dataset,
+    Model,
+    Endpoint,
+}
+
+impl CustomSpeechResourceKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::Dataset => "dataset",
+            Self::Model => "model",
+            Self::Endpoint => "endpoint",
+        }
+    }
+
+    const fn collection_path(self) -> &'static str {
+        match self {
+            Self::Project => "/speechtotext/projects",
+            Self::Dataset => "/speechtotext/datasets",
+            Self::Model => "/speechtotext/models",
+            Self::Endpoint => "/speechtotext/endpoints",
+        }
+    }
+
+    const fn id_field(self) -> &'static str {
+        match self {
+            Self::Project => "project_id",
+            Self::Dataset => "dataset_id",
+            Self::Model => "model_id",
+            Self::Endpoint => "endpoint_id",
+        }
+    }
+
+    const fn url_field(self) -> &'static str {
+        match self {
+            Self::Project => "project_url",
+            Self::Dataset => "dataset_url",
+            Self::Model => "model_url",
+            Self::Endpoint => "endpoint_url",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CustomSpeechAction {
+    Create,
+    List,
+    Get,
+    Delete,
+}
+
+impl CustomSpeechAction {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::List => "list",
+            Self::Get => "get",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CustomSpeechRoute {
+    kind: CustomSpeechResourceKind,
+    action: CustomSpeechAction,
+}
+
+impl CustomSpeechRoute {
+    const fn provider_operation(self) -> &'static str {
+        match (self.kind, self.action) {
+            (CustomSpeechResourceKind::Project, CustomSpeechAction::Create) => {
+                "custom.projects.create"
+            }
+            (CustomSpeechResourceKind::Project, CustomSpeechAction::List) => "custom.projects.list",
+            (CustomSpeechResourceKind::Project, CustomSpeechAction::Get) => "custom.projects.get",
+            (CustomSpeechResourceKind::Project, CustomSpeechAction::Delete) => {
+                "custom.projects.delete"
+            }
+            (CustomSpeechResourceKind::Dataset, CustomSpeechAction::Create) => {
+                "custom.datasets.create"
+            }
+            (CustomSpeechResourceKind::Dataset, CustomSpeechAction::List) => "custom.datasets.list",
+            (CustomSpeechResourceKind::Dataset, CustomSpeechAction::Get) => "custom.datasets.get",
+            (CustomSpeechResourceKind::Dataset, CustomSpeechAction::Delete) => {
+                "custom.datasets.delete"
+            }
+            (CustomSpeechResourceKind::Model, CustomSpeechAction::Create) => "custom.models.create",
+            (CustomSpeechResourceKind::Model, CustomSpeechAction::List) => "custom.models.list",
+            (CustomSpeechResourceKind::Model, CustomSpeechAction::Get) => "custom.models.get",
+            (CustomSpeechResourceKind::Model, CustomSpeechAction::Delete) => "custom.models.delete",
+            (CustomSpeechResourceKind::Endpoint, CustomSpeechAction::Create) => {
+                "custom.endpoints.create"
+            }
+            (CustomSpeechResourceKind::Endpoint, CustomSpeechAction::List) => {
+                "custom.endpoints.list"
+            }
+            (CustomSpeechResourceKind::Endpoint, CustomSpeechAction::Get) => "custom.endpoints.get",
+            (CustomSpeechResourceKind::Endpoint, CustomSpeechAction::Delete) => {
+                "custom.endpoints.delete"
+            }
+        }
+    }
+
+    fn from_operation(operation: &str) -> Option<Self> {
+        match operation {
+            OP_CUSTOM_PROJECTS_CREATE => Some(Self {
+                kind: CustomSpeechResourceKind::Project,
+                action: CustomSpeechAction::Create,
+            }),
+            OP_CUSTOM_PROJECTS_LIST => Some(Self {
+                kind: CustomSpeechResourceKind::Project,
+                action: CustomSpeechAction::List,
+            }),
+            OP_CUSTOM_PROJECTS_GET => Some(Self {
+                kind: CustomSpeechResourceKind::Project,
+                action: CustomSpeechAction::Get,
+            }),
+            OP_CUSTOM_PROJECTS_DELETE => Some(Self {
+                kind: CustomSpeechResourceKind::Project,
+                action: CustomSpeechAction::Delete,
+            }),
+            OP_CUSTOM_DATASETS_CREATE => Some(Self {
+                kind: CustomSpeechResourceKind::Dataset,
+                action: CustomSpeechAction::Create,
+            }),
+            OP_CUSTOM_DATASETS_LIST => Some(Self {
+                kind: CustomSpeechResourceKind::Dataset,
+                action: CustomSpeechAction::List,
+            }),
+            OP_CUSTOM_DATASETS_GET => Some(Self {
+                kind: CustomSpeechResourceKind::Dataset,
+                action: CustomSpeechAction::Get,
+            }),
+            OP_CUSTOM_DATASETS_DELETE => Some(Self {
+                kind: CustomSpeechResourceKind::Dataset,
+                action: CustomSpeechAction::Delete,
+            }),
+            OP_CUSTOM_MODELS_CREATE => Some(Self {
+                kind: CustomSpeechResourceKind::Model,
+                action: CustomSpeechAction::Create,
+            }),
+            OP_CUSTOM_MODELS_LIST => Some(Self {
+                kind: CustomSpeechResourceKind::Model,
+                action: CustomSpeechAction::List,
+            }),
+            OP_CUSTOM_MODELS_GET => Some(Self {
+                kind: CustomSpeechResourceKind::Model,
+                action: CustomSpeechAction::Get,
+            }),
+            OP_CUSTOM_MODELS_DELETE => Some(Self {
+                kind: CustomSpeechResourceKind::Model,
+                action: CustomSpeechAction::Delete,
+            }),
+            OP_CUSTOM_ENDPOINTS_CREATE => Some(Self {
+                kind: CustomSpeechResourceKind::Endpoint,
+                action: CustomSpeechAction::Create,
+            }),
+            OP_CUSTOM_ENDPOINTS_LIST => Some(Self {
+                kind: CustomSpeechResourceKind::Endpoint,
+                action: CustomSpeechAction::List,
+            }),
+            OP_CUSTOM_ENDPOINTS_GET => Some(Self {
+                kind: CustomSpeechResourceKind::Endpoint,
+                action: CustomSpeechAction::Get,
+            }),
+            OP_CUSTOM_ENDPOINTS_DELETE => Some(Self {
+                kind: CustomSpeechResourceKind::Endpoint,
+                action: CustomSpeechAction::Delete,
+            }),
+            _ => None,
+        }
+    }
+}
+
+struct CustomSpeechRequest {
+    url: Url,
+    body: Option<Value>,
+}
+
+impl CustomSpeechRequest {
+    fn from_input(input: &Value, stt_base_url: &str, route: CustomSpeechRoute) -> FcpResult<Self> {
+        let base = Url::parse(stt_base_url).map_err(|error| FcpError::Internal {
+            message: format!("configured stt_base_url is invalid: {error}"),
+        })?;
+        let (url, body) = match route.action {
+            CustomSpeechAction::Create => (
+                custom_speech_collection_url(&base, route.kind, input)?,
+                Some(build_custom_speech_create_body(input, route.kind, &base)?),
+            ),
+            CustomSpeechAction::List => (
+                custom_speech_collection_url(&base, route.kind, input)?,
+                None,
+            ),
+            CustomSpeechAction::Get | CustomSpeechAction::Delete => (
+                custom_speech_resource_url_from_input(input, route.kind, &base)?,
+                None,
+            ),
+        };
+        Ok(Self { url, body })
+    }
+}
+
 impl BatchSubmitRequest {
-    fn from_input(input: &Value) -> FcpResult<Self> {
+    fn from_input(input: &Value, stt_base_url: &str) -> FcpResult<Self> {
+        let stt_base = Url::parse(stt_base_url).map_err(|error| FcpError::Internal {
+            message: format!("configured stt_base_url is invalid: {error}"),
+        })?;
         let display_name = required_string(input, "display_name")?;
         let locale = input
             .get("locale")
@@ -1215,10 +1531,28 @@ impl BatchSubmitRequest {
         body.insert("displayName".into(), json!(display_name));
         body.insert("locale".into(), json!(locale));
         copy_optional_string(&mut body, input, "description", "description");
-        copy_optional_object(&mut body, input, "customProperties", "custom_properties")?;
-        copy_optional_object(&mut body, input, "model", "model")?;
-        copy_optional_object(&mut body, input, "project", "project")?;
-        copy_optional_object(&mut body, input, "dataset", "dataset")?;
+        copy_optional_custom_properties(&mut body, input)?;
+        copy_optional_reference_object(
+            &mut body,
+            input,
+            "model",
+            CustomSpeechResourceKind::Model,
+            &stt_base,
+        )?;
+        copy_optional_reference_object(
+            &mut body,
+            input,
+            "project",
+            CustomSpeechResourceKind::Project,
+            &stt_base,
+        )?;
+        copy_optional_reference_object(
+            &mut body,
+            input,
+            "dataset",
+            CustomSpeechResourceKind::Dataset,
+            &stt_base,
+        )?;
         let content_source =
             append_batch_content_source(&mut body, batch_content_source_input(input)?)?;
         body.insert("properties".into(), batch_properties_from_input(input)?);
@@ -1336,6 +1670,7 @@ impl AzureSpeechConnector {
             "host_allow": config.host_allowlist(),
             "request_timeout_ms": config.request_timeout_ms,
             "inline_audio_max_bytes": config.inline_audio_max_bytes,
+            "custom_speech_lifecycle": custom_speech_lifecycle_info(),
         }))
     }
 
@@ -1446,6 +1781,12 @@ impl AzureSpeechConnector {
                     "critical": false,
                     "message": connector_local_identity_policy_info()
                 },
+                {
+                    "name": "custom_speech_lifecycle",
+                    "passed": true,
+                    "critical": false,
+                    "message": custom_speech_lifecycle_info()
+                },
                 { "name": "surface_boundary", "passed": true, "critical": false, "message": BOUNDARY }
             ],
             "streaming_blocker": streaming_blocker_info(),
@@ -1502,6 +1843,15 @@ impl AzureSpeechConnector {
                 "stt_fast_2025_10_15": DOC_STT_TRANSCRIBE,
                 "stt_batch_submit_2025_10_15": DOC_STT_BATCH_SUBMIT,
                 "tts_rest_auth": DOC_TTS_REST_AUTH,
+                "stt_2025_10_15_migration": DOC_STT_2025_MIGRATION,
+                "custom_speech_project": DOC_CUSTOM_SPEECH_PROJECT,
+                "custom_speech_dataset": DOC_CUSTOM_SPEECH_DATASET,
+                "custom_speech_model": DOC_CUSTOM_SPEECH_MODEL,
+                "custom_speech_endpoint": DOC_CUSTOM_SPEECH_ENDPOINT,
+                "custom_speech_projects_api_2025_10_15": DOC_CUSTOM_PROJECTS_API,
+                "custom_speech_datasets_api_2025_10_15": DOC_CUSTOM_DATASETS_API,
+                "custom_speech_models_api_2025_10_15": DOC_CUSTOM_MODELS_API,
+                "custom_speech_endpoints_api_2025_10_15": DOC_CUSTOM_ENDPOINTS_API,
                 "entra_auth": DOC_ENTRA_AUTH,
                 "managed_identity_vm_token": DOC_MANAGED_IDENTITY_VM_TOKEN,
                 "llm_speech_keyless_auth": DOC_LLM_SPEECH_AUTH,
@@ -1509,7 +1859,8 @@ impl AzureSpeechConnector {
                 "stt_realtime_sdk": DOC_STT_REALTIME,
                 "sdk_connection_reuse": DOC_SDK_CONNECTIONS
             },
-            "connector_local_identity_acquisition": connector_local_identity_policy_info()
+            "connector_local_identity_acquisition": connector_local_identity_policy_info(),
+            "custom_speech_lifecycle": custom_speech_lifecycle_info()
         }))
     }
 
@@ -1543,12 +1894,15 @@ impl AzureSpeechConnector {
         self.verify_capability(operation, &input, capability_grant)?;
         self.request_count.fetch_add(1, Ordering::Relaxed);
         let result = match operation {
-            "azure.speech.voices.list" => client.voices_list().await,
-            "azure.speech.tts.synthesize" => client.synthesize(&input).await,
-            "azure.speech.stt.transcribe_fast" => client.transcribe_fast(&input).await,
-            "azure.speech.stt.batch.submit" => client.batch_submit(&input).await,
-            "azure.speech.stt.batch.get" => client.batch_get(&input).await,
-            "azure.speech.stt.batch.files" => client.batch_files(&input).await,
+            OP_VOICES_LIST => client.voices_list().await,
+            OP_TTS_SYNTHESIZE => client.synthesize(&input).await,
+            OP_STT_TRANSCRIBE_FAST => client.transcribe_fast(&input).await,
+            OP_STT_BATCH_SUBMIT => client.batch_submit(&input).await,
+            OP_STT_BATCH_GET => client.batch_get(&input).await,
+            OP_STT_BATCH_FILES => client.batch_files(&input).await,
+            _ if CustomSpeechRoute::from_operation(operation).is_some() => {
+                client.custom_speech(operation, &input).await
+            }
             _ => Err(FcpError::InvalidRequest {
                 code: 1002,
                 message: format!("Unknown operation: {operation}"),
@@ -1710,9 +2064,28 @@ fn deferred_operations_info() -> Vec<Value> {
         json!({
             "id": "azure.speech.stt.custom_speech.projects",
             "summary": "Azure Speech custom speech project, dataset, model training, and endpoint lifecycle",
-            "outcome": "deferred_to_custom_speech_slice",
+            "outcome": "implemented_2025_10_15_create_list_get_delete",
             "tracking_bead": "flywheel_connectors-4kw5f.2.9.6.2",
-            "rationale": "The direct REST coverage here includes fast transcription and batch job submit/status/files. Custom speech project/model training and deployment endpoints are a separate lifecycle surface with different data retention and review requirements."
+            "rationale": "The production connector exposes current Speech-to-text REST API 2025-10-15 custom speech project, dataset, model, and endpoint create/list/get/delete operations with api-version pinning, endpoint validation, capability enforcement, and redacted provider outputs. Upload-block, file-download, evaluation, webhook, and model-copy sub-surfaces remain outside this lifecycle slice.",
+            "official_docs": [DOC_STT_REST_OVERVIEW, DOC_STT_2025_MIGRATION, DOC_CUSTOM_PROJECTS_API, DOC_CUSTOM_DATASETS_API, DOC_CUSTOM_MODELS_API, DOC_CUSTOM_ENDPOINTS_API],
+            "implemented_operations": [
+                OP_CUSTOM_PROJECTS_CREATE,
+                OP_CUSTOM_PROJECTS_LIST,
+                OP_CUSTOM_PROJECTS_GET,
+                OP_CUSTOM_PROJECTS_DELETE,
+                OP_CUSTOM_DATASETS_CREATE,
+                OP_CUSTOM_DATASETS_LIST,
+                OP_CUSTOM_DATASETS_GET,
+                OP_CUSTOM_DATASETS_DELETE,
+                OP_CUSTOM_MODELS_CREATE,
+                OP_CUSTOM_MODELS_LIST,
+                OP_CUSTOM_MODELS_GET,
+                OP_CUSTOM_MODELS_DELETE,
+                OP_CUSTOM_ENDPOINTS_CREATE,
+                OP_CUSTOM_ENDPOINTS_LIST,
+                OP_CUSTOM_ENDPOINTS_GET,
+                OP_CUSTOM_ENDPOINTS_DELETE
+            ]
         }),
         json!({
             "id": "azure.speech.auth.connector_local_identity",
@@ -1724,6 +2097,37 @@ fn deferred_operations_info() -> Vec<Value> {
             "implementation_gate": "Do not perform connector-local IMDS/MSAL token acquisition from this connector process unless FCP gains an auth preflight/host-token-broker operation with a separate all-local network policy."
         }),
     ]
+}
+
+fn custom_speech_lifecycle_info() -> Value {
+    json!({
+        "status": "implemented_2025_10_15",
+        "tracking_bead": "flywheel_connectors-4kw5f.2.9.6.2",
+        "api_version": STT_API_VERSION,
+        "operation_families": ["projects", "datasets", "models", "endpoints"],
+        "supported_actions": ["create", "list", "get", "delete"],
+        "batch_custom_model_boundary": "azure.speech.stt.batch.submit accepts validated project/model/dataset references and sends them to the 2025-10-15 transcriptions:submit API.",
+        "official_docs": [
+            DOC_STT_REST_OVERVIEW,
+            DOC_STT_2025_MIGRATION,
+            DOC_CUSTOM_SPEECH_PROJECT,
+            DOC_CUSTOM_SPEECH_DATASET,
+            DOC_CUSTOM_SPEECH_MODEL,
+            DOC_CUSTOM_SPEECH_ENDPOINT,
+            DOC_CUSTOM_PROJECTS_API,
+            DOC_CUSTOM_DATASETS_API,
+            DOC_CUSTOM_MODELS_API,
+            DOC_CUSTOM_ENDPOINTS_API
+        ],
+        "excluded_subsurfaces": [
+            "dataset upload blocks and file retrieval",
+            "model copy authorization/cross-subscription copy",
+            "custom speech evaluations",
+            "custom speech web hooks",
+            "endpoint logs"
+        ],
+        "redaction_policy": "Provider self/location/contentUrl values are returned as host/path/query hashes; Azure resource IDs, project IDs, model IDs, SAS URLs, transcripts, audio bytes, provider bodies, and local paths are not logged raw.",
+    })
 }
 
 fn connector_local_identity_policy_info() -> Value {
@@ -1756,12 +2160,14 @@ fn streaming_blocker_info() -> Value {
 
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
     match operation {
-        "azure.speech.voices.list" => Ok(CapabilityId::from_static("azure.speech.voices")),
-        "azure.speech.tts.synthesize" => Ok(CapabilityId::from_static("azure.speech.tts")),
-        "azure.speech.stt.transcribe_fast"
-        | "azure.speech.stt.batch.submit"
-        | "azure.speech.stt.batch.get"
-        | "azure.speech.stt.batch.files" => Ok(CapabilityId::from_static("azure.speech.stt")),
+        OP_VOICES_LIST => Ok(CapabilityId::from_static("azure.speech.voices")),
+        OP_TTS_SYNTHESIZE => Ok(CapabilityId::from_static("azure.speech.tts")),
+        OP_STT_TRANSCRIBE_FAST | OP_STT_BATCH_SUBMIT | OP_STT_BATCH_GET | OP_STT_BATCH_FILES => {
+            Ok(CapabilityId::from_static("azure.speech.stt"))
+        }
+        _ if CustomSpeechRoute::from_operation(operation).is_some() => {
+            Ok(CapabilityId::from_static("azure.speech.stt"))
+        }
         _ => Err(FcpError::OperationNotGranted {
             operation: operation.into(),
         }),
@@ -1770,15 +2176,15 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
 
 fn resource_uris_for_operation(operation: &str, input: &Value) -> Vec<String> {
     match operation {
-        "azure.speech.voices.list" => vec!["azure-speech:voices".into()],
-        "azure.speech.tts.synthesize" => {
+        OP_VOICES_LIST => vec!["azure-speech:voices".into()],
+        OP_TTS_SYNTHESIZE => {
             let voice = input
                 .get("voice")
                 .and_then(Value::as_str)
                 .unwrap_or("ssml-provided");
             vec![format!("azure-speech:tts:voice:{voice}")]
         }
-        "azure.speech.stt.transcribe_fast" => {
+        OP_STT_TRANSCRIBE_FAST => {
             let locale = input
                 .get("locale")
                 .and_then(Value::as_str)
@@ -1792,16 +2198,38 @@ fn resource_uris_for_operation(operation: &str, input: &Value) -> Vec<String> {
                 .unwrap_or(DEFAULT_STT_LOCALE);
             vec![format!("azure-speech:stt:locale:{locale}")]
         }
-        "azure.speech.stt.batch.submit" => vec!["azure-speech:stt:batch:submit".into()],
-        "azure.speech.stt.batch.get" | "azure.speech.stt.batch.files" => {
+        OP_STT_BATCH_SUBMIT => vec!["azure-speech:stt:batch:submit".into()],
+        OP_STT_BATCH_GET | OP_STT_BATCH_FILES => {
             let id = input
                 .get("transcription_id")
                 .and_then(Value::as_str)
                 .map_or_else(|| "url-input".into(), |value| sha256_hex(value.as_bytes()));
             vec![format!("azure-speech:stt:batch:{id}")]
         }
-        _ => Vec::new(),
+        _ => CustomSpeechRoute::from_operation(operation).map_or_else(Vec::new, |route| {
+            let id = custom_speech_input_resource_hash(input, route)
+                .unwrap_or_else(|| route.action.as_str().to_owned());
+            vec![format!(
+                "azure-speech:stt:custom:{}:{id}",
+                route.kind.as_str()
+            )]
+        }),
     }
+}
+
+fn custom_speech_input_resource_hash(input: &Value, route: CustomSpeechRoute) -> Option<String> {
+    input
+        .get(route.kind.id_field())
+        .and_then(Value::as_str)
+        .map(|value| sha256_hex(value.as_bytes()))
+        .or_else(|| {
+            input
+                .get(route.kind.url_field())
+                .and_then(Value::as_str)
+                .and_then(|raw| Url::parse(raw).ok())
+                .and_then(|url| last_path_segment(&url))
+                .map(|value| sha256_hex(value.as_bytes()))
+        })
 }
 
 fn normalize_transcription_result(provider_result: &Value, request: &SttRequest) -> Value {
@@ -2036,6 +2464,437 @@ fn copy_optional_object(
     }
     body.insert(azure_name.to_owned(), value.clone());
     Ok(())
+}
+
+fn copy_optional_custom_properties(
+    body: &mut serde_json::Map<String, Value>,
+    input: &Value,
+) -> FcpResult<()> {
+    let Some(value) = input.get("custom_properties") else {
+        return Ok(());
+    };
+    let Some(properties) = value.as_object() else {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "custom_properties must be an object".into(),
+        });
+    };
+    if properties.len() > 10 {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "custom_properties must contain at most 10 entries".into(),
+        });
+    }
+    for (key, value) in properties {
+        if key.is_empty() || key.len() > 64 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "custom_properties keys must be 1..=64 bytes".into(),
+            });
+        }
+        let Some(text) = value.as_str() else {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "custom_properties values must be strings".into(),
+            });
+        };
+        if text.len() > 256 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "custom_properties values must be at most 256 bytes".into(),
+            });
+        }
+    }
+    body.insert("customProperties".into(), value.clone());
+    Ok(())
+}
+
+fn copy_optional_reference_object(
+    body: &mut serde_json::Map<String, Value>,
+    input: &Value,
+    field: &str,
+    kind: CustomSpeechResourceKind,
+    base: &Url,
+) -> FcpResult<()> {
+    let object = reference_object_from_input(input, field, kind, base)?;
+    if let Some(object) = object {
+        body.insert(field.to_owned(), object);
+    }
+    Ok(())
+}
+
+fn copy_optional_reference_object_as(
+    body: &mut serde_json::Map<String, Value>,
+    input: &Value,
+    azure_field: &str,
+    input_field: &str,
+    kind: CustomSpeechResourceKind,
+    base: &Url,
+) -> FcpResult<()> {
+    let object = reference_object_from_input(input, input_field, kind, base)?;
+    if let Some(object) = object {
+        body.insert(azure_field.to_owned(), object);
+    }
+    Ok(())
+}
+
+fn reference_object_from_input(
+    input: &Value,
+    field: &str,
+    kind: CustomSpeechResourceKind,
+    base: &Url,
+) -> FcpResult<Option<Value>> {
+    if let Some(value) = input.get(field) {
+        return normalize_reference_object(value, field, kind, base).map(Some);
+    }
+    let id_field = format!("{field}_id");
+    if let Some(id) = input
+        .get(&id_field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let url = custom_speech_resource_url_from_id(id, kind, base)?;
+        return Ok(Some(json!({ "self": url.as_str() })));
+    }
+    let url_field = format!("{field}_url");
+    if let Some(url) = input
+        .get(&url_field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let url = normalize_custom_speech_resource_url(url, base, kind, &url_field)?;
+        return Ok(Some(json!({ "self": url.as_str() })));
+    }
+    Ok(None)
+}
+
+fn normalize_reference_object(
+    value: &Value,
+    field: &str,
+    kind: CustomSpeechResourceKind,
+    base: &Url,
+) -> FcpResult<Value> {
+    let Some(object) = value.as_object() else {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must be an object"),
+        });
+    };
+    let mut normalized = object.clone();
+    if let Some(self_url) = object.get("self").and_then(Value::as_str) {
+        let url = normalize_custom_speech_resource_url(self_url, base, kind, field)?;
+        normalized.insert("self".into(), json!(url.as_str()));
+    } else {
+        let id_field = format!("{field}_id");
+        if let Some(id) = object
+            .get("id")
+            .or_else(|| object.get(&id_field))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            let url = custom_speech_resource_url_from_id(id, kind, base)?;
+            normalized.insert("self".into(), json!(url.as_str()));
+        } else {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("{field} must include self or id"),
+            });
+        }
+    }
+    Ok(Value::Object(normalized))
+}
+
+fn custom_speech_collection_url(
+    base: &Url,
+    kind: CustomSpeechResourceKind,
+    input: &Value,
+) -> FcpResult<Url> {
+    let mut url = base.clone();
+    url.set_path(kind.collection_path());
+    let mut pairs = vec![("api-version".to_string(), STT_API_VERSION.to_string())];
+    copy_query_integer(input, &mut pairs, "skip", "skip")?;
+    copy_query_integer(input, &mut pairs, "top", "top")?;
+    if let Some(filter) = input
+        .get("filter")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        validate_filter(filter)?;
+        pairs.push(("filter".into(), filter.to_owned()));
+    }
+    url.query_pairs_mut().clear().extend_pairs(pairs);
+    Ok(url)
+}
+
+fn custom_speech_resource_url_from_input(
+    input: &Value,
+    kind: CustomSpeechResourceKind,
+    base: &Url,
+) -> FcpResult<Url> {
+    if let Some(raw) = input
+        .get(kind.url_field())
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return normalize_custom_speech_resource_url(raw, base, kind, kind.url_field());
+    }
+    let id = required_string(input, kind.id_field())?;
+    custom_speech_resource_url_from_id(id, kind, base)
+}
+
+fn custom_speech_resource_url_from_id(
+    id: &str,
+    kind: CustomSpeechResourceKind,
+    base: &Url,
+) -> FcpResult<Url> {
+    validate_custom_speech_resource_id(id, kind.id_field())?;
+    let mut url = base.clone();
+    url.set_path(&format!("{}/{}", kind.collection_path(), id));
+    url.set_query(Some(&format!("api-version={STT_API_VERSION}")));
+    Ok(url)
+}
+
+fn normalize_custom_speech_resource_url(
+    raw: &str,
+    base: &Url,
+    kind: CustomSpeechResourceKind,
+    label: &str,
+) -> FcpResult<Url> {
+    let mut parsed = Url::parse(raw).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{label} is invalid: {error}"),
+    })?;
+    if parsed.scheme() != base.scheme() || host(&parsed) != host(base) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label} must use the configured Azure Speech STT host"),
+        });
+    }
+    if parsed.path().contains("/speechtotext/v3.") || parsed.path().contains("/speechtotext/v3/") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label} must not use retired v3.x Speech-to-text URLs"),
+        });
+    }
+    let prefix = format!("{}/", kind.collection_path());
+    if !parsed.path().starts_with(&prefix) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label} must point at {prefix}{{id}}"),
+        });
+    }
+    let suffix = &parsed.path()[prefix.len()..];
+    if suffix.is_empty() || suffix.contains('/') {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label} must identify exactly one {}", kind.as_str()),
+        });
+    }
+    validate_custom_speech_resource_id(suffix, kind.id_field())?;
+    for (key, value) in parsed.query_pairs() {
+        if key == "api-version" && value != STT_API_VERSION {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("{label} api-version must be {STT_API_VERSION}"),
+            });
+        }
+    }
+    parsed.set_query(Some(&format!("api-version={STT_API_VERSION}")));
+    Ok(parsed)
+}
+
+fn build_custom_speech_create_body(
+    input: &Value,
+    kind: CustomSpeechResourceKind,
+    base: &Url,
+) -> FcpResult<Value> {
+    let display_name = required_string(input, "display_name")?;
+    let locale = input
+        .get("locale")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_STT_LOCALE);
+    validate_locale(locale)?;
+    let mut body = serde_json::Map::new();
+    body.insert("displayName".into(), json!(display_name));
+    body.insert("locale".into(), json!(locale));
+    copy_optional_string(&mut body, input, "description", "description");
+    copy_optional_custom_properties(&mut body, input)?;
+    copy_optional_object(&mut body, input, "properties", "properties")?;
+    match kind {
+        CustomSpeechResourceKind::Project => {
+            copy_optional_string(
+                &mut body,
+                input,
+                "foundryProjectName",
+                "foundry_project_name",
+            );
+        }
+        CustomSpeechResourceKind::Dataset => {
+            let dataset_kind = required_string(input, "kind")?;
+            validate_dataset_kind(dataset_kind)?;
+            body.insert("kind".into(), json!(dataset_kind));
+            copy_optional_content_url(&mut body, input)?;
+            copy_optional_reference_object(
+                &mut body,
+                input,
+                "project",
+                CustomSpeechResourceKind::Project,
+                base,
+            )?;
+        }
+        CustomSpeechResourceKind::Model => {
+            copy_optional_reference_object(
+                &mut body,
+                input,
+                "project",
+                CustomSpeechResourceKind::Project,
+                base,
+            )?;
+            copy_optional_reference_object_as(
+                &mut body,
+                input,
+                "baseModel",
+                "base_model",
+                CustomSpeechResourceKind::Model,
+                base,
+            )?;
+            copy_optional_reference_array(
+                &mut body,
+                input,
+                "datasets",
+                CustomSpeechResourceKind::Dataset,
+                base,
+            )?;
+        }
+        CustomSpeechResourceKind::Endpoint => {
+            copy_required_reference_object(
+                &mut body,
+                input,
+                "model",
+                CustomSpeechResourceKind::Model,
+                base,
+            )?;
+            copy_optional_reference_object(
+                &mut body,
+                input,
+                "project",
+                CustomSpeechResourceKind::Project,
+                base,
+            )?;
+            copy_optional_string(&mut body, input, "text", "text");
+        }
+    }
+    Ok(Value::Object(body))
+}
+
+fn copy_optional_content_url(
+    body: &mut serde_json::Map<String, Value>,
+    input: &Value,
+) -> FcpResult<()> {
+    if let Some(url) = input
+        .get("content_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        validate_external_https_url(url, "content_url")?;
+        body.insert("contentUrl".into(), json!(url));
+    }
+    Ok(())
+}
+
+fn copy_required_reference_object(
+    body: &mut serde_json::Map<String, Value>,
+    input: &Value,
+    field: &str,
+    kind: CustomSpeechResourceKind,
+    base: &Url,
+) -> FcpResult<()> {
+    let Some(object) = reference_object_from_input(input, field, kind, base)? else {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} reference is required"),
+        });
+    };
+    body.insert(field.to_owned(), object);
+    Ok(())
+}
+
+fn copy_optional_reference_array(
+    body: &mut serde_json::Map<String, Value>,
+    input: &Value,
+    field: &str,
+    kind: CustomSpeechResourceKind,
+    base: &Url,
+) -> FcpResult<()> {
+    let Some(values) = input.get(field).and_then(Value::as_array) else {
+        return Ok(());
+    };
+    if values.is_empty() || values.len() > 32 {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must contain 1..=32 references"),
+        });
+    }
+    let mut normalized = Vec::with_capacity(values.len());
+    for value in values {
+        normalized.push(normalize_reference_object(value, field, kind, base)?);
+    }
+    body.insert(field.to_owned(), Value::Array(normalized));
+    Ok(())
+}
+
+fn validate_dataset_kind(kind: &str) -> FcpResult<()> {
+    let allowed = [
+        "Acoustic",
+        "AudioFiles",
+        "Language",
+        "LanguageMarkdown",
+        "OutputFormatting",
+        "Pronunciation",
+    ];
+    if allowed.contains(&kind) {
+        Ok(())
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported custom speech dataset kind {kind:?}"),
+        })
+    }
+}
+
+fn validate_custom_speech_resource_id(id: &str, label: &str) -> FcpResult<()> {
+    let valid = !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+    if valid {
+        Ok(())
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{label} must be a non-empty Azure Speech resource identifier"),
+        })
+    }
+}
+
+fn validate_filter(filter: &str) -> FcpResult<()> {
+    if filter.len() <= 512 && !filter.contains(['\r', '\n']) {
+        Ok(())
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "filter must be at most 512 bytes and contain no control newlines".into(),
+        })
+    }
 }
 
 fn validated_url_array(
@@ -2281,6 +3140,41 @@ fn transcription_id_hash_from_value(value: &Value) -> Value {
         .map_or(Value::Null, |id| json!(sha256_hex(id.as_bytes())))
 }
 
+fn resource_id_hash_from_value(value: &Value) -> Value {
+    value
+        .get("self")
+        .and_then(Value::as_str)
+        .and_then(|url| Url::parse(url).ok())
+        .and_then(|url| last_path_segment(&url))
+        .map_or(Value::Null, |id| json!(sha256_hex(id.as_bytes())))
+}
+
+fn model_id_hash_for_result(kind: CustomSpeechResourceKind, value: &Value) -> Value {
+    if kind == CustomSpeechResourceKind::Model {
+        return resource_id_hash_from_value(value);
+    }
+    value
+        .get("model")
+        .and_then(|model| model.get("self"))
+        .and_then(Value::as_str)
+        .and_then(|url| Url::parse(url).ok())
+        .and_then(|url| last_path_segment(&url))
+        .map_or(Value::Null, |id| json!(sha256_hex(id.as_bytes())))
+}
+
+fn project_id_hash_for_result(kind: CustomSpeechResourceKind, value: &Value) -> Value {
+    if kind == CustomSpeechResourceKind::Project {
+        return resource_id_hash_from_value(value);
+    }
+    value
+        .get("project")
+        .and_then(|project| project.get("self"))
+        .and_then(Value::as_str)
+        .and_then(|url| Url::parse(url).ok())
+        .and_then(|url| last_path_segment(&url))
+        .map_or(Value::Null, |id| json!(sha256_hex(id.as_bytes())))
+}
+
 fn transcription_id_from_url(url: &Url) -> Option<String> {
     let mut segments = url.path_segments()?;
     while let Some(segment) = segments.next() {
@@ -2289,6 +3183,13 @@ fn transcription_id_from_url(url: &Url) -> Option<String> {
         }
     }
     None
+}
+
+fn last_path_segment(url: &Url) -> Option<String> {
+    url.path_segments()
+        .and_then(Iterator::last)
+        .filter(|segment| !segment.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn sanitize_provider_urls(value: &Value) -> Value {
@@ -2964,6 +3865,168 @@ mod tests {
     }
 
     #[test]
+    fn batch_submit_validates_custom_speech_references_and_pins_api_version() {
+        let request = BatchSubmitRequest::from_input(
+            &json!({
+                "display_name": "redacted batch",
+                "locale": "en-US",
+                "content_urls": ["https://storage.example/audio.wav?sig=SECRET"],
+                "model_id": "model-123",
+                "dataset_url": "https://eastus.api.cognitive.microsoft.com/speechtotext/datasets/dataset-456",
+                "project": {"id": "project-789"},
+                "custom_properties": {"purpose": "loopback"}
+            }),
+            "https://eastus.api.cognitive.microsoft.com",
+        )
+        .expect("custom speech batch references should validate");
+        assert_eq!(
+            request.body["model"]["self"],
+            "https://eastus.api.cognitive.microsoft.com/speechtotext/models/model-123?api-version=2025-10-15"
+        );
+        assert_eq!(
+            request.body["dataset"]["self"],
+            "https://eastus.api.cognitive.microsoft.com/speechtotext/datasets/dataset-456?api-version=2025-10-15"
+        );
+        assert_eq!(
+            request.body["project"]["self"],
+            "https://eastus.api.cognitive.microsoft.com/speechtotext/projects/project-789?api-version=2025-10-15"
+        );
+        assert_eq!(request.body["customProperties"]["purpose"], "loopback");
+        assert!(
+            !request
+                .content_source
+                .to_string()
+                .contains("https://storage.example/audio.wav")
+        );
+    }
+
+    #[test]
+    fn custom_speech_references_reject_wrong_host_and_retired_versions() {
+        let wrong_host = BatchSubmitRequest::from_input(
+            &json!({
+                "display_name": "redacted batch",
+                "locale": "en-US",
+                "content_urls": ["https://storage.example/audio.wav"],
+                "model_url": "https://westus.api.cognitive.microsoft.com/speechtotext/models/model-123?api-version=2025-10-15"
+            }),
+            "https://eastus.api.cognitive.microsoft.com",
+        );
+        assert!(wrong_host.is_err());
+
+        let retired = BatchSubmitRequest::from_input(
+            &json!({
+                "display_name": "redacted batch",
+                "locale": "en-US",
+                "content_urls": ["https://storage.example/audio.wav"],
+                "model_url": "https://eastus.api.cognitive.microsoft.com/speechtotext/v3.2-preview.2/models/model-123"
+            }),
+            "https://eastus.api.cognitive.microsoft.com",
+        );
+        assert!(retired.is_err());
+    }
+
+    #[test]
+    fn custom_speech_create_bodies_validate_project_dataset_model_and_endpoint_shapes() {
+        let base = Url::parse("https://eastus.api.cognitive.microsoft.com").expect("valid base");
+        let project = build_custom_speech_create_body(
+            &json!({
+                "display_name": "project",
+                "locale": "en-US",
+                "foundry_project_name": "FoundrySpeech",
+                "custom_properties": {"owner": "qa"}
+            }),
+            CustomSpeechResourceKind::Project,
+            &base,
+        )
+        .expect("project body should validate");
+        assert_eq!(project["foundryProjectName"], "FoundrySpeech");
+
+        let dataset = build_custom_speech_create_body(
+            &json!({
+                "display_name": "dataset",
+                "locale": "en-US",
+                "kind": "AudioFiles",
+                "content_url": "https://storage.example/dataset.zip?sig=SECRET",
+                "project_id": "project-123"
+            }),
+            CustomSpeechResourceKind::Dataset,
+            &base,
+        )
+        .expect("dataset body should validate");
+        assert_eq!(dataset["kind"], "AudioFiles");
+        assert_eq!(
+            dataset["project"]["self"],
+            "https://eastus.api.cognitive.microsoft.com/speechtotext/projects/project-123?api-version=2025-10-15"
+        );
+
+        let model = build_custom_speech_create_body(
+            &json!({
+                "display_name": "model",
+                "locale": "en-US",
+                "project_id": "project-123",
+                "base_model_id": "base-model-1",
+                "datasets": [{"id": "dataset-123"}]
+            }),
+            CustomSpeechResourceKind::Model,
+            &base,
+        )
+        .expect("model body should validate");
+        assert_eq!(
+            model["baseModel"]["self"],
+            "https://eastus.api.cognitive.microsoft.com/speechtotext/models/base-model-1?api-version=2025-10-15"
+        );
+        assert_eq!(
+            model["datasets"][0]["self"],
+            "https://eastus.api.cognitive.microsoft.com/speechtotext/datasets/dataset-123?api-version=2025-10-15"
+        );
+
+        let endpoint = build_custom_speech_create_body(
+            &json!({
+                "display_name": "endpoint",
+                "locale": "en-US",
+                "model_id": "model-123",
+                "project_id": "project-123"
+            }),
+            CustomSpeechResourceKind::Endpoint,
+            &base,
+        )
+        .expect("endpoint body should validate");
+        assert_eq!(
+            endpoint["model"]["self"],
+            "https://eastus.api.cognitive.microsoft.com/speechtotext/models/model-123?api-version=2025-10-15"
+        );
+    }
+
+    #[test]
+    fn custom_speech_resource_urls_are_api_version_pinned() {
+        let input = json!({
+            "project_url": "https://eastus.api.cognitive.microsoft.com/speechtotext/projects/project-123"
+        });
+        let request = CustomSpeechRequest::from_input(
+            &input,
+            "https://eastus.api.cognitive.microsoft.com",
+            CustomSpeechRoute {
+                kind: CustomSpeechResourceKind::Project,
+                action: CustomSpeechAction::Get,
+            },
+        )
+        .expect("missing api-version should be pinned");
+        assert_eq!(request.url.query(), Some("api-version=2025-10-15"));
+
+        let wrong_version = CustomSpeechRequest::from_input(
+            &json!({
+                "project_url": "https://eastus.api.cognitive.microsoft.com/speechtotext/projects/project-123?api-version=2024-11-15"
+            }),
+            "https://eastus.api.cognitive.microsoft.com",
+            CustomSpeechRoute {
+                kind: CustomSpeechResourceKind::Project,
+                action: CustomSpeechAction::Get,
+            },
+        );
+        assert!(wrong_version.is_err());
+    }
+
+    #[test]
     fn streaming_surface_is_blocked_on_official_sdk_only_docs() {
         let blocker = streaming_blocker_info();
         assert_eq!(blocker["status"], "blocked_official_sdk_only_protocol");
@@ -2988,6 +4051,9 @@ mod tests {
         assert!(deferred_ids.contains(&"azure.speech.stt.realtime.websocket"));
         assert!(deferred_ids.contains(&"azure.speech.stt.custom_speech.projects"));
         assert!(deferred_ids.contains(&"azure.speech.auth.connector_local_identity"));
+        let custom = custom_speech_lifecycle_info();
+        assert_eq!(custom["status"], "implemented_2025_10_15");
+        assert_eq!(custom["api_version"], STT_API_VERSION);
         let identity = connector_local_identity_policy_info();
         assert_eq!(identity["status"], "host_token_broker_required");
         assert_eq!(identity["imds"]["host_allow"][0], IMDS_HOST);

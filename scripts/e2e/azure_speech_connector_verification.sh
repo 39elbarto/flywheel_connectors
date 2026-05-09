@@ -46,6 +46,19 @@ required_scenarios=(
   batch_submit
   batch_get
   batch_files
+  custom_project_create
+  custom_project_list
+  custom_project_get
+  custom_project_delete
+  custom_dataset_create
+  custom_dataset_get
+  custom_dataset_delete
+  custom_model_create
+  custom_model_get
+  custom_model_delete
+  custom_endpoint_create
+  custom_endpoint_get
+  custom_endpoint_delete
   managed_identity_host_token_handoff
   connector_local_imds_policy_skip
   imds_token_success_skip
@@ -93,7 +106,10 @@ jq -e '
       .endpoint_class,
       .auth_mode,
       .token_source_class,
+      .api_version,
       .resource_id_hash,
+      .model_id_hash,
+      .project_id_hash,
       .voice_id,
       .language_id,
       .model_id,
@@ -114,7 +130,7 @@ jq -e '
   | all(. != null)
 ' "${LOG_JSONL}" >/dev/null
 
-if grep -aE 'loopback-secret|aad-secret|Bearer|/subscriptions/|11111111-2222-3333-4444-555555555555|sig=SECRET|Weather|hello|nightly support calls|should-not-leak|transcript text|raw-audio' "${LOG_JSONL}" >/dev/null; then
+if grep -aE 'loopback-secret|aad-secret|Bearer|/subscriptions/|11111111-2222-3333-4444-555555555555|project-loopback-123|dataset-loopback-123|model-loopback-123|endpoint-loopback-123|sig=SECRET|Weather|hello|nightly support calls|should-not-leak|transcript text|raw-audio' "${LOG_JSONL}" >/dev/null; then
   echo "Azure Speech e2e JSONL leaked a forbidden secret, transcript, provider URL, or content fragment" >&2
   exit 1
 fi

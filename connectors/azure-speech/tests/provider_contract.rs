@@ -4,13 +4,29 @@ use jsonschema::Validator;
 use serde_json::{Value, json};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
-const EXPECTED_OPERATION_IDS: [&str; 6] = [
+const EXPECTED_OPERATION_IDS: [&str; 22] = [
     "azure.speech.voices.list",
     "azure.speech.tts.synthesize",
     "azure.speech.stt.transcribe_fast",
     "azure.speech.stt.batch.submit",
     "azure.speech.stt.batch.get",
     "azure.speech.stt.batch.files",
+    "azure.speech.stt.custom.projects.create",
+    "azure.speech.stt.custom.projects.list",
+    "azure.speech.stt.custom.projects.get",
+    "azure.speech.stt.custom.projects.delete",
+    "azure.speech.stt.custom.datasets.create",
+    "azure.speech.stt.custom.datasets.list",
+    "azure.speech.stt.custom.datasets.get",
+    "azure.speech.stt.custom.datasets.delete",
+    "azure.speech.stt.custom.models.create",
+    "azure.speech.stt.custom.models.list",
+    "azure.speech.stt.custom.models.get",
+    "azure.speech.stt.custom.models.delete",
+    "azure.speech.stt.custom.endpoints.create",
+    "azure.speech.stt.custom.endpoints.list",
+    "azure.speech.stt.custom.endpoints.get",
+    "azure.speech.stt.custom.endpoints.delete",
 ];
 
 fn azure_speech_manifest_unchecked() -> ConnectorManifest {
@@ -122,6 +138,26 @@ async fn azure_speech_manifest_operations_match_runtime_introspection() {
         })
         .expect("batch files operation should be present");
     assert_eq!(batch_files["idempotency"], "strict");
+    let project_create = runtime_operations
+        .iter()
+        .find(|operation| {
+            operation.get("id").and_then(Value::as_str)
+                == Some("azure.speech.stt.custom.projects.create")
+        })
+        .expect("custom project create operation should be present");
+    assert_eq!(project_create["capability"], "azure.speech.stt");
+    assert_eq!(
+        project_create["input_schema"]["required"][0],
+        "display_name"
+    );
+    let endpoint_delete = runtime_operations
+        .iter()
+        .find(|operation| {
+            operation.get("id").and_then(Value::as_str)
+                == Some("azure.speech.stt.custom.endpoints.delete")
+        })
+        .expect("custom endpoint delete operation should be present");
+    assert_eq!(endpoint_delete["requires_approval"], "interactive");
 
     let streaming_blocker = introspection
         .get("deferred_operations")
@@ -233,4 +269,66 @@ fn azure_speech_manifest_schemas_cover_core_request_shapes() {
         }),
     );
     assert_schema_rejects(batch_files_schema, &json!({"top": 2}));
+}
+
+#[test]
+fn azure_speech_manifest_schemas_cover_custom_speech_request_shapes() {
+    let manifest = azure_speech_manifest_unchecked();
+    let project_create_schema =
+        manifest_input_schema(&manifest, "azure.speech.stt.custom.projects.create");
+    assert_schema_accepts(
+        project_create_schema,
+        &json!({
+            "display_name": "project",
+            "locale": "en-US",
+            "foundry_project_name": "FoundrySpeech"
+        }),
+    );
+    assert_schema_rejects(project_create_schema, &json!({"locale": "en-US"}));
+
+    let dataset_create_schema =
+        manifest_input_schema(&manifest, "azure.speech.stt.custom.datasets.create");
+    assert_schema_accepts(
+        dataset_create_schema,
+        &json!({
+            "display_name": "dataset",
+            "locale": "en-US",
+            "kind": "AudioFiles",
+            "content_url": "https://storage.example/dataset.zip?sig=redacted",
+            "project_id": "project-123"
+        }),
+    );
+    assert_schema_rejects(
+        dataset_create_schema,
+        &json!({"display_name": "dataset", "locale": "en-US"}),
+    );
+
+    let model_create_schema =
+        manifest_input_schema(&manifest, "azure.speech.stt.custom.models.create");
+    assert_schema_accepts(
+        model_create_schema,
+        &json!({
+            "display_name": "model",
+            "locale": "en-US",
+            "base_model_id": "base-model-1",
+            "datasets": [{"id": "dataset-123"}]
+        }),
+    );
+    assert_schema_rejects(model_create_schema, &json!({"locale": "en-US"}));
+
+    let endpoint_create_schema =
+        manifest_input_schema(&manifest, "azure.speech.stt.custom.endpoints.create");
+    assert_schema_accepts(
+        endpoint_create_schema,
+        &json!({
+            "display_name": "endpoint",
+            "locale": "en-US",
+            "model_id": "model-123",
+            "project_id": "project-123"
+        }),
+    );
+    assert_schema_rejects(
+        endpoint_create_schema,
+        &json!({"display_name": "endpoint", "locale": "en-US"}),
+    );
 }

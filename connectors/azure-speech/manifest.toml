@@ -11,7 +11,7 @@ interface_hash = "blake3-256:fcp.interface.v2:ffd32fa3b46916b215ccd5751eab6fc0b8
 id = "fcp.azure-speech"
 name = "Azure Speech"
 version = "0.1.0"
-description = "Azure Speech REST connector for regional voice discovery, text-to-speech synthesis, host-brokered Microsoft Entra handoff, and 2025-10-15 fast plus batch transcription"
+description = "Azure Speech REST connector for regional voice discovery, text-to-speech synthesis, host-brokered Microsoft Entra handoff, and 2025-10-15 fast, batch, and custom speech lifecycle surfaces"
 archetypes = [
     "operational",
     "streaming",
@@ -21,7 +21,7 @@ format = "native"
 [connector.state]
 model = "stateless"
 state_schema_version = "1"
-migration_hint = "This slice supports REST token exchange, Microsoft Entra external-token handoff, host credential references, voices.list, REST TTS synthesis, fast STT transcription, and 2025-10-15 batch STT submit/status/files. Realtime WebSocket and custom speech project/model lifecycle remain explicit follow-up surfaces. Connector-local IMDS/MSAL acquisition is intentionally host-token-broker-only because FCP runtime network policy cannot safely mix link-local IMDS and external Speech egress in every provider operation."
+migration_hint = "This slice supports REST token exchange, Microsoft Entra external-token handoff, host credential references, voices.list, REST TTS synthesis, fast STT transcription, 2025-10-15 batch STT submit/status/files, and 2025-10-15 custom speech project/dataset/model/endpoint create/list/get/delete lifecycle operations. Realtime WebSocket remains an explicit follow-up surface. Connector-local IMDS/MSAL acquisition is intentionally host-token-broker-only because FCP runtime network policy cannot safely mix link-local IMDS and external Speech egress in every provider operation."
 
 [zones]
 home = "z:work"
@@ -48,6 +48,182 @@ forbidden = [
     "network.listen",
     "system.exec",
 ]
+
+[provides.operations."azure.speech.stt.custom.projects.create"]
+description = "Create an Azure Speech-to-text REST API 2025-10-15 custom speech project"
+capability = "azure.speech.stt"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["display_name", "locale"], properties = { display_name = { type = "string", minLength = 1 }, locale = { type = "string", default = "en-US" }, foundry_project_name = { type = "string" }, description = { type = "string" }, custom_properties = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."azure.speech.stt.custom.projects.list"]
+description = "List Azure Speech-to-text REST API 2025-10-15 custom speech projects"
+capability = "azure.speech.stt"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = { filter = { type = "string" }, skip = { type = "integer", minimum = 0 }, top = { type = "integer", minimum = 1 } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."azure.speech.stt.custom.projects.get"]
+description = "Get one Azure Speech-to-text REST API 2025-10-15 custom speech project"
+capability = "azure.speech.stt"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", anyOf = [{ required = ["project_id"] }, { required = ["project_url"] }], properties = { project_id = { type = "string", minLength = 1 }, project_url = { type = "string", minLength = 1 } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."azure.speech.stt.custom.projects.delete"]
+description = "Delete one Azure Speech-to-text REST API 2025-10-15 custom speech project"
+capability = "azure.speech.stt"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+input_schema = { type = "object", anyOf = [{ required = ["project_id"] }, { required = ["project_url"] }], properties = { project_id = { type = "string", minLength = 1 }, project_url = { type = "string", minLength = 1 } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."azure.speech.stt.custom.datasets.create"]
+description = "Create an Azure Speech-to-text REST API 2025-10-15 custom speech dataset"
+capability = "azure.speech.stt"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["display_name", "locale", "kind"], properties = { display_name = { type = "string", minLength = 1 }, locale = { type = "string", default = "en-US" }, kind = { type = "string" }, content_url = { type = "string" }, project_id = { type = "string" }, project_url = { type = "string" }, project = { type = "object" }, description = { type = "string" }, custom_properties = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."azure.speech.stt.custom.datasets.list"]
+description = "List Azure Speech-to-text REST API 2025-10-15 custom speech datasets"
+capability = "azure.speech.stt"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = { filter = { type = "string" }, skip = { type = "integer", minimum = 0 }, top = { type = "integer", minimum = 1 } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."azure.speech.stt.custom.datasets.get"]
+description = "Get one Azure Speech-to-text REST API 2025-10-15 custom speech dataset"
+capability = "azure.speech.stt"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", anyOf = [{ required = ["dataset_id"] }, { required = ["dataset_url"] }], properties = { dataset_id = { type = "string", minLength = 1 }, dataset_url = { type = "string", minLength = 1 } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."azure.speech.stt.custom.datasets.delete"]
+description = "Delete one Azure Speech-to-text REST API 2025-10-15 custom speech dataset"
+capability = "azure.speech.stt"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+input_schema = { type = "object", anyOf = [{ required = ["dataset_id"] }, { required = ["dataset_url"] }], properties = { dataset_id = { type = "string", minLength = 1 }, dataset_url = { type = "string", minLength = 1 } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."azure.speech.stt.custom.models.create"]
+description = "Create an Azure Speech-to-text REST API 2025-10-15 custom speech model"
+capability = "azure.speech.stt"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["display_name", "locale"], properties = { display_name = { type = "string", minLength = 1 }, locale = { type = "string", default = "en-US" }, project_id = { type = "string" }, project_url = { type = "string" }, project = { type = "object" }, base_model_id = { type = "string" }, base_model_url = { type = "string" }, base_model = { type = "object" }, datasets = { type = "array" }, description = { type = "string" }, custom_properties = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."azure.speech.stt.custom.models.list"]
+description = "List Azure Speech-to-text REST API 2025-10-15 custom speech models"
+capability = "azure.speech.stt"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = { filter = { type = "string" }, skip = { type = "integer", minimum = 0 }, top = { type = "integer", minimum = 1 } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."azure.speech.stt.custom.models.get"]
+description = "Get one Azure Speech-to-text REST API 2025-10-15 custom speech model"
+capability = "azure.speech.stt"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", anyOf = [{ required = ["model_id"] }, { required = ["model_url"] }], properties = { model_id = { type = "string", minLength = 1 }, model_url = { type = "string", minLength = 1 } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."azure.speech.stt.custom.models.delete"]
+description = "Delete one Azure Speech-to-text REST API 2025-10-15 custom speech model"
+capability = "azure.speech.stt"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+input_schema = { type = "object", anyOf = [{ required = ["model_id"] }, { required = ["model_url"] }], properties = { model_id = { type = "string", minLength = 1 }, model_url = { type = "string", minLength = 1 } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."azure.speech.stt.custom.endpoints.create"]
+description = "Create an Azure Speech-to-text REST API 2025-10-15 custom speech endpoint"
+capability = "azure.speech.stt"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["display_name", "locale"], anyOf = [{ required = ["model"] }, { required = ["model_id"] }, { required = ["model_url"] }], properties = { display_name = { type = "string", minLength = 1 }, locale = { type = "string", default = "en-US" }, model_id = { type = "string" }, model_url = { type = "string" }, model = { type = "object" }, project_id = { type = "string" }, project_url = { type = "string" }, project = { type = "object" }, text = { type = "string" }, description = { type = "string" }, custom_properties = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."azure.speech.stt.custom.endpoints.list"]
+description = "List Azure Speech-to-text REST API 2025-10-15 custom speech endpoints"
+capability = "azure.speech.stt"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = { filter = { type = "string" }, skip = { type = "integer", minimum = 0 }, top = { type = "integer", minimum = 1 } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."azure.speech.stt.custom.endpoints.get"]
+description = "Get one Azure Speech-to-text REST API 2025-10-15 custom speech endpoint"
+capability = "azure.speech.stt"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", anyOf = [{ required = ["endpoint_id"] }, { required = ["endpoint_url"] }], properties = { endpoint_id = { type = "string", minLength = 1 }, endpoint_url = { type = "string", minLength = 1 } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."azure.speech.stt.custom.endpoints.delete"]
+description = "Delete one Azure Speech-to-text REST API 2025-10-15 custom speech endpoint"
+capability = "azure.speech.stt"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+input_schema = { type = "object", anyOf = [{ required = ["endpoint_id"] }, { required = ["endpoint_url"] }], properties = { endpoint_id = { type = "string", minLength = 1 }, endpoint_url = { type = "string", minLength = 1 } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
 
 [provides.operations."azure.speech.stt.batch.files"]
 description = "List redacted file metadata for an Azure Speech-to-text REST API batch transcription job"

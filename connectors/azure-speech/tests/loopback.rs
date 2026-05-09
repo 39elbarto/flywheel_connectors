@@ -28,9 +28,26 @@ const OP_STT_FAST: &str = "azure.speech.stt.transcribe_fast";
 const OP_BATCH_SUBMIT: &str = "azure.speech.stt.batch.submit";
 const OP_BATCH_GET: &str = "azure.speech.stt.batch.get";
 const OP_BATCH_FILES: &str = "azure.speech.stt.batch.files";
+const OP_CUSTOM_PROJECT_CREATE: &str = "azure.speech.stt.custom.projects.create";
+const OP_CUSTOM_PROJECT_LIST: &str = "azure.speech.stt.custom.projects.list";
+const OP_CUSTOM_PROJECT_GET: &str = "azure.speech.stt.custom.projects.get";
+const OP_CUSTOM_PROJECT_DELETE: &str = "azure.speech.stt.custom.projects.delete";
+const OP_CUSTOM_DATASET_CREATE: &str = "azure.speech.stt.custom.datasets.create";
+const OP_CUSTOM_DATASET_GET: &str = "azure.speech.stt.custom.datasets.get";
+const OP_CUSTOM_DATASET_DELETE: &str = "azure.speech.stt.custom.datasets.delete";
+const OP_CUSTOM_MODEL_CREATE: &str = "azure.speech.stt.custom.models.create";
+const OP_CUSTOM_MODEL_GET: &str = "azure.speech.stt.custom.models.get";
+const OP_CUSTOM_MODEL_DELETE: &str = "azure.speech.stt.custom.models.delete";
+const OP_CUSTOM_ENDPOINT_CREATE: &str = "azure.speech.stt.custom.endpoints.create";
+const OP_CUSTOM_ENDPOINT_GET: &str = "azure.speech.stt.custom.endpoints.get";
+const OP_CUSTOM_ENDPOINT_DELETE: &str = "azure.speech.stt.custom.endpoints.delete";
 const CAP_VOICES: &str = "azure.speech.voices";
 const CAP_TTS: &str = "azure.speech.tts";
 const CAP_STT: &str = "azure.speech.stt";
+const CUSTOM_PROJECT_ID: &str = "project-loopback-123";
+const CUSTOM_DATASET_ID: &str = "dataset-loopback-123";
+const CUSTOM_MODEL_ID: &str = "model-loopback-123";
+const CUSTOM_ENDPOINT_ID: &str = "endpoint-loopback-123";
 
 async fn configured_connector(server: &MockServer) -> (AzureSpeechConnector, Ed25519SigningKey) {
     configured_connector_with(server, json!({})).await
@@ -279,7 +296,10 @@ fn e2e_record(
         "endpoint_class": if fixture_or_live_mode == "live" { "microsoft_public" } else { "loopback" },
         "auth_mode": auth_mode,
         "token_source_class": "not_applicable",
+        "api_version": "2025-10-15",
         "resource_id_hash": "n/a",
+        "model_id_hash": "n/a",
+        "project_id_hash": "n/a",
         "voice_id": voice_id,
         "language_id": language_id,
         "model_id": model_id,
@@ -307,6 +327,24 @@ fn with_identity_metadata(
 ) -> Value {
     record["token_source_class"] = json!(token_source_class);
     record["resource_id_hash"] = json!(resource_id_hash);
+    record
+}
+
+fn with_custom_speech_hashes(
+    mut record: Value,
+    resource_id: Option<&str>,
+    model_id: Option<&str>,
+    project_id: Option<&str>,
+) -> Value {
+    if let Some(resource_id) = resource_id {
+        record["resource_id_hash"] = json!(test_sha256_hex(resource_id.as_bytes()));
+    }
+    if let Some(model_id) = model_id {
+        record["model_id_hash"] = json!(test_sha256_hex(model_id.as_bytes()));
+    }
+    if let Some(project_id) = project_id {
+        record["project_id_hash"] = json!(test_sha256_hex(project_id.as_bytes()));
+    }
     record
 }
 
@@ -358,6 +396,10 @@ fn assert_jsonl_is_redacted(records: &[Value]) {
         "transcript text",
         "should-not-leak",
         TEST_MANAGED_IDENTITY_CLIENT_ID,
+        CUSTOM_PROJECT_ID,
+        CUSTOM_DATASET_ID,
+        CUSTOM_MODEL_ID,
+        CUSTOM_ENDPOINT_ID,
     ] {
         assert!(
             !jsonl.contains(forbidden),
@@ -1053,6 +1095,627 @@ async fn azure_speech_loopback_e2e_jsonl_matrix() {
             0,
         ),
     );
+
+    let custom_server = MockServer::start().await;
+    let project_url = format!(
+        "{}/speechtotext/projects/{CUSTOM_PROJECT_ID}?api-version=2025-10-15",
+        custom_server.uri()
+    );
+    let dataset_url = format!(
+        "{}/speechtotext/datasets/{CUSTOM_DATASET_ID}?api-version=2025-10-15",
+        custom_server.uri()
+    );
+    let model_url = format!(
+        "{}/speechtotext/models/{CUSTOM_MODEL_ID}?api-version=2025-10-15",
+        custom_server.uri()
+    );
+    let endpoint_url = format!(
+        "{}/speechtotext/endpoints/{CUSTOM_ENDPOINT_ID}?api-version=2025-10-15",
+        custom_server.uri()
+    );
+    Mock::given(method("POST"))
+        .and(path("/speechtotext/projects"))
+        .and(query_param("api-version", "2025-10-15"))
+        .and(header("ocp-apim-subscription-key", "loopback-secret"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .insert_header("location", project_url.as_str())
+                .set_body_json(json!({
+                    "self": project_url,
+                    "displayName": "redacted project",
+                    "locale": "en-US",
+                    "links": {
+                        "models": format!("{}/speechtotext/projects/{CUSTOM_PROJECT_ID}/models?api-version=2025-10-15", custom_server.uri())
+                    }
+                })),
+        )
+        .mount(&custom_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/speechtotext/projects"))
+        .and(query_param("api-version", "2025-10-15"))
+        .and(query_param("filter", "foundryProjectName eq 'redacted'"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "values": [{"self": project_url, "displayName": "redacted project"}]
+        })))
+        .mount(&custom_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/speechtotext/projects/{CUSTOM_PROJECT_ID}")))
+        .and(query_param("api-version", "2025-10-15"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "self": project_url,
+            "displayName": "redacted project",
+            "locale": "en-US"
+        })))
+        .mount(&custom_server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/speechtotext/projects/{CUSTOM_PROJECT_ID}")))
+        .and(query_param("api-version", "2025-10-15"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&custom_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/speechtotext/datasets"))
+        .and(query_param("api-version", "2025-10-15"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .insert_header("location", dataset_url.as_str())
+                .set_body_json(json!({
+                    "self": dataset_url,
+                    "kind": "AudioFiles",
+                    "contentUrl": "https://storage.example/dataset.zip?sig=SECRET",
+                    "project": {"self": project_url}
+                })),
+        )
+        .mount(&custom_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/speechtotext/datasets/{CUSTOM_DATASET_ID}")))
+        .and(query_param("api-version", "2025-10-15"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "self": dataset_url,
+            "kind": "AudioFiles",
+            "project": {"self": project_url}
+        })))
+        .mount(&custom_server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/speechtotext/datasets/{CUSTOM_DATASET_ID}")))
+        .and(query_param("api-version", "2025-10-15"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&custom_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/speechtotext/models"))
+        .and(query_param("api-version", "2025-10-15"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .insert_header("location", model_url.as_str())
+                .set_body_json(json!({
+                    "self": model_url,
+                    "displayName": "redacted model",
+                    "project": {"self": project_url},
+                    "datasets": [{"self": dataset_url}]
+                })),
+        )
+        .mount(&custom_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/speechtotext/models/{CUSTOM_MODEL_ID}")))
+        .and(query_param("api-version", "2025-10-15"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "self": model_url,
+            "project": {"self": project_url}
+        })))
+        .mount(&custom_server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/speechtotext/models/{CUSTOM_MODEL_ID}")))
+        .and(query_param("api-version", "2025-10-15"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&custom_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/speechtotext/endpoints"))
+        .and(query_param("api-version", "2025-10-15"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .insert_header("location", endpoint_url.as_str())
+                .set_body_json(json!({
+                    "self": endpoint_url,
+                    "displayName": "redacted endpoint",
+                    "project": {"self": project_url},
+                    "model": {"self": model_url}
+                })),
+        )
+        .mount(&custom_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/speechtotext/endpoints/{CUSTOM_ENDPOINT_ID}"
+        )))
+        .and(query_param("api-version", "2025-10-15"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "self": endpoint_url,
+            "project": {"self": project_url},
+            "model": {"self": model_url}
+        })))
+        .mount(&custom_server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path(format!(
+            "/speechtotext/endpoints/{CUSTOM_ENDPOINT_ID}"
+        )))
+        .and(query_param("api-version", "2025-10-15"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&custom_server)
+        .await;
+
+    let (custom_connector, custom_key) = configured_connector(&custom_server).await;
+    let project_create = invoke(
+        &custom_connector,
+        &custom_key,
+        OP_CUSTOM_PROJECT_CREATE,
+        CAP_STT,
+        json!({
+            "display_name": "redacted project",
+            "locale": "en-US",
+            "foundry_project_name": "redacted"
+        }),
+    )
+    .await
+    .expect("custom project create should succeed");
+    assert_eq!(project_create["resource"]["self"]["redacted"], true);
+    append_e2e_record(
+        &mut records,
+        with_custom_speech_hashes(
+            e2e_record(
+                "custom_project_create",
+                OP_CUSTOM_PROJECT_CREATE,
+                CAP_STT,
+                "subscription_key",
+                "fixture",
+                201,
+                "not_retried",
+                "none",
+                0,
+                "passed",
+                "not_started",
+                "not_skipped",
+                "n/a",
+                "en-US",
+                "n/a",
+                "application/json",
+                0,
+                0,
+                0,
+                0,
+            ),
+            Some(CUSTOM_PROJECT_ID),
+            None,
+            Some(CUSTOM_PROJECT_ID),
+        ),
+    );
+    let project_list = invoke(
+        &custom_connector,
+        &custom_key,
+        OP_CUSTOM_PROJECT_LIST,
+        CAP_STT,
+        json!({"filter": "foundryProjectName eq 'redacted'"}),
+    )
+    .await
+    .expect("custom project list should succeed");
+    assert_eq!(
+        project_list["resource"]["values"][0]["self"]["redacted"],
+        true
+    );
+    append_e2e_record(
+        &mut records,
+        with_custom_speech_hashes(
+            e2e_record(
+                "custom_project_list",
+                OP_CUSTOM_PROJECT_LIST,
+                CAP_STT,
+                "subscription_key",
+                "fixture",
+                200,
+                "not_retried",
+                "none",
+                0,
+                "passed",
+                "not_started",
+                "not_skipped",
+                "n/a",
+                "en-US",
+                "n/a",
+                "application/json",
+                0,
+                0,
+                0,
+                0,
+            ),
+            None,
+            None,
+            Some(CUSTOM_PROJECT_ID),
+        ),
+    );
+    let _project_get = invoke(
+        &custom_connector,
+        &custom_key,
+        OP_CUSTOM_PROJECT_GET,
+        CAP_STT,
+        json!({"project_id": CUSTOM_PROJECT_ID}),
+    )
+    .await
+    .expect("custom project get should succeed");
+    append_e2e_record(
+        &mut records,
+        with_custom_speech_hashes(
+            e2e_record(
+                "custom_project_get",
+                OP_CUSTOM_PROJECT_GET,
+                CAP_STT,
+                "subscription_key",
+                "fixture",
+                200,
+                "not_retried",
+                "none",
+                0,
+                "passed",
+                "not_started",
+                "not_skipped",
+                "n/a",
+                "en-US",
+                "n/a",
+                "application/json",
+                0,
+                0,
+                0,
+                0,
+            ),
+            Some(CUSTOM_PROJECT_ID),
+            None,
+            Some(CUSTOM_PROJECT_ID),
+        ),
+    );
+
+    let dataset_create = invoke(
+        &custom_connector,
+        &custom_key,
+        OP_CUSTOM_DATASET_CREATE,
+        CAP_STT,
+        json!({
+            "display_name": "redacted dataset",
+            "locale": "en-US",
+            "kind": "AudioFiles",
+            "content_url": "https://storage.example/dataset.zip?sig=SECRET",
+            "project_id": CUSTOM_PROJECT_ID
+        }),
+    )
+    .await
+    .expect("custom dataset create should succeed");
+    assert_eq!(dataset_create["resource"]["contentUrl"]["redacted"], true);
+    append_e2e_record(
+        &mut records,
+        with_custom_speech_hashes(
+            e2e_record(
+                "custom_dataset_create",
+                OP_CUSTOM_DATASET_CREATE,
+                CAP_STT,
+                "subscription_key",
+                "fixture",
+                201,
+                "not_retried",
+                "none",
+                0,
+                "passed",
+                "not_started",
+                "not_skipped",
+                "n/a",
+                "en-US",
+                "n/a",
+                "application/json",
+                0,
+                0,
+                0,
+                0,
+            ),
+            Some(CUSTOM_DATASET_ID),
+            None,
+            Some(CUSTOM_PROJECT_ID),
+        ),
+    );
+    let _dataset_get = invoke(
+        &custom_connector,
+        &custom_key,
+        OP_CUSTOM_DATASET_GET,
+        CAP_STT,
+        json!({"dataset_id": CUSTOM_DATASET_ID}),
+    )
+    .await
+    .expect("custom dataset get should succeed");
+    append_e2e_record(
+        &mut records,
+        with_custom_speech_hashes(
+            e2e_record(
+                "custom_dataset_get",
+                OP_CUSTOM_DATASET_GET,
+                CAP_STT,
+                "subscription_key",
+                "fixture",
+                200,
+                "not_retried",
+                "none",
+                0,
+                "passed",
+                "not_started",
+                "not_skipped",
+                "n/a",
+                "en-US",
+                "n/a",
+                "application/json",
+                0,
+                0,
+                0,
+                0,
+            ),
+            Some(CUSTOM_DATASET_ID),
+            None,
+            Some(CUSTOM_PROJECT_ID),
+        ),
+    );
+
+    let model_create = invoke(
+        &custom_connector,
+        &custom_key,
+        OP_CUSTOM_MODEL_CREATE,
+        CAP_STT,
+        json!({
+            "display_name": "redacted model",
+            "locale": "en-US",
+            "project_id": CUSTOM_PROJECT_ID,
+            "datasets": [{"id": CUSTOM_DATASET_ID}]
+        }),
+    )
+    .await
+    .expect("custom model create should succeed");
+    assert_eq!(
+        model_create["model_id_hash"],
+        test_sha256_hex(CUSTOM_MODEL_ID.as_bytes())
+    );
+    append_e2e_record(
+        &mut records,
+        with_custom_speech_hashes(
+            e2e_record(
+                "custom_model_create",
+                OP_CUSTOM_MODEL_CREATE,
+                CAP_STT,
+                "subscription_key",
+                "fixture",
+                201,
+                "not_retried",
+                "none",
+                0,
+                "passed",
+                "not_started",
+                "not_skipped",
+                "n/a",
+                "en-US",
+                "custom_model_hash_only",
+                "application/json",
+                0,
+                0,
+                0,
+                0,
+            ),
+            Some(CUSTOM_MODEL_ID),
+            Some(CUSTOM_MODEL_ID),
+            Some(CUSTOM_PROJECT_ID),
+        ),
+    );
+    let _model_get = invoke(
+        &custom_connector,
+        &custom_key,
+        OP_CUSTOM_MODEL_GET,
+        CAP_STT,
+        json!({"model_id": CUSTOM_MODEL_ID}),
+    )
+    .await
+    .expect("custom model get should succeed");
+    append_e2e_record(
+        &mut records,
+        with_custom_speech_hashes(
+            e2e_record(
+                "custom_model_get",
+                OP_CUSTOM_MODEL_GET,
+                CAP_STT,
+                "subscription_key",
+                "fixture",
+                200,
+                "not_retried",
+                "none",
+                0,
+                "passed",
+                "not_started",
+                "not_skipped",
+                "n/a",
+                "en-US",
+                "custom_model_hash_only",
+                "application/json",
+                0,
+                0,
+                0,
+                0,
+            ),
+            Some(CUSTOM_MODEL_ID),
+            Some(CUSTOM_MODEL_ID),
+            Some(CUSTOM_PROJECT_ID),
+        ),
+    );
+
+    let endpoint_create = invoke(
+        &custom_connector,
+        &custom_key,
+        OP_CUSTOM_ENDPOINT_CREATE,
+        CAP_STT,
+        json!({
+            "display_name": "redacted endpoint",
+            "locale": "en-US",
+            "model_id": CUSTOM_MODEL_ID,
+            "project_id": CUSTOM_PROJECT_ID
+        }),
+    )
+    .await
+    .expect("custom endpoint create should succeed");
+    assert_eq!(
+        endpoint_create["model_id_hash"],
+        test_sha256_hex(CUSTOM_MODEL_ID.as_bytes())
+    );
+    append_e2e_record(
+        &mut records,
+        with_custom_speech_hashes(
+            e2e_record(
+                "custom_endpoint_create",
+                OP_CUSTOM_ENDPOINT_CREATE,
+                CAP_STT,
+                "subscription_key",
+                "fixture",
+                201,
+                "not_retried",
+                "none",
+                0,
+                "passed",
+                "not_started",
+                "not_skipped",
+                "n/a",
+                "en-US",
+                "custom_model_hash_only",
+                "application/json",
+                0,
+                0,
+                0,
+                0,
+            ),
+            Some(CUSTOM_ENDPOINT_ID),
+            Some(CUSTOM_MODEL_ID),
+            Some(CUSTOM_PROJECT_ID),
+        ),
+    );
+    let _endpoint_get = invoke(
+        &custom_connector,
+        &custom_key,
+        OP_CUSTOM_ENDPOINT_GET,
+        CAP_STT,
+        json!({"endpoint_id": CUSTOM_ENDPOINT_ID}),
+    )
+    .await
+    .expect("custom endpoint get should succeed");
+    append_e2e_record(
+        &mut records,
+        with_custom_speech_hashes(
+            e2e_record(
+                "custom_endpoint_get",
+                OP_CUSTOM_ENDPOINT_GET,
+                CAP_STT,
+                "subscription_key",
+                "fixture",
+                200,
+                "not_retried",
+                "none",
+                0,
+                "passed",
+                "not_started",
+                "not_skipped",
+                "n/a",
+                "en-US",
+                "custom_model_hash_only",
+                "application/json",
+                0,
+                0,
+                0,
+                0,
+            ),
+            Some(CUSTOM_ENDPOINT_ID),
+            Some(CUSTOM_MODEL_ID),
+            Some(CUSTOM_PROJECT_ID),
+        ),
+    );
+    for (scenario, operation, id_field, id_value, resource_id, model_id) in [
+        (
+            "custom_endpoint_delete",
+            OP_CUSTOM_ENDPOINT_DELETE,
+            "endpoint_id",
+            CUSTOM_ENDPOINT_ID,
+            CUSTOM_ENDPOINT_ID,
+            Some(CUSTOM_MODEL_ID),
+        ),
+        (
+            "custom_model_delete",
+            OP_CUSTOM_MODEL_DELETE,
+            "model_id",
+            CUSTOM_MODEL_ID,
+            CUSTOM_MODEL_ID,
+            Some(CUSTOM_MODEL_ID),
+        ),
+        (
+            "custom_dataset_delete",
+            OP_CUSTOM_DATASET_DELETE,
+            "dataset_id",
+            CUSTOM_DATASET_ID,
+            CUSTOM_DATASET_ID,
+            None,
+        ),
+        (
+            "custom_project_delete",
+            OP_CUSTOM_PROJECT_DELETE,
+            "project_id",
+            CUSTOM_PROJECT_ID,
+            CUSTOM_PROJECT_ID,
+            None,
+        ),
+    ] {
+        invoke(
+            &custom_connector,
+            &custom_key,
+            operation,
+            CAP_STT,
+            json!({id_field: id_value}),
+        )
+        .await
+        .expect("custom delete should succeed");
+        append_e2e_record(
+            &mut records,
+            with_custom_speech_hashes(
+                e2e_record(
+                    scenario,
+                    operation,
+                    CAP_STT,
+                    "subscription_key",
+                    "fixture",
+                    204,
+                    "not_retried",
+                    "none",
+                    0,
+                    "passed",
+                    "deleted_loopback_resource",
+                    "not_skipped",
+                    "n/a",
+                    "en-US",
+                    "custom_model_hash_only",
+                    "application/json",
+                    0,
+                    0,
+                    0,
+                    0,
+                ),
+                Some(resource_id),
+                model_id,
+                Some(CUSTOM_PROJECT_ID),
+            ),
+        );
+    }
 
     let identity_server = MockServer::start().await;
     let expected_authorization = format!("Bearer aad#{TEST_RESOURCE_ID}#aad-secret");

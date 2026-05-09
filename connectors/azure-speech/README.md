@@ -7,8 +7,9 @@ This connector implements the core Azure Speech REST surface for FCP:
 - `voices/list` discovery
 - REST text-to-speech synthesis through `/cognitiveservices/v1`
 - Speech-to-text fast and batch transcription through `2025-10-15`
+- Speech-to-text custom speech project, dataset, model, and endpoint lifecycle through `2025-10-15`
 
-Realtime WebSocket sessions and custom speech project/model lifecycle are intentionally separate follow-up surfaces: `flywheel_connectors-4kw5f.2.9.6.1.2` and `flywheel_connectors-4kw5f.2.9.6.2`. Connector-local IMDS/MSAL token acquisition was reviewed under `flywheel_connectors-4kw5f.2.9.6.3` and is retained as a host-token-broker-only boundary.
+Realtime WebSocket sessions remain an intentionally separate follow-up surface: `flywheel_connectors-4kw5f.2.9.6.1.2`. Custom speech lifecycle is implemented under `flywheel_connectors-4kw5f.2.9.6.2` for the current `2025-10-15` REST operation families. Connector-local IMDS/MSAL token acquisition was reviewed under `flywheel_connectors-4kw5f.2.9.6.3` and is retained as a host-token-broker-only boundary.
 
 ## Enterprise Auth Status
 
@@ -26,9 +27,29 @@ All invoke paths require a bound FCP capability token after handshake. The conne
 
 ## Speech-to-text REST Status
 
-`flywheel_connectors-4kw5f.2.9.6.1.3` covers the current `2025-10-15` REST paths that are explicit in Microsoft Learn: fast transcription via `/speechtotext/transcriptions:transcribe` and batch transcription submit/status/files via `/speechtotext/transcriptions:submit` plus the transcription resource and files links returned by that API. Batch input accepts storage URLs or a Blob container URL; runtime output redacts provider URLs and SAS-bearing file links into hashes/descriptors.
+`flywheel_connectors-4kw5f.2.9.6.1.3` covers the current `2025-10-15` REST paths that are explicit in Microsoft Learn: fast transcription via `/speechtotext/transcriptions:transcribe` and batch transcription submit/status/files via `/speechtotext/transcriptions:submit` plus the transcription resource and files links returned by that API. Batch input accepts storage URLs or a Blob container URL; runtime output redacts provider URLs and SAS-bearing file links into hashes/descriptors. Batch submit also accepts validated custom `project`, `dataset`, and `model` references, including ergonomic `*_id` and `*_url` inputs. These references are pinned to the configured Speech-to-text host and `api-version=2025-10-15`; retired v3.x URLs and cross-region hosts are rejected before provider egress.
 
-Custom speech projects, dataset/model training, deployment endpoints, and webhook management are not part of this connector slice; they are tracked in `flywheel_connectors-4kw5f.2.9.6.2`.
+## Custom Speech Lifecycle
+
+`flywheel_connectors-4kw5f.2.9.6.2` implements the stable Custom Speech operation families documented by Microsoft for Speech-to-text REST API `2025-10-15`:
+
+- projects: `azure.speech.stt.custom.projects.create/list/get/delete`
+- datasets: `azure.speech.stt.custom.datasets.create/list/get/delete`
+- models: `azure.speech.stt.custom.models.create/list/get/delete`
+- endpoints: `azure.speech.stt.custom.endpoints.create/list/get/delete`
+
+All custom speech operations use the `azure.speech.stt` capability and the same bound-token zone/instance checks as fast and batch transcription. Create requests validate required schema fields, locale, custom property bounds, dataset kind, external `content_url`, and project/model/dataset reference objects. Get/delete requests accept either an ID or provider URL, normalize the URL to the configured STT host, pin `api-version=2025-10-15`, and reject retired v3.x paths. Provider `self`, `location`, `contentUrl`, and related links are returned as redacted host/path/query/hash descriptors; project/model/resource identifiers are exposed only as SHA-256 hashes in connector outputs and e2e logs.
+
+The intentionally excluded subsurfaces are dataset upload blocks and file downloads, custom speech evaluations, web hooks, endpoint logs, and model copy authorization/cross-subscription copy. Those are separate operation families with different data-retention and cleanup semantics, not missing pieces of the create/list/get/delete lifecycle implemented here.
+
+Current docs rechecked for this slice:
+
+- <https://learn.microsoft.com/en-us/azure/ai-services/speech-service/rest-speech-to-text>
+- <https://learn.microsoft.com/en-us/azure/ai-services/speech-service/migrate-2025-10-15>
+- <https://learn.microsoft.com/en-us/rest/api/speechtotext/projects?view=rest-speechtotext-2025-10-15>
+- <https://learn.microsoft.com/en-us/rest/api/speechtotext/datasets?view=rest-speechtotext-2025-10-15>
+- <https://learn.microsoft.com/en-us/rest/api/speechtotext/models?view=rest-speechtotext-2025-10-15>
+- <https://learn.microsoft.com/en-us/rest/api/speechtotext/endpoints?view=rest-speechtotext-2025-10-15>
 
 ## Realtime WebSocket Status
 
@@ -48,6 +69,6 @@ Current docs:
 
 ## Verification
 
-The closeout proof lane is `scripts/e2e/azure_speech_connector_verification.sh`. It runs the no-live-credential loopback matrix through the production connector boundary and emits redacted JSONL records for token issue, voices.list, TTS synth, STT fast transcription, batch submit/get/files, host-brokered managed-identity token handoff, connector-local IMDS policy skips, provider error redaction, rate-limit retry, timeout, malformed input, unsupported format, oversized audio, capability-token zone and instance denial, harness cancellation, streaming blocker disposition, shutdown cleanup, and optional live-smoke skip/pass state.
+The closeout proof lane is `scripts/e2e/azure_speech_connector_verification.sh`. It runs the no-live-credential loopback matrix through the production connector boundary and emits redacted JSONL records for token issue, voices.list, TTS synth, STT fast transcription, batch submit/get/files, custom project create/list/get/delete, custom dataset/model/endpoint create/get/delete, host-brokered managed-identity token handoff, connector-local IMDS policy skips, provider error redaction, rate-limit retry, timeout, malformed input, unsupported format, oversized audio, capability-token zone and instance denial, harness cancellation, streaming blocker disposition, shutdown cleanup, and optional live-smoke skip/pass state.
 
-The JSONL contract records command line, git revision, connector id, operation id, capability, zone, instance id, fixture/live mode, region and endpoint class, auth mode, token source class, resource id hash, voice/language/model id, content type, audio byte counts, transcript length only, stream chunk count, HTTP status, retry/backoff decision, FCP error mapping, latency, result, audit receipt id, cleanup result, and skip reason. It deliberately rejects keys, bearer tokens, raw tenant/resource IDs, SAS URLs, SSML/text content, transcripts, raw audio bytes, provider bodies, local absolute paths, and PII.
+The JSONL contract records command line, git revision, connector id, operation id, capability, zone, instance id, fixture/live mode, region and endpoint class, auth mode, token source class, API version, resource/model/project id hashes, voice/language/model labels, content type, audio byte counts, transcript length only, stream chunk count, HTTP status, retry/backoff decision, FCP error mapping, latency, result, audit receipt id, cleanup result, and skip reason. It deliberately rejects keys, bearer tokens, raw tenant/resource IDs, raw custom speech resource IDs, SAS URLs, SSML/text content, transcripts, raw audio bytes, provider bodies, local absolute paths, and PII.

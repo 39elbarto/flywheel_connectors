@@ -186,18 +186,24 @@ fn manifest_network_constraints_are_complete_for_all_declared_operations() {
             .as_ref()
             .expect("operation should declare operation-level network constraints");
         if id == HOST_FORWARDED_WEBHOOK_OP {
-            assert!(
-                constraints.host_allow.is_empty(),
-                "host-forwarded webhook must not open provider egress"
+            assert_eq!(
+                constraints.host_allow,
+                vec!["none.invalid".to_string()],
+                "host-forwarded webhook must use the no-egress sentinel host"
             );
-            assert!(
-                constraints.port_allow.is_empty(),
-                "host-forwarded webhook must not open provider ports"
+            assert_eq!(
+                constraints.port_allow,
+                vec![0],
+                "host-forwarded webhook must use the no-egress sentinel port"
             );
             assert_eq!(constraints.dns_max_ips, 0, "{id} should not resolve DNS");
+            assert!(
+                !constraints.require_sni,
+                "{id} should not require SNI without provider egress"
+            );
             assert_eq!(
-                constraints.max_response_bytes, 0,
-                "{id} should not receive provider responses"
+                constraints.max_response_bytes, 65_536,
+                "{id} should keep a finite no-egress response cap"
             );
         } else {
             assert_eq!(
@@ -225,7 +231,9 @@ fn manifest_network_constraints_are_complete_for_all_declared_operations() {
             constraints.deny_tailnet_ranges,
             "{id} should deny tailnet ranges"
         );
-        assert!(constraints.require_sni, "{id} should require SNI");
+        if id != HOST_FORWARDED_WEBHOOK_OP {
+            assert!(constraints.require_sni, "{id} should require SNI");
+        }
         assert!(constraints.deny_ip_literals, "{id} should deny IP literals");
         assert!(
             constraints.require_host_canonicalization,

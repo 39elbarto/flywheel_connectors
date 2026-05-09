@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+interface_hash = "blake3-256:fcp.interface.v2:6660a557a9840cb3617f92eb97849a8e47ed2d87ab1a333c61db905413248d53"
 
 [connector]
 id = "fcp.google_chat"
@@ -89,19 +89,21 @@ type = "object"
 type = "object"
 
 [provides.operations."chat.ingest_webhook".network_constraints]
-host_allow = []
-port_allow = []
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
-require_sni = true
+require_sni = false
 deny_ip_literals = true
 require_host_canonicalization = true
 dns_max_ips = 0
 max_redirects = 0
-connect_timeout_ms = 0
+connect_timeout_ms = 1000
 total_timeout_ms = 3000
-max_response_bytes = 0
+max_response_bytes = 65536
 
 [provides.operations."chat.ingest_webhook".ai_hints]
 when_to_use = "Handle a Google Chat callback that the FCP host has already accepted into a request region. The connector does not open a listener."

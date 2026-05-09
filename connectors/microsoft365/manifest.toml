@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:57f6eaa20db0cbb0ca6ba7678a4a7d2f6f44de3348e6214dcc20ad5138e3b0e6"
+interface_hash = "blake3-256:fcp.interface.v2:9aae062c5066538b78e6c901db0adb9e124cbcb8972319535563835f440a4877"
 
 [connector]
 id = "fcp.microsoft365"
@@ -2405,6 +2405,24 @@ type = "array"
 
 [provides.operations."m365.notifications.ingest".output_schema.properties.retry_after_seconds]
 type = "integer"
+
+[provides.operations."m365.notifications.ingest".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."m365.notifications.ingest".ai_hints]
 when_to_use = "Use after the FCP host receives a Microsoft Graph webhook POST and needs the connector to validate clientState, suppress duplicates, acknowledge lifecycle events, and produce delta-sync handoff work."

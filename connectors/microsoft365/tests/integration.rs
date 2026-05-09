@@ -30,6 +30,8 @@ use zip::{CompressionMethod, write::FileOptions};
 
 use fcp_microsoft365::connector::M365Connector;
 
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -102,6 +104,113 @@ fn generate_valid_token(issuer: &TokenIssuer, op: &str) -> fcp_core::CapabilityT
         .sign(&issuer.signing_key)
         .unwrap();
     fcp_core::CapabilityToken::from_raw(cose)
+}
+
+fn manifest() -> Result<toml::Table, String> {
+    MANIFEST_TOML
+        .parse::<toml::Table>()
+        .map_err(|err| format!("microsoft365 manifest should parse as TOML: {err}"))
+}
+
+fn manifest_operations(
+    manifest: &toml::Table,
+) -> Result<&toml::map::Map<String, toml::Value>, String> {
+    manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "manifest should declare operation tables".to_owned())
+}
+
+fn manifest_operation_network_constraints<'a>(
+    manifest: &'a toml::Table,
+    operation_id: &str,
+) -> Result<&'a toml::map::Map<String, toml::Value>, String> {
+    manifest_operations(manifest)?
+        .get(operation_id)
+        .and_then(toml::Value::as_table)
+        .and_then(|operation| operation.get("network_constraints"))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| format!("{operation_id} should declare network_constraints"))
+}
+
+fn network_string_array(
+    table: &toml::map::Map<String, toml::Value>,
+    key: &str,
+) -> Result<Vec<String>, String> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| format!("{key} should be an array"))?
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{key} entries should be strings"))
+        })
+        .collect()
+}
+
+fn network_integer_array(
+    table: &toml::map::Map<String, toml::Value>,
+    key: &str,
+) -> Result<Vec<i64>, String> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| format!("{key} should be an array"))?
+        .iter()
+        .map(|entry| {
+            entry
+                .as_integer()
+                .ok_or_else(|| format!("{key} entries should be integers"))
+        })
+        .collect()
+}
+
+fn network_bool(table: &toml::map::Map<String, toml::Value>, key: &str) -> Result<bool, String> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_bool)
+        .ok_or_else(|| format!("{key} should be a boolean"))
+}
+
+fn network_integer(table: &toml::map::Map<String, toml::Value>, key: &str) -> Result<i64, String> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_integer)
+        .ok_or_else(|| format!("{key} should be an integer"))
+}
+
+fn assert_no_egress_network_constraints(
+    manifest: &toml::Table,
+    operation_id: &str,
+) -> Result<(), String> {
+    let constraints = manifest_operation_network_constraints(manifest, operation_id)?;
+    assert_eq!(
+        network_string_array(constraints, "host_allow")?,
+        vec!["none.invalid"]
+    );
+    assert_eq!(network_integer_array(constraints, "port_allow")?, vec![0]);
+    assert!(network_string_array(constraints, "ip_allow")?.is_empty());
+    assert!(network_string_array(constraints, "cidr_deny")?.is_empty());
+    assert!(network_bool(constraints, "deny_localhost")?);
+    assert!(network_bool(constraints, "deny_private_ranges")?);
+    assert!(network_bool(constraints, "deny_tailnet_ranges")?);
+    assert!(!network_bool(constraints, "require_sni")?);
+    assert!(network_string_array(constraints, "spki_pins")?.is_empty());
+    assert!(network_bool(constraints, "deny_ip_literals")?);
+    assert!(network_bool(constraints, "require_host_canonicalization")?);
+    assert_eq!(network_integer(constraints, "dns_max_ips")?, 0);
+    assert_eq!(network_integer(constraints, "max_redirects")?, 0);
+    assert_eq!(network_integer(constraints, "connect_timeout_ms")?, 1_000);
+    assert_eq!(network_integer(constraints, "total_timeout_ms")?, 30_000);
+    assert_eq!(
+        network_integer(constraints, "max_response_bytes")?,
+        1_048_576
+    );
+    Ok(())
 }
 
 fn unique_zone_dir(label: &str) -> String {
@@ -2208,6 +2317,29 @@ async fn introspect_lists_all_operations() {
     assert!(op_ids.contains(&"m365.notifications.ingest"));
     assert!(op_ids.contains(&"m365.delta.sync"));
     assert_eq!(ops.len(), 44);
+}
+
+#[test]
+fn manifest_declares_per_operation_network_constraints() -> Result<(), String> {
+    let manifest = manifest()?;
+    let operations = manifest_operations(&manifest)?;
+
+    for operation_id in operations.keys() {
+        let constraints = manifest_operation_network_constraints(&manifest, operation_id)?;
+        assert!(
+            !network_string_array(constraints, "host_allow")?.is_empty(),
+            "{operation_id} host_allow should not be empty"
+        );
+        assert!(
+            !network_integer_array(constraints, "port_allow")?.is_empty(),
+            "{operation_id} port_allow should not be empty"
+        );
+        let _deny_private_ranges = network_bool(constraints, "deny_private_ranges")?;
+        let _require_sni = network_bool(constraints, "require_sni")?;
+    }
+
+    assert_no_egress_network_constraints(&manifest, "m365.notifications.ingest")?;
+    Ok(())
 }
 
 #[fcp_async_core::runtime::test]

@@ -73,6 +73,7 @@ The first slice is mailbox-oriented rather than admin-oriented. It is not a gene
 - Base API host: `graph.microsoft.com`
 - Default API root: `https://graph.microsoft.com/v1.0`
 - Auth host: `login.microsoftonline.com`
+- `m365.notifications.ingest` is a host-forwarded local ingress path. It validates Graph webhook payloads, updates connector state, and returns acknowledgements without opening Graph or Entra network connections.
 - Port: `443`
 - TLS + SNI required
 - `deny_localhost = true`

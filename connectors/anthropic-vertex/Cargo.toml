@@ -1,0 +1,51 @@
+[package]
+name = "fcp-anthropic-vertex"
+description = "Anthropic Claude on Google Vertex AI connector for the Flywheel Connector Protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+name = "fcp_anthropic_vertex"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fcp-anthropic-vertex"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+fcp-core = { path = "../../crates/fcp-core" }
+fcp-prelude = { path = "../../crates/fcp-prelude" }
+fcp-async-core = { path = "../../crates/fcp-async-core" }
+fcp-sdk = { path = "../../crates/fcp-sdk" }
+fcp-google-discovery = { path = "../../crates/fcp-google-discovery" }
+
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+url.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+ciborium.workspace = true
+fcp-crypto = { path = "../../crates/fcp-crypto" }
+fcp-testkit = { path = "../../crates/fcp-testkit" }
+jsonschema.workspace = true
+toml.workspace = true
+wiremock.workspace = true

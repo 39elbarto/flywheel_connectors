@@ -1,0 +1,201 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:pending-anthropic-vertex"
+
+[connector]
+id = "fcp.anthropic-vertex"
+name = "Anthropic Vertex"
+version = "0.1.0"
+description = "Claude Messages connector for Google Vertex AI partner model endpoints, using Vertex auth and rawPredict or streamRawPredict routing"
+archetypes = ["operational", "streaming"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "No durable connector state; Google auth material and HTTP clients live only inside the current connector instance."
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work", "z:private"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public", "z:community"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = []
+forbidden = ["system.exec", "network.listen", "system.privileged"]
+
+[provides.operations."anthropic_vertex.messages.create"]
+description = "Invoke Claude Messages through Google Vertex AI rawPredict."
+capability = "anthropic_vertex.messages"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."anthropic_vertex.messages.create".input_schema]
+type = "object"
+required = ["messages", "max_tokens"]
+additionalProperties = true
+
+[provides.operations."anthropic_vertex.messages.create".output_schema]
+type = "object"
+additionalProperties = true
+
+[provides.operations."anthropic_vertex.messages.create".network_constraints]
+host_allow = [
+    "aiplatform.googleapis.com",
+    "aiplatform.us.rep.googleapis.com",
+    "aiplatform.eu.rep.googleapis.com",
+    "*.aiplatform.googleapis.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 240000
+max_response_bytes = 25000000
+
+[provides.operations."anthropic_vertex.messages.create".ai_hints]
+when_to_use = "Use for Claude Messages requests that must run through Google Vertex AI rather than direct Anthropic billing/auth."
+common_mistakes = [
+    "Passing direct Anthropic API keys; configure Google access_token, oauth_refresh, or credential_id instead.",
+    "Including model in the raw body; the connector normalizes the model into the Vertex URL path.",
+    "Sending Anthropic beta headers; Claude on Vertex uses anthropic_version in the JSON body.",
+]
+examples = [
+    '{"model": "sonnet-4.6", "messages": [{"role": "user", "content": "Summarize this incident."}], "max_tokens": 256}',
+]
+related = ["anthropic_vertex.messages.stream", "anthropic_vertex.models.normalize"]
+
+[provides.operations."anthropic_vertex.messages.stream"]
+description = "Invoke Claude Messages through Google Vertex AI streamRawPredict and return decoded SSE events."
+capability = "anthropic_vertex.messages"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."anthropic_vertex.messages.stream".input_schema]
+type = "object"
+required = ["messages", "max_tokens"]
+additionalProperties = true
+
+[provides.operations."anthropic_vertex.messages.stream".output_schema]
+type = "object"
+required = ["events", "event_count", "total_payload_bytes"]
+additionalProperties = false
+
+[provides.operations."anthropic_vertex.messages.stream".output_schema.properties.events]
+type = "array"
+
+[provides.operations."anthropic_vertex.messages.stream".output_schema.properties.event_count]
+type = "integer"
+minimum = 0
+
+[provides.operations."anthropic_vertex.messages.stream".output_schema.properties.total_payload_bytes]
+type = "integer"
+minimum = 0
+
+[provides.operations."anthropic_vertex.messages.stream".network_constraints]
+host_allow = [
+    "aiplatform.googleapis.com",
+    "aiplatform.us.rep.googleapis.com",
+    "aiplatform.eu.rep.googleapis.com",
+    "*.aiplatform.googleapis.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 240000
+max_response_bytes = 25000000
+
+[provides.operations."anthropic_vertex.messages.stream".ai_hints]
+when_to_use = "Use when Claude token deltas or streaming state are needed through Vertex AI."
+common_mistakes = [
+    "Assuming streaming uses the direct Anthropic /v1/messages path; Vertex uses streamRawPredict on the model resource.",
+    "Logging streamed content, thinking blocks, bearer tokens, or prompt cache content.",
+]
+examples = [
+    '{"model": "sonnet-4.6", "messages": [{"role": "user", "content": "Stream a short answer."}], "max_tokens": 32}',
+]
+related = ["anthropic_vertex.messages.create"]
+
+[provides.operations."anthropic_vertex.models.normalize"]
+description = "Normalize Anthropic/Claude aliases to Claude-on-Vertex model ids and return the local catalog entry."
+capability = "anthropic_vertex.models.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."anthropic_vertex.models.normalize".input_schema]
+type = "object"
+required = ["model"]
+additionalProperties = false
+
+[provides.operations."anthropic_vertex.models.normalize".input_schema.properties.model]
+type = "string"
+minLength = 1
+
+[provides.operations."anthropic_vertex.models.normalize".output_schema]
+type = "object"
+additionalProperties = true
+
+[provides.operations."anthropic_vertex.models.normalize".ai_hints]
+when_to_use = "Use before invocation to inspect how a user-facing Claude alias maps to a Vertex model resource id."
+common_mistakes = [
+    "Assuming every direct Anthropic date-suffixed id is also the Vertex path id; several Vertex ids use @YYYYMMDD.",
+]
+examples = ['{"model": "claude-sonnet-4-5-20250929"}']
+related = ["anthropic_vertex.messages.create"]
+
+[provides.operations."anthropic_vertex.health"]
+description = "Return local Anthropic Vertex connector readiness without live Google calls."
+capability = "anthropic_vertex.models.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."anthropic_vertex.health".input_schema]
+type = "object"
+additionalProperties = false
+maxProperties = 0
+
+[provides.operations."anthropic_vertex.health".output_schema]
+type = "object"
+additionalProperties = true
+
+[provides.operations."anthropic_vertex.health".ai_hints]
+when_to_use = "Use to inspect configured project, location, endpoint mode, and local model catalog status without making a production Vertex call."
+common_mistakes = [
+    "Treating health as a live quota or model-availability probe; self_check intentionally avoids default Vertex endpoints.",
+]
+examples = ["{}"]
+related = ["anthropic_vertex.models.normalize"]

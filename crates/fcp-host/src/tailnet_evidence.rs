@@ -513,17 +513,30 @@ fn redact_command_line(command_line: Vec<String>) -> Vec<String> {
 
 fn redact_sensitive_text(input: &str) -> String {
     let lower = input.to_ascii_lowercase();
-    if [
+    let contains_secret = [
         "token",
         "secret",
         "password",
         "credential",
         "bearer",
         "api_key",
+        "apikey",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "private_key",
+        "authorization",
     ]
     .iter()
-    .any(|needle| lower.contains(needle))
-    {
+    .any(|needle| lower.contains(needle));
+    let contains_endpoint = lower.contains("://");
+    let contains_tailnet_hostname = lower.contains(".ts.net") || lower.contains(".tailnet.");
+    let contains_private_path = lower.contains("/users/")
+        || lower.contains("/home/")
+        || lower.contains("\\users\\")
+        || lower.contains(":\\");
+
+    if contains_secret || contains_endpoint || contains_tailnet_hostname || contains_private_path {
         "[REDACTED]".to_string()
     } else {
         input.to_string()
@@ -683,6 +696,38 @@ mod tests {
                 "missing_prerequisites:direct-lan-route-observed,production-mesh-invoke-transport"
             )
         );
+    }
+
+    #[test]
+    fn evidence_redacts_urls_tailnet_hosts_and_private_paths_in_free_text() {
+        let record = TailnetInvokeEvidenceRecord::structured_skip(
+            TailnetInvokeRouteMode::DirectLan,
+            vec![
+                "fcp-tailnet-invoke-evidence".to_string(),
+                "--localapi-url=http://127.0.0.1:41112".to_string(),
+                "--topology=alice.tailnet.ts.net".to_string(),
+                "--artifact=/Users/jemanuel/private/evidence.jsonl".to_string(),
+            ],
+            "abc123",
+            "caller alice.tailnet.ts.net wrote /Users/jemanuel/private/evidence.jsonl",
+            vec![TailnetInvokePrerequisite::new(
+                "direct-lan-route-observed",
+                false,
+                "status came from https://example.invalid/localapi/v0/status",
+            )],
+        );
+
+        assert_eq!(record.command_line[1], "[REDACTED]");
+        assert_eq!(record.command_line[2], "[REDACTED]");
+        assert_eq!(record.command_line[3], "[REDACTED]");
+        assert_eq!(record.topology, "[REDACTED]");
+        assert_eq!(record.prerequisites[0].detail, "[REDACTED]");
+
+        let jsonl = record.to_jsonl_line().expect("serialize JSONL");
+        assert!(!jsonl.contains("127.0.0.1"));
+        assert!(!jsonl.contains("alice.tailnet.ts.net"));
+        assert!(!jsonl.contains("/Users/jemanuel"));
+        assert!(!jsonl.contains("example.invalid"));
     }
 
     #[test]

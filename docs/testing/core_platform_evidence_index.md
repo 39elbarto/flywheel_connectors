@@ -297,7 +297,8 @@ The real-transport record shape already reserves typed per-invoke attempts for
 the eventual production harness. Each attempt carries a success, error,
 timeout, or cancellation classification plus optional latency and redacted
 diagnostic detail; percentile summaries are derived from successful invoke
-samples only.
+samples only. The free-text evidence fields redact credential-like values,
+URLs, raw tailnet hostnames, and local user paths before JSONL serialization.
 
 ```bash
 cargo run -p fcp-host --bin fcp-tailnet-invoke-evidence -- --route direct-lan

@@ -206,6 +206,7 @@ struct DirectCdpManagerEvent {
 #[derive(Debug)]
 struct DirectCdpTargetSessionManager {
     manager_id_hash: String,
+    started: bool,
     current_target: Option<DirectCdpOwnedTarget>,
     active_lease: Option<DirectCdpActiveLease>,
     session_objects: BTreeMap<String, DirectCdpSessionObjectLease>,
@@ -218,6 +219,7 @@ impl Default for DirectCdpTargetSessionManager {
     fn default() -> Self {
         Self {
             manager_id_hash: direct_cdp_redaction_hash("fcp.browser.direct_cdp.manager.v1"),
+            started: false,
             current_target: None,
             active_lease: None,
             session_objects: BTreeMap::new(),
@@ -252,6 +254,7 @@ impl DirectCdpTargetSessionManager {
                 endpoint.target.kind.as_str()
             )));
         }
+        self.ensure_started(endpoint, operation_id, timeout);
 
         let target = DirectCdpOwnedTarget::from(&endpoint.target);
         let current_tab_decision = if self.current_target.as_ref() == Some(&target) {
@@ -346,6 +349,39 @@ impl DirectCdpTargetSessionManager {
         Ok(lease_seq)
     }
 
+    fn ensure_started(
+        &mut self,
+        endpoint: &DirectCdpEndpoint,
+        operation_id: &'static str,
+        timeout: Duration,
+    ) {
+        if self.started {
+            return;
+        }
+        self.started = true;
+        self.push_event(DirectCdpManagerEvent {
+            event_kind: "manager_start",
+            command_line: direct_cdp_manager_command_line(),
+            git_revision: direct_cdp_git_revision(),
+            run_id: self.manager_id_hash.clone(),
+            manager_id_hash: self.manager_id_hash.clone(),
+            endpoint_kind: endpoint.endpoint_kind.as_str(),
+            target_kind: endpoint.target.kind.as_str(),
+            target_id_hash: endpoint.target.id_hash.clone(),
+            operation_id,
+            cdp_command_ids: Vec::new(),
+            current_tab_decision: "manager_started_without_current_tab",
+            session_object_id_hash: None,
+            session_lease_seq: None,
+            retry_decision: "not_applicable_manager_start",
+            timeout_budget_ms: duration_millis_u64(timeout),
+            timeout_checkpoint: "manager_initialized_before_connect",
+            cancellation_checkpoint: "checkpoint_before_connect",
+            cleanup_result: "manager_started",
+            skip_reason: None,
+        });
+    }
+
     fn finish_operation(
         &mut self,
         endpoint: &DirectCdpEndpoint,
@@ -419,6 +455,7 @@ impl DirectCdpTargetSessionManager {
                 "direct CDP session object lease_seq must be greater than zero".into(),
             ));
         }
+        self.ensure_started(endpoint, operation_id, Duration::ZERO);
         let object_id_hash = direct_cdp_redaction_hash(raw_object_id);
         let cookie_scope_hash = cookie_scope.map(direct_cdp_redaction_hash);
         self.session_objects.insert(
@@ -471,6 +508,29 @@ impl DirectCdpTargetSessionManager {
         let had_session_objects = !self.session_objects.is_empty();
         self.session_objects.clear();
         self.shutdown = true;
+        if let Some(target) = cleared_target.as_ref() {
+            self.push_event(DirectCdpManagerEvent {
+                event_kind: "target_detach",
+                command_line: direct_cdp_manager_command_line(),
+                git_revision: direct_cdp_git_revision(),
+                run_id: self.manager_id_hash.clone(),
+                manager_id_hash: self.manager_id_hash.clone(),
+                endpoint_kind: "direct_cdp_websocket",
+                target_kind: target.kind.as_str(),
+                target_id_hash: target.id_hash.clone(),
+                operation_id: "browser.shutdown",
+                cdp_command_ids: Vec::new(),
+                current_tab_decision: "manager_shutdown_detached_current_tab",
+                session_object_id_hash: None,
+                session_lease_seq: None,
+                retry_decision: "not_applicable_shutdown",
+                timeout_budget_ms: 0,
+                timeout_checkpoint: "not_applicable_shutdown",
+                cancellation_checkpoint: "shutdown_signal_observed",
+                cleanup_result: "target_detached_no_orphan",
+                skip_reason: None,
+            });
+        }
         self.push_event(DirectCdpManagerEvent {
             event_kind: "manager_shutdown",
             command_line: direct_cdp_manager_command_line(),
@@ -4646,6 +4706,148 @@ mod tests {
         assert!(!jsonl.contains("shutdown-state-object-secret"));
         assert!(!jsonl.contains("private.example.test"));
         assert!(!jsonl.contains("page-shutdown"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_direct_cdp_manager_artifact_contains_closeout_evidence() -> BrowserResult<()> {
+        let endpoint =
+            browser_control_endpoint_for_url("ws://127.0.0.1:9222/devtools/page/page-alpha")?;
+        let BrowserControlEndpoint::DirectCdp(endpoint) = endpoint else {
+            return Err(BrowserError::InvalidConfig(
+                "expected direct CDP endpoint".into(),
+            ));
+        };
+        let replacement =
+            browser_control_endpoint_for_url("ws://127.0.0.1:9222/devtools/page/page-beta")?;
+        let BrowserControlEndpoint::DirectCdp(replacement) = replacement else {
+            return Err(BrowserError::InvalidConfig(
+                "expected direct CDP endpoint".into(),
+            ));
+        };
+        let manager = Arc::new(Mutex::new(DirectCdpTargetSessionManager::default()));
+
+        let mut navigate = DirectCdpManagerLease::acquire(
+            Arc::clone(&manager),
+            &endpoint,
+            "browser.navigate",
+            Duration::from_secs(60),
+        )?;
+        navigate.finish(&[1, 2, 3, 4, 5], "success", "session_closed_by_scope")?;
+
+        {
+            let mut guard = manager.lock().unwrap();
+            guard.record_session_object(
+                &endpoint,
+                "browser.session.save",
+                "session-object-secret-save",
+                10,
+                Some("private.example.test"),
+            )?;
+            guard.record_session_object(
+                &endpoint,
+                "browser.session.restore",
+                "session-object-secret-restore",
+                11,
+                Some("private.example.test"),
+            )?;
+        }
+
+        let mut screenshot = DirectCdpManagerLease::acquire(
+            Arc::clone(&manager),
+            &replacement,
+            "browser.screenshot",
+            Duration::from_secs(60),
+        )?;
+        screenshot.finish(&[6, 7], "success", "session_closed_by_scope")?;
+
+        let dropped = DirectCdpManagerLease::acquire(
+            Arc::clone(&manager),
+            &replacement,
+            "browser.click",
+            Duration::from_secs(30),
+        )?;
+        drop(dropped);
+
+        let active_at_shutdown = DirectCdpManagerLease::acquire(
+            Arc::clone(&manager),
+            &replacement,
+            "browser.evaluate_js",
+            Duration::from_secs(30),
+        )?;
+        manager.lock().unwrap().shutdown();
+        drop(active_at_shutdown);
+
+        let jsonl = manager.lock().unwrap().events_jsonl();
+        let event_kinds = jsonl
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .expect("manager JSONL event should parse")
+                    .get("event_kind")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("manager event_kind should be present")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        for expected in [
+            "manager_start",
+            "target_attach",
+            "operation_begin",
+            "operation_complete",
+            "session_object_recorded",
+            "stale_target_recovery",
+            "operation_failed",
+            "target_detach",
+            "manager_shutdown",
+        ] {
+            assert!(
+                event_kinds.iter().any(|kind| kind == expected),
+                "missing direct-CDP manager event kind {expected}: {event_kinds:?}"
+            );
+        }
+        assert!(jsonl.contains("\"operation_id\":\"browser.navigate\""));
+        assert!(jsonl.contains("\"operation_id\":\"browser.screenshot\""));
+        assert!(jsonl.contains("\"operation_id\":\"browser.click\""));
+        assert!(jsonl.contains("\"operation_id\":\"browser.evaluate_js\""));
+        assert!(jsonl.contains("\"operation_id\":\"browser.session.save\""));
+        assert!(jsonl.contains("\"operation_id\":\"browser.session.restore\""));
+        assert!(jsonl.contains("\"cdp_command_ids\":[1,2,3,4,5]"));
+        assert!(jsonl.contains("\"cdp_command_ids\":[6,7]"));
+        assert!(jsonl.contains("\"cleanup_result\":\"lease_dropped_cleanup\""));
+        assert!(jsonl.contains(
+            "\"cleanup_result\":\"active_lease_released_targets_and_sessions_cleared_no_orphan\""
+        ));
+        assert!(!jsonl.contains("page-alpha"));
+        assert!(!jsonl.contains("page-beta"));
+        assert!(!jsonl.contains("session-object-secret"));
+        assert!(!jsonl.contains("private.example.test"));
+
+        for line in jsonl.lines() {
+            println!("BROWSER_TARGET_SESSION_MANAGER_JSONL {line}");
+        }
+        println!(
+            "BROWSER_TARGET_SESSION_MANAGER_SUMMARY {}",
+            serde_json::json!({
+                "schema_version": "fcp-browser-target-session-manager-evidence.v1",
+                "manager_event_count": event_kinds.len(),
+                "event_kinds": event_kinds,
+                "operations_exercised": [
+                    "browser.navigate",
+                    "browser.screenshot",
+                    "browser.click",
+                    "browser.evaluate_js",
+                    "browser.session.save",
+                    "browser.session.restore",
+                    "browser.shutdown"
+                ],
+                "redaction": {
+                    "raw_target_ids": false,
+                    "raw_session_object_ids": false,
+                    "raw_cookie_scope": false
+                }
+            })
+        );
         Ok(())
     }
 

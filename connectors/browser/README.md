@@ -3,7 +3,7 @@
 > **Status**: runtime contract documented; manifest/runtime drift documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/browser_target_session_manager_verification.sh`
 > **Chrome DevTools Protocol upstream**: https://chromedevtools.github.io/devtools-protocol/
 
 ## Purpose
@@ -82,9 +82,9 @@ This README documents the runtime truth and keeps current drift visible:
 - Manifest marks some risky browser operations as `requires_approval = "policy"` and dangerous operations as `interactive`.
 - Runtime introspection derives approval mode from safety tier, while direct invocation requires an `approval_token` only for the explicit execution-approval list.
 - `browser.navigate` and `browser.click` are risky operations but do not require a direct runtime `approval_token`.
-- `handle_shutdown()` reports shutdown status but does not fully clear stored config, client, verifier, or session state.
+- `handle_shutdown()` reports shutdown status and signals the direct-CDP manager shutdown cleanup, but it does not fully clear stored config, client, verifier, or session state.
 - Manifest state hints mention browser profile state and page cache metadata, but the runtime session store in this slice is process-local.
-- There is no dedicated tracked verification shell script for this connector.
+- The tracked target/session manager verification script covers direct-CDP manager JSONL evidence; there is still no full Browser connector verification bundle for every operation mode.
 
 A follow-up parity bead should replace placeholder manifest proof, make `simulate` enforce the same readiness and token checks as `invoke`, decide whether resource URI binding is required for browser targets, reconcile approval metadata with runtime enforcement, and clarify whether browser session objects need durable state.
 
@@ -230,13 +230,13 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/browser_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The tracked direct-CDP target/session manager bundle is `scripts/e2e/browser_target_session_manager_verification.sh`. It runs the deterministic manager proof through `rch`, extracts `BROWSER_TARGET_SESSION_MANAGER_JSONL` records from test stdout, validates the JSONL shape, and writes an ignored operator bundle under `artifacts/e2e/browser_target_session_manager/<run-id>/`.
 
 The verification surface captures:
 
 - runtime operation inventory and policy metadata
 - browser-control URL policy, control-plane headers, timeout budgets, and raw DevTools rejection
-- direct-CDP manager JSONL event coverage; the deterministic manager fixture writes `/tmp/fcp-browser-direct-cdp-manager/logs.jsonl`
+- direct-CDP manager JSONL event coverage for manager start, target attach/detach, stale-target recovery, operation leases, command IDs, timeout/cancellation markers, dropped-lease cleanup, shutdown cleanup, and redacted session/cookie metadata
 - capability-token and execution-approval enforcement for invoke
 - deterministic HTTP fixtures and real-browser e2e coverage
 - formatting, check, test, and clippy proof through `rch`
@@ -269,4 +269,5 @@ The verification surface captures:
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-browser-readme cargo check -p fcp-browser --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-browser-readme cargo test -p fcp-browser --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-browser-readme cargo clippy -p fcp-browser --all-targets --no-deps -- -D warnings`
+- `scripts/e2e/browser_target_session_manager_verification.sh --run-id manual-browser-manager`
 - `ubs connectors/browser/README.md`

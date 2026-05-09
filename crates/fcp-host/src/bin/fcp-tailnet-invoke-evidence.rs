@@ -840,12 +840,17 @@ fn evidence_record_from_probe(
         });
     }
 
-    TailnetInvokeEvidenceRecord::structured_skip(
+    let auth_result = run.auth_result();
+    let retries = run.retries();
+    TailnetInvokeEvidenceRecord::structured_skip_with_attempts(
         route_mode,
         command_line,
         git_revision,
         topology,
         prerequisites,
+        auth_result,
+        retries,
+        run.attempts,
     )
 }
 
@@ -1250,6 +1255,9 @@ mod tests {
         );
 
         assert_eq!(record.source, TailnetInvokeEvidenceSource::StructuredSkip);
+        assert_eq!(record.auth_result, "capability_verified");
+        assert_eq!(record.retries, 0);
+        assert_eq!(record.attempts.len(), 1);
         assert!(
             record
                 .missing_prerequisites
@@ -1263,6 +1271,54 @@ mod tests {
                     |prerequisite| prerequisite.name == "successful-tailnet-invoke"
                         && prerequisite.satisfied
                 )
+        );
+    }
+
+    #[test]
+    fn probe_record_preserves_failed_invoke_attempts_in_structured_skip() {
+        let config = invoke_probe_config();
+        let record = evidence_record_from_probe(
+            TailnetInvokeRouteMode::DirectLan,
+            args(&["fcp-tailnet-invoke-evidence"]),
+            "abc123".to_string(),
+            "two node tailnet".to_string(),
+            satisfied_observation(true),
+            &config,
+            TailnetInvokeProbeRun {
+                attempts: vec![
+                    TailnetInvokeAttemptEvidence::non_success(
+                        0,
+                        TailnetInvokeAttemptOutcome::Error,
+                        Some(100),
+                        "http_status_401",
+                        "401 Unauthorized",
+                    ),
+                    TailnetInvokeAttemptEvidence::non_success(
+                        1,
+                        TailnetInvokeAttemptOutcome::Timeout,
+                        Some(200),
+                        "request_timeout",
+                        "deadline elapsed",
+                    ),
+                ],
+            },
+        );
+
+        assert_eq!(record.source, TailnetInvokeEvidenceSource::StructuredSkip);
+        assert_eq!(record.auth_result, "not_verified");
+        assert_eq!(record.retries, 1);
+        assert!(record.latency.is_none());
+        assert_eq!(record.attempts.len(), 2);
+        assert!(
+            record
+                .missing_prerequisites
+                .contains(&"successful-tailnet-invoke".to_string())
+        );
+        assert!(
+            record
+                .attempts
+                .iter()
+                .any(|attempt| attempt.outcome == TailnetInvokeAttemptOutcome::Timeout)
         );
     }
 

@@ -439,8 +439,34 @@ impl TailnetInvokeEvidenceRecord {
         topology: impl Into<String>,
         prerequisites: Vec<TailnetInvokePrerequisite>,
     ) -> Self {
+        Self::structured_skip_with_attempts(
+            route_mode,
+            command_line,
+            git_revision,
+            topology,
+            prerequisites,
+            "not_attempted",
+            0,
+            Vec::new(),
+        )
+    }
+
+    /// Build a structured skip record while preserving attempted invoke samples.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn structured_skip_with_attempts(
+        route_mode: TailnetInvokeRouteMode,
+        command_line: Vec<String>,
+        git_revision: impl Into<String>,
+        topology: impl Into<String>,
+        prerequisites: Vec<TailnetInvokePrerequisite>,
+        auth_result: impl Into<String>,
+        retries: u64,
+        attempts: Vec<TailnetInvokeAttemptEvidence>,
+    ) -> Self {
         let git_revision = git_revision.into();
         let topology = topology.into();
+        let auth_result = auth_result.into();
         let missing_prerequisites = prerequisites
             .iter()
             .filter(|prerequisite| !prerequisite.satisfied)
@@ -463,10 +489,10 @@ impl TailnetInvokeEvidenceRecord {
             git_revision: redact_sensitive_text(&git_revision),
             topology: redact_sensitive_text(&topology),
             nodes: Vec::new(),
-            auth_result: "not_attempted".to_string(),
-            retries: 0,
+            auth_result: redact_sensitive_text(&auth_result),
+            retries,
             latency: None,
-            attempts: Vec::new(),
+            attempts,
             prerequisites,
             missing_prerequisites,
             skip_reason,
@@ -670,6 +696,61 @@ mod tests {
             "no relay route observed"
         );
         assert!(!jsonl.contains("example-value"));
+    }
+
+    #[test]
+    fn structured_skip_with_attempts_preserves_failed_probe_diagnostics() {
+        let record = TailnetInvokeEvidenceRecord::structured_skip_with_attempts(
+            TailnetInvokeRouteMode::DirectLan,
+            vec![
+                "fcp-tailnet-invoke-evidence".to_string(),
+                "--invoke-request-json={\"token\":\"secret\"}".to_string(),
+            ],
+            "abcdef123456",
+            "tailnet proof with failed invoke",
+            vec![
+                TailnetInvokePrerequisite::new("direct-lan-route-observed", true, "available"),
+                TailnetInvokePrerequisite::new(
+                    "successful-tailnet-invoke",
+                    false,
+                    "successful_attempts=0,total_attempts=2",
+                ),
+            ],
+            "not_verified",
+            1,
+            vec![
+                TailnetInvokeAttemptEvidence::non_success(
+                    0,
+                    TailnetInvokeAttemptOutcome::Error,
+                    Some(100),
+                    "http_status_401",
+                    "401 Unauthorized bearer token leaked",
+                ),
+                TailnetInvokeAttemptEvidence::non_success(
+                    1,
+                    TailnetInvokeAttemptOutcome::Timeout,
+                    Some(200),
+                    "request_timeout",
+                    "deadline elapsed",
+                ),
+            ],
+        );
+
+        assert_eq!(record.source, TailnetInvokeEvidenceSource::StructuredSkip);
+        assert_eq!(record.auth_result, "not_verified");
+        assert_eq!(record.retries, 1);
+        assert!(record.latency.is_none());
+        assert_eq!(record.attempts.len(), 2);
+        assert_eq!(
+            record.missing_prerequisites,
+            vec!["successful-tailnet-invoke"]
+        );
+
+        let jsonl = record.to_jsonl_line().expect("serialize JSONL");
+        assert!(jsonl.contains("\"outcome\":\"error\""));
+        assert!(jsonl.contains("\"outcome\":\"timeout\""));
+        assert!(!jsonl.contains("secret"));
+        assert!(!jsonl.contains("bearer token leaked"));
     }
 
     #[test]

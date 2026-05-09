@@ -64,6 +64,11 @@ deny_localhost = true
 deny_private_ranges = false
 require_sni = true
 
+[provides.operations."mattermost.get_me".ai_hints]
+when_to_use = "Use to verify authentication and get the bot or user identity."
+common_mistakes = ["Using an expired token."]
+examples = ['{}']
+
 [provides.operations."mattermost.get_user"]
 description = "Get a user by ID"
 capability = "mattermost.read"
@@ -86,6 +91,11 @@ cidr_deny = []
 deny_localhost = true
 deny_private_ranges = false
 require_sni = true
+
+[provides.operations."mattermost.get_user".ai_hints]
+when_to_use = "Use to look up another user's profile by their Mattermost user ID."
+common_mistakes = ["Passing a username instead of the stable Mattermost user ID."]
+examples = ['{"user_id": "abc123def456"}']
 
 [provides.operations."mattermost.get_my_teams"]
 description = "List teams the user belongs to"
@@ -110,6 +120,11 @@ deny_localhost = true
 deny_private_ranges = false
 require_sni = true
 
+[provides.operations."mattermost.get_my_teams".ai_hints]
+when_to_use = "Use to discover teams visible to the authenticated identity before listing channels."
+common_mistakes = ["Assuming a bot or personal token can see teams it has not been added to."]
+examples = ['{}']
+
 [provides.operations."mattermost.get_team"]
 description = "Get a team by ID"
 capability = "mattermost.read"
@@ -132,6 +147,11 @@ cidr_deny = []
 deny_localhost = true
 deny_private_ranges = false
 require_sni = true
+
+[provides.operations."mattermost.get_team".ai_hints]
+when_to_use = "Use to resolve a team name, slug, or description from a known team ID."
+common_mistakes = ["Passing a team name or display name instead of a Mattermost team ID."]
+examples = ['{"team_id": "team123"}']
 
 [provides.operations."mattermost.get_channels_for_team"]
 description = "List channels available to a user within a team"
@@ -156,6 +176,14 @@ deny_localhost = true
 deny_private_ranges = false
 require_sni = true
 
+[provides.operations."mattermost.get_channels_for_team".ai_hints]
+when_to_use = "Use to enumerate channels available in a team before reading history or posting."
+common_mistakes = [
+    "Forgetting that user_id defaults to the authenticated identity.",
+    "Expecting private or DM channels to appear when the acting identity is not a member.",
+]
+examples = ['{"team_id": "team123"}']
+
 [provides.operations."mattermost.get_channel"]
 description = "Get a channel by ID"
 capability = "mattermost.read"
@@ -178,6 +206,11 @@ cidr_deny = []
 deny_localhost = true
 deny_private_ranges = false
 require_sni = true
+
+[provides.operations."mattermost.get_channel".ai_hints]
+when_to_use = "Use to get metadata for a specific channel before reading, posting, or checking membership."
+common_mistakes = ["Using a channel name instead of the stable Mattermost channel ID."]
+examples = ['{"channel_id": "abc123"}']
 
 [provides.operations."mattermost.get_post"]
 description = "Get a post by ID"
@@ -202,6 +235,11 @@ deny_localhost = true
 deny_private_ranges = false
 require_sni = true
 
+[provides.operations."mattermost.get_post".ai_hints]
+when_to_use = "Use to retrieve a specific Mattermost post or message by its ID."
+common_mistakes = ["Passing a channel ID or thread root when the operation needs the exact post ID."]
+examples = ['{"post_id": "abc123"}']
+
 [provides.operations."mattermost.get_thread"]
 description = "Get a thread by root or child post ID"
 capability = "mattermost.read"
@@ -224,6 +262,11 @@ cidr_deny = []
 deny_localhost = true
 deny_private_ranges = false
 require_sni = true
+
+[provides.operations."mattermost.get_thread".ai_hints]
+when_to_use = "Use to reconstruct a thread rooted at a post, including replies and pagination cursors."
+common_mistakes = ["Passing the wrong post_id when you meant the thread root or a specific reply."]
+examples = ['{"post_id": "post123", "per_page": 50}']
 
 [provides.operations."mattermost.get_posts_for_channel"]
 description = "List posts in a channel (paginated)"
@@ -248,6 +291,11 @@ deny_localhost = true
 deny_private_ranges = false
 require_sni = true
 
+[provides.operations."mattermost.get_posts_for_channel".ai_hints]
+when_to_use = "Use to read recent message history in a channel with explicit pagination."
+common_mistakes = ["Setting per_page above the upstream server's configured limits."]
+examples = ['{"channel_id": "abc123", "page": 0, "per_page": 30}']
+
 [provides.operations."mattermost.search_posts"]
 description = "Search posts in a team"
 capability = "mattermost.read"
@@ -270,6 +318,14 @@ cidr_deny = []
 deny_localhost = true
 deny_private_ranges = false
 require_sni = true
+
+[provides.operations."mattermost.search_posts".ai_hints]
+when_to_use = "Use to search messages across channels visible within a single Mattermost team."
+common_mistakes = [
+    "Omitting team_id.",
+    "Expecting server-wide search; this connector slice is team-scoped.",
+]
+examples = ['{"team_id": "t1", "terms": "deployment issue"}']
 
 [provides.operations."mattermost.get_file_info"]
 description = "Get file metadata and stable access paths by file ID"
@@ -294,6 +350,11 @@ deny_localhost = true
 deny_private_ranges = false
 require_sni = true
 
+[provides.operations."mattermost.get_file_info".ai_hints]
+when_to_use = "Use to inspect file attachments before deciding whether to download or preview them."
+common_mistakes = ["Passing a post ID instead of a Mattermost file ID."]
+examples = ['{"file_id": "file123"}']
+
 [provides.operations."mattermost.get_file_link"]
 description = "Get the public link for a file"
 capability = "mattermost.read"
@@ -316,6 +377,11 @@ cidr_deny = []
 deny_localhost = true
 deny_private_ranges = false
 require_sni = true
+
+[provides.operations."mattermost.get_file_link".ai_hints]
+when_to_use = "Use to retrieve the public sharing URL for a file when a direct link is needed."
+common_mistakes = ["Passing a post ID instead of the file ID returned by Mattermost."]
+examples = ['{"file_id": "file123"}']
 
 [provides.operations."mattermost.download_file"]
 description = "Download a file body as base64 content"
@@ -340,6 +406,11 @@ deny_localhost = true
 deny_private_ranges = false
 require_sni = true
 
+[provides.operations."mattermost.download_file".ai_hints]
+when_to_use = "Use when the connector needs the file body itself, not just metadata or a share link."
+common_mistakes = ["Downloading large files when metadata inspection would have been enough."]
+examples = ['{"file_id": "file123"}']
+
 [provides.operations."mattermost.get_file_infos_for_post"]
 description = "List file metadata and access paths for all files attached to a post"
 capability = "mattermost.read"
@@ -362,6 +433,11 @@ cidr_deny = []
 deny_localhost = true
 deny_private_ranges = false
 require_sni = true
+
+[provides.operations."mattermost.get_file_infos_for_post".ai_hints]
+when_to_use = "Use to enumerate files attached to a post before fetching individual file metadata."
+common_mistakes = ["Passing a root thread ID when you meant a specific post ID."]
+examples = ['{"post_id": "post123"}']
 
 [provides.operations."mattermost.authorize_slash_command"]
 description = "Authorize an inbound Mattermost slash command payload with the configured stable-ID monitor policy"
@@ -394,6 +470,14 @@ max_redirects = 0
 connect_timeout_ms = 1000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
+
+[provides.operations."mattermost.authorize_slash_command".ai_hints]
+when_to_use = "Use from a host-owned slash-command HTTP route before converting an inbound command into an agent event or turn input."
+common_mistakes = [
+    "Treating user_name or channel_name as authorization inputs; this operation authorizes by stable user_id and channel_id only.",
+    "Expecting this operation to register or serve Mattermost slash-command routes.",
+]
+examples = ['{"channel_id": "c_general", "user_id": "u_alice", "command": "/agent", "text": "status"}']
 
 # ── Events ──
 
@@ -477,6 +561,15 @@ deny_localhost = true
 deny_private_ranges = false
 require_sni = true
 
+[provides.operations."mattermost.create_direct_channel".ai_hints]
+when_to_use = "Use when a workflow needs to open or ensure a direct-message channel before posting."
+common_mistakes = [
+    "Passing fewer or more than two user IDs.",
+    "Passing duplicate user IDs instead of the two participants.",
+    "Assuming UI-level direct-message restrictions are the same as backend API authorization.",
+]
+examples = ['{"user_ids": ["user_a", "user_b"]}']
+
 [provides.operations."mattermost.create_direct_channel".rate_limit]
 max = 10
 per_ms = 60000
@@ -503,6 +596,18 @@ cidr_deny = []
 deny_localhost = true
 deny_private_ranges = false
 require_sni = true
+
+[provides.operations."mattermost.create_post".ai_hints]
+when_to_use = "Use to send a message to a channel or reply to an existing thread."
+common_mistakes = [
+    "Forgetting to set channel_id.",
+    "Not using root_id when replying to a thread.",
+    "Using a bot token that has not been added to the target team or channel.",
+]
+examples = [
+    '{"channel_id": "abc123", "message": "Hello team!"}',
+    '{"channel_id": "abc123", "message": "Reply here", "root_id": "post_id"}',
+]
 
 [provides.operations."mattermost.create_post".rate_limit]
 max = 30
@@ -531,6 +636,14 @@ deny_localhost = true
 deny_private_ranges = false
 require_sni = true
 
+[provides.operations."mattermost.create_reaction".ai_hints]
+when_to_use = "Use to acknowledge or classify a post with an emoji reaction without editing the post body."
+common_mistakes = [
+    "Passing an empty emoji_name.",
+    "Using a post ID that the acting user cannot access.",
+]
+examples = ['{"user_id": "user_a", "post_id": "post123", "emoji_name": "thumbsup"}']
+
 [provides.operations."mattermost.create_reaction".rate_limit]
 max = 60
 per_ms = 60000
@@ -557,6 +670,14 @@ cidr_deny = []
 deny_localhost = true
 deny_private_ranges = false
 require_sni = true
+
+[provides.operations."mattermost.delete_reaction".ai_hints]
+when_to_use = "Use to clean up or revert a reaction without deleting the underlying post."
+common_mistakes = [
+    "Trying to remove a reaction without the acting user ID.",
+    "Forgetting that server-side permissions still apply when removing someone else's reaction.",
+]
+examples = ['{"user_id": "user_a", "post_id": "post123", "emoji_name": "thumbsup"}']
 
 [provides.operations."mattermost.delete_reaction".rate_limit]
 max = 60
@@ -585,6 +706,15 @@ deny_localhost = true
 deny_private_ranges = false
 require_sni = true
 
+[provides.operations."mattermost.upload_file".ai_hints]
+when_to_use = "Use before create_post when a workflow needs to attach a file to a Mattermost message."
+common_mistakes = [
+    "Passing raw bytes instead of base64-encoded content.",
+    "Forgetting to carry the returned file IDs into create_post.",
+    "Trying to upload as a bot that is not a member of the target channel.",
+]
+examples = ['{"channel_id": "abc123", "filename": "report.txt", "content_base64": "aGVsbG8="}']
+
 [provides.operations."mattermost.upload_file".rate_limit]
 max = 20
 per_ms = 60000
@@ -611,6 +741,14 @@ cidr_deny = []
 deny_localhost = true
 deny_private_ranges = false
 require_sni = true
+
+[provides.operations."mattermost.delete_post".ai_hints]
+when_to_use = "Use to delete a message after verifying the post ID carefully."
+common_mistakes = [
+    "Deleting the wrong post by not verifying post_id first.",
+    "Treating this connector like a workspace-admin surface; delete permissions still depend on the acting account and server policy.",
+]
+examples = ['{"post_id": "abc123"}']
 
 [provides.operations."mattermost.delete_post".rate_limit]
 max = 10
@@ -644,6 +782,11 @@ deny_localhost = true
 deny_private_ranges = false
 require_sni = true
 
+[provides.operations."mattermost.get_reactions_for_post".ai_hints]
+when_to_use = "Use to retrieve all reactions on a message, such as counting votes or checking acknowledgments."
+common_mistakes = ["Assuming reaction names include colons; Mattermost uses bare emoji names like 'thumbsup'."]
+examples = ['{"post_id": "abc123"}']
+
 [provides.operations."mattermost.create_group_channel"]
 description = "Create or fetch a group direct-message channel for three or more users"
 capability = "mattermost.write"
@@ -671,6 +814,14 @@ cidr_deny = []
 deny_localhost = true
 deny_private_ranges = false
 require_sni = true
+
+[provides.operations."mattermost.create_group_channel".ai_hints]
+when_to_use = "Use when a workflow needs a group DM channel with three or more participants."
+common_mistakes = [
+    "Passing fewer than three user IDs; use create_direct_channel for one-to-one conversations.",
+    "Passing duplicate user IDs.",
+]
+examples = ['{"user_ids": ["user_a", "user_b", "user_c"]}']
 
 [provides.operations."mattermost.create_group_channel".rate_limit]
 max = 10
@@ -704,6 +855,15 @@ deny_localhost = true
 deny_private_ranges = false
 require_sni = true
 
+[provides.operations."mattermost.update_post".ai_hints]
+when_to_use = "Use to edit a message after it has been posted, such as correcting a typo or updating status information."
+common_mistakes = [
+    "Forgetting to include the id field for the post to update.",
+    "Assuming you can change the channel_id or user_id of an existing post.",
+    "Editing a post without checking that the acting account has permission.",
+]
+examples = ['{"id": "abc123", "message": "Updated message text"}']
+
 [provides.operations."mattermost.update_post".rate_limit]
 max = 30
 per_ms = 60000
@@ -736,6 +896,11 @@ deny_localhost = true
 deny_private_ranges = false
 require_sni = true
 
+[provides.operations."mattermost.pin_post".ai_hints]
+when_to_use = "Use to highlight an important message so channel members can find it easily."
+common_mistakes = ["Pinning without verifying the post_id first."]
+examples = ['{"post_id": "abc123"}']
+
 [provides.operations."mattermost.pin_post".rate_limit]
 max = 60
 per_ms = 60000
@@ -767,6 +932,11 @@ cidr_deny = []
 deny_localhost = true
 deny_private_ranges = false
 require_sni = true
+
+[provides.operations."mattermost.unpin_post".ai_hints]
+when_to_use = "Use to remove a post from the pinned messages list."
+common_mistakes = ["Unpinning a post that was not pinned; this is a no-op on most Mattermost versions."]
+examples = ['{"post_id": "abc123"}']
 
 [provides.operations."mattermost.unpin_post".rate_limit]
 max = 60

@@ -41,6 +41,18 @@ fn manifest_operation_schema(
         .map_err(|err| format!("{operation_id}.{field} should convert to JSON: {err}"))
 }
 
+fn manifest_operation_ai_hints<'a>(
+    manifest: &'a toml::Table,
+    operation_id: &str,
+) -> Result<&'a toml::map::Map<String, toml::Value>, String> {
+    manifest_operations(manifest)?
+        .get(operation_id)
+        .and_then(toml::Value::as_table)
+        .and_then(|operation| operation.get("ai_hints"))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| format!("{operation_id} should declare ai_hints"))
+}
+
 fn manifest_operation_network_constraints<'a>(
     manifest: &'a toml::Table,
     operation_id: &str,
@@ -159,6 +171,37 @@ fn mattermost_manifest_and_runtime_catalog_have_contract_coverage() -> Result<()
             "{} should include agent usage hints",
             operation.id.as_str()
         );
+        let manifest_hints = manifest_operation_ai_hints(&manifest, operation.id.as_str())?;
+        let manifest_when_to_use = manifest_hints
+            .get("when_to_use")
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| format!("{} should declare ai_hints.when_to_use", operation.id))?;
+        assert!(
+            !manifest_when_to_use.trim().is_empty(),
+            "{} manifest ai_hints.when_to_use should not be empty",
+            operation.id.as_str()
+        );
+        assert!(
+            !string_array(manifest_hints, "common_mistakes")?.is_empty(),
+            "{} manifest ai_hints.common_mistakes should not be empty",
+            operation.id.as_str()
+        );
+        let examples = string_array(manifest_hints, "examples")?;
+        assert!(
+            !examples.is_empty(),
+            "{} manifest ai_hints.examples should not be empty",
+            operation.id.as_str()
+        );
+        for example in examples {
+            let lower = example.to_ascii_lowercase();
+            assert!(
+                !lower.contains("token")
+                    && !lower.contains("password")
+                    && !lower.contains("secret"),
+                "{} manifest ai_hints example should not include secret-shaped sample values",
+                operation.id.as_str()
+            );
+        }
         let _input_validator = validator_for(&operation.input_schema)?;
         let _output_validator = validator_for(&operation.output_schema)?;
         let _manifest_input = validator_for(&manifest_operation_schema(

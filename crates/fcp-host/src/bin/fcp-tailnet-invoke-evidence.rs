@@ -22,7 +22,7 @@ const USAGE: &str = "\
 Usage: fcp-tailnet-invoke-evidence [OPTIONS]
 
 Options:
-  --route <direct-lan|derp-fallback>       Requested route mode (default: direct-lan)
+  --route <direct-lan|derp-fallback|all>   Requested route mode (default: direct-lan)
   --topology <label>                       Redaction-safe topology label
   --localapi-url <url>                     HTTP-exposed Tailscale LocalAPI base URL
   --git-revision <rev>                     Git revision under test
@@ -35,7 +35,7 @@ Environment:
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Cli {
-    route_mode: TailnetInvokeRouteMode,
+    route_selection: TailnetInvokeRouteSelection,
     topology: String,
     localapi_url: Option<String>,
     git_revision: Option<String>,
@@ -44,10 +44,36 @@ struct Cli {
 impl Default for Cli {
     fn default() -> Self {
         Self {
-            route_mode: TailnetInvokeRouteMode::DirectLan,
+            route_selection: TailnetInvokeRouteSelection::Single(TailnetInvokeRouteMode::DirectLan),
             topology: "tailnet invoke prerequisite probe".to_string(),
             localapi_url: None,
             git_revision: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TailnetInvokeRouteSelection {
+    Single(TailnetInvokeRouteMode),
+    All,
+}
+
+impl TailnetInvokeRouteSelection {
+    fn parse_cli(value: &str) -> Result<Self, String> {
+        if value == "all" {
+            Ok(Self::All)
+        } else {
+            TailnetInvokeRouteMode::parse_cli(value).map(Self::Single)
+        }
+    }
+
+    fn route_modes(self) -> Vec<TailnetInvokeRouteMode> {
+        match self {
+            Self::Single(route_mode) => vec![route_mode],
+            Self::All => vec![
+                TailnetInvokeRouteMode::DirectLan,
+                TailnetInvokeRouteMode::DerpFallback,
+            ],
         }
     }
 }
@@ -75,24 +101,25 @@ fn main() -> ExitCode {
         .clone()
         .or_else(|| env::var("FCP_TAILNET_EVIDENCE_GIT_REVISION").ok())
         .unwrap_or_else(detect_git_revision);
-    let observation = observe_tailnet(localapi_url.as_deref(), cli.route_mode);
-    let record = observation.structured_skip_record(
-        cli.route_mode,
-        command_line,
-        git_revision,
-        cli.topology,
-    );
+    for route_mode in cli.route_selection.route_modes() {
+        let observation = observe_tailnet(localapi_url.as_deref(), route_mode);
+        let record = observation.structured_skip_record(
+            route_mode,
+            command_line.clone(),
+            git_revision.clone(),
+            cli.topology.clone(),
+        );
 
-    match record.to_jsonl_line() {
-        Ok(line) => {
-            println!("{line}");
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprintln!("failed to serialize tailnet invoke evidence: {error}");
-            ExitCode::FAILURE
+        match record.to_jsonl_line() {
+            Ok(line) => println!("{line}"),
+            Err(error) => {
+                eprintln!("failed to serialize tailnet invoke evidence: {error}");
+                return ExitCode::FAILURE;
+            }
         }
     }
+
+    ExitCode::SUCCESS
 }
 
 fn parse_cli(args: &[String]) -> Result<Option<Cli>, String> {
@@ -106,7 +133,7 @@ fn parse_cli(args: &[String]) -> Result<Option<Cli>, String> {
                 let value = iter
                     .next()
                     .ok_or_else(|| "--route requires a value".to_string())?;
-                cli.route_mode = TailnetInvokeRouteMode::parse_cli(value)?;
+                cli.route_selection = TailnetInvokeRouteSelection::parse_cli(value)?;
             }
             "--topology" => {
                 cli.topology = iter
@@ -130,7 +157,7 @@ fn parse_cli(args: &[String]) -> Result<Option<Cli>, String> {
             }
             value if value.starts_with("--route=") => {
                 let value = value.split_once('=').map_or("", |(_, route)| route);
-                cli.route_mode = TailnetInvokeRouteMode::parse_cli(value)?;
+                cli.route_selection = TailnetInvokeRouteSelection::parse_cli(value)?;
             }
             value if value.starts_with("--topology=") => {
                 cli.topology = value
@@ -351,7 +378,10 @@ mod tests {
             .expect("parse")
             .expect("not help");
 
-        assert_eq!(cli.route_mode, TailnetInvokeRouteMode::DirectLan);
+        assert_eq!(
+            cli.route_selection,
+            TailnetInvokeRouteSelection::Single(TailnetInvokeRouteMode::DirectLan)
+        );
         assert_eq!(cli.topology, "tailnet invoke prerequisite probe");
         assert!(cli.localapi_url.is_none());
     }
@@ -370,10 +400,29 @@ mod tests {
         .expect("parse")
         .expect("not help");
 
-        assert_eq!(cli.route_mode, TailnetInvokeRouteMode::DerpFallback);
+        assert_eq!(
+            cli.route_selection,
+            TailnetInvokeRouteSelection::Single(TailnetInvokeRouteMode::DerpFallback)
+        );
         assert_eq!(cli.topology, "two-node DERP");
         assert_eq!(cli.localapi_url.as_deref(), Some("http://127.0.0.1:41112"));
         assert_eq!(cli.git_revision.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn parse_cli_accepts_all_routes() {
+        let cli = parse_cli(&args(&["fcp-tailnet-invoke-evidence", "--route=all"]))
+            .expect("parse")
+            .expect("not help");
+
+        assert_eq!(cli.route_selection, TailnetInvokeRouteSelection::All);
+        assert_eq!(
+            cli.route_selection.route_modes(),
+            vec![
+                TailnetInvokeRouteMode::DirectLan,
+                TailnetInvokeRouteMode::DerpFallback
+            ]
+        );
     }
 
     #[test]

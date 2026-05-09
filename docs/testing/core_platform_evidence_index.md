@@ -307,7 +307,8 @@ cargo run -p fcp-host --bin fcp-tailnet-invoke-evidence -- --route direct-lan
 Operators with an HTTP-exposed Tailscale LocalAPI can pass
 `--localapi-url <url>` or set `FCP_TAILSCALE_LOCALAPI_URL`; missing
 prerequisites remain machine-readable in `missing_prerequisites` and the full
-redacted `prerequisites` list.
+redacted `prerequisites` list. Use `--route all` to emit one direct-LAN record
+and one DERP/fallback record from the same invocation.
 
 ### Cross-Controller Safety Invariants
 

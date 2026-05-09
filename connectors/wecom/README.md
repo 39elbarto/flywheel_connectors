@@ -113,7 +113,9 @@ This slice is intentionally closer to "tenant-bound enterprise app automation" t
 - Production API host: `qyapi.weixin.qq.com`
 - Port: `443`
 - TLS + SNI required for live traffic
-- `localhost` and `127.0.0.1` are accepted only for deterministic tests
+- Outbound message, media, directory, and health operations declare per-operation egress only to `qyapi.weixin.qq.com`
+- Callback URL verification and callback event ingest are connector-local host-forwarded crypto/policy paths and declare a no-egress sentinel
+- `localhost` and `127.0.0.1` remain accepted only in connector configuration for deterministic tests, not in production manifest egress constraints
 - The runtime is request-response only
 - No inbound listener, webhook server, or websocket loop exists inside the connector itself; callback replay state is a bounded connector-local safety cache loaded from the host-provided zone directory when available
 - Callback ingress is a host-forwarded HTTP pattern: the host receives the GET or POST, then invokes `wecom.callback.verify_url` or `wecom.callback.ingest_event`

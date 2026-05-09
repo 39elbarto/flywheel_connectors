@@ -1,0 +1,175 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = ["streaming"]
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:microsoft-foundry-oai-responses"
+
+[connector]
+id = "fcp.microsoft-foundry"
+name = "Microsoft Foundry"
+version = "0.1.0"
+description = "Microsoft Foundry / Azure OpenAI v1 connector with deployment-aware chat, streaming, Responses API, embeddings, and Entra/API-key auth policy"
+archetypes = ["request-response", "streaming"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Stores no durable state. Configuration is limited to base_url, api_key or entra_access_token or credential_id, default_model, timeout, model cache TTL, and rate-limit retry policy."
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work", "z:project:*"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = ["microsoft_foundry.responses", "microsoft_foundry.chat", "microsoft_foundry.embeddings", "microsoft_foundry.deployments.read", "microsoft_foundry.health"]
+forbidden = ["system.exec", "network.listen"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 160
+cpu_percent = 25
+wall_clock_timeout_ms = 300000
+deny_exec = true
+deny_ptrace = true
+
+[provides.operations."microsoft_foundry.responses.create"]
+description = "Create a Microsoft Foundry Responses API result through POST /openai/v1/responses. The model field is the Azure deployment name."
+capability = "microsoft_foundry.responses"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["input"], properties = { model = { type = "string", default = "gpt-4o" }, input = {}, instructions = { type = "string" }, include = { type = "array", items = { type = "string" } }, tools = { type = "array" }, tool_choice = {}, max_output_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, top_p = { type = "number", minimum = 0, maximum = 1 }, store = { type = "boolean" }, background = { type = "boolean" }, previous_response_id = { type = "string" }, metadata = { type = "object" }, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.openai.azure.com", "*.services.ai.azure.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 300000, max_response_bytes = 10485760 }
+
+[provides.operations."microsoft_foundry.responses.create".ai_hints]
+when_to_use = "Use for Azure OpenAI Foundry deployments when Responses API features, background mode, or input-item tracking are needed."
+common_mistakes = ["Use the deployment name in model; do not pass an Azure resource path.", "Do not log prompts, completions, bearer tokens, API keys, tenant IDs, or full resource hostnames."]
+examples = ['{"model":"prod-gpt4o","input":[{"role":"user","content":"Summarize this incident."}],"max_output_tokens":256}']
+related = ["microsoft_foundry.responses.cancel", "microsoft_foundry.responses.input_items.list", "microsoft_foundry.deployments.list"]
+
+[provides.operations."microsoft_foundry.responses.cancel"]
+description = "Cancel a background Responses API response through POST /openai/v1/responses/{response_id}/cancel."
+capability = "microsoft_foundry.responses"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "idempotent"
+input_schema = { type = "object", required = ["response_id"], properties = { response_id = { type = "string" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.openai.azure.com", "*.services.ai.azure.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."microsoft_foundry.responses.cancel".ai_hints]
+when_to_use = "Use to stop a no-longer-needed background Responses API job."
+common_mistakes = ["Do not log raw response IDs if they are tenant-sensitive; hash them in audit logs."]
+examples = ['{"response_id":"resp_abc123"}']
+related = ["microsoft_foundry.responses.create"]
+
+[provides.operations."microsoft_foundry.responses.input_items.list"]
+description = "List input items for a Responses API response through GET /openai/v1/responses/{response_id}/input_items."
+capability = "microsoft_foundry.responses"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["response_id"], properties = { response_id = { type = "string" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.openai.azure.com", "*.services.ai.azure.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."microsoft_foundry.responses.input_items.list".ai_hints]
+when_to_use = "Use for response diagnostics without reissuing the model request."
+common_mistakes = ["Do not write input item text to JSONL proof logs."]
+examples = ['{"response_id":"resp_abc123"}']
+related = ["microsoft_foundry.responses.create"]
+
+[provides.operations."microsoft_foundry.chat.completions"]
+description = "Create a Microsoft Foundry chat completion through POST /openai/v1/chat/completions."
+capability = "microsoft_foundry.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["messages"], properties = { model = { type = "string", default = "gpt-4o" }, messages = { type = "array", minItems = 1 }, max_tokens = { type = "integer", minimum = 1 }, max_completion_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, top_p = { type = "number", minimum = 0, maximum = 1 }, stop = {}, response_format = { type = "object" }, tools = { type = "array" }, tool_choice = {}, reasoning_effort = { type = "string" }, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.openai.azure.com", "*.services.ai.azure.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 180000, max_response_bytes = 10485760 }
+
+[provides.operations."microsoft_foundry.chat.completions".ai_hints]
+when_to_use = "Use for Foundry deployments or Foundry-hosted compatible third-party models that expose chat completions."
+common_mistakes = ["Do not use this connector for Microsoft Graph, Azure resource management, or Azure Speech.", "Use Responses API when the deployment supports Responses-specific features."]
+examples = ['{"model":"prod-gpt4o","messages":[{"role":"user","content":"Summarize FCP in three bullets."}]}']
+related = ["microsoft_foundry.chat.completions_stream", "microsoft_foundry.responses.create"]
+
+[provides.operations."microsoft_foundry.chat.completions_stream"]
+description = "Open a Microsoft Foundry SSE chat-completions stream and return redaction-safe chunk metadata plus assembled text."
+capability = "microsoft_foundry.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["messages"], properties = { model = { type = "string", default = "gpt-4o" }, messages = { type = "array", minItems = 1 }, max_tokens = { type = "integer", minimum = 1 }, max_completion_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, top_p = { type = "number", minimum = 0, maximum = 1 }, stop = {}, response_format = { type = "object" }, tools = { type = "array" }, tool_choice = {}, reasoning_effort = { type = "string" }, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.openai.azure.com", "*.services.ai.azure.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 300000, max_response_bytes = 10485760 }
+
+[provides.operations."microsoft_foundry.chat.completions_stream".ai_hints]
+when_to_use = "Use when first-token latency matters and the caller can consume stream chunk metadata."
+common_mistakes = ["Do not log chunks or prompt bodies in e2e JSONL; log counts and byte sizes only."]
+examples = ['{"model":"prod-gpt4o","messages":[{"role":"user","content":"Stream a one sentence answer."}],"max_tokens":64}']
+related = ["microsoft_foundry.chat.completions"]
+
+[provides.operations."microsoft_foundry.embeddings.create"]
+description = "Create embeddings through POST /openai/v1/embeddings using a Foundry embeddings deployment."
+capability = "microsoft_foundry.embeddings"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["input"], properties = { model = { type = "string" }, input = {}, encoding_format = { type = "string" }, dimensions = { type = "integer", minimum = 1 }, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.openai.azure.com", "*.services.ai.azure.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 180000, max_response_bytes = 52428800 }
+
+[provides.operations."microsoft_foundry.embeddings.create".ai_hints]
+when_to_use = "Use with a configured Foundry embeddings deployment."
+common_mistakes = ["Do not log raw embedding vectors or input text.", "Do not assume the default chat deployment supports embeddings."]
+examples = ['{"model":"prod-embedding-3-large","input":"short text"}']
+related = ["microsoft_foundry.deployments.list"]
+[provides.operations."microsoft_foundry.deployments.list"]
+description = "List Microsoft Foundry model/deployment IDs via GET /openai/v1/models."
+capability = "microsoft_foundry.deployments.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = { refresh = { type = "boolean", default = false } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.openai.azure.com", "*.services.ai.azure.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."microsoft_foundry.deployments.list".ai_hints]
+when_to_use = "Use to discover deployment IDs before sending chat, Responses, or embeddings requests."
+common_mistakes = ["Treat model IDs as deployment names configured on the Azure resource; do not infer provider ownership from display names alone."]
+examples = ["{}"]
+related = ["microsoft_foundry.responses.create", "microsoft_foundry.chat.completions"]
+
+[provides.operations."microsoft_foundry.health"]
+description = "Probe Microsoft Foundry model/deployment listing with a short timeout and return connector health metadata."
+capability = "microsoft_foundry.health"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = {} }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["*.openai.azure.com", "*.services.ai.azure.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 5000, total_timeout_ms = 5000, max_response_bytes = 10485760 }
+
+[provides.operations."microsoft_foundry.health".ai_hints]
+when_to_use = "Use for bounded readiness before routing user-visible Microsoft Foundry work."
+common_mistakes = ["Do not treat credential_id mode as failed merely because live egress injection is host-owned."]
+examples = ["{}"]
+related = ["microsoft_foundry.deployments.list"]

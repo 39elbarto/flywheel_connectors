@@ -1,0 +1,45 @@
+[package]
+name = "fcp-microsoft-foundry"
+description = "Microsoft Foundry OpenAI v1 connector for the Flywheel Connector Protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "fcp_microsoft_foundry"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fcp-microsoft-foundry"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+fcp-async-core = { workspace = true }
+fcp-core = { workspace = true }
+fcp-openai-compat = { workspace = true }
+fcp-prelude = { workspace = true }
+
+anyhow.workspace = true
+blake3.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+ciborium.workspace = true
+fcp-crypto = { workspace = true }
+fcp-e2e = { path = "../../crates/fcp-e2e", default-features = false }
+pretty_assertions.workspace = true
+toml.workspace = true
+wiremock.workspace = true

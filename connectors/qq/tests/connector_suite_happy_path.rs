@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -6,7 +8,7 @@ use fcp_prelude::{
     InstanceId, InvokeRequest, OperationId, RequestId, ZoneId,
 };
 use fcp_qq::QqConnector;
-use serde_json::json;
+use serde_json::{Value, json};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{body_partial_json, header, method, path},
@@ -14,6 +16,125 @@ use wiremock::{
 
 const OP_SEND_CHANNEL: &str = "qq.messages.send_channel";
 const CAP_MESSAGES_WRITE: &str = "qq.messages.write";
+
+#[test]
+fn qq_manifest_ai_hints_cover_all_operations() {
+    let manifest: toml::Value =
+        toml::from_str(include_str!("../manifest.toml")).expect("QQ manifest should parse");
+    let operations = manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("QQ manifest should define operations");
+
+    let expected_operations = [
+        "messages_send_channel",
+        "messages_send_group",
+        "messages_send_c2c",
+        "gateway_get",
+        "events_normalize",
+        "gateway_project_event",
+        "health",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    let actual_operations = operations.keys().cloned().collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual_operations, expected_operations,
+        "manifest operation inventory changed; update ai_hints coverage expectations"
+    );
+
+    let mut missing_when_to_use = Vec::new();
+    let mut missing_common_mistakes = Vec::new();
+    let mut missing_examples = Vec::new();
+    let mut invalid_examples = Vec::new();
+    let mut secret_shaped_examples = Vec::new();
+
+    for (operation_id, operation) in operations {
+        let Some(ai_hints) = operation.get("ai_hints").and_then(toml::Value::as_table) else {
+            missing_when_to_use.push(operation_id.clone());
+            missing_common_mistakes.push(operation_id.clone());
+            missing_examples.push(operation_id.clone());
+            continue;
+        };
+
+        let when_to_use = ai_hints
+            .get("when_to_use")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if when_to_use.is_empty() {
+            missing_when_to_use.push(operation_id.clone());
+        }
+
+        let common_mistakes = ai_hints
+            .get("common_mistakes")
+            .and_then(toml::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if common_mistakes.is_empty()
+            || common_mistakes
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .all(|mistake| mistake.trim().is_empty())
+        {
+            missing_common_mistakes.push(operation_id.clone());
+        }
+
+        let examples = ai_hints
+            .get("examples")
+            .and_then(toml::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if examples.is_empty() {
+            missing_examples.push(operation_id.clone());
+            continue;
+        }
+
+        for example in examples {
+            let Some(example_text) = example.as_str().map(str::trim) else {
+                invalid_examples.push(format!("{operation_id}: non-string example"));
+                continue;
+            };
+            if example_text.is_empty() {
+                invalid_examples.push(format!("{operation_id}: empty example"));
+                continue;
+            }
+            if let Err(error) = serde_json::from_str::<Value>(example_text) {
+                invalid_examples.push(format!("{operation_id}: invalid json example: {error}"));
+            }
+
+            let lower = example_text.to_ascii_lowercase();
+            for forbidden in ["api_key", "bearer", "password", "secret", "token"] {
+                if lower.contains(forbidden) {
+                    secret_shaped_examples.push(format!("{operation_id}: {forbidden}"));
+                }
+            }
+        }
+    }
+
+    assert!(
+        missing_when_to_use.is_empty(),
+        "operations missing ai_hints.when_to_use: {missing_when_to_use:?}"
+    );
+    assert!(
+        missing_common_mistakes.is_empty(),
+        "operations missing ai_hints.common_mistakes: {missing_common_mistakes:?}"
+    );
+    assert!(
+        missing_examples.is_empty(),
+        "operations missing ai_hints.examples: {missing_examples:?}"
+    );
+    assert!(
+        invalid_examples.is_empty(),
+        "operations with invalid ai_hints examples: {invalid_examples:?}"
+    );
+    assert!(
+        secret_shaped_examples.is_empty(),
+        "ai_hints examples contain secret-shaped values: {secret_shaped_examples:?}"
+    );
+}
 
 fn handshake_request(host_public_key: [u8; 32], instance_id: InstanceId) -> HandshakeRequest {
     HandshakeRequest {

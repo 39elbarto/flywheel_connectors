@@ -27,7 +27,6 @@ const EXPECTED_AI_HINT_GAPS: &[&str] = &[
     "google-workspace-events",
     "mastodon",
     "nostr",
-    "qq",
     "telnyx",
 ];
 const EXPECTED_SANDBOX_GAPS: &[&str] = &["anthropic-vertex", "inworld"];

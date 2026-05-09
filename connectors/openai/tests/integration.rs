@@ -37,6 +37,7 @@ use wiremock::{
 
 // ──────────────── re-export the connector under test ────────────────
 use base64::Engine;
+use fcp_manifest::{ConnectorManifest, NetworkConstraints};
 use fcp_openai::client::OpenAIClient;
 use fcp_openai::connector::OpenAIConnector;
 use fcp_openai::types::Model;
@@ -54,6 +55,153 @@ fn capability_for_operation(op: &str) -> &str {
         // All other operations have capability == operation ID
         other => other,
     }
+}
+
+#[test]
+fn manifest_declares_strict_per_operation_network_constraints() {
+    let manifest = ConnectorManifest::parse_str_unchecked(include_str!("../manifest.toml"))
+        .expect("OpenAI manifest should parse");
+    assert_eq!(
+        manifest.manifest.interface_hash,
+        manifest
+            .compute_interface_hash()
+            .expect("OpenAI interface hash should compute")
+    );
+
+    for operation_id in ["chat", "simple_chat", "embeddings"] {
+        let constraints = network_constraints(&manifest, operation_id);
+        assert_openai_or_compatible_api_constraints(constraints, 10_485_760);
+    }
+    assert_openai_or_compatible_api_constraints(
+        network_constraints(&manifest, "images_generate"),
+        52_428_800,
+    );
+
+    for operation_id in [
+        "audio_transcribe",
+        "audio_tts",
+        "finetune_create",
+        "finetune_list",
+        "finetune_get",
+        "finetune_cancel",
+        "finetune_events",
+        "assistants_create",
+        "assistants_list",
+        "assistants_get",
+        "assistants_delete",
+        "threads_create",
+        "threads_get",
+        "threads_messages_create",
+        "threads_messages_list",
+        "threads_runs_create",
+        "threads_runs_get",
+        "threads_runs_cancel",
+    ] {
+        let constraints = network_constraints(&manifest, operation_id);
+        assert_openai_or_compatible_api_constraints(constraints, constraints.max_response_bytes);
+    }
+
+    for operation_id in [
+        "videos_generate",
+        "realtime_transcribe",
+        "realtime_voice",
+        "realtime_browser_session",
+    ] {
+        let constraints = network_constraints(&manifest, operation_id);
+        assert_openai_api_only_constraints(operation_id, constraints);
+    }
+
+    assert_no_egress_constraints(network_constraints(&manifest, "get_usage"));
+    assert_eq!(
+        manifest.provides.operations.len(),
+        27,
+        "update network constraint assertions when OpenAI operations change"
+    );
+}
+
+fn network_constraints<'a>(
+    manifest: &'a ConnectorManifest,
+    operation_id: &str,
+) -> &'a NetworkConstraints {
+    manifest
+        .provides
+        .operations
+        .get(operation_id)
+        .unwrap_or_else(|| panic!("missing {operation_id} operation"))
+        .network_constraints
+        .as_ref()
+        .unwrap_or_else(|| panic!("{operation_id} missing network_constraints"))
+}
+
+fn assert_openai_or_compatible_api_constraints(
+    constraints: &NetworkConstraints,
+    max_response_bytes: u64,
+) {
+    assert_eq!(
+        constraints.host_allow.as_slice(),
+        ["api.openai.com", "api.deepseek.com"]
+    );
+    assert_common_provider_constraints(constraints);
+    assert_eq!(constraints.max_redirects, 5);
+    assert_eq!(constraints.total_timeout_ms, 120_000);
+    assert_eq!(constraints.max_response_bytes, max_response_bytes);
+}
+
+fn assert_openai_api_only_constraints(operation_id: &str, constraints: &NetworkConstraints) {
+    assert_eq!(constraints.host_allow.as_slice(), ["api.openai.com"]);
+    assert_common_provider_constraints(constraints);
+    match operation_id {
+        "videos_generate" => {
+            assert_eq!(constraints.max_redirects, 5);
+            assert_eq!(constraints.total_timeout_ms, 120_000);
+            assert_eq!(constraints.max_response_bytes, 104_857_600);
+        }
+        "realtime_transcribe" | "realtime_voice" => {
+            assert_eq!(constraints.max_redirects, 0);
+            assert_eq!(constraints.total_timeout_ms, 300_000);
+            assert_eq!(constraints.max_response_bytes, 10_485_760);
+        }
+        "realtime_browser_session" => {
+            assert_eq!(constraints.max_redirects, 0);
+            assert_eq!(constraints.total_timeout_ms, 120_000);
+            assert_eq!(constraints.max_response_bytes, 10_485_760);
+        }
+        other => panic!("unexpected OpenAI-only operation {other}"),
+    }
+}
+
+fn assert_common_provider_constraints(constraints: &NetworkConstraints) {
+    assert_eq!(constraints.port_allow.as_slice(), [443]);
+    assert!(constraints.ip_allow.is_empty());
+    assert!(constraints.cidr_deny.is_empty());
+    assert!(constraints.deny_localhost);
+    assert!(constraints.deny_private_ranges);
+    assert!(constraints.deny_tailnet_ranges);
+    assert!(constraints.require_sni);
+    assert!(constraints.spki_pins.is_empty());
+    assert!(constraints.deny_ip_literals);
+    assert!(constraints.require_host_canonicalization);
+    assert_eq!(constraints.dns_max_ips, 16);
+    assert_eq!(constraints.connect_timeout_ms, 10_000);
+}
+
+fn assert_no_egress_constraints(constraints: &NetworkConstraints) {
+    assert_eq!(constraints.host_allow.as_slice(), ["none.invalid"]);
+    assert_eq!(constraints.port_allow.as_slice(), [0]);
+    assert!(constraints.ip_allow.is_empty());
+    assert!(constraints.cidr_deny.is_empty());
+    assert!(constraints.deny_localhost);
+    assert!(constraints.deny_private_ranges);
+    assert!(constraints.deny_tailnet_ranges);
+    assert!(!constraints.require_sni);
+    assert!(constraints.spki_pins.is_empty());
+    assert!(constraints.deny_ip_literals);
+    assert!(constraints.require_host_canonicalization);
+    assert_eq!(constraints.dns_max_ips, 0);
+    assert_eq!(constraints.max_redirects, 0);
+    assert_eq!(constraints.connect_timeout_ms, 10_000);
+    assert_eq!(constraints.total_timeout_ms, 30_000);
+    assert_eq!(constraints.max_response_bytes, 65_536);
 }
 
 /// Generate a valid COSE capability token signed by the given key.

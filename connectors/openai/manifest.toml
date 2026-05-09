@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:6dd0b9c47f03cc738ab04178ca9c2ab2b10fdf13ced350729f460cd43b1918d6"
+interface_hash = "blake3-256:fcp.interface.v2:b975b64993732f5ccadc694043b79f71e08bb7c08d5560d8f4289c274d1a9d07"
 
 [connector]
 id = "fcp.openai"
@@ -353,6 +353,24 @@ type = "integer"
 [provides.operations.get_usage.output_schema.properties.requests_error]
 description = "Total failed requests"
 type = "integer"
+
+[provides.operations.get_usage.network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
 
 [provides.operations.get_usage.ai_hints]
 when_to_use = "Check usage and costs for the current session. Useful for monitoring spend."

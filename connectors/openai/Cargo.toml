@@ -49,4 +49,5 @@ base64.workspace = true
 wiremock.workspace = true
 futures-util.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
+fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }

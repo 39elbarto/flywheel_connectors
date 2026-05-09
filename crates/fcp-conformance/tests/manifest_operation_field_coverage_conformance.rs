@@ -36,7 +36,6 @@ const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
     "mattermost",
     "microsoft365",
     "nostr",
-    "openai",
     "plivo",
     "qq",
     "sonos",

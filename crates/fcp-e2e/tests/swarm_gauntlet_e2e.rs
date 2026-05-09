@@ -945,6 +945,7 @@ struct PrewarmEvidenceCase<'a> {
     activation_latency_ms: u64,
     baseline_on_demand_latency_ms: u64,
     latency: SwarmPrewarmLatencyPercentiles,
+    baseline_latency: SwarmPrewarmLatencyPercentiles,
     process_count: u32,
     concurrent_startups: u32,
     restart_reason: Option<&'a str>,
@@ -985,6 +986,7 @@ fn prewarm_evidence(
         activation_latency_ms: case.activation_latency_ms,
         baseline_on_demand_latency_ms: case.baseline_on_demand_latency_ms,
         latency: case.latency,
+        baseline_latency: case.baseline_latency,
         sandbox_layer: serde_label(&case.observation.sandbox)?,
         sandbox_profile: "strict".to_string(),
         sandbox_boundary: "fcp-sandbox::strict-profile-limits".to_string(),
@@ -1292,6 +1294,7 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
             activation_latency_ms: 96,
             baseline_on_demand_latency_ms: 96,
             latency: prewarm_latency(96, 96, 96, 96, 96, 96),
+            baseline_latency: prewarm_latency(96, 96, 96, 96, 96, 96),
             process_count: 1,
             concurrent_startups: 1,
             restart_reason: None,
@@ -1310,6 +1313,7 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
             activation_latency_ms: 18,
             baseline_on_demand_latency_ms: 96,
             latency: prewarm_latency(18, 22, 26, 29, 30, 20),
+            baseline_latency: prewarm_latency(90, 96, 112, 125, 130, 95),
             process_count: 1,
             concurrent_startups: 1,
             restart_reason: None,
@@ -1328,6 +1332,7 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
             activation_latency_ms: 96,
             baseline_on_demand_latency_ms: 96,
             latency: prewarm_latency(96, 96, 96, 96, 96, 96),
+            baseline_latency: prewarm_latency(96, 96, 96, 96, 96, 96),
             process_count: 1,
             concurrent_startups: 1,
             restart_reason: None,
@@ -1346,6 +1351,7 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
             activation_latency_ms: 96,
             baseline_on_demand_latency_ms: 96,
             latency: prewarm_latency(96, 96, 96, 96, 96, 96),
+            baseline_latency: prewarm_latency(96, 96, 96, 96, 96, 96),
             process_count: 1,
             concurrent_startups: 1,
             restart_reason: Some("exit_code_1"),
@@ -1364,6 +1370,7 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
             activation_latency_ms: 21,
             baseline_on_demand_latency_ms: 96,
             latency: prewarm_latency(21, 24, 28, 31, 32, 23),
+            baseline_latency: prewarm_latency(90, 96, 112, 125, 130, 95),
             process_count: 1,
             concurrent_startups: 1,
             restart_reason: None,
@@ -1382,6 +1389,7 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
             activation_latency_ms: 24,
             baseline_on_demand_latency_ms: 112,
             latency: prewarm_latency(24, 31, 42, 50, 55, 28),
+            baseline_latency: prewarm_latency(96, 112, 148, 180, 200, 118),
             process_count: 256,
             concurrent_startups: 10_000,
             restart_reason: None,
@@ -1400,6 +1408,7 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
             activation_latency_ms: 96,
             baseline_on_demand_latency_ms: 96,
             latency: prewarm_latency(96, 96, 96, 96, 96, 96),
+            baseline_latency: prewarm_latency(96, 96, 96, 96, 96, 96),
             process_count: 1,
             concurrent_startups: 1,
             restart_reason: None,
@@ -1501,6 +1510,50 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
             && warm_hit["p95_activation_latency_ms"].is_u64()
             && warm_hit["p99_activation_latency_ms"].is_u64()
     );
+    let warm_p50 = warm_hit["p50_activation_latency_ms"]
+        .as_u64()
+        .ok_or("warm p50 should be recorded")?;
+    let warm_p95 = warm_hit["p95_activation_latency_ms"]
+        .as_u64()
+        .ok_or("warm p95 should be recorded")?;
+    let warm_p99 = warm_hit["p99_activation_latency_ms"]
+        .as_u64()
+        .ok_or("warm p99 should be recorded")?;
+    let warm_baseline_p50 = warm_hit["baseline_p50_activation_latency_ms"]
+        .as_u64()
+        .ok_or("warm baseline p50 should be recorded")?;
+    let warm_baseline_p95 = warm_hit["baseline_p95_activation_latency_ms"]
+        .as_u64()
+        .ok_or("warm baseline p95 should be recorded")?;
+    let warm_baseline_p99 = warm_hit["baseline_p99_activation_latency_ms"]
+        .as_u64()
+        .ok_or("warm baseline p99 should be recorded")?;
+    assert_eq!(warm_baseline_p50, 90);
+    assert_eq!(warm_baseline_p95, 96);
+    assert_eq!(warm_baseline_p99, 112);
+    assert_eq!(
+        warm_hit["p50_activation_latency_improvement_ms"].as_u64(),
+        Some(warm_baseline_p50 - warm_p50)
+    );
+    assert_eq!(
+        warm_hit["p95_activation_latency_improvement_ms"].as_u64(),
+        Some(warm_baseline_p95 - warm_p95)
+    );
+    assert_eq!(
+        warm_hit["p99_activation_latency_improvement_ms"].as_u64(),
+        Some(warm_baseline_p99 - warm_p99)
+    );
+    assert!(
+        warm_hit["p50_activation_latency_improvement_ms"]
+            .as_u64()
+            .is_some_and(|improvement| improvement > 0)
+            && warm_hit["p95_activation_latency_improvement_ms"]
+                .as_u64()
+                .is_some_and(|improvement| improvement > 0)
+            && warm_hit["p99_activation_latency_improvement_ms"]
+                .as_u64()
+                .is_some_and(|improvement| improvement > 0)
+    );
     assert_eq!(empty_pool["fallback_reason"], "empty_pool");
     assert_eq!(empty_pool["admission_decision"], "fallback_on_demand");
     assert_eq!(empty_pool["warm_checkout"], false);
@@ -1534,6 +1587,22 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
         concurrent["p50_activation_latency_ms"].is_u64()
             && concurrent["p95_activation_latency_ms"].is_u64()
             && concurrent["p99_activation_latency_ms"].is_u64()
+    );
+    let concurrent_p99 = concurrent["p99_activation_latency_ms"]
+        .as_u64()
+        .ok_or("concurrent p99 should be recorded")?;
+    let concurrent_baseline_p99 = concurrent["baseline_p99_activation_latency_ms"]
+        .as_u64()
+        .ok_or("concurrent baseline p99 should be recorded")?;
+    assert_eq!(concurrent_baseline_p99, 148);
+    assert_eq!(
+        concurrent["p99_activation_latency_improvement_ms"].as_u64(),
+        Some(concurrent_baseline_p99 - concurrent_p99)
+    );
+    assert!(
+        concurrent["p99_activation_latency_improvement_ms"]
+            .as_u64()
+            .is_some_and(|improvement| improvement > 0)
     );
     for line in jsonl.lines() {
         serde_json::from_str::<Value>(line)?;

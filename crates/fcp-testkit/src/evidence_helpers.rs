@@ -2725,6 +2725,8 @@ pub struct SwarmPrewarmColdStartEvidence {
     pub baseline_on_demand_latency_ms: u64,
     /// Activation latency percentile summary.
     pub latency: SwarmPrewarmLatencyPercentiles,
+    /// Conservative on-demand percentile baseline used for before/after comparison.
+    pub baseline_latency: SwarmPrewarmLatencyPercentiles,
     /// Sandbox layer active for the connector.
     pub sandbox_layer: String,
     /// Sandbox profile requested for the connector fixture.
@@ -2757,6 +2759,15 @@ pub struct SwarmPrewarmColdStartEvidence {
     pub skip_reason: Option<String>,
     /// Whether the scenario verified shutdown cleanup.
     pub shutdown_cleanup_verified: bool,
+}
+
+const fn validate_prewarm_latency_percentiles(latency: &SwarmPrewarmLatencyPercentiles) -> bool {
+    latency.p50_ms != 0
+        && latency.p50_ms <= latency.p95_ms
+        && latency.p95_ms <= latency.p99_ms
+        && latency.p99_ms <= latency.p999_ms
+        && latency.p999_ms <= latency.max_ms
+        && latency.mean_ms != 0
 }
 
 impl SwarmPrewarmColdStartEvidence {
@@ -2812,15 +2823,28 @@ impl SwarmPrewarmColdStartEvidence {
                 baseline_ms: self.baseline_on_demand_latency_ms,
             });
         }
-        let latency = &self.latency;
-        if latency.p50_ms == 0
-            || latency.p50_ms > latency.p95_ms
-            || latency.p95_ms > latency.p99_ms
-            || latency.p99_ms > latency.p999_ms
-            || latency.p999_ms > latency.max_ms
-            || latency.mean_ms == 0
+        if !validate_prewarm_latency_percentiles(&self.latency)
+            || !validate_prewarm_latency_percentiles(&self.baseline_latency)
         {
             return Err(SwarmPrewarmColdStartEvidenceError::InvalidLatencyPercentiles);
+        }
+        if self.latency.p50_ms > self.baseline_latency.p50_ms {
+            return Err(SwarmPrewarmColdStartEvidenceError::LatencyRegression {
+                activation_ms: self.latency.p50_ms,
+                baseline_ms: self.baseline_latency.p50_ms,
+            });
+        }
+        if self.latency.p95_ms > self.baseline_latency.p95_ms {
+            return Err(SwarmPrewarmColdStartEvidenceError::LatencyRegression {
+                activation_ms: self.latency.p95_ms,
+                baseline_ms: self.baseline_latency.p95_ms,
+            });
+        }
+        if self.latency.p99_ms > self.baseline_latency.p99_ms {
+            return Err(SwarmPrewarmColdStartEvidenceError::LatencyRegression {
+                activation_ms: self.latency.p99_ms,
+                baseline_ms: self.baseline_latency.p99_ms,
+            });
         }
         if self.rss_bytes == 0 {
             return Err(
@@ -2878,6 +2902,21 @@ impl SwarmPrewarmColdStartEvidence {
             "p50_activation_latency_ms": self.latency.p50_ms,
             "p95_activation_latency_ms": self.latency.p95_ms,
             "p99_activation_latency_ms": self.latency.p99_ms,
+            "baseline_p50_activation_latency_ms": self.baseline_latency.p50_ms,
+            "baseline_p95_activation_latency_ms": self.baseline_latency.p95_ms,
+            "baseline_p99_activation_latency_ms": self.baseline_latency.p99_ms,
+            "p50_activation_latency_improvement_ms": self
+                .baseline_latency
+                .p50_ms
+                .saturating_sub(self.latency.p50_ms),
+            "p95_activation_latency_improvement_ms": self
+                .baseline_latency
+                .p95_ms
+                .saturating_sub(self.latency.p95_ms),
+            "p99_activation_latency_improvement_ms": self
+                .baseline_latency
+                .p99_ms
+                .saturating_sub(self.latency.p99_ms),
             "sandbox_layer": self.sandbox_layer,
             "sandbox_profile": self.sandbox_profile,
             "sandbox_boundary": self.sandbox_boundary,
@@ -8990,6 +9029,14 @@ mod tests {
                 max_ms: 30,
                 mean_ms: 20,
             },
+            baseline_latency: SwarmPrewarmLatencyPercentiles {
+                p50_ms: 90,
+                p95_ms: 96,
+                p99_ms: 112,
+                p999_ms: 125,
+                max_ms: 130,
+                mean_ms: 95,
+            },
             sandbox_layer: "wasi".to_string(),
             sandbox_profile: "strict".to_string(),
             sandbox_boundary: "fcp-sandbox::strict-profile-limits".to_string(),
@@ -9057,6 +9104,12 @@ mod tests {
         assert_eq!(record["p50_activation_latency_ms"], 18);
         assert_eq!(record["p95_activation_latency_ms"], 22);
         assert_eq!(record["p99_activation_latency_ms"], 26);
+        assert_eq!(record["baseline_p50_activation_latency_ms"], 90);
+        assert_eq!(record["baseline_p95_activation_latency_ms"], 96);
+        assert_eq!(record["baseline_p99_activation_latency_ms"], 112);
+        assert_eq!(record["p50_activation_latency_improvement_ms"], 72);
+        assert_eq!(record["p95_activation_latency_improvement_ms"], 74);
+        assert_eq!(record["p99_activation_latency_improvement_ms"], 86);
         assert_eq!(record["sandbox_layer"], "wasi");
         assert_eq!(record["sandbox_profile"], "strict");
         assert_eq!(
@@ -9119,6 +9172,26 @@ mod tests {
         assert_eq!(
             bad_percentiles.validate(),
             Err(SwarmPrewarmColdStartEvidenceError::InvalidLatencyPercentiles)
+        );
+
+        let mut bad_baseline_percentiles = prewarm_cold_start_evidence_fixture();
+        bad_baseline_percentiles.baseline_latency.p95_ms = 80;
+        bad_baseline_percentiles.baseline_latency.p99_ms = 70;
+        assert_eq!(
+            bad_baseline_percentiles.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidLatencyPercentiles)
+        );
+
+        let mut regressed_percentile = prewarm_cold_start_evidence_fixture();
+        regressed_percentile.baseline_latency.p50_ms = 18;
+        regressed_percentile.baseline_latency.p95_ms = 22;
+        regressed_percentile.baseline_latency.p99_ms = 24;
+        assert_eq!(
+            regressed_percentile.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::LatencyRegression {
+                activation_ms: 26,
+                baseline_ms: 24
+            })
         );
     }
 

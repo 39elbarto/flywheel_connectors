@@ -514,6 +514,13 @@ pub fn reconstruct_secret(shares: &[ShamirShare]) -> ShamirResult<ZeroizingSecre
 ///
 /// Cloning is deliberate: every clone owns an independent buffer and each
 /// buffer is zeroized when its wrapper is dropped.
+///
+/// Secret values intentionally do not serialize:
+///
+/// ```compile_fail
+/// let secret = fcp_crypto::ZeroizingSecret::from("do-not-serialize");
+/// let _json = serde_json::to_string(&secret).unwrap();
+/// ```
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct ZeroizingSecret(Vec<u8>);
 
@@ -1095,6 +1102,13 @@ mod tests {
     fn zeroizing_secret_with_zeroize_drop_accepts_owned_vec() {
         let secret = ZeroizingSecret::with_zeroize_drop(vec![9, 8, 7]);
         assert_eq!(secret.as_bytes(), &[9, 8, 7]);
+    }
+
+    #[test]
+    fn zeroizing_secret_is_zeroize_on_drop_type() {
+        fn assert_zeroize_on_drop<T: Zeroize + ZeroizeOnDrop>() {}
+
+        assert_zeroize_on_drop::<ZeroizingSecret>();
     }
 
     #[test]

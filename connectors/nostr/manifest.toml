@@ -56,6 +56,24 @@ idempotency = "none"
 input_schema = { type = "object", required = ["content"], additionalProperties = false, properties = { content = { type = "string", minLength = 1, pattern = "\\S" }, kind = { type = "integer", enum = [1] }, tags = { type = "array", items = { type = "array", items = { type = "string" } } } } }
 output_schema = { type = "object", required = ["event", "accepted_relays", "rejected_relays", "relay_resilience", "relay_metrics"], additionalProperties = false, properties = { event = { type = "object", required = ["id", "pubkey", "created_at", "kind"], additionalProperties = true, properties = { id = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" }, pubkey = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" }, created_at = { type = "integer" }, kind = { type = "integer" }, content = { type = "string" }, tags = { type = "array", items = { type = "array", items = { type = "string" } } }, sig = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" } } }, accepted_relays = { type = "array", items = { type = "object", additionalProperties = true } }, rejected_relays = { type = "array", items = { type = "object", additionalProperties = true } }, relay_resilience = { type = "array", items = { type = "object", additionalProperties = true } }, relay_metrics = { type = "array", items = { type = "object", additionalProperties = true } } } }
 
+[provides.operations.notes_publish.network_constraints]
+host_allow = ["${nostr_relay_host}"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations.dm_send]
 summary = "Encrypt and publish a NIP-04 direct message to configured relays"
 capability = "nostr.dm.write"
@@ -64,6 +82,24 @@ safety_tier = "risky"
 idempotency = "none"
 input_schema = { type = "object", additionalProperties = false, anyOf = [{ required = ["recipient"] }, { required = ["recipient_pubkey"] }, { required = ["target"] }], allOf = [{ anyOf = [{ required = ["plaintext"] }, { required = ["content"] }] }], properties = { recipient = { type = "string", minLength = 1, pattern = "\\S" }, recipient_pubkey = { type = "string", minLength = 1, pattern = "\\S" }, target = { type = "string", minLength = 1, pattern = "\\S" }, plaintext = { type = "string", minLength = 1, maxLength = 4096, pattern = "\\S" }, content = { type = "string", minLength = 1, maxLength = 4096, pattern = "\\S" }, reply_to_event_id = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" }, reply_to = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" }, allow_self_send = { type = "boolean" } } }
 output_schema = { type = "object", required = ["event_id", "event_kind", "sender_pubkey_hex", "recipient_pubkey_hex", "recipient_format", "tags", "created_at", "accepted_relays", "rejected_relays", "relay_resilience", "relay_metrics"], additionalProperties = false, properties = { event_id = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" }, event_kind = { type = "integer", enum = [4] }, sender_pubkey_hex = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" }, recipient_pubkey_hex = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" }, recipient_format = { type = "string" }, tags = { type = "array", items = { type = "array", items = { type = "string" } } }, created_at = { type = "integer" }, accepted_relays = { type = "array", items = { type = "object", additionalProperties = true } }, rejected_relays = { type = "array", items = { type = "object", additionalProperties = true } }, relay_resilience = { type = "array", items = { type = "object", additionalProperties = true } }, relay_metrics = { type = "array", items = { type = "object", additionalProperties = true } } } }
+
+[provides.operations.dm_send.network_constraints]
+host_allow = ["${nostr_relay_host}"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations.profile_publish]
 summary = "Validate, sign, publish, and persist NIP-01 profile metadata"
@@ -74,6 +110,24 @@ idempotency = "none"
 input_schema = { type = "object", required = ["profile"], additionalProperties = false, properties = { profile = { type = "object", additionalProperties = false, properties = { name = { type = "string", maxLength = 256 }, display_name = { type = "string", maxLength = 256 }, displayName = { type = "string", maxLength = 256 }, about = { type = "string", maxLength = 2000 }, picture = { type = "string", format = "uri", pattern = "^https://" }, banner = { type = "string", format = "uri", pattern = "^https://" }, website = { type = "string", format = "uri", pattern = "^https://" }, nip05 = { type = "string", maxLength = 320, pattern = "^[^\\s@]+@[^\\s@]+$" }, lud16 = { type = "string", maxLength = 320, pattern = "^[^\\s@]+@[^\\s@]+$" } } }, last_published_at = { type = "integer", minimum = 0 } } }
 output_schema = { type = "object", required = ["event", "event_kind", "profile", "display_profile", "accepted_relays", "rejected_relays", "persist_recommended", "persisted", "persistence_result", "profile_state", "relay_resilience", "relay_metrics"], additionalProperties = false, properties = { event = { type = "object", required = ["id", "pubkey", "created_at", "kind"], additionalProperties = true, properties = { id = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" }, pubkey = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" }, created_at = { type = "integer" }, kind = { type = "integer" }, content = { type = "string" }, tags = { type = "array", items = { type = "array", items = { type = "string" } } }, sig = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" } } }, event_kind = { type = "integer", enum = [0] }, profile = { type = "object", additionalProperties = true }, display_profile = { type = "object", additionalProperties = true }, accepted_relays = { type = "array", items = { type = "object", additionalProperties = true } }, rejected_relays = { type = "array", items = { type = "object", additionalProperties = true } }, persist_recommended = { type = "boolean" }, persisted = { type = "boolean" }, persistence_result = { type = "string" }, profile_state = { type = "object", required = ["load_result", "persistence", "connector_public_key_hex", "last_published_at", "last_published_event_id", "last_publish_results", "last_profile", "updated_at_secs"], additionalProperties = false, properties = { load_result = { type = "string" }, persistence = { type = "string", enum = ["zone_dir", "memory_only_no_zone_dir"] }, connector_public_key_hex = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" }, last_published_at = { type = ["integer", "null"] }, last_published_event_id = { type = ["string", "null"] }, last_publish_results = { type = "object", additionalProperties = { type = "string" } }, last_profile = { type = ["object", "null"] }, updated_at_secs = { type = ["integer", "null"] } } }, relay_resilience = { type = "array", items = { type = "object", additionalProperties = true } }, relay_metrics = { type = "array", items = { type = "object", additionalProperties = true } } } }
 
+[provides.operations.profile_publish.network_constraints]
+host_allow = ["${nostr_relay_host}"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations.profile_state]
 summary = "Read local NIP-01 profile publish state"
 capability = "nostr.profile.read"
@@ -82,6 +136,24 @@ safety_tier = "safe"
 idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["load_result", "persistence", "connector_public_key_hex", "last_published_at", "last_published_event_id", "last_publish_results", "last_profile", "updated_at_secs"], additionalProperties = false, properties = { load_result = { type = "string" }, persistence = { type = "string", enum = ["zone_dir", "memory_only_no_zone_dir"] }, connector_public_key_hex = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" }, last_published_at = { type = ["integer", "null"] }, last_published_event_id = { type = ["string", "null"] }, last_publish_results = { type = "object", additionalProperties = { type = "string" } }, last_profile = { type = ["object", "null"] }, updated_at_secs = { type = ["integer", "null"] } } }
+
+[provides.operations.profile_state.network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations.profile_import]
 summary = "Import newest verified NIP-01 profile metadata from configured relays"
@@ -92,6 +164,24 @@ idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false, properties = { pubkey = { type = "string", minLength = 1, pattern = "\\S" }, local_profile = { type = "object", additionalProperties = false, properties = { name = { type = "string", maxLength = 256 }, display_name = { type = "string", maxLength = 256 }, displayName = { type = "string", maxLength = 256 }, about = { type = "string", maxLength = 2000 }, picture = { type = "string", format = "uri", pattern = "^https://" }, banner = { type = "string", format = "uri", pattern = "^https://" }, website = { type = "string", format = "uri", pattern = "^https://" }, nip05 = { type = "string", maxLength = 320, pattern = "^[^\\s@]+@[^\\s@]+$" }, lud16 = { type = "string", maxLength = 320, pattern = "^[^\\s@]+@[^\\s@]+$" } } } } }
 output_schema = { type = "object", required = ["ok", "pubkey_hex", "relays_queried", "relay_results", "invalid_candidates", "relay_resilience", "relay_metrics"], additionalProperties = false, properties = { ok = { type = "boolean" }, pubkey_hex = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" }, error = { type = "string" }, profile = { type = "object", additionalProperties = true }, display_profile = { type = "object", additionalProperties = true }, merged_profile = { type = "object", additionalProperties = true }, event = { type = "object", required = ["id", "pubkey", "created_at", "kind"], additionalProperties = true, properties = { id = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" }, pubkey = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" }, created_at = { type = "integer" }, kind = { type = "integer" }, content = { type = "string" }, tags = { type = "array", items = { type = "array", items = { type = "string" } } }, sig = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" } } }, source_relay = { type = "string", format = "uri" }, relays_queried = { type = "array", items = { type = "string", format = "uri" } }, relay_results = { type = "array", items = { type = "object", additionalProperties = true } }, dropped_profile_fields = { type = "array", items = { type = "string" } }, invalid_candidates = { type = "array", items = { type = "object", additionalProperties = true } }, relay_resilience = { type = "array", items = { type = "object", additionalProperties = true } }, relay_metrics = { type = "array", items = { type = "object", additionalProperties = true } } } }
 
+[provides.operations.profile_import.network_constraints]
+host_allow = ["${nostr_relay_host}"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations.events_query]
 summary = "Query bounded public Nostr events from configured relays"
 capability = "nostr.events.read"
@@ -100,6 +190,24 @@ safety_tier = "safe"
 idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false, properties = { authors = { type = "array", items = { type = "string", minLength = 1, pattern = "\\S" } }, kinds = { type = "array", items = { type = "integer", minimum = 0 } }, ids = { type = "array", items = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" } }, since = { type = "integer" }, until = { type = "integer" }, limit = { type = "integer", minimum = 1, maximum = 1000 } } }
 output_schema = { type = "object", required = ["subscription_id", "filter", "results", "relay_resilience", "relay_metrics"], additionalProperties = false, properties = { subscription_id = { type = "string" }, filter = { type = "object", additionalProperties = true }, results = { type = "array", items = { type = "object", additionalProperties = true } }, relay_resilience = { type = "array", items = { type = "object", additionalProperties = true } }, relay_metrics = { type = "array", items = { type = "object", additionalProperties = true } } } }
+
+[provides.operations.events_query.network_constraints]
+host_allow = ["${nostr_relay_host}"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations.relays_list]
 summary = "List configured Nostr relays"
@@ -110,6 +218,24 @@ idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["relays", "public_key_hex"], additionalProperties = false, properties = { relays = { type = "array", items = { type = "string", format = "uri" } }, public_key_hex = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" } } }
 
+[provides.operations.relays_list.network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations.health]
 summary = "Verify relay connectivity and local signing identity"
 capability = "nostr.health.read"
@@ -119,6 +245,24 @@ idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["public_key_hex", "relay_health", "relay_resilience", "relay_metrics"], additionalProperties = false, properties = { public_key_hex = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" }, relay_health = { type = "array", items = { type = "object", additionalProperties = true } }, relay_resilience = { type = "array", items = { type = "object", additionalProperties = true } }, relay_metrics = { type = "array", items = { type = "object", additionalProperties = true } } } }
 
+[provides.operations.health.network_constraints]
+host_allow = ["${nostr_relay_host}"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations.relays_health]
 summary = "Score relay health with latency and NIP support metrics"
 capability = "nostr.health.read"
@@ -127,6 +271,24 @@ safety_tier = "safe"
 idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["public_key_hex", "relay_scores", "scored_count", "relay_resilience", "relay_metrics"], additionalProperties = false, properties = { public_key_hex = { type = "string", pattern = "^[0-9A-Fa-f]{64}$" }, relay_scores = { type = "array", items = { type = "object", additionalProperties = true } }, scored_count = { type = "integer", minimum = 0 }, relay_resilience = { type = "array", items = { type = "object", additionalProperties = true } }, relay_metrics = { type = "array", items = { type = "object", additionalProperties = true } } } }
+
+[provides.operations.relays_health.network_constraints]
+host_allow = ["${nostr_relay_host}"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 # Top-level event_caps is intentionally omitted here because the current
 # manifest schema requires min_buffer_events > 0 whenever streaming = true.

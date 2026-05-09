@@ -1993,6 +1993,153 @@ mod tests {
             .map_err(|err| format!("{operation_key}.{field} should convert to JSON: {err}"))
     }
 
+    const RELAY_NETWORK_CONSTRAINT_OPS: &[&str] = &[
+        "notes_publish",
+        "dm_send",
+        "profile_publish",
+        "profile_import",
+        "events_query",
+        "health",
+        "relays_health",
+    ];
+    const LOCAL_ONLY_NETWORK_CONSTRAINT_OPS: &[&str] = &["profile_state", "relays_list"];
+
+    fn operation_network_constraints<'a>(
+        manifest: &'a toml::Value,
+        operation_key: &str,
+    ) -> Result<&'a toml::map::Map<String, toml::Value>, String> {
+        manifest_operations(manifest)?
+            .get(operation_key)
+            .and_then(toml::Value::as_table)
+            .and_then(|operation| operation.get("network_constraints"))
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| format!("{operation_key} should declare network_constraints"))
+    }
+
+    fn constraint_strings(
+        constraints: &toml::map::Map<String, toml::Value>,
+        field: &str,
+    ) -> Result<Vec<String>, String> {
+        let values = constraints
+            .get(field)
+            .and_then(toml::Value::as_array)
+            .ok_or_else(|| format!("{field} should be a string array"))?;
+        values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("{field} should contain only strings"))
+            })
+            .collect()
+    }
+
+    fn constraint_integers(
+        constraints: &toml::map::Map<String, toml::Value>,
+        field: &str,
+    ) -> Result<Vec<i64>, String> {
+        let values = constraints
+            .get(field)
+            .and_then(toml::Value::as_array)
+            .ok_or_else(|| format!("{field} should be an integer array"))?;
+        values
+            .iter()
+            .map(|value| {
+                value
+                    .as_integer()
+                    .ok_or_else(|| format!("{field} should contain only integers"))
+            })
+            .collect()
+    }
+
+    fn constraint_bool(
+        constraints: &toml::map::Map<String, toml::Value>,
+        field: &str,
+    ) -> Result<bool, String> {
+        constraints
+            .get(field)
+            .and_then(toml::Value::as_bool)
+            .ok_or_else(|| format!("{field} should be a boolean"))
+    }
+
+    fn constraint_integer(
+        constraints: &toml::map::Map<String, toml::Value>,
+        field: &str,
+    ) -> Result<i64, String> {
+        constraints
+            .get(field)
+            .and_then(toml::Value::as_integer)
+            .ok_or_else(|| format!("{field} should be an integer"))
+    }
+
+    fn assert_common_network_constraints(
+        constraints: &toml::map::Map<String, toml::Value>,
+        require_sni: bool,
+        dns_max_ips: i64,
+        connect_timeout_ms: i64,
+    ) -> Result<(), String> {
+        assert_eq!(
+            constraint_strings(constraints, "ip_allow")?,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            constraint_strings(constraints, "cidr_deny")?,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            constraint_strings(constraints, "spki_pins")?,
+            Vec::<String>::new()
+        );
+        for field in [
+            "deny_localhost",
+            "deny_private_ranges",
+            "deny_tailnet_ranges",
+            "deny_ip_literals",
+            "require_host_canonicalization",
+        ] {
+            assert!(
+                constraint_bool(constraints, field)?,
+                "{field} should be true"
+            );
+        }
+        assert_eq!(constraint_bool(constraints, "require_sni")?, require_sni);
+        assert_eq!(constraint_integer(constraints, "dns_max_ips")?, dns_max_ips);
+        assert_eq!(constraint_integer(constraints, "max_redirects")?, 0);
+        assert_eq!(
+            constraint_integer(constraints, "connect_timeout_ms")?,
+            connect_timeout_ms
+        );
+        assert_eq!(constraint_integer(constraints, "total_timeout_ms")?, 30_000);
+        assert_eq!(
+            constraint_integer(constraints, "max_response_bytes")?,
+            1_048_576
+        );
+        Ok(())
+    }
+
+    fn assert_relay_network_constraints(
+        constraints: &toml::map::Map<String, toml::Value>,
+    ) -> Result<(), String> {
+        assert_eq!(
+            constraint_strings(constraints, "host_allow")?,
+            vec!["${nostr_relay_host}".to_owned()]
+        );
+        assert_eq!(constraint_integers(constraints, "port_allow")?, vec![443]);
+        assert_common_network_constraints(constraints, true, 16, 10_000)
+    }
+
+    fn assert_no_egress_network_constraints(
+        constraints: &toml::map::Map<String, toml::Value>,
+    ) -> Result<(), String> {
+        assert_eq!(
+            constraint_strings(constraints, "host_allow")?,
+            vec!["none.invalid".to_owned()]
+        );
+        assert_eq!(constraint_integers(constraints, "port_allow")?, vec![0]);
+        assert_common_network_constraints(constraints, false, 0, 1_000)
+    }
+
     fn validator_for(schema: &serde_json::Value) -> Result<jsonschema::Validator, String> {
         jsonschema::Validator::new(schema)
             .map_err(|err| format!("manifest operation schema should compile: {err}"))
@@ -2368,6 +2515,28 @@ mod tests {
                 "relay_metrics": []
             }),
         )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_declares_runtime_scoped_network_constraints() -> Result<(), String> {
+        let manifest = nostr_manifest()?;
+        let operations = manifest_operations(&manifest)?;
+        assert_eq!(
+            operations.len(),
+            RELAY_NETWORK_CONSTRAINT_OPS.len() + LOCAL_ONLY_NETWORK_CONSTRAINT_OPS.len(),
+            "manifest operation count should match the audited constraint split"
+        );
+
+        for operation_key in RELAY_NETWORK_CONSTRAINT_OPS {
+            let constraints = operation_network_constraints(&manifest, operation_key)?;
+            assert_relay_network_constraints(constraints)?;
+        }
+        for operation_key in LOCAL_ONLY_NETWORK_CONSTRAINT_OPS {
+            let constraints = operation_network_constraints(&manifest, operation_key)?;
+            assert_no_egress_network_constraints(constraints)?;
+        }
 
         Ok(())
     }

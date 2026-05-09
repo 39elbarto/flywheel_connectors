@@ -22,7 +22,6 @@ const INVALID_INPUT_SCHEMA: &str = "invalid_input_schema";
 const INVALID_OUTPUT_SCHEMA: &str = "invalid_output_schema";
 const EXPECTED_SCHEMA_GAPS: &[&str] = &[];
 const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
-    "anthropic",
     "anthropic-vertex",
     "dingtalk",
     "email-generic",

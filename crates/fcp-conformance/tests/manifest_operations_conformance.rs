@@ -809,7 +809,6 @@ fn expected_output_schema_gap_connectors() -> Vec<String> {
 
 fn expected_network_constraints_gap_connectors() -> Vec<String> {
     connector_names(&[
-        "anthropic",
         "anthropic-vertex",
         "dingtalk",
         "email-generic",

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:802fdc5f20104e4fe4e5cc21150596812bb45a9e193f9d067bb522fcf3a134c8"
+interface_hash = "blake3-256:fcp.interface.v2:4793b702c6a6eb0f6fe3fc2c3c742b4f2e3029e476683db07150f97825526f4e"
 
 [connector]
 id = "fcp.anthropic"
@@ -254,6 +254,24 @@ type = "integer"
 [provides.operations."anthropic.get_usage".output_schema.properties.total_output_tokens]
 type = "integer"
 
+[provides.operations."anthropic.get_usage".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
+
 [provides.operations."anthropic.get_usage".ai_hints]
 when_to_use = "Inspect connector token and cost usage counters."
 common_mistakes = [
@@ -279,6 +297,24 @@ type = "object"
 
 [provides.operations."anthropic.auth.list_methods".output_schema]
 type = "object"
+
+[provides.operations."anthropic.auth.list_methods".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
 
 [provides.operations."anthropic.auth.list_methods".ai_hints]
 when_to_use = "Use when an agent needs to discover which Anthropic credential modes this connector supports and which one is currently configured."
@@ -308,6 +344,24 @@ type = "object"
 
 [provides.operations."anthropic.auth.refresh_oauth".output_schema]
 type = "object"
+
+[provides.operations."anthropic.auth.refresh_oauth".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
 
 [provides.operations."anthropic.auth.refresh_oauth".ai_hints]
 when_to_use = "Use when an agent needs to check whether the host can refresh the configured Claude Code OAuth credential instead of using a static API key."
@@ -343,6 +397,24 @@ type = "string"
 
 [provides.operations."anthropic.models.normalize".output_schema]
 type = "object"
+
+[provides.operations."anthropic.models.normalize".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
 
 [provides.operations."anthropic.models.normalize".ai_hints]
 when_to_use = "Use before invoking Claude when an agent has a user-facing model alias and needs the connector's canonical Anthropic model ID."

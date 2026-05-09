@@ -1,9 +1,9 @@
 # Hugging Face Connector V3 Contract
 
 > **Status**: incubating runtime contract documented with inference-endpoint and credential-injection drift
-> **Bead**: `flywheel_connectors-4kw5f.12`
+> **Bead**: `flywheel_connectors-4kw5f.2.4.4`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/huggingface_connector_verification.sh`
 > **Hugging Face Inference Providers upstream**: https://huggingface.co/docs/inference-providers/index
 > **Text generation upstream**: https://huggingface.co/docs/inference-providers/tasks/text-generation
 > **Summarization upstream**: https://huggingface.co/docs/api-inference/en/tasks/summarization
@@ -174,7 +174,7 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/huggingface_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The dedicated closeout bundle is `scripts/e2e/huggingface_connector_verification.sh`. It runs the manifest check, focused `rch` check/fmt/test/clippy lanes, extracts redaction-safe loopback JSONL evidence, and writes a replay script plus summary artifact.
 
 The verification surface captures:
 
@@ -182,6 +182,7 @@ The verification surface captures:
 - deterministic WireMock coverage for Hugging Face HTTP paths
 - auth, provider error, retry, timeout, lifecycle, simulation, introspection, doctor, and self-check coverage
 - formatting, check, test, and clippy proof through `rch`
+- replayable verification artifacts under `artifacts/e2e/huggingface/<run-id>/`
 - UBS on changed files before commit
 
 ## Operator Guidance
@@ -216,6 +217,7 @@ The verification surface captures:
 
 **Rerun commands**:
 
+- `RUN_ID=manual-huggingface OUT_ROOT=artifacts/e2e/huggingface/manual-huggingface scripts/e2e/huggingface_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-huggingface-readme cargo check -p fcp-huggingface --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-huggingface-readme cargo test -p fcp-huggingface --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-huggingface-readme cargo clippy -p fcp-huggingface --all-targets --no-deps -- -D warnings`

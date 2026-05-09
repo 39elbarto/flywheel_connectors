@@ -92,7 +92,7 @@ else
   manifest_check_runner="rch:cargo-run"
   if run_logged \
     manifest_check \
-    rch exec -- bash -lc "export CARGO_TARGET_DIR='${TARGET_DIR}'; cargo run -q -p fwc -- manifest fix connectors/huggingface/manifest.toml --check --json"
+    rch exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo run -q -p fwc -- manifest fix connectors/huggingface/manifest.toml --check --json
   then
     manifest_status="passed"
     cp "${OUT_ROOT}/logs/manifest_check.log" "${OUT_ROOT}/evidence/manifest_check.json"
@@ -105,10 +105,10 @@ EOF
   fi
 fi
 
-cargo_check_status="$(run_step cargo_check rch exec -- bash -lc "export CARGO_TARGET_DIR='${TARGET_DIR}'; cargo check -p fcp-huggingface --all-targets")"
-format_check_status="$(run_step format_check rch exec -- bash -lc "export CARGO_TARGET_DIR='${TARGET_DIR}'; cargo fmt --package fcp-huggingface --check")"
-loopback_status="$(run_step loopback_jsonl rch exec -- bash -lc "export CARGO_TARGET_DIR='${TARGET_DIR}'; export HUGGINGFACE_E2E_GIT_REVISION='${git_revision}'; cargo test -p fcp-huggingface --test provider_contract huggingface_loopback_e2e_jsonl_matrix -- --nocapture")"
-clippy_status="$(run_step clippy rch exec -- bash -lc "export CARGO_TARGET_DIR='${TARGET_DIR}'; cargo clippy -p fcp-huggingface --all-targets --no-deps -- -D warnings")"
+cargo_check_status="$(run_step cargo_check rch exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo check -p fcp-huggingface --all-targets)"
+format_check_status="$(run_step format_check rch exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo fmt --package fcp-huggingface --check)"
+loopback_status="$(run_step loopback_jsonl rch exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" HUGGINGFACE_E2E_GIT_REVISION="${git_revision}" cargo test -p fcp-huggingface --test provider_contract huggingface_loopback_e2e_jsonl_matrix -- --nocapture)"
+clippy_status="$(run_step clippy rch exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo clippy -p fcp-huggingface --all-targets --no-deps -- -D warnings)"
 
 if grep -a '^HUGGINGFACE_E2E_JSONL ' "${OUT_ROOT}/logs/loopback_jsonl.log" \
   | sed 's/^HUGGINGFACE_E2E_JSONL //' >"${OUT_ROOT}/evidence/loopback_fixtures.jsonl"
@@ -159,13 +159,13 @@ FWC_MANIFEST_BIN="\${FWC_MANIFEST_BIN:-fwc}"
 if command -v "\${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
   "\${FWC_MANIFEST_BIN}" manifest fix connectors/huggingface/manifest.toml --check --json
 else
-  rch exec -- bash -lc "export CARGO_TARGET_DIR='\${TARGET_DIR}'; cargo run -q -p fwc -- manifest fix connectors/huggingface/manifest.toml --check --json"
+  rch exec -- env CARGO_TARGET_DIR="\${TARGET_DIR}" cargo run -q -p fwc -- manifest fix connectors/huggingface/manifest.toml --check --json
 fi
-rch exec -- bash -lc "export CARGO_TARGET_DIR='\${TARGET_DIR}'; cargo check -p fcp-huggingface --all-targets"
-rch exec -- bash -lc "export CARGO_TARGET_DIR='\${TARGET_DIR}'; cargo fmt --package fcp-huggingface --check"
+rch exec -- env CARGO_TARGET_DIR="\${TARGET_DIR}" cargo check -p fcp-huggingface --all-targets
+rch exec -- env CARGO_TARGET_DIR="\${TARGET_DIR}" cargo fmt --package fcp-huggingface --check
 git_revision="\$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-rch exec -- bash -lc "export CARGO_TARGET_DIR='\${TARGET_DIR}'; export HUGGINGFACE_E2E_GIT_REVISION='\${git_revision}'; cargo test -p fcp-huggingface --test provider_contract huggingface_loopback_e2e_jsonl_matrix -- --nocapture"
-rch exec -- bash -lc "export CARGO_TARGET_DIR='\${TARGET_DIR}'; cargo clippy -p fcp-huggingface --all-targets --no-deps -- -D warnings"
+rch exec -- env CARGO_TARGET_DIR="\${TARGET_DIR}" HUGGINGFACE_E2E_GIT_REVISION="\${git_revision}" cargo test -p fcp-huggingface --test provider_contract huggingface_loopback_e2e_jsonl_matrix -- --nocapture
+rch exec -- env CARGO_TARGET_DIR="\${TARGET_DIR}" cargo clippy -p fcp-huggingface --all-targets --no-deps -- -D warnings
 EOF
 chmod +x "${OUT_ROOT}/replay.sh"
 

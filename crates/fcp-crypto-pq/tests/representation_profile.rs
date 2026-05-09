@@ -256,6 +256,7 @@ struct FormalCorrespondenceEvidenceLog<'a> {
 }
 
 #[derive(Debug, Serialize)]
+#[allow(clippy::struct_excessive_bools)] // JSONL proof evidence records independent checks as booleans.
 struct FormalCryptoCorrespondenceChecks {
     public_material_reconstruction: bool,
     route_profile_domain_separation: bool,
@@ -571,11 +572,12 @@ fn formal_correspondence_fixture_id(profile: &str) -> String {
     hashed_fixture_id_for(&format!("fixture:{profile}:formal-correspondence-v1"))
 }
 
+#[allow(clippy::too_many_lines)] // The proof-evidence builder keeps one JSONL record's provenance local.
 fn formal_correspondence_evidence_for(
     command_line: Cow<'static, str>,
     profile: &'static str,
     params: LatticeParams,
-    entropy: TrapGenEntropy,
+    entropy: &TrapGenEntropy,
 ) -> FormalCorrespondenceEvidenceLog<'static> {
     let started = Instant::now();
     let representation = params
@@ -584,7 +586,7 @@ fn formal_correspondence_evidence_for(
     let zone = [0xC3; 32];
     let period = period();
     let (master_pub, master_trap) =
-        trap_gen_with_entropy(params, &entropy).expect("formal TrapGen succeeds");
+        trap_gen_with_entropy(params, entropy).expect("formal TrapGen succeeds");
     let (zone_pub, _zone_trap) = delegate(&master_pub, &master_trap, zone, period, params)
         .expect("formal Delegate succeeds");
     let material_digest = reconstruct_public_matrix_digest(&zone_pub, params)
@@ -637,7 +639,7 @@ fn formal_correspondence_evidence_for(
     ));
 
     let mut stale_route = zone_pub.clone();
-    stale_route.public_matrix.route_revision = stale_route.public_matrix.route_revision + 1;
+    stale_route.public_matrix.route_revision += 1;
     assert!(matches!(
         reconstruct_public_matrix_digest(&stale_route, params),
         Err(LatticePqError::InvalidTrapdoorSecret {
@@ -728,7 +730,7 @@ fn lean_sis_assumption_boundary_correspondence_fixture_jsonl_is_secret_free() {
         ),
     ] {
         let evidence =
-            formal_correspondence_evidence_for(command_line.clone(), profile, params, entropy);
+            formal_correspondence_evidence_for(command_line.clone(), profile, params, &entropy);
         assert_eq!(
             evidence.representation_version,
             LATTICE_REPRESENTATION_VERSION

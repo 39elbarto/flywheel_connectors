@@ -139,7 +139,7 @@ pub use fcp_core::*;
 // External crate re-exports (mirror fcp-core's compatibility surface).
 pub use async_trait::async_trait;
 pub use chrono::{DateTime, Utc};
-pub use fcp_crypto::ZeroizingSecret;
+pub use fcp_crypto::{CredentialIdHash, SecretFetchError, SecretFetchHook, ZeroizingSecret};
 pub use uuid::Uuid;
 
 // ── Production-hardening helpers (ptb6n) ───────────────────────────
@@ -216,6 +216,23 @@ mod tests {
         let secret = ZeroizingSecret::from("prelude-secret");
         assert_eq!(secret.as_bytes(), b"prelude-secret");
         assert_eq!(secret.to_string(), "ZeroizingSecret(<redacted, len=14>)");
+    }
+
+    #[test]
+    fn crypto_re_exports_resolve_secret_fetch_contract() {
+        fn assert_secret_fetch_hook<T: SecretFetchHook + ?Sized>() {}
+
+        let error = SecretFetchError::not_found("prelude-secret-id");
+        let rendered = error.to_string();
+
+        assert_secret_fetch_hook::<dyn SecretFetchHook>();
+        assert!(!rendered.contains("prelude-secret-id"));
+        assert_eq!(
+            CredentialIdHash::from_credential_id("prelude-secret-id")
+                .as_str()
+                .len(),
+            64
+        );
     }
 
     #[test]

@@ -27,6 +27,7 @@
 //! - [`ml_dsa`] - FIPS 204 ML-DSA-65 (post-quantum signatures, owner-key V4)
 //! - [`owner_key`] - owner-key migration traits and attestation envelopes
 //! - [`shamir`] - Shamir secret sharing (split, seal, reconstruct) for owner-key distribution
+//! - [`secret_fetch`] - secretless connector credential-fetch hook API
 //! - [`canonicalize`] - Signature canonicalization helpers
 //!
 //! # Example: Signing and Verifying
@@ -99,6 +100,7 @@ pub mod kid;
 pub mod mac;
 pub mod ml_dsa;
 pub mod owner_key;
+pub mod secret_fetch;
 pub mod shamir;
 pub mod x25519;
 pub mod xwing;
@@ -134,6 +136,7 @@ pub use owner_key::{
     OWNER_KEY_MIGRATION_ATTESTATION_SCHEMA, OWNER_KEY_MIGRATION_DOMAIN, OwnerKeyAlgorithm,
     OwnerKeyMigrationAttestation, OwnerKeyMigrationTranscript,
 };
+pub use secret_fetch::{CredentialIdHash, SecretFetchError, SecretFetchHook};
 pub use shamir::{
     SealedShamirShare, ShamirError, ShamirResult, ShamirShare, ZeroizingSecret, open_share,
     reconstruct_secret, seal_share, split_and_seal, split_secret, split_secret_with_rng,
@@ -148,12 +151,14 @@ pub use xwing::{
 
 /// Common crypto imports for connector and host code.
 pub mod prelude {
-    pub use crate::ZeroizingSecret;
+    pub use crate::{CredentialIdHash, SecretFetchError, SecretFetchHook, ZeroizingSecret};
 }
 
 /// Test-only crypto helpers.
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils {
+    pub use crate::secret_fetch::InMemorySecretRegistry;
+
     use crate::ZeroizingSecret;
 
     /// Construct a zeroizing secret from static test bytes.

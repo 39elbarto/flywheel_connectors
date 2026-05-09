@@ -23,6 +23,7 @@ use base64::Engine;
 use chrono::{Duration, Utc};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
+use fcp_manifest::{ConnectorManifest, OperationSection};
 use fcp_prelude::CapabilityConstraints;
 use fcp_testkit::AsyncTestContext;
 use fcp_voice_call::stable_redacted_hash;
@@ -36,6 +37,8 @@ use wiremock::{
 
 use fcp_twilio::client::TwilioClient;
 use fcp_twilio::connector::TwilioConnector;
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 // ============================================================================
 // Helpers
@@ -220,6 +223,104 @@ fn twilio_error_response(code: u32, message: &str) -> serde_json::Value {
         "status": 400,
         "more_info": "https://www.twilio.com/docs/errors"
     })
+}
+
+fn twilio_manifest() -> ConnectorManifest {
+    ConnectorManifest::parse_str(MANIFEST_TOML).expect("Twilio manifest should validate")
+}
+
+fn manifest_operation<'a>(manifest: &'a ConnectorManifest, id: &str) -> &'a OperationSection {
+    manifest
+        .provides
+        .operations
+        .get(id)
+        .unwrap_or_else(|| panic!("Twilio manifest missing operation {id}"))
+}
+
+fn assert_provider_network_constraints(
+    id: &str,
+    operation: &OperationSection,
+    expected_hosts: &[&str],
+) {
+    let constraints = operation
+        .network_constraints
+        .as_ref()
+        .unwrap_or_else(|| panic!("{id} missing network_constraints"));
+    let actual_hosts = constraints
+        .host_allow
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(actual_hosts, expected_hosts, "{id} host_allow");
+    assert_eq!(constraints.port_allow, vec![443], "{id} port_allow");
+    assert!(constraints.deny_localhost, "{id} should deny localhost");
+    assert!(
+        constraints.deny_private_ranges,
+        "{id} should deny private ranges"
+    );
+    assert!(
+        constraints.deny_tailnet_ranges,
+        "{id} should deny tailnet ranges"
+    );
+    assert!(constraints.require_sni, "{id} should require SNI");
+    assert!(
+        constraints.deny_ip_literals,
+        "{id} should deny IP literal hosts"
+    );
+    assert!(
+        constraints.require_host_canonicalization,
+        "{id} should require host canonicalization"
+    );
+    assert_eq!(constraints.dns_max_ips, 16, "{id} dns_max_ips");
+    assert!(
+        constraints.max_response_bytes > 0,
+        "{id} max_response_bytes"
+    );
+}
+
+fn assert_no_connector_egress_network_constraints(id: &str, operation: &OperationSection) {
+    let constraints = operation
+        .network_constraints
+        .as_ref()
+        .unwrap_or_else(|| panic!("{id} missing network_constraints"));
+    assert_eq!(
+        constraints.host_allow,
+        vec!["none.invalid"],
+        "{id} host_allow"
+    );
+    assert_eq!(constraints.port_allow, vec![0], "{id} port_allow");
+    assert!(constraints.ip_allow.is_empty(), "{id} ip_allow");
+    assert!(constraints.cidr_deny.is_empty(), "{id} cidr_deny");
+    assert!(constraints.deny_localhost, "{id} should deny localhost");
+    assert!(
+        constraints.deny_private_ranges,
+        "{id} should deny private ranges"
+    );
+    assert!(
+        constraints.deny_tailnet_ranges,
+        "{id} should deny tailnet ranges"
+    );
+    assert!(!constraints.require_sni, "{id} should not require SNI");
+    assert!(constraints.spki_pins.is_empty(), "{id} spki_pins");
+    assert!(
+        constraints.deny_ip_literals,
+        "{id} should deny IP literal hosts"
+    );
+    assert!(
+        constraints.require_host_canonicalization,
+        "{id} should require host canonicalization"
+    );
+    assert_eq!(constraints.dns_max_ips, 0, "{id} dns_max_ips");
+    assert_eq!(constraints.max_redirects, 0, "{id} max_redirects");
+    assert_eq!(
+        constraints.connect_timeout_ms, 1000,
+        "{id} connect_timeout_ms"
+    );
+    assert_eq!(constraints.total_timeout_ms, 10000, "{id} total_timeout_ms");
+    assert_eq!(
+        constraints.max_response_bytes, 65536,
+        "{id} max_response_bytes"
+    );
 }
 
 fn twilio_media_start_frame(stream_sid: &str, call_sid: &str) -> serde_json::Value {
@@ -1275,6 +1376,112 @@ async fn lifecycle_introspect_all_operations() {
             op["output_schema"].is_object(),
             "output_schema should be object for {}",
             op["id"]
+        );
+    }
+}
+
+#[test]
+fn manifest_declares_strict_per_operation_network_constraints() {
+    let manifest = twilio_manifest();
+    assert_eq!(
+        manifest.provides.operations.len(),
+        42,
+        "Twilio manifest operation count should match introspection"
+    );
+
+    for id in [
+        "twilio.send_message",
+        "twilio.get_message",
+        "twilio.list_messages",
+        "twilio.list_media",
+        "twilio.get_media",
+        "twilio.create_call",
+        "twilio.get_call",
+        "twilio.hangup_call",
+        "twilio.list_calls",
+        "twilio.list_recordings",
+        "twilio.get_account",
+        "twilio.list_phone_numbers",
+        "twilio.whatsapp_send",
+        "twilio.whatsapp_send_template",
+        "twilio.whatsapp_get",
+        "twilio.whatsapp_list",
+    ] {
+        assert_provider_network_constraints(
+            id,
+            manifest_operation(&manifest, id),
+            &["api.twilio.com"],
+        );
+    }
+
+    for id in ["twilio.download_recording", "twilio.download_media"] {
+        assert_provider_network_constraints(
+            id,
+            manifest_operation(&manifest, id),
+            &["api.twilio.com", "media.twiliocdn.com"],
+        );
+    }
+
+    for id in [
+        "twilio.conversation.create",
+        "twilio.conversation.get",
+        "twilio.conversation.list",
+        "twilio.conversation.participant.add",
+        "twilio.conversation.participant.remove",
+        "twilio.conversation.message.send",
+        "twilio.conversation.message.list",
+    ] {
+        assert_provider_network_constraints(
+            id,
+            manifest_operation(&manifest, id),
+            &["conversations.twilio.com"],
+        );
+    }
+
+    for id in [
+        "twilio.verify.send",
+        "twilio.verify.check",
+        "twilio.verify.cancel",
+    ] {
+        assert_provider_network_constraints(
+            id,
+            manifest_operation(&manifest, id),
+            &["verify.twilio.com"],
+        );
+    }
+
+    for id in [
+        "twilio.video.room.create",
+        "twilio.video.room.get",
+        "twilio.video.room.list",
+        "twilio.video.room.end",
+        "twilio.video.room.participants",
+        "twilio.video.recording.list",
+    ] {
+        assert_provider_network_constraints(
+            id,
+            manifest_operation(&manifest, id),
+            &["video.twilio.com"],
+        );
+    }
+
+    for id in [
+        "twilio.generate_twiml",
+        "twilio.media_stream.process_events",
+        "twilio.webhook.validate_signature",
+        "twilio.webhook.evaluate_inbound_policy",
+        "twilio.webhook.ingest_request",
+        "twilio.webhook.parse_sms_event",
+        "twilio.webhook.parse_status_callback",
+        "twilio.webhook.parse_voice_event",
+    ] {
+        assert_no_connector_egress_network_constraints(id, manifest_operation(&manifest, id));
+    }
+
+    for (id, operation) in &manifest.provides.operations {
+        assert!(
+            operation.network_constraints.is_some(),
+            "{id} should declare per-operation network_constraints"
         );
     }
 }

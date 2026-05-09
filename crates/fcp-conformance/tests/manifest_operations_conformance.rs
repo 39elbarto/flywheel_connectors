@@ -821,7 +821,6 @@ fn expected_network_constraints_gap_connectors() -> Vec<String> {
         "teams",
         "telnyx",
         "tlon",
-        "twilio",
         "vectordb",
         "wecom",
         "whatsapp",

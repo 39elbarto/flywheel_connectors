@@ -34,7 +34,6 @@ const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
     "teams",
     "telnyx",
     "tlon",
-    "twilio",
     "vectordb",
     "wecom",
     "whatsapp",

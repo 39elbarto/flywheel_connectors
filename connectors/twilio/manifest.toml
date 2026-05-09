@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:8d9fab69872638b356ca41153a825e357a14e9d37b7ee10179b86a6f216a0b5f"
+interface_hash = "blake3-256:fcp.interface.v2:0e964cd7251b8ef07145a9f7c0e427f5af4dac017a93b87d8fadfbc14cdc57b9"
 
 [connector]
 id = "fcp.twilio"
@@ -898,6 +898,24 @@ type = "object"
 description = "Generated TwiML XML string"
 type = "string"
 
+[provides.operations."twilio.generate_twiml".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 10000
+max_response_bytes = 65536
+
 [provides.operations."twilio.generate_twiml".ai_hints]
 when_to_use = "Generate TwiML XML locally from safe templates. No API call. Use the output to host at a URL for create_call."
 common_mistakes = [
@@ -1057,6 +1075,24 @@ type = "array"
 
 [provides.operations."twilio.media_stream.process_events".output_schema.properties.clean_shutdown]
 type = "boolean"
+
+[provides.operations."twilio.media_stream.process_events".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 10000
+max_response_bytes = 65536
 
 [provides.operations."twilio.media_stream.process_events".ai_hints]
 when_to_use = "Process realtime voice frames forwarded by the FCP host from Twilio Media Streams. Use for bidirectional <Connect><Stream> sessions after create_call/generate_twiml setup."
@@ -2573,6 +2609,24 @@ type = "string"
 [provides.operations."twilio.webhook.validate_signature".output_schema.properties.verification_url]
 type = "string"
 
+[provides.operations."twilio.webhook.validate_signature".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 10000
+max_response_bytes = 65536
+
 [provides.operations."twilio.webhook.validate_signature".ai_hints]
 when_to_use = "Validate an incoming Twilio webhook signature before processing. Local-only, no HTTP call."
 common_mistakes = ["Not using the full URL including protocol and query string."]
@@ -2648,6 +2702,24 @@ type = "string"
 
 [provides.operations."twilio.webhook.evaluate_inbound_policy".output_schema.properties.tainted]
 type = "boolean"
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 10000
+max_response_bytes = 65536
 
 [provides.operations."twilio.webhook.evaluate_inbound_policy".ai_hints]
 when_to_use = "Gate an authenticated Twilio SMS or voice webhook before emitting it downstream. Local-only."
@@ -2771,6 +2843,24 @@ type = "boolean"
 [provides.operations."twilio.webhook.ingest_request".output_schema.properties.clean_shutdown]
 type = "boolean"
 
+[provides.operations."twilio.webhook.ingest_request".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 10000
+max_response_bytes = 65536
+
 [provides.operations."twilio.webhook.ingest_request".ai_hints]
 when_to_use = "Handle a Twilio webhook forwarded by the FCP host request region. Verifies signature/replay, parses the payload, applies inbound policy for non-status events, and returns the HTTP-style outcome for Twilio."
 common_mistakes = ["Letting the connector open a listener instead of forwarding through the FCP host request region.", "Parsing or emitting the payload before signature and replay checks pass.", "Applying inbound caller allowlists to status callbacks instead of inbound message/voice events."]
@@ -2824,6 +2914,24 @@ type = "integer"
 [provides.operations."twilio.webhook.parse_sms_event".output_schema.properties.tainted]
 type = "boolean"
 
+[provides.operations."twilio.webhook.parse_sms_event".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 10000
+max_response_bytes = 65536
+
 [provides.operations."twilio.webhook.parse_sms_event".ai_hints]
 when_to_use = "Parse an incoming SMS/MMS webhook from Twilio into a typed event. Local-only."
 common_mistakes = ["Not validating the signature before trusting the payload."]
@@ -2873,6 +2981,24 @@ type = "string"
 
 [provides.operations."twilio.webhook.parse_status_callback".output_schema.properties.tainted]
 type = "boolean"
+
+[provides.operations."twilio.webhook.parse_status_callback".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 10000
+max_response_bytes = 65536
 
 [provides.operations."twilio.webhook.parse_status_callback".ai_hints]
 when_to_use = "Parse a delivery status callback into a typed event. Local-only."
@@ -2926,6 +3052,24 @@ type = "string"
 
 [provides.operations."twilio.webhook.parse_voice_event".output_schema.properties.tainted]
 type = "boolean"
+
+[provides.operations."twilio.webhook.parse_voice_event".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 10000
+max_response_bytes = 65536
 
 [provides.operations."twilio.webhook.parse_voice_event".ai_hints]
 when_to_use = "Parse an incoming voice call webhook from Twilio into a typed event. Local-only."

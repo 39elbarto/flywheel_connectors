@@ -33,7 +33,6 @@ const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
     "microsoft365",
     "nostr",
     "plivo",
-    "qq",
     "sonos",
     "teams",
     "telnyx",

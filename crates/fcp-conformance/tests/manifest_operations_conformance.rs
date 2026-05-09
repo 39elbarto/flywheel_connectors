@@ -820,7 +820,6 @@ fn expected_network_constraints_gap_connectors() -> Vec<String> {
         "microsoft365",
         "nostr",
         "plivo",
-        "qq",
         "sonos",
         "teams",
         "telnyx",

@@ -1342,8 +1342,8 @@ Owner policy can enforce:
 |--------|------------------|--------------|
 | Cold start (connector activate) | < 100ms / < 500ms | Host-backed connector activation benchmark harness |
 | Local invoke latency (same node) | < 2ms / < 10ms | Host-backed local invoke scenario |
-| Tailnet invoke latency (LAN) | < 20ms / < 100ms | Host-backed invoke stub benchmark with injected direct-path RTT plus `fcp-tailnet-invoke-evidence` structured-skip runner; real `fcp-tailscale`/mesh invoke path still pending |
-| Tailnet invoke latency (DERP) | < 150ms / < 500ms | Host-backed invoke stub benchmark with injected DERP RTT plus `fcp-tailnet-invoke-evidence` structured-skip runner; real `fcp-tailscale`/mesh invoke path still pending |
+| Tailnet invoke latency (LAN) | < 20ms / < 100ms | Host-backed invoke stub benchmark with injected direct-path RTT plus `fcp-tailnet-invoke-evidence`; real records require a configured tailnet `/rpc/invoke` endpoint and LocalAPI direct-route telemetry, while automatic `fcp-tailscale`/mesh harnessing is still pending |
+| Tailnet invoke latency (DERP) | < 150ms / < 500ms | Host-backed invoke stub benchmark with injected DERP RTT plus `fcp-tailnet-invoke-evidence`; real records require a configured tailnet `/rpc/invoke` endpoint and LocalAPI DERP/fallback telemetry, while automatic `fcp-tailscale`/mesh harnessing is still pending |
 | Symbol reconstruction (1MB) | < 50ms / < 250ms | RaptorQ benchmark harness |
 | Secret reconstruction (k-of-n) | < 150ms / < 750ms | Secret reconstruction benchmark harness |
 | Memory overhead | < 10MB per connector | Host-backed RSS process-tree benchmark; current proof: `docs/perf/memory_overhead_evidence.md` |

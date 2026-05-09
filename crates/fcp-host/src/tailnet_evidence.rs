@@ -278,6 +278,8 @@ pub struct TailnetInvokeHarnessObservation {
     pub route_telemetry_detail: String,
     /// Whether production invoke is wired through the mesh/tailscale boundary.
     pub production_mesh_invoke_transport_available: bool,
+    /// Redaction-safe detail explaining the production transport decision.
+    pub production_mesh_invoke_transport_detail: String,
     /// Redaction-safe detail from the `LocalAPI` probe.
     pub localapi_detail: String,
 }
@@ -293,6 +295,8 @@ impl TailnetInvokeHarnessObservation {
             route_telemetry_available: false,
             route_telemetry_detail: "LocalAPI status unavailable".to_string(),
             production_mesh_invoke_transport_available: false,
+            production_mesh_invoke_transport_detail:
+                "no production tailnet invoke endpoint configured".to_string(),
             localapi_detail: "set --localapi-url or FCP_TAILSCALE_LOCALAPI_URL".to_string(),
         }
     }
@@ -336,7 +340,7 @@ impl TailnetInvokeHarnessObservation {
             TailnetInvokePrerequisite::new(
                 "production-mesh-invoke-transport",
                 self.production_mesh_invoke_transport_available,
-                "fcp-host invoke remains host-first; mesh/tailscale invoke routing is not wired",
+                self.production_mesh_invoke_transport_detail.clone(),
             ),
         ]
     }
@@ -505,9 +509,23 @@ fn nearest_rank(sorted: &[u64], per_mille: usize) -> Option<u64> {
 }
 
 fn redact_command_line(command_line: Vec<String>) -> Vec<String> {
+    let mut redact_next_arg = false;
     command_line
         .into_iter()
-        .map(|arg| redact_sensitive_text(&arg))
+        .map(|arg| {
+            if redact_next_arg {
+                redact_next_arg = false;
+                return "[REDACTED]".to_string();
+            }
+            if arg == "--invoke-request-json" {
+                redact_next_arg = true;
+                return arg;
+            }
+            if arg.starts_with("--invoke-request-json=") {
+                return "--invoke-request-json=[REDACTED]".to_string();
+            }
+            redact_sensitive_text(&arg)
+        })
         .collect()
 }
 
@@ -663,6 +681,8 @@ mod tests {
             route_telemetry_available: false,
             route_telemetry_detail: "no active direct route".to_string(),
             production_mesh_invoke_transport_available: false,
+            production_mesh_invoke_transport_detail:
+                "no production tailnet invoke endpoint configured".to_string(),
             localapi_detail: "backend_state=Running".to_string(),
         };
 
@@ -728,6 +748,35 @@ mod tests {
         assert!(!jsonl.contains("alice.tailnet.ts.net"));
         assert!(!jsonl.contains("/Users/jemanuel"));
         assert!(!jsonl.contains("example.invalid"));
+    }
+
+    #[test]
+    fn evidence_redacts_inline_invoke_request_json_from_rerun_command() {
+        let record = TailnetInvokeEvidenceRecord::structured_skip(
+            TailnetInvokeRouteMode::DirectLan,
+            vec![
+                "fcp-tailnet-invoke-evidence".to_string(),
+                "--invoke-request-json".to_string(),
+                r#"{"method":"messages.list","params":{"channel":"ops"}}"#.to_string(),
+                "--invoke-request-json={\"method\":\"users.get\"}".to_string(),
+            ],
+            "abc123",
+            "tailnet proof",
+            vec![TailnetInvokePrerequisite::new(
+                "successful-tailnet-invoke",
+                false,
+                "not attempted",
+            )],
+        );
+
+        assert_eq!(record.command_line[1], "--invoke-request-json");
+        assert_eq!(record.command_line[2], "[REDACTED]");
+        assert_eq!(record.command_line[3], "--invoke-request-json=[REDACTED]");
+
+        let jsonl = record.to_jsonl_line().expect("serialize JSONL");
+        assert!(!jsonl.contains("messages.list"));
+        assert!(!jsonl.contains("users.get"));
+        assert!(!jsonl.contains("ops"));
     }
 
     #[test]

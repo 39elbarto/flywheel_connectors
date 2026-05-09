@@ -1,20 +1,26 @@
-//! Emit redaction-safe JSONL evidence for tailnet invoke proof prerequisites.
+//! Emit redaction-safe JSONL evidence for tailnet invoke proof runs.
 //!
-//! This runner is intentionally conservative: until `fcp-host` invoke traffic is
-//! routed through the production mesh/tailscale boundary, it emits a structured
-//! skip record instead of treating host-first or synthetic RTT measurements as
-//! live tailnet proof.
+//! This runner is intentionally conservative: it emits real-transport evidence
+//! only when an operator supplies a tailnet-reachable `/rpc/invoke` endpoint,
+//! the request succeeds, and LocalAPI route telemetry proves the requested
+//! direct-LAN or DERP/fallback path. Otherwise it emits a structured skip record
+//! instead of treating host-first or synthetic RTT measurements as tailnet proof.
 
-use std::env;
 use std::process::{Command, ExitCode};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::{env, fs};
 
 use fcp_async_core::{
     compatibility_cx,
     http::{HttpClientBuilder, Method},
     time,
 };
-use fcp_host::{TailnetInvokeHarnessObservation, TailnetInvokeRouteMode};
+use fcp_core::{InvokeResponse, InvokeStatus};
+use fcp_host::{
+    TailnetInvokeAttemptEvidence, TailnetInvokeAttemptOutcome, TailnetInvokeEvidenceRecord,
+    TailnetInvokeHarnessObservation, TailnetInvokeLatencySummary, TailnetInvokeNodeEvidence,
+    TailnetInvokePrerequisite, TailnetInvokeRealTransportInput, TailnetInvokeRouteMode,
+};
 use fcp_tailscale::TailscaleStatus;
 use serde_json::Value;
 
@@ -25,11 +31,23 @@ Options:
   --route <direct-lan|derp-fallback|all>   Requested route mode (default: direct-lan)
   --topology <label>                       Redaction-safe topology label
   --localapi-url <url>                     HTTP-exposed Tailscale LocalAPI base URL
+  --invoke-url <url>                       Tailnet-reachable fcp-host /rpc/invoke URL
+  --invoke-request-json <json>             InvokeRequest JSON body to POST
+  --invoke-request-file <path>             File containing InvokeRequest JSON body
+  --invoke-attempts <n>                    Number of invoke samples to collect (default: 1)
+  --caller-node-id <id>                    Raw caller node label; emitted only as a hash
+  --responder-node-id <id>                 Raw responder node label; emitted only as a hash
   --git-revision <rev>                     Git revision under test
   -h, --help                               Print this help
 
 Environment:
   FCP_TAILSCALE_LOCALAPI_URL               Fallback for --localapi-url
+  FCP_TAILNET_INVOKE_URL                   Fallback for --invoke-url
+  FCP_TAILNET_INVOKE_REQUEST_JSON          Fallback for --invoke-request-json
+  FCP_TAILNET_INVOKE_REQUEST_FILE          Fallback for --invoke-request-file
+  FCP_TAILNET_INVOKE_ATTEMPTS              Fallback for --invoke-attempts
+  FCP_TAILNET_CALLER_NODE_ID               Fallback for --caller-node-id
+  FCP_TAILNET_RESPONDER_NODE_ID            Fallback for --responder-node-id
   FCP_TAILNET_EVIDENCE_GIT_REVISION        Fallback for --git-revision
 ";
 
@@ -38,6 +56,11 @@ struct Cli {
     route_selection: TailnetInvokeRouteSelection,
     topology: String,
     localapi_url: Option<String>,
+    invoke_url: Option<String>,
+    invoke_request_source: Option<InvokeRequestSource>,
+    invoke_attempts: Option<usize>,
+    caller_node_id: Option<String>,
+    responder_node_id: Option<String>,
     git_revision: Option<String>,
 }
 
@@ -47,9 +70,20 @@ impl Default for Cli {
             route_selection: TailnetInvokeRouteSelection::Single(TailnetInvokeRouteMode::DirectLan),
             topology: "tailnet invoke prerequisite probe".to_string(),
             localapi_url: None,
+            invoke_url: None,
+            invoke_request_source: None,
+            invoke_attempts: None,
+            caller_node_id: None,
+            responder_node_id: None,
             git_revision: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InvokeRequestSource {
+    InlineJson(String),
+    File(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +126,13 @@ fn main() -> ExitCode {
         }
     };
 
+    let invoke_probe_config = match resolve_invoke_probe_config(&cli) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("{error}\n\n{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
     let localapi_url = cli
         .localapi_url
         .clone()
@@ -102,13 +143,47 @@ fn main() -> ExitCode {
         .or_else(|| env::var("FCP_TAILNET_EVIDENCE_GIT_REVISION").ok())
         .unwrap_or_else(detect_git_revision);
     for route_mode in cli.route_selection.route_modes() {
-        let observation = observe_tailnet(localapi_url.as_deref(), route_mode);
-        let record = observation.structured_skip_record(
-            route_mode,
-            command_line.clone(),
-            git_revision.clone(),
-            cli.topology.clone(),
-        );
+        let mut observation = observe_tailnet(localapi_url.as_deref(), route_mode);
+        let record = if let Some(config) = &invoke_probe_config {
+            observation.production_mesh_invoke_transport_available = true;
+            observation.production_mesh_invoke_transport_detail =
+                "configured tailnet-reachable fcp-host /rpc/invoke endpoint".to_string();
+            match fcp_async_core::runtime::block_on_sync(async {
+                run_tailnet_invoke_probe(config).await
+            }) {
+                Ok(run) => evidence_record_from_probe(
+                    route_mode,
+                    command_line.clone(),
+                    git_revision.clone(),
+                    cli.topology.clone(),
+                    observation,
+                    config,
+                    run,
+                ),
+                Err(error) => {
+                    let mut prerequisites = observation.prerequisites(route_mode);
+                    prerequisites.push(TailnetInvokePrerequisite::new(
+                        "successful-tailnet-invoke",
+                        false,
+                        format!("runtime_error:{error}"),
+                    ));
+                    TailnetInvokeEvidenceRecord::structured_skip(
+                        route_mode,
+                        command_line.clone(),
+                        git_revision.clone(),
+                        cli.topology.clone(),
+                        prerequisites,
+                    )
+                }
+            }
+        } else {
+            observation.structured_skip_record(
+                route_mode,
+                command_line.clone(),
+                git_revision.clone(),
+                cli.topology.clone(),
+            )
+        };
 
         match record.to_jsonl_line() {
             Ok(line) => println!("{line}"),
@@ -148,6 +223,53 @@ fn parse_cli(args: &[String]) -> Result<Option<Cli>, String> {
                         .clone(),
                 );
             }
+            "--invoke-url" => {
+                cli.invoke_url = Some(
+                    iter.next()
+                        .ok_or_else(|| "--invoke-url requires a value".to_string())?
+                        .clone(),
+                );
+            }
+            "--invoke-request-json" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--invoke-request-json requires a value".to_string())?
+                    .clone();
+                set_invoke_request_source(
+                    &mut cli.invoke_request_source,
+                    InvokeRequestSource::InlineJson(value),
+                )?;
+            }
+            "--invoke-request-file" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--invoke-request-file requires a value".to_string())?
+                    .clone();
+                set_invoke_request_source(
+                    &mut cli.invoke_request_source,
+                    InvokeRequestSource::File(value),
+                )?;
+            }
+            "--invoke-attempts" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| "--invoke-attempts requires a value".to_string())?;
+                cli.invoke_attempts = Some(parse_attempt_count(value)?);
+            }
+            "--caller-node-id" => {
+                cli.caller_node_id = Some(
+                    iter.next()
+                        .ok_or_else(|| "--caller-node-id requires a value".to_string())?
+                        .clone(),
+                );
+            }
+            "--responder-node-id" => {
+                cli.responder_node_id = Some(
+                    iter.next()
+                        .ok_or_else(|| "--responder-node-id requires a value".to_string())?
+                        .clone(),
+                );
+            }
             "--git-revision" => {
                 cli.git_revision = Some(
                     iter.next()
@@ -173,6 +295,54 @@ fn parse_cli(args: &[String]) -> Result<Option<Cli>, String> {
                         .to_string(),
                 );
             }
+            value if value.starts_with("--invoke-url=") => {
+                cli.invoke_url = Some(
+                    value
+                        .split_once('=')
+                        .map_or("", |(_, invoke_url)| invoke_url)
+                        .to_string(),
+                );
+            }
+            value if value.starts_with("--invoke-request-json=") => {
+                let value = value
+                    .split_once('=')
+                    .map_or("", |(_, request_json)| request_json)
+                    .to_string();
+                set_invoke_request_source(
+                    &mut cli.invoke_request_source,
+                    InvokeRequestSource::InlineJson(value),
+                )?;
+            }
+            value if value.starts_with("--invoke-request-file=") => {
+                let value = value
+                    .split_once('=')
+                    .map_or("", |(_, request_file)| request_file)
+                    .to_string();
+                set_invoke_request_source(
+                    &mut cli.invoke_request_source,
+                    InvokeRequestSource::File(value),
+                )?;
+            }
+            value if value.starts_with("--invoke-attempts=") => {
+                let value = value.split_once('=').map_or("", |(_, attempts)| attempts);
+                cli.invoke_attempts = Some(parse_attempt_count(value)?);
+            }
+            value if value.starts_with("--caller-node-id=") => {
+                cli.caller_node_id = Some(
+                    value
+                        .split_once('=')
+                        .map_or("", |(_, caller)| caller)
+                        .to_string(),
+                );
+            }
+            value if value.starts_with("--responder-node-id=") => {
+                cli.responder_node_id = Some(
+                    value
+                        .split_once('=')
+                        .map_or("", |(_, responder)| responder)
+                        .to_string(),
+                );
+            }
             value if value.starts_with("--git-revision=") => {
                 cli.git_revision = Some(
                     value
@@ -186,6 +356,114 @@ fn parse_cli(args: &[String]) -> Result<Option<Cli>, String> {
     }
 
     Ok(Some(cli))
+}
+
+fn set_invoke_request_source(
+    slot: &mut Option<InvokeRequestSource>,
+    source: InvokeRequestSource,
+) -> Result<(), String> {
+    if slot.is_some() {
+        return Err(
+            "provide only one of --invoke-request-json or --invoke-request-file".to_string(),
+        );
+    }
+    *slot = Some(source);
+    Ok(())
+}
+
+fn parse_attempt_count(value: &str) -> Result<usize, String> {
+    let attempts = value
+        .parse::<usize>()
+        .map_err(|error| format!("invalid --invoke-attempts value '{value}': {error}"))?;
+    if attempts == 0 {
+        return Err("--invoke-attempts must be greater than zero".to_string());
+    }
+    Ok(attempts)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TailnetInvokeProbeConfig {
+    invoke_url: String,
+    request_body: Vec<u8>,
+    attempts: usize,
+    caller_node_id: String,
+    responder_node_id: String,
+}
+
+fn resolve_invoke_probe_config(cli: &Cli) -> Result<Option<TailnetInvokeProbeConfig>, String> {
+    let invoke_url = cli
+        .invoke_url
+        .clone()
+        .or_else(|| env::var("FCP_TAILNET_INVOKE_URL").ok());
+    let request_source = resolve_invoke_request_source(cli)?;
+
+    match (invoke_url, request_source) {
+        (None, None) => Ok(None),
+        (Some(_), None) => {
+            Err("--invoke-url requires --invoke-request-json or --invoke-request-file".to_string())
+        }
+        (None, Some(_)) => {
+            Err("--invoke-request-json/--invoke-request-file requires --invoke-url".to_string())
+        }
+        (Some(invoke_url), Some(request_source)) => {
+            let attempts = if let Some(attempts) = cli.invoke_attempts {
+                attempts
+            } else if let Ok(value) = env::var("FCP_TAILNET_INVOKE_ATTEMPTS") {
+                parse_attempt_count(&value)?
+            } else {
+                1
+            };
+            let request_body = load_invoke_request_body(request_source)?;
+            let caller_node_id = cli
+                .caller_node_id
+                .clone()
+                .or_else(|| env::var("FCP_TAILNET_CALLER_NODE_ID").ok())
+                .unwrap_or_else(|| "caller".to_string());
+            let responder_node_id = cli
+                .responder_node_id
+                .clone()
+                .or_else(|| env::var("FCP_TAILNET_RESPONDER_NODE_ID").ok())
+                .unwrap_or_else(|| invoke_url.clone());
+
+            Ok(Some(TailnetInvokeProbeConfig {
+                invoke_url,
+                request_body,
+                attempts,
+                caller_node_id,
+                responder_node_id,
+            }))
+        }
+    }
+}
+
+fn resolve_invoke_request_source(cli: &Cli) -> Result<Option<InvokeRequestSource>, String> {
+    if cli.invoke_request_source.is_some() {
+        return Ok(cli.invoke_request_source.clone());
+    }
+
+    let inline_json = env::var("FCP_TAILNET_INVOKE_REQUEST_JSON").ok();
+    let file = env::var("FCP_TAILNET_INVOKE_REQUEST_FILE").ok();
+    match (inline_json, file) {
+        (None, None) => Ok(None),
+        (Some(json), None) => Ok(Some(InvokeRequestSource::InlineJson(json))),
+        (None, Some(file)) => Ok(Some(InvokeRequestSource::File(file))),
+        (Some(_), Some(_)) => Err(
+            "set only one of FCP_TAILNET_INVOKE_REQUEST_JSON or FCP_TAILNET_INVOKE_REQUEST_FILE"
+                .to_string(),
+        ),
+    }
+}
+
+fn load_invoke_request_body(source: InvokeRequestSource) -> Result<Vec<u8>, String> {
+    let raw = match source {
+        InvokeRequestSource::InlineJson(json) => json,
+        InvokeRequestSource::File(path) => {
+            fs::read_to_string(&path).map_err(|error| format!("read_request_file:{error}"))?
+        }
+    };
+    let value: Value =
+        serde_json::from_str(&raw).map_err(|error| format!("parse_invoke_request_json:{error}"))?;
+    serde_json::to_vec(&value).map_err(|error| format!("serialize_invoke_request_json:{error}"))
 }
 
 fn observe_tailnet(
@@ -211,6 +489,8 @@ fn observe_tailnet(
                 route_telemetry_available: route_telemetry.available,
                 route_telemetry_detail: route_telemetry.detail,
                 production_mesh_invoke_transport_available: false,
+                production_mesh_invoke_transport_detail:
+                    "no production tailnet invoke endpoint configured".to_string(),
                 localapi_detail: format!("backend_state={}", status.backend_state),
             }
         }
@@ -221,6 +501,8 @@ fn observe_tailnet(
             route_telemetry_available: false,
             route_telemetry_detail: "LocalAPI status unavailable".to_string(),
             production_mesh_invoke_transport_available: false,
+            production_mesh_invoke_transport_detail:
+                "no production tailnet invoke endpoint configured".to_string(),
             localapi_detail: format!("localapi_error:{}", redact_sensitive_text(&error)),
         },
         Err(error) => {
@@ -232,6 +514,8 @@ fn observe_tailnet(
                 route_telemetry_available: false,
                 route_telemetry_detail: "LocalAPI status unavailable".to_string(),
                 production_mesh_invoke_transport_available: false,
+                production_mesh_invoke_transport_detail:
+                    "no production tailnet invoke endpoint configured".to_string(),
                 localapi_detail: format!("runtime_error:{}", redact_sensitive_text(&error)),
             }
         }
@@ -268,6 +552,177 @@ async fn read_tailnet_status(base_url: &str) -> Result<(TailscaleStatus, Value),
     let status = serde_json::from_value(status_json.clone())
         .map_err(|error| format!("parse_status:{error}"))?;
     Ok((status, status_json))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TailnetInvokeProbeRun {
+    attempts: Vec<TailnetInvokeAttemptEvidence>,
+}
+
+impl TailnetInvokeProbeRun {
+    fn successful_attempt_count(&self) -> usize {
+        self.attempts
+            .iter()
+            .filter(|attempt| attempt.outcome == TailnetInvokeAttemptOutcome::Success)
+            .count()
+    }
+
+    fn auth_result(&self) -> String {
+        if self.successful_attempt_count() > 0 {
+            "capability_verified".to_string()
+        } else {
+            "not_verified".to_string()
+        }
+    }
+
+    fn success_detail(&self) -> String {
+        format!(
+            "successful_attempts={},total_attempts={}",
+            self.successful_attempt_count(),
+            self.attempts.len()
+        )
+    }
+
+    fn retries(&self) -> u64 {
+        u64::try_from(self.attempts.len().saturating_sub(1)).unwrap_or(u64::MAX)
+    }
+}
+
+async fn run_tailnet_invoke_probe(config: &TailnetInvokeProbeConfig) -> TailnetInvokeProbeRun {
+    let cx = compatibility_cx();
+    let client = HttpClientBuilder::new()
+        .user_agent("fcp-tailnet-invoke-evidence/0.1.0")
+        .build();
+    let headers = vec![
+        ("content-type".to_string(), "application/json".to_string()),
+        ("accept".to_string(), "application/json".to_string()),
+    ];
+    let mut attempts = Vec::with_capacity(config.attempts);
+
+    for attempt_index in 0..config.attempts {
+        let started_at = Instant::now();
+        let response = time::timeout(
+            Duration::from_secs(30),
+            client.request(
+                &cx,
+                Method::Post,
+                &config.invoke_url,
+                headers.clone(),
+                config.request_body.clone(),
+            ),
+        )
+        .await;
+        let latency_ns = elapsed_nanos(started_at);
+        let attempt_index = u64::try_from(attempt_index).unwrap_or(u64::MAX);
+
+        attempts.push(match response {
+            Ok(Ok(response)) => classify_invoke_response(attempt_index, latency_ns, response),
+            Ok(Err(error)) => TailnetInvokeAttemptEvidence::non_success(
+                attempt_index,
+                TailnetInvokeAttemptOutcome::Error,
+                Some(latency_ns),
+                "request_failed",
+                error.to_string(),
+            ),
+            Err(error) => TailnetInvokeAttemptEvidence::non_success(
+                attempt_index,
+                TailnetInvokeAttemptOutcome::Timeout,
+                Some(latency_ns),
+                "request_timeout",
+                error.to_string(),
+            ),
+        });
+    }
+
+    TailnetInvokeProbeRun { attempts }
+}
+
+fn classify_invoke_response(
+    attempt_index: u64,
+    latency_ns: u64,
+    response: fcp_async_core::http::HttpResponse,
+) -> TailnetInvokeAttemptEvidence {
+    if !response.is_success() {
+        return TailnetInvokeAttemptEvidence::non_success(
+            attempt_index,
+            TailnetInvokeAttemptOutcome::Error,
+            Some(latency_ns),
+            format!("http_status_{}", response.status),
+            format!("{} {}", response.status, response.reason),
+        );
+    }
+
+    match serde_json::from_slice::<InvokeResponse>(&response.body) {
+        Ok(invoke_response) if invoke_response.status == InvokeStatus::Ok => {
+            TailnetInvokeAttemptEvidence::success(attempt_index, latency_ns)
+        }
+        Ok(invoke_response) => TailnetInvokeAttemptEvidence::non_success(
+            attempt_index,
+            TailnetInvokeAttemptOutcome::Error,
+            Some(latency_ns),
+            "invoke_response_error",
+            invoke_response
+                .error
+                .map_or_else(|| "status=error".to_string(), |error| error.to_string()),
+        ),
+        Err(error) => TailnetInvokeAttemptEvidence::non_success(
+            attempt_index,
+            TailnetInvokeAttemptOutcome::Error,
+            Some(latency_ns),
+            "parse_invoke_response",
+            error.to_string(),
+        ),
+    }
+}
+
+fn elapsed_nanos(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+fn evidence_record_from_probe(
+    route_mode: TailnetInvokeRouteMode,
+    command_line: Vec<String>,
+    git_revision: String,
+    topology: String,
+    observation: TailnetInvokeHarnessObservation,
+    config: &TailnetInvokeProbeConfig,
+    run: TailnetInvokeProbeRun,
+) -> TailnetInvokeEvidenceRecord {
+    let mut prerequisites = observation.prerequisites(route_mode);
+    prerequisites.push(TailnetInvokePrerequisite::new(
+        "successful-tailnet-invoke",
+        run.successful_attempt_count() > 0,
+        run.success_detail(),
+    ));
+    let prerequisites_satisfied = prerequisites
+        .iter()
+        .all(|prerequisite| prerequisite.satisfied);
+    let latency = TailnetInvokeLatencySummary::from_successful_attempts(&run.attempts);
+
+    if prerequisites_satisfied && let Some(latency) = latency {
+        return TailnetInvokeEvidenceRecord::real_transport(TailnetInvokeRealTransportInput {
+            route_mode,
+            command_line,
+            git_revision,
+            topology,
+            nodes: vec![
+                TailnetInvokeNodeEvidence::new("caller", &config.caller_node_id),
+                TailnetInvokeNodeEvidence::new("responder", &config.responder_node_id),
+            ],
+            auth_result: run.auth_result(),
+            retries: run.retries(),
+            latency,
+            attempts: run.attempts,
+        });
+    }
+
+    TailnetInvokeEvidenceRecord::structured_skip(
+        route_mode,
+        command_line,
+        git_revision,
+        topology,
+        prerequisites,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -367,9 +822,36 @@ fn detect_git_revision() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_core::RequestId;
+    use fcp_host::TailnetInvokeEvidenceSource;
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(ToString::to_string).collect()
+    }
+
+    fn satisfied_observation(route_telemetry_available: bool) -> TailnetInvokeHarnessObservation {
+        TailnetInvokeHarnessObservation {
+            localapi_configured: true,
+            tailscale_connected: true,
+            online_peer_count: 1,
+            route_telemetry_available,
+            route_telemetry_detail: "active_online_peers=1,direct_candidates=1,derp_candidates=0"
+                .to_string(),
+            production_mesh_invoke_transport_available: true,
+            production_mesh_invoke_transport_detail:
+                "configured tailnet-reachable fcp-host /rpc/invoke endpoint".to_string(),
+            localapi_detail: "backend_state=Running".to_string(),
+        }
+    }
+
+    fn invoke_probe_config() -> TailnetInvokeProbeConfig {
+        TailnetInvokeProbeConfig {
+            invoke_url: "http://responder.tailnet.ts.net/rpc/invoke".to_string(),
+            request_body: br#"{"type":"invoke"}"#.to_vec(),
+            attempts: 2,
+            caller_node_id: "caller.tailnet.ts.net".to_string(),
+            responder_node_id: "responder.tailnet.ts.net".to_string(),
+        }
     }
 
     #[test]
@@ -384,6 +866,59 @@ mod tests {
         );
         assert_eq!(cli.topology, "tailnet invoke prerequisite probe");
         assert!(cli.localapi_url.is_none());
+    }
+
+    #[test]
+    fn parse_cli_accepts_real_invoke_probe_options() {
+        let cli = parse_cli(&args(&[
+            "fcp-tailnet-invoke-evidence",
+            "--invoke-url=http://responder.tailnet.ts.net/rpc/invoke",
+            "--invoke-request-json",
+            r#"{"type":"invoke"}"#,
+            "--invoke-attempts=5",
+            "--caller-node-id",
+            "caller-node",
+            "--responder-node-id=responder-node",
+        ]))
+        .expect("parse")
+        .expect("not help");
+
+        assert_eq!(
+            cli.invoke_url.as_deref(),
+            Some("http://responder.tailnet.ts.net/rpc/invoke")
+        );
+        assert_eq!(
+            cli.invoke_request_source,
+            Some(InvokeRequestSource::InlineJson(
+                r#"{"type":"invoke"}"#.to_string()
+            ))
+        );
+        assert_eq!(cli.invoke_attempts, Some(5));
+        assert_eq!(cli.caller_node_id.as_deref(), Some("caller-node"));
+        assert_eq!(cli.responder_node_id.as_deref(), Some("responder-node"));
+    }
+
+    #[test]
+    fn parse_cli_rejects_duplicate_invoke_request_sources() {
+        let err = parse_cli(&args(&[
+            "fcp-tailnet-invoke-evidence",
+            "--invoke-request-json={}",
+            "--invoke-request-file=request.json",
+        ]))
+        .expect_err("duplicate request sources should fail");
+
+        assert!(err.contains("provide only one"));
+    }
+
+    #[test]
+    fn parse_cli_rejects_zero_invoke_attempts() {
+        let err = parse_cli(&args(&[
+            "fcp-tailnet-invoke-evidence",
+            "--invoke-attempts=0",
+        ]))
+        .expect_err("zero attempts should fail");
+
+        assert!(err.contains("greater than zero"));
     }
 
     #[test]
@@ -451,6 +986,89 @@ mod tests {
             record
                 .missing_prerequisites
                 .contains(&"production-mesh-invoke-transport".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_invoke_response_marks_fcp_ok_as_success() {
+        let response_body = serde_json::to_vec(&InvokeResponse::ok(
+            RequestId::new("req-1"),
+            serde_json::json!({}),
+        ))
+        .expect("serialize invoke response");
+        let attempt = classify_invoke_response(
+            0,
+            42,
+            fcp_async_core::http::HttpResponse::new(200, "OK", response_body),
+        );
+
+        assert_eq!(attempt.outcome, TailnetInvokeAttemptOutcome::Success);
+        assert_eq!(attempt.latency_ns, Some(42));
+    }
+
+    #[test]
+    fn probe_record_emits_real_transport_only_when_prerequisites_succeed() {
+        let config = invoke_probe_config();
+        let record = evidence_record_from_probe(
+            TailnetInvokeRouteMode::DirectLan,
+            args(&[
+                "fcp-tailnet-invoke-evidence",
+                "--invoke-url=http://secret.example",
+            ]),
+            "abc123".to_string(),
+            "two node tailnet".to_string(),
+            satisfied_observation(true),
+            &config,
+            TailnetInvokeProbeRun {
+                attempts: vec![
+                    TailnetInvokeAttemptEvidence::success(0, 100),
+                    TailnetInvokeAttemptEvidence::success(1, 200),
+                ],
+            },
+        );
+
+        assert_eq!(record.source, TailnetInvokeEvidenceSource::RealTransport);
+        assert!(record.missing_prerequisites.is_empty());
+        assert_eq!(record.auth_result, "capability_verified");
+        assert_eq!(record.retries, 1);
+        assert_eq!(record.latency.expect("latency").p99_ns, 200);
+        assert!(
+            record
+                .nodes
+                .iter()
+                .all(|node| node.redacted_node_id.starts_with("blake3:"))
+        );
+    }
+
+    #[test]
+    fn probe_record_keeps_structured_skip_when_route_prerequisite_is_missing() {
+        let config = invoke_probe_config();
+        let record = evidence_record_from_probe(
+            TailnetInvokeRouteMode::DirectLan,
+            args(&["fcp-tailnet-invoke-evidence"]),
+            "abc123".to_string(),
+            "two node tailnet".to_string(),
+            satisfied_observation(false),
+            &config,
+            TailnetInvokeProbeRun {
+                attempts: vec![TailnetInvokeAttemptEvidence::success(0, 100)],
+            },
+        );
+
+        assert_eq!(record.source, TailnetInvokeEvidenceSource::StructuredSkip);
+        assert!(
+            record
+                .missing_prerequisites
+                .contains(&"direct-lan-route-observed".to_string())
+        );
+        assert!(
+            record
+                .prerequisites
+                .iter()
+                .any(
+                    |prerequisite| prerequisite.name == "successful-tailnet-invoke"
+                        && prerequisite.satisfied
+                )
         );
     }
 

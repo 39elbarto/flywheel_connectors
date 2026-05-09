@@ -288,10 +288,13 @@ cargo test -p fcp-e2e --no-default-features --test swarm_gauntlet_e2e swarm_stat
 
 `fcp-tailnet-invoke-evidence` emits the `tailnet-invoke-evidence/v1`
 JSONL contract for direct-LAN and DERP/fallback invoke proof attempts. The
-current runner probes configured Tailscale LocalAPI state, records online-peer
-and route prerequisites, and emits a structured skip while the production
-`fcp-host` invoke path remains host-first instead of routed through the
-`fcp-mesh` / `fcp-tailscale` transport boundary.
+runner probes configured Tailscale LocalAPI state, records online-peer and route
+prerequisites, and can POST a caller-supplied `InvokeRequest` JSON body to a
+tailnet-reachable `fcp-host` `/rpc/invoke` endpoint. It emits `real_transport`
+records only when the invoke succeeds and LocalAPI route telemetry proves the
+requested direct-LAN or DERP/fallback path; otherwise it emits a structured skip.
+The fully automatic two-node `fcp-mesh` / `fcp-tailscale` transport harness is
+still pending.
 
 The real-transport record shape already reserves typed per-invoke attempts for
 the eventual production harness. Each attempt carries a success, error,
@@ -309,6 +312,10 @@ Operators with an HTTP-exposed Tailscale LocalAPI can pass
 prerequisites remain machine-readable in `missing_prerequisites` and the full
 redacted `prerequisites` list. Use `--route all` to emit one direct-LAN record
 and one DERP/fallback record from the same invocation.
+
+For real invoke samples, also pass `--invoke-url <tailnet-host-rpc-invoke-url>`
+and one of `--invoke-request-json <json>` or `--invoke-request-file <path>`.
+Use `--invoke-attempts <n>` to collect multiple samples for percentile output.
 
 ### Cross-Controller Safety Invariants
 

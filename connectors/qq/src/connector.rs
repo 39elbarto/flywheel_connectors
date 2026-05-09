@@ -19,6 +19,7 @@ use crate::client::{
     QqClient, channel_message_body, direct_message_body, normalize_message_event,
     sanitize_path_segment,
 };
+use crate::error::QqError;
 use crate::types::{
     CAP_EVENTS_READ, CAP_GATEWAY_READ, CAP_HEALTH_READ, CAP_MESSAGES_WRITE, EVENT_QQ_EVENT_DROPPED,
     EVENT_QQ_MESSAGE_AUTHORIZED, OP_EVENTS_NORMALIZE, OP_GATEWAY_PROJECT_EVENT, OP_GET_GATEWAY,
@@ -844,7 +845,7 @@ fn validate_simulate_input(operation: &str, input: &Value) -> FcpResult<()> {
             optional_string(input, "msg_id")?;
         }
         OP_GET_GATEWAY | OP_HEALTH => {}
-        OP_EVENTS_NORMALIZE | OP_GATEWAY_PROJECT_EVENT => {
+        OP_EVENTS_NORMALIZE => {
             let event_value = input.get("event").ok_or_else(|| FcpError::InvalidRequest {
                 code: 1005,
                 message: "event is required".into(),
@@ -856,6 +857,7 @@ fn validate_simulate_input(operation: &str, input: &Value) -> FcpResult<()> {
                 })?;
             normalize_message_event(&gateway_event).map_err(|e| e.to_fcp_error())?;
         }
+        OP_GATEWAY_PROJECT_EVENT => validate_gateway_project_input(input)?,
         _ => {
             return Err(FcpError::InvalidRequest {
                 code: 1004,
@@ -864,6 +866,18 @@ fn validate_simulate_input(operation: &str, input: &Value) -> FcpResult<()> {
         }
     }
     Ok(())
+}
+
+fn validate_gateway_project_input(input: &Value) -> FcpResult<()> {
+    let gateway_event = parse_gateway_event(input)?;
+    if gateway_event.op != 0 {
+        return Ok(());
+    }
+    match normalize_message_event(&gateway_event) {
+        Ok(_) => Ok(()),
+        Err(QqError::InvalidInput(message)) if message.contains("not a normalizable") => Ok(()),
+        Err(error) => Err(error.to_fcp_error()),
+    }
 }
 
 fn parse_gateway_event(input: &Value) -> FcpResult<QqGatewayEvent> {
@@ -1808,6 +1822,80 @@ mod tests {
                 CAP_EVENTS_READ,
                 OP_EVENTS_NORMALIZE,
                 json!({}),
+            ))
+            .await
+            .unwrap();
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-1005"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_gateway_project_event_allows_control_frames() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = ready_connector(&signing_key).await;
+        let response = connector
+            .simulate(simulate_request(
+                &signing_key,
+                &connector.base.instance_id,
+                CAP_EVENTS_READ,
+                OP_GATEWAY_PROJECT_EVENT,
+                json!({"event": {"op": 10, "d": {"session_id": "session-1"}}}),
+            ))
+            .await
+            .unwrap();
+
+        assert!(response.would_succeed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_gateway_project_event_allows_non_message_dispatch_drops() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = ready_connector(&signing_key).await;
+        let response = connector
+            .simulate(simulate_request(
+                &signing_key,
+                &connector.base.instance_id,
+                CAP_EVENTS_READ,
+                OP_GATEWAY_PROJECT_EVENT,
+                json!({"event": {"op": 0, "s": 1, "t": "READY", "d": {}, "id": "evt-ready"}}),
+            ))
+            .await
+            .unwrap();
+
+        assert!(response.would_succeed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_gateway_project_event_rejects_malformed_dispatch() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = ready_connector(&signing_key).await;
+        let response = connector
+            .simulate(simulate_request(
+                &signing_key,
+                &connector.base.instance_id,
+                CAP_EVENTS_READ,
+                OP_GATEWAY_PROJECT_EVENT,
+                json!({"event": {"op": 0, "s": 1, "d": {}, "id": "evt-missing-type"}}),
+            ))
+            .await
+            .unwrap();
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-1005"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_events_normalize_still_denies_control_frames() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = ready_connector(&signing_key).await;
+        let response = connector
+            .simulate(simulate_request(
+                &signing_key,
+                &connector.base.instance_id,
+                CAP_EVENTS_READ,
+                OP_EVENTS_NORMALIZE,
+                json!({"event": {"op": 10, "d": {"session_id": "session-1"}}}),
             ))
             .await
             .unwrap();

@@ -31,8 +31,8 @@ optional = []
 forbidden = ["system.exec", "network.listen", "system.privileged"]
 
 # Nextcloud Talk deployments are operator-configured and may live on public,
-# private, or tailnet addresses, so host-level constraints are intentionally
-# left to runtime configuration instead of being hardcoded in the manifest.
+# private, or tailnet addresses, so per-operation host constraints use an
+# installer/runtime-resolved placeholder instead of a hardcoded provider host.
 
 [provides.operations."nextcloud_talk.health"]
 description = "Probe Nextcloud Talk reachability and capability surface"
@@ -41,6 +41,20 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+[provides.operations."nextcloud_talk.health".network_constraints]
+host_allow = ["${nextcloud_server_host}"]
+port_allow = [80, 443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 [provides.operations."nextcloud_talk.health".input_schema]
 type = "object"
 [provides.operations."nextcloud_talk.health".output_schema]
@@ -57,6 +71,20 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+[provides.operations."nextcloud_talk.list_conversations".network_constraints]
+host_allow = ["${nextcloud_server_host}"]
+port_allow = [80, 443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 [provides.operations."nextcloud_talk.list_conversations".input_schema]
 type = "object"
 [provides.operations."nextcloud_talk.list_conversations".output_schema]
@@ -73,6 +101,20 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+[provides.operations."nextcloud_talk.get_conversation".network_constraints]
+host_allow = ["${nextcloud_server_host}"]
+port_allow = [80, 443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 [provides.operations."nextcloud_talk.get_conversation".input_schema]
 type = "object"
 [provides.operations."nextcloud_talk.get_conversation".output_schema]
@@ -89,6 +131,20 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "none"
+[provides.operations."nextcloud_talk.create_conversation".network_constraints]
+host_allow = ["${nextcloud_server_host}"]
+port_allow = [80, 443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 [provides.operations."nextcloud_talk.create_conversation".input_schema]
 type = "object"
 [provides.operations."nextcloud_talk.create_conversation".output_schema]
@@ -105,6 +161,20 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+[provides.operations."nextcloud_talk.get_messages".network_constraints]
+host_allow = ["${nextcloud_server_host}"]
+port_allow = [80, 443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 70000
+max_response_bytes = 10485760
 [provides.operations."nextcloud_talk.get_messages".input_schema]
 type = "object"
 [provides.operations."nextcloud_talk.get_messages".output_schema]
@@ -121,6 +191,20 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+[provides.operations."nextcloud_talk.poll_conversation_events".network_constraints]
+host_allow = ["${nextcloud_server_host}"]
+port_allow = [80, 443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 70000
+max_response_bytes = 10485760
 [provides.operations."nextcloud_talk.poll_conversation_events".input_schema]
 type = "object"
 [provides.operations."nextcloud_talk.poll_conversation_events".output_schema]
@@ -137,6 +221,23 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "strict"
+[provides.operations."nextcloud_talk.ingest_webhook".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+require_sni = false
+spki_pins = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 1000
+max_response_bytes = 1048576
 [provides.operations."nextcloud_talk.ingest_webhook".input_schema]
 type = "object"
 required = ["headers", "body"]
@@ -154,6 +255,20 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "none"
+[provides.operations."nextcloud_talk.send_message".network_constraints]
+host_allow = ["${nextcloud_server_host}"]
+port_allow = [80, 443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 [provides.operations."nextcloud_talk.send_message".input_schema]
 type = "object"
 [provides.operations."nextcloud_talk.send_message".output_schema]
@@ -170,6 +285,20 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "none"
 idempotency = "strict"
+[provides.operations."nextcloud_talk.delete_message".network_constraints]
+host_allow = ["${nextcloud_server_host}"]
+port_allow = [80, 443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 [provides.operations."nextcloud_talk.delete_message".input_schema]
 type = "object"
 [provides.operations."nextcloud_talk.delete_message".output_schema]
@@ -186,6 +315,20 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+[provides.operations."nextcloud_talk.set_read_marker".network_constraints]
+host_allow = ["${nextcloud_server_host}"]
+port_allow = [80, 443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 [provides.operations."nextcloud_talk.set_read_marker".input_schema]
 type = "object"
 [provides.operations."nextcloud_talk.set_read_marker".output_schema]
@@ -202,6 +345,20 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+[provides.operations."nextcloud_talk.list_participants".network_constraints]
+host_allow = ["${nextcloud_server_host}"]
+port_allow = [80, 443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 [provides.operations."nextcloud_talk.list_participants".input_schema]
 type = "object"
 [provides.operations."nextcloud_talk.list_participants".output_schema]
@@ -218,6 +375,20 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "none"
+[provides.operations."nextcloud_talk.add_participant".network_constraints]
+host_allow = ["${nextcloud_server_host}"]
+port_allow = [80, 443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 [provides.operations."nextcloud_talk.add_participant".input_schema]
 type = "object"
 [provides.operations."nextcloud_talk.add_participant".output_schema]
@@ -234,6 +405,20 @@ risk_level = "high"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "strict"
+[provides.operations."nextcloud_talk.remove_participant".network_constraints]
+host_allow = ["${nextcloud_server_host}"]
+port_allow = [80, 443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 [provides.operations."nextcloud_talk.remove_participant".input_schema]
 type = "object"
 [provides.operations."nextcloud_talk.remove_participant".output_schema]
@@ -250,6 +435,20 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+[provides.operations."nextcloud_talk.get_call_state".network_constraints]
+host_allow = ["${nextcloud_server_host}"]
+port_allow = [80, 443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 [provides.operations."nextcloud_talk.get_call_state".input_schema]
 type = "object"
 [provides.operations."nextcloud_talk.get_call_state".output_schema]
@@ -266,6 +465,20 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+[provides.operations."nextcloud_talk.add_reaction".network_constraints]
+host_allow = ["${nextcloud_server_host}"]
+port_allow = [80, 443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 [provides.operations."nextcloud_talk.add_reaction".input_schema]
 type = "object"
 [provides.operations."nextcloud_talk.add_reaction".output_schema]
@@ -282,6 +495,20 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+[provides.operations."nextcloud_talk.delete_reaction".network_constraints]
+host_allow = ["${nextcloud_server_host}"]
+port_allow = [80, 443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 [provides.operations."nextcloud_talk.delete_reaction".input_schema]
 type = "object"
 [provides.operations."nextcloud_talk.delete_reaction".output_schema]
@@ -298,6 +525,20 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "none"
+[provides.operations."nextcloud_talk.share_file".network_constraints]
+host_allow = ["${nextcloud_server_host}"]
+port_allow = [80, 443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 [provides.operations."nextcloud_talk.share_file".input_schema]
 type = "object"
 [provides.operations."nextcloud_talk.share_file".output_schema]

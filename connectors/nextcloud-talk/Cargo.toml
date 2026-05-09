@@ -37,6 +37,7 @@ percent-encoding.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+toml.workspace = true
 wiremock.workspace = true
 fcp-crypto.workspace = true
 chrono = { workspace = true, features = ["serde"] }

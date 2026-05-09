@@ -826,7 +826,6 @@ fn expected_network_constraints_gap_connectors() -> Vec<String> {
         "mastodon",
         "mattermost",
         "microsoft365",
-        "nextcloud-talk",
         "nostr",
         "openai",
         "plivo",

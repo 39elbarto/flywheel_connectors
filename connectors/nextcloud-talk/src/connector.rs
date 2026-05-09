@@ -2684,8 +2684,29 @@ mod tests {
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_prelude::InstanceId;
     use hmac::Mac;
+    use toml::Value as TomlValue;
     use wiremock::matchers::{body_string_contains, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const NEXTCLOUD_SERVER_HOST_PLACEHOLDER: &str = "${nextcloud_server_host}";
+    const NEXTCLOUD_SERVER_EGRESS_OPS: &[&str] = &[
+        OP_HEALTH,
+        OP_LIST_CONVERSATIONS,
+        OP_GET_CONVERSATION,
+        OP_CREATE_CONVERSATION,
+        OP_GET_MESSAGES,
+        OP_POLL_CONVERSATION_EVENTS,
+        OP_SEND_MESSAGE,
+        OP_DELETE_MESSAGE,
+        OP_SET_READ_MARKER,
+        OP_LIST_PARTICIPANTS,
+        OP_ADD_PARTICIPANT,
+        OP_REMOVE_PARTICIPANT,
+        OP_GET_CALL_STATE,
+        OP_ADD_REACTION,
+        OP_DELETE_REACTION,
+        OP_SHARE_FILE,
+    ];
 
     fn base_handshake() -> HandshakeRequest {
         HandshakeRequest {
@@ -2880,6 +2901,149 @@ mod tests {
         })
     }
 
+    fn operation<'a>(manifest: &'a TomlValue, id: &str) -> &'a TomlValue {
+        manifest
+            .get("provides")
+            .and_then(|provides| provides.get("operations"))
+            .and_then(|operations| operations.get(id))
+            .unwrap_or_else(|| panic!("{id} operation should exist"))
+    }
+
+    fn network_constraints<'a>(manifest: &'a TomlValue, id: &str) -> &'a TomlValue {
+        operation(manifest, id)
+            .get("network_constraints")
+            .unwrap_or_else(|| panic!("{id} should declare network_constraints"))
+    }
+
+    fn string_array<'a>(constraints: &'a TomlValue, field: &str) -> Vec<&'a str> {
+        constraints
+            .get(field)
+            .and_then(TomlValue::as_array)
+            .unwrap_or_else(|| panic!("network_constraints.{field} should be an array"))
+            .iter()
+            .map(|entry| {
+                entry.as_str().unwrap_or_else(|| {
+                    panic!("network_constraints.{field} entries should be strings")
+                })
+            })
+            .collect()
+    }
+
+    fn integer_array(constraints: &TomlValue, field: &str) -> Vec<i64> {
+        constraints
+            .get(field)
+            .and_then(TomlValue::as_array)
+            .unwrap_or_else(|| panic!("network_constraints.{field} should be an array"))
+            .iter()
+            .map(|entry| {
+                entry.as_integer().unwrap_or_else(|| {
+                    panic!("network_constraints.{field} entries should be integers")
+                })
+            })
+            .collect()
+    }
+
+    fn bool_field(constraints: &TomlValue, field: &str) -> bool {
+        constraints
+            .get(field)
+            .and_then(TomlValue::as_bool)
+            .unwrap_or_else(|| panic!("network_constraints.{field} should be a bool"))
+    }
+
+    fn integer_field(constraints: &TomlValue, field: &str) -> i64 {
+        constraints
+            .get(field)
+            .and_then(TomlValue::as_integer)
+            .unwrap_or_else(|| panic!("network_constraints.{field} should be an integer"))
+    }
+
+    fn assert_nextcloud_server_network_constraints(id: &str, constraints: &TomlValue) {
+        assert_eq!(
+            string_array(constraints, "host_allow"),
+            vec![NEXTCLOUD_SERVER_HOST_PLACEHOLDER],
+            "{id} should only allow the configured Nextcloud server host"
+        );
+        assert_eq!(
+            integer_array(constraints, "port_allow"),
+            vec![80, 443],
+            "{id}"
+        );
+        assert!(
+            bool_field(constraints, "require_sni"),
+            "{id} should require SNI"
+        );
+        assert!(
+            bool_field(constraints, "deny_localhost"),
+            "{id} should deny localhost"
+        );
+        assert!(
+            bool_field(constraints, "deny_private_ranges"),
+            "{id} should deny private ranges by default"
+        );
+        assert!(
+            bool_field(constraints, "deny_tailnet_ranges"),
+            "{id} should deny tailnet ranges by default"
+        );
+        assert!(
+            !bool_field(constraints, "deny_ip_literals"),
+            "{id} should preserve operator-configured public IP deployments"
+        );
+        assert!(
+            bool_field(constraints, "require_host_canonicalization"),
+            "{id} should canonicalize the configured host"
+        );
+        assert_eq!(integer_field(constraints, "dns_max_ips"), 16, "{id}");
+        assert_eq!(integer_field(constraints, "max_redirects"), 5, "{id}");
+        assert_eq!(
+            integer_field(constraints, "connect_timeout_ms"),
+            10_000,
+            "{id}"
+        );
+        assert_eq!(
+            integer_field(constraints, "max_response_bytes"),
+            10_485_760,
+            "{id}"
+        );
+    }
+
+    fn assert_no_connector_egress_network_constraints(id: &str, constraints: &TomlValue) {
+        assert_eq!(
+            string_array(constraints, "host_allow"),
+            vec!["none.invalid"],
+            "{id}"
+        );
+        assert_eq!(integer_array(constraints, "port_allow"), vec![0], "{id}");
+        assert!(string_array(constraints, "ip_allow").is_empty(), "{id}");
+        assert!(string_array(constraints, "cidr_deny").is_empty(), "{id}");
+        assert!(!bool_field(constraints, "require_sni"), "{id}");
+        assert!(string_array(constraints, "spki_pins").is_empty(), "{id}");
+        assert!(bool_field(constraints, "deny_localhost"), "{id}");
+        assert!(bool_field(constraints, "deny_private_ranges"), "{id}");
+        assert!(bool_field(constraints, "deny_tailnet_ranges"), "{id}");
+        assert!(bool_field(constraints, "deny_ip_literals"), "{id}");
+        assert!(
+            bool_field(constraints, "require_host_canonicalization"),
+            "{id}"
+        );
+        assert_eq!(integer_field(constraints, "dns_max_ips"), 0, "{id}");
+        assert_eq!(integer_field(constraints, "max_redirects"), 0, "{id}");
+        assert_eq!(
+            integer_field(constraints, "connect_timeout_ms"),
+            1_000,
+            "{id}"
+        );
+        assert_eq!(
+            integer_field(constraints, "total_timeout_ms"),
+            1_000,
+            "{id}"
+        );
+        assert_eq!(
+            integer_field(constraints, "max_response_bytes"),
+            1_048_576,
+            "{id}"
+        );
+    }
+
     fn git_revision() -> String {
         Command::new("git")
             .args(["rev-parse", "HEAD"])
@@ -2956,6 +3120,36 @@ mod tests {
         if let Some(path) = std::env::var_os("NEXTCLOUD_TALK_WEBHOOK_E2E_JSONL_OUT") {
             std::fs::write(path, jsonl).expect("write webhook evidence JSONL");
         }
+    }
+
+    #[test]
+    fn manifest_declares_per_operation_network_constraints() {
+        let manifest: TomlValue =
+            toml::from_str(MANIFEST_TOML).expect("Nextcloud Talk manifest should parse as TOML");
+        let operation_count = manifest
+            .get("provides")
+            .and_then(|provides| provides.get("operations"))
+            .and_then(TomlValue::as_table)
+            .expect("provides.operations should be a table")
+            .len();
+        assert_eq!(operation_count, 17);
+
+        for operation_id in NEXTCLOUD_SERVER_EGRESS_OPS {
+            let constraints = network_constraints(&manifest, operation_id);
+            assert_nextcloud_server_network_constraints(operation_id, constraints);
+            let expected_timeout = match *operation_id {
+                OP_GET_MESSAGES | OP_POLL_CONVERSATION_EVENTS => 70_000,
+                _ => 30_000,
+            };
+            assert_eq!(
+                integer_field(constraints, "total_timeout_ms"),
+                expected_timeout,
+                "{operation_id}"
+            );
+        }
+
+        let ingest = network_constraints(&manifest, OP_INGEST_WEBHOOK);
+        assert_no_connector_egress_network_constraints(OP_INGEST_WEBHOOK, ingest);
     }
 
     #[test]

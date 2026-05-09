@@ -39,7 +39,6 @@ const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
     "mastodon",
     "mattermost",
     "microsoft365",
-    "nextcloud-talk",
     "nostr",
     "openai",
     "plivo",

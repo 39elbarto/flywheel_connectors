@@ -344,12 +344,16 @@ impl SlackClient {
         channels: &str,
         content: &str,
         filename: Option<&str>,
+        thread_ts: Option<&str>,
     ) -> SlackResult<crate::types::SlackFile> {
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "channels": channels,
             "content": content,
             "filename": filename.unwrap_or("upload.txt"),
         });
+        if let Some(thread_ts) = thread_ts {
+            body["thread_ts"] = serde_json::Value::String(thread_ts.to_string());
+        }
         let resp: SlackApiResponse<FileUploadData> = self.post_json("files.upload", &body).await?;
         Self::check_response(&resp)?;
         Ok(Self::expect_data(resp.data, "files.upload")?.file)

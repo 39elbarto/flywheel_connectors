@@ -1223,6 +1223,97 @@ async fn upload_file_happy_path() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn upload_file_threaded_denies_duplicate_owner_before_http_send() {
+    let _ctx = AsyncTestContext::for_scenario("slack.upload_file.coordination.deny_duplicate");
+    let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/files.upload");
+        let body: serde_json::Value =
+            serde_json::from_slice(&request.body).expect("slack upload body json");
+        assert_eq!(body["channels"], "C01234567");
+        assert_eq!(body["thread_ts"], "1234567890.123456");
+        assert_eq!(body["content"], "agent A upload");
+        StructuredHttpResponse::json(
+            200,
+            &json!({
+                "ok": true,
+                "file": {
+                    "id": "F01234567",
+                    "name": "output.log",
+                    "title": "output.log",
+                    "mimetype": "text/plain",
+                    "filetype": "text",
+                    "size": 42
+                }
+            }),
+        )
+    });
+    let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+    let mut first = SlackConnector::new()
+        .with_thread_ownership_checker(checker.clone(), ChatCoordinationBackend::InMemory);
+    let mut second = SlackConnector::new()
+        .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+    let first_key = setup_handshake(&mut first, &["slack.files.write"]).await;
+    let second_key = setup_handshake(&mut second, &["slack.files.write"]).await;
+    setup_configure(&mut first, fake_server.url()).await;
+    setup_configure(&mut second, fake_server.url()).await;
+
+    let first_cap = generate_valid_token_for_principal(
+        &first_key,
+        "slack.files.write",
+        "slack.upload_file",
+        "agent:a",
+    );
+    let first_result = first
+        .handle_invoke(json!({
+            "operation": "slack.upload_file",
+            "input": {
+                "channels": "C01234567",
+                "content_object_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "resolved_content": "agent A upload",
+                "filename": "output.log",
+                "thread_ts": "1234567890.123456"
+            },
+            "capability_token": first_cap
+        }))
+        .await
+        .expect("first owner should upload");
+    assert_eq!(first_result["file"]["id"], "F01234567");
+    assert_eq!(first_result["coordination"][0]["event"], "claim_attempt");
+    assert_eq!(first_result["coordination"][2]["event"], "send_executed");
+
+    let second_cap = generate_valid_token_for_principal(
+        &second_key,
+        "slack.files.write",
+        "slack.upload_file",
+        "agent:b",
+    );
+    let second_error = second
+        .handle_invoke(json!({
+            "operation": "slack.upload_file",
+            "input": {
+                "channels": "C01234567",
+                "content_object_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "resolved_content": "agent B upload",
+                "filename": "output.log",
+                "thread_ts": "1234567890.123456"
+            },
+            "capability_token": second_cap
+        }))
+        .await
+        .expect_err("second owner should be denied");
+
+    assert!(matches!(
+        second_error,
+        fcp_core::FcpError::Unauthorized {
+            code: 4090,
+            ref message
+        } if message == "thread_owned_by_peer:agent:a"
+    ));
+    assert_eq!(fake_server.requests().len(), 1);
+}
+
+#[fcp_async_core::runtime::test]
 async fn download_file_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("slack.download_file.happy_path");
     let mock_server = MockServer::start().await;

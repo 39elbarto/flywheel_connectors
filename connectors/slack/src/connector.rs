@@ -691,7 +691,8 @@ impl SlackConnector {
                             "channels": { "type": "string", "description": "Comma-separated channel IDs" },
                             "content_object_id": { "type": "string", "description": "Source mesh object reference (hex ObjectId)" },
                             "resolved_content": { "type": "string", "description": "Host-materialized content bytes for content_object_id" },
-                            "filename": { "type": "string", "description": "Filename to display" }
+                            "filename": { "type": "string", "description": "Filename to display" },
+                            "thread_ts": { "type": "string", "description": "Optional parent thread timestamp for a single-channel threaded upload" }
                         }
                     }),
                     json!({
@@ -700,7 +701,8 @@ impl SlackConnector {
                         "properties": {
                             "file": { "type": "object" },
                             "file_object_id": { "type": "string" },
-                            "source_object_id": { "type": "string" }
+                            "source_object_id": { "type": "string" },
+                            "coordination": { "type": "array", "description": "Redacted chat coordination audit records for threaded uploads" }
                         }
                     }),
                     "slack.files.write",
@@ -1242,7 +1244,10 @@ impl SlackConnector {
             "slack.search_messages" => self.invoke_search_messages(input).await,
             "slack.list_channels" => self.invoke_list_channels(input).await,
             "slack.get_user_info" => self.invoke_get_user_info(input).await,
-            "slack.upload_file" => self.invoke_upload_file(input).await,
+            "slack.upload_file" => {
+                self.invoke_upload_file(input, zone_id, claimant_agent_id)
+                    .await
+            }
             "slack.download_file" => self.invoke_download_file(input).await,
             "slack.add_reaction" => self.invoke_add_reaction(input).await,
             "slack.set_channel_topic" => self.invoke_set_channel_topic(input).await,
@@ -1641,15 +1646,42 @@ impl SlackConnector {
         Ok(json!({ "user": user_info }))
     }
 
-    async fn invoke_upload_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_upload_file(
+        &self,
+        input: serde_json::Value,
+        zone_id: ZoneId,
+        claimant_agent_id: AgentId,
+    ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let channels = require_str(&input, "channels")?;
         let source_object_id = require_object_id_str(&input, "content_object_id")?;
         let content = require_str(&input, "resolved_content")?;
         let filename = input.get("filename").and_then(|v| v.as_str());
+        let thread_ts = input.get("thread_ts").and_then(|v| v.as_str());
+        let coordination = if let Some(thread_ts) = thread_ts {
+            let channel = require_single_threaded_upload_channel(channels)?;
+            let coordination = self
+                .claim_before_slack_send(
+                    zone_id,
+                    channel,
+                    Some(thread_ts),
+                    claimant_agent_id.clone(),
+                )
+                .await;
+            if let Some(error) = coordination.denial_error() {
+                warn!(
+                    error = %error,
+                    "Slack upload_file denied by chat coordination"
+                );
+                return Err(error.clone());
+            }
+            Some(coordination)
+        } else {
+            None
+        };
 
         let file = client
-            .upload_file(channels, content, filename)
+            .upload_file(channels, content, filename, thread_ts)
             .await
             .map_err(|e: SlackError| e.to_fcp_error())?;
         let file_object_id = derive_slack_file_object_id("upload", &file.id, source_object_id);
@@ -1662,12 +1694,20 @@ impl SlackConnector {
             timestamp: String::new(),
         };
 
-        Ok(json!({
+        let mut response = json!({
             "file": redacted_file,
             "file_object_id": file_object_id.to_string(),
             "source_object_id": source_object_id,
             "receipt": receipt
-        }))
+        });
+        if let Some(coordination) = coordination.as_ref() {
+            response["coordination"] = json!(slack_coordination_audit_records(
+                coordination,
+                self.chat_coordination_config.backend(),
+                &claimant_agent_id,
+            ));
+        }
+        Ok(response)
     }
 
     async fn invoke_download_file(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -3107,6 +3147,9 @@ fn validate_simulate_input(operation: &str, input: &serde_json::Value) -> FcpRes
             require_str(input, "channels")?;
             require_object_id_str(input, "content_object_id")?;
             require_str(input, "resolved_content")?;
+            if input.get("thread_ts").and_then(|v| v.as_str()).is_some() {
+                require_single_threaded_upload_channel(require_str(input, "channels")?)?;
+            }
         }
         "slack.download_file" => {
             require_str(input, "file_id")?;
@@ -3171,12 +3214,19 @@ fn resource_uris_for_operation(
         }
         "slack.upload_file" => {
             let channels = require_str(input, "channels")?;
-            for channel in channels
-                .split(',')
-                .map(str::trim)
-                .filter(|channel| !channel.is_empty())
-            {
+            let upload_channels = parse_upload_channels(channels);
+            let thread_ts = input.get("thread_ts").and_then(|v| v.as_str());
+            if thread_ts.is_some() && upload_channels.len() != 1 {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "slack.upload_file thread_ts requires exactly one channel".into(),
+                });
+            }
+            for channel in upload_channels {
                 push_unique(format!("slack:channel:{channel}"));
+                if let Some(thread_ts) = thread_ts {
+                    push_unique(format!("slack:thread:{channel}:{thread_ts}"));
+                }
             }
         }
         "slack.download_file" => {
@@ -3215,6 +3265,25 @@ fn require_object_id_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpRe
         });
     }
     Ok(object_id)
+}
+
+fn parse_upload_channels(channels: &str) -> Vec<&str> {
+    channels
+        .split(',')
+        .map(str::trim)
+        .filter(|channel| !channel.is_empty())
+        .collect()
+}
+
+fn require_single_threaded_upload_channel(channels: &str) -> FcpResult<&str> {
+    let channels = parse_upload_channels(channels);
+    match channels.as_slice() {
+        [channel] => Ok(*channel),
+        _ => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "slack.upload_file thread_ts requires exactly one channel".into(),
+        }),
+    }
 }
 
 fn derive_slack_file_object_id(namespace: &str, file_id: &str, seed: &str) -> ObjectId {
@@ -3443,6 +3512,40 @@ mod tests {
                 "slack:channel:C222".to_string()
             ]
         );
+
+        let uris = resource_uris_for_operation(
+            "slack.upload_file",
+            &json!({
+                "channels": "C111",
+                "content_object_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "resolved_content": "hello",
+                "thread_ts": "171234.5678"
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            uris,
+            vec![
+                "slack:channel:C111".to_string(),
+                "slack:thread:C111:171234.5678".to_string()
+            ]
+        );
+
+        let err = resource_uris_for_operation(
+            "slack.upload_file",
+            &json!({
+                "channels": "C111,C222",
+                "content_object_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "resolved_content": "hello",
+                "thread_ts": "171234.5678"
+            }),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            FcpError::InvalidRequest { ref message, .. }
+                if message.contains("thread_ts requires exactly one channel")
+        ));
     }
 
     #[fcp_async_core::runtime::test]

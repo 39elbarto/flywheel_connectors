@@ -1836,6 +1836,9 @@ impl BrowserConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("Browser connector shutting down");
+        if let Some(client) = self.client.as_ref() {
+            client.shutdown();
+        }
         Ok(json!({ "status": "shutdown" }))
     }
 }
@@ -2760,6 +2763,66 @@ mod tests {
             "ws://localhost:9222/devtools/page/target-1"
         );
         assert_eq!(health["network_guard"]["allowlisted"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_connector_shutdown_clears_direct_cdp_manager_without_raw_identifiers() {
+        let mut connector = BrowserConnector::new();
+        connector
+            .handle_configure(json!({
+                "browser_url": "ws://localhost:9222/devtools/page/shutdown-target-secret"
+            }))
+            .await
+            .unwrap();
+
+        let client = connector
+            .client
+            .as_ref()
+            .expect("configured browser client");
+        let object_hash = client
+            .record_direct_cdp_session_object(
+                "browser.session.save",
+                "state-object-secret",
+                12,
+                Some("private.example.test"),
+            )
+            .unwrap()
+            .expect("direct CDP session object hash");
+        assert_eq!(object_hash.len(), 16);
+
+        let before_shutdown = client.direct_cdp_manager_events_jsonl().unwrap();
+        assert!(before_shutdown.contains("\"event_kind\":\"session_object_recorded\""));
+        assert!(!before_shutdown.contains("shutdown-target-secret"));
+        assert!(!before_shutdown.contains("state-object-secret"));
+        assert!(!before_shutdown.contains("private.example.test"));
+
+        let shutdown = connector.handle_shutdown(json!({})).await.unwrap();
+        assert_eq!(shutdown["status"], "shutdown");
+
+        let rejected = client
+            .record_direct_cdp_session_object(
+                "browser.session.save",
+                "post-shutdown-state-secret",
+                13,
+                Some("after-shutdown.example.test"),
+            )
+            .unwrap_err();
+        assert!(format!("{rejected}").contains("manager is shut down"));
+
+        let after_shutdown = client.direct_cdp_manager_events_jsonl().unwrap();
+        assert!(after_shutdown.contains("\"event_kind\":\"manager_shutdown\""));
+        assert!(
+            after_shutdown
+                .contains("\"cleanup_result\":\"targets_and_sessions_cleared_no_orphan\"")
+        );
+        assert!(
+            after_shutdown.contains("\"cancellation_checkpoint\":\"shutdown_signal_observed\"")
+        );
+        assert!(!after_shutdown.contains("shutdown-target-secret"));
+        assert!(!after_shutdown.contains("state-object-secret"));
+        assert!(!after_shutdown.contains("private.example.test"));
+        assert!(!after_shutdown.contains("post-shutdown-state-secret"));
+        assert!(!after_shutdown.contains("after-shutdown.example.test"));
     }
 
     #[fcp_async_core::runtime::test]

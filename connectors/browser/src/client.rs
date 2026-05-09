@@ -409,6 +409,11 @@ impl DirectCdpTargetSessionManager {
         lease_seq: u64,
         cookie_scope: Option<&str>,
     ) -> BrowserResult<String> {
+        if self.shutdown {
+            return Err(BrowserError::InvalidConfig(
+                "direct CDP target/session manager is shut down".into(),
+            ));
+        }
         if lease_seq == 0 {
             return Err(BrowserError::InvalidConfig(
                 "direct CDP session object lease_seq must be greater than zero".into(),
@@ -461,6 +466,10 @@ impl DirectCdpTargetSessionManager {
 
     fn shutdown(&mut self) {
         let had_active_lease = self.active_lease.take().is_some();
+        let cleared_target = self.current_target.take();
+        let had_target = cleared_target.is_some();
+        let had_session_objects = !self.session_objects.is_empty();
+        self.session_objects.clear();
         self.shutdown = true;
         self.push_event(DirectCdpManagerEvent {
             event_kind: "manager_shutdown",
@@ -469,11 +478,10 @@ impl DirectCdpTargetSessionManager {
             run_id: self.manager_id_hash.clone(),
             manager_id_hash: self.manager_id_hash.clone(),
             endpoint_kind: "not_applicable",
-            target_kind: self
-                .current_target
+            target_kind: cleared_target
                 .as_ref()
                 .map_or("not_applicable", |target| target.kind.as_str()),
-            target_id_hash: self.current_target.as_ref().map_or_else(
+            target_id_hash: cleared_target.as_ref().map_or_else(
                 || "not_applicable".to_string(),
                 |target| target.id_hash.clone(),
             ),
@@ -487,7 +495,9 @@ impl DirectCdpTargetSessionManager {
             timeout_checkpoint: "not_applicable_shutdown",
             cancellation_checkpoint: "shutdown_signal_observed",
             cleanup_result: if had_active_lease {
-                "active_lease_released_no_orphan"
+                "active_lease_released_targets_and_sessions_cleared_no_orphan"
+            } else if had_target || had_session_objects {
+                "targets_and_sessions_cleared_no_orphan"
             } else {
                 "no_active_lease_no_orphan"
             },
@@ -3072,7 +3082,7 @@ impl BrowserClient {
     }
 
     #[cfg(test)]
-    fn direct_cdp_manager_events_jsonl(&self) -> BrowserResult<String> {
+    pub(crate) fn direct_cdp_manager_events_jsonl(&self) -> BrowserResult<String> {
         let manager = lock_direct_cdp_manager(&self.direct_cdp_manager)?;
         Ok(manager.events_jsonl())
     }
@@ -4607,7 +4617,18 @@ mod tests {
         {
             let mut guard = manager.lock().unwrap();
             assert!(guard.active_lease.is_none());
+            let session_hash = guard.record_session_object(
+                &endpoint,
+                "browser.session.save",
+                "shutdown-state-object-secret",
+                7,
+                Some("private.example.test"),
+            )?;
+            assert!(guard.session_objects.contains_key(&session_hash));
             guard.shutdown();
+            assert!(guard.current_target.is_none());
+            assert!(guard.session_objects.is_empty());
+            drop(guard);
         }
         let rejected = DirectCdpManagerLease::acquire(
             Arc::clone(&manager),
@@ -4620,8 +4641,10 @@ mod tests {
 
         let jsonl = manager.lock().unwrap().events_jsonl();
         assert!(jsonl.contains("\"cleanup_result\":\"lease_dropped_cleanup\""));
-        assert!(jsonl.contains("\"cleanup_result\":\"no_active_lease_no_orphan\""));
+        assert!(jsonl.contains("\"cleanup_result\":\"targets_and_sessions_cleared_no_orphan\""));
         assert!(jsonl.contains("\"cancellation_checkpoint\":\"shutdown_signal_observed\""));
+        assert!(!jsonl.contains("shutdown-state-object-secret"));
+        assert!(!jsonl.contains("private.example.test"));
         assert!(!jsonl.contains("page-shutdown"));
         Ok(())
     }

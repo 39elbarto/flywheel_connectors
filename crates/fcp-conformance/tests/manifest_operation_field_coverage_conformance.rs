@@ -20,26 +20,10 @@ const AI_HINTS: &str = "ai_hints";
 const SANDBOX: &str = "sandbox";
 const INVALID_INPUT_SCHEMA: &str = "invalid_input_schema";
 const INVALID_OUTPUT_SCHEMA: &str = "invalid_output_schema";
-const EXPECTED_SCHEMA_GAPS: &[&str] = &[
-    "bluebubbles",
-    "confluence",
-    "dingtalk",
-    "email-generic",
-    "google-places",
-    "google-workspace-events",
-    "hue",
-    "imessage",
-    "mastodon",
-    "netlify",
-    "nostr",
-    "qq",
-    "sonos",
-    "vercel",
-    "wecom",
-    "whatsapp",
-];
+const EXPECTED_SCHEMA_GAPS: &[&str] = &[];
 const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
     "anthropic",
+    "anthropic-vertex",
     "apple-notes",
     "apple-reminders",
     "dingtalk",
@@ -48,6 +32,7 @@ const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
     "google-chat",
     "google-workspace-events",
     "hue",
+    "inworld",
     "irc",
     "linear",
     "llm-router",
@@ -78,11 +63,10 @@ const EXPECTED_AI_HINT_GAPS: &[&str] = &[
     "mattermost",
     "nostr",
     "qq",
-    "sonos",
     "telnyx",
     "wecom",
 ];
-const EXPECTED_SANDBOX_GAPS: &[&str] = &[];
+const EXPECTED_SANDBOX_GAPS: &[&str] = &["anthropic-vertex", "inworld"];
 
 #[derive(Debug, Clone)]
 struct ManifestFieldCoverageRecord {

@@ -188,18 +188,23 @@ fn assert_input_schema_examples(manifest: &toml::Value) {
     assert_schema_accepts(&spaces_list, &json!({}));
     assert_schema_accepts(&spaces_list, &json!({ "start": 0, "limit": 2 }));
     assert_schema_rejects(&spaces_list, &json!({ "limit": "two" }));
+    assert_schema_rejects(&spaces_list, &json!({ "start": 0, "unexpected": true }));
 
     let spaces_get = operation_schema(manifest, "spaces_get", "input_schema");
     assert_schema_accepts(&spaces_get, &json!({ "space_key": "ENG" }));
     assert_schema_rejects(&spaces_get, &json!({}));
+    assert_schema_rejects(&spaces_get, &json!({ "space_key": "../ENG" }));
+    assert_schema_rejects(&spaces_get, &json!({ "space_key": "ENG", "extra": true }));
 
     let pages_list = operation_schema(manifest, "pages_list", "input_schema");
     assert_schema_accepts(&pages_list, &json!({ "space_key": "ENG", "start": 2 }));
     assert_schema_rejects(&pages_list, &json!({ "limit": 10 }));
+    assert_schema_rejects(&pages_list, &json!({ "space_key": "ENG", "limit": 0 }));
 
     let pages_get = operation_schema(manifest, "pages_get", "input_schema");
     assert_schema_accepts(&pages_get, &json!({ "page_id": "page-1" }));
     assert_schema_rejects(&pages_get, &json!({ "page_id": 42 }));
+    assert_schema_rejects(&pages_get, &json!({ "page_id": "page/1" }));
 
     let pages_create = operation_schema(manifest, "pages_create", "input_schema");
     assert_schema_accepts(
@@ -214,6 +219,10 @@ fn assert_input_schema_examples(manifest: &toml::Value) {
     assert_schema_rejects(
         &pages_create,
         &json!({ "space_key": "ENG", "title": "Runbook" }),
+    );
+    assert_schema_rejects(
+        &pages_create,
+        &json!({ "space_key": "ENG", "title": "Runbook", "body": "<p>Hello</p>", "draft": true }),
     );
 
     let pages_update = operation_schema(manifest, "pages_update", "input_schema");
@@ -235,10 +244,21 @@ fn assert_input_schema_examples(manifest: &toml::Value) {
             "version_number": "2"
         }),
     );
+    assert_schema_rejects(
+        &pages_update,
+        &json!({
+            "page_id": "page-1",
+            "title": "Runbook",
+            "body": "<p>Hello</p>",
+            "version_number": 2,
+            "extra": true
+        }),
+    );
 
     let pages_delete = operation_schema(manifest, "pages_delete", "input_schema");
     assert_schema_accepts(&pages_delete, &json!({ "page_id": "page-1" }));
     assert_schema_rejects(&pages_delete, &json!({}));
+    assert_schema_rejects(&pages_delete, &json!({ "page_id": ".." }));
 
     let search = operation_schema(manifest, "search", "input_schema");
     assert_schema_accepts(
@@ -246,9 +266,12 @@ fn assert_input_schema_examples(manifest: &toml::Value) {
         &json!({ "cql": "space = ENG and text ~ \"runbook\"", "limit": 10 }),
     );
     assert_schema_rejects(&search, &json!({ "limit": 10 }));
+    assert_schema_rejects(&search, &json!({ "cql": "" }));
+    assert_schema_rejects(&search, &json!({ "cql": "space = ENG", "extra": true }));
 
     let health = operation_schema(manifest, "health", "input_schema");
     assert_schema_accepts(&health, &json!({}));
+    assert_schema_rejects(&health, &json!({ "extra": true }));
 }
 
 fn assert_output_schema_examples(manifest: &toml::Value) {
@@ -260,12 +283,20 @@ fn assert_output_schema_examples(manifest: &toml::Value) {
     let spaces_list = operation_schema(manifest, "spaces_list", "output_schema");
     assert_schema_accepts(&spaces_list, &paginated_output);
     assert_schema_rejects(&spaces_list, &json!({ "results": {}, "size": 1 }));
+    assert_schema_rejects(
+        &spaces_list,
+        &json!({ "results": [], "size": 1, "extra": true }),
+    );
 
     let spaces_get = operation_schema(manifest, "spaces_get", "output_schema");
     assert_schema_accepts(&spaces_get, &space_json("ENG"));
     assert_schema_rejects(
         &spaces_get,
         &json!({ "id": 1, "key": "ENG", "name": "Engineering" }),
+    );
+    assert_schema_rejects(
+        &spaces_get,
+        &json!({ "id": "space-1", "key": "ENG", "name": "Engineering", "extra": true }),
     );
 
     let pages_list = operation_schema(manifest, "pages_list", "output_schema");
@@ -315,6 +346,7 @@ fn assert_output_schema_examples(manifest: &toml::Value) {
     let health = operation_schema(manifest, "health", "output_schema");
     assert_schema_accepts(&health, &json!({ "status": "ok" }));
     assert_schema_rejects(&health, &json!({ "status": 200 }));
+    assert_schema_rejects(&health, &json!({ "status": "degraded" }));
 }
 
 #[test]

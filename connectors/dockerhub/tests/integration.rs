@@ -70,9 +70,7 @@ fn dockerhub_manifest() -> toml::Value {
     toml::from_str(include_str!("../manifest.toml")).expect("Docker Hub manifest TOML should parse")
 }
 
-fn manifest_operations(
-    manifest: &toml::Value,
-) -> &toml::map::Map<String, toml::Value> {
+fn manifest_operations(manifest: &toml::Value) -> &toml::map::Map<String, toml::Value> {
     manifest
         .get("provides")
         .and_then(|provides| provides.get("operations"))
@@ -504,7 +502,10 @@ fn manifest_operation_schemas_compile_and_validate_core_payloads() {
     let repos_list_input = operation_schema(&manifest, "repos_list", "input_schema");
     assert_schema_accepts(&repos_list_input, &json!({"namespace": "acme"}));
     assert_schema_rejects(&repos_list_input, &json!({}));
-    assert_schema_rejects(&repos_list_input, &json!({"namespace": "acme", "extra": true}));
+    assert_schema_rejects(
+        &repos_list_input,
+        &json!({"namespace": "acme", "extra": true}),
+    );
 
     let repos_create_input = operation_schema(&manifest, "repos_create", "input_schema");
     assert_schema_accepts(
@@ -524,7 +525,10 @@ fn manifest_operation_schemas_compile_and_validate_core_payloads() {
         &tags_get_input,
         &json!({"namespace": "acme", "name": "widget", "tag": "latest"}),
     );
-    assert_schema_rejects(&tags_get_input, &json!({"namespace": "acme", "name": "widget"}));
+    assert_schema_rejects(
+        &tags_get_input,
+        &json!({"namespace": "acme", "name": "widget"}),
+    );
 
     let orgs_input = operation_schema(&manifest, "orgs_list", "input_schema");
     assert_schema_accepts(&orgs_input, &json!({}));

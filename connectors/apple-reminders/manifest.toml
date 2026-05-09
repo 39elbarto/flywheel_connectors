@@ -48,7 +48,7 @@ common_mistakes = [
     "Running this on non-macOS hosts and interpreting the unsupported-platform response as a connector outage.",
 ]
 examples = ['{"check":"platform_and_configuration"}']
-related = ["apple_reminders.list_lists"]
+related = ["apple_reminders.list_lists", "apple_reminders.list_reminders"]
 
 [provides.operations."apple_reminders.health".input_schema]
 type = "object"
@@ -64,15 +64,6 @@ type = "string"
 
 [provides.operations."apple_reminders.health".output_schema.properties.manifest_hash]
 type = "string"
-
-[provides.operations."apple_reminders.health".ai_hints]
-when_to_use = "Use this before Apple Reminders operations on a new macOS host or when diagnosing a failed reminder automation request."
-common_mistakes = [
-    "Treating health success as proof that the Reminders app has already granted Automation permission.",
-    "Running this on a non-macOS host and interpreting the platform failure as missing reminder data.",
-]
-examples = ['{"check":"platform-and-configuration"}']
-related = ["apple_reminders.list_lists", "apple_reminders.list_reminders"]
 
 [provides.operations."apple_reminders.list_lists"]
 description = "List reminder lists"
@@ -108,15 +99,6 @@ type = "string"
 
 [provides.operations."apple_reminders.list_lists".output_schema.properties.lists.items.properties.name]
 type = "string"
-
-[provides.operations."apple_reminders.list_lists".ai_hints]
-when_to_use = "Use this when the agent needs the available Reminders lists before listing or creating reminders in a specific list."
-common_mistakes = [
-    "Guessing a list name before inspecting the user's local Reminders lists.",
-    "Assuming list names are globally stable across machines or Apple IDs.",
-]
-examples = ['{"scope":"all-lists"}']
-related = ["apple_reminders.list_reminders", "apple_reminders.create_reminder"]
 
 [provides.operations."apple_reminders.list_reminders"]
 description = "List reminders in a list or across all lists"
@@ -165,15 +147,6 @@ type = "boolean"
 [provides.operations."apple_reminders.list_reminders".output_schema.properties.reminders.items.properties.due]
 type = "string"
 
-[provides.operations."apple_reminders.list_reminders".ai_hints]
-when_to_use = "Use this when the agent needs reminder inventory, optionally scoped to a known Reminders list."
-common_mistakes = [
-    "Passing a display list name that has not been confirmed with list_lists.",
-    "Treating completed and active reminder filtering as implicit; inspect the returned reminder fields before deciding what is pending.",
-]
-examples = ['{"list_name":"Work"}']
-related = ["apple_reminders.list_lists", "apple_reminders.complete_reminder"]
-
 [provides.operations."apple_reminders.create_reminder"]
 description = "Create a reminder"
 capability = "apple_reminders.write"
@@ -214,16 +187,6 @@ type = "string"
 [provides.operations."apple_reminders.create_reminder".output_schema.properties.list]
 type = "string"
 
-[provides.operations."apple_reminders.create_reminder".ai_hints]
-when_to_use = "Use this when the user explicitly asks the agent to add a new reminder to Apple Reminders."
-common_mistakes = [
-    "Creating reminders without explicit user intent or policy approval; this mutates the user's local Reminders data.",
-    "Sending an empty title; the connector rejects blank reminder titles.",
-    "Guessing a list name instead of using list_lists or the configured default list.",
-]
-examples = ['{"title":"Review deployment notes","list_name":"Work"}']
-related = ["apple_reminders.list_lists", "apple_reminders.list_reminders"]
-
 [provides.operations."apple_reminders.complete_reminder"]
 description = "Mark a reminder complete"
 capability = "apple_reminders.write"
@@ -260,15 +223,6 @@ type = "string"
 
 [provides.operations."apple_reminders.complete_reminder".output_schema.properties.completed]
 type = "boolean"
-
-[provides.operations."apple_reminders.complete_reminder".ai_hints]
-when_to_use = "Use this when the user has identified a specific reminder and wants it marked complete."
-common_mistakes = [
-    "Passing the reminder title instead of the stable reminder identifier returned by list_reminders.",
-    "Treating best-effort idempotency as strict exactly-once behavior; confirm the returned completed flag when the caller needs certainty.",
-]
-examples = ['{"reminder_id":"x-apple-reminder://REMINDER-ID"}']
-related = ["apple_reminders.list_reminders", "apple_reminders.list_lists"]
 
 [sandbox]
 profile = "strict"

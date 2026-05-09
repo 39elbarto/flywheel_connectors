@@ -800,24 +800,7 @@ fn connector_names(names: &[&str]) -> Vec<String> {
 }
 
 fn expected_input_schema_gap_connectors() -> Vec<String> {
-    connector_names(&[
-        "bluebubbles",
-        "confluence",
-        "dingtalk",
-        "email-generic",
-        "google-places",
-        "google-workspace-events",
-        "hue",
-        "imessage",
-        "mastodon",
-        "netlify",
-        "nostr",
-        "qq",
-        "sonos",
-        "vercel",
-        "wecom",
-        "whatsapp",
-    ])
+    Vec::new()
 }
 
 fn expected_output_schema_gap_connectors() -> Vec<String> {
@@ -827,6 +810,7 @@ fn expected_output_schema_gap_connectors() -> Vec<String> {
 fn expected_network_constraints_gap_connectors() -> Vec<String> {
     connector_names(&[
         "anthropic",
+        "anthropic-vertex",
         "apple-notes",
         "apple-reminders",
         "dingtalk",
@@ -835,6 +819,7 @@ fn expected_network_constraints_gap_connectors() -> Vec<String> {
         "google-chat",
         "google-workspace-events",
         "hue",
+        "inworld",
         "irc",
         "linear",
         "llm-router",
@@ -859,6 +844,10 @@ fn expected_network_constraints_gap_connectors() -> Vec<String> {
     ])
 }
 
+fn expected_sandbox_gap_connectors() -> Vec<String> {
+    connector_names(&["anthropic-vertex", "inworld"])
+}
+
 fn expected_ai_hints_gap_connectors() -> Vec<String> {
     connector_names(&[
         "dingtalk",
@@ -868,7 +857,6 @@ fn expected_ai_hints_gap_connectors() -> Vec<String> {
         "mattermost",
         "nostr",
         "qq",
-        "sonos",
         "telnyx",
         "wecom",
     ])
@@ -1035,7 +1023,7 @@ fn raw_manifest_field_coverage_reports_known_connector_metadata_gaps() -> Result
     )?;
     require_equal(
         connectors_with_gap(&records, |record| record.missing_sandbox).as_slice(),
-        Vec::<String>::new().as_slice(),
+        expected_sandbox_gap_connectors().as_slice(),
         "connectors with missing top-level sandbox section",
     )?;
 

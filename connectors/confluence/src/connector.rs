@@ -233,16 +233,29 @@ pub fn operations_info() -> Vec<OperationInfo> {
             description: Some("Returns a paginated list of spaces".into()),
             input_schema: json!({
                 "type": "object",
+                "additionalProperties": false,
                 "properties": {
-                    "start": { "type": "integer", "default": 0 },
-                    "limit": { "type": "integer", "default": 25 }
+                    "start": { "type": "integer", "minimum": 0, "default": 0 },
+                    "limit": { "type": "integer", "minimum": 1, "default": 25 }
                 }
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["results", "size"],
+                "additionalProperties": false,
                 "properties": {
-                    "results": { "type": "array" },
-                    "size": { "type": "integer" }
+                    "results": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["id", "key", "name"],
+                            "additionalProperties": true
+                        }
+                    },
+                    "start": { "type": "integer", "minimum": 0 },
+                    "limit": { "type": "integer", "minimum": 0 },
+                    "size": { "type": "integer", "minimum": 0 },
+                    "_links": { "type": "object", "additionalProperties": true }
                 }
             }),
             capability: CapabilityId::from_static(CAP_SPACES_READ),
@@ -265,16 +278,29 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["space_key"],
+                "additionalProperties": false,
                 "properties": {
-                    "space_key": { "type": "string", "description": "Space key (e.g., DEV)" }
+                    "space_key": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[^/\\\\]+$",
+                        "not": { "enum": [".", ".."] },
+                        "description": "Space key (e.g., DEV)"
+                    }
                 }
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["id", "key", "name"],
+                "additionalProperties": false,
                 "properties": {
                     "id": { "type": "string" },
                     "key": { "type": "string" },
-                    "name": { "type": "string" }
+                    "name": { "type": "string" },
+                    "type": { "type": "string" },
+                    "status": { "type": "string" },
+                    "description": { "type": "object", "additionalProperties": true },
+                    "_links": { "type": "object", "additionalProperties": true }
                 }
             }),
             capability: CapabilityId::from_static(CAP_SPACES_READ),
@@ -297,17 +323,36 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["space_key"],
+                "additionalProperties": false,
                 "properties": {
-                    "space_key": { "type": "string", "description": "Space key" },
-                    "start": { "type": "integer", "default": 0 },
-                    "limit": { "type": "integer", "default": 25 }
+                    "space_key": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[^/\\\\]+$",
+                        "not": { "enum": [".", ".."] },
+                        "description": "Space key"
+                    },
+                    "start": { "type": "integer", "minimum": 0, "default": 0 },
+                    "limit": { "type": "integer", "minimum": 1, "default": 25 }
                 }
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["results", "size"],
+                "additionalProperties": false,
                 "properties": {
-                    "results": { "type": "array" },
-                    "size": { "type": "integer" }
+                    "results": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["id", "title"],
+                            "additionalProperties": true
+                        }
+                    },
+                    "start": { "type": "integer", "minimum": 0 },
+                    "limit": { "type": "integer", "minimum": 0 },
+                    "size": { "type": "integer", "minimum": 0 },
+                    "_links": { "type": "object", "additionalProperties": true }
                 }
             }),
             capability: CapabilityId::from_static(CAP_PAGES_READ),
@@ -330,16 +375,30 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["page_id"],
+                "additionalProperties": false,
                 "properties": {
-                    "page_id": { "type": "string", "description": "Page ID" }
+                    "page_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[^/\\\\]+$",
+                        "not": { "enum": [".", ".."] },
+                        "description": "Page ID"
+                    }
                 }
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["id", "title"],
+                "additionalProperties": false,
                 "properties": {
                     "id": { "type": "string" },
                     "title": { "type": "string" },
-                    "body": { "type": "object" }
+                    "type": { "type": "string" },
+                    "status": { "type": "string" },
+                    "space": { "type": "object", "additionalProperties": true },
+                    "version": { "type": "object", "additionalProperties": true },
+                    "body": { "type": "object", "additionalProperties": true },
+                    "_links": { "type": "object", "additionalProperties": true }
                 }
             }),
             capability: CapabilityId::from_static(CAP_PAGES_READ),
@@ -362,18 +421,43 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["space_key", "title", "body"],
+                "additionalProperties": false,
                 "properties": {
-                    "space_key": { "type": "string", "description": "Space key to create page in" },
-                    "title": { "type": "string", "description": "Page title" },
-                    "body": { "type": "string", "description": "Page body in Confluence storage format (XHTML)" },
-                    "parent_id": { "type": "string", "description": "Optional parent page ID" }
+                    "space_key": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[^/\\\\]+$",
+                        "not": { "enum": [".", ".."] },
+                        "description": "Space key to create page in"
+                    },
+                    "title": { "type": "string", "minLength": 1, "description": "Page title" },
+                    "body": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Page body in Confluence storage format (XHTML)"
+                    },
+                    "parent_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[^/\\\\]+$",
+                        "not": { "enum": [".", ".."] },
+                        "description": "Optional parent page ID"
+                    }
                 }
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["id", "title"],
+                "additionalProperties": false,
                 "properties": {
                     "id": { "type": "string" },
-                    "title": { "type": "string" }
+                    "title": { "type": "string" },
+                    "type": { "type": "string" },
+                    "status": { "type": "string" },
+                    "space": { "type": "object", "additionalProperties": true },
+                    "version": { "type": "object", "additionalProperties": true },
+                    "body": { "type": "object", "additionalProperties": true },
+                    "_links": { "type": "object", "additionalProperties": true }
                 }
             }),
             capability: CapabilityId::from_static(CAP_PAGES_WRITE),
@@ -399,20 +483,42 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["page_id", "title", "body", "version_number"],
+                "additionalProperties": false,
                 "properties": {
-                    "page_id": { "type": "string", "description": "Page ID to update" },
-                    "title": { "type": "string", "description": "New page title" },
-                    "body": { "type": "string", "description": "New page body in storage format" },
-                    "version_number": { "type": "integer", "description": "Current page version number; the connector increments it by 1 for the provider request" },
+                    "page_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[^/\\\\]+$",
+                        "not": { "enum": [".", ".."] },
+                        "description": "Page ID to update"
+                    },
+                    "title": { "type": "string", "minLength": 1, "description": "New page title" },
+                    "body": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "New page body in storage format"
+                    },
+                    "version_number": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Current page version number; the connector increments it by 1 for the provider request"
+                    },
                     "version_message": { "type": "string", "description": "Optional version comment" }
                 }
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["id", "title"],
+                "additionalProperties": false,
                 "properties": {
                     "id": { "type": "string" },
                     "title": { "type": "string" },
-                    "version": { "type": "object" }
+                    "type": { "type": "string" },
+                    "status": { "type": "string" },
+                    "space": { "type": "object", "additionalProperties": true },
+                    "version": { "type": "object", "additionalProperties": true },
+                    "body": { "type": "object", "additionalProperties": true },
+                    "_links": { "type": "object", "additionalProperties": true }
                 }
             }),
             capability: CapabilityId::from_static(CAP_PAGES_WRITE),
@@ -438,12 +544,21 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["page_id"],
+                "additionalProperties": false,
                 "properties": {
-                    "page_id": { "type": "string", "description": "Page ID to delete" }
+                    "page_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "^[^/\\\\]+$",
+                        "not": { "enum": [".", ".."] },
+                        "description": "Page ID to delete"
+                    }
                 }
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["deleted"],
+                "additionalProperties": false,
                 "properties": {
                     "deleted": { "type": "boolean" }
                 }
@@ -471,17 +586,30 @@ pub fn operations_info() -> Vec<OperationInfo> {
             input_schema: json!({
                 "type": "object",
                 "required": ["cql"],
+                "additionalProperties": false,
                 "properties": {
-                    "cql": { "type": "string", "description": "CQL query string" },
-                    "start": { "type": "integer", "default": 0 },
-                    "limit": { "type": "integer", "default": 25 }
+                    "cql": { "type": "string", "minLength": 1, "description": "CQL query string" },
+                    "start": { "type": "integer", "minimum": 0, "default": 0 },
+                    "limit": { "type": "integer", "minimum": 1, "default": 25 }
                 }
             }),
             output_schema: json!({
                 "type": "object",
+                "required": ["results", "size"],
+                "additionalProperties": false,
                 "properties": {
-                    "results": { "type": "array" },
-                    "size": { "type": "integer" }
+                    "results": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["title"],
+                            "additionalProperties": true
+                        }
+                    },
+                    "start": { "type": "integer", "minimum": 0 },
+                    "limit": { "type": "integer", "minimum": 0 },
+                    "size": { "type": "integer", "minimum": 0 },
+                    "_links": { "type": "object", "additionalProperties": true }
                 }
             }),
             capability: CapabilityId::from_static(CAP_PAGES_READ),
@@ -504,11 +632,13 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_HEALTH),
             summary: "Check Confluence API health".into(),
             description: Some("Validates Confluence API reachability and auth".into()),
-            input_schema: json!({ "type": "object" }),
+            input_schema: json!({ "type": "object", "additionalProperties": false }),
             output_schema: json!({
                 "type": "object",
+                "required": ["status"],
+                "additionalProperties": false,
                 "properties": {
-                    "status": { "type": "string" }
+                    "status": { "type": "string", "enum": ["ok"] }
                 }
             }),
             capability: CapabilityId::from_static(CAP_SPACES_READ),

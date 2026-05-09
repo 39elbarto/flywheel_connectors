@@ -8,7 +8,7 @@
 > target. `FCP_Specification_V2.md` is retained as historical / legacy-interoperability context.
 > When descriptions conflict, trust V3 for intended semantics and the code for current behavior.
 
-A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. The current tree includes **34 platform crates** under `crates/`, **150 connector crates** under `connectors/`, and a single agent-first CLI (`fwc`) that refuses to fabricate runtime state. Connector maturity is intentionally described as uneven: all 150 currently ship a `manifest.toml` and tests, 138 follow the full `src/client.rs` + `src/connector.rs` + `src/types.rs` layout, 147 publish explicit `OperationInfo` structs, and a smaller set remain thinner or explicitly incubating/quarantined.
+A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. The current tree includes **37 platform crates** under `crates/`, **176 connector crates** under `connectors/`, and a single agent-first CLI (`fwc`) that refuses to fabricate runtime state. Connector maturity is intentionally described as uneven: all 176 currently ship a `manifest.toml` and tests, 158 follow the full `src/client.rs` + `src/connector.rs` + `src/types.rs` layout, 165 publish explicit `OperationInfo` structs, and a smaller set remain thinner or explicitly incubating/quarantined.
 
 ---
 
@@ -24,7 +24,7 @@ A secure connector protocol and Rust platform for AI agent operations across zon
 
 2. **FCP specifications and the mesh-native ownership split**: the protocol model, security invariants, and the FCP3 owner crates (`fcp-kernel`, `fcp-policy`, `fcp-evidence`) that will own canonical semantics post-cutover. These crates currently re-export from `fcp-core` during the transition.
 
-3. **A broad but uneven connector workspace**: 150 connector crates covering messaging, cloud, databases, AI providers, dev tools, productivity, local-device control, and Google service integrations; all 150 currently ship manifests, tests, and `ConnectorErrorMapping`, while the depth of typed operation metadata and runtime proof still varies by connector.
+3. **A broad but uneven connector workspace**: 176 connector crates covering messaging, cloud, databases, AI providers, dev tools, productivity, local-device control, and Google service integrations; all 176 currently ship manifests, tests, and `ConnectorErrorMapping`, while the depth of typed operation metadata and runtime proof still varies by connector.
 
 **Target steady state (V2 — Mesh-Native, converging):** personal-device sovereignty, mesh durability, and capability-gated execution across your own infrastructure. In the target model, mesh-backed answers are the highest-confidence runtime truth. The mesh infrastructure (gossip, IBLT, XOR filters, symbol-first object distribution, LiveTruthResolver, KnowledgeState taxonomy) is built and tested; the remaining work is production evidence and cutover gating. See `docs/FCP3_Transition_Scorecard.md` for progress.
 
@@ -735,9 +735,9 @@ These unlock entire categories of autonomous agent work.
 | `fcp.redis` | Queue/Pub-Sub | Caching, message queues |
 | `fcp.whisper` | CLI/Process | Voice transcription |
 
-### Connector Inventory (150 connector crates)
+### Connector Inventory (176 connector crates)
 
-The live tree currently contains 150 connector crates. All 150 ship a `manifest.toml`, tests, and `ConnectorErrorMapping`; 138 currently follow the full `src/client.rs` + `src/connector.rs` + `src/types.rs` layout, and 147 currently publish explicit `OperationInfo` structs. That means the workspace is broad, but the connector surface is not perfectly uniform.
+The live tree currently contains 176 connector crates. All 176 ship a `manifest.toml`, tests, and `ConnectorErrorMapping`; 158 currently follow the full `src/client.rs` + `src/connector.rs` + `src/types.rs` layout, and 165 currently publish explicit `OperationInfo` structs. That means the workspace is broad, but the connector surface is not perfectly uniform.
 
 The authoritative inventory is the `connectors/` directory or manifest-backed `fwc list --offline`, not a handwritten static table. The older audits in [`docs/connector_census_v3.md`](docs/connector_census_v3.md) and [`docs/V3_Connector_Audit_Matrix.md`](docs/V3_Connector_Audit_Matrix.md) are useful historical snapshots, but they only cover an earlier 89-connector window and should not be treated as the live inventory. Recent additions in the current wave include BlueBubbles, Synology Chat, Google Places, Email Generic, Sonos, Hue, Apple Notes, and Apple Reminders.
 
@@ -1217,7 +1217,7 @@ window = "60s"
 | **Multi-device** | Mesh-native with fountain code distribution | Single process | Client-server | Load balancer |
 | **Revocation** | First-class objects with O(1) freshness | N/A | N/A | API key rotation |
 | **Agent UX** | TOON-first CLI with intent compilation | Python SDK | JSON-RPC | REST API |
-| **Connector count** | 150 connector crates in the workspace, with maturity varying per connector | ~50 community tools | Varies by server | Custom per service |
+| **Connector count** | 176 connector crates in the workspace, with maturity varying per connector | ~50 community tools | Varies by server | Custom per service |
 | **Supply chain** | Ed25519 signatures, in-toto/SLSA attestations | pip install | npm install | Docker images |
 
 FCP is heavier than MCP or LangChain tools. That weight buys cryptographic isolation, mesh distribution, and auditability. For single-machine prototyping, MCP is simpler. For production agent operations where security matters, FCP provides guarantees the alternatives cannot.
@@ -1599,7 +1599,7 @@ control-plane failover.
 
 ## Project Structure
 
-This is a schematic map, not an exhaustive directory dump. The current tree contains 34 crates under `crates/` and 150 connector crates under `connectors/`. All 150 connector crates currently ship manifests and tests; 138 use the full `client.rs`/`connector.rs`/`types.rs` layout, while a smaller set are thinner or explicitly incubating/quarantined. Default workspace operations focus on a curated subset of platform crates; connector crates are usually targeted explicitly.
+This is a schematic map, not an exhaustive directory dump. The current tree contains 37 crates under `crates/` and 176 connector crates under `connectors/`. All 176 connector crates currently ship manifests and tests; 158 use the full `client.rs`/`connector.rs`/`types.rs` layout, while a smaller set are thinner or explicitly incubating/quarantined. Default workspace operations focus on a curated subset of platform crates; connector crates are usually targeted explicitly.
 
 ```
 flywheel_connectors/
@@ -1637,7 +1637,7 @@ flywheel_connectors/
 │   ├── fcp-e2e/               # End-to-end compliance and host-backed scenarios
 │   └── fwc/                   # Sole supported Flywheel connectors CLI
 │
-├── connectors/                # 150 connector crates at varying maturity; 138 use the full client/connector/types layout
+├── connectors/                # 176 connector crates at varying maturity; 158 use the full client/connector/types layout
 │   ├── github/
 │   ├── gmail/
 │   ├── slack/
@@ -2133,7 +2133,7 @@ Honest about what FCP doesn't do yet:
 
 ## FAQ
 
-**Q: Why 150 separate connector crates instead of a plugin system?**
+**Q: Why 176 separate connector crates instead of a plugin system?**
 Each connector is a standalone binary with its own manifest, capabilities, and sandbox policy. This eliminates shared-memory vulnerabilities, enables per-connector resource limits, and makes supply-chain verification tractable (you sign one binary, not a runtime + plugin combination).
 
 **Q: Why RaptorQ instead of regular file transfer?**

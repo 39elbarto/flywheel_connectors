@@ -52,6 +52,7 @@ path = "src/bin/manifest_ops_audit.rs"
 
 [dev-dependencies]
 pretty_assertions.workspace = true
+regex.workspace = true
 fcp-async-core = { path = "../fcp-async-core" }
 async-trait.workspace = true
 base64.workspace = true

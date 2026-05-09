@@ -280,6 +280,8 @@ The operator-visible strategy values are:
 - `round_robin`: rotate across available credentials
 - `sticky`: keep using the selected credential until it is unavailable
 - `priority`: choose the lowest-priority-number available credential
+- `least_recently_used`: choose a never-used credential first, then the
+  available credential with the oldest last-use timestamp
 
 The exhausted behavior values are:
 

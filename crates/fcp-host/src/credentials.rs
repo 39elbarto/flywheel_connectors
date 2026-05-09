@@ -5,6 +5,7 @@
 //! these primitives in `bin/fcp-host.rs`; connector-facing transport remains a
 //! separate integration layer.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration as StdDuration;
@@ -124,6 +125,8 @@ pub enum CredentialPoolStrategy {
     Sticky,
     /// Always choose the lowest-priority-number available credential.
     Priority,
+    /// Choose the available credential that has gone unused the longest.
+    LeastRecentlyUsed,
 }
 
 /// Behavior when every credential is unavailable.
@@ -1088,6 +1091,7 @@ impl CredentialPool {
             CredentialPoolStrategy::RoundRobin => self.select_round_robin(now),
             CredentialPoolStrategy::Sticky => self.select_sticky(now),
             CredentialPoolStrategy::Priority => self.select_priority(now),
+            CredentialPoolStrategy::LeastRecentlyUsed => self.select_least_recently_used(now),
         }
     }
 
@@ -1124,6 +1128,15 @@ impl CredentialPool {
             .iter()
             .enumerate()
             .find_map(|(index, _)| self.can_select(index, now).then_some(index))
+    }
+
+    fn select_least_recently_used(&self, now: DateTime<Utc>) -> Option<usize> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.can_select(*index, now))
+            .min_by(|(_, left), (_, right)| compare_lru_entries(left, right))
+            .map(|(index, _)| index)
     }
 
     fn can_select(&self, index: usize, now: DateTime<Utc>) -> bool {
@@ -1598,6 +1611,25 @@ fn sort_entries(entries: &mut [PooledCredential]) {
     });
 }
 
+fn compare_lru_entries(left: &PooledCredential, right: &PooledCredential) -> Ordering {
+    match (left.last_used_at, right.last_used_at) {
+        (None, None) => compare_priority_then_id(left, right),
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(left_used), Some(right_used)) => left_used
+            .cmp(&right_used)
+            .then_with(|| compare_priority_then_id(left, right)),
+    }
+}
+
+fn compare_priority_then_id(left: &PooledCredential, right: &PooledCredential) -> Ordering {
+    left.priority.cmp(&right.priority).then_with(|| {
+        left.credential_id
+            .to_string()
+            .cmp(&right.credential_id.to_string())
+    })
+}
+
 fn cooldown_for_error(
     kind: CredentialErrorKind,
     retry_after: Option<StdDuration>,
@@ -1774,6 +1806,91 @@ mod tests {
 
         assert_eq!(first.credential_id, cred(0x01));
         assert_eq!(second.credential_id, cred(0x01));
+    }
+
+    #[test]
+    fn least_recently_used_prefers_never_used_then_oldest_used() {
+        let mut pool = three_entry_pool(CredentialPoolStrategy::LeastRecentlyUsed);
+        let current_time = now();
+
+        let first = pool.acquire(current_time).expect("first lru lease");
+        pool.release(first.token).expect("release first");
+        let second = pool
+            .acquire(current_time + Duration::seconds(1))
+            .expect("second lru lease");
+        pool.release(second.token).expect("release second");
+        let third = pool
+            .acquire(current_time + Duration::seconds(2))
+            .expect("third lru lease");
+        pool.release(third.token).expect("release third");
+        let oldest = pool
+            .acquire(current_time + Duration::seconds(3))
+            .expect("oldest-used lease");
+
+        assert_eq!(first.credential_id, cred(0x01));
+        assert_eq!(second.credential_id, cred(0x02));
+        assert_eq!(third.credential_id, cred(0x03));
+        assert_eq!(oldest.credential_id, cred(0x01));
+    }
+
+    #[test]
+    fn least_recently_used_ties_by_priority_then_credential_id() {
+        let mut priority_pool = CredentialPool::new(
+            key("openai"),
+            CredentialPoolStrategy::LeastRecentlyUsed,
+            vec![
+                entry(0x01, 30, "alpha"),
+                entry(0x02, 10, "middle"),
+                entry(0x03, 20, "zulu"),
+            ],
+        );
+        let priority_first = priority_pool
+            .acquire(now())
+            .expect("priority tie-broken lru lease");
+        assert_eq!(priority_first.credential_id, cred(0x02));
+
+        let mut id_pool = CredentialPool::new(
+            key("openai"),
+            CredentialPoolStrategy::LeastRecentlyUsed,
+            vec![
+                entry(0x03, 10, "alpha"),
+                entry(0x01, 10, "zulu"),
+                entry(0x02, 10, "middle"),
+            ],
+        );
+        let id_first = id_pool.acquire(now()).expect("id tie-broken lru lease");
+        assert_eq!(id_first.credential_id, cred(0x01));
+    }
+
+    #[test]
+    fn least_recently_used_skips_cooldown_and_active_lease_entries() {
+        let mut pool = three_entry_pool(CredentialPoolStrategy::LeastRecentlyUsed)
+            .with_max_concurrent_per_credential(1);
+        pool.set_cooldown(
+            cred(0x01),
+            Some(CredentialCooldown::Until {
+                until: now() + Duration::seconds(30),
+            }),
+        )
+        .expect("cool down first");
+
+        let first_available = pool.acquire(now()).expect("skip cooldown");
+        let second_available = pool.acquire(now()).expect("skip active lease");
+
+        assert_eq!(first_available.credential_id, cred(0x02));
+        assert_eq!(second_available.credential_id, cred(0x03));
+    }
+
+    #[test]
+    fn least_recently_used_serializes_for_admin_strategy_requests() {
+        let encoded =
+            serde_json::to_string(&CredentialPoolStrategy::LeastRecentlyUsed).expect("serialize");
+        assert_eq!(encoded, "\"least_recently_used\"");
+        assert_eq!(
+            serde_json::from_str::<CredentialPoolStrategy>("\"least_recently_used\"")
+                .expect("deserialize"),
+            CredentialPoolStrategy::LeastRecentlyUsed
+        );
     }
 
     #[test]

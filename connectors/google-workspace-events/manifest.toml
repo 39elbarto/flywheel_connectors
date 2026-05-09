@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+interface_hash = "blake3-256:fcp.interface.v2:82a9bd9a57fe4ba6f18e0fe1a064be965bcf950483d9862fa0549245731256d6"
 
 [connector]
 id = "fcp.workspace-events"
@@ -42,19 +42,22 @@ input_schema = { type = "object", additionalProperties = false, properties = { s
 output_schema = { type = "object", required = ["bundle", "effective_scopes"], additionalProperties = false, properties = { bundle = { type = "object" }, effective_scopes = { type = "array", items = { type = "string" } } } }
 
 [provides.operations."workspace_events.describe_provisioning".network_constraints]
-host_allow = []
-port_allow = []
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
 deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
-require_sni = true
+require_sni = false
+spki_pins = []
 deny_ip_literals = true
 require_host_canonicalization = true
-dns_max_ips = 16
+dns_max_ips = 0
 max_redirects = 0
-connect_timeout_ms = 10000
+connect_timeout_ms = 1000
 total_timeout_ms = 10000
-max_response_bytes = 524288
+max_response_bytes = 65536
 
 [provides.operations."workspace_events.list_subscriptions"]
 description = "List Google Workspace Events subscriptions"

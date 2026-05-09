@@ -86,6 +86,93 @@ fn manifest_operation_schema(
     serde_json::to_value(schema).expect("manifest schema should convert to JSON")
 }
 
+fn manifest_operation_network_constraints<'a>(
+    manifest: &'a toml::Value,
+    operation_id: &str,
+) -> &'a toml::Table {
+    manifest_operations(manifest)
+        .get(operation_id)
+        .and_then(|operation| operation.get("network_constraints"))
+        .and_then(toml::Value::as_table)
+        .expect("operation should define network_constraints")
+}
+
+fn network_string_array<'a>(network_constraints: &'a toml::Table, key: &str) -> Vec<&'a str> {
+    network_constraints
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .expect("network constraint should be an array")
+        .iter()
+        .map(|value| value.as_str().expect("network constraint should be string"))
+        .collect()
+}
+
+fn network_integer_array(network_constraints: &toml::Table, key: &str) -> Vec<i64> {
+    network_constraints
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .expect("network constraint should be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_integer()
+                .expect("network constraint should be integer")
+        })
+        .collect()
+}
+
+fn assert_network_bool(network_constraints: &toml::Table, key: &str, expected: bool) {
+    assert_eq!(
+        network_constraints.get(key).and_then(toml::Value::as_bool),
+        Some(expected),
+        "{key} should be {expected}"
+    );
+}
+
+fn assert_network_integer(network_constraints: &toml::Table, key: &str, expected: i64) {
+    assert_eq!(
+        network_constraints
+            .get(key)
+            .and_then(toml::Value::as_integer),
+        Some(expected),
+        "{key} should be {expected}"
+    );
+}
+
+fn assert_common_network_denials(network_constraints: &toml::Table) {
+    for key in [
+        "deny_localhost",
+        "deny_private_ranges",
+        "deny_tailnet_ranges",
+        "deny_ip_literals",
+        "require_host_canonicalization",
+    ] {
+        assert_network_bool(network_constraints, key, true);
+    }
+    assert_network_integer(network_constraints, "max_redirects", 0);
+}
+
+fn assert_external_https_network_constraints(
+    manifest: &toml::Value,
+    operation_id: &str,
+    expected_host: &str,
+) {
+    let network_constraints = manifest_operation_network_constraints(manifest, operation_id);
+    assert_eq!(
+        network_string_array(network_constraints, "host_allow"),
+        vec![expected_host],
+        "{operation_id} should restrict egress to its provider host"
+    );
+    assert_eq!(
+        network_integer_array(network_constraints, "port_allow"),
+        vec![443],
+        "{operation_id} should restrict egress to HTTPS"
+    );
+    assert_common_network_denials(network_constraints);
+    assert_network_bool(network_constraints, "require_sni", true);
+    assert_network_integer(network_constraints, "dns_max_ips", 16);
+}
+
 fn introspection_operation<'a>(introspection: &'a Value, operation_id: &str) -> &'a Value {
     array_field(introspection, "operations")
         .iter()
@@ -420,6 +507,69 @@ async fn assert_introspection_matches_manifest(connector: &WorkspaceEventsConnec
         manifest.contains("Pub/Sub-backed event delivery"),
         "manifest should describe Pub/Sub-backed Workspace Events delivery"
     );
+}
+
+#[test]
+fn manifest_declares_scoped_network_constraints() {
+    let manifest = workspace_events_manifest();
+    let manifest_ops = manifest_operations(&manifest);
+    assert_eq!(
+        manifest_ops.len(),
+        SCHEMA_OPERATION_IDS.len(),
+        "manifest operation count should match network-constraint coverage set"
+    );
+
+    let local_only =
+        manifest_operation_network_constraints(&manifest, "workspace_events.describe_provisioning");
+    assert_eq!(
+        network_string_array(local_only, "host_allow"),
+        vec!["none.invalid"],
+        "local provisioning metadata should declare no external egress"
+    );
+    assert_eq!(
+        network_integer_array(local_only, "port_allow"),
+        vec![0],
+        "local provisioning metadata should use the no-egress port sentinel"
+    );
+    assert!(
+        network_string_array(local_only, "ip_allow").is_empty(),
+        "local provisioning metadata should not allow direct IP egress"
+    );
+    assert!(
+        network_string_array(local_only, "cidr_deny").is_empty(),
+        "local provisioning metadata should keep CIDR denies explicit and empty"
+    );
+    assert!(
+        network_string_array(local_only, "spki_pins").is_empty(),
+        "local provisioning metadata should not pin certificates without TLS egress"
+    );
+    assert_common_network_denials(local_only);
+    assert_network_bool(local_only, "require_sni", false);
+    assert_network_integer(local_only, "dns_max_ips", 0);
+    assert_network_integer(local_only, "connect_timeout_ms", 1000);
+    assert_network_integer(local_only, "total_timeout_ms", 10000);
+    assert_network_integer(local_only, "max_response_bytes", 65536);
+
+    for operation_id in [
+        "workspace_events.list_subscriptions",
+        "workspace_events.get_subscription",
+        "workspace_events.create_subscription",
+        "workspace_events.reactivate_subscription",
+        "workspace_events.delete_subscription",
+    ] {
+        assert_external_https_network_constraints(
+            &manifest,
+            operation_id,
+            "workspaceevents.googleapis.com",
+        );
+    }
+
+    for operation_id in [
+        "workspace_events.pull_events",
+        "workspace_events.ack_events",
+    ] {
+        assert_external_https_network_constraints(&manifest, operation_id, "pubsub.googleapis.com");
+    }
 }
 
 #[test]

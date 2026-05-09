@@ -57,7 +57,7 @@ requires_approval = "none"
 idempotency = "none"
 input_schema = { type = "object", required = ["target", "message"] }
 output_schema = { type = "object", required = ["status", "target", "transcript"] }
-network_constraints = { host_allow = [], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+network_constraints = { host_allow = ["${irc_server_host}"], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations."irc.messages.send".ai_hints]
 when_to_use = "Use when a bounded IRC send to one nick or channel is intentionally desired."
@@ -74,7 +74,7 @@ requires_approval = "none"
 idempotency = "best_effort"
 input_schema = { type = "object", required = ["channel"] }
 output_schema = { type = "object", required = ["status", "channel", "transcript", "events", "identity"] }
-network_constraints = { host_allow = [], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+network_constraints = { host_allow = ["${irc_server_host}"], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations."irc.channels.join".ai_hints]
 when_to_use = "Use when you need to verify channel access or join a channel intentionally with the configured IRC identity."
@@ -91,7 +91,7 @@ requires_approval = "none"
 idempotency = "strict"
 input_schema = { type = "object", required = ["channel"] }
 output_schema = { type = "object", required = ["channel", "lines", "events", "identity"] }
-network_constraints = { host_allow = [], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+network_constraints = { host_allow = ["${irc_server_host}"], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations."irc.transcript.sample".ai_hints]
 when_to_use = "Use when you need a short bounded sample of IRC traffic from one channel plus normalized IRC event metadata."
@@ -108,7 +108,7 @@ requires_approval = "none"
 idempotency = "strict"
 input_schema = { type = "object" }
 output_schema = { type = "object", required = ["status", "server", "port", "tls", "nick", "transcript", "events", "identity", "manifest_hash"] }
-network_constraints = { host_allow = [], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+network_constraints = { host_allow = ["${irc_server_host}"], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations."irc.health".ai_hints]
 when_to_use = "Use before join, send, or transcript sampling to verify that registration succeeds against the configured IRC server."

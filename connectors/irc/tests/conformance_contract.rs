@@ -9,6 +9,8 @@ use fcp_irc::{
 use fcp_prelude::{FcpConnector, FcpError};
 use fcp_testkit::{OperationContract, assert_operation_contracts};
 
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
 #[test]
 fn irc_schema_operation_and_error_contracts_are_advertised() {
     let connector = IrcConnector::new();
@@ -114,4 +116,148 @@ fn irc_schema_operation_and_error_contracts_are_advertised() {
             ..
         } if service == "irc"
     ));
+}
+
+#[test]
+fn manifest_declares_runtime_scoped_per_operation_network_constraints() {
+    let manifest: toml::Value =
+        toml::from_str(MANIFEST_TOML).expect("IRC manifest should parse as TOML");
+    let operations = manifest
+        .get("provides")
+        .and_then(|value| value.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("IRC manifest should declare operations");
+
+    for operation_id in [
+        OP_SEND_MESSAGE,
+        OP_JOIN_CHANNEL,
+        OP_SAMPLE_TRANSCRIPT,
+        OP_HEALTH,
+    ] {
+        let operation = operations
+            .get(operation_id)
+            .expect("IRC operation should be declared in manifest");
+        let network_constraints = operation
+            .get("network_constraints")
+            .expect("IRC operation should declare network_constraints");
+
+        assert_string_array_eq(
+            network_constraints,
+            "host_allow",
+            &["${irc_server_host}"],
+            operation_id,
+        );
+        assert_integer_array_eq(
+            network_constraints,
+            "port_allow",
+            &[6667, 6697],
+            operation_id,
+        );
+        assert_bool(network_constraints, "require_sni", true, operation_id);
+        assert_bool(network_constraints, "deny_localhost", false, operation_id);
+        assert_bool(
+            network_constraints,
+            "deny_private_ranges",
+            false,
+            operation_id,
+        );
+        assert_bool(
+            network_constraints,
+            "deny_tailnet_ranges",
+            false,
+            operation_id,
+        );
+        assert_bool(network_constraints, "deny_ip_literals", false, operation_id);
+        assert_bool(
+            network_constraints,
+            "require_host_canonicalization",
+            true,
+            operation_id,
+        );
+        assert_integer(network_constraints, "max_redirects", 0, operation_id);
+        assert_integer(
+            network_constraints,
+            "connect_timeout_ms",
+            10000,
+            operation_id,
+        );
+        assert_integer(network_constraints, "total_timeout_ms", 30000, operation_id);
+    }
+}
+
+fn assert_string_array_eq(
+    network_constraints: &toml::Value,
+    field: &str,
+    expected: &[&str],
+    operation_id: &str,
+) {
+    let actual = network_constraints
+        .get(field)
+        .expect("network_constraints field should be declared")
+        .as_array()
+        .expect("network_constraints field should be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("network_constraints array entries should be strings")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual, expected,
+        "{operation_id} network_constraints.{field}"
+    );
+}
+
+fn assert_integer_array_eq(
+    network_constraints: &toml::Value,
+    field: &str,
+    expected: &[i64],
+    operation_id: &str,
+) {
+    let actual = network_constraints
+        .get(field)
+        .expect("network_constraints field should be declared")
+        .as_array()
+        .expect("network_constraints field should be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_integer()
+                .expect("network_constraints array entries should be integers")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual, expected,
+        "{operation_id} network_constraints.{field}"
+    );
+}
+
+fn assert_bool(network_constraints: &toml::Value, field: &str, expected: bool, operation_id: &str) {
+    let actual = network_constraints
+        .get(field)
+        .expect("network_constraints field should be declared")
+        .as_bool()
+        .expect("network_constraints field should be a bool");
+    assert_eq!(
+        actual, expected,
+        "{operation_id} network_constraints.{field}"
+    );
+}
+
+fn assert_integer(
+    network_constraints: &toml::Value,
+    field: &str,
+    expected: i64,
+    operation_id: &str,
+) {
+    let actual = network_constraints
+        .get(field)
+        .expect("network_constraints field should be declared")
+        .as_integer()
+        .expect("network_constraints field should be an integer");
+    assert_eq!(
+        actual, expected,
+        "{operation_id} network_constraints.{field}"
+    );
 }

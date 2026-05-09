@@ -4,6 +4,7 @@
 //! test intentionally checks every matching README count so stale repeated
 //! claims fail with the same signal as the headline paragraph.
 
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,7 @@ use std::path::{Path, PathBuf};
 use regex::Regex;
 
 const DRIFT_GUIDANCE: &str = "see flywheel_connectors-qywo5 and docs/quarterly/TEMPLATE.md";
+const WORKSPACE_GUIDANCE: &str = "see flywheel_connectors-h3rg7";
 
 #[derive(Debug, Clone, Copy)]
 struct InventoryCounts {
@@ -139,6 +141,57 @@ fn assert_claims_match(label: &str, actual: usize, claims: &[usize]) {
     }
 }
 
+fn workspace_members(root: &Path, key: &str) -> Result<Vec<String>, String> {
+    let cargo_toml_path = root.join("Cargo.toml");
+    let cargo_toml = fs::read_to_string(&cargo_toml_path)
+        .map_err(|error| format!("cannot read {}: {error}", cargo_toml_path.display()))?;
+    let parsed = cargo_toml.parse::<toml::Table>().map_err(|error| {
+        format!(
+            "cannot parse workspace manifest {}: {error}",
+            cargo_toml_path.display()
+        )
+    })?;
+    let workspace = parsed
+        .get("workspace")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "workspace manifest is missing a [workspace] table".to_owned())?;
+    let members = workspace
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| format!("workspace.{key} is missing or is not an array"))?;
+
+    members
+        .iter()
+        .map(|member| {
+            member
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("workspace.{key} contains a non-string member"))
+        })
+        .collect()
+}
+
+fn duplicate_members(members: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut duplicates = BTreeSet::new();
+
+    for member in members {
+        if !seen.insert(member.clone()) {
+            duplicates.insert(member.clone());
+        }
+    }
+
+    duplicates.into_iter().collect()
+}
+
+fn assert_no_duplicate_members(label: &str, members: &[String]) {
+    let duplicates = duplicate_members(members);
+    assert!(
+        duplicates.is_empty(),
+        "{label} contains duplicate entries {duplicates:?}; {WORKSPACE_GUIDANCE}"
+    );
+}
+
 #[test]
 fn readme_inventory_counts_match_workspace_reality() -> Result<(), String> {
     let root = workspace_root()?;
@@ -186,6 +239,19 @@ fn readme_inventory_counts_match_workspace_reality() -> Result<(), String> {
         counts.operation_info_connectors,
         &operation_info_claims,
     );
+
+    Ok(())
+}
+
+#[test]
+fn workspace_member_lists_do_not_contain_duplicates() -> Result<(), String> {
+    let root = workspace_root()?;
+
+    let members = workspace_members(&root, "members")?;
+    assert_no_duplicate_members("workspace.members", &members);
+
+    let default_members = workspace_members(&root, "default-members")?;
+    assert_no_duplicate_members("workspace.default-members", &default_members);
 
     Ok(())
 }

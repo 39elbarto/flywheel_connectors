@@ -185,8 +185,6 @@ members = [
     "connectors/bigquery",
     "connectors/nextcloud-talk",
     "connectors/whisper",
-    "connectors/imessage",
-    "connectors/vercel",
     "connectors/azure",
     "connectors/azure-speech",
     "connectors/inworld",

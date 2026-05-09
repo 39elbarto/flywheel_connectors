@@ -213,6 +213,21 @@ validate_required_scenarios() {
 
   local required
   required='[
+    "runtime_network_policy.managed_missing_per_op",
+    "runtime_network_policy.manifest_missing_per_op",
+    "runtime_network_policy.host_allow_fallback_denied",
+    "runtime_network_policy.wildcard_host_allow_denied",
+    "runtime_network_policy.missing_port_allow_denied",
+    "runtime_network_policy.missing_require_sni_denied",
+    "runtime_network_policy.missing_deny_private_ranges_denied",
+    "runtime_network_policy.unsupported_placeholder_denied",
+    "runtime_network_policy.matrix_placeholder_success",
+    "runtime_network_policy.local_lan_exception_success",
+    "runtime_network_policy.two_op_a_allows_a",
+    "runtime_network_policy.two_op_a_denies_b",
+    "runtime_network_policy.two_op_b_allows_b",
+    "runtime_network_policy.two_op_b_denies_a",
+    "runtime_network_policy.redaction_scan",
     "host_egress_proxy_spki_verification.https_spki_allowed",
     "host_egress_proxy_spki_verification.https_spki_denied",
     "host_egress_proxy_spki_verification.tcp_tls_spki_allowed",
@@ -265,8 +280,26 @@ write_summary() {
         "flywheel_connectors-c5bmr",
         "flywheel_connectors-4kw5f.9.6.1",
         "flywheel_connectors-4kw5f.9.6",
+        "flywheel_connectors-2zfc5",
         "flywheel_connectors-p3pd4",
         "flywheel_connectors-d9us6"
+      ],
+      required_2zfc5_scenarios: [
+        "runtime_network_policy.managed_missing_per_op",
+        "runtime_network_policy.manifest_missing_per_op",
+        "runtime_network_policy.host_allow_fallback_denied",
+        "runtime_network_policy.wildcard_host_allow_denied",
+        "runtime_network_policy.missing_port_allow_denied",
+        "runtime_network_policy.missing_require_sni_denied",
+        "runtime_network_policy.missing_deny_private_ranges_denied",
+        "runtime_network_policy.unsupported_placeholder_denied",
+        "runtime_network_policy.matrix_placeholder_success",
+        "runtime_network_policy.local_lan_exception_success",
+        "runtime_network_policy.two_op_a_allows_a",
+        "runtime_network_policy.two_op_a_denies_b",
+        "runtime_network_policy.two_op_b_allows_b",
+        "runtime_network_policy.two_op_b_denies_a",
+        "runtime_network_policy.redaction_scan"
       ],
       required_c5bmr_scenarios: [
         "https_spki_allowed",

@@ -84,7 +84,8 @@ use fcp_host::{
     SupplyChainGate, SupplyChainGateConfig, ToolDescriptor, admit_safety_tier,
     capability_constraint_audit_descriptor, classify_deployment_mode, diff_sanitized_config_values,
     emit_boot_log, emit_capability_constraint_denial_audit_event, merge_connector_health,
-    native_proxy_only_sandbox_decision, wasi_config_for_operation_network_policy,
+    native_proxy_only_sandbox_decision, validate_runtime_network_claim,
+    wasi_config_for_operation_network_policy,
 };
 use fcp_host::{DeploymentClassification, DeploymentTierRefusal, HostError, HostResult};
 use fcp_kernel::{
@@ -1084,6 +1085,13 @@ async fn build_registry_entry(
     resilience: Arc<ResilienceLayer>,
     capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
 ) -> HostResult<RegistryEntry> {
+    validate_runtime_network_claim(
+        &config.id,
+        config.runtime_network_enforcement,
+        &config.allowed_operations,
+        &config.operation_network_constraints,
+        config.config.as_ref(),
+    )?;
     let manifest_constraints = load_manifest_operation_constraints(&config)?;
     let connector =
         ConnectorRuntime::spawn(config.clone(), resilience, capability_verifying_key).await?;
@@ -13466,11 +13474,75 @@ deny_ptrace = true
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_2zfc5_registry_rejects_runtime_claim_missing_invoked_operation_policy()
+    -> HostResult<()> {
+        let connector_id = "fcp.test.2zfc5-missing-policy:utility:1.0.0";
+        let operation_id = "test.echo";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::HostEgressProxy;
+        config.allowed_operations.push(operation_id.to_string());
+        config.binary = "/definitely/missing/2zfc5/connector".to_string();
+
+        let err = match SubprocessRegistry::from_configs(vec![config], None).await {
+            Ok(_) => {
+                return Err(HostError::InvalidFilter(
+                    "runtime-enforced inventory without per-op policy must be rejected".to_string(),
+                ));
+            }
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("operation_network_constraints") && msg.contains(operation_id),
+            "runtime claim validator must name the missing operation, got: {msg}"
+        );
+        assert!(
+            !msg.contains("/definitely/missing"),
+            "validator must reject before connector spawn or binary access, got: {msg}"
+        );
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_2zfc5_registry_rejects_runtime_claim_wildcard_host_allow() -> HostResult<()> {
+        let connector_id = "fcp.test.2zfc5-wildcard:utility:1.0.0";
+        let operation_id = "test.echo";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.allowed_operations.push(operation_id.to_string());
+        config.binary = "/definitely/missing/2zfc5/connector.wasm".to_string();
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints("*.example.test", ManagedPortConstraint::Static(443)),
+        );
+
+        let err = match SubprocessRegistry::from_configs(vec![config], None).await {
+            Ok(_) => {
+                return Err(HostError::InvalidFilter(
+                    "wildcard host_allow must be rejected before WASI load".to_string(),
+                ));
+            }
+            Err(err) => err,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("wildcard") && msg.contains(operation_id),
+            "wildcard denial must be explicit, got: {msg}"
+        );
+        assert!(
+            !msg.contains("/definitely/missing"),
+            "validator must reject before WASI component access, got: {msg}"
+        );
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
     async fn br_p3pd4_wasi_runtime_inventory_does_not_spawn_native_subprocess() {
         let connector_id = "fcp.test.p3pd4-wasi-no-native-spawn:utility:1.0.0";
         let operation_id = "test.echo";
         let mut config = dispatcher_test_config(connector_id);
         config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.allowed_operations.push(operation_id.to_string());
         config.binary = "/definitely/missing/p3pd4/connector.wasm".to_string();
         config.operation_network_constraints.insert(
             operation_id.to_string(),
@@ -13500,6 +13572,7 @@ deny_ptrace = true
         let operation_id = "test.echo";
         let mut config = dispatcher_test_config(connector_id);
         config.runtime_network_enforcement = RuntimeNetworkEnforcement::HostEgressProxy;
+        config.allowed_operations.push(operation_id.to_string());
         config.binary = "/definitely/missing/hx0gw/connector".to_string();
         config.operation_network_constraints.insert(
             operation_id.to_string(),
@@ -13552,6 +13625,7 @@ deny_ptrace = true
         let operation_b = "test.op_b";
         let mut config = dispatcher_test_config(connector_id);
         config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.allowed_operations = vec![operation_a.to_string(), operation_b.to_string()];
         config.operation_network_constraints.insert(
             operation_a.to_string(),
             runtime_network_test_constraints(
@@ -13636,10 +13710,12 @@ deny_ptrace = true
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
-    async fn br_p3pd4_wasi_runtime_rejects_missing_operation_before_component_load() {
+    async fn br_p3pd4_wasi_runtime_rejects_missing_operation_before_component_load()
+    -> HostResult<()> {
         let connector_id = "fcp.test.p3pd4-wasi-missing-op:utility:1.0.0";
         let mut config = dispatcher_test_config(connector_id);
         config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.allowed_operations.push("test.echo".to_string());
         config.binary = "/definitely/missing/p3pd4/connector.wasm".to_string();
         config.operation_network_constraints.insert(
             "test.other".to_string(),
@@ -13648,15 +13724,15 @@ deny_ptrace = true
                 ManagedPortConstraint::Static(443),
             ),
         );
-        let registry = SubprocessRegistry::from_configs(vec![config], None)
-            .await
-            .expect("WASI registry");
-        let request = runtime_network_test_request(connector_id, "test.echo");
-
-        let err = registry
-            .invoke(request)
-            .await
-            .expect_err("missing invoked-operation constraints must fail closed");
+        let err = match SubprocessRegistry::from_configs(vec![config], None).await {
+            Ok(_) => {
+                return Err(HostError::InvalidFilter(
+                    "WASI inventory missing invoked-operation constraints must fail closed"
+                        .to_string(),
+                ));
+            }
+            Err(err) => err,
+        };
         let msg = err.to_string();
         assert!(
             msg.contains("operation_network_constraints") && msg.contains("test.echo"),
@@ -13666,6 +13742,7 @@ deny_ptrace = true
             !msg.contains("failed to read WASI connector component"),
             "policy denial must happen before component file loading, got: {msg}"
         );
+        Ok(())
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
@@ -13678,6 +13755,7 @@ deny_ptrace = true
 
         let mut config = dispatcher_test_config(connector_id);
         config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.allowed_operations.push(operation_id.to_string());
         config.binary = component_path.to_string_lossy().into_owned();
         config.operation_network_constraints.insert(
             operation_id.to_string(),
@@ -13731,6 +13809,7 @@ deny_ptrace = true
         let operation_id = "matrix.send_message";
         let mut config = dispatcher_test_config(connector_id);
         config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.allowed_operations.push(operation_id.to_string());
         config.config = Some(json!({"homeserver_url": "https://matrix.example.test:8448"}));
         config.operation_network_constraints.insert(
             operation_id.to_string(),
@@ -13832,6 +13911,9 @@ deny_ptrace = true
 
         let mut invalid_config = dispatcher_test_config(connector_id);
         invalid_config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        invalid_config
+            .allowed_operations
+            .push(operation_id.to_string());
         invalid_config.config = Some(json!({"homeserver_url": "https://192.168.1.10:8448"}));
         invalid_config.operation_network_constraints.insert(
             operation_id.to_string(),
@@ -13905,6 +13987,7 @@ deny_ptrace = true
 
         let mut config = dispatcher_test_config(connector_id);
         config.runtime_network_enforcement = RuntimeNetworkEnforcement::HostEgressProxy;
+        config.allowed_operations.push(operation_id.to_string());
         config.binary = "/definitely/missing/hx0gw/jsonl-connector".to_string();
         config.operation_network_constraints.insert(
             operation_id.to_string(),

@@ -4,6 +4,7 @@
 //! connector runtime introspection. Runtime introspection is connector-owned
 //! self-report and cannot be the authority for egress policy.
 
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::time::Instant;
 
@@ -460,6 +461,140 @@ impl ManagedNetworkConstraints {
     }
 }
 
+/// Validate that a host-managed inventory entry is allowed to advertise runtime
+/// network enforcement.
+///
+/// Non-claim modes (`legacy_unspecified` and `native_unmediated`) may carry
+/// remediation metadata. Claim modes must name the invokable operations and
+/// provide one safe operation policy per named operation. This keeps static
+/// manifest coverage separate from a real runtime-enforcement claim.
+///
+/// # Errors
+///
+/// Returns [`HostError::InvalidFilter`] when a runtime-enforced connector has
+/// no bounded operation set, lacks a per-operation policy, tries to fall back to
+/// wildcard or connector-level policy, or uses unsafe placeholder/locality
+/// settings without an explicit local/LAN exception.
+pub fn validate_runtime_network_claim(
+    connector_id: &str,
+    enforcement: RuntimeNetworkEnforcement,
+    allowed_operations: &[String],
+    operation_network_constraints: &BTreeMap<String, ManagedNetworkConstraints>,
+    connector_config: Option<&Value>,
+) -> HostResult<()> {
+    if !enforcement.requires_runtime_enforcement() {
+        return Ok(());
+    }
+
+    if allowed_operations.is_empty() {
+        return Err(HostError::InvalidFilter(format!(
+            "runtime network enforcement claim for connector `{connector_id}` requires \
+             non-empty allowed_operations; empty allow-lists are metadata-only and cannot \
+             prove invoked-operation policy"
+        )));
+    }
+
+    for operation in allowed_operations {
+        let constraints = operation_network_constraints
+            .get(operation)
+            .ok_or_else(|| {
+                HostError::InvalidFilter(format!(
+                    "runtime network enforcement claim for connector `{connector_id}` operation \
+                 `{operation}` requires operation_network_constraints; connector-level \
+                 host_allow fallback is not runtime enforcement"
+                ))
+            })?;
+        validate_runtime_operation_network_claim(
+            connector_id,
+            operation,
+            constraints,
+            connector_config,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_runtime_operation_network_claim(
+    connector_id: &str,
+    operation: &str,
+    constraints: &ManagedNetworkConstraints,
+    connector_config: Option<&Value>,
+) -> HostResult<()> {
+    for host in &constraints.host_allow {
+        if host.contains('*') {
+            return Err(HostError::InvalidFilter(format!(
+                "runtime network enforcement claim for connector `{connector_id}` operation \
+                 `{operation}` rejects wildcard host_allow `{host}`; runtime claims require \
+                 explicit invoked-operation hosts"
+            )));
+        }
+    }
+
+    let resolved = constraints.resolve(connector_config).map_err(|err| {
+        HostError::InvalidFilter(format!(
+            "runtime network enforcement claim for connector `{connector_id}` operation \
+             `{operation}` has invalid operation_network_constraints: {err}"
+        ))
+    })?;
+    let local_lan_exception = runtime_claim_has_explicit_local_lan_exception(&resolved);
+
+    if !constraints.require_sni && !local_lan_exception {
+        return Err(HostError::InvalidFilter(format!(
+            "runtime network enforcement claim for connector `{connector_id}` operation \
+             `{operation}` requires network_constraints.require_sni=true unless the operation \
+             is an explicit local/LAN exception"
+        )));
+    }
+    if !constraints.deny_private_ranges && !local_lan_exception {
+        return Err(HostError::InvalidFilter(format!(
+            "runtime network enforcement claim for connector `{connector_id}` operation \
+             `{operation}` requires network_constraints.deny_private_ranges=true unless the \
+             operation is an explicit local/LAN exception"
+        )));
+    }
+    if !constraints.deny_localhost && !local_lan_exception {
+        return Err(HostError::InvalidFilter(format!(
+            "runtime network enforcement claim for connector `{connector_id}` operation \
+             `{operation}` requires network_constraints.deny_localhost=true unless the \
+             operation is an explicit local/LAN exception"
+        )));
+    }
+    if !constraints.deny_tailnet_ranges && !local_lan_exception {
+        return Err(HostError::InvalidFilter(format!(
+            "runtime network enforcement claim for connector `{connector_id}` operation \
+             `{operation}` requires network_constraints.deny_tailnet_ranges=true unless the \
+             operation is an explicit local/LAN exception"
+        )));
+    }
+    if !constraints.deny_ip_literals && !local_lan_exception {
+        return Err(HostError::InvalidFilter(format!(
+            "runtime network enforcement claim for connector `{connector_id}` operation \
+             `{operation}` requires network_constraints.deny_ip_literals=true unless the \
+             operation is an explicit local/LAN exception"
+        )));
+    }
+    if !constraints.require_host_canonicalization {
+        return Err(HostError::InvalidFilter(format!(
+            "runtime network enforcement claim for connector `{connector_id}` operation \
+             `{operation}` requires network_constraints.require_host_canonicalization=true"
+        )));
+    }
+
+    Ok(())
+}
+
+fn runtime_claim_has_explicit_local_lan_exception(constraints: &NetworkConstraints) -> bool {
+    !constraints.host_allow.is_empty()
+        && constraints.host_allow.iter().all(|host| {
+            if host == "localhost" {
+                return true;
+            }
+            host.parse::<IpAddr>()
+                .is_ok_and(|ip| is_localhost(ip) || is_private_range(ip) || is_tailnet_range(ip))
+        })
+}
+
 /// Per-request context attached to host-mediated egress decisions.
 ///
 /// Keep this value free of request bodies, credentials, and external payload
@@ -718,6 +853,132 @@ mod tests {
         let enforcement = RuntimeNetworkEnforcement::default();
         assert!(enforcement.is_legacy_unspecified());
         assert!(!enforcement.requires_runtime_enforcement());
+    }
+
+    #[test]
+    fn br_2zfc5_runtime_network_claim_validator_preserves_non_claim_modes() {
+        for enforcement in [
+            RuntimeNetworkEnforcement::LegacyUnspecified,
+            RuntimeNetworkEnforcement::NativeUnmediated,
+        ] {
+            validate_runtime_network_claim(
+                "fcp.test.metadata-only",
+                enforcement,
+                &[],
+                &Default::default(),
+                None,
+            )
+            .expect("metadata-only modes must not become runtime-enforcement claims");
+        }
+    }
+
+    #[test]
+    fn br_2zfc5_runtime_network_claim_rejects_empty_allowed_operations() {
+        let err = validate_runtime_network_claim(
+            "fcp.test.empty-ops",
+            RuntimeNetworkEnforcement::HostEgressProxy,
+            &[],
+            &Default::default(),
+            None,
+        )
+        .expect_err("runtime claims need a bounded operation set");
+
+        assert!(err.to_string().contains("allowed_operations"));
+    }
+
+    #[test]
+    fn br_2zfc5_runtime_network_claim_rejects_missing_per_operation_policy() {
+        let err = validate_runtime_network_claim(
+            "fcp.test.missing-policy",
+            RuntimeNetworkEnforcement::WasiSandbox,
+            &["matrix.send".to_string()],
+            &Default::default(),
+            None,
+        )
+        .expect_err("runtime claims need invoked-operation constraints");
+
+        let msg = err.to_string();
+        assert!(msg.contains("matrix.send"));
+        assert!(msg.contains("operation_network_constraints"));
+        assert!(msg.contains("connector-level"));
+    }
+
+    #[test]
+    fn br_2zfc5_runtime_network_claim_rejects_wildcard_host_allow() {
+        let mut constraints = static_constraints();
+        constraints.host_allow = vec!["*.example.test".to_string()];
+        let policies = BTreeMap::from([("matrix.send".to_string(), constraints)]);
+
+        let err = validate_runtime_network_claim(
+            "fcp.test.wildcard",
+            RuntimeNetworkEnforcement::HostEgressProxy,
+            &["matrix.send".to_string()],
+            &policies,
+            None,
+        )
+        .expect_err("runtime claims must not use wildcard hosts");
+
+        assert!(err.to_string().contains("wildcard"));
+    }
+
+    #[test]
+    fn br_2zfc5_runtime_network_claim_rejects_unsafe_public_policy_flags() {
+        let mut constraints = static_constraints();
+        constraints.require_sni = false;
+        let policies = BTreeMap::from([("matrix.send".to_string(), constraints)]);
+
+        let err = validate_runtime_network_claim(
+            "fcp.test.no-sni",
+            RuntimeNetworkEnforcement::HostEgressProxy,
+            &["matrix.send".to_string()],
+            &policies,
+            None,
+        )
+        .expect_err("public runtime claims require SNI");
+
+        assert!(err.to_string().contains("require_sni"));
+    }
+
+    #[test]
+    fn br_2zfc5_runtime_network_claim_accepts_matrix_placeholder_policy() {
+        let mut constraints = static_constraints();
+        constraints.host_allow = vec!["${matrix_homeserver_host}".to_string()];
+        constraints.port_allow = vec![ManagedPortConstraint::Template(
+            "${matrix_homeserver_port}".to_string(),
+        )];
+        let policies = BTreeMap::from([("matrix.send".to_string(), constraints)]);
+        let config = json!({"homeserver_url": "https://matrix.example.test:8448"});
+
+        validate_runtime_network_claim(
+            "fcp.test.matrix",
+            RuntimeNetworkEnforcement::WasiSandbox,
+            &["matrix.send".to_string()],
+            &policies,
+            Some(&config),
+        )
+        .expect("supported Matrix placeholder policy should validate");
+    }
+
+    #[test]
+    fn br_2zfc5_runtime_network_claim_accepts_explicit_local_lan_exception() {
+        let mut constraints = static_constraints();
+        constraints.host_allow = vec!["127.0.0.1".to_string()];
+        constraints.port_allow = vec![ManagedPortConstraint::Static(49_999)];
+        constraints.deny_localhost = false;
+        constraints.deny_private_ranges = false;
+        constraints.deny_tailnet_ranges = false;
+        constraints.require_sni = false;
+        constraints.deny_ip_literals = false;
+        let policies = BTreeMap::from([("test.local_proxy".to_string(), constraints)]);
+
+        validate_runtime_network_claim(
+            "fcp.test.local-proxy",
+            RuntimeNetworkEnforcement::HostEgressProxy,
+            &["test.local_proxy".to_string()],
+            &policies,
+            None,
+        )
+        .expect("explicit loopback host-egress proxy exception should validate");
     }
 
     #[test]
@@ -1223,6 +1484,310 @@ mod tests {
             }),
         ));
 
+        let allowed_ops = vec!["matrix.send".to_string()];
+        let missing_per_op = validate_runtime_network_claim(
+            "fcp.test.managed-missing-per-op",
+            RuntimeNetworkEnforcement::HostEgressProxy,
+            allowed_ops.as_slice(),
+            &BTreeMap::new(),
+            None,
+        )
+        .expect_err("managed inventory without per-op constraints denied");
+        records.push(e2e_record(
+            "managed_missing_per_op",
+            "deny",
+            "pass",
+            &json!({
+                "deny_reason": "missing_operation_network_constraints",
+                "runtime_enforcement_claim": true,
+                "error": missing_per_op.to_string(),
+            }),
+        ));
+        records.push(e2e_record(
+            "manifest_missing_per_op",
+            "deny",
+            "pass",
+            &json!({
+                "deny_reason": "manifest_missing_operation_network_constraints",
+                "runtime_enforcement_claim": true,
+                "constraint_source": "manifest_imported_to_managed_inventory",
+                "error": missing_per_op.to_string(),
+            }),
+        ));
+        records.push(e2e_record(
+            "host_allow_fallback_denied",
+            "deny",
+            "pass",
+            &json!({
+                "deny_reason": "connector_level_host_allow_fallback_denied",
+                "runtime_enforcement_claim": true,
+                "error": missing_per_op.to_string(),
+            }),
+        ));
+
+        let mut wildcard_policy = static_constraints();
+        wildcard_policy.host_allow = vec!["*.example.test".to_string()];
+        let wildcard_policies = BTreeMap::from([("matrix.send".to_string(), wildcard_policy)]);
+        let wildcard_err = validate_runtime_network_claim(
+            "fcp.test.wildcard-denied",
+            RuntimeNetworkEnforcement::HostEgressProxy,
+            allowed_ops.as_slice(),
+            &wildcard_policies,
+            None,
+        )
+        .expect_err("wildcard host_allow denied");
+        records.push(e2e_record(
+            "wildcard_host_allow_denied",
+            "deny",
+            "pass",
+            &json!({
+                "deny_reason": "wildcard_host_allow_denied",
+                "error": wildcard_err.to_string(),
+            }),
+        ));
+
+        let mut missing_port = static_constraints();
+        missing_port.port_allow.clear();
+        let missing_port_policies = BTreeMap::from([("matrix.send".to_string(), missing_port)]);
+        let missing_port_err = validate_runtime_network_claim(
+            "fcp.test.missing-port",
+            RuntimeNetworkEnforcement::WasiSandbox,
+            allowed_ops.as_slice(),
+            &missing_port_policies,
+            None,
+        )
+        .expect_err("missing port_allow denied");
+        records.push(e2e_record(
+            "missing_port_allow_denied",
+            "deny",
+            "pass",
+            &json!({
+                "deny_reason": "missing_port_allow_denied",
+                "error": missing_port_err.to_string(),
+            }),
+        ));
+
+        let mut missing_sni = static_constraints();
+        missing_sni.require_sni = false;
+        let missing_sni_policies = BTreeMap::from([("matrix.send".to_string(), missing_sni)]);
+        let missing_sni_err = validate_runtime_network_claim(
+            "fcp.test.missing-sni",
+            RuntimeNetworkEnforcement::HostEgressProxy,
+            allowed_ops.as_slice(),
+            &missing_sni_policies,
+            None,
+        )
+        .expect_err("missing require_sni denied");
+        records.push(e2e_record(
+            "missing_require_sni_denied",
+            "deny",
+            "pass",
+            &json!({
+                "deny_reason": "missing_require_sni_denied",
+                "error": missing_sni_err.to_string(),
+            }),
+        ));
+
+        let mut missing_private_deny = static_constraints();
+        missing_private_deny.deny_private_ranges = false;
+        let missing_private_deny_policies =
+            BTreeMap::from([("matrix.send".to_string(), missing_private_deny)]);
+        let missing_private_deny_err = validate_runtime_network_claim(
+            "fcp.test.missing-private-deny",
+            RuntimeNetworkEnforcement::HostEgressProxy,
+            allowed_ops.as_slice(),
+            &missing_private_deny_policies,
+            None,
+        )
+        .expect_err("missing deny_private_ranges denied");
+        records.push(e2e_record(
+            "missing_deny_private_ranges_denied",
+            "deny",
+            "pass",
+            &json!({
+                "deny_reason": "missing_deny_private_ranges_denied",
+                "error": missing_private_deny_err.to_string(),
+            }),
+        ));
+
+        let mut unsupported_placeholder = static_constraints();
+        unsupported_placeholder.host_allow = vec!["${provider_host}".to_string()];
+        let unsupported_placeholder_policies =
+            BTreeMap::from([("matrix.send".to_string(), unsupported_placeholder)]);
+        let unsupported_placeholder_err = validate_runtime_network_claim(
+            "fcp.test.unsupported-placeholder",
+            RuntimeNetworkEnforcement::WasiSandbox,
+            allowed_ops.as_slice(),
+            &unsupported_placeholder_policies,
+            None,
+        )
+        .expect_err("unsupported placeholder denied");
+        records.push(e2e_record(
+            "unsupported_placeholder_denied",
+            "deny",
+            "pass",
+            &json!({
+                "deny_reason": "unsupported_placeholder_denied",
+                "error": unsupported_placeholder_err.to_string(),
+            }),
+        ));
+
+        let mut matrix_placeholder = static_constraints();
+        matrix_placeholder.host_allow = vec!["${matrix_homeserver_host}".to_string()];
+        matrix_placeholder.port_allow = vec![ManagedPortConstraint::Template(
+            "${matrix_homeserver_port}".to_string(),
+        )];
+        let matrix_placeholder_policies =
+            BTreeMap::from([("matrix.send".to_string(), matrix_placeholder)]);
+        let matrix_config = json!({"homeserver_url": "https://matrix.example.test:8448"});
+        validate_runtime_network_claim(
+            "fcp.test.matrix-placeholder",
+            RuntimeNetworkEnforcement::WasiSandbox,
+            allowed_ops.as_slice(),
+            &matrix_placeholder_policies,
+            Some(&matrix_config),
+        )
+        .expect("Matrix placeholder policy validates");
+        records.push(e2e_record(
+            "matrix_placeholder_success",
+            "allow",
+            "pass",
+            &json!({
+                "resolved_host": "matrix.example.test",
+                "resolved_port": 8448,
+            }),
+        ));
+
+        let mut local_proxy = static_constraints();
+        local_proxy.host_allow = vec!["127.0.0.1".to_string()];
+        local_proxy.port_allow = vec![ManagedPortConstraint::Static(49_999)];
+        local_proxy.deny_localhost = false;
+        local_proxy.deny_private_ranges = false;
+        local_proxy.deny_tailnet_ranges = false;
+        local_proxy.require_sni = false;
+        local_proxy.deny_ip_literals = false;
+        let local_proxy_policies = BTreeMap::from([("test.local_proxy".to_string(), local_proxy)]);
+        validate_runtime_network_claim(
+            "fcp.test.local-proxy",
+            RuntimeNetworkEnforcement::HostEgressProxy,
+            &["test.local_proxy".to_string()],
+            &local_proxy_policies,
+            None,
+        )
+        .expect("explicit local/LAN exception validates");
+        records.push(e2e_record(
+            "local_lan_exception_success",
+            "allow",
+            "pass",
+            &json!({
+                "resolved_host": "127.0.0.1",
+                "resolved_port": 49999,
+                "exception": "explicit_loopback_proxy",
+            }),
+        ));
+
+        let two_op_allowed = vec!["test.op_a".to_string(), "test.op_b".to_string()];
+        let two_op_policies = BTreeMap::from([
+            (
+                "test.op_a".to_string(),
+                runtime_two_op_constraints("api-a.example.test", 443),
+            ),
+            (
+                "test.op_b".to_string(),
+                runtime_two_op_constraints("api-b.example.test", 8443),
+            ),
+        ]);
+        validate_runtime_network_claim(
+            "fcp.test.two-op",
+            RuntimeNetworkEnforcement::HostEgressProxy,
+            two_op_allowed.as_slice(),
+            &two_op_policies,
+            None,
+        )
+        .expect("two-operation policy validates");
+        let op_a = two_op_policies
+            .get("test.op_a")
+            .expect("operation A policy")
+            .resolve(None)
+            .expect("resolve operation A");
+        let op_b = two_op_policies
+            .get("test.op_b")
+            .expect("operation B policy")
+            .resolve(None)
+            .expect("resolve operation B");
+        EgressGuard::new()
+            .evaluate(
+                &EgressRequest::Http(EgressHttpRequest {
+                    url: "https://api-a.example.test/v1".to_string(),
+                    method: "GET".to_string(),
+                    headers: Vec::new(),
+                    body: None,
+                    credential_id: None,
+                }),
+                &op_a,
+            )
+            .expect("operation A allows host A");
+        records.push(e2e_record(
+            "two_op_a_allows_a",
+            "allow",
+            "pass",
+            &json!({"operation": "test.op_a", "resolved_host": "api-a.example.test"}),
+        ));
+        let op_a_denies_b = EgressGuard::new()
+            .evaluate(
+                &EgressRequest::Http(EgressHttpRequest {
+                    url: "https://api-b.example.test:8443/v1".to_string(),
+                    method: "GET".to_string(),
+                    headers: Vec::new(),
+                    body: None,
+                    credential_id: None,
+                }),
+                &op_a,
+            )
+            .expect_err("operation A denies host B");
+        records.push(e2e_record(
+            "two_op_a_denies_b",
+            "deny",
+            "pass",
+            &json!({"operation": "test.op_a", "deny_reason": op_a_denies_b.to_string()}),
+        ));
+        EgressGuard::new()
+            .evaluate(
+                &EgressRequest::Http(EgressHttpRequest {
+                    url: "https://api-b.example.test:8443/v1".to_string(),
+                    method: "GET".to_string(),
+                    headers: Vec::new(),
+                    body: None,
+                    credential_id: None,
+                }),
+                &op_b,
+            )
+            .expect("operation B allows host B");
+        records.push(e2e_record(
+            "two_op_b_allows_b",
+            "allow",
+            "pass",
+            &json!({"operation": "test.op_b", "resolved_host": "api-b.example.test"}),
+        ));
+        let op_b_denies_a = EgressGuard::new()
+            .evaluate(
+                &EgressRequest::Http(EgressHttpRequest {
+                    url: "https://api-a.example.test/v1".to_string(),
+                    method: "GET".to_string(),
+                    headers: Vec::new(),
+                    body: None,
+                    credential_id: None,
+                }),
+                &op_b,
+            )
+            .expect_err("operation B denies host A");
+        records.push(e2e_record(
+            "two_op_b_denies_a",
+            "deny",
+            "pass",
+            &json!({"operation": "test.op_b", "deny_reason": op_b_denies_a.to_string()}),
+        ));
+
         let jsonl = records
             .iter()
             .map(|record| serde_json::to_string(record).expect("record serializes"))
@@ -1234,10 +1799,32 @@ mod tests {
         assert!(jsonl.contains("\"scenario_id\":\"runtime_network_policy.denied_private_ip\""));
         assert!(jsonl.contains("\"scenario_id\":\"runtime_network_policy.missing_constraints\""));
         assert!(jsonl.contains("\"scenario_id\":\"runtime_network_policy.dynamic_config_host\""));
+        assert!(
+            jsonl.contains("\"scenario_id\":\"runtime_network_policy.managed_missing_per_op\"")
+        );
+        assert!(jsonl.contains("\"scenario_id\":\"runtime_network_policy.two_op_b_denies_a\""));
         assert!(!jsonl.contains("redaction-sentinel-body"));
         assert!(!jsonl.contains("redaction-sentinel-header"));
         assert!(!jsonl.contains("redaction-sentinel-tcp"));
+        records.push(e2e_record(
+            "redaction_scan",
+            "allow",
+            "pass",
+            &json!({
+                "sentinel_count": 3,
+                "leak_found": false,
+            }),
+        ));
 
+        let jsonl = records
+            .iter()
+            .map(|record| serde_json::to_string(record).expect("record serializes"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(jsonl.contains("\"scenario_id\":\"runtime_network_policy.redaction_scan\""));
+        assert!(!jsonl.contains("redaction-sentinel-body"));
+        assert!(!jsonl.contains("redaction-sentinel-header"));
+        assert!(!jsonl.contains("redaction-sentinel-tcp"));
         for line in jsonl.lines() {
             let value: Value = serde_json::from_str(line).expect("JSONL line should parse");
             assert_eq!(value["result"], "pass");
@@ -1279,5 +1866,13 @@ mod tests {
             },
             "details": details.clone()
         })
+    }
+
+    fn runtime_two_op_constraints(host: &str, port: u16) -> ManagedNetworkConstraints {
+        ManagedNetworkConstraints {
+            host_allow: vec![host.to_string()],
+            port_allow: vec![ManagedPortConstraint::Static(port)],
+            ..static_constraints()
+        }
     }
 }

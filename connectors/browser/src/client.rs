@@ -5,7 +5,14 @@
 //! `/json/version` endpoint as sufficient proof that FCP browser operations are
 //! available.
 
-use std::{net::IpAddr, time::Duration};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    net::IpAddr,
+    pin::Pin,
+    sync::{Arc, Mutex, MutexGuard},
+    time::Duration,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use fcp_async_core::{
@@ -74,6 +81,8 @@ enum BrowserControlEndpoint {
     DirectCdp(DirectCdpEndpoint),
 }
 
+type DirectCdpSessionFuture<'a, T> = Pin<Box<dyn Future<Output = BrowserResult<T>> + 'a>>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DirectCdpEndpointKind {
     WebSocket,
@@ -136,6 +145,435 @@ impl DirectCdpEndpoint {
             "export_target_decision": "configured_target_is_export_target",
             "stale_target_recovery": false,
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectCdpOwnedTarget {
+    kind: DirectCdpTargetKind,
+    path_kind: String,
+    id_hash: String,
+}
+
+impl From<&DirectCdpTarget> for DirectCdpOwnedTarget {
+    fn from(target: &DirectCdpTarget) -> Self {
+        Self {
+            kind: target.kind,
+            path_kind: target.path_kind.clone(),
+            id_hash: target.id_hash.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectCdpActiveLease {
+    lease_seq: u64,
+    operation_id: &'static str,
+    target_id_hash: String,
+    timeout_budget_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectCdpSessionObjectLease {
+    object_id_hash: String,
+    lease_seq: u64,
+    cookie_scope_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct DirectCdpManagerEvent {
+    command_line: &'static str,
+    git_revision: String,
+    run_id: String,
+    event_kind: &'static str,
+    manager_id_hash: String,
+    endpoint_kind: &'static str,
+    target_kind: &'static str,
+    target_id_hash: String,
+    operation_id: &'static str,
+    cdp_command_ids: Vec<u64>,
+    current_tab_decision: &'static str,
+    session_object_id_hash: Option<String>,
+    session_lease_seq: Option<u64>,
+    retry_decision: &'static str,
+    timeout_budget_ms: u64,
+    timeout_checkpoint: &'static str,
+    cancellation_checkpoint: &'static str,
+    cleanup_result: &'static str,
+    skip_reason: Option<&'static str>,
+}
+
+#[derive(Debug)]
+struct DirectCdpTargetSessionManager {
+    manager_id_hash: String,
+    current_target: Option<DirectCdpOwnedTarget>,
+    active_lease: Option<DirectCdpActiveLease>,
+    session_objects: BTreeMap<String, DirectCdpSessionObjectLease>,
+    events: Vec<DirectCdpManagerEvent>,
+    next_lease_seq: u64,
+    shutdown: bool,
+}
+
+impl Default for DirectCdpTargetSessionManager {
+    fn default() -> Self {
+        Self {
+            manager_id_hash: direct_cdp_redaction_hash("fcp.browser.direct_cdp.manager.v1"),
+            current_target: None,
+            active_lease: None,
+            session_objects: BTreeMap::new(),
+            events: Vec::new(),
+            next_lease_seq: 1,
+            shutdown: false,
+        }
+    }
+}
+
+impl DirectCdpTargetSessionManager {
+    fn begin_operation(
+        &mut self,
+        endpoint: &DirectCdpEndpoint,
+        operation_id: &'static str,
+        timeout: Duration,
+    ) -> BrowserResult<u64> {
+        if self.shutdown {
+            return Err(BrowserError::InvalidConfig(
+                "direct CDP target/session manager is shut down".into(),
+            ));
+        }
+        if let Some(active) = &self.active_lease {
+            return Err(BrowserError::InvalidConfig(format!(
+                "direct CDP target/session manager already owns operation {} for target hash {}; retry after the active lease is cleaned up",
+                active.operation_id, active.target_id_hash
+            )));
+        }
+        if endpoint.target.kind != DirectCdpTargetKind::Page {
+            return Err(BrowserError::InvalidConfig(format!(
+                "direct CDP target/session manager supports only page targets, got {}",
+                endpoint.target.kind.as_str()
+            )));
+        }
+
+        let target = DirectCdpOwnedTarget::from(&endpoint.target);
+        let current_tab_decision = if self.current_target.as_ref() == Some(&target) {
+            "configured_target_already_current_tab"
+        } else if self.current_target.is_some() {
+            self.current_target = Some(target);
+            self.push_event(DirectCdpManagerEvent {
+                event_kind: "stale_target_recovery",
+                command_line: direct_cdp_manager_command_line(),
+                git_revision: direct_cdp_git_revision(),
+                run_id: self.manager_id_hash.clone(),
+                manager_id_hash: self.manager_id_hash.clone(),
+                endpoint_kind: endpoint.endpoint_kind.as_str(),
+                target_kind: endpoint.target.kind.as_str(),
+                target_id_hash: endpoint.target.id_hash.clone(),
+                operation_id,
+                cdp_command_ids: Vec::new(),
+                current_tab_decision: "stale_target_recovered_and_current_tab_updated",
+                session_object_id_hash: None,
+                session_lease_seq: None,
+                retry_decision: "not_retried_manager_state_update",
+                timeout_budget_ms: duration_millis_u64(timeout),
+                timeout_checkpoint: "before_connect",
+                cancellation_checkpoint: "checkpoint_before_connect",
+                cleanup_result: "target_rebound",
+                skip_reason: None,
+            });
+            "stale_target_recovered_and_current_tab_updated"
+        } else {
+            self.current_target = Some(target);
+            self.push_event(DirectCdpManagerEvent {
+                event_kind: "target_attach",
+                command_line: direct_cdp_manager_command_line(),
+                git_revision: direct_cdp_git_revision(),
+                run_id: self.manager_id_hash.clone(),
+                manager_id_hash: self.manager_id_hash.clone(),
+                endpoint_kind: endpoint.endpoint_kind.as_str(),
+                target_kind: endpoint.target.kind.as_str(),
+                target_id_hash: endpoint.target.id_hash.clone(),
+                operation_id,
+                cdp_command_ids: Vec::new(),
+                current_tab_decision: "configured_target_attached_as_current_tab",
+                session_object_id_hash: None,
+                session_lease_seq: None,
+                retry_decision: "not_retried_initial_attach",
+                timeout_budget_ms: duration_millis_u64(timeout),
+                timeout_checkpoint: "before_connect",
+                cancellation_checkpoint: "checkpoint_before_connect",
+                cleanup_result: "target_attached",
+                skip_reason: None,
+            });
+            "configured_target_attached_as_current_tab"
+        };
+
+        let lease_seq = self.next_lease_seq;
+        self.next_lease_seq =
+            self.next_lease_seq
+                .checked_add(1)
+                .ok_or_else(|| BrowserError::Api {
+                    message: "direct CDP target/session manager lease sequence overflowed u64"
+                        .into(),
+                    status_code: None,
+                })?;
+        self.active_lease = Some(DirectCdpActiveLease {
+            lease_seq,
+            operation_id,
+            target_id_hash: endpoint.target.id_hash.clone(),
+            timeout_budget_ms: duration_millis_u64(timeout),
+        });
+        self.push_event(DirectCdpManagerEvent {
+            event_kind: "operation_begin",
+            command_line: direct_cdp_manager_command_line(),
+            git_revision: direct_cdp_git_revision(),
+            run_id: self.manager_id_hash.clone(),
+            manager_id_hash: self.manager_id_hash.clone(),
+            endpoint_kind: endpoint.endpoint_kind.as_str(),
+            target_kind: endpoint.target.kind.as_str(),
+            target_id_hash: endpoint.target.id_hash.clone(),
+            operation_id,
+            cdp_command_ids: Vec::new(),
+            current_tab_decision,
+            session_object_id_hash: None,
+            session_lease_seq: None,
+            retry_decision: "not_retried_single_direct_session_attempt",
+            timeout_budget_ms: duration_millis_u64(timeout),
+            timeout_checkpoint: "before_connect",
+            cancellation_checkpoint: "checkpoint_before_connect",
+            cleanup_result: "pending",
+            skip_reason: None,
+        });
+
+        Ok(lease_seq)
+    }
+
+    fn finish_operation(
+        &mut self,
+        endpoint: &DirectCdpEndpoint,
+        lease_seq: u64,
+        operation_id: &'static str,
+        cdp_command_ids: &[u64],
+        outcome: &'static str,
+        cleanup_result: &'static str,
+    ) -> BrowserResult<()> {
+        let Some(active) = self.active_lease.take() else {
+            return Err(BrowserError::Api {
+                message: "direct CDP target/session manager has no active lease to finish".into(),
+                status_code: None,
+            });
+        };
+        if active.lease_seq != lease_seq || active.operation_id != operation_id {
+            self.active_lease = Some(active);
+            return Err(BrowserError::Api {
+                message: "direct CDP target/session manager lease mismatch during cleanup".into(),
+                status_code: None,
+            });
+        }
+        let event_kind = if outcome == "success" {
+            "operation_complete"
+        } else {
+            "operation_failed"
+        };
+        self.push_event(DirectCdpManagerEvent {
+            event_kind,
+            command_line: direct_cdp_manager_command_line(),
+            git_revision: direct_cdp_git_revision(),
+            run_id: self.manager_id_hash.clone(),
+            manager_id_hash: self.manager_id_hash.clone(),
+            endpoint_kind: endpoint.endpoint_kind.as_str(),
+            target_kind: endpoint.target.kind.as_str(),
+            target_id_hash: endpoint.target.id_hash.clone(),
+            operation_id,
+            cdp_command_ids: cdp_command_ids.to_vec(),
+            current_tab_decision: "configured_target_remains_current_tab",
+            session_object_id_hash: None,
+            session_lease_seq: None,
+            retry_decision: if outcome == "success" {
+                "not_retried_completed"
+            } else {
+                "retry_delegated_to_operation_policy"
+            },
+            timeout_budget_ms: active.timeout_budget_ms,
+            timeout_checkpoint: "operation_scope_finished",
+            cancellation_checkpoint: "checkpoint_after_operation",
+            cleanup_result,
+            skip_reason: None,
+        });
+        Ok(())
+    }
+
+    fn record_session_object(
+        &mut self,
+        endpoint: &DirectCdpEndpoint,
+        operation_id: &'static str,
+        raw_object_id: &str,
+        lease_seq: u64,
+        cookie_scope: Option<&str>,
+    ) -> BrowserResult<String> {
+        if lease_seq == 0 {
+            return Err(BrowserError::InvalidConfig(
+                "direct CDP session object lease_seq must be greater than zero".into(),
+            ));
+        }
+        let object_id_hash = direct_cdp_redaction_hash(raw_object_id);
+        let cookie_scope_hash = cookie_scope.map(direct_cdp_redaction_hash);
+        self.session_objects.insert(
+            object_id_hash.clone(),
+            DirectCdpSessionObjectLease {
+                object_id_hash: object_id_hash.clone(),
+                lease_seq,
+                cookie_scope_hash: cookie_scope_hash.clone(),
+            },
+        );
+        let recorded =
+            self.session_objects
+                .get(&object_id_hash)
+                .ok_or_else(|| BrowserError::Api {
+                    message: "direct CDP session object lease was not recorded".into(),
+                    status_code: None,
+                })?;
+        self.push_event(DirectCdpManagerEvent {
+            event_kind: "session_object_recorded",
+            command_line: direct_cdp_manager_command_line(),
+            git_revision: direct_cdp_git_revision(),
+            run_id: self.manager_id_hash.clone(),
+            manager_id_hash: self.manager_id_hash.clone(),
+            endpoint_kind: endpoint.endpoint_kind.as_str(),
+            target_kind: endpoint.target.kind.as_str(),
+            target_id_hash: endpoint.target.id_hash.clone(),
+            operation_id,
+            cdp_command_ids: Vec::new(),
+            current_tab_decision: if recorded.cookie_scope_hash.is_some() {
+                "cookie_state_owned_by_manager"
+            } else {
+                "session_state_owned_by_manager"
+            },
+            session_object_id_hash: Some(format!("blake3:{}", recorded.object_id_hash)),
+            session_lease_seq: Some(recorded.lease_seq),
+            retry_decision: "not_applicable_local_state",
+            timeout_budget_ms: 0,
+            timeout_checkpoint: "not_applicable_local_state",
+            cancellation_checkpoint: "not_applicable_local_state",
+            cleanup_result: "session_object_leased",
+            skip_reason: None,
+        });
+        Ok(object_id_hash)
+    }
+
+    fn shutdown(&mut self) {
+        let had_active_lease = self.active_lease.take().is_some();
+        self.shutdown = true;
+        self.push_event(DirectCdpManagerEvent {
+            event_kind: "manager_shutdown",
+            command_line: direct_cdp_manager_command_line(),
+            git_revision: direct_cdp_git_revision(),
+            run_id: self.manager_id_hash.clone(),
+            manager_id_hash: self.manager_id_hash.clone(),
+            endpoint_kind: "not_applicable",
+            target_kind: self
+                .current_target
+                .as_ref()
+                .map_or("not_applicable", |target| target.kind.as_str()),
+            target_id_hash: self.current_target.as_ref().map_or_else(
+                || "not_applicable".to_string(),
+                |target| target.id_hash.clone(),
+            ),
+            operation_id: "browser.shutdown",
+            cdp_command_ids: Vec::new(),
+            current_tab_decision: "manager_shutdown_cleared_active_owner",
+            session_object_id_hash: None,
+            session_lease_seq: None,
+            retry_decision: "not_applicable_shutdown",
+            timeout_budget_ms: 0,
+            timeout_checkpoint: "not_applicable_shutdown",
+            cancellation_checkpoint: "shutdown_signal_observed",
+            cleanup_result: if had_active_lease {
+                "active_lease_released_no_orphan"
+            } else {
+                "no_active_lease_no_orphan"
+            },
+            skip_reason: None,
+        });
+    }
+
+    fn push_event(&mut self, event: DirectCdpManagerEvent) {
+        self.events.push(event);
+    }
+
+    #[cfg(test)]
+    fn events_jsonl(&self) -> String {
+        self.events
+            .iter()
+            .map(|event| serde_json::to_string(event).expect("manager event should serialize"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+struct DirectCdpManagerLease {
+    manager: Arc<Mutex<DirectCdpTargetSessionManager>>,
+    endpoint: DirectCdpEndpoint,
+    operation_id: &'static str,
+    lease_seq: u64,
+    finished: bool,
+}
+
+impl DirectCdpManagerLease {
+    fn acquire(
+        manager: Arc<Mutex<DirectCdpTargetSessionManager>>,
+        endpoint: &DirectCdpEndpoint,
+        operation_id: &'static str,
+        timeout: Duration,
+    ) -> BrowserResult<Self> {
+        let lease_seq = {
+            let mut state = lock_direct_cdp_manager(&manager)?;
+            state.begin_operation(endpoint, operation_id, timeout)?
+        };
+
+        Ok(Self {
+            manager,
+            endpoint: endpoint.clone(),
+            operation_id,
+            lease_seq,
+            finished: false,
+        })
+    }
+
+    fn finish(
+        &mut self,
+        cdp_command_ids: &[u64],
+        outcome: &'static str,
+        cleanup_result: &'static str,
+    ) -> BrowserResult<()> {
+        let mut state = lock_direct_cdp_manager(&self.manager)?;
+        state.finish_operation(
+            &self.endpoint,
+            self.lease_seq,
+            self.operation_id,
+            cdp_command_ids,
+            outcome,
+            cleanup_result,
+        )?;
+        self.finished = true;
+        Ok(())
+    }
+}
+
+impl Drop for DirectCdpManagerLease {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        if let Ok(mut state) = self.manager.lock() {
+            let _ = state.finish_operation(
+                &self.endpoint,
+                self.lease_seq,
+                self.operation_id,
+                &[],
+                "cancelled_or_dropped",
+                "lease_dropped_cleanup",
+            );
+            self.finished = true;
+        }
     }
 }
 
@@ -388,12 +826,41 @@ fn direct_cdp_target_from_path(path: &str) -> BrowserResult<DirectCdpTarget> {
 }
 
 fn direct_cdp_target_id_hash(target_id: &str) -> String {
-    blake3::hash(target_id.as_bytes())
+    direct_cdp_redaction_hash(target_id)
+}
+
+fn direct_cdp_redaction_hash(value: &str) -> String {
+    blake3::hash(value.as_bytes())
         .to_hex()
         .as_str()
         .chars()
         .take(16)
         .collect()
+}
+
+const fn direct_cdp_manager_command_line() -> &'static str {
+    "fcp-browser direct-cdp target-session-manager"
+}
+
+fn direct_cdp_git_revision() -> String {
+    option_env!("GIT_COMMIT")
+        .or(option_env!("VERGEN_GIT_SHA"))
+        .or(option_env!("SOURCE_DATE_EPOCH"))
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn lock_direct_cdp_manager(
+    manager: &Arc<Mutex<DirectCdpTargetSessionManager>>,
+) -> BrowserResult<MutexGuard<'_, DirectCdpTargetSessionManager>> {
+    manager.lock().map_err(|_| BrowserError::Api {
+        message: "direct CDP target/session manager lock was poisoned".into(),
+        status_code: None,
+    })
 }
 
 fn redacted_direct_cdp_url(parsed: &WsUrl, target: &DirectCdpTarget) -> String {
@@ -1697,6 +2164,17 @@ where
         }
     }
 
+    fn next_command_id(&self) -> u64 {
+        self.next_command_id
+    }
+
+    fn command_ids_since(&self, start_command_id: u64) -> Vec<u64> {
+        if start_command_id >= self.next_command_id {
+            return Vec::new();
+        }
+        (start_command_id..self.next_command_id).collect()
+    }
+
     async fn call_method(
         &mut self,
         cx: &Cx,
@@ -2492,6 +2970,7 @@ pub struct BrowserClient {
     auth: BrowserAuth,
     runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
+    direct_cdp_manager: Arc<Mutex<DirectCdpTargetSessionManager>>,
 }
 
 impl std::fmt::Debug for BrowserClient {
@@ -2556,12 +3035,16 @@ impl BrowserClient {
                 max_retries: 2,
                 ..HttpRetryConfig::default()
             },
+            direct_cdp_manager: Arc::new(Mutex::new(DirectCdpTargetSessionManager::default())),
         })
     }
 
     /// Shut down the connector runtime.
     pub fn shutdown(&self) {
         self.runtime.shutdown();
+        if let Ok(mut manager) = self.direct_cdp_manager.lock() {
+            manager.shutdown();
+        }
     }
 
     /// Lightweight connectivity probe for the FCP browser-control plane.
@@ -2617,18 +3100,67 @@ impl BrowserClient {
         browser_control_endpoint_for_url(&self.browser_url)
     }
 
-    async fn direct_cdp_health_check(&self, endpoint: &DirectCdpEndpoint) -> BrowserResult<()> {
-        let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_SHORT);
+    async fn direct_cdp_session_operation<T, F>(
+        &self,
+        endpoint: &DirectCdpEndpoint,
+        operation_id: &'static str,
+        context_operation: &'static str,
+        timeout: Duration,
+        max_response_bytes: usize,
+        run: F,
+    ) -> BrowserResult<T>
+    where
+        F: for<'a> FnOnce(
+            &'a Cx,
+            &'a mut CdpSession<WebSocket<TcpStream>>,
+        ) -> DirectCdpSessionFuture<'a, T>,
+    {
         let ctx = self.request_context_for_timeout(timeout);
-        ctx.run(async {
+        let manager = Arc::clone(&self.direct_cdp_manager);
+        let endpoint = endpoint.clone();
+        ctx.run(async move {
+            let mut lease =
+                DirectCdpManagerLease::acquire(manager, &endpoint, operation_id, timeout)?;
             let cx = fcp_async_core::compatibility_cx();
             let mut session =
-                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_SMALL)
-                    .await?;
-            session.evaluate_expression(&cx, "1").await.map(|_| ())
+                match connect_direct_cdp_session(&cx, &endpoint, timeout, max_response_bytes).await
+                {
+                    Ok(session) => session,
+                    Err(err) => {
+                        lease.finish(&[], "connect_error", "connect_failed_cleanup")?;
+                        return Err(err);
+                    }
+                };
+            let first_command_id = session.next_command_id();
+            let result = run(&cx, &mut session).await;
+            let cdp_command_ids = session.command_ids_since(first_command_id);
+            let outcome = if result.is_ok() { "success" } else { "error" };
+            let finish_result = lease.finish(&cdp_command_ids, outcome, "session_closed_by_scope");
+
+            match (result, finish_result) {
+                (Ok(value), Ok(())) => Ok(value),
+                (Err(err), Ok(())) => Err(err),
+                (Ok(_), Err(err)) => Err(err),
+                (Err(err), Err(_)) => Err(err),
+            }
         })
         .await
-        .map_err(|err| direct_cdp_context_error("health_check", err))?
+        .map_err(|err| direct_cdp_context_error(context_operation, err))?
+    }
+
+    async fn direct_cdp_health_check(&self, endpoint: &DirectCdpEndpoint) -> BrowserResult<()> {
+        let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_SHORT);
+        self.direct_cdp_session_operation(
+            endpoint,
+            "browser.health_check",
+            "health_check",
+            timeout,
+            CONTROL_RESPONSE_BYTES_SMALL,
+            |cx, session| {
+                Box::pin(async move { session.evaluate_expression(cx, "1").await.map(|_| ()) })
+            },
+        )
+        .await
     }
 
     async fn direct_cdp_navigate(
@@ -2640,28 +3172,31 @@ impl BrowserClient {
         user_agent: Option<&str>,
     ) -> BrowserResult<NavigateResult> {
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(CONTROL_TIMEOUT_MS_STANDARD));
-        let ctx = self.request_context_for_timeout(timeout);
-        ctx.run(async {
-            let cx = fcp_async_core::compatibility_cx();
-            let mut session =
-                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_STANDARD)
-                    .await?;
-            let navigation = session.navigate_page(&cx, url, user_agent).await?;
-            let completion = session
-                .wait_for_navigation(&cx, &navigation, wait_until)
-                .await?;
-            let title = session
-                .evaluate_expression(&cx, "document.title")
-                .await?
-                .result;
-            Ok(NavigateResult {
-                url: url.to_string(),
-                status: completion.status.unwrap_or(0),
-                title: (!title.is_empty()).then_some(title),
-            })
-        })
+        self.direct_cdp_session_operation(
+            endpoint,
+            "browser.navigate",
+            "navigate",
+            timeout,
+            CONTROL_RESPONSE_BYTES_STANDARD,
+            |cx, session| {
+                Box::pin(async move {
+                    let navigation = session.navigate_page(cx, url, user_agent).await?;
+                    let completion = session
+                        .wait_for_navigation(cx, &navigation, wait_until)
+                        .await?;
+                    let title = session
+                        .evaluate_expression(cx, "document.title")
+                        .await?
+                        .result;
+                    Ok(NavigateResult {
+                        url: url.to_string(),
+                        status: completion.status.unwrap_or(0),
+                        title: (!title.is_empty()).then_some(title),
+                    })
+                })
+            },
+        )
         .await
-        .map_err(|err| direct_cdp_context_error("navigate", err))?
     }
 
     async fn direct_cdp_screenshot(
@@ -2673,23 +3208,32 @@ impl BrowserClient {
         quality: Option<u32>,
     ) -> BrowserResult<ScreenshotResult> {
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_CAPTURE);
-        let ctx = self.request_context_for_timeout(timeout);
-        ctx.run(async {
-            let cx = fcp_async_core::compatibility_cx();
-            let mut session =
-                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_CAPTURE)
-                    .await?;
-            let response = session
-                .capture_screenshot(&cx, selector, full_page.unwrap_or(false), format, quality)
-                .await?;
-            Ok(ScreenshotResult {
-                image_data: response.image_data,
-                width: response.width,
-                height: response.height,
-            })
-        })
+        self.direct_cdp_session_operation(
+            endpoint,
+            "browser.screenshot",
+            "screenshot",
+            timeout,
+            CONTROL_RESPONSE_BYTES_CAPTURE,
+            |cx, session| {
+                Box::pin(async move {
+                    let response = session
+                        .capture_screenshot(
+                            cx,
+                            selector,
+                            full_page.unwrap_or(false),
+                            format,
+                            quality,
+                        )
+                        .await?;
+                    Ok(ScreenshotResult {
+                        image_data: response.image_data,
+                        width: response.width,
+                        height: response.height,
+                    })
+                })
+            },
+        )
         .await
-        .map_err(|err| direct_cdp_context_error("screenshot", err))?
     }
 
     async fn direct_cdp_render_pdf(
@@ -2700,22 +3244,25 @@ impl BrowserClient {
         print_background: Option<bool>,
     ) -> BrowserResult<PdfResult> {
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_CAPTURE);
-        let ctx = self.request_context_for_timeout(timeout);
-        ctx.run(async {
-            let cx = fcp_async_core::compatibility_cx();
-            let mut session =
-                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_CAPTURE)
-                    .await?;
-            let response = session
-                .render_pdf(&cx, format, landscape, print_background)
-                .await?;
-            Ok(PdfResult {
-                pdf_data: response.pdf_data,
-                page_count: response.page_count,
-            })
-        })
+        self.direct_cdp_session_operation(
+            endpoint,
+            "browser.render_pdf",
+            "render_pdf",
+            timeout,
+            CONTROL_RESPONSE_BYTES_CAPTURE,
+            |cx, session| {
+                Box::pin(async move {
+                    let response = session
+                        .render_pdf(cx, format, landscape, print_background)
+                        .await?;
+                    Ok(PdfResult {
+                        pdf_data: response.pdf_data,
+                        page_count: response.page_count,
+                    })
+                })
+            },
+        )
         .await
-        .map_err(|err| direct_cdp_context_error("render_pdf", err))?
     }
 
     async fn direct_cdp_extract_text(
@@ -2725,16 +3272,17 @@ impl BrowserClient {
         include_hidden: Option<bool>,
     ) -> BrowserResult<TextResult> {
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
-        let ctx = self.request_context_for_timeout(timeout);
-        ctx.run(async {
-            let cx = fcp_async_core::compatibility_cx();
-            let mut session =
-                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_STANDARD)
-                    .await?;
-            session.extract_text(&cx, selector, include_hidden).await
-        })
+        self.direct_cdp_session_operation(
+            endpoint,
+            "browser.extract_text",
+            "extract_text",
+            timeout,
+            CONTROL_RESPONSE_BYTES_STANDARD,
+            |cx, session| {
+                Box::pin(async move { session.extract_text(cx, selector, include_hidden).await })
+            },
+        )
         .await
-        .map_err(|err| direct_cdp_context_error("extract_text", err))?
     }
 
     async fn direct_cdp_extract_links(
@@ -2743,16 +3291,15 @@ impl BrowserClient {
         selector: Option<&str>,
     ) -> BrowserResult<LinksResult> {
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
-        let ctx = self.request_context_for_timeout(timeout);
-        ctx.run(async {
-            let cx = fcp_async_core::compatibility_cx();
-            let mut session =
-                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_STANDARD)
-                    .await?;
-            session.extract_links(&cx, selector).await
-        })
+        self.direct_cdp_session_operation(
+            endpoint,
+            "browser.extract_links",
+            "extract_links",
+            timeout,
+            CONTROL_RESPONSE_BYTES_STANDARD,
+            |cx, session| Box::pin(async move { session.extract_links(cx, selector).await }),
+        )
         .await
-        .map_err(|err| direct_cdp_context_error("extract_links", err))?
     }
 
     async fn direct_cdp_wait_for_selector(
@@ -2763,18 +3310,21 @@ impl BrowserClient {
         timeout_ms: Option<u64>,
     ) -> BrowserResult<WaitResult> {
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(CONTROL_TIMEOUT_MS_STANDARD));
-        let ctx = self.request_context_for_timeout(timeout);
-        ctx.run(async {
-            let cx = fcp_async_core::compatibility_cx();
-            let mut session =
-                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_STANDARD)
-                    .await?;
-            session
-                .wait_for_selector(&cx, selector, state, timeout_ms)
-                .await
-        })
+        self.direct_cdp_session_operation(
+            endpoint,
+            "browser.wait_for_selector",
+            "wait_for_selector",
+            timeout,
+            CONTROL_RESPONSE_BYTES_STANDARD,
+            |cx, session| {
+                Box::pin(async move {
+                    session
+                        .wait_for_selector(cx, selector, state, timeout_ms)
+                        .await
+                })
+            },
+        )
         .await
-        .map_err(|err| direct_cdp_context_error("wait_for_selector", err))?
     }
 
     async fn direct_cdp_click(
@@ -2784,16 +3334,15 @@ impl BrowserClient {
         timeout_ms: Option<u64>,
     ) -> BrowserResult<ClickResult> {
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(CONTROL_TIMEOUT_MS_STANDARD));
-        let ctx = self.request_context_for_timeout(timeout);
-        ctx.run(async {
-            let cx = fcp_async_core::compatibility_cx();
-            let mut session =
-                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_STANDARD)
-                    .await?;
-            session.click(&cx, selector, timeout_ms).await
-        })
+        self.direct_cdp_session_operation(
+            endpoint,
+            "browser.click",
+            "click",
+            timeout,
+            CONTROL_RESPONSE_BYTES_STANDARD,
+            |cx, session| Box::pin(async move { session.click(cx, selector, timeout_ms).await }),
+        )
         .await
-        .map_err(|err| direct_cdp_context_error("click", err))?
     }
 
     async fn direct_cdp_fill_form(
@@ -2803,16 +3352,17 @@ impl BrowserClient {
         submit_selector: Option<&str>,
     ) -> BrowserResult<FormResult> {
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
-        let ctx = self.request_context_for_timeout(timeout);
-        ctx.run(async {
-            let cx = fcp_async_core::compatibility_cx();
-            let mut session =
-                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_STANDARD)
-                    .await?;
-            session.fill_form(&cx, fields, submit_selector).await
-        })
+        self.direct_cdp_session_operation(
+            endpoint,
+            "browser.fill_form",
+            "fill_form",
+            timeout,
+            CONTROL_RESPONSE_BYTES_STANDARD,
+            |cx, session| {
+                Box::pin(async move { session.fill_form(cx, fields, submit_selector).await })
+            },
+        )
         .await
-        .map_err(|err| direct_cdp_context_error("fill_form", err))?
     }
 
     async fn direct_cdp_evaluate_js(
@@ -2821,19 +3371,22 @@ impl BrowserClient {
         expression: &str,
     ) -> BrowserResult<JsResult> {
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
-        let ctx = self.request_context_for_timeout(timeout);
-        ctx.run(async {
-            let cx = fcp_async_core::compatibility_cx();
-            let mut session =
-                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_STANDARD)
-                    .await?;
-            let response = session.evaluate_expression(&cx, expression).await?;
-            Ok(JsResult {
-                result: response.result,
-            })
-        })
+        self.direct_cdp_session_operation(
+            endpoint,
+            "browser.evaluate_js",
+            "evaluate_js",
+            timeout,
+            CONTROL_RESPONSE_BYTES_STANDARD,
+            |cx, session| {
+                Box::pin(async move {
+                    let response = session.evaluate_expression(cx, expression).await?;
+                    Ok(JsResult {
+                        result: response.result,
+                    })
+                })
+            },
+        )
         .await
-        .map_err(|err| direct_cdp_context_error("evaluate_js", err))?
     }
 
     async fn direct_cdp_get_cookies(
@@ -2842,19 +3395,22 @@ impl BrowserClient {
         domain: Option<&str>,
     ) -> BrowserResult<Vec<Cookie>> {
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
-        let ctx = self.request_context_for_timeout(timeout);
-        ctx.run(async {
-            let cx = fcp_async_core::compatibility_cx();
-            let mut session =
-                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_STANDARD)
-                    .await?;
-            session
-                .get_cookies(&cx, domain)
-                .await
-                .map(|response| response.cookies)
-        })
+        self.direct_cdp_session_operation(
+            endpoint,
+            "browser.get_cookies",
+            "get_cookies",
+            timeout,
+            CONTROL_RESPONSE_BYTES_STANDARD,
+            |cx, session| {
+                Box::pin(async move {
+                    session
+                        .get_cookies(cx, domain)
+                        .await
+                        .map(|response| response.cookies)
+                })
+            },
+        )
         .await
-        .map_err(|err| direct_cdp_context_error("get_cookies", err))?
     }
 
     async fn direct_cdp_set_cookies(
@@ -2863,19 +3419,22 @@ impl BrowserClient {
         cookies: &[Cookie],
     ) -> BrowserResult<u32> {
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
-        let ctx = self.request_context_for_timeout(timeout);
-        ctx.run(async {
-            let cx = fcp_async_core::compatibility_cx();
-            let mut session =
-                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_STANDARD)
-                    .await?;
-            session
-                .set_cookies(&cx, cookies)
-                .await
-                .map(|response| response.set_count)
-        })
+        self.direct_cdp_session_operation(
+            endpoint,
+            "browser.set_cookies",
+            "set_cookies",
+            timeout,
+            CONTROL_RESPONSE_BYTES_STANDARD,
+            |cx, session| {
+                Box::pin(async move {
+                    session
+                        .set_cookies(cx, cookies)
+                        .await
+                        .map(|response| response.set_count)
+                })
+            },
+        )
         .await
-        .map_err(|err| direct_cdp_context_error("set_cookies", err))?
     }
 
     // -- Navigation --
@@ -3821,6 +4380,152 @@ mod tests {
         assert!(redacted.starts_with("ws://localhost:9222/devtools/page/target-hash-"));
         assert!(!redacted.contains("sensitive-target"));
         assert!(!descriptor.to_string().contains("sensitive-target"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_direct_cdp_manager_single_owner_state_transitions_and_jsonl() -> BrowserResult<()> {
+        let endpoint =
+            browser_control_endpoint_for_url("ws://127.0.0.1:9222/devtools/page/page-alpha")?;
+        let BrowserControlEndpoint::DirectCdp(endpoint) = endpoint else {
+            return Err(BrowserError::InvalidConfig(
+                "expected direct CDP endpoint".into(),
+            ));
+        };
+        let replacement =
+            browser_control_endpoint_for_url("ws://127.0.0.1:9222/devtools/page/page-beta")?;
+        let BrowserControlEndpoint::DirectCdp(replacement) = replacement else {
+            return Err(BrowserError::InvalidConfig(
+                "expected direct CDP endpoint".into(),
+            ));
+        };
+        let manager = Arc::new(Mutex::new(DirectCdpTargetSessionManager::default()));
+        let mut lease = DirectCdpManagerLease::acquire(
+            Arc::clone(&manager),
+            &endpoint,
+            "browser.navigate",
+            Duration::from_millis(1_500),
+        )?;
+
+        let busy = DirectCdpManagerLease::acquire(
+            Arc::clone(&manager),
+            &endpoint,
+            "browser.screenshot",
+            Duration::from_millis(1_500),
+        )
+        .unwrap_err();
+        assert!(format!("{busy}").contains("already owns operation browser.navigate"));
+
+        lease.finish(&[1, 2, 3], "success", "session_closed_by_scope")?;
+        let mut replacement_lease = DirectCdpManagerLease::acquire(
+            Arc::clone(&manager),
+            &replacement,
+            "browser.get_cookies",
+            Duration::from_millis(2_000),
+        )?;
+        replacement_lease.finish(&[4], "success", "session_closed_by_scope")?;
+
+        let guard = manager.lock().unwrap();
+        assert!(guard.active_lease.is_none());
+        assert_eq!(
+            guard
+                .current_target
+                .as_ref()
+                .map(|target| target.id_hash.as_str()),
+            Some(replacement.target.id_hash.as_str())
+        );
+        let jsonl = guard.events_jsonl();
+        let artifact_dir = std::env::temp_dir().join("fcp-browser-direct-cdp-manager");
+        std::fs::create_dir_all(&artifact_dir).expect("manager artifact dir should be writable");
+        let artifact_path = artifact_dir.join("logs.jsonl");
+        std::fs::write(&artifact_path, &jsonl).expect("manager JSONL artifact should be writable");
+        assert!(artifact_path.ends_with("logs.jsonl"));
+        assert!(
+            jsonl.contains("\"command_line\":\"fcp-browser direct-cdp target-session-manager\"")
+        );
+        assert!(jsonl.contains("\"git_revision\""));
+        assert!(jsonl.contains("\"run_id\""));
+        assert!(jsonl.contains("\"event_kind\":\"target_attach\""));
+        assert!(jsonl.contains("\"event_kind\":\"stale_target_recovery\""));
+        assert!(jsonl.contains("\"event_kind\":\"operation_complete\""));
+        assert!(jsonl.contains("\"manager_id_hash\""));
+        assert!(jsonl.contains("\"cdp_command_ids\":[1,2,3]"));
+        assert!(jsonl.contains("\"timeout_budget_ms\":1500"));
+        assert!(!jsonl.contains("page-alpha"));
+        assert!(!jsonl.contains("page-beta"));
+        assert!(!jsonl.contains("ws://127.0.0.1:9222/devtools/page/page"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_direct_cdp_manager_cookie_session_lease_metadata_is_redacted() -> BrowserResult<()> {
+        let endpoint = browser_control_endpoint_for_url(
+            "ws://localhost:9222/devtools/page/session-target-secret",
+        )?;
+        let BrowserControlEndpoint::DirectCdp(endpoint) = endpoint else {
+            return Err(BrowserError::InvalidConfig(
+                "expected direct CDP endpoint".into(),
+            ));
+        };
+        let mut manager = DirectCdpTargetSessionManager::default();
+        let object_hash = manager.record_session_object(
+            &endpoint,
+            "browser.session.save",
+            "/Users/example/private/profile/session-object-secret",
+            42,
+            Some("private.example.test"),
+        )?;
+
+        assert_eq!(object_hash.len(), 16);
+        let jsonl = manager.events_jsonl();
+        assert!(jsonl.contains("\"event_kind\":\"session_object_recorded\""));
+        assert!(jsonl.contains("\"current_tab_decision\":\"cookie_state_owned_by_manager\""));
+        assert!(jsonl.contains("\"session_object_id_hash\":\"blake3:"));
+        assert!(!jsonl.contains("session-object-secret"));
+        assert!(!jsonl.contains("/Users/example"));
+        assert!(!jsonl.contains("private.example.test"));
+        assert!(!jsonl.contains("session-target-secret"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_direct_cdp_manager_shutdown_releases_active_lease_without_orphan() -> BrowserResult<()>
+    {
+        let endpoint =
+            browser_control_endpoint_for_url("ws://127.0.0.1:9222/devtools/page/page-shutdown")?;
+        let BrowserControlEndpoint::DirectCdp(endpoint) = endpoint else {
+            return Err(BrowserError::InvalidConfig(
+                "expected direct CDP endpoint".into(),
+            ));
+        };
+        let manager = Arc::new(Mutex::new(DirectCdpTargetSessionManager::default()));
+        let lease = DirectCdpManagerLease::acquire(
+            Arc::clone(&manager),
+            &endpoint,
+            "browser.evaluate_js",
+            Duration::from_millis(500),
+        )?;
+        drop(lease);
+        {
+            let mut guard = manager.lock().unwrap();
+            assert!(guard.active_lease.is_none());
+            guard.shutdown();
+        }
+        let rejected = DirectCdpManagerLease::acquire(
+            Arc::clone(&manager),
+            &endpoint,
+            "browser.evaluate_js",
+            Duration::from_millis(500),
+        )
+        .unwrap_err();
+        assert!(format!("{rejected}").contains("manager is shut down"));
+
+        let guard = manager.lock().unwrap();
+        let jsonl = guard.events_jsonl();
+        assert!(jsonl.contains("\"cleanup_result\":\"lease_dropped_cleanup\""));
+        assert!(jsonl.contains("\"cleanup_result\":\"no_active_lease_no_orphan\""));
+        assert!(jsonl.contains("\"cancellation_checkpoint\":\"shutdown_signal_observed\""));
+        assert!(!jsonl.contains("page-shutdown"));
         Ok(())
     }
 

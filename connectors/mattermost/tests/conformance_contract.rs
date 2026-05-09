@@ -41,6 +41,67 @@ fn manifest_operation_schema(
         .map_err(|err| format!("{operation_id}.{field} should convert to JSON: {err}"))
 }
 
+fn manifest_operation_network_constraints<'a>(
+    manifest: &'a toml::Table,
+    operation_id: &str,
+) -> Result<&'a toml::map::Map<String, toml::Value>, String> {
+    manifest_operations(manifest)?
+        .get(operation_id)
+        .and_then(toml::Value::as_table)
+        .and_then(|operation| operation.get("network_constraints"))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| format!("{operation_id} should declare network_constraints"))
+}
+
+fn string_array(
+    table: &toml::map::Map<String, toml::Value>,
+    key: &str,
+) -> Result<Vec<String>, String> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| format!("{key} should be an array"))?
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{key} entries should be strings"))
+        })
+        .collect()
+}
+
+fn integer_array(
+    table: &toml::map::Map<String, toml::Value>,
+    key: &str,
+) -> Result<Vec<i64>, String> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| format!("{key} should be an array"))?
+        .iter()
+        .map(|entry| {
+            entry
+                .as_integer()
+                .ok_or_else(|| format!("{key} entries should be integers"))
+        })
+        .collect()
+}
+
+fn bool_value(table: &toml::map::Map<String, toml::Value>, key: &str) -> Result<bool, String> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_bool)
+        .ok_or_else(|| format!("{key} should be a boolean"))
+}
+
+fn integer_value(table: &toml::map::Map<String, toml::Value>, key: &str) -> Result<i64, String> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_integer)
+        .ok_or_else(|| format!("{key} should be an integer"))
+}
+
 fn validator_for(schema: &Value) -> Result<jsonschema::Validator, String> {
     jsonschema::Validator::new(schema)
         .map_err(|err| format!("operation schema should compile as JSON Schema: {err}"))
@@ -118,6 +179,48 @@ fn mattermost_manifest_and_runtime_catalog_have_contract_coverage() -> Result<()
             "runtime catalog should expose manifest operation {manifest_operation_id}"
         );
     }
+
+    Ok(())
+}
+
+#[test]
+fn mattermost_manifest_declares_per_operation_network_constraints() -> Result<(), String> {
+    let manifest = manifest()?;
+    let operations = manifest_operations(&manifest)?;
+
+    for (operation_id, operation) in operations {
+        let constraints = operation
+            .as_table()
+            .and_then(|operation| operation.get("network_constraints"))
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| format!("{operation_id} should declare network_constraints"))?;
+        assert!(
+            !string_array(constraints, "host_allow")?.is_empty(),
+            "{operation_id} host_allow should not be empty"
+        );
+        assert!(
+            !integer_array(constraints, "port_allow")?.is_empty(),
+            "{operation_id} port_allow should not be empty"
+        );
+        let _require_sni = bool_value(constraints, "require_sni")?;
+        let _deny_private_ranges = bool_value(constraints, "deny_private_ranges")?;
+    }
+
+    let slash =
+        manifest_operation_network_constraints(&manifest, "mattermost.authorize_slash_command")?;
+    assert_eq!(string_array(slash, "host_allow")?, vec!["none.invalid"]);
+    assert_eq!(integer_array(slash, "port_allow")?, vec![0]);
+    assert!(!bool_value(slash, "require_sni")?);
+    assert!(bool_value(slash, "deny_localhost")?);
+    assert!(bool_value(slash, "deny_private_ranges")?);
+    assert!(bool_value(slash, "deny_tailnet_ranges")?);
+    assert!(bool_value(slash, "deny_ip_literals")?);
+    assert!(bool_value(slash, "require_host_canonicalization")?);
+    assert_eq!(integer_value(slash, "dns_max_ips")?, 0);
+    assert_eq!(integer_value(slash, "max_redirects")?, 0);
+    assert_eq!(integer_value(slash, "connect_timeout_ms")?, 1_000);
+    assert_eq!(integer_value(slash, "total_timeout_ms")?, 30_000);
+    assert_eq!(integer_value(slash, "max_response_bytes")?, 1_048_576);
 
     Ok(())
 }

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:bc27ff97696c469eb98f6964560fe9855597aec56df05865c7a570829e197997"
+interface_hash = "blake3-256:fcp.interface.v2:5c56140fff96821173c29e1ffdbafded142cd3441ebf64459443814e61f6bbe2"
 
 [connector]
 id = "fcp.mattermost"
@@ -376,6 +376,24 @@ type = "object"
 
 [provides.operations."mattermost.authorize_slash_command".output_schema]
 type = "object"
+
+[provides.operations."mattermost.authorize_slash_command".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+require_sni = false
+spki_pins = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 # ── Events ──
 

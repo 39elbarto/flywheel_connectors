@@ -157,6 +157,7 @@ This README documents runtime truth and keeps current drift visible:
 - Runtime websocket subscription is monitor-only. It does not persist an event cursor, replay missed events, or acknowledge events.
 - Runtime event topics are normalized FCP topic names such as `mattermost.posted`, not raw provider event names.
 - Manifest network constraints use placeholder hosts `*.example.com`, while runtime accepts any trimmed `base_url` and builds requests from it.
+- `mattermost.authorize_slash_command` is the exception: it declares a no-egress sentinel because it evaluates the local monitor policy and never calls Mattermost or a response URL.
 - Manifest required capabilities use `network.dns`, `network.egress`, and `network.tls.sni`, while the runtime configure path does not enforce a URL or network policy.
 - Runtime accepts `credential_id` and forwards a credential-ID header, but this connector does not itself prove that an egress proxy resolves the credential into a provider token.
 - Runtime `health()` is local while `doctor()` and `self_check()` are live `GET /api/v4/users/me` probes.

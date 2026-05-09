@@ -146,7 +146,11 @@ fn main() -> ExitCode {
         .or_else(|| env::var("FCP_TAILNET_EVIDENCE_GIT_REVISION").ok())
         .unwrap_or_else(detect_git_revision);
     for route_mode in cli.route_selection.route_modes() {
-        let mut observation = observe_tailnet(localapi_url.as_deref(), route_mode);
+        let route_peer_identity = invoke_probe_config
+            .as_ref()
+            .map(|config| &config.route_peer_identity);
+        let mut observation =
+            observe_tailnet(localapi_url.as_deref(), route_mode, route_peer_identity);
         let record = if let Some(config) = &invoke_probe_config {
             observation.production_mesh_invoke_transport_available = true;
             observation.production_mesh_invoke_transport_detail =
@@ -391,6 +395,75 @@ struct TailnetInvokeProbeConfig {
     attempts: usize,
     caller_node_id: String,
     responder_node_id: String,
+    route_peer_identity: TailnetInvokeRoutePeerIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TailnetInvokeRoutePeerIdentity {
+    invoke_host: String,
+    invoke_ip: Option<IpAddr>,
+    responder_node_id: String,
+}
+
+impl TailnetInvokeRoutePeerIdentity {
+    fn new(invoke_url: &str, responder_node_id: &str) -> Result<Self, String> {
+        let url = Url::parse(invoke_url)
+            .map_err(|error| format!("--invoke-url must be an absolute URL: {error}"))?;
+        let invoke_host = url
+            .host_str()
+            .map(normalize_tailnet_identity)
+            .ok_or_else(|| "--invoke-url must include a host".to_string())?;
+        let invoke_ip = invoke_host.parse::<IpAddr>().ok();
+        Ok(Self {
+            invoke_host,
+            invoke_ip,
+            responder_node_id: normalize_tailnet_identity(responder_node_id),
+        })
+    }
+
+    fn matches_peer(&self, peer_key: &str, peer: &serde_json::Map<String, Value>) -> bool {
+        if self.matches_text(peer_key) {
+            return true;
+        }
+        for field in ["ID", "HostName", "DNSName", "Name"] {
+            if peer
+                .get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|value| self.matches_text(value))
+            {
+                return true;
+            }
+        }
+        peer.get("TailscaleIPs")
+            .and_then(Value::as_array)
+            .is_some_and(|ips| {
+                ips.iter()
+                    .filter_map(Value::as_str)
+                    .any(|value| self.matches_ip(value))
+            })
+    }
+
+    fn matches_text(&self, value: &str) -> bool {
+        let candidate = normalize_tailnet_identity(value);
+        if candidate.is_empty() {
+            return false;
+        }
+        candidate == self.invoke_host
+            || candidate == self.responder_node_id
+            || self
+                .invoke_host
+                .strip_prefix(&candidate)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+    }
+
+    fn matches_ip(&self, value: &str) -> bool {
+        let Some(invoke_ip) = self.invoke_ip else {
+            return false;
+        };
+        normalize_tailnet_identity(value)
+            .parse::<IpAddr>()
+            .is_ok_and(|candidate| candidate == invoke_ip)
+    }
 }
 
 fn resolve_invoke_probe_config(cli: &Cli) -> Result<Option<TailnetInvokeProbeConfig>, String> {
@@ -428,6 +501,8 @@ fn resolve_invoke_probe_config(cli: &Cli) -> Result<Option<TailnetInvokeProbeCon
                 .clone()
                 .or_else(|| env::var("FCP_TAILNET_RESPONDER_NODE_ID").ok())
                 .unwrap_or_else(|| invoke_url.clone());
+            let route_peer_identity =
+                TailnetInvokeRoutePeerIdentity::new(&invoke_url, &responder_node_id)?;
 
             Ok(Some(TailnetInvokeProbeConfig {
                 invoke_url,
@@ -435,6 +510,7 @@ fn resolve_invoke_probe_config(cli: &Cli) -> Result<Option<TailnetInvokeProbeCon
                 attempts,
                 caller_node_id,
                 responder_node_id,
+                route_peer_identity,
             }))
         }
     }
@@ -498,17 +574,24 @@ fn validate_tailnet_invoke_url(raw_url: &str) -> Result<(), String> {
 }
 
 fn is_tailnet_invoke_host(host: &str) -> bool {
-    let host = host.trim_matches(|ch| ch == '[' || ch == ']');
+    let host = normalize_tailnet_identity(host);
     if let Ok(ip) = host.parse::<IpAddr>() {
         return is_tailnet_range(ip);
     }
-    let lower = host.trim_end_matches('.').to_ascii_lowercase();
-    lower.ends_with(".ts.net") || lower.contains(".tailnet.")
+    host.ends_with(".ts.net") || host.contains(".tailnet.")
+}
+
+fn normalize_tailnet_identity(value: &str) -> String {
+    value
+        .trim_matches(|ch| ch == '[' || ch == ']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
 }
 
 fn observe_tailnet(
     localapi_url: Option<&str>,
     route_mode: TailnetInvokeRouteMode,
+    route_peer_identity: Option<&TailnetInvokeRoutePeerIdentity>,
 ) -> TailnetInvokeHarnessObservation {
     let Some(localapi_url) = localapi_url else {
         return TailnetInvokeHarnessObservation::localapi_not_configured();
@@ -521,7 +604,8 @@ fn observe_tailnet(
         Ok(Ok((status, status_json))) => {
             let online_peer_count = status.peer.values().filter(|peer| peer.online).count();
             let tailscale_connected = status.backend_state == "Running" && status.self_node.online;
-            let route_telemetry = observe_route_telemetry(&status_json, route_mode);
+            let route_telemetry =
+                observe_route_telemetry(&status_json, route_mode, route_peer_identity);
             TailnetInvokeHarnessObservation {
                 localapi_configured: true,
                 tailscale_connected,
@@ -774,6 +858,7 @@ struct RouteTelemetryObservation {
 fn observe_route_telemetry(
     status_json: &Value,
     route_mode: TailnetInvokeRouteMode,
+    route_peer_identity: Option<&TailnetInvokeRoutePeerIdentity>,
 ) -> RouteTelemetryObservation {
     let Some(peers) = status_json.get("Peer").and_then(Value::as_object) else {
         return RouteTelemetryObservation {
@@ -783,10 +868,14 @@ fn observe_route_telemetry(
     };
 
     let mut active_online_peers = 0usize;
+    let mut matched_active_peers = 0usize;
     let mut direct_candidates = 0usize;
     let mut derp_candidates = 0usize;
 
-    for peer in peers.values().filter_map(Value::as_object) {
+    for (peer_key, peer) in peers
+        .iter()
+        .filter_map(|(peer_key, peer)| peer.as_object().map(|peer| (peer_key.as_str(), peer)))
+    {
         let online = peer.get("Online").and_then(Value::as_bool).unwrap_or(false);
         let active = peer.get("Active").and_then(Value::as_bool).unwrap_or(false);
         if !(online && active) {
@@ -794,6 +883,10 @@ fn observe_route_telemetry(
         }
 
         active_online_peers += 1;
+        if route_peer_identity.is_some_and(|identity| !identity.matches_peer(peer_key, peer)) {
+            continue;
+        }
+        matched_active_peers += 1;
         let cur_addr = non_empty_string(peer.get("CurAddr"));
         let relay = non_empty_string(peer.get("Relay"));
         let peer_relay = non_empty_string(peer.get("PeerRelay"));
@@ -812,7 +905,7 @@ fn observe_route_telemetry(
     RouteTelemetryObservation {
         available,
         detail: format!(
-            "active_online_peers={active_online_peers},direct_candidates={direct_candidates},derp_candidates={derp_candidates}"
+            "active_online_peers={active_online_peers},matched_active_peers={matched_active_peers},direct_candidates={direct_candidates},derp_candidates={derp_candidates}"
         ),
     }
 }
@@ -875,8 +968,9 @@ mod tests {
             tailscale_connected: true,
             online_peer_count: 1,
             route_telemetry_available,
-            route_telemetry_detail: "active_online_peers=1,direct_candidates=1,derp_candidates=0"
-                .to_string(),
+            route_telemetry_detail:
+                "active_online_peers=1,matched_active_peers=1,direct_candidates=1,derp_candidates=0"
+                    .to_string(),
             production_mesh_invoke_transport_available: true,
             production_mesh_invoke_transport_detail:
                 "configured tailnet-reachable fcp-host /rpc/invoke endpoint".to_string(),
@@ -891,6 +985,11 @@ mod tests {
             attempts: 2,
             caller_node_id: "caller.tailnet.ts.net".to_string(),
             responder_node_id: "responder.tailnet.ts.net".to_string(),
+            route_peer_identity: TailnetInvokeRoutePeerIdentity::new(
+                "http://responder.tailnet.ts.net/rpc/invoke",
+                "responder.tailnet.ts.net",
+            )
+            .expect("route identity"),
         }
     }
 
@@ -1064,7 +1163,7 @@ mod tests {
 
     #[test]
     fn observe_tailnet_without_localapi_is_conservative() {
-        let observation = observe_tailnet(None, TailnetInvokeRouteMode::DirectLan);
+        let observation = observe_tailnet(None, TailnetInvokeRouteMode::DirectLan, None);
         let record = observation.structured_skip_record(
             TailnetInvokeRouteMode::DirectLan,
             args(&["fcp-tailnet-invoke-evidence"]),
@@ -1179,11 +1278,11 @@ mod tests {
             }
         });
 
-        let observation = observe_route_telemetry(&status, TailnetInvokeRouteMode::DirectLan);
+        let observation = observe_route_telemetry(&status, TailnetInvokeRouteMode::DirectLan, None);
         assert!(observation.available);
         assert!(observation.detail.contains("direct_candidates=1"));
 
-        let derp = observe_route_telemetry(&status, TailnetInvokeRouteMode::DerpFallback);
+        let derp = observe_route_telemetry(&status, TailnetInvokeRouteMode::DerpFallback, None);
         assert!(!derp.available);
         assert!(derp.detail.contains("derp_candidates=0"));
     }
@@ -1205,13 +1304,82 @@ mod tests {
             }
         });
 
-        let observation = observe_route_telemetry(&status, TailnetInvokeRouteMode::DerpFallback);
+        let observation =
+            observe_route_telemetry(&status, TailnetInvokeRouteMode::DerpFallback, None);
         assert!(observation.available);
         assert!(observation.detail.contains("derp_candidates=2"));
 
-        let direct = observe_route_telemetry(&status, TailnetInvokeRouteMode::DirectLan);
+        let direct = observe_route_telemetry(&status, TailnetInvokeRouteMode::DirectLan, None);
         assert!(!direct.available);
         assert!(direct.detail.contains("direct_candidates=0"));
+    }
+
+    #[test]
+    fn route_telemetry_scopes_candidates_to_responder_peer() {
+        let status = serde_json::json!({
+            "Peer": {
+                "unrelated": {
+                    "ID": "unrelated",
+                    "HostName": "other-node",
+                    "DNSName": "other-node.tailnet.ts.net.",
+                    "Online": true,
+                    "Active": true,
+                    "CurAddr": "203.0.113.10:41641"
+                },
+                "node-responder": {
+                    "ID": "node-responder",
+                    "HostName": "responder",
+                    "DNSName": "responder.tailnet.ts.net.",
+                    "Online": true,
+                    "Active": true,
+                    "Relay": "nyc"
+                }
+            }
+        });
+        let identity = TailnetInvokeRoutePeerIdentity::new(
+            "https://responder.tailnet.ts.net/rpc/invoke",
+            "node-responder",
+        )
+        .expect("route identity");
+
+        let direct =
+            observe_route_telemetry(&status, TailnetInvokeRouteMode::DirectLan, Some(&identity));
+        assert!(!direct.available);
+        assert!(direct.detail.contains("active_online_peers=2"));
+        assert!(direct.detail.contains("matched_active_peers=1"));
+        assert!(direct.detail.contains("direct_candidates=0"));
+
+        let derp = observe_route_telemetry(
+            &status,
+            TailnetInvokeRouteMode::DerpFallback,
+            Some(&identity),
+        );
+        assert!(derp.available);
+        assert!(derp.detail.contains("matched_active_peers=1"));
+        assert!(derp.detail.contains("derp_candidates=1"));
+    }
+
+    #[test]
+    fn route_telemetry_matches_responder_tailnet_ip() {
+        let status = serde_json::json!({
+            "Peer": {
+                "node-responder": {
+                    "Online": true,
+                    "Active": true,
+                    "CurAddr": "203.0.113.10:41641",
+                    "TailscaleIPs": ["100.64.0.42"]
+                }
+            }
+        });
+        let identity =
+            TailnetInvokeRoutePeerIdentity::new("http://100.64.0.42:8080/rpc/invoke", "responder")
+                .expect("route identity");
+
+        let observation =
+            observe_route_telemetry(&status, TailnetInvokeRouteMode::DirectLan, Some(&identity));
+        assert!(observation.available);
+        assert!(observation.detail.contains("matched_active_peers=1"));
+        assert!(observation.detail.contains("direct_candidates=1"));
     }
 
     #[test]
@@ -1231,7 +1399,7 @@ mod tests {
             }
         });
 
-        let observation = observe_route_telemetry(&status, TailnetInvokeRouteMode::DirectLan);
+        let observation = observe_route_telemetry(&status, TailnetInvokeRouteMode::DirectLan, None);
         assert!(!observation.available);
         assert!(observation.detail.contains("active_online_peers=0"));
     }

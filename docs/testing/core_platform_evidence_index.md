@@ -318,7 +318,10 @@ and one of `--invoke-request-json <json>` or `--invoke-request-file <path>`.
 The invoke URL must be an explicit tailnet-class `http`/`https` endpoint at
 `/rpc/invoke`: a MagicDNS `.ts.net` host, `.tailnet.` host, or tailnet IP. This
 prevents a public or localhost HTTP endpoint from combining with unrelated
-LocalAPI route telemetry to produce misleading `real_transport` evidence. Use
+LocalAPI route telemetry to produce misleading `real_transport` evidence.
+LocalAPI route telemetry is also scoped to the responder peer identified by the
+invoke URL host/IP or `--responder-node-id`; direct/DERP evidence from a
+different active peer does not satisfy the route prerequisite. Use
 `--invoke-attempts <n>` to collect multiple samples for percentile output.
 
 ### Cross-Controller Safety Invariants

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:2fa0fd7f3114fa56d0f944281e7724d773221175c7471471429a989e28145907"
+interface_hash = "blake3-256:fcp.interface.v2:7a84ddbc36efda935617a965320e46c0df7b5b547b6485c07ee00fbe14d8ae19"
 
 [connector]
 id = "fcp.tlon"
@@ -47,6 +47,24 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "best_effort"
 
+[provides.operations."tlon.dm.send".network_constraints]
+host_allow = ["${tlon_base_host}"]
+port_allow = [80, 443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
 [provides.operations."tlon.dm.send".input_schema]
 required = ["ship", "message"]
 type = "object"
@@ -82,6 +100,24 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "best_effort"
 
+[provides.operations."tlon.channel.send".network_constraints]
+host_allow = ["${tlon_base_host}"]
+port_allow = [80, 443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
 [provides.operations."tlon.channel.send".input_schema]
 required = ["channel", "message"]
 type = "object"
@@ -116,6 +152,24 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations."tlon.target.resolve".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 10000
+max_response_bytes = 65536
 
 [provides.operations."tlon.target.resolve".input_schema]
 required = ["target"]

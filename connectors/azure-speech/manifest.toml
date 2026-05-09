@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:ffd32fa3b46916b215ccd5751eab6fc0b81857b51407f7385215d470c13c4c9e"
+interface_hash = "blake3-256:fcp.interface.v2:123fdf64dcf4d1cb9a75415d165198d282fad420b2c3fb9ac8ff7eff9d310dfe"
 
 [connector]
 id = "fcp.azure-speech"
@@ -59,6 +59,7 @@ idempotency = "none"
 input_schema = { type = "object", required = ["display_name", "locale"], properties = { display_name = { type = "string", minLength = 1 }, locale = { type = "string", default = "en-US" }, foundry_project_name = { type = "string" }, description = { type = "string" }, custom_properties = { type = "object" } } }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+ai_hints = { when_to_use = "Use to create a Custom Speech project container before registering datasets, training models, or deploying endpoints.", common_mistakes = ["Do not confuse foundry_project_name with the Azure Speech project display name.", "Keep all related datasets, models, and endpoints in the same region and locale family.", "Use custom_properties for provider metadata instead of embedding workflow notes in display_name."], examples = ['{"display_name":"support-speech-project","locale":"en-US","foundry_project_name":"ContosoSpeech"}'], related = ["azure.speech.stt.custom.datasets.create", "azure.speech.stt.custom.models.create"] }
 
 [provides.operations."azure.speech.stt.custom.projects.list"]
 description = "List Azure Speech-to-text REST API 2025-10-15 custom speech projects"
@@ -70,6 +71,7 @@ idempotency = "strict"
 input_schema = { type = "object", properties = { filter = { type = "string" }, skip = { type = "integer", minimum = 0 }, top = { type = "integer", minimum = 1 } } }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+ai_hints = { when_to_use = "Use to inventory Custom Speech projects before selecting the project that owns datasets, models, or endpoints.", common_mistakes = ["Do not assume display names are unique; follow up with projects.get when exact identity matters.", "Keep top and skip bounded so large tenants do not produce noisy discovery loops.", "Apply provider filters only when they are copied from Azure Speech documentation."], examples = ['{"filter":"locale eq en-US","top":25}'], related = ["azure.speech.stt.custom.projects.get"] }
 
 [provides.operations."azure.speech.stt.custom.projects.get"]
 description = "Get one Azure Speech-to-text REST API 2025-10-15 custom speech project"
@@ -81,6 +83,7 @@ idempotency = "strict"
 input_schema = { type = "object", anyOf = [{ required = ["project_id"] }, { required = ["project_url"] }], properties = { project_id = { type = "string", minLength = 1 }, project_url = { type = "string", minLength = 1 } } }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+ai_hints = { when_to_use = "Use to inspect one Custom Speech project before attaching datasets or reviewing lifecycle status.", common_mistakes = ["Pass either project_id or project_url, not an arbitrary display name.", "Do not pass provider URLs from another Speech region or API version.", "Use this before delete when an agent needs to confirm the exact project target."], examples = ['{"project_id":"project-123"}'], related = ["azure.speech.stt.custom.projects.list", "azure.speech.stt.custom.datasets.list"] }
 
 [provides.operations."azure.speech.stt.custom.projects.delete"]
 description = "Delete one Azure Speech-to-text REST API 2025-10-15 custom speech project"
@@ -92,6 +95,7 @@ idempotency = "none"
 input_schema = { type = "object", anyOf = [{ required = ["project_id"] }, { required = ["project_url"] }], properties = { project_id = { type = "string", minLength = 1 }, project_url = { type = "string", minLength = 1 } } }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+ai_hints = { when_to_use = "Use only after approval to remove an obsolete Custom Speech project and its provider-side lifecycle container.", common_mistakes = ["Do not delete by display name; resolve the stable project id or provider URL first.", "Check dependent datasets, models, and endpoints before deleting the project.", "Treat a repeated delete as non-idempotent because the provider resource may already be gone."], examples = ['{"project_id":"project-123"}'], related = ["azure.speech.stt.custom.projects.get", "azure.speech.stt.custom.endpoints.list"] }
 
 [provides.operations."azure.speech.stt.custom.datasets.create"]
 description = "Create an Azure Speech-to-text REST API 2025-10-15 custom speech dataset"
@@ -103,6 +107,7 @@ idempotency = "none"
 input_schema = { type = "object", required = ["display_name", "locale", "kind"], properties = { display_name = { type = "string", minLength = 1 }, locale = { type = "string", default = "en-US" }, kind = { type = "string" }, content_url = { type = "string" }, project_id = { type = "string" }, project_url = { type = "string" }, project = { type = "object" }, description = { type = "string" }, custom_properties = { type = "object" } } }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+ai_hints = { when_to_use = "Use to register training or evaluation material for Custom Speech from provider-accessible storage.", common_mistakes = ["Choose the dataset kind that matches the Azure Speech asset, such as AudioFiles or LanguageData.", "Do not inline audio bytes; provide a storage URL or project reference accepted by the provider.", "Keep dataset locale aligned with the project and model locale."], examples = ['{"display_name":"support-audio-dataset","locale":"en-US","kind":"AudioFiles","content_url":"https://storage.example/dataset.zip?sig=redacted","project_id":"project-123"}'], related = ["azure.speech.stt.custom.datasets.get", "azure.speech.stt.custom.models.create"] }
 
 [provides.operations."azure.speech.stt.custom.datasets.list"]
 description = "List Azure Speech-to-text REST API 2025-10-15 custom speech datasets"
@@ -114,6 +119,7 @@ idempotency = "strict"
 input_schema = { type = "object", properties = { filter = { type = "string" }, skip = { type = "integer", minimum = 0 }, top = { type = "integer", minimum = 1 } } }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+ai_hints = { when_to_use = "Use to find existing Custom Speech datasets before selecting training, evaluation, or cleanup targets.", common_mistakes = ["Do not assume dataset display names are unique across projects.", "Use paging fields deliberately; large tenants may have many historical datasets.", "Confirm the dataset kind before using it to train a model."], examples = ['{"filter":"locale eq en-US","top":50}'], related = ["azure.speech.stt.custom.datasets.get", "azure.speech.stt.custom.models.create"] }
 
 [provides.operations."azure.speech.stt.custom.datasets.get"]
 description = "Get one Azure Speech-to-text REST API 2025-10-15 custom speech dataset"
@@ -125,6 +131,7 @@ idempotency = "strict"
 input_schema = { type = "object", anyOf = [{ required = ["dataset_id"] }, { required = ["dataset_url"] }], properties = { dataset_id = { type = "string", minLength = 1 }, dataset_url = { type = "string", minLength = 1 } } }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+ai_hints = { when_to_use = "Use to verify one Custom Speech dataset status, locale, and provider resource links before model training.", common_mistakes = ["Pass dataset_id or dataset_url rather than the dataset display name.", "Do not log provider content links returned in dataset metadata.", "Check provisioning status before treating the dataset as trainable."], examples = ['{"dataset_id":"dataset-123"}'], related = ["azure.speech.stt.custom.datasets.list", "azure.speech.stt.custom.models.create"] }
 
 [provides.operations."azure.speech.stt.custom.datasets.delete"]
 description = "Delete one Azure Speech-to-text REST API 2025-10-15 custom speech dataset"
@@ -136,6 +143,7 @@ idempotency = "none"
 input_schema = { type = "object", anyOf = [{ required = ["dataset_id"] }, { required = ["dataset_url"] }], properties = { dataset_id = { type = "string", minLength = 1 }, dataset_url = { type = "string", minLength = 1 } } }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+ai_hints = { when_to_use = "Use only after approval to remove an obsolete Custom Speech dataset that is not needed by active models.", common_mistakes = ["Do not delete a dataset still referenced by a model training workflow.", "Resolve the exact dataset id first; display names are not stable identifiers.", "Expect provider-side cleanup to affect future reproducibility of model-training evidence."], examples = ['{"dataset_id":"dataset-123"}'], related = ["azure.speech.stt.custom.datasets.get", "azure.speech.stt.custom.models.list"] }
 
 [provides.operations."azure.speech.stt.custom.models.create"]
 description = "Create an Azure Speech-to-text REST API 2025-10-15 custom speech model"
@@ -147,6 +155,7 @@ idempotency = "none"
 input_schema = { type = "object", required = ["display_name", "locale"], properties = { display_name = { type = "string", minLength = 1 }, locale = { type = "string", default = "en-US" }, project_id = { type = "string" }, project_url = { type = "string" }, project = { type = "object" }, base_model_id = { type = "string" }, base_model_url = { type = "string" }, base_model = { type = "object" }, datasets = { type = "array" }, description = { type = "string" }, custom_properties = { type = "object" } } }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+ai_hints = { when_to_use = "Use to start Custom Speech model training from selected datasets and an optional base model.", common_mistakes = ["Do not start training before dataset status is ready.", "Keep model locale compatible with every dataset and base model reference.", "Use stable dataset/model ids or provider resource objects rather than display names."], examples = ['{"display_name":"support-acoustic-model","locale":"en-US","base_model_id":"base-model-1","datasets":[{"id":"dataset-123"}]}'], related = ["azure.speech.stt.custom.datasets.get", "azure.speech.stt.custom.models.get"] }
 
 [provides.operations."azure.speech.stt.custom.models.list"]
 description = "List Azure Speech-to-text REST API 2025-10-15 custom speech models"
@@ -158,6 +167,7 @@ idempotency = "strict"
 input_schema = { type = "object", properties = { filter = { type = "string" }, skip = { type = "integer", minimum = 0 }, top = { type = "integer", minimum = 1 } } }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+ai_hints = { when_to_use = "Use to discover trained or training Custom Speech models before deployment, inspection, or cleanup.", common_mistakes = ["Do not assume a listed model is deployable; inspect status with models.get first.", "Use paging for tenants with many historical training runs.", "Filter by locale or project when the workflow needs a specific speech domain."], examples = ['{"filter":"locale eq en-US","top":25}'], related = ["azure.speech.stt.custom.models.get", "azure.speech.stt.custom.endpoints.create"] }
 
 [provides.operations."azure.speech.stt.custom.models.get"]
 description = "Get one Azure Speech-to-text REST API 2025-10-15 custom speech model"
@@ -169,6 +179,7 @@ idempotency = "strict"
 input_schema = { type = "object", anyOf = [{ required = ["model_id"] }, { required = ["model_url"] }], properties = { model_id = { type = "string", minLength = 1 }, model_url = { type = "string", minLength = 1 } } }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+ai_hints = { when_to_use = "Use to inspect one Custom Speech model's training status before endpoint deployment or cleanup.", common_mistakes = ["Pass model_id or model_url instead of a display name.", "Do not deploy a model until provider status says the training run succeeded.", "Check dataset and base-model provenance before using the model in production workflows."], examples = ['{"model_id":"model-123"}'], related = ["azure.speech.stt.custom.models.list", "azure.speech.stt.custom.endpoints.create"] }
 
 [provides.operations."azure.speech.stt.custom.models.delete"]
 description = "Delete one Azure Speech-to-text REST API 2025-10-15 custom speech model"
@@ -180,6 +191,7 @@ idempotency = "none"
 input_schema = { type = "object", anyOf = [{ required = ["model_id"] }, { required = ["model_url"] }], properties = { model_id = { type = "string", minLength = 1 }, model_url = { type = "string", minLength = 1 } } }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+ai_hints = { when_to_use = "Use only after approval to remove an obsolete Custom Speech model that is not deployed to active endpoints.", common_mistakes = ["Check endpoints.list before deleting a model that may still be deployed.", "Resolve the stable model id first; display names can collide.", "Keep external audit evidence before deleting provider training artifacts."], examples = ['{"model_id":"model-123"}'], related = ["azure.speech.stt.custom.models.get", "azure.speech.stt.custom.endpoints.list"] }
 
 [provides.operations."azure.speech.stt.custom.endpoints.create"]
 description = "Create an Azure Speech-to-text REST API 2025-10-15 custom speech endpoint"
@@ -191,6 +203,7 @@ idempotency = "none"
 input_schema = { type = "object", required = ["display_name", "locale"], anyOf = [{ required = ["model"] }, { required = ["model_id"] }, { required = ["model_url"] }], properties = { display_name = { type = "string", minLength = 1 }, locale = { type = "string", default = "en-US" }, model_id = { type = "string" }, model_url = { type = "string" }, model = { type = "object" }, project_id = { type = "string" }, project_url = { type = "string" }, project = { type = "object" }, text = { type = "string" }, description = { type = "string" }, custom_properties = { type = "object" } } }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+ai_hints = { when_to_use = "Use to deploy a trained Custom Speech model behind a provider endpoint for later transcription traffic.", common_mistakes = ["Do not create an endpoint from a model that is still training or failed.", "Use model_id, model_url, or model object from models.get rather than a display name.", "Endpoint creation is not the same as fast transcription; use transcribe_fast only for direct audio requests."], examples = ['{"display_name":"support-speech-endpoint","locale":"en-US","model_id":"model-123","project_id":"project-123"}'], related = ["azure.speech.stt.custom.models.get", "azure.speech.stt.custom.endpoints.get"] }
 
 [provides.operations."azure.speech.stt.custom.endpoints.list"]
 description = "List Azure Speech-to-text REST API 2025-10-15 custom speech endpoints"
@@ -202,6 +215,7 @@ idempotency = "strict"
 input_schema = { type = "object", properties = { filter = { type = "string" }, skip = { type = "integer", minimum = 0 }, top = { type = "integer", minimum = 1 } } }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+ai_hints = { when_to_use = "Use to inventory Custom Speech deployment endpoints before routing traffic or planning cleanup.", common_mistakes = ["Do not assume endpoint display names are unique.", "Use endpoints.get to confirm provisioning and model association before invoking downstream traffic.", "Keep paging bounded for tenants with many deployment attempts."], examples = ['{"filter":"locale eq en-US","top":25}'], related = ["azure.speech.stt.custom.endpoints.get", "azure.speech.stt.custom.models.list"] }
 
 [provides.operations."azure.speech.stt.custom.endpoints.get"]
 description = "Get one Azure Speech-to-text REST API 2025-10-15 custom speech endpoint"
@@ -213,6 +227,7 @@ idempotency = "strict"
 input_schema = { type = "object", anyOf = [{ required = ["endpoint_id"] }, { required = ["endpoint_url"] }], properties = { endpoint_id = { type = "string", minLength = 1 }, endpoint_url = { type = "string", minLength = 1 } } }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+ai_hints = { when_to_use = "Use to inspect one Custom Speech endpoint's provisioning status, model binding, and provider URL.", common_mistakes = ["Pass endpoint_id or endpoint_url rather than display name.", "Do not send production traffic until provider status says the endpoint is ready.", "Do not log provider endpoint URLs if tenant policy treats them as sensitive routing metadata."], examples = ['{"endpoint_id":"endpoint-123"}'], related = ["azure.speech.stt.custom.endpoints.list", "azure.speech.stt.custom.endpoints.delete"] }
 
 [provides.operations."azure.speech.stt.custom.endpoints.delete"]
 description = "Delete one Azure Speech-to-text REST API 2025-10-15 custom speech endpoint"
@@ -224,6 +239,7 @@ idempotency = "none"
 input_schema = { type = "object", anyOf = [{ required = ["endpoint_id"] }, { required = ["endpoint_url"] }], properties = { endpoint_id = { type = "string", minLength = 1 }, endpoint_url = { type = "string", minLength = 1 } } }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["*.api.cognitive.microsoft.com", "*.api.cognitive.microsoft.us"], port_allow = [443], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, require_sni = true, deny_ip_literals = true, require_host_canonicalization = true, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+ai_hints = { when_to_use = "Use only after approval to remove an obsolete Custom Speech deployment endpoint.", common_mistakes = ["Verify no workflow still routes transcription traffic to the endpoint before deleting it.", "Resolve the endpoint id first; display names are not enough for destructive cleanup.", "Delete endpoints before deleting their backing model when cleaning up a project."], examples = ['{"endpoint_id":"endpoint-123"}'], related = ["azure.speech.stt.custom.endpoints.get", "azure.speech.stt.custom.models.delete"] }
 
 [provides.operations."azure.speech.stt.batch.files"]
 description = "List redacted file metadata for an Azure Speech-to-text REST API batch transcription job"

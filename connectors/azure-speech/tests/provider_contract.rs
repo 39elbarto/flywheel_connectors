@@ -204,6 +204,40 @@ async fn azure_speech_manifest_operations_match_runtime_introspection() {
 }
 
 #[test]
+fn azure_speech_manifest_ai_hints_cover_all_operations() {
+    let manifest = azure_speech_manifest_unchecked();
+    for operation_id in EXPECTED_OPERATION_IDS {
+        let hints = &manifest
+            .provides
+            .operations
+            .get(operation_id)
+            .expect("manifest operation should be declared")
+            .ai_hints;
+        assert!(
+            !hints.when_to_use.trim().is_empty(),
+            "{operation_id} should declare ai_hints.when_to_use"
+        );
+        assert!(
+            !hints.common_mistakes.is_empty(),
+            "{operation_id} should declare ai_hints.common_mistakes"
+        );
+        assert!(
+            !hints.examples.is_empty(),
+            "{operation_id} should declare ai_hints.examples"
+        );
+        for example in &hints.examples {
+            let lower = example.to_ascii_lowercase();
+            assert!(
+                !lower.contains("token")
+                    && !lower.contains("password")
+                    && !lower.contains("secret"),
+                "{operation_id} example should not include secret-shaped sample values"
+            );
+        }
+    }
+}
+
+#[test]
 fn azure_speech_manifest_schemas_cover_core_request_shapes() {
     let manifest = azure_speech_manifest_unchecked();
     let tts_schema = manifest_input_schema(&manifest, "azure.speech.tts.synthesize");

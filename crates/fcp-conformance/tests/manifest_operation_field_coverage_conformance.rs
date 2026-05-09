@@ -23,7 +23,6 @@ const INVALID_OUTPUT_SCHEMA: &str = "invalid_output_schema";
 const EXPECTED_SCHEMA_GAPS: &[&str] = &[];
 const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[];
 const EXPECTED_AI_HINT_GAPS: &[&str] = &[
-    "azure-speech",
     "dingtalk",
     "google-people",
     "google-workspace-events",

@@ -861,22 +861,7 @@ fn expected_output_schema_gap_connectors() -> Vec<String> {
 }
 
 fn expected_network_constraints_gap_connectors() -> Vec<String> {
-    connector_names(&[
-        "hue",
-        "inworld",
-        "irc",
-        "mattermost",
-        "microsoft365",
-        "nostr",
-        "plivo",
-        "sonos",
-        "teams",
-        "telnyx",
-        "tlon",
-        "vectordb",
-        "wecom",
-        "whatsapp",
-    ])
+    connector_names(&[])
 }
 
 fn expected_sandbox_gap_connectors() -> Vec<String> {
@@ -885,11 +870,11 @@ fn expected_sandbox_gap_connectors() -> Vec<String> {
 
 fn expected_ai_hints_gap_connectors() -> Vec<String> {
     connector_names(&[
+        "azure-speech",
         "dingtalk",
         "google-people",
         "google-workspace-events",
         "mastodon",
-        "mattermost",
         "nostr",
         "qq",
         "telnyx",

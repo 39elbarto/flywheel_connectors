@@ -21,28 +21,13 @@ const SANDBOX: &str = "sandbox";
 const INVALID_INPUT_SCHEMA: &str = "invalid_input_schema";
 const INVALID_OUTPUT_SCHEMA: &str = "invalid_output_schema";
 const EXPECTED_SCHEMA_GAPS: &[&str] = &[];
-const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
-    "hue",
-    "inworld",
-    "irc",
-    "mattermost",
-    "microsoft365",
-    "nostr",
-    "plivo",
-    "sonos",
-    "teams",
-    "telnyx",
-    "tlon",
-    "vectordb",
-    "wecom",
-    "whatsapp",
-];
+const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[];
 const EXPECTED_AI_HINT_GAPS: &[&str] = &[
+    "azure-speech",
     "dingtalk",
     "google-people",
     "google-workspace-events",
     "mastodon",
-    "mattermost",
     "nostr",
     "qq",
     "telnyx",

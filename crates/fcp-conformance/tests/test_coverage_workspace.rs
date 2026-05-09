@@ -14,17 +14,7 @@ use std::process::Command;
 
 use serde_json::json;
 
-const EXPECTED_MISSING_TEST_DIRS: &[&str] = &[
-    "apple-notes",
-    "apple-reminders",
-    "bluebubbles",
-    "email-generic",
-    "imessage",
-    "signal",
-    "twitch",
-    "whisper",
-    "zalo",
-];
+const EXPECTED_MISSING_TEST_DIRS: &[&str] = &[];
 
 #[derive(Debug, Clone)]
 struct ConnectorTestCoverageRecord {

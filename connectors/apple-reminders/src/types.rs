@@ -89,6 +89,15 @@ mod tests {
     }
 
     #[test]
+    fn manifest_interface_hash_matches_declared_metadata() {
+        let manifest = parsed_manifest();
+        let computed = manifest
+            .compute_interface_hash()
+            .expect("compute interface hash");
+        assert_eq!(manifest.manifest.interface_hash, computed);
+    }
+
+    #[test]
     fn config_defaults_osascript_path() {
         let config =
             AppleRemindersConfig::from_value(serde_json::json!({})).expect("config should parse");

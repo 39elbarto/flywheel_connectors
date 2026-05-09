@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:bf005d141a95614f8cdffad3ea7a846f64211b31cfec8918d87eaab621a9714c"
+interface_hash = "blake3-256:fcp.interface.v2:7e5b729ae1c12e92a1a5b23dcd79f608f6a29a86dab35bb54abc0cd1a30fe9ff"
 
 [connector]
 id = "fcp.apple-reminders"
@@ -41,6 +41,24 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
+[provides.operations."apple_reminders.health".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
+
 [provides.operations."apple_reminders.health".ai_hints]
 when_to_use = "Use this before any Apple Reminders read or write operation to confirm the host is macOS and the connector is configured."
 common_mistakes = [
@@ -72,6 +90,24 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations."apple_reminders.list_lists".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
 
 [provides.operations."apple_reminders.list_lists".ai_hints]
 when_to_use = "Use this when an agent needs the exact reminder-list names before listing or creating reminders."
@@ -107,6 +143,24 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations."apple_reminders.list_reminders".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
 
 [provides.operations."apple_reminders.list_reminders".ai_hints]
 when_to_use = "Use this to inspect open reminder inventory in a known list or across all lists before deciding what to create or complete."
@@ -155,6 +209,24 @@ safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
 
+[provides.operations."apple_reminders.create_reminder".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
+
 [provides.operations."apple_reminders.create_reminder".ai_hints]
 when_to_use = "Use this only after the user asks the agent to add a specific reminder to the local macOS Reminders app."
 common_mistakes = [
@@ -194,6 +266,24 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "best_effort"
+
+[provides.operations."apple_reminders.complete_reminder".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
 
 [provides.operations."apple_reminders.complete_reminder".ai_hints]
 when_to_use = "Use this after listing reminders and selecting the exact reminder identifier that the user wants marked complete."

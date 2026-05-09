@@ -296,6 +296,7 @@ fn apple_reminders_manifest_matches_introspection_and_local_bridge_security_cont
                 .is_some_and(|value| !value.trim().is_empty()),
             "{operation_id} manifest ai_hints are empty"
         );
+        assert_no_egress_network_constraints(manifest_op, operation_id);
     }
 
     assert_manifest_output_fields(
@@ -405,6 +406,127 @@ fn assert_array_contains(value: &toml::Value, path: &[&str], expected: &str) {
         "{} should contain {expected}",
         path.join(".")
     );
+}
+
+fn assert_no_egress_network_constraints(operation: &toml::Value, operation_id: &str) {
+    let constraints = operation
+        .get("network_constraints")
+        .expect("Apple Reminders operation should declare network_constraints");
+    assert_eq!(
+        string_array_field(constraints, "host_allow"),
+        vec!["none.invalid"],
+        "{operation_id} should use the no-egress sentinel host"
+    );
+    assert_eq!(
+        integer_array_field(constraints, "port_allow"),
+        vec![0],
+        "{operation_id} should use the no-egress sentinel port"
+    );
+    assert!(
+        string_array_field(constraints, "ip_allow").is_empty(),
+        "{operation_id} should not allow IP egress"
+    );
+    assert!(
+        string_array_field(constraints, "cidr_deny").is_empty(),
+        "{operation_id} should not need CIDR deny exceptions"
+    );
+    assert!(
+        string_array_field(constraints, "spki_pins").is_empty(),
+        "{operation_id} should not pin TLS keys for a no-egress operation"
+    );
+    assert!(
+        bool_field(constraints, "deny_localhost"),
+        "{operation_id} should deny localhost egress"
+    );
+    assert!(
+        bool_field(constraints, "deny_private_ranges"),
+        "{operation_id} should deny private-range egress"
+    );
+    assert!(
+        bool_field(constraints, "deny_tailnet_ranges"),
+        "{operation_id} should deny tailnet egress"
+    );
+    assert!(
+        !bool_field(constraints, "require_sni"),
+        "{operation_id} should not require SNI for a no-egress operation"
+    );
+    assert!(
+        bool_field(constraints, "deny_ip_literals"),
+        "{operation_id} should deny IP-literal egress"
+    );
+    assert!(
+        bool_field(constraints, "require_host_canonicalization"),
+        "{operation_id} should require host canonicalization"
+    );
+    assert_eq!(
+        integer_field(constraints, "dns_max_ips"),
+        0,
+        "{operation_id} should not resolve DNS for no-egress operations"
+    );
+    assert_eq!(
+        integer_field(constraints, "max_redirects"),
+        0,
+        "{operation_id} should deny redirects"
+    );
+    assert_eq!(
+        integer_field(constraints, "connect_timeout_ms"),
+        10_000,
+        "{operation_id} should keep a bounded connect timeout"
+    );
+    assert_eq!(
+        integer_field(constraints, "total_timeout_ms"),
+        30_000,
+        "{operation_id} should stay within the connector wall-clock timeout"
+    );
+    assert_eq!(
+        integer_field(constraints, "max_response_bytes"),
+        65_536,
+        "{operation_id} should bound hypothetical response bytes"
+    );
+}
+
+fn string_array_field<'a>(value: &'a toml::Value, field: &str) -> Vec<&'a str> {
+    value
+        .get(field)
+        .unwrap_or_else(|| panic!("network_constraints should contain {field}"))
+        .as_array()
+        .unwrap_or_else(|| panic!("network_constraints.{field} should be an array"))
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .unwrap_or_else(|| panic!("network_constraints.{field} entries should be strings"))
+        })
+        .collect()
+}
+
+fn integer_array_field(value: &toml::Value, field: &str) -> Vec<i64> {
+    value
+        .get(field)
+        .unwrap_or_else(|| panic!("network_constraints should contain {field}"))
+        .as_array()
+        .unwrap_or_else(|| panic!("network_constraints.{field} should be an array"))
+        .iter()
+        .map(|item| {
+            item.as_integer()
+                .unwrap_or_else(|| panic!("network_constraints.{field} entries should be integers"))
+        })
+        .collect()
+}
+
+fn bool_field(value: &toml::Value, field: &str) -> bool {
+    value
+        .get(field)
+        .unwrap_or_else(|| panic!("network_constraints should contain {field}"))
+        .as_bool()
+        .unwrap_or_else(|| panic!("network_constraints.{field} should be a bool"))
+}
+
+fn integer_field(value: &toml::Value, field: &str) -> i64 {
+    value
+        .get(field)
+        .unwrap_or_else(|| panic!("network_constraints should contain {field}"))
+        .as_integer()
+        .unwrap_or_else(|| panic!("network_constraints.{field} should be an integer"))
 }
 
 fn assert_redacted(value: &str) {

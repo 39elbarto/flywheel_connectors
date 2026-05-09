@@ -24,7 +24,6 @@ const EXPECTED_SCHEMA_GAPS: &[&str] = &[];
 const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
     "anthropic",
     "anthropic-vertex",
-    "apple-reminders",
     "dingtalk",
     "email-generic",
     "google-ai",

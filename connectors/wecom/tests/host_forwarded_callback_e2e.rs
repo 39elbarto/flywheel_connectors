@@ -209,10 +209,7 @@ fn wecom_manifest_ai_hints_cover_all_operations() {
     let mut secret_shaped_examples = Vec::new();
 
     for (operation_id, operation) in operations {
-        let Some(ai_hints) = operation
-            .get("ai_hints")
-            .and_then(toml::Value::as_table)
-        else {
+        let Some(ai_hints) = operation.get("ai_hints").and_then(toml::Value::as_table) else {
             missing_when_to_use.push(operation_id.clone());
             missing_common_mistakes.push(operation_id.clone());
             missing_examples.push(operation_id.clone());

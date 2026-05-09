@@ -40,10 +40,24 @@
     {
       "theorem": "Fcp.Invariants.LatticeDelegation.lattice_delegation_chain_corruption_rejected",
       "source_path": "lean/Fcp/Invariants/LatticeDelegation.lean",
-      "source_hash": "sha256:904a476c5d994ed0b775d32a6cf31714fcc5760ae518b9d964cde3b6c3a21cb4",
+      "source_hash": "sha256:003c87900b1e93998e8f4d9b9af4092447002a1ceb069f99d1927d877051c7ee",
       "lake_target": "Fcp",
-      "verified_at": "2026-05-02",
+      "verified_at": "2026-05-09",
       "cross_validation_seed": "fcp-policy:lattice_delegation_rust_matches_lean_structural_model:v1:cases=1024"
+    },
+    {
+      "theorem": "Fcp.Invariants.LatticeDelegation.lattice_delegation_sis_assumption_boundary_complete",
+      "source_path": "lean/Fcp/Invariants/LatticeDelegation.lean",
+      "source_hash": "sha256:003c87900b1e93998e8f4d9b9af4092447002a1ceb069f99d1927d877051c7ee",
+      "lake_target": "Fcp",
+      "verified_at": "2026-05-09"
+    },
+    {
+      "theorem": "Fcp.Invariants.LatticeDelegation.lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions",
+      "source_path": "lean/Fcp/Invariants/LatticeDelegation.lean",
+      "source_hash": "sha256:003c87900b1e93998e8f4d9b9af4092447002a1ceb069f99d1927d877051c7ee",
+      "lake_target": "Fcp",
+      "verified_at": "2026-05-09"
     }
   ]
 }

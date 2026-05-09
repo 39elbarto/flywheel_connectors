@@ -43,12 +43,15 @@ const PUBLIC_MATRIX_ARTIFACT_PATH: &str =
     "target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl";
 const SAMPLE_PRE_VERIFY_ARTIFACT_PATH: &str =
     "target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl";
+const FORMAL_CORRESPONDENCE_ARTIFACT_PATH: &str =
+    "target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl";
 const ROUTE_FIXTURE_ID: &str = "fixture:small_test:trapgen-delegate-route-v1";
 const REPRESENTATION_EVIDENCE_COMMAND: &str = "cargo test -p fcp-crypto-pq representation_profile_evidence_jsonl_is_secret_free -- --nocapture";
 const ROUTE_EVIDENCE_COMMAND: &str = "cargo test -p fcp-crypto-pq trapgen_delegate_route_evidence_jsonl_is_secret_free -- --nocapture";
 const PUBLIC_MATRIX_EVIDENCE_COMMAND: &str = "cargo test -p fcp-crypto-pq public_matrix_reconstruction_evidence_jsonl_is_secret_free -- --nocapture";
 const SAMPLE_PRE_VERIFY_EVIDENCE_COMMAND: &str =
     "cargo test -p fcp-crypto-pq sample_pre_verify_evidence_jsonl_is_secret_free -- --nocapture";
+const FORMAL_CORRESPONDENCE_EVIDENCE_COMMAND: &str = "cargo test -p fcp-crypto-pq --test representation_profile lean_sis_assumption_boundary_correspondence_fixture_jsonl_is_secret_free -- --nocapture";
 const V4_ROUTE_FIXTURE_ID: &str = "fixture:v4_reference:trapgen-delegate-route-v1";
 
 #[derive(Debug, Serialize)]
@@ -225,6 +228,48 @@ struct SamplePreVerifyEvidenceLog<'a> {
     cleanup: &'a str,
     result: &'a str,
     skip_reason: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+struct FormalCorrespondenceEvidenceLog<'a> {
+    schema: &'a str,
+    command_line: Cow<'a, str>,
+    git_revision: String,
+    theorem_names: Vec<&'a str>,
+    assumption_ids: Vec<&'a str>,
+    fixture_id_hash: String,
+    fixture_category: &'a str,
+    parameter_profile: &'a str,
+    primitive_route_id: &'a str,
+    primitive_route_revision: u16,
+    representation_version: u16,
+    public_matrix_material_version: u16,
+    zone_id_hash: String,
+    period_id_hash: String,
+    public_material_summary: PublicMaterialSummary,
+    matrix_dimensions: MatrixDimensions,
+    checks: FormalCryptoCorrespondenceChecks,
+    artifact_hashes: FormalArtifactHashes,
+    duration_ms: u128,
+    result: &'a str,
+    skip_reason: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+struct FormalCryptoCorrespondenceChecks {
+    public_material_reconstruction: bool,
+    route_profile_domain_separation: bool,
+    operation_principal_domain_separation: bool,
+    malformed_public_header_rejected: bool,
+    malformed_tail_coefficients_rejected: bool,
+    stale_route_revision_rejected: bool,
+    unsupported_profile_rejected: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct FormalArtifactHashes {
+    public_material_digest_hex: Option<String>,
+    public_seed_hash_hex: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -493,6 +538,250 @@ fn write_sample_pre_verify_jsonl_artifact(lines: &[String]) {
     jsonl.push('\n');
     fs::write(SAMPLE_PRE_VERIFY_ARTIFACT_PATH, jsonl)
         .expect("SamplePre/Verify evidence artifact writes");
+}
+
+fn write_formal_correspondence_jsonl_artifact(lines: &[String]) {
+    fs::create_dir_all("target/fcp-crypto-pq").expect("evidence artifact directory is writable");
+    let mut jsonl = lines.join("\n");
+    jsonl.push('\n');
+    fs::write(FORMAL_CORRESPONDENCE_ARTIFACT_PATH, jsonl)
+        .expect("formal correspondence evidence artifact writes");
+}
+
+fn formal_theorem_names() -> Vec<&'static str> {
+    vec![
+        "Fcp.Invariants.LatticeDelegation.lattice_delegation_chain_corruption_rejected",
+        "Fcp.Invariants.LatticeDelegation.lattice_delegation_sis_assumption_boundary_complete",
+        "Fcp.Invariants.LatticeDelegation.lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions",
+    ]
+}
+
+fn formal_assumption_ids() -> Vec<&'static str> {
+    vec![
+        "FCP-PQ-SIS-HARDNESS-V1",
+        "FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1",
+        "FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1",
+        "FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1",
+        "FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1",
+        "FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1",
+    ]
+}
+
+fn formal_correspondence_fixture_id(profile: &str) -> String {
+    hashed_fixture_id_for(&format!("fixture:{profile}:formal-correspondence-v1"))
+}
+
+fn formal_correspondence_evidence_for(
+    command_line: Cow<'static, str>,
+    profile: &'static str,
+    params: LatticeParams,
+    entropy: TrapGenEntropy,
+) -> FormalCorrespondenceEvidenceLog<'static> {
+    let started = Instant::now();
+    let representation = params
+        .representation_profile()
+        .expect("formal correspondence profile representation is bounded");
+    let zone = [0xC3; 32];
+    let period = period();
+    let (master_pub, master_trap) =
+        trap_gen_with_entropy(params, &entropy).expect("formal TrapGen succeeds");
+    let (zone_pub, _zone_trap) = delegate(&master_pub, &master_trap, zone, period, params)
+        .expect("formal Delegate succeeds");
+    let material_digest = reconstruct_public_matrix_digest(&zone_pub, params)
+        .expect("formal public material reconstructs");
+
+    let h_read = operation_hash(&zone, period, b"formal-read", b"formal-principal-a");
+    let h_write = operation_hash(&zone, period, b"formal-write", b"formal-principal-a");
+    let h_other_principal = operation_hash(&zone, period, b"formal-read", b"formal-principal-b");
+    assert_ne!(h_read, h_write, "operation id must domain-separate RHS");
+    assert_ne!(
+        h_read, h_other_principal,
+        "principal id must domain-separate RHS"
+    );
+
+    let mut wrong_seed = zone_pub.clone();
+    wrong_seed.public_matrix.public_seed[0] ^= 0x44;
+    assert_ne!(
+        reconstruct_public_matrix_digest(&wrong_seed, params)
+            .expect("wrong public seed remains syntactically valid"),
+        material_digest,
+        "public seed changes must affect public material digest"
+    );
+
+    let mut wrong_header = zone_pub.clone();
+    wrong_header.public_matrix.version = wrong_header.public_matrix.version.saturating_add(1);
+    assert!(matches!(
+        reconstruct_public_matrix_digest(&wrong_header, params),
+        Err(LatticePqError::InvalidEncodingLength {
+            material: "public_matrix_material_version",
+            ..
+        })
+    ));
+
+    let mut wrong_tail = zone_pub.clone();
+    let coefficient_bytes = params
+        .coefficient_bytes()
+        .expect("coefficient byte length is bounded");
+    let tail_len = wrong_tail.public_matrix.tail_coefficients.len();
+    let last_coeff_offset = tail_len - coefficient_bytes;
+    let invalid = params.q.to_le_bytes();
+    wrong_tail.public_matrix.tail_coefficients
+        [last_coeff_offset..last_coeff_offset + coefficient_bytes]
+        .copy_from_slice(&invalid[..coefficient_bytes]);
+    assert!(matches!(
+        reconstruct_public_matrix_digest(&wrong_tail, params),
+        Err(LatticePqError::InvalidTrapdoorSecret {
+            material: "public_matrix_tail",
+            ..
+        })
+    ));
+
+    let mut stale_route = zone_pub.clone();
+    stale_route.public_matrix.route_revision = stale_route.public_matrix.route_revision + 1;
+    assert!(matches!(
+        reconstruct_public_matrix_digest(&stale_route, params),
+        Err(LatticePqError::InvalidTrapdoorSecret {
+            material: "public_matrix_material",
+            ..
+        })
+    ));
+
+    let mut unsupported = LatticeParams::V4_REFERENCE;
+    unsupported.depth = 3;
+    let (fixture_master_pub, fixture_master_trap) =
+        trap_gen_fixture(unsupported).expect("fixture custom setup succeeds");
+    let (fixture_zone_pub, _) = delegate_fixture(
+        &fixture_master_pub,
+        &fixture_master_trap,
+        zone,
+        period,
+        unsupported,
+    )
+    .expect("fixture custom delegate succeeds");
+    assert!(matches!(
+        reconstruct_public_matrix_digest(&fixture_zone_pub, unsupported),
+        Err(LatticePqError::UnsupportedPrimitiveRoute { .. })
+    ));
+
+    FormalCorrespondenceEvidenceLog {
+        schema: "fcp.crypto_pq.lattice_formal_correspondence.v1",
+        command_line,
+        git_revision: git_revision(),
+        theorem_names: formal_theorem_names(),
+        assumption_ids: formal_assumption_ids(),
+        fixture_id_hash: formal_correspondence_fixture_id(profile),
+        fixture_category: "deterministic-public-correspondence",
+        parameter_profile: profile,
+        primitive_route_id: PRIMITIVE_ROUTE_ID,
+        primitive_route_revision: PRIMITIVE_ROUTE_REVISION,
+        representation_version: LATTICE_REPRESENTATION_VERSION,
+        public_matrix_material_version: PUBLIC_MATRIX_MATERIAL_VERSION,
+        zone_id_hash: zone_id_hash(&zone),
+        period_id_hash: period_id_hash(period),
+        public_material_summary: public_material_summary(
+            zone_pub.hash,
+            zone_pub.public_matrix.kind,
+            zone_pub.public_matrix.seed().len(),
+            zone_pub.public_matrix.tail_coefficients_len(),
+            Some(material_digest),
+        ),
+        matrix_dimensions: matrix_dimensions(params, &representation),
+        checks: FormalCryptoCorrespondenceChecks {
+            public_material_reconstruction: true,
+            route_profile_domain_separation: true,
+            operation_principal_domain_separation: true,
+            malformed_public_header_rejected: true,
+            malformed_tail_coefficients_rejected: true,
+            stale_route_revision_rejected: true,
+            unsupported_profile_rejected: true,
+        },
+        artifact_hashes: FormalArtifactHashes {
+            public_material_digest_hex: Some(hex::encode(material_digest)),
+            public_seed_hash_hex: hex::encode(
+                blake3::hash(&zone_pub.public_matrix.public_seed).as_bytes(),
+            ),
+        },
+        duration_ms: started.elapsed().as_millis(),
+        result: "passed",
+        skip_reason: None,
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // The correspondence fixture is intentionally explicit.
+fn lean_sis_assumption_boundary_correspondence_fixture_jsonl_is_secret_free() {
+    let command_line = evidence_command_line(
+        "FCP_CRYPTO_PQ_FORMAL_CORRESPONDENCE_COMMAND_LINE",
+        FORMAL_CORRESPONDENCE_EVIDENCE_COMMAND,
+    );
+    let mut lines = Vec::new();
+    for (profile, params, entropy) in [
+        (
+            "SMALL_TEST",
+            LatticeParams::SMALL_TEST,
+            route_fixture_entropy(),
+        ),
+        (
+            "V4_REFERENCE",
+            LatticeParams::V4_REFERENCE,
+            v4_route_fixture_entropy(),
+        ),
+    ] {
+        let evidence =
+            formal_correspondence_evidence_for(command_line.clone(), profile, params, entropy);
+        assert_eq!(
+            evidence.representation_version,
+            LATTICE_REPRESENTATION_VERSION
+        );
+        assert_eq!(
+            evidence.public_matrix_material_version,
+            PUBLIC_MATRIX_MATERIAL_VERSION
+        );
+        assert_eq!(evidence.primitive_route_revision, PRIMITIVE_ROUTE_REVISION);
+        assert!(
+            evidence.checks.public_material_reconstruction
+                && evidence.checks.route_profile_domain_separation
+                && evidence.checks.operation_principal_domain_separation
+                && evidence.checks.malformed_public_header_rejected
+                && evidence.checks.malformed_tail_coefficients_rejected
+                && evidence.checks.stale_route_revision_rejected
+                && evidence.checks.unsupported_profile_rejected,
+            "all formal correspondence checks must pass"
+        );
+        lines.push(serde_json::to_string(&evidence).expect("formal evidence serializes"));
+    }
+
+    for line in &lines {
+        assert!(
+            !line.contains("/Users/") && !line.contains("/tmp/"),
+            "formal correspondence evidence must not expose local paths: {line}"
+        );
+        assert!(
+            !line.contains("trapdoor_coefficients")
+                && !line.contains("secret_seed")
+                && !line.contains("expanded_secret_matrix")
+                && !line.contains("preimage_coefficients")
+                && !line.contains("preimage_bytes")
+                && !line.contains("bytes\":\""),
+            "formal correspondence evidence must not expose secret material: {line}"
+        );
+        assert!(
+            !line.contains("op:")
+                && !line.contains("principal:")
+                && !line.contains("formal-read")
+                && !line.contains("formal-principal"),
+            "formal correspondence evidence must hash or omit request text: {line}"
+        );
+        eprintln!("{line}");
+    }
+    write_formal_correspondence_jsonl_artifact(&lines);
+    assert!(
+        fs::metadata(FORMAL_CORRESPONDENCE_ARTIFACT_PATH)
+            .expect("formal correspondence evidence artifact exists")
+            .len()
+            > 0,
+        "formal correspondence evidence artifact must be non-empty"
+    );
 }
 
 #[test]

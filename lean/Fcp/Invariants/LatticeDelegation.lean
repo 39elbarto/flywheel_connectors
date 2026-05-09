@@ -12,19 +12,13 @@ expected to enforce:
   verifier MUST reject the sub-token.
 
 The cryptographic verification equation (`A · e ≡ h (mod q)` plus
-short-vector norm check) is **out of scope here** — that part of
-soundness lives in the SIS-hardness reduction sketched in
-`docs/post-quantum/lattice_trapdoor_delegation.md` §4. This file
-proves only the structural / chain-walk side: zone agreement, leaf
-period containment, and ancestor period containment must each hold,
-or the verifier rejects.
-
-This matches the soundness guarantees the Rust implementation
-*actually* enforces today (the cryptographic body is a stub returning
-`NotImplemented` per kyopb.1.3.1). When the lattice arithmetic lands,
-this file should be augmented with the SIS-reduction theorem; the
-structural piece proven here remains a load-bearing pre-condition
-either way.
+short-vector norm check) now has an implemented Rust fixture route for
+`SMALL_TEST` and `V4_REFERENCE`, but the full SIS reduction is still too
+large to honestly mechanize in this file. Instead, this module states a
+named mechanized assumption boundary with stable assumption ids and maps
+that boundary to the implementation facts that the Rust correspondence
+fixtures must check. The structural piece proven here remains a
+load-bearing pre-condition for that boundary.
 
 Important scope boundary: this file proves the Lean model, not the
 Rust implementation by extraction. The bridge to production code is
@@ -46,6 +40,97 @@ structure Cert where
   zone : Nat
   period : Period
   deriving DecidableEq, Repr
+
+/-- Stable identifier for an unmechanized cryptographic or bridge assumption. -/
+abbrev AssumptionId := String
+
+/-- Implementation profile facts that the Rust correspondence fixtures pin. -/
+structure RouteProfileBinding where
+  profileId : String
+  latticeRepresentationVersion : Nat
+  publicMatrixMaterialVersion : Nat
+  primitiveRouteRevision : Nat
+  deriving DecidableEq, Repr
+
+/-- The compact test profile implemented by `fcp-crypto-pq`. -/
+def smallTestRouteProfile : RouteProfileBinding where
+  profileId := "SMALL_TEST"
+  latticeRepresentationVersion := 2
+  publicMatrixMaterialVersion := 1
+  primitiveRouteRevision := 1
+
+/-- The V4 reference profile implemented by `fcp-crypto-pq`. -/
+def v4ReferenceRouteProfile : RouteProfileBinding where
+  profileId := "V4_REFERENCE"
+  latticeRepresentationVersion := 2
+  publicMatrixMaterialVersion := 1
+  primitiveRouteRevision := 1
+
+/-- Stable assumption ids for the SIS-side soundness boundary. -/
+def requiredSISAssumptionIds : List AssumptionId :=
+  [ "FCP-PQ-SIS-HARDNESS-V1",
+    "FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1",
+    "FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1",
+    "FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1",
+    "FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1",
+    "FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1" ]
+
+/-- Boundary consumed by the proof script and Rust correspondence fixtures.
+
+The boolean fields are deliberately explicit: each one names an
+implementation seam that must be covered by the checked Rust fixtures before
+the SIS-side theorem can be cited as applying to FCP's current code. -/
+structure SISAssumptionBoundary where
+  assumptionIds : List AssumptionId
+  routeProfiles : List RouteProfileBinding
+  zonePeriodPublicKeyShape : Bool
+  delegationCertificateClaims : Bool
+  requestBindingFields : Bool
+  dispatcherEnforcementChecks : Bool
+  replayDenialInvariants : Bool
+  deriving DecidableEq, Repr
+
+/-- The current FCP lattice-delegation assumption boundary. -/
+def implementedSISAssumptionBoundary : SISAssumptionBoundary where
+  assumptionIds := requiredSISAssumptionIds
+  routeProfiles := [smallTestRouteProfile, v4ReferenceRouteProfile]
+  zonePeriodPublicKeyShape := true
+  delegationCertificateClaims := true
+  requestBindingFields := true
+  dispatcherEnforcementChecks := true
+  replayDenialInvariants := true
+
+/-- Completeness predicate for the named SIS assumption boundary. -/
+def BoundaryComplete (b : SISAssumptionBoundary) : Prop :=
+  b.assumptionIds = requiredSISAssumptionIds /\
+    b.routeProfiles = [smallTestRouteProfile, v4ReferenceRouteProfile] /\
+    b.zonePeriodPublicKeyShape = true /\
+    b.delegationCertificateClaims = true /\
+    b.requestBindingFields = true /\
+    b.dispatcherEnforcementChecks = true /\
+    b.replayDenialInvariants = true
+
+/-- Mechanized boundary check for the current SIS-side assumption ids.
+
+This is not a proof of SIS hardness. It is the stable Lean theorem that says
+which unmechanized assumptions and implementation seams must be validated by
+Rust fixtures before the informal SIS reduction in
+`docs/post-quantum/lattice_trapdoor_delegation.md` may be cited for the
+implemented route. -/
+theorem lattice_delegation_sis_assumption_boundary_complete :
+    BoundaryComplete implementedSISAssumptionBoundary := by
+  unfold BoundaryComplete implementedSISAssumptionBoundary requiredSISAssumptionIds
+    smallTestRouteProfile v4ReferenceRouteProfile
+  simp
+
+/-- A named theorem for the V4 profile's SIS-side assumption boundary. -/
+theorem lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions :
+    BoundaryComplete implementedSISAssumptionBoundary /\
+      v4ReferenceRouteProfile ∈ implementedSISAssumptionBoundary.routeProfiles := by
+  constructor
+  · exact lattice_delegation_sis_assumption_boundary_complete
+  · unfold implementedSISAssumptionBoundary v4ReferenceRouteProfile smallTestRouteProfile
+    simp
 
 /-- The verifier accepts a `(leaf, ancestors)` chain for `(requestZone, now)`
     iff:

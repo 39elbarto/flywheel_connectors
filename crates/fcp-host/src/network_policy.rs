@@ -865,7 +865,7 @@ mod tests {
                 "fcp.test.metadata-only",
                 enforcement,
                 &[],
-                &Default::default(),
+                &BTreeMap::default(),
                 None,
             )
             .expect("metadata-only modes must not become runtime-enforcement claims");
@@ -878,7 +878,7 @@ mod tests {
             "fcp.test.empty-ops",
             RuntimeNetworkEnforcement::HostEgressProxy,
             &[],
-            &Default::default(),
+            &BTreeMap::default(),
             None,
         )
         .expect_err("runtime claims need a bounded operation set");
@@ -892,7 +892,7 @@ mod tests {
             "fcp.test.missing-policy",
             RuntimeNetworkEnforcement::WasiSandbox,
             &["matrix.send".to_string()],
-            &Default::default(),
+            &BTreeMap::default(),
             None,
         )
         .expect_err("runtime claims need invoked-operation constraints");

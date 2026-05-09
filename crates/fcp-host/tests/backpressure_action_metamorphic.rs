@@ -337,7 +337,7 @@ fn mr_backpressure_action_smoke_floor() {
         BackpressureAction::Shed | BackpressureAction::CancelLowPriority
     );
     assert!(
-        !(critical_rejected && !low_rejected),
+        !critical_rejected || low_rejected,
         "smoke: Critical rejected ({:?}) while Low admitted ({:?}) — fairness inversion",
         critical.action,
         low.action,

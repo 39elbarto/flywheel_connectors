@@ -16,8 +16,11 @@ use wiremock::{
 const CAP_READ: &str = "hue.read";
 const CAP_WRITE: &str = "hue.write";
 const OP_HEALTH: &str = "hue.health";
+const OP_LIST_LIGHTS: &str = "hue.list_lights";
+const OP_LIST_SCENES: &str = "hue.list_scenes";
 const OP_SET_LIGHT_STATE: &str = "hue.set_light_state";
 const OP_RECALL_SCENE: &str = "hue.recall_scene";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
     HandshakeRequest {
@@ -275,4 +278,87 @@ async fn invoke_health_reports_transport_metadata() {
     assert_eq!(result["status"], "ok");
     assert_eq!(result["transport"], "http-loopback");
     assert_eq!(result["app_key_configured"], true);
+}
+
+#[test]
+fn manifest_declares_bridge_scoped_network_constraints() {
+    let manifest: toml::Value = toml::from_str(MANIFEST_TOML).expect("manifest TOML should parse");
+    let operations = manifest["provides"]["operations"]
+        .as_table()
+        .expect("operations table should exist");
+    let expected_operations = [
+        OP_HEALTH,
+        OP_LIST_LIGHTS,
+        OP_LIST_SCENES,
+        OP_SET_LIGHT_STATE,
+        OP_RECALL_SCENE,
+    ];
+
+    assert_eq!(
+        operations.len(),
+        expected_operations.len(),
+        "operation count should match the connector's declared Hue surface"
+    );
+
+    for operation in expected_operations {
+        let manifest_key = operation
+            .strip_prefix("hue.")
+            .expect("Hue operation id should use hue prefix");
+        let operation_table = operations[manifest_key]
+            .as_table()
+            .expect("operation table should exist");
+        let network_constraints = operation_table["network_constraints"]
+            .as_table()
+            .expect("operation must declare network_constraints");
+
+        assert_eq!(
+            network_constraints["host_allow"]
+                .as_array()
+                .expect("host_allow"),
+            &[toml::Value::String("${hue_bridge_host}".into())],
+            "{operation} must be scoped to the configured bridge host placeholder"
+        );
+        assert_eq!(
+            network_constraints["port_allow"]
+                .as_array()
+                .expect("port_allow"),
+            &[toml::Value::Integer(80), toml::Value::Integer(443)],
+            "{operation} must allow only Hue bridge HTTP test and HTTPS ports"
+        );
+        assert_eq!(
+            network_constraints["require_sni"].as_bool(),
+            Some(false),
+            "{operation} must not require SNI for IP-addressed local Hue bridges"
+        );
+        assert_eq!(
+            network_constraints["deny_localhost"].as_bool(),
+            Some(false),
+            "{operation} must keep loopback available for deterministic tests"
+        );
+        assert_eq!(
+            network_constraints["deny_private_ranges"].as_bool(),
+            Some(false),
+            "{operation} must allow LAN/private Hue bridge addresses"
+        );
+        assert_eq!(
+            network_constraints["deny_tailnet_ranges"].as_bool(),
+            Some(false),
+            "{operation} must allow tailnet-reached home bridges"
+        );
+        assert_eq!(
+            network_constraints["deny_ip_literals"].as_bool(),
+            Some(false),
+            "{operation} must allow bridges configured by IP address"
+        );
+        assert_eq!(
+            network_constraints["require_host_canonicalization"].as_bool(),
+            Some(true),
+            "{operation} must still require host canonicalization"
+        );
+        assert_eq!(
+            network_constraints["max_redirects"].as_integer(),
+            Some(0),
+            "{operation} must not follow redirects away from the configured bridge"
+        );
+    }
 }

@@ -6492,6 +6492,7 @@ dependencies = [
 name = "fcp-sdk"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "async-trait",
  "chrono",
  "fcp-async-core",

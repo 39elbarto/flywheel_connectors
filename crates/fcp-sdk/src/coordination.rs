@@ -26,6 +26,9 @@ pub const THREAD_OWNERSHIP_INDETERMINATE_ERROR_CODE: u16 = 5090;
 /// Stable reason returned when Agent Mail cannot decide ownership.
 pub const AGENT_MAIL_UNAVAILABLE_REASON: &str = "agent_mail_unavailable";
 
+/// Stable reason returned when the caller cancels chat ownership before a claim.
+pub const THREAD_OWNERSHIP_CANCELLED_REASON: &str = "request_cancelled";
+
 /// Prefix used for Agent Mail chat-thread reservation keys.
 pub const CHAT_THREAD_RESERVATION_PREFIX: &str = "chat-thread://";
 
@@ -480,6 +483,9 @@ where
     ) -> ClaimOutcome {
         let request = self.request_for(key, agent_id);
         for _ in 0..=self.retry_attempts {
+            if cx.checkpoint().is_err() {
+                return ClaimOutcome::Indeterminate(THREAD_OWNERSHIP_CANCELLED_REASON.to_owned());
+            }
             match self.client.claim_thread_reservation(cx, &request).await {
                 AgentMailThreadReservationOutcome::Granted => {
                     return ClaimOutcome::Granted(request.claimant_agent_id().clone());
@@ -817,6 +823,9 @@ impl ChatClaimDecision {
         match outcome {
             ClaimOutcome::Granted(_) => Self::Proceed,
             ClaimOutcome::AlreadyOwned(owner) => Self::Deny(thread_owned_by_peer_error(&owner)),
+            ClaimOutcome::Indeterminate(reason) if reason == THREAD_OWNERSHIP_CANCELLED_REASON => {
+                Self::Deny(thread_ownership_indeterminate_error(&reason))
+            }
             ClaimOutcome::Indeterminate(reason) if fail_open => Self::DegradedProceed { reason },
             ClaimOutcome::Indeterminate(reason) => {
                 Self::Deny(thread_ownership_indeterminate_error(&reason))
@@ -2364,6 +2373,58 @@ mod tests {
         );
         assert_eq!(checker.retry_attempts(), AGENT_MAIL_CLAIM_RETRY_ATTEMPTS);
         assert_eq!(checker.client().requests().len(), 2);
+    }
+
+    #[test]
+    fn cancelled_agent_mail_claim_does_not_touch_backend_and_fails_closed() {
+        let checker =
+            AgentMailThreadOwnershipChecker::new(ScriptedAgentMailReservationClient::new([
+                AgentMailThreadReservationOutcome::Granted,
+            ]));
+        let cx = fcp_async_core::Cx::for_testing();
+        cx.cancel_fast(asupersync::types::CancelKind::User);
+
+        let decision = fcp_async_core::runtime::block_on_sync(
+            ChatCoordinationConfig::new()
+                .with_fail_open(true)
+                .claim_before_send(
+                    &cx,
+                    &checker,
+                    ChatCoordinationSendRequest::new(
+                        ZoneId::work(),
+                        connector("slack:chat:1.0.0"),
+                        ChannelId::new("C123"),
+                        Some(ThreadId::new("1700000000.000100")),
+                        agent("alice"),
+                    ),
+                ),
+        )
+        .expect("test runtime starts");
+
+        assert_eq!(checker.client().requests().len(), 0);
+        assert_eq!(
+            decision.claim_outcome(),
+            Some(&ClaimOutcome::Indeterminate(
+                THREAD_OWNERSHIP_CANCELLED_REASON.to_owned()
+            ))
+        );
+        assert!(!decision.should_send());
+        assert!(matches!(
+            decision.denial_error(),
+            Some(FcpError::ConnectorUnavailable {
+                code: THREAD_OWNERSHIP_INDETERMINATE_ERROR_CODE,
+                message,
+            }) if message == "thread_ownership_indeterminate:request_cancelled"
+        ));
+        assert!(
+            decision
+                .send_executed_audit_record(ChatCoordinationBackend::AgentMail, &agent("alice"))
+                .is_none()
+        );
+        let denied = decision
+            .send_denied_audit_record(ChatCoordinationBackend::AgentMail, &agent("alice"))
+            .expect("cancelled claim emits denial audit");
+        assert_eq!(denied.reason(), Some(THREAD_OWNERSHIP_CANCELLED_REASON));
     }
 
     #[test]

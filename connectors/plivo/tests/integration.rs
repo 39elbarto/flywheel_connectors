@@ -11,6 +11,7 @@ use std::{
 
 use chrono::Utc;
 use fcp_crypto::{CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_manifest::{ConnectorManifest, OperationSection};
 use fcp_plivo::connector::PlivoConnector;
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, OperationId, ZoneId,
@@ -28,6 +29,23 @@ use wiremock::{
 
 const TEST_AUTH_ID: &str = "MA123";
 const TEST_AUTH_SECRET: &str = "plivo_test_auth_secret";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const EXPECTED_OPERATION_COUNT: usize = 11;
+const PLIVO_API_EGRESS_OPERATIONS: &[&str] = &[
+    "plivo.call.continue",
+    "plivo.call.end",
+    "plivo.call.initiate",
+    "plivo.call.speak",
+    "plivo.call.status",
+    "plivo.call.transfer",
+];
+const NO_CONNECTOR_EGRESS_OPERATIONS: &[&str] = &[
+    "plivo.call.gather",
+    "plivo.webhook.evaluate_inbound_policy",
+    "plivo.webhook.ingest_request",
+    "plivo.webhook.parse_event",
+    "plivo.webhook.validate_signature",
+];
 
 async fn configure_connector(connector: &mut PlivoConnector, server: &MockServer) {
     connector
@@ -237,6 +255,100 @@ fn log_plivo_e2e(
         "artifact_paths": details.get("artifact_paths").cloned().unwrap_or_else(|| json!([])),
     });
     writeln!(logs, "{body}").expect("write plivo e2e log");
+}
+
+fn plivo_manifest() -> ConnectorManifest {
+    ConnectorManifest::parse_str(MANIFEST_TOML).expect("Plivo manifest should validate")
+}
+
+fn manifest_operation<'a>(manifest: &'a ConnectorManifest, id: &str) -> &'a OperationSection {
+    manifest
+        .provides
+        .operations
+        .get(id)
+        .unwrap_or_else(|| panic!("{id} should be declared in the manifest"))
+}
+
+fn assert_plivo_api_network_constraints(id: &str, operation: &OperationSection) {
+    let constraints = operation
+        .network_constraints
+        .as_ref()
+        .unwrap_or_else(|| panic!("{id} should declare network_constraints"));
+    assert_eq!(
+        constraints.host_allow,
+        ["api.plivo.com"],
+        "{id} should only allow the production Plivo REST API host"
+    );
+    assert_eq!(constraints.port_allow, [443], "{id}");
+    assert!(constraints.require_sni, "{id} should require SNI");
+    assert!(constraints.deny_localhost, "{id} should deny localhost");
+    assert!(
+        constraints.deny_private_ranges,
+        "{id} should deny private ranges"
+    );
+    assert!(
+        constraints.deny_tailnet_ranges,
+        "{id} should deny tailnet ranges"
+    );
+    assert!(constraints.deny_ip_literals, "{id} should deny IP literals");
+    assert_eq!(constraints.max_redirects, 0, "{id}");
+    assert_eq!(constraints.connect_timeout_ms, 10_000, "{id}");
+    assert_eq!(constraints.total_timeout_ms, 30_000, "{id}");
+}
+
+fn assert_no_connector_egress_network_constraints(id: &str, operation: &OperationSection) {
+    let constraints = operation
+        .network_constraints
+        .as_ref()
+        .unwrap_or_else(|| panic!("{id} should declare network_constraints"));
+    assert_eq!(
+        constraints.host_allow,
+        ["none.invalid"],
+        "{id} should advertise no connector-owned egress"
+    );
+    assert_eq!(constraints.port_allow, [0], "{id}");
+    assert!(
+        !constraints.require_sni,
+        "{id} should not require SNI for a no-egress sentinel"
+    );
+    assert!(constraints.deny_localhost, "{id} should deny localhost");
+    assert!(
+        constraints.deny_private_ranges,
+        "{id} should deny private ranges"
+    );
+    assert!(
+        constraints.deny_tailnet_ranges,
+        "{id} should deny tailnet ranges"
+    );
+    assert!(constraints.deny_ip_literals, "{id} should deny IP literals");
+    assert_eq!(constraints.dns_max_ips, 0, "{id}");
+    assert_eq!(constraints.max_redirects, 0, "{id}");
+    assert_eq!(constraints.connect_timeout_ms, 1_000, "{id}");
+    assert_eq!(constraints.total_timeout_ms, 30_000, "{id}");
+}
+
+#[test]
+fn manifest_declares_strict_per_operation_network_constraints() {
+    let manifest = plivo_manifest();
+    assert_eq!(
+        manifest.provides.operations.len(),
+        EXPECTED_OPERATION_COUNT,
+        "Plivo manifest operation count changed; update network-constraint assertions"
+    );
+
+    for id in PLIVO_API_EGRESS_OPERATIONS {
+        assert_plivo_api_network_constraints(id, manifest_operation(&manifest, id));
+    }
+    for id in NO_CONNECTOR_EGRESS_OPERATIONS {
+        assert_no_connector_egress_network_constraints(id, manifest_operation(&manifest, id));
+    }
+
+    for (id, operation) in &manifest.provides.operations {
+        assert!(
+            operation.network_constraints.is_some(),
+            "{id} should declare per-operation network_constraints"
+        );
+    }
 }
 
 #[fcp_async_core::runtime::test]

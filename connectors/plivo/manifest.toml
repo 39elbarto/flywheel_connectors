@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:fe9c3f6d70ea0fb8bcd9fac51590eab027c108ea6cdecfffc82df077b509e647"
+interface_hash = "blake3-256:fcp.interface.v2:a00e6f61de31909f3a359510923b7c77303aab4b3031f55ed951fa96b83fe550"
 
 [connector]
 id = "fcp.plivo"
@@ -164,6 +164,24 @@ type = "object"
 
 [provides.operations."plivo.call.gather".output_schema]
 type = "object"
+
+[provides.operations."plivo.call.gather".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."plivo.call.gather".ai_hints]
 when_to_use = "Use this to generate GetDigits XML for an IVR prompt that Plivo will fetch during call flow control."
@@ -394,6 +412,24 @@ type = "object"
 [provides.operations."plivo.webhook.evaluate_inbound_policy".output_schema]
 type = "object"
 
+[provides.operations."plivo.webhook.evaluate_inbound_policy".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."plivo.webhook.evaluate_inbound_policy".ai_hints]
 when_to_use = "Use this after signature validation to decide whether an inbound Plivo webhook caller should be accepted by the configured policy."
 common_mistakes = [
@@ -427,6 +463,24 @@ type = "object"
 [provides.operations."plivo.webhook.ingest_request".output_schema]
 type = "object"
 
+[provides.operations."plivo.webhook.ingest_request".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."plivo.webhook.ingest_request".ai_hints]
 when_to_use = "Use this for a Plivo webhook forwarded by the FCP host so the connector can verify signature/replay, parse the event, and apply inbound policy."
 common_mistakes = [
@@ -455,6 +509,24 @@ type = "object"
 
 [provides.operations."plivo.webhook.parse_event".output_schema]
 type = "object"
+
+[provides.operations."plivo.webhook.parse_event".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."plivo.webhook.parse_event".ai_hints]
 when_to_use = "Use this local parser only after a Plivo webhook has been authenticated and replay-checked."
@@ -487,6 +559,24 @@ type = "object"
 
 [provides.operations."plivo.webhook.validate_signature".output_schema]
 type = "object"
+
+[provides.operations."plivo.webhook.validate_signature".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."plivo.webhook.validate_signature".ai_hints]
 when_to_use = "Use this before trusting any Plivo webhook body to verify V3/V2 HMAC headers, replay state, and signed URL material."

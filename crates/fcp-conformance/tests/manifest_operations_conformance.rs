@@ -840,7 +840,6 @@ fn expected_network_constraints_gap_connectors() -> Vec<String> {
         "vectordb",
         "wecom",
         "whatsapp",
-        "zalo",
     ])
 }
 

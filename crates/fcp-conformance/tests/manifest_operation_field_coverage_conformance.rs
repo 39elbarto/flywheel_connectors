@@ -53,7 +53,6 @@ const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
     "vectordb",
     "wecom",
     "whatsapp",
-    "zalo",
 ];
 const EXPECTED_AI_HINT_GAPS: &[&str] = &[
     "dingtalk",

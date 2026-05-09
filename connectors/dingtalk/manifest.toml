@@ -29,6 +29,7 @@ safety_tier = "risky"
 idempotency = "none"
 input_schema = { type = "object", required = ["to", "content"], additionalProperties = false, properties = { to = { type = "string", minLength = 1, pattern = "\\S" }, content = { type = "string", minLength = 1, pattern = "\\S" } } }
 output_schema = { type = "object", additionalProperties = true, properties = { processQueryKey = { type = "string" }, messageId = { type = "string" }, errcode = { type = "integer" }, errmsg = { type = "string" } } }
+network_constraints = { host_allow = ["api.dingtalk.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.messages_send_link]
 summary = "Send a DingTalk link message"
@@ -38,6 +39,7 @@ safety_tier = "risky"
 idempotency = "none"
 input_schema = { type = "object", required = ["to", "title", "text", "message_url"], additionalProperties = false, properties = { to = { type = "string", minLength = 1, pattern = "\\S" }, title = { type = "string", minLength = 1, pattern = "\\S" }, text = { type = "string", minLength = 1, pattern = "\\S" }, message_url = { type = "string", minLength = 1, format = "uri" }, pic_url = { type = "string", minLength = 1, format = "uri" } } }
 output_schema = { type = "object", additionalProperties = true, properties = { processQueryKey = { type = "string" }, messageId = { type = "string" }, errcode = { type = "integer" }, errmsg = { type = "string" } } }
+network_constraints = { host_allow = ["api.dingtalk.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.messages_send_file]
 summary = "Send a DingTalk file message with a prior media_id"
@@ -47,6 +49,7 @@ safety_tier = "risky"
 idempotency = "none"
 input_schema = { type = "object", required = ["to", "media_id", "file_name", "file_type"], additionalProperties = false, properties = { to = { type = "string", minLength = 1, pattern = "\\S" }, media_id = { type = "string", minLength = 1, pattern = "\\S" }, file_name = { type = "string", minLength = 1, pattern = "\\S" }, file_type = { type = "string", minLength = 1, pattern = "\\S" } } }
 output_schema = { type = "object", additionalProperties = true, properties = { processQueryKey = { type = "string" }, messageId = { type = "string" }, errcode = { type = "integer" }, errmsg = { type = "string" } } }
+network_constraints = { host_allow = ["api.dingtalk.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.media_upload]
 summary = "Upload media to DingTalk"
@@ -56,6 +59,7 @@ safety_tier = "risky"
 idempotency = "best_effort"
 input_schema = { type = "object", required = ["media_type", "file_name", "content_base64"], additionalProperties = false, properties = { media_type = { type = "string", enum = ["image", "voice", "video", "file"] }, file_name = { type = "string", minLength = 1, pattern = "\\S" }, mime_type = { type = "string", minLength = 1, pattern = "\\S" }, content_base64 = { type = "string", minLength = 1, contentEncoding = "base64" } } }
 output_schema = { type = "object", additionalProperties = true, properties = { media_id = { type = "string" }, mediaId = { type = "string" }, errcode = { type = "integer" }, errmsg = { type = "string" } } }
+network_constraints = { host_allow = ["api.dingtalk.com", "oapi.dingtalk.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.events_normalize]
 summary = "Normalize a DingTalk robot callback event"
@@ -65,6 +69,7 @@ safety_tier = "safe"
 idempotency = "strict"
 input_schema = { type = "object", required = ["event"], additionalProperties = false, properties = { event = { type = "object", description = "Raw DingTalk robot callback JSON payload", additionalProperties = true } } }
 output_schema = { type = "object", required = ["event_type", "message_id", "conversation_id", "conversation_type", "sender_id", "sender_name", "text", "timestamp_ms", "at_bot", "raw"], additionalProperties = false, properties = { event_type = { type = "string", enum = ["message"] }, message_id = { type = ["string", "null"] }, conversation_id = { type = ["string", "null"] }, conversation_type = { type = "string", enum = ["private", "group", "unknown"] }, sender_id = { type = ["string", "null"] }, sender_name = { type = ["string", "null"] }, text = { type = ["string", "null"] }, timestamp_ms = { type = ["integer", "null"], minimum = 0 }, at_bot = { type = "boolean" }, raw = { type = "object", additionalProperties = true } } }
+network_constraints = { host_allow = ["none.invalid"], port_allow = [0], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 0, max_redirects = 0, connect_timeout_ms = 1000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.stream_ingest_message]
 summary = "Policy-gate and normalize one host-forwarded DingTalk Stream Mode message frame"
@@ -74,6 +79,7 @@ safety_tier = "safe"
 idempotency = "strict"
 input_schema = { type = "object", required = ["event"], additionalProperties = false, properties = { event = { type = "object", description = "Raw DingTalk Stream Mode ChatbotMessage payload", additionalProperties = true }, is_in_at_list = { type = "boolean" }, isInAtList = { type = "boolean" }, session_webhook = { type = "string", minLength = 1, format = "uri" }, sessionWebhook = { type = "string", minLength = 1, format = "uri" }, session_webhook_expired_time_ms = { type = "integer", minimum = 0 }, sessionWebhookExpiredTime = { type = "integer", minimum = 0 } } }
 output_schema = { type = "object", required = ["stream", "delivery", "policy", "state", "normalized", "event"], additionalProperties = false, properties = { stream = { type = "object", additionalProperties = true }, delivery = { type = "object", additionalProperties = true }, policy = { type = "object", additionalProperties = true }, state = { type = "object", required = ["seen_messages", "cached_session_webhooks", "accepted_events", "rejected_events", "duplicate_events"], additionalProperties = false, properties = { seen_messages = { type = "integer", minimum = 0 }, cached_session_webhooks = { type = "integer", minimum = 0 }, accepted_events = { type = "integer", minimum = 0 }, rejected_events = { type = "integer", minimum = 0 }, duplicate_events = { type = "integer", minimum = 0 } } }, normalized = { anyOf = [{ type = "object", additionalProperties = true }, { type = "null" }] }, event = { anyOf = [{ type = "object", additionalProperties = true }, { type = "null" }] } } }
+network_constraints = { host_allow = ["none.invalid"], port_allow = [0], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 0, max_redirects = 0, connect_timeout_ms = 1000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.stream_reply]
 summary = "Reply through a validated DingTalk Stream Mode session webhook"
@@ -83,6 +89,7 @@ safety_tier = "risky"
 idempotency = "none"
 input_schema = { type = "object", required = ["chat_id", "content"], additionalProperties = false, properties = { chat_id = { type = "string", minLength = 1, pattern = "\\S" }, content = { type = "string", minLength = 1, pattern = "\\S" }, session_webhook = { type = "string", minLength = 1, format = "uri" }, reply_to = { type = "string", minLength = 1 } } }
 output_schema = { type = "object", required = ["status", "chat_id_hash", "session_webhook_hash", "session_webhook_source", "reply_to_hash", "response", "redaction_status"], additionalProperties = false, properties = { status = { type = "string", enum = ["sent"] }, chat_id_hash = { type = "string", pattern = "^sha256:[0-9a-f]{16}$" }, session_webhook_hash = { type = "string", pattern = "^sha256:[0-9a-f]{16}$" }, session_webhook_source = { type = "string", enum = ["request", "cache"] }, reply_to_hash = { type = ["string", "null"], pattern = "^sha256:[0-9a-f]{16}$" }, response = { type = "object", additionalProperties = true }, redaction_status = { type = "string" } } }
+network_constraints = { host_allow = ["api.dingtalk.com", "oapi.dingtalk.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.health]
 summary = "Verify DingTalk credentials and token issuance"
@@ -92,6 +99,7 @@ safety_tier = "safe"
 idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["status", "base_url", "media_base_url", "client_id", "stream_policy_model", "stream_mode_enabled", "stream_state", "manifest_hash"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, base_url = { type = "string", format = "uri" }, media_base_url = { type = "string", format = "uri" }, client_id = { type = "string" }, stream_policy_model = { type = "string", enum = ["host_forwarded_stream_frame_supervision"] }, stream_mode_enabled = { type = "boolean" }, stream_state = { type = "object", required = ["seen_messages", "cached_session_webhooks", "accepted_events", "rejected_events", "duplicate_events"], additionalProperties = false, properties = { seen_messages = { type = "integer", minimum = 0 }, cached_session_webhooks = { type = "integer", minimum = 0 }, accepted_events = { type = "integer", minimum = 0 }, rejected_events = { type = "integer", minimum = 0 }, duplicate_events = { type = "integer", minimum = 0 } } }, manifest_hash = { type = "string", pattern = "^sha256:[0-9a-f]{64}$" } } }
+network_constraints = { host_allow = ["api.dingtalk.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [sandbox]
 profile = "strict"

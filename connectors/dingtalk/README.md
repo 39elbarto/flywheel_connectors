@@ -97,11 +97,13 @@ This slice is intentionally closer to "outbound robot automation" than to "full 
 - Production session-webhook reply hosts: `api.dingtalk.com` and `oapi.dingtalk.com`
 - Port: `443`
 - TLS + SNI required for live traffic
-- `localhost` and `127.0.0.1` are accepted only for deterministic test harnesses
+- Send and health operations declare per-operation egress only to `api.dingtalk.com`
+- Media upload and Stream Mode reply operations declare per-operation egress only to `api.dingtalk.com` and `oapi.dingtalk.com`
+- Callback normalization and Stream Mode ingest are connector-local and declare a no-egress sentinel
+- `localhost` and `127.0.0.1` remain accepted only in connector configuration for deterministic test harnesses, not in production manifest egress constraints
 - The runtime does not open inbound listeners and does not own DingTalk's WebSocket Stream Mode transport
 - Host-forwarded stream frames use bounded in-memory replay/session-webhook state owned by the connector instance
 - Session webhook URLs are validated against DingTalk reply hosts, reject userinfo, and use HTTPS outside explicit localhost test seams
-- Configure-time host validation already rejects unexpected hosts, but the manifest has not yet been upgraded to explicit per-operation network constraints the way newer connector manifests have. That alignment belongs in the runtime and manifest follow-on bead.
 
 ## Capability Families
 

@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use fcp_email_generic::EmailGenericConnector;
 use fcp_email_generic::error::EmailGenericError;
 use fcp_prelude::{ApprovalMode, IdempotencyClass, RiskLevel, SafetyTier};
+use toml::Value;
 
 const MANIFEST: &str = include_str!("../manifest.toml");
 const OP_HEALTH: &str = "email_generic.health";
@@ -170,6 +171,100 @@ fn manifest_declares_matching_operation_suffixes_and_capabilities() {
     assert!(MANIFEST.contains("network.dns"));
     assert!(MANIFEST.contains("network.outbound"));
     assert!(MANIFEST.contains("network.listen"));
+}
+
+#[test]
+fn manifest_declares_runtime_scoped_network_constraints() {
+    let manifest =
+        toml::from_str::<Value>(MANIFEST).expect("email-generic manifest should parse as TOML");
+
+    for section in ["health", "list_mailboxes", "search_messages"] {
+        let constraints = network_constraints(&manifest, section);
+        assert_eq!(
+            string_list(constraints, "host_allow"),
+            ["${email_imap_host}"]
+        );
+        assert_eq!(integer_list(constraints, "port_allow"), [143, 993]);
+        assert_common_mail_constraints(constraints);
+        assert_eq!(integer(constraints, "max_response_bytes"), 1_048_576);
+    }
+
+    let smtp = network_constraints(&manifest, "send_message");
+    assert_eq!(string_list(smtp, "host_allow"), ["${email_smtp_host}"]);
+    assert_eq!(integer_list(smtp, "port_allow"), [25, 465, 587]);
+    assert_common_mail_constraints(smtp);
+    assert_eq!(integer(smtp, "max_response_bytes"), 65_536);
+}
+
+fn network_constraints<'a>(manifest: &'a Value, section: &str) -> &'a toml::value::Table {
+    manifest
+        .get("provides")
+        .and_then(Value::as_table)
+        .and_then(|provides| provides.get("operations"))
+        .and_then(Value::as_table)
+        .and_then(|operations| operations.get(section))
+        .and_then(Value::as_table)
+        .and_then(|operation| operation.get("network_constraints"))
+        .and_then(Value::as_table)
+        .unwrap_or_else(|| panic!("{section} should declare network_constraints"))
+}
+
+fn string_list<'a>(table: &'a toml::value::Table, key: &str) -> Vec<&'a str> {
+    table
+        .get(key)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{key} should be an array"))
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} entries should be strings"))
+        })
+        .collect()
+}
+
+fn integer_list(table: &toml::value::Table, key: &str) -> Vec<i64> {
+    table
+        .get(key)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{key} should be an array"))
+        .iter()
+        .map(|value| {
+            value
+                .as_integer()
+                .unwrap_or_else(|| panic!("{key} entries should be integers"))
+        })
+        .collect()
+}
+
+fn boolean(table: &toml::value::Table, key: &str) -> bool {
+    table
+        .get(key)
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| panic!("{key} should be a boolean"))
+}
+
+fn integer(table: &toml::value::Table, key: &str) -> i64 {
+    table
+        .get(key)
+        .and_then(Value::as_integer)
+        .unwrap_or_else(|| panic!("{key} should be an integer"))
+}
+
+fn assert_common_mail_constraints(constraints: &toml::value::Table) {
+    assert!(integer_list(constraints, "ip_allow").is_empty());
+    assert!(integer_list(constraints, "cidr_deny").is_empty());
+    assert!(!boolean(constraints, "deny_localhost"));
+    assert!(!boolean(constraints, "deny_private_ranges"));
+    assert!(!boolean(constraints, "deny_tailnet_ranges"));
+    assert!(boolean(constraints, "require_sni"));
+    assert!(string_list(constraints, "spki_pins").is_empty());
+    assert!(!boolean(constraints, "deny_ip_literals"));
+    assert!(boolean(constraints, "require_host_canonicalization"));
+    assert_eq!(integer(constraints, "dns_max_ips"), 16);
+    assert_eq!(integer(constraints, "max_redirects"), 0);
+    assert_eq!(integer(constraints, "connect_timeout_ms"), 10_000);
+    assert_eq!(integer(constraints, "total_timeout_ms"), 30_000);
 }
 
 #[test]

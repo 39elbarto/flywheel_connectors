@@ -811,7 +811,6 @@ fn expected_network_constraints_gap_connectors() -> Vec<String> {
     connector_names(&[
         "anthropic-vertex",
         "dingtalk",
-        "email-generic",
         "google-ai",
         "google-chat",
         "google-workspace-events",

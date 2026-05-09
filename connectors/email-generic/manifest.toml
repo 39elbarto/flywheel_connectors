@@ -22,8 +22,9 @@ optional = []
 forbidden = ["system.exec", "system.privileged", "network.listen"]
 
 # IMAP and SMTP hosts are operator-configured and may point at public, private,
-# or tailnet infrastructure, so the host allowlist is intentionally deferred to
-# runtime configuration.
+# or tailnet infrastructure, so per-operation egress policy uses runtime-resolved
+# host placeholders while still limiting each operation to the relevant mail
+# protocol host and common protocol ports.
 
 [provides.operations.health]
 summary = "Report connector configuration, IMAP reachability, and inbound monitor policy state"
@@ -33,6 +34,24 @@ safety_tier = "safe"
 idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["status", "imap_host", "smtp_host", "manifest_hash", "monitor_policy", "inbound_monitor"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, imap_host = { type = "string", minLength = 1 }, smtp_host = { type = "string", minLength = 1 }, manifest_hash = { type = "string", pattern = "^sha256:[0-9a-f]{64}$" }, monitor_policy = { type = "object", required = ["allowed_senders_configured", "allowed_senders_count", "require_allowed_sender", "drop_automated", "allow_attachments", "poll_interval_secs", "max_body_chars", "seen_uid_cap"], additionalProperties = false, properties = { allowed_senders_configured = { type = "boolean" }, allowed_senders_count = { type = "integer", minimum = 0 }, require_allowed_sender = { type = "boolean" }, drop_automated = { type = "boolean" }, allow_attachments = { type = "boolean" }, poll_interval_secs = { type = "integer", minimum = 1 }, max_body_chars = { type = "integer", minimum = 1 }, seen_uid_cap = { type = "integer", minimum = 1 } } }, inbound_monitor = { type = "object", required = ["status", "streaming", "reason", "pre_emission_policy"], additionalProperties = false, properties = { status = { type = "string", enum = ["deferred"] }, streaming = { type = "boolean", enum = [false] }, reason = { type = "string", minLength = 1 }, pre_emission_policy = { type = "object", required = ["sender_allowlist", "automated_sender_suppression", "bounded_uid_cache", "body_length_bound", "attachment_classification", "thread_metadata"], additionalProperties = false, properties = { sender_allowlist = { type = "boolean" }, automated_sender_suppression = { type = "boolean" }, bounded_uid_cache = { type = "boolean" }, body_length_bound = { type = "boolean" }, attachment_classification = { type = "boolean" }, thread_metadata = { type = "boolean" } } } } } } }
+
+[provides.operations.health.network_constraints]
+host_allow = ["${email_imap_host}"]
+port_allow = [143, 993]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations.health.ai_hints]
 when_to_use = "Use this before mailbox search or SMTP send work to confirm the configured account, IMAP reachability, and inbound monitor policy are healthy."
@@ -52,6 +71,24 @@ idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["mailboxes"], additionalProperties = false, properties = { mailboxes = { type = "array", items = { type = "string" } } } }
 
+[provides.operations.list_mailboxes.network_constraints]
+host_allow = ["${email_imap_host}"]
+port_allow = [143, 993]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations.list_mailboxes.ai_hints]
 when_to_use = "Use this when an agent needs the exact provider mailbox names before searching messages, especially on accounts with localized or nested folders."
 common_mistakes = [
@@ -69,6 +106,24 @@ safety_tier = "safe"
 idempotency = "strict"
 input_schema = { type = "object", required = ["mailbox", "query"], additionalProperties = false, properties = { mailbox = { type = "string", minLength = 1 }, query = { type = "string", minLength = 1 } } }
 output_schema = { type = "object", required = ["mailbox", "query", "uids"], additionalProperties = false, properties = { mailbox = { type = "string", minLength = 1 }, query = { type = "string", minLength = 1 }, uids = { type = "array", items = { type = "integer", minimum = 0 } } } }
+
+[provides.operations.search_messages.network_constraints]
+host_allow = ["${email_imap_host}"]
+port_allow = [143, 993]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations.search_messages.ai_hints]
 when_to_use = "Use this to find candidate email message UIDs in a known mailbox before a follow-up workflow fetches or acts on specific messages."
@@ -88,6 +143,24 @@ safety_tier = "risky"
 idempotency = "none"
 input_schema = { type = "object", required = ["to", "subject", "body"], additionalProperties = false, properties = { to = { type = "array", minItems = 1, items = { type = "string", minLength = 1 } }, cc = { type = "array", items = { type = "string", minLength = 1 } }, subject = { type = "string" }, body = { type = "string" } } }
 output_schema = { type = "object", required = ["status", "to", "cc", "subject"], additionalProperties = false, properties = { status = { type = "string", enum = ["sent"] }, to = { type = "array", minItems = 1, items = { type = "string", minLength = 1 } }, cc = { type = "array", items = { type = "string", minLength = 1 } }, subject = { type = "string" } } }
+
+[provides.operations.send_message.network_constraints]
+host_allow = ["${email_smtp_host}"]
+port_allow = [25, 465, 587]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
 
 [provides.operations.send_message.ai_hints]
 when_to_use = "Use this only after the agent has explicit approval to send mail from the configured SMTP account to the requested recipients."

@@ -192,7 +192,11 @@ fn evidence_hash(raw: &str) -> String {
     hasher.update(b"fcp-qq-gateway-evidence-v1:");
     hasher.update(raw.as_bytes());
     let digest = hasher.finalize();
-    hex::encode(&digest[..12])
+    let mut prefix = [0_u8; 12];
+    for (slot, byte) in prefix.iter_mut().zip(digest.iter().copied()) {
+        *slot = byte;
+    }
+    hex::encode(prefix)
 }
 
 fn git_revision() -> String {

@@ -2901,6 +2901,183 @@ async fn socket_mode_subscribe_reuses_single_connection() {
     mock_server.verify().await;
 }
 
+#[fcp_async_core::runtime::test]
+async fn socket_mode_reconnects_after_websocket_close_and_shutdown_cleans_up() {
+    let _ctx = AsyncTestContext::for_scenario("slack.socket_mode.reconnect_cleanup");
+    let runtime = fcp_async_core::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build async-core runtime");
+
+    let first_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind first websocket listener");
+    let first_ws_url = format!(
+        "ws://{}",
+        first_listener.local_addr().expect("first listener addr")
+    );
+    let second_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind second websocket listener");
+    let second_ws_url = format!(
+        "ws://{}",
+        second_listener.local_addr().expect("second listener addr")
+    );
+
+    let first_ws_task = fcp_async_core::task::spawn(async move {
+        let (tcp_stream, _) = first_listener
+            .accept()
+            .await
+            .expect("accept first websocket client");
+        let mut ws_stream = accept_test_websocket(tcp_stream).await;
+        send_json_frame(
+            &mut ws_stream,
+            json!({ "type": "hello" }),
+            "send first hello frame",
+        )
+        .await;
+        close_test_websocket(&mut ws_stream).await;
+    });
+
+    let (second_connected_tx, second_connected_rx) = oneshot::channel::<()>();
+    let (second_ack_tx, second_ack_rx) = oneshot::channel::<Option<String>>();
+    let second_ws_task = fcp_async_core::task::spawn(async move {
+        let (tcp_stream, _) = second_listener
+            .accept()
+            .await
+            .expect("accept second websocket client");
+        let mut ws_stream = accept_test_websocket(tcp_stream).await;
+        let _ = second_connected_tx.send(());
+
+        send_json_frame(
+            &mut ws_stream,
+            json!({ "type": "hello" }),
+            "send second hello frame",
+        )
+        .await;
+        send_json_frame(
+            &mut ws_stream,
+            json!({
+                "envelope_id": "envelope-after-reconnect",
+                "type": "events_api",
+                "payload": {
+                    "event_id": "EvAfterReconnect",
+                    "team_id": "T_TEAM_1",
+                    "event": {
+                        "type": "message",
+                        "user": "U_EVT_RECONNECT",
+                        "channel": "C_RECONNECT",
+                        "text": "hello after reconnect",
+                        "ts": "1700000000.000200"
+                    }
+                }
+            }),
+            "send reconnected events_api frame",
+        )
+        .await;
+
+        let ack_payload = recv_text_frame(&mut ws_stream, "reconnected ack frame")
+            .await
+            .expect("reconnected ack frame should be readable");
+        let _ = second_ack_tx.send(ack_payload);
+
+        loop {
+            match ws_stream.recv(&Cx::for_testing()).await {
+                Ok(Some(ServerWsMessage::Close(_)) | None) | Err(_) => break,
+                _ => {}
+            }
+        }
+    });
+
+    let socket_urls = [first_ws_url, second_ws_url];
+    let fake_server = StructuredFakeHttpServer::spawn(2, move |idx, request| {
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/apps.connections.open");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer xapp-test-token-xyz")
+        );
+        StructuredHttpResponse::json(
+            200,
+            &json!({
+                "ok": true,
+                "url": socket_urls[idx].clone()
+            }),
+        )
+    });
+
+    let mut connector = SlackConnector::new();
+    let _key = setup_handshake(&mut connector, &["slack.read"]).await;
+    connector
+        .handle_configure(json!({
+            "token": "xoxb-test-token-xyz",
+            "app_token": "xapp-test-token-xyz",
+            "base_url": fake_server.url(),
+            "monitor_policy": { "require_mention": false }
+        }))
+        .await
+        .expect("configure");
+
+    let mut event_rx = connector.subscribe_events();
+    let subscribe_result = runtime
+        .block_on(connector.handle_subscribe(json!({
+            "topics": ["slack.message.new"]
+        })))
+        .expect("subscribe should succeed");
+    assert_eq!(subscribe_result["connection_status"], "started");
+
+    fcp_async_core::time::timeout(StdDuration::from_secs(3), first_ws_task)
+        .await
+        .expect("timeout waiting for first ws task")
+        .expect("first ws task join");
+    fcp_async_core::time::timeout(StdDuration::from_secs(5), second_connected_rx)
+        .await
+        .expect("timeout waiting for reconnected socket")
+        .expect("reconnected socket signal should complete");
+
+    let event = fcp_async_core::time::timeout(StdDuration::from_secs(3), event_rx.recv())
+        .await
+        .expect("timeout waiting for reconnected socket event")
+        .expect("broadcast receive")
+        .expect("event payload");
+    assert_eq!(event.topic, "slack.message.new");
+    assert_eq!(event.cursor, "EvAfterReconnect");
+    assert_eq!(event.data.principal.id, "U_EVT_RECONNECT");
+    assert_eq!(
+        event.data.payload["event"]["text"].as_str(),
+        Some("hello after reconnect")
+    );
+
+    let ack_json = fcp_async_core::time::timeout(StdDuration::from_secs(3), second_ack_rx)
+        .await
+        .expect("timeout waiting for reconnected socket ack")
+        .expect("ack channel should complete")
+        .expect("ack payload missing");
+    let ack_value: serde_json::Value =
+        serde_json::from_str(&ack_json).expect("ack should be valid json");
+    assert_eq!(ack_value["envelope_id"], "envelope-after-reconnect");
+
+    let health = connector.handle_health().await.expect("health");
+    assert_eq!(health["streaming"]["socket_mode_running"], true);
+
+    runtime
+        .block_on(connector.handle_shutdown(json!({})))
+        .expect("shutdown should succeed");
+
+    fcp_async_core::time::timeout(StdDuration::from_secs(3), second_ws_task)
+        .await
+        .expect("timeout waiting for second ws task")
+        .expect("second ws task join");
+
+    let requests = fake_server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.path == "/apps.connections.open")
+    );
+}
+
 // ============================================================================
 // Input validation edge cases
 // ============================================================================

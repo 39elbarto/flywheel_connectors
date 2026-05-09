@@ -5,7 +5,7 @@
 //! `/json/version` endpoint as sufficient proof that FCP browser operations are
 //! available.
 
-use std::time::Duration;
+use std::{net::IpAddr, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use fcp_async_core::{
@@ -63,12 +63,80 @@ struct BrowserControlOperation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DirectCdpEndpoint {
     url: String,
+    endpoint_kind: DirectCdpEndpointKind,
+    target: DirectCdpTarget,
+    redacted_url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BrowserControlEndpoint {
     FcpControlPlane,
     DirectCdp(DirectCdpEndpoint),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectCdpEndpointKind {
+    WebSocket,
+}
+
+impl DirectCdpEndpointKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::WebSocket => "direct_cdp_websocket",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectCdpTarget {
+    kind: DirectCdpTargetKind,
+    path_kind: String,
+    id_hash: String,
+}
+
+impl DirectCdpTarget {
+    #[cfg(test)]
+    fn descriptor(&self) -> serde_json::Value {
+        serde_json::json!({
+            "target_kind": self.kind.as_str(),
+            "path_kind": self.path_kind.as_str(),
+            "target_id_hash": format!("blake3:{}", self.id_hash),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectCdpTargetKind {
+    Page,
+    Browser,
+    Worker,
+    Unsupported,
+}
+
+impl DirectCdpTargetKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Page => "page",
+            Self::Browser => "browser",
+            Self::Worker => "worker",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+impl DirectCdpEndpoint {
+    #[cfg(test)]
+    fn descriptor(&self) -> serde_json::Value {
+        serde_json::json!({
+            "endpoint_kind": self.endpoint_kind.as_str(),
+            "redacted_endpoint": self.redacted_url.as_str(),
+            "target": self.target.descriptor(),
+            "target_selection": "configured_page_websocket",
+            "current_tab_decision": "configured_target_is_current_tab",
+            "export_target_decision": "configured_target_is_export_target",
+            "stale_target_recovery": false,
+        })
+    }
 }
 
 impl BrowserControlOperation {
@@ -259,25 +327,92 @@ fn browser_control_endpoint_for_url(url: &str) -> BrowserResult<BrowserControlEn
                 .into(),
         ));
     }
-    let target_id = parsed
-        .path
-        .strip_prefix("/devtools/page/")
-        .filter(|target_id| !target_id.is_empty())
-        .ok_or_else(|| {
-            BrowserError::InvalidConfig(
-                "direct Chrome DevTools WebSocket URL must target a page endpoint under /devtools/page/<target-id>"
-                    .into(),
-            )
-        })?;
-    if target_id.contains('/') {
-        return Err(BrowserError::InvalidConfig(
-            "direct Chrome DevTools page target id must be a single path segment".into(),
-        ));
+    if !is_loopback_direct_cdp_host(&parsed.host) {
+        return Err(BrowserError::InvalidConfig(format!(
+            "direct Chrome DevTools WebSocket URL must use a loopback host, got `{}`",
+            parsed.host
+        )));
     }
+
+    let target = direct_cdp_target_from_path(&parsed.path)?;
+    if target.kind != DirectCdpTargetKind::Page {
+        return Err(BrowserError::InvalidConfig(format!(
+            "direct Chrome DevTools WebSocket URL targets an unsupported {} endpoint; direct CDP mode supports only page endpoints under /devtools/page/<target-id>",
+            target.kind.as_str()
+        )));
+    }
+    let redacted_url = redacted_direct_cdp_url(&parsed, &target);
 
     Ok(BrowserControlEndpoint::DirectCdp(DirectCdpEndpoint {
         url: url.to_string(),
+        endpoint_kind: DirectCdpEndpointKind::WebSocket,
+        target,
+        redacted_url,
     }))
+}
+
+fn direct_cdp_target_from_path(path: &str) -> BrowserResult<DirectCdpTarget> {
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    let Some("devtools") = segments.next() else {
+        return Err(BrowserError::InvalidConfig(
+            "direct Chrome DevTools WebSocket URL must target /devtools/page/<target-id>".into(),
+        ));
+    };
+    let Some(path_kind) = segments.next() else {
+        return Err(BrowserError::InvalidConfig(
+            "direct Chrome DevTools WebSocket URL is missing target kind".into(),
+        ));
+    };
+    let Some(target_id) = segments.next().filter(|target_id| !target_id.is_empty()) else {
+        return Err(BrowserError::InvalidConfig(
+            "direct Chrome DevTools WebSocket URL is missing target id".into(),
+        ));
+    };
+    if segments.next().is_some() {
+        return Err(BrowserError::InvalidConfig(
+            "direct Chrome DevTools target id must be a single path segment".into(),
+        ));
+    }
+
+    let kind = match path_kind {
+        "page" => DirectCdpTargetKind::Page,
+        "browser" => DirectCdpTargetKind::Browser,
+        "worker" | "shared_worker" | "service_worker" => DirectCdpTargetKind::Worker,
+        _ => DirectCdpTargetKind::Unsupported,
+    };
+    Ok(DirectCdpTarget {
+        kind,
+        path_kind: path_kind.to_string(),
+        id_hash: direct_cdp_target_id_hash(target_id),
+    })
+}
+
+fn direct_cdp_target_id_hash(target_id: &str) -> String {
+    blake3::hash(target_id.as_bytes())
+        .to_hex()
+        .as_str()
+        .chars()
+        .take(16)
+        .collect()
+}
+
+fn redacted_direct_cdp_url(parsed: &WsUrl, target: &DirectCdpTarget) -> String {
+    format!(
+        "ws://{}/devtools/{}/target-hash-{}",
+        parsed.host_header(),
+        target.path_kind,
+        target.id_hash
+    )
+}
+
+fn is_loopback_direct_cdp_host(host: &str) -> bool {
+    let normalized = host
+        .trim_matches(|ch| ch == '[' || ch == ']')
+        .to_ascii_lowercase();
+    normalized == "localhost"
+        || normalized
+            .parse::<IpAddr>()
+            .is_ok_and(|addr| addr.is_loopback())
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -1527,6 +1662,16 @@ async fn connect_direct_cdp_session(
         .max_frame_size(max_response_bytes)
         .max_message_size(max_response_bytes)
         .ping_interval(None);
+    tracing::debug!(
+        endpoint_kind = endpoint.endpoint_kind.as_str(),
+        target_kind = endpoint.target.kind.as_str(),
+        target_path_kind = endpoint.target.path_kind.as_str(),
+        target_id_hash = %endpoint.target.id_hash,
+        redacted_endpoint = endpoint.redacted_url.as_str(),
+        timeout_ms = timeout.as_millis(),
+        max_response_bytes,
+        "connecting direct Chrome DevTools endpoint"
+    );
     let websocket = WebSocket::connect_with_config(cx, &endpoint.url, config)
         .await
         .map_err(|err| BrowserError::Api {
@@ -3543,16 +3688,60 @@ mod tests {
     }
 
     #[test]
-    fn test_direct_cdp_endpoint_accepts_page_websocket_url() {
+    fn test_direct_cdp_endpoint_accepts_page_websocket_url() -> BrowserResult<()> {
         let endpoint =
-            browser_control_endpoint_for_url("ws://127.0.0.1:9222/devtools/page/page-1").unwrap();
+            browser_control_endpoint_for_url("ws://127.0.0.1:9222/devtools/page/page-1")?;
 
+        let BrowserControlEndpoint::DirectCdp(endpoint) = endpoint else {
+            return Err(BrowserError::InvalidConfig(
+                "expected direct CDP endpoint".into(),
+            ));
+        };
+        assert_eq!(endpoint.url, "ws://127.0.0.1:9222/devtools/page/page-1");
+        assert_eq!(endpoint.endpoint_kind, DirectCdpEndpointKind::WebSocket);
+        assert_eq!(endpoint.target.kind, DirectCdpTargetKind::Page);
+        assert_eq!(endpoint.target.path_kind, "page");
+        assert_eq!(endpoint.target.id_hash, direct_cdp_target_id_hash("page-1"));
         assert_eq!(
-            endpoint,
-            BrowserControlEndpoint::DirectCdp(DirectCdpEndpoint {
-                url: "ws://127.0.0.1:9222/devtools/page/page-1".to_string()
+            endpoint.redacted_url,
+            format!(
+                "ws://127.0.0.1:9222/devtools/page/target-hash-{}",
+                direct_cdp_target_id_hash("page-1")
+            )
+        );
+        assert!(!endpoint.redacted_url.contains("page-1"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_direct_cdp_target_path_classification_is_explicit() {
+        let page = direct_cdp_target_from_path("/devtools/page/page-target").unwrap();
+        assert_eq!(page.kind, DirectCdpTargetKind::Page);
+        assert_eq!(page.path_kind, "page");
+        assert_eq!(page.id_hash, direct_cdp_target_id_hash("page-target"));
+
+        let browser = direct_cdp_target_from_path("/devtools/browser/browser-target").unwrap();
+        assert_eq!(browser.kind, DirectCdpTargetKind::Browser);
+        assert_eq!(browser.path_kind, "browser");
+        assert_eq!(
+            browser.descriptor(),
+            serde_json::json!({
+                "target_kind": "browser",
+                "path_kind": "browser",
+                "target_id_hash": format!("blake3:{}", direct_cdp_target_id_hash("browser-target")),
             })
         );
+
+        let worker = direct_cdp_target_from_path("/devtools/service_worker/sw-target").unwrap();
+        assert_eq!(worker.kind, DirectCdpTargetKind::Worker);
+        assert_eq!(worker.path_kind, "service_worker");
+
+        let unsupported = direct_cdp_target_from_path("/devtools/iframe/frame-target").unwrap();
+        assert_eq!(unsupported.kind, DirectCdpTargetKind::Unsupported);
+        assert_eq!(unsupported.path_kind, "iframe");
+
+        let missing_target = direct_cdp_target_from_path("/devtools/page/").unwrap_err();
+        assert!(format!("{missing_target}").contains("missing target id"));
     }
 
     #[test]
@@ -3567,17 +3756,22 @@ mod tests {
                 "must not contain userinfo",
             ),
             (
-                "ws://127.0.0.1:9222/devtools/page/page-1?token=secret",
+                "ws://127.0.0.1:9222/devtools/page/page-1?debug=true",
                 "must not contain query",
             ),
             (
-                "ws://127.0.0.1:9222/devtools/browser/browser-1",
-                "must target a page endpoint",
+                "ws://10.0.0.2:9222/devtools/page/page-1",
+                "must use a loopback host",
             ),
             (
-                "ws://127.0.0.1:9222/devtools/page/",
-                "must target a page endpoint",
+                "ws://127.0.0.1:9222/devtools/browser/browser-1",
+                "unsupported browser endpoint",
             ),
+            (
+                "ws://127.0.0.1:9222/devtools/worker/worker-1",
+                "unsupported worker endpoint",
+            ),
+            ("ws://127.0.0.1:9222/devtools/page/", "missing target id"),
         ] {
             let error = browser_control_endpoint_for_url(url).unwrap_err();
             assert!(
@@ -3592,6 +3786,42 @@ mod tests {
         let endpoint = browser_control_endpoint_for_url("http://127.0.0.1:9222").unwrap();
 
         assert_eq!(endpoint, BrowserControlEndpoint::FcpControlPlane);
+    }
+
+    #[test]
+    fn test_direct_cdp_endpoint_descriptor_is_redaction_safe() -> BrowserResult<()> {
+        let endpoint =
+            browser_control_endpoint_for_url("ws://localhost:9222/devtools/page/sensitive-target")?;
+        let BrowserControlEndpoint::DirectCdp(endpoint) = endpoint else {
+            return Err(BrowserError::InvalidConfig(
+                "expected direct CDP endpoint".into(),
+            ));
+        };
+
+        let descriptor = endpoint.descriptor();
+
+        assert_eq!(descriptor["endpoint_kind"], "direct_cdp_websocket");
+        assert_eq!(descriptor["target"]["target_kind"], "page");
+        assert_eq!(
+            descriptor["current_tab_decision"],
+            "configured_target_is_current_tab"
+        );
+        assert_eq!(
+            descriptor["export_target_decision"],
+            "configured_target_is_export_target"
+        );
+        assert_eq!(descriptor["stale_target_recovery"], false);
+        assert!(
+            descriptor["target"]["target_id_hash"]
+                .as_str()
+                .unwrap()
+                .starts_with("blake3:")
+        );
+        let redacted = descriptor["redacted_endpoint"].as_str().unwrap();
+        assert!(redacted.starts_with("ws://localhost:9222/devtools/page/target-hash-"));
+        assert!(!redacted.contains("sensitive-target"));
+        assert!(!descriptor.to_string().contains("sensitive-target"));
+        Ok(())
     }
 
     #[fcp_async_core::runtime::test]
@@ -3621,7 +3851,7 @@ mod tests {
 
         let error = client.health_check().await.unwrap_err();
 
-        assert!(format!("{error}").contains("must target a page endpoint"));
+        assert!(format!("{error}").contains("must target /devtools/page"));
     }
 
     #[fcp_async_core::runtime::test]

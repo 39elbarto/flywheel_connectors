@@ -47,6 +47,8 @@ Important runtime truths the contract preserves:
 - `browser_url` must be absolute and must not contain userinfo, query parameters, or fragments.
 - Runtime accepts `http` and `https` browser-control URLs, but non-loopback HTTP is rejected.
 - Direct Chrome DevTools WebSocket mode accepts only `ws://` loopback page endpoints under `/devtools/page/<target-id>`.
+- Direct Chrome DevTools endpoint handling classifies page, browser, worker, unsupported, and missing-target URL shapes before connecting; browser/worker/non-page targets fail closed.
+- Direct Chrome DevTools logs and descriptors use redacted endpoint URLs plus BLAKE3 target-id hashes rather than raw target IDs.
 - Raw Chrome DevTools discovery endpoints such as `/json` and `/json/version` are rejected as `browser_url` values.
 - `wss://` direct DevTools WebSocket URLs are rejected until TLS WebSocket support is wired.
 - Runtime request timeout is 30 seconds.
@@ -123,6 +125,7 @@ The current Browser README slice documents the existing runtime surface:
 - Runtime browser-control host allowlist: loopback plus `*.browser.mesh.internal` and `*.browser.flywheel.internal`.
 - Non-loopback browser-control URLs must use HTTPS.
 - Direct DevTools WebSocket support is limited to loopback page targets.
+- Direct DevTools target metadata records the configured page target as the current-tab/export target and disables stale-target recovery for raw page WebSocket mode.
 - Raw DevTools discovery endpoints are rejected as control-plane bases.
 - Manifest target-page host allowlist currently includes `*.github.com`, `*.google.com`, `*.wikipedia.org`, and `*.amazonaws.com`.
 - Manifest target-page ports are `80` and `443`.

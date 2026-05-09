@@ -6,6 +6,7 @@
 //! direct-LAN or DERP/fallback path. Otherwise it emits a structured skip record
 //! instead of treating host-first or synthetic RTT measurements as tailnet proof.
 
+use std::net::IpAddr;
 use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 use std::{env, fs};
@@ -21,8 +22,10 @@ use fcp_host::{
     TailnetInvokeHarnessObservation, TailnetInvokeLatencySummary, TailnetInvokeNodeEvidence,
     TailnetInvokePrerequisite, TailnetInvokeRealTransportInput, TailnetInvokeRouteMode,
 };
+use fcp_sandbox::is_tailnet_range;
 use fcp_tailscale::TailscaleStatus;
 use serde_json::Value;
+use url::Url;
 
 const USAGE: &str = "\
 Usage: fcp-tailnet-invoke-evidence [OPTIONS]
@@ -406,6 +409,7 @@ fn resolve_invoke_probe_config(cli: &Cli) -> Result<Option<TailnetInvokeProbeCon
             Err("--invoke-request-json/--invoke-request-file requires --invoke-url".to_string())
         }
         (Some(invoke_url), Some(request_source)) => {
+            validate_tailnet_invoke_url(&invoke_url)?;
             let attempts = if let Some(attempts) = cli.invoke_attempts {
                 attempts
             } else if let Ok(value) = env::var("FCP_TAILNET_INVOKE_ATTEMPTS") {
@@ -464,6 +468,42 @@ fn load_invoke_request_body(source: InvokeRequestSource) -> Result<Vec<u8>, Stri
     let value: Value =
         serde_json::from_str(&raw).map_err(|error| format!("parse_invoke_request_json:{error}"))?;
     serde_json::to_vec(&value).map_err(|error| format!("serialize_invoke_request_json:{error}"))
+}
+
+fn validate_tailnet_invoke_url(raw_url: &str) -> Result<(), String> {
+    let url = Url::parse(raw_url)
+        .map_err(|error| format!("--invoke-url must be an absolute URL: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("--invoke-url must use http or https".to_string());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("--invoke-url must not embed credentials".to_string());
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("--invoke-url must not include query strings or fragments".to_string());
+    }
+    if url.path() != "/rpc/invoke" {
+        return Err("--invoke-url must point to the fcp-host /rpc/invoke path".to_string());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "--invoke-url must include a host".to_string())?;
+    if !is_tailnet_invoke_host(host) {
+        return Err(
+            "--invoke-url host must be a tailnet-class endpoint (.ts.net, .tailnet., or tailnet IP)"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn is_tailnet_invoke_host(host: &str) -> bool {
+    let host = host.trim_matches(|ch| ch == '[' || ch == ']');
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return is_tailnet_range(ip);
+    }
+    let lower = host.trim_end_matches('.').to_ascii_lowercase();
+    lower.ends_with(".ts.net") || lower.contains(".tailnet.")
 }
 
 fn observe_tailnet(
@@ -919,6 +959,61 @@ mod tests {
         .expect_err("zero attempts should fail");
 
         assert!(err.contains("greater than zero"));
+    }
+
+    #[test]
+    fn resolve_probe_rejects_non_tailnet_invoke_url() {
+        let cli = parse_cli(&args(&[
+            "fcp-tailnet-invoke-evidence",
+            "--invoke-url=https://example.com/rpc/invoke",
+            "--invoke-request-json={}",
+        ]))
+        .expect("parse")
+        .expect("not help");
+
+        let err = resolve_invoke_probe_config(&cli)
+            .expect_err("public invoke URLs must not count as tailnet proof");
+        assert!(err.contains("tailnet-class"));
+    }
+
+    #[test]
+    fn resolve_probe_rejects_wrong_invoke_path() {
+        let cli = parse_cli(&args(&[
+            "fcp-tailnet-invoke-evidence",
+            "--invoke-url=https://responder.tailnet.ts.net/debug",
+            "--invoke-request-json={}",
+        ]))
+        .expect("parse")
+        .expect("not help");
+
+        let err = resolve_invoke_probe_config(&cli)
+            .expect_err("only the production invoke boundary should count");
+        assert!(err.contains("/rpc/invoke"));
+    }
+
+    #[test]
+    fn resolve_probe_accepts_tailnet_magicdns_or_ip_invoke_url() {
+        for invoke_url in [
+            "https://responder.tailnet.ts.net/rpc/invoke",
+            "http://100.64.0.42:8080/rpc/invoke",
+            "http://[fd7a:115c:a1e0::42]:8080/rpc/invoke",
+        ] {
+            let cli = parse_cli(&args(&[
+                "fcp-tailnet-invoke-evidence",
+                "--invoke-url",
+                invoke_url,
+                "--invoke-request-json",
+                "{}",
+            ]))
+            .expect("parse")
+            .expect("not help");
+
+            assert!(
+                resolve_invoke_probe_config(&cli)
+                    .expect("valid tailnet invoke URL")
+                    .is_some()
+            );
+        }
     }
 
     #[test]

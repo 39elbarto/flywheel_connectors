@@ -315,7 +315,11 @@ and one DERP/fallback record from the same invocation.
 
 For real invoke samples, also pass `--invoke-url <tailnet-host-rpc-invoke-url>`
 and one of `--invoke-request-json <json>` or `--invoke-request-file <path>`.
-Use `--invoke-attempts <n>` to collect multiple samples for percentile output.
+The invoke URL must be an explicit tailnet-class `http`/`https` endpoint at
+`/rpc/invoke`: a MagicDNS `.ts.net` host, `.tailnet.` host, or tailnet IP. This
+prevents a public or localhost HTTP endpoint from combining with unrelated
+LocalAPI route telemetry to produce misleading `real_transport` evidence. Use
+`--invoke-attempts <n>` to collect multiple samples for percentile output.
 
 ### Cross-Controller Safety Invariants
 

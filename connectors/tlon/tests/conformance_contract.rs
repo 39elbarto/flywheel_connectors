@@ -119,7 +119,7 @@ async fn runtime_catalog_matches_manifest_operation_contracts() {
                 .as_str()
                 .expect("manifest operation idempotency")
         );
-        assert_eq!(runtime_operation["implemented"], false);
+        assert_eq!(runtime_operation["implemented"], true);
 
         validator_for(&runtime_operation["input_schema"]);
         validator_for(&runtime_operation["output_schema"]);
@@ -191,7 +191,7 @@ async fn operation_risk_safety_idempotency_and_incubation_are_stable() {
         assert_eq!(operation["risk_level"], "medium");
         assert_eq!(operation["safety_tier"], "safe");
         assert_eq!(operation["idempotency"], "best_effort");
-        assert_eq!(operation["implemented"], false);
+        assert_eq!(operation["implemented"], true);
     }
 
     let resolve = by_id
@@ -200,16 +200,16 @@ async fn operation_risk_safety_idempotency_and_incubation_are_stable() {
     assert_eq!(resolve["risk_level"], "low");
     assert_eq!(resolve["safety_tier"], "safe");
     assert_eq!(resolve["idempotency"], "strict");
-    assert_eq!(resolve["implemented"], false);
+    assert_eq!(resolve["implemented"], true);
 
     let connector = TlonConnector::new();
     let introspection = connector
         .handle_introspect()
         .await
         .expect("introspection should succeed");
-    assert_eq!(introspection["surface_status"], "incubating");
+    assert_eq!(introspection["surface_status"], "implemented");
     assert_eq!(
         introspection["surface_status_rationale"],
-        "Runtime path is incomplete or lacks production evidence"
+        "Authenticated Urbit Eyre channel runtime for DM send, channel send, and local target resolution with SSRF-safe base URL validation."
     );
 }

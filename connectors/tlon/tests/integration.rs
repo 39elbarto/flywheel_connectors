@@ -8,23 +8,31 @@
 
 use std::{
     io::Write,
+    net::TcpListener,
     process::{Command, Stdio},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
+use chrono::{Duration as ChronoDuration, Utc};
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_prelude::FcpError;
+use fcp_prelude::{CapabilityConstraints, CapabilityToken};
 use fcp_tlon::TlonConnector;
 use serde_json::{Value, json};
+use wiremock::matchers::{header, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const CONNECTOR_ID: &str = "fcp.tlon";
 const BEAD_ID: &str = "flywheel_connectors-4kw5f.11.13";
-const SKIP_REASON: &str = "invoke_surface_unimplemented";
 const DM_OPERATION: &str = "tlon.dm.send";
 const CHANNEL_OPERATION: &str = "tlon.channel.send";
 const RESOLVE_OPERATION: &str = "tlon.target.resolve";
 const SHIP_FIXTURE: &str = "~zod";
 const CHANNEL_FIXTURE: &str = "/ship/~zod/general";
 const MESSAGE_FIXTURE: &str = "body text that must stay out of evidence";
+const SESSION_COOKIE: &str = "urbauth-ship=fixture-session";
+const CREDENTIAL_ID: &str = "fixture-credential-id";
+const EYRE_CHANNEL_PATH: &str = "/~/channel/fcp-tlon";
 
 #[derive(Clone, Copy)]
 struct Evidence<'a> {
@@ -69,7 +77,7 @@ fn evidence_json(evidence: Evidence<'_>) -> Value {
         "operation_id": evidence.operation_id,
         "capability": evidence.capability,
         "zone": "z:community",
-        "instance_id": "planned-only",
+        "instance_id": "loopback-fixture",
         "fixture_id": evidence.fixture_id,
         "ship_hash": stable_hash("ship", SHIP_FIXTURE),
         "group_channel_id_hash": stable_hash("channel", CHANNEL_FIXTURE),
@@ -88,6 +96,8 @@ fn assert_redacted(serialized: &str) {
         SHIP_FIXTURE,
         CHANNEL_FIXTURE,
         MESSAGE_FIXTURE,
+        SESSION_COOKIE,
+        CREDENTIAL_ID,
         "/Users/",
         "/private/",
         "provider response body",
@@ -105,12 +115,14 @@ fn emit_redacted_evidence(evidence: Evidence<'_>) {
     eprintln!("{serialized}");
 }
 
-async fn configured_connector() -> TlonConnector {
+async fn configured_cookie_connector(base_url: &str) -> TlonConnector {
     let mut connector = TlonConnector::new();
     connector
         .handle_configure(json!({
-            "base_url": "https://fixture.tlon.example",
-            "auth_ref": "fixture-auth-ref"
+            "base_url": base_url,
+            "session_cookie": SESSION_COOKIE,
+            "allow_private_network": true,
+            "ship": SHIP_FIXTURE
         }))
         .await
         .expect("configure should succeed");
@@ -122,6 +134,90 @@ async fn configured_connector() -> TlonConnector {
         .await
         .expect("handshake should succeed");
     connector
+}
+
+async fn configured_credential_connector(base_url: &str) -> TlonConnector {
+    let mut connector = TlonConnector::new();
+    connector
+        .handle_configure(json!({
+            "base_url": base_url,
+            "credential_id": CREDENTIAL_ID,
+            "allow_private_network": true,
+            "ship": SHIP_FIXTURE
+        }))
+        .await
+        .expect("configure with credential id should succeed");
+    connector
+        .handle_handshake(json!({
+            "protocol_version": "2.0",
+            "zone": "z:community"
+        }))
+        .await
+        .expect("handshake should succeed");
+    connector
+}
+
+async fn configured_bound_connector(
+    base_url: &str,
+    signing_key: &Ed25519SigningKey,
+) -> TlonConnector {
+    let mut connector = TlonConnector::new();
+    connector
+        .handle_configure(json!({
+            "base_url": base_url,
+            "session_cookie": SESSION_COOKIE,
+            "allow_private_network": true,
+            "ship": SHIP_FIXTURE
+        }))
+        .await
+        .expect("configure should succeed");
+    connector
+        .handle_handshake(json!({
+            "protocol_version": "2.0",
+            "zone": "z:community",
+            "host_public_key": signing_key.verifying_key().to_bytes(),
+            "nonce": vec![0_u8; 32],
+            "capabilities_requested": ["tlon.dm", "tlon.channel"],
+        }))
+        .await
+        .expect("bound handshake should succeed");
+    connector
+}
+
+fn capability_token(
+    signing_key: &Ed25519SigningKey,
+    capability: &str,
+    operation: &str,
+    zone: &str,
+    target_instance: Option<&str>,
+) -> CapabilityToken {
+    let constraints = CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut constraints_cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize constraints");
+    let now = Utc::now();
+    let mut builder = CapabilityTokenBuilder::new()
+        .capability_id(capability)
+        .zone_id(zone)
+        .principal("user:test")
+        .operations(&[operation])
+        .issuer("node:test")
+        .validity(now, now + ChronoDuration::hours(1))
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("valid constraints cbor");
+    if let Some(instance) = target_instance {
+        builder = builder.target_instance(instance);
+    }
+    CapabilityToken::from_raw(builder.sign(signing_key).expect("sign token"))
+}
+
+fn unused_loopback_base_url() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind unused loopback port");
+    let addr = listener.local_addr().expect("read unused loopback address");
+    drop(listener);
+    format!("http://{addr}")
 }
 
 fn assert_invalid_request(error: FcpError, expected_code: u16, expected_text: &str) {
@@ -139,9 +235,68 @@ fn assert_invalid_request(error: FcpError, expected_code: u16, expected_text: &s
     );
 }
 
+fn assert_operation_not_granted(error: &FcpError, operation_id: &str) {
+    assert!(
+        matches!(&error, FcpError::OperationNotGranted { operation } if operation == operation_id),
+        "expected OperationNotGranted for {operation_id}, got {error:?}"
+    );
+}
+
+fn assert_rate_limited(error: &FcpError, retry_after_ms: u64) {
+    assert!(
+        matches!(
+            &error,
+            FcpError::RateLimited {
+                retry_after_ms: actual,
+                ..
+            } if *actual == retry_after_ms
+        ),
+        "expected RateLimited retry_after_ms={retry_after_ms}, got {error:?}"
+    );
+}
+
+fn assert_external_status(error: FcpError, status_code: u16) {
+    assert!(
+        matches!(
+            &error,
+            FcpError::External {
+                service,
+                status_code: Some(actual),
+                ..
+            } if service == "tlon" && *actual == status_code
+        ),
+        "expected External status {status_code}, got {error:?}"
+    );
+    let FcpError::External { message, .. } = error else {
+        return;
+    };
+    assert!(
+        !message.contains("secret")
+            && !message.contains("token")
+            && !message.contains(MESSAGE_FIXTURE),
+        "provider error message leaked sensitive data: {message}"
+    );
+}
+
+fn assert_transport_error(error: &FcpError, retryable: bool) {
+    assert!(
+        matches!(
+            &error,
+            FcpError::External {
+                service,
+                status_code: None,
+                retryable: actual,
+                ..
+            } if service == "tlon" && *actual == retryable
+        ),
+        "expected Tlon transport error retryable={retryable}, got {error:?}"
+    );
+}
+
 #[fcp_async_core::runtime::test]
 async fn lifecycle_and_shutdown_emit_redacted_jsonl() {
     let started = Instant::now();
+    let server = MockServer::start().await;
     let mut connector = TlonConnector::new();
 
     let health = connector
@@ -151,16 +306,21 @@ async fn lifecycle_and_shutdown_emit_redacted_jsonl() {
     assert_eq!(health["status"], "unconfigured");
 
     connector
-        .handle_configure(json!({"base_url": "https://fixture.tlon.example"}))
+        .handle_configure(json!({
+            "base_url": server.uri(),
+            "session_cookie": SESSION_COOKIE,
+            "allow_private_network": true,
+            "ship": SHIP_FIXTURE
+        }))
         .await
         .expect("configure should succeed");
     let handshake = connector
         .handle_handshake(json!({"protocol_version": "2.0", "zone": "z:community"}))
         .await
         .expect("handshake should succeed");
-    assert_eq!(handshake["surface_status"], "incubating");
+    assert_eq!(handshake["surface_status"], "implemented");
     assert_eq!(
-        handshake["planned_capabilities"],
+        handshake["capabilities"],
         json!(["tlon.dm", "tlon.channel"])
     );
 
@@ -168,22 +328,22 @@ async fn lifecycle_and_shutdown_emit_redacted_jsonl() {
         .handle_health()
         .await
         .expect("health after handshake should succeed");
-    assert_eq!(health["status"], "degraded");
-    assert_eq!(health["live_requests_supported"], false);
+    assert_eq!(health["status"], "healthy");
+    assert_eq!(health["live_requests_supported"], true);
 
     let doctor = connector
         .handle_doctor()
         .await
         .expect("doctor should succeed");
-    assert_eq!(doctor["status"], "degraded");
-    assert_eq!(doctor["checks"][2]["passed"], false);
+    assert_eq!(doctor["status"], "healthy");
+    assert_eq!(doctor["checks"][4]["passed"], true);
 
     let self_check = connector
         .handle_self_check()
         .await
         .expect("self_check should succeed");
-    assert_eq!(self_check["status"], "unsupported");
-    assert_eq!(self_check["reason_code"], SKIP_REASON);
+    assert_eq!(self_check["status"], "ok");
+    assert_eq!(self_check["reason_code"], "ready");
 
     connector
         .handle_shutdown(json!({}))
@@ -199,7 +359,7 @@ async fn lifecycle_and_shutdown_emit_redacted_jsonl() {
         test: "lifecycle_and_shutdown_emit_redacted_jsonl",
         operation_id: "lifecycle",
         capability: "tlon.lifecycle",
-        fixture_id: "tlon-planned-only-lifecycle",
+        fixture_id: "tlon-loopback-lifecycle",
         lifecycle_phase: "shutdown",
         latency_ms: started.elapsed().as_millis(),
         result: "pass",
@@ -210,60 +370,236 @@ async fn lifecycle_and_shutdown_emit_redacted_jsonl() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn planned_urbit_fixture_paths_emit_skipped_jsonl_without_live_credentials() {
-    let connector = configured_connector().await;
+async fn loopback_dm_and_channel_send_emit_redacted_jsonl() {
+    let started = Instant::now();
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path(EYRE_CHANNEL_PATH))
+        .and(header("cookie", SESSION_COOKIE))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(2)
+        .mount(&server)
+        .await;
 
-    for (operation_id, capability, input) in [
-        (
-            DM_OPERATION,
-            "tlon.dm",
-            json!({"ship": SHIP_FIXTURE, "message": MESSAGE_FIXTURE}),
-        ),
-        (
-            CHANNEL_OPERATION,
-            "tlon.channel",
-            json!({"channel": CHANNEL_FIXTURE, "message": MESSAGE_FIXTURE}),
-        ),
-        (
-            RESOLVE_OPERATION,
-            "tlon.channel",
-            json!({"target": CHANNEL_FIXTURE}),
-        ),
-    ] {
-        let started = Instant::now();
-        let error = connector
+    let connector = configured_cookie_connector(&server.uri()).await;
+
+    let dm_result = connector
+        .handle_invoke(json!({
+            "operation_id": DM_OPERATION,
+            "input": {"ship": SHIP_FIXTURE, "message": MESSAGE_FIXTURE}
+        }))
+        .await
+        .expect("DM send should hit loopback Eyre channel");
+    assert_eq!(dm_result["ok"], true);
+    assert_eq!(dm_result["provider_status"], "accepted");
+
+    let channel_result = connector
+        .handle_invoke(json!({
+            "operation_id": CHANNEL_OPERATION,
+            "input": {"channel": CHANNEL_FIXTURE, "message": MESSAGE_FIXTURE}
+        }))
+        .await
+        .expect("channel send should hit loopback Eyre channel");
+    assert_eq!(channel_result["ok"], true);
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 2);
+    let dm_body: Value = serde_json::from_slice(&requests[0].body).expect("DM request body JSON");
+    let channel_body: Value =
+        serde_json::from_slice(&requests[1].body).expect("channel request body JSON");
+    assert_eq!(dm_body[0]["id"], 1);
+    assert_eq!(dm_body[0]["action"], "poke");
+    assert_eq!(dm_body[0]["ship"], "zod");
+    assert_eq!(dm_body[0]["mark"], "tlon-dm-action");
+    assert_eq!(dm_body[0]["json"]["kind"], "dm.send");
+    assert_eq!(dm_body[0]["json"]["ship"], SHIP_FIXTURE);
+    assert_eq!(dm_body[0]["json"]["message"], MESSAGE_FIXTURE);
+    assert_eq!(channel_body[0]["id"], 2);
+    assert_eq!(channel_body[0]["ship"], "zod");
+    assert_eq!(channel_body[0]["mark"], "tlon-channel-action");
+    assert_eq!(channel_body[0]["json"]["kind"], "channel.send");
+    assert_eq!(channel_body[0]["json"]["channel"], CHANNEL_FIXTURE);
+
+    emit_redacted_evidence(Evidence {
+        test: "loopback_dm_and_channel_send_emit_redacted_jsonl",
+        operation_id: "tlon.send.loopback",
+        capability: "tlon.dm+tlon.channel",
+        fixture_id: "tlon-loopback-eyre-channel",
+        lifecycle_phase: "invoke",
+        latency_ms: started.elapsed().as_millis(),
+        result: "pass",
+        error_code: None,
+        cleanup_result: "mock_server_dropped",
+        skip_reason: None,
+    });
+}
+
+#[fcp_async_core::runtime::test]
+async fn target_resolve_and_validation_denials_are_local() {
+    let started = Instant::now();
+    let server = MockServer::start().await;
+    let connector = configured_cookie_connector(&server.uri()).await;
+
+    for target in [SHIP_FIXTURE, CHANNEL_FIXTURE] {
+        let resolved = connector
             .handle_invoke(json!({
-                "operation_id": operation_id,
-                "input": input
+                "operation_id": RESOLVE_OPERATION,
+                "input": {"target": target}
             }))
             .await
-            .expect_err("planned operation should refuse execution");
-        assert_invalid_request(error, 1002, "planned but not implemented");
-
-        let simulate = connector
-            .handle_simulate(json!({"operation_id": operation_id}))
-            .await
-            .expect("simulate should succeed");
-        assert_eq!(simulate["allowed"], false);
-        assert_eq!(simulate["simulate_capability"], "unsupported");
-        assert_eq!(
-            simulate["reason"],
-            "This connector scaffold only declares planned operations. Live invoke support is not implemented yet."
-        );
-
-        emit_redacted_evidence(Evidence {
-            test: "planned_urbit_fixture_paths_emit_skipped_jsonl_without_live_credentials",
-            operation_id,
-            capability,
-            fixture_id: "tlon-urbit-no-live-credential-fixture",
-            lifecycle_phase: "invoke",
-            latency_ms: started.elapsed().as_millis(),
-            result: "skipped",
-            error_code: Some(SKIP_REASON),
-            cleanup_result: "no_provider_socket_opened",
-            skip_reason: Some(SKIP_REASON),
-        });
+            .expect("target resolution should validate locally");
+        assert_eq!(resolved["resolved"], true);
     }
+
+    let bad_channel = connector
+        .handle_invoke(json!({
+            "operation_id": RESOLVE_OPERATION,
+            "input": {"target": "/ship/~zod/../secret"}
+        }))
+        .await
+        .expect_err("path traversal should be denied before provider work");
+    assert_invalid_request(bad_channel, 1005, "channel must be an absolute");
+
+    let bad_message = connector
+        .handle_invoke(json!({
+            "operation_id": DM_OPERATION,
+            "input": {"ship": SHIP_FIXTURE, "message": "bad\u{0}message"}
+        }))
+        .await
+        .expect_err("NUL message should be denied before provider work");
+    assert_invalid_request(bad_message, 1005, "NUL");
+
+    assert_eq!(
+        server.received_requests().await.unwrap_or_default().len(),
+        0
+    );
+    emit_redacted_evidence(Evidence {
+        test: "target_resolve_and_validation_denials_are_local",
+        operation_id: RESOLVE_OPERATION,
+        capability: "tlon.channel",
+        fixture_id: "tlon-local-validation",
+        lifecycle_phase: "invoke",
+        latency_ms: started.elapsed().as_millis(),
+        result: "pass",
+        error_code: None,
+        cleanup_result: "no_provider_socket_opened",
+        skip_reason: None,
+    });
+}
+
+#[fcp_async_core::runtime::test]
+async fn credential_id_mode_reports_injection_requirement_and_sends_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path(EYRE_CHANNEL_PATH))
+        .and(header("x-fcp-credential-id", CREDENTIAL_ID))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let connector = configured_credential_connector(&server.uri()).await;
+    let self_check = connector
+        .handle_self_check()
+        .await
+        .expect("self_check should succeed");
+    assert_eq!(self_check["status"], "degraded");
+    assert_eq!(self_check["reason_code"], "credential_injection_required");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": DM_OPERATION,
+            "input": {"ship": SHIP_FIXTURE, "message": MESSAGE_FIXTURE}
+        }))
+        .await
+        .expect("credential id mode should pass the host credential reference header");
+    assert_eq!(result["ok"], true);
+    assert_eq!(
+        server.received_requests().await.unwrap_or_default().len(),
+        1
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn provider_error_mapping_is_redacted_and_retry_aware() {
+    let retry_server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path(EYRE_CHANNEL_PATH))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "2")
+                .set_body_string("secret token message body"),
+        )
+        .expect(1)
+        .mount(&retry_server)
+        .await;
+    let retry_connector = configured_cookie_connector(&retry_server.uri()).await;
+    let retry_error = retry_connector
+        .handle_invoke(json!({
+            "operation_id": CHANNEL_OPERATION,
+            "input": {"channel": CHANNEL_FIXTURE, "message": MESSAGE_FIXTURE}
+        }))
+        .await
+        .expect_err("429 should map to FCP rate limit");
+    assert_rate_limited(&retry_error, 2_000);
+
+    let auth_server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path(EYRE_CHANNEL_PATH))
+        .respond_with(ResponseTemplate::new(401).set_body_string("secret token message body"))
+        .expect(1)
+        .mount(&auth_server)
+        .await;
+    let auth_connector = configured_cookie_connector(&auth_server.uri()).await;
+    let auth_error = auth_connector
+        .handle_invoke(json!({
+            "operation_id": DM_OPERATION,
+            "input": {"ship": SHIP_FIXTURE, "message": MESSAGE_FIXTURE}
+        }))
+        .await
+        .expect_err("401 should map to a redacted external auth error");
+    assert_external_status(auth_error, 401);
+
+    let network_connector = configured_cookie_connector(&unused_loopback_base_url()).await;
+    let network_error = network_connector
+        .handle_invoke(json!({
+            "operation_id": DM_OPERATION,
+            "input": {"ship": SHIP_FIXTURE, "message": MESSAGE_FIXTURE}
+        }))
+        .await
+        .expect_err("closed loopback port should map to retryable transport error");
+    assert_transport_error(&network_error, true);
+
+    let timeout_server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path(EYRE_CHANNEL_PATH))
+        .respond_with(ResponseTemplate::new(204).set_delay(Duration::from_millis(1_200)))
+        .expect(1)
+        .mount(&timeout_server)
+        .await;
+    let mut timeout_connector = TlonConnector::new();
+    timeout_connector
+        .handle_configure(json!({
+            "base_url": timeout_server.uri(),
+            "session_cookie": SESSION_COOKIE,
+            "allow_private_network": true,
+            "ship": SHIP_FIXTURE,
+            "timeout_ms": 1000
+        }))
+        .await
+        .expect("timeout configure should succeed");
+    timeout_connector
+        .handle_handshake(json!({"protocol_version": "2.0", "zone": "z:community"}))
+        .await
+        .expect("timeout handshake should succeed");
+    let timeout_error = timeout_connector
+        .handle_invoke(json!({
+            "operation_id": CHANNEL_OPERATION,
+            "input": {"channel": CHANNEL_FIXTURE, "message": MESSAGE_FIXTURE}
+        }))
+        .await
+        .expect_err("slow provider should map to retryable timeout transport error");
+    assert_transport_error(&timeout_error, true);
 }
 
 #[fcp_async_core::runtime::test]
@@ -275,7 +611,23 @@ async fn malformed_unknown_and_pre_handshake_requests_are_denied() {
         .expect_err("invoke before configure should fail readiness");
     assert!(matches!(not_configured, FcpError::NotConfigured));
 
-    let connector = configured_connector().await;
+    let mut unhandshaken = TlonConnector::new();
+    unhandshaken
+        .handle_configure(json!({
+            "base_url": "https://fixture.tlon.example",
+            "session_cookie": SESSION_COOKIE,
+            "ship": SHIP_FIXTURE
+        }))
+        .await
+        .expect("configure should succeed");
+    let not_handshaken = unhandshaken
+        .handle_invoke(json!({"operation_id": DM_OPERATION}))
+        .await
+        .expect_err("invoke before handshake should fail readiness");
+    assert!(matches!(not_handshaken, FcpError::NotHandshaken));
+
+    let server = MockServer::start().await;
+    let connector = configured_cookie_connector(&server.uri()).await;
 
     let missing_operation = connector
         .handle_invoke(json!({"input": {"ship": SHIP_FIXTURE}}))
@@ -287,7 +639,7 @@ async fn malformed_unknown_and_pre_handshake_requests_are_denied() {
         .handle_invoke(json!({"operation_id": "tlon.unexpected.operation"}))
         .await
         .expect_err("unknown operation should be rejected");
-    assert_invalid_request(unknown_operation, 1002, "Unknown operation");
+    assert_operation_not_granted(&unknown_operation, "tlon.unexpected.operation");
 
     let simulate = connector
         .handle_simulate(json!({"operation_id": "tlon.unexpected.operation"}))
@@ -310,6 +662,84 @@ async fn malformed_unknown_and_pre_handshake_requests_are_denied() {
     });
 }
 
+#[fcp_async_core::runtime::test]
+async fn bound_handshake_requires_valid_zone_and_instance_capability_tokens() {
+    let started = Instant::now();
+    let server = MockServer::start().await;
+    let signing_key = Ed25519SigningKey::generate();
+    let connector = configured_bound_connector(&server.uri(), &signing_key).await;
+
+    let missing_token = connector
+        .handle_invoke(json!({
+            "operation_id": DM_OPERATION,
+            "input": {"ship": SHIP_FIXTURE, "message": MESSAGE_FIXTURE}
+        }))
+        .await
+        .expect_err("bound handshakes must require capability_token");
+    assert_invalid_request(missing_token, 1003, "Missing capability_token");
+
+    let wrong_zone_token = capability_token(
+        &signing_key,
+        "tlon.dm",
+        DM_OPERATION,
+        "z:work",
+        Some("wrong-instance"),
+    );
+    let wrong_zone = connector
+        .handle_invoke(json!({
+            "operation_id": DM_OPERATION,
+            "input": {"ship": SHIP_FIXTURE, "message": MESSAGE_FIXTURE},
+            "capability_token": wrong_zone_token
+        }))
+        .await
+        .expect_err("token for the wrong zone should fail before provider I/O");
+    assert!(
+        matches!(wrong_zone, FcpError::ZoneViolation { .. }),
+        "expected wrong-zone capability denial, got {wrong_zone:?}"
+    );
+
+    let wrong_instance_token = capability_token(
+        &signing_key,
+        "tlon.dm",
+        DM_OPERATION,
+        "z:community",
+        Some("wrong-instance"),
+    );
+    let wrong_instance = connector
+        .handle_invoke(json!({
+            "operation_id": DM_OPERATION,
+            "input": {"ship": SHIP_FIXTURE, "message": MESSAGE_FIXTURE},
+            "capability_token": wrong_instance_token
+        }))
+        .await
+        .expect_err("token for the wrong connector instance should fail before provider I/O");
+    assert!(
+        matches!(
+            &wrong_instance,
+            FcpError::ZoneViolation { message, .. } if message.contains("Token instance mismatch")
+        ),
+        "expected wrong-instance capability denial, got {wrong_instance:?}"
+    );
+
+    assert_eq!(
+        server.received_requests().await.unwrap_or_default().len(),
+        0,
+        "capability denials must not reach the Tlon provider"
+    );
+    emit_redacted_evidence(Evidence {
+        test: "bound_handshake_requires_valid_zone_and_instance_capability_tokens",
+        operation_id: DM_OPERATION,
+        capability: "tlon.dm",
+        fixture_id: "tlon-capability-denial-fixture",
+        lifecycle_phase: "capability_check",
+        latency_ms: started.elapsed().as_millis(),
+        result: "denied",
+        error_code: Some("capability_token_denied"),
+        cleanup_result: "no_provider_socket_opened",
+        skip_reason: None,
+    });
+}
+
 #[test]
 fn jsonrpc_process_handles_invalid_json_lifecycle_and_shutdown() {
     let executable =
@@ -327,7 +757,16 @@ fn jsonrpc_process_handles_invalid_json_lifecycle_and_shutdown() {
         writeln!(
             stdin,
             "{}",
-            json!({"jsonrpc": "2.0", "id": 1, "method": "configure", "params": {}})
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "configure",
+                "params": {
+                    "base_url": "https://fixture.tlon.example",
+                    "session_cookie": SESSION_COOKIE,
+                    "ship": SHIP_FIXTURE
+                }
+            })
         )
         .expect("write configure request");
         writeln!(
@@ -360,7 +799,7 @@ fn jsonrpc_process_handles_invalid_json_lifecycle_and_shutdown() {
     assert_eq!(responses[1]["id"], 1);
     assert_eq!(responses[1]["result"]["configured"], true);
     assert_eq!(responses[2]["id"], 2);
-    assert_eq!(responses[2]["result"]["surface_status"], "incubating");
+    assert_eq!(responses[2]["result"]["surface_status"], "implemented");
     assert_eq!(responses[3]["id"], 3);
     assert_eq!(responses[3]["result"], json!({}));
 

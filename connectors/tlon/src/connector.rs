@@ -9,9 +9,8 @@ use std::{
 };
 
 use fcp_prelude::{
-    BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, OperationId,
-    SessionId,
+    BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
+    EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, OperationId, SessionId,
 };
 use reqwest::{Client, Response, StatusCode, header};
 use serde_json::{Value, json};
@@ -119,26 +118,22 @@ fn target_resolve_output_schema() -> Value {
 
 #[derive(Clone)]
 enum TlonAuth {
-    SessionCookie(String),
-    CredentialId(String),
+    SessionCookie(header::HeaderValue),
+    CredentialId(header::HeaderValue),
 }
 
 impl TlonAuth {
     fn from_params(params: &Value) -> FcpResult<Self> {
-        let session_cookie = params
-            .get("session_cookie")
-            .or_else(|| params.get("cookie"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned);
-        let credential_id = params
-            .get("credential_id")
-            .or_else(|| params.get("auth_ref"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned);
+        let session_cookie = optional_header_value(
+            params,
+            &["session_cookie", "cookie"],
+            "session_cookie/cookie",
+        )?;
+        let credential_id = optional_header_value(
+            params,
+            &["credential_id", "auth_ref"],
+            "credential_id/auth_ref",
+        )?;
 
         match (session_cookie, credential_id) {
             (Some(cookie), None) => Ok(Self::SessionCookie(cookie)),
@@ -155,16 +150,38 @@ impl TlonAuth {
         }
     }
 
-    fn auth_mode(&self) -> &'static str {
+    const fn auth_mode(&self) -> &'static str {
         match self {
             Self::SessionCookie(_) => "session_cookie",
             Self::CredentialId(_) => "credential_id",
         }
     }
 
-    fn requires_credential_injection(&self) -> bool {
+    const fn requires_credential_injection(&self) -> bool {
         matches!(self, Self::CredentialId(_))
     }
+}
+
+fn optional_header_value(
+    params: &Value,
+    fields: &[&str],
+    label: &str,
+) -> FcpResult<Option<header::HeaderValue>> {
+    let value = fields
+        .iter()
+        .find_map(|field| params.get(*field).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    value
+        .map(|value| validate_header_value(value, label))
+        .transpose()
+}
+
+fn validate_header_value(value: &str, label: &str) -> FcpResult<header::HeaderValue> {
+    header::HeaderValue::from_str(value).map_err(|_| FcpError::InvalidRequest {
+        code: 1005,
+        message: format!("{label} contains invalid HTTP header characters"),
+    })
 }
 
 impl fmt::Debug for TlonAuth {
@@ -174,7 +191,10 @@ impl fmt::Debug for TlonAuth {
                 .debug_tuple("SessionCookie")
                 .field(&"<redacted>")
                 .finish(),
-            Self::CredentialId(id) => formatter.debug_tuple("CredentialId").field(id).finish(),
+            Self::CredentialId(_) => formatter
+                .debug_tuple("CredentialId")
+                .field(&"<redacted>")
+                .finish(),
         }
     }
 }
@@ -225,8 +245,8 @@ impl TlonConfig {
             .map_or_else(|| normalize_ship("~zod"), normalize_ship)?;
         let channel_id = optional_trimmed(params, "channel_id")
             .map_or_else(|| Ok(DEFAULT_CHANNEL_ID.to_owned()), validate_channel_id)?;
-        let dm_app =
-            optional_trimmed(params, "dm_app").map_or_else(|| Ok(DEFAULT_DM_APP.to_owned()), validate_term)?;
+        let dm_app = optional_trimmed(params, "dm_app")
+            .map_or_else(|| Ok(DEFAULT_DM_APP.to_owned()), validate_term)?;
         let dm_mark = optional_trimmed(params, "dm_mark")
             .map_or_else(|| Ok(DEFAULT_DM_MARK.to_owned()), validate_term)?;
         let channel_app = optional_trimmed(params, "channel_app")
@@ -279,18 +299,20 @@ impl TlonClient {
         let url = format!("{}/~/channel/{}", self.base_url, self.channel_id);
         debug!(
             endpoint_kind = "urbit_eyre_channel",
-            action_kind = action.get("action").and_then(Value::as_str).unwrap_or("unknown"),
+            action_kind = action
+                .get("action")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown"),
             "sending Tlon Eyre action"
         );
         let request = match &self.auth {
-            TlonAuth::SessionCookie(cookie) => self
-                .client
-                .put(&url)
-                .header(header::COOKIE, cookie.as_str()),
+            TlonAuth::SessionCookie(cookie) => {
+                self.client.put(&url).header(header::COOKIE, cookie.clone())
+            }
             TlonAuth::CredentialId(credential_id) => self
                 .client
                 .put(&url)
-                .header("X-FCP-Credential-Id", credential_id.as_str()),
+                .header("X-FCP-Credential-Id", credential_id.clone()),
         }
         .header(header::CONTENT_TYPE, "application/json")
         .json(&json!([action]));
@@ -482,7 +504,11 @@ impl TlonConnector {
 
     pub async fn handle_self_check(&self) -> FcpResult<Value> {
         let (status, reason_code, message) = if self.config.is_none() {
-            ("degraded", json!(NOT_CONFIGURED_REASON_CODE), json!(BOUNDARY))
+            (
+                "degraded",
+                json!(NOT_CONFIGURED_REASON_CODE),
+                json!(BOUNDARY),
+            )
         } else if self.session_id.is_none() {
             (
                 "degraded",
@@ -587,11 +613,14 @@ impl TlonConnector {
         let capability = required_capability(operation)?;
         self.verify_capability(&params, operation, capability)?;
 
-        self.request_count.fetch_add(1, Ordering::Relaxed);
+        let request_id = self
+            .request_count
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
         let result = match operation {
-            DM_SEND_OPERATION => self.invoke_dm_send(&input).await,
-            CHANNEL_SEND_OPERATION => self.invoke_channel_send(&input).await,
-            TARGET_RESOLVE_OPERATION => self.invoke_target_resolve(&input),
+            DM_SEND_OPERATION => self.invoke_dm_send(&input, request_id).await,
+            CHANNEL_SEND_OPERATION => self.invoke_channel_send(&input, request_id).await,
+            TARGET_RESOLVE_OPERATION => Self::invoke_target_resolve(&input),
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -633,17 +662,13 @@ impl TlonConnector {
     }
 
     fn client(&self) -> FcpResult<&TlonClient> {
-        self.client
-            .as_deref()
-            .ok_or_else(|| FcpError::Internal {
-                message: "Tlon client not initialized".into(),
-            })
+        self.client.as_deref().ok_or_else(|| FcpError::Internal {
+            message: "Tlon client not initialized".into(),
+        })
     }
 
     fn config(&self) -> FcpResult<&TlonConfig> {
-        self.config
-            .as_ref()
-            .ok_or_else(|| FcpError::NotConfigured)
+        self.config.as_ref().ok_or(FcpError::NotConfigured)
     }
 
     fn verify_capability(
@@ -655,12 +680,13 @@ impl TlonConnector {
         let Some(verifier) = &self.verifier else {
             return Ok(());
         };
-        let token_value = params
-            .get("capability_token")
-            .ok_or_else(|| FcpError::InvalidRequest {
-                code: 1003,
-                message: "Missing capability_token".into(),
-            })?;
+        let token_value =
+            params
+                .get("capability_token")
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing capability_token".into(),
+                })?;
         let token: CapabilityToken =
             serde_json::from_value(token_value.clone()).map_err(|error| {
                 FcpError::InvalidRequest {
@@ -668,10 +694,11 @@ impl TlonConnector {
                     message: format!("Invalid capability_token format: {error}"),
                 }
             })?;
-        let operation_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
-            code: 1003,
-            message: "Invalid operation ID format".into(),
-        })?;
+        let operation_id: OperationId =
+            operation.parse().map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Invalid operation ID format".into(),
+            })?;
         let capability_id: CapabilityId =
             capability.parse().map_err(|_| FcpError::InvalidRequest {
                 code: 1003,
@@ -681,27 +708,29 @@ impl TlonConnector {
         Ok(())
     }
 
-    async fn invoke_dm_send(&self, input: &Value) -> FcpResult<Value> {
+    async fn invoke_dm_send(&self, input: &Value, action_id: u64) -> FcpResult<Value> {
         let config = self.config()?;
         let ship = require_ship(input, "ship")?;
         let message = require_message(input)?;
+        let payload = json!({
+            "kind": "dm.send",
+            "ship": ship.display,
+            "message": message
+        });
         let action = build_poke_action(
-            self.next_action_id(),
+            action_id,
             &ship.eyre,
             &config.dm_app,
             &config.dm_mark,
-            json!({
-                "kind": "dm.send",
-                "ship": ship.display,
-                "message": message
-            }),
+            &payload,
         );
-        self.client()
-            .and_then(|client| futures_result(client.send_action(action)))
+        self.client()?
+            .send_action(action)
             .await
+            .map_err(|error| error.to_fcp_error())
     }
 
-    async fn invoke_channel_send(&self, input: &Value) -> FcpResult<Value> {
+    async fn invoke_channel_send(&self, input: &Value, action_id: u64) -> FcpResult<Value> {
         let config = self.config()?;
         let channel = require_channel(input, "channel")?;
         let message = require_message(input)?;
@@ -711,23 +740,25 @@ impl TlonConnector {
             .unwrap_or(&config.own_ship)
             .eyre
             .clone();
+        let payload = json!({
+            "kind": "channel.send",
+            "channel": channel.display,
+            "message": message
+        });
         let action = build_poke_action(
-            self.next_action_id(),
+            action_id,
             &ship,
             &config.channel_app,
             &config.channel_mark,
-            json!({
-                "kind": "channel.send",
-                "channel": channel.display,
-                "message": message
-            }),
+            &payload,
         );
-        self.client()
-            .and_then(|client| futures_result(client.send_action(action)))
+        self.client()?
+            .send_action(action)
             .await
+            .map_err(|error| error.to_fcp_error())
     }
 
-    fn invoke_target_resolve(&self, input: &Value) -> FcpResult<Value> {
+    fn invoke_target_resolve(input: &Value) -> FcpResult<Value> {
         let target = require_str(input, "target")?;
         if target.starts_with('~') {
             let _ = normalize_ship(target)?;
@@ -736,19 +767,9 @@ impl TlonConnector {
         }
         Ok(json!({ "resolved": true }))
     }
-
-    fn next_action_id(&self) -> u64 {
-        self.request_count
-            .load(Ordering::Relaxed)
-            .saturating_add(1)
-    }
 }
 
-async fn futures_result(future: impl std::future::Future<Output = TlonResult<Value>>) -> FcpResult<Value> {
-    future.await.map_err(|error| error.to_fcp_error())
-}
-
-fn supported_capabilities() -> [&'static str; 2] {
+const fn supported_capabilities() -> [&'static str; 2] {
     [DM_CAPABILITY, CHANNEL_CAPABILITY]
 }
 
@@ -766,7 +787,7 @@ fn required_capability(operation: &str) -> FcpResult<&'static str> {
     }
 }
 
-fn build_poke_action(id: u64, ship: &str, app: &str, mark: &str, payload: Value) -> Value {
+fn build_poke_action(id: u64, ship: &str, app: &str, mark: &str, payload: &Value) -> Value {
     json!({
         "id": id,
         "action": "poke",
@@ -855,8 +876,7 @@ fn normalize_channel(raw: &str) -> FcpResult<NormalizedChannel> {
     {
         return Err(FcpError::InvalidRequest {
             code: 1005,
-            message: "channel must be an absolute Urbit/Tlon channel path without traversal"
-                .into(),
+            message: "channel must be an absolute Urbit/Tlon channel path without traversal".into(),
         });
     }
     let target_ship = extract_ship_from_channel(trimmed)?;
@@ -949,7 +969,8 @@ fn validate_base_url(raw: &str, allow_private_network: bool) -> FcpResult<String
         });
     }
     let mut sanitized = parsed;
-    sanitized.set_path(sanitized.path().trim_end_matches('/'));
+    let path = sanitized.path().trim_end_matches('/').to_owned();
+    sanitized.set_path(&path);
     Ok(sanitized.as_str().trim_end_matches('/').to_owned())
 }
 
@@ -959,10 +980,7 @@ fn is_private_or_loopback_host(host: &str) -> bool {
     }
     host.parse::<IpAddr>().is_ok_and(|ip| match ip {
         IpAddr::V4(ip) => {
-            ip.is_loopback()
-                || ip.is_private()
-                || ip.is_link_local()
-                || ip == Ipv4Addr::UNSPECIFIED
+            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip == Ipv4Addr::UNSPECIFIED
         }
         IpAddr::V6(ip) => {
             ip.is_loopback()
@@ -976,12 +994,20 @@ fn is_private_or_loopback_host(host: &str) -> bool {
 fn redact_provider_message(raw: &str) -> String {
     let compact = raw
         .chars()
-        .map(|ch| if ch.is_control() && !ch.is_whitespace() { ' ' } else { ch })
+        .map(|ch| {
+            if ch.is_control() && !ch.is_whitespace() {
+                ' '
+            } else {
+                ch
+            }
+        })
         .collect::<String>();
     let lower = compact.to_ascii_lowercase();
-    if ["cookie", "session", "token", "secret", "password", "message", "body"]
-        .iter()
-        .any(|needle| lower.contains(needle))
+    if [
+        "cookie", "session", "token", "secret", "password", "message", "body",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
     {
         return "<redacted provider error>".into();
     }
@@ -1004,11 +1030,19 @@ impl Default for TlonConnector {
 mod tests {
     use super::*;
 
+    fn valid_config() -> Value {
+        json!({
+            "base_url": "https://fixture.tlon.example",
+            "session_cookie": "urbauth-ship=fixture-session",
+            "ship": "~zod"
+        })
+    }
+
     #[fcp_async_core::runtime::test]
-    async fn planned_only_connector_reports_degraded_readiness() {
+    async fn implemented_connector_reports_ready_lifecycle() {
         let mut connector = TlonConnector::new();
         connector
-            .handle_configure(json!({}))
+            .handle_configure(valid_config())
             .await
             .expect("configure should succeed");
 
@@ -1019,37 +1053,42 @@ mod tests {
         assert_eq!(pre_handshake["status"], "degraded");
         assert_eq!(pre_handshake["reason_code"], NOT_HANDSHAKEN_REASON_CODE);
 
-        connector
+        let handshake = connector
             .handle_handshake(json!({}))
             .await
             .expect("handshake should succeed");
+        assert_eq!(handshake["surface_status"], "implemented");
+        assert_eq!(
+            handshake["capabilities"],
+            json!([DM_CAPABILITY, CHANNEL_CAPABILITY])
+        );
 
         let health = connector
             .handle_health()
             .await
             .expect("health should succeed");
-        assert_eq!(health["status"], "degraded");
-        assert_eq!(health["live_requests_supported"], false);
+        assert_eq!(health["status"], "healthy");
+        assert_eq!(health["live_requests_supported"], true);
 
         let doctor = connector
             .handle_doctor()
             .await
             .expect("doctor should succeed");
-        assert_eq!(doctor["status"], "degraded");
-        assert_eq!(doctor["checks"][2]["passed"], false);
+        assert_eq!(doctor["status"], "healthy");
+        assert_eq!(doctor["checks"][4]["passed"], true);
 
         let introspect = connector
             .handle_introspect()
             .await
             .expect("introspect should succeed");
-        assert_eq!(introspect["surface_status"], "incubating");
+        assert_eq!(introspect["surface_status"], "implemented");
         assert!(
             introspect["operations"]
                 .as_array()
                 .expect("operations should be an array")
                 .iter()
                 .all(|operation| {
-                    operation.get("implemented").and_then(Value::as_bool) == Some(false)
+                    operation.get("implemented").and_then(Value::as_bool) == Some(true)
                 })
         );
 
@@ -1057,15 +1096,15 @@ mod tests {
             .handle_self_check()
             .await
             .expect("self_check should succeed");
-        assert_eq!(self_check["status"], "unsupported");
-        assert_eq!(self_check["reason_code"], UNIMPLEMENTED_REASON_CODE);
+        assert_eq!(self_check["status"], "ok");
+        assert_eq!(self_check["reason_code"], READY_REASON_CODE);
     }
 
     #[fcp_async_core::runtime::test]
-    async fn planned_operation_invoke_and_simulate_refuse_execution() {
+    async fn target_resolve_and_simulate_use_live_contract() {
         let mut connector = TlonConnector::new();
         connector
-            .handle_configure(json!({}))
+            .handle_configure(valid_config())
             .await
             .expect("configure should succeed");
         connector
@@ -1073,17 +1112,20 @@ mod tests {
             .await
             .expect("handshake should succeed");
 
-        let error = connector
-            .handle_invoke(json!({"operation_id": "tlon.dm.send"}))
+        let resolved = connector
+            .handle_invoke(json!({
+                "operation_id": TARGET_RESOLVE_OPERATION,
+                "input": {"target": "/ship/~zod/general"}
+            }))
             .await
-            .expect_err("invoke should refuse planned operation");
-        assert!(error.to_string().contains("not implemented"));
+            .expect("target resolution should execute locally");
+        assert_eq!(resolved["resolved"], true);
 
         let simulate = connector
-            .handle_simulate(json!({"operation_id": "tlon.dm.send"}))
+            .handle_simulate(json!({"operation_id": DM_SEND_OPERATION}))
             .await
             .expect("simulate should succeed");
-        assert_eq!(simulate["allowed"], false);
-        assert_eq!(simulate["simulate_capability"], "unsupported");
+        assert_eq!(simulate["allowed"], true);
+        assert_eq!(simulate["simulate_capability"], DM_CAPABILITY);
     }
 }

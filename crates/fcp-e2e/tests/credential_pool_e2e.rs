@@ -1155,6 +1155,7 @@ fn map_pool_client_error(error: CredentialPoolError) -> CredentialLeaseClientErr
     match error {
         CredentialPoolError::DuplicateCredential { .. }
         | CredentialPoolError::InvalidMaxConcurrentPerCredential { .. }
+        | CredentialPoolError::InvalidStickyMaxUses { .. }
         | CredentialPoolError::SelectionIndexInvalid { .. } => {
             CredentialLeaseClientError::invalid(error.to_string())
         }
@@ -1193,6 +1194,7 @@ fn audit_operation_label(operation: CredentialPoolAuditOperation) -> &'static st
         CredentialPoolAuditOperation::CredentialRemove => "credential_remove",
         CredentialPoolAuditOperation::StrategySet => "strategy_set",
         CredentialPoolAuditOperation::MaxConcurrentSet => "max_concurrent_set",
+        CredentialPoolAuditOperation::StickyPolicySet => "sticky_policy_set",
         CredentialPoolAuditOperation::ExhaustedBehaviorSet => "exhausted_behavior_set",
         CredentialPoolAuditOperation::CooldownSet => "cooldown_set",
     }

@@ -250,6 +250,7 @@ Use the host admin API when the operator needs live credential-pool truth:
 | Remove a credential | `DELETE /rpc/admin/credentials/pools/{provider}/{zone_id}/credentials/{credential_id}` |
 | Change selection strategy | `POST /rpc/admin/credentials/pools/{provider}/{zone_id}/strategy` |
 | Change active lease ceiling | `POST /rpc/admin/credentials/pools/{provider}/{zone_id}/max-concurrent` |
+| Change sticky strategy policy | `POST /rpc/admin/credentials/pools/{provider}/{zone_id}/sticky-policy` |
 | Change exhausted behavior | `POST /rpc/admin/credentials/pools/{provider}/{zone_id}/exhausted-behavior` |
 | Set or clear a cooldown | `POST /rpc/admin/credentials/pools/{provider}/{zone_id}/credentials/{credential_id}/cooldown` |
 
@@ -271,17 +272,39 @@ Credential add requests carry a secret-bearing input shape:
 
 Responses must be treated as redacted operator views. They may expose
 `credential_id`, `source`, `priority`, `label`, cooldown state, last-use
-metadata, active lease counts, strategy, and exhausted behavior. They must not
-echo raw credential payloads, API keys, provider error bodies, or signed secret
-material.
+metadata, active lease counts, strategy, sticky policy, and exhausted behavior.
+They must not echo raw credential payloads, API keys, provider error bodies, or
+signed secret material.
 
 The operator-visible strategy values are:
 
 - `round_robin`: rotate across available credentials
-- `sticky`: keep using the selected credential until it is unavailable
+- `sticky`: keep using the selected credential until it is unavailable; by
+  default, fallback stickiness is preserved after cooldown or auth recovery
 - `priority`: choose the lowest-priority-number available credential
 - `least_recently_used`: choose a never-used credential first, then the
   available credential with the oldest last-use timestamp
+
+Sticky pools also expose an opt-in `sticky_policy`:
+
+```json
+{
+  "restick_on_recovery": true,
+  "max_uses_per_stick": 8
+}
+```
+
+`restick_on_recovery: true` means a sticky credential displaced by cooldown,
+manual auth failure, or active-lease exhaustion is remembered and selected
+again once it becomes selectable. The default is `false`, which preserves the
+existing behavior: after fallback selection, the pool stays stuck to that
+fallback until the fallback itself becomes unavailable.
+
+`max_uses_per_stick` is optional. When present, it must be greater than zero.
+After that many lease selections on the current sticky credential, the pool
+rotates deterministically to the lowest-priority-number selectable alternative.
+If no alternative is selectable, the current credential remains usable rather
+than fabricating exhaustion.
 
 The exhausted behavior values are:
 

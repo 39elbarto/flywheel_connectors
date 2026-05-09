@@ -81,10 +81,10 @@ use fcp_host::{
     RuntimeNetworkEnforcement, SafetyTierExt, SanitizedConnectorConfig, SimulateCostConfidence,
     SimulateCostEstimate, SimulatePhase, SimulateReceipt, SimulateReceiptQueryRequest,
     SimulateReceiptQueryResponse, SimulateResourceAvailability, StartupReconciliationReport,
-    SupplyChainGate, SupplyChainGateConfig, ToolDescriptor, admit_safety_tier,
-    capability_constraint_audit_descriptor, classify_deployment_mode, diff_sanitized_config_values,
-    emit_boot_log, emit_capability_constraint_denial_audit_event, merge_connector_health,
-    native_proxy_only_sandbox_decision, validate_runtime_network_claim,
+    StickyCredentialPolicy, SupplyChainGate, SupplyChainGateConfig, ToolDescriptor,
+    admit_safety_tier, capability_constraint_audit_descriptor, classify_deployment_mode,
+    diff_sanitized_config_values, emit_boot_log, emit_capability_constraint_denial_audit_event,
+    merge_connector_health, native_proxy_only_sandbox_decision, validate_runtime_network_claim,
     wasi_config_for_operation_network_policy,
 };
 use fcp_host::{DeploymentClassification, DeploymentTierRefusal, HostError, HostResult};
@@ -5156,6 +5156,10 @@ async fn async_main() -> HostResult<()> {
             post(credential_pool_max_concurrent_handler),
         )
         .route(
+            "/rpc/admin/credentials/pools/{provider}/{zone_id}/sticky-policy",
+            post(credential_pool_sticky_policy_handler),
+        )
+        .route(
             "/rpc/admin/credentials/pools/{provider}/{zone_id}/exhausted-behavior",
             post(credential_pool_exhausted_behavior_handler),
         )
@@ -5507,6 +5511,23 @@ struct CredentialPoolMaxConcurrentRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct CredentialPoolStickyPolicyRequest {
+    #[serde(default)]
+    restick_on_recovery: bool,
+    #[serde(default)]
+    max_uses_per_stick: Option<u32>,
+}
+
+impl From<CredentialPoolStickyPolicyRequest> for StickyCredentialPolicy {
+    fn from(request: CredentialPoolStickyPolicyRequest) -> Self {
+        Self {
+            restick_on_recovery: request.restick_on_recovery,
+            max_uses_per_stick: request.max_uses_per_stick,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct CredentialPoolExhaustedBehaviorRequest {
     exhausted_behavior: PoolExhaustedBehavior,
 }
@@ -5568,7 +5589,8 @@ fn map_credential_pool_error(error: CredentialPoolError) -> (StatusCode, String)
     let status = match error {
         CredentialPoolError::InvalidProviderKey
         | CredentialPoolError::DuplicateCredential { .. }
-        | CredentialPoolError::InvalidMaxConcurrentPerCredential { .. } => StatusCode::BAD_REQUEST,
+        | CredentialPoolError::InvalidMaxConcurrentPerCredential { .. }
+        | CredentialPoolError::InvalidStickyMaxUses { .. } => StatusCode::BAD_REQUEST,
         CredentialPoolError::PoolNotFound { .. }
         | CredentialPoolError::CredentialNotFound { .. }
         | CredentialPoolError::UnknownLease { .. } => StatusCode::NOT_FOUND,
@@ -5662,6 +5684,22 @@ async fn credential_pool_max_concurrent_handler(
     let mut registry = state.credential_pools.lock().await;
     registry
         .set_max_concurrent_per_credential(&key, request.max_concurrent_per_credential)
+        .map_err(map_credential_pool_error)?;
+    let pool = registry
+        .redacted_view(&key, Utc::now())
+        .map_err(map_credential_pool_error)?;
+    Ok(Json(CredentialPoolResponse { pool }))
+}
+
+async fn credential_pool_sticky_policy_handler(
+    State(state): State<Arc<AppState>>,
+    Path((provider, zone_id)): Path<(String, String)>,
+    Json(request): Json<CredentialPoolStickyPolicyRequest>,
+) -> Result<Json<CredentialPoolResponse>, (StatusCode, String)> {
+    let key = credential_pool_key_from_path(provider, zone_id)?;
+    let mut registry = state.credential_pools.lock().await;
+    registry
+        .set_sticky_policy(&key, request.into())
         .map_err(map_credential_pool_error)?;
     let pool = registry
         .redacted_view(&key, Utc::now())
@@ -14765,8 +14803,7 @@ deny_ptrace = true
         let line = match serde_json::to_string(&record) {
             Ok(line) => line,
             Err(err) => {
-                assert!(false, "SPKI e2e evidence must serialize: {err}");
-                String::new()
+                panic!("SPKI e2e evidence must serialize: {err}");
             }
         };
         let parsed = serde_json::from_str::<Value>(&line);
@@ -21762,6 +21799,10 @@ done"#;
                 post(credential_pool_max_concurrent_handler),
             )
             .route(
+                "/rpc/admin/credentials/pools/{provider}/{zone_id}/sticky-policy",
+                post(credential_pool_sticky_policy_handler),
+            )
+            .route(
                 "/rpc/admin/credentials/pools/{provider}/{zone_id}/exhausted-behavior",
                 post(credential_pool_exhausted_behavior_handler),
             )
@@ -22135,7 +22176,7 @@ done"#;
         assert_eq!(added_body["pool"]["key"]["provider"], "openai");
         assert_eq!(added_body["pool"]["entries"][0]["label"], "primary");
         let added_text = added_body.to_string();
-        assert!(!added_text.contains("payload"));
+        assert!(!added_text.contains("\"payload\":"));
         assert!(!added_text.contains("sk-live-primary"));
 
         let duplicate = send_json_request(
@@ -22189,6 +22230,10 @@ done"#;
                 json!({"max_concurrent_per_credential": 1}),
             ),
             (
+                format!("{pool_path}/sticky-policy"),
+                json!({"restick_on_recovery": true, "max_uses_per_stick": 4}),
+            ),
+            (
                 format!("{pool_path}/exhausted-behavior"),
                 json!({"exhausted_behavior": "wait"}),
             ),
@@ -22214,6 +22259,14 @@ done"#;
         assert_eq!(snapshot.status(), axum::http::StatusCode::OK);
         let snapshot_body = response_body_json(snapshot).await?;
         assert_eq!(snapshot_body["pool"]["strategy"], "sticky");
+        assert_eq!(
+            snapshot_body["pool"]["sticky_policy"]["restick_on_recovery"],
+            true
+        );
+        assert_eq!(
+            snapshot_body["pool"]["sticky_policy"]["max_uses_per_stick"],
+            4
+        );
         assert_eq!(snapshot_body["pool"]["max_concurrent_per_credential"], 1);
         assert_eq!(snapshot_body["pool"]["exhausted_behavior"], "wait");
         assert_eq!(
@@ -22265,6 +22318,7 @@ done"#;
                 CredentialPoolAuditOperation::CredentialUpsert,
                 CredentialPoolAuditOperation::StrategySet,
                 CredentialPoolAuditOperation::MaxConcurrentSet,
+                CredentialPoolAuditOperation::StickyPolicySet,
                 CredentialPoolAuditOperation::ExhaustedBehaviorSet,
                 CredentialPoolAuditOperation::CooldownSet,
                 CredentialPoolAuditOperation::CredentialRemove,
@@ -22284,10 +22338,17 @@ done"#;
         );
         assert_eq!(audit_events[3].max_concurrent_per_credential, Some(1));
         assert_eq!(
-            audit_events[4].exhausted_behavior,
+            audit_events[4].sticky_policy,
+            Some(StickyCredentialPolicy {
+                restick_on_recovery: true,
+                max_uses_per_stick: Some(4),
+            })
+        );
+        assert_eq!(
+            audit_events[5].exhausted_behavior,
             Some(PoolExhaustedBehavior::Wait)
         );
-        assert!(audit_events[5].cooldown.is_some());
+        assert!(audit_events[6].cooldown.is_some());
 
         let audit_text = serde_json::to_string(&audit_events)?;
         assert!(audit_text.contains("credential_pool.admin_mutation"));

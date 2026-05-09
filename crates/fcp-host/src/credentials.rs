@@ -129,6 +129,35 @@ pub enum CredentialPoolStrategy {
     LeastRecentlyUsed,
 }
 
+/// Sticky-strategy controls for a credential pool.
+///
+/// Defaults preserve the original sticky behavior: once a fallback credential
+/// is selected, the pool keeps that fallback until it becomes unavailable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct StickyCredentialPolicy {
+    /// Return to a displaced sticky credential once it becomes selectable again.
+    #[serde(default)]
+    pub restick_on_recovery: bool,
+    /// Maximum lease selections to keep on one sticky credential before rotating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_uses_per_stick: Option<u32>,
+}
+
+impl StickyCredentialPolicy {
+    /// Validate operator-supplied sticky policy values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialPoolError::InvalidStickyMaxUses`] when
+    /// `max_uses_per_stick` is zero.
+    pub fn validate(self) -> Result<(), CredentialPoolError> {
+        if self.max_uses_per_stick == Some(0) {
+            return Err(CredentialPoolError::InvalidStickyMaxUses { max: 0 });
+        }
+        Ok(())
+    }
+}
+
 /// Behavior when every credential is unavailable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -413,6 +442,8 @@ pub enum CredentialPoolAuditOperation {
     StrategySet,
     /// The per-credential active lease ceiling changed.
     MaxConcurrentSet,
+    /// Sticky strategy policy changed.
+    StickyPolicySet,
     /// The all-pool-exhausted behavior changed.
     ExhaustedBehaviorSet,
     /// A credential cooldown was manually set or cleared.
@@ -467,6 +498,9 @@ pub struct CredentialPoolAuditEvent {
     /// New active lease ceiling, when applicable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_concurrent_per_credential: Option<u32>,
+    /// New sticky policy, when applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sticky_policy: Option<StickyCredentialPolicy>,
     /// New all-pool-exhausted behavior, when applicable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exhausted_behavior: Option<PoolExhaustedBehavior>,
@@ -491,6 +525,7 @@ impl CredentialPoolAuditEvent {
             outcome: Some(outcome),
             strategy: None,
             max_concurrent_per_credential: None,
+            sticky_policy: None,
             exhausted_behavior: None,
             cooldown: None,
         }
@@ -511,6 +546,7 @@ impl CredentialPoolAuditEvent {
             outcome: Some(outcome),
             strategy: None,
             max_concurrent_per_credential: None,
+            sticky_policy: None,
             exhausted_behavior: None,
             cooldown: None,
         }
@@ -530,6 +566,7 @@ impl CredentialPoolAuditEvent {
             outcome: None,
             strategy: Some(strategy),
             max_concurrent_per_credential: None,
+            sticky_policy: None,
             exhausted_behavior: None,
             cooldown: None,
         }
@@ -549,6 +586,27 @@ impl CredentialPoolAuditEvent {
             outcome: None,
             strategy: None,
             max_concurrent_per_credential: Some(max_concurrent_per_credential),
+            sticky_policy: None,
+            exhausted_behavior: None,
+            cooldown: None,
+        }
+    }
+
+    fn sticky_policy_set(
+        pool_key: CredentialPoolKey,
+        sticky_policy: StickyCredentialPolicy,
+        occurred_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            event_type: CREDENTIAL_POOL_AUDIT_EVENT_TYPE.to_owned(),
+            occurred_at,
+            operation: CredentialPoolAuditOperation::StickyPolicySet,
+            pool_key,
+            credential_id: None,
+            outcome: None,
+            strategy: None,
+            max_concurrent_per_credential: None,
+            sticky_policy: Some(sticky_policy),
             exhausted_behavior: None,
             cooldown: None,
         }
@@ -568,6 +626,7 @@ impl CredentialPoolAuditEvent {
             outcome: None,
             strategy: None,
             max_concurrent_per_credential: None,
+            sticky_policy: None,
             exhausted_behavior: Some(exhausted_behavior),
             cooldown: None,
         }
@@ -588,6 +647,7 @@ impl CredentialPoolAuditEvent {
             outcome: None,
             strategy: None,
             max_concurrent_per_credential: None,
+            sticky_policy: None,
             exhausted_behavior: None,
             cooldown: Some(CredentialCooldownAuditState::from(cooldown)),
         }
@@ -672,6 +732,8 @@ pub struct CredentialPoolView {
     pub key: CredentialPoolKey,
     /// Selection strategy.
     pub strategy: CredentialPoolStrategy,
+    /// Sticky-strategy controls.
+    pub sticky_policy: StickyCredentialPolicy,
     /// Maximum active leases per credential.
     pub max_concurrent_per_credential: u32,
     /// Exhaustion behavior.
@@ -685,6 +747,7 @@ pub struct CredentialPoolView {
 pub struct CredentialPool {
     key: CredentialPoolKey,
     strategy: CredentialPoolStrategy,
+    sticky_policy: StickyCredentialPolicy,
     exhausted_behavior: PoolExhaustedBehavior,
     max_concurrent_per_credential: u32,
     entries: Vec<PooledCredential>,
@@ -692,6 +755,8 @@ pub struct CredentialPool {
     lease_index: HashMap<CredentialLeaseToken, CredentialId>,
     round_robin_cursor: usize,
     sticky_current: Option<CredentialId>,
+    sticky_restick_target: Option<CredentialId>,
+    sticky_current_uses: u32,
     next_lease_serial: u64,
 }
 
@@ -708,6 +773,7 @@ impl CredentialPool {
         Self {
             key,
             strategy,
+            sticky_policy: StickyCredentialPolicy::default(),
             exhausted_behavior: PoolExhaustedBehavior::FailFast,
             max_concurrent_per_credential: DEFAULT_MAX_CONCURRENT_PER_CREDENTIAL,
             entries,
@@ -715,6 +781,8 @@ impl CredentialPool {
             lease_index: HashMap::new(),
             round_robin_cursor: 0,
             sticky_current: None,
+            sticky_restick_target: None,
+            sticky_current_uses: 0,
             next_lease_serial: 1,
         }
     }
@@ -743,6 +811,12 @@ impl CredentialPool {
     #[must_use]
     pub const fn strategy(&self) -> CredentialPoolStrategy {
         self.strategy
+    }
+
+    /// Current sticky-strategy controls.
+    #[must_use]
+    pub const fn sticky_policy(&self) -> StickyCredentialPolicy {
+        self.sticky_policy
     }
 
     /// Current all-pool-exhausted behavior.
@@ -825,6 +899,10 @@ impl CredentialPool {
             .retain(|_, leased_credential_id| *leased_credential_id != credential_id);
         if self.sticky_current == Some(credential_id) {
             self.sticky_current = None;
+            self.sticky_current_uses = 0;
+        }
+        if self.sticky_restick_target == Some(credential_id) {
+            self.sticky_restick_target = None;
         }
         if self.entries.is_empty() {
             self.round_robin_cursor = 0;
@@ -838,6 +916,26 @@ impl CredentialPool {
     pub const fn set_strategy(&mut self, strategy: CredentialPoolStrategy) {
         self.strategy = strategy;
         self.sticky_current = None;
+        self.sticky_restick_target = None;
+        self.sticky_current_uses = 0;
+    }
+
+    /// Set sticky-strategy controls.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialPoolError::InvalidStickyMaxUses`] when
+    /// `max_uses_per_stick` is zero.
+    pub fn set_sticky_policy(
+        &mut self,
+        policy: StickyCredentialPolicy,
+    ) -> Result<(), CredentialPoolError> {
+        policy.validate()?;
+        self.sticky_policy = policy;
+        if !policy.restick_on_recovery {
+            self.sticky_restick_target = None;
+        }
+        Ok(())
     }
 
     /// Set the per-credential active lease ceiling.
@@ -890,7 +988,7 @@ impl CredentialPool {
         let payload = entry.payload.clone();
         entry.last_used_at = Some(now);
         if self.strategy == CredentialPoolStrategy::Sticky {
-            self.sticky_current = Some(credential_id);
+            self.record_sticky_selection(credential_id);
         }
 
         let lease_id = CredentialLeaseToken(self.next_lease_serial);
@@ -945,7 +1043,7 @@ impl CredentialPool {
         let payload = entry.payload.clone();
         entry.last_used_at = Some(now);
         if self.strategy == CredentialPoolStrategy::Sticky {
-            self.sticky_current = Some(credential_id);
+            self.record_sticky_selection(credential_id);
         }
 
         let lease_id = CredentialLeaseToken(self.next_lease_serial);
@@ -1013,9 +1111,7 @@ impl CredentialPool {
         };
         entry.error_count = entry.error_count.saturating_add(1);
         entry.cooldown = cooldown_for_error(kind, retry_after, now);
-        if self.sticky_current == Some(credential_id) {
-            self.sticky_current = None;
-        }
+        self.displace_sticky_current(credential_id);
         Ok(())
     }
 
@@ -1046,9 +1142,10 @@ impl CredentialPool {
         let Some(entry) = self.entry_mut(credential_id) else {
             return Err(CredentialPoolError::CredentialNotFound { credential_id });
         };
+        let displace_sticky = cooldown.is_some();
         entry.cooldown = cooldown;
-        if entry.cooldown.is_some() && self.sticky_current == Some(credential_id) {
-            self.sticky_current = None;
+        if displace_sticky {
+            self.displace_sticky_current(credential_id);
         }
         Ok(())
     }
@@ -1080,6 +1177,7 @@ impl CredentialPool {
         CredentialPoolView {
             key: self.key.clone(),
             strategy: self.strategy,
+            sticky_policy: self.sticky_policy,
             max_concurrent_per_credential: self.max_concurrent_per_credential,
             exhausted_behavior: self.exhausted_behavior,
             entries,
@@ -1111,15 +1209,35 @@ impl CredentialPool {
     }
 
     fn select_sticky(&mut self, now: DateTime<Utc>) -> Option<usize> {
+        if let Some(restick_target) = self.sticky_restick_target
+            && self.sticky_policy.restick_on_recovery
+            && let Some(index) = self.index_of(restick_target)
+            && self.can_select(index, now)
+        {
+            self.prepare_sticky_selection(restick_target);
+            return Some(index);
+        }
+
         if let Some(current) = self.sticky_current
             && let Some(index) = self.index_of(current)
             && self.can_select(index, now)
         {
+            if self.sticky_use_limit_reached()
+                && let Some(selected) = self.select_priority_excluding(now, current)
+            {
+                let credential_id = self.entries.get(selected)?.credential_id;
+                self.prepare_sticky_selection(credential_id);
+                return Some(selected);
+            }
             return Some(index);
         }
 
+        if let Some(current) = self.sticky_current {
+            self.displace_sticky_current(current);
+        }
+
         let selected = self.select_priority(now)?;
-        self.sticky_current = Some(self.entries.get(selected)?.credential_id);
+        self.prepare_sticky_selection(self.entries.get(selected)?.credential_id);
         Some(selected)
     }
 
@@ -1128,6 +1246,16 @@ impl CredentialPool {
             .iter()
             .enumerate()
             .find_map(|(index, _)| self.can_select(index, now).then_some(index))
+    }
+
+    fn select_priority_excluding(
+        &self,
+        now: DateTime<Utc>,
+        excluded: CredentialId,
+    ) -> Option<usize> {
+        self.entries.iter().enumerate().find_map(|(index, entry)| {
+            (entry.credential_id != excluded && self.can_select(index, now)).then_some(index)
+        })
     }
 
     fn select_least_recently_used(&self, now: DateTime<Utc>) -> Option<usize> {
@@ -1152,6 +1280,48 @@ impl CredentialPool {
             .get(&credential_id)
             .copied()
             .unwrap_or_default()
+    }
+
+    fn sticky_use_limit_reached(&self) -> bool {
+        self.sticky_policy
+            .max_uses_per_stick
+            .is_some_and(|max_uses| self.sticky_current_uses >= max_uses)
+    }
+
+    fn prepare_sticky_selection(&mut self, credential_id: CredentialId) {
+        if self.sticky_current != Some(credential_id) {
+            self.sticky_current = Some(credential_id);
+            self.sticky_current_uses = 0;
+        }
+        if self.sticky_restick_target == Some(credential_id) {
+            self.sticky_restick_target = None;
+        }
+    }
+
+    fn record_sticky_selection(&mut self, credential_id: CredentialId) {
+        if self.sticky_current == Some(credential_id) {
+            self.sticky_current_uses = self.sticky_current_uses.saturating_add(1);
+        } else {
+            self.sticky_current = Some(credential_id);
+            self.sticky_current_uses = 1;
+        }
+        if self.sticky_restick_target == Some(credential_id) {
+            self.sticky_restick_target = None;
+        }
+    }
+
+    fn displace_sticky_current(&mut self, credential_id: CredentialId) {
+        if self.sticky_current != Some(credential_id) {
+            return;
+        }
+        if self.sticky_policy.restick_on_recovery
+            && self.sticky_restick_target.is_none()
+            && self.contains_credential(credential_id)
+        {
+            self.sticky_restick_target = Some(credential_id);
+        }
+        self.sticky_current = None;
+        self.sticky_current_uses = 0;
     }
 
     fn wait_required_or_exhausted<T>(&self, now: DateTime<Utc>) -> Result<T, CredentialPoolError> {
@@ -1319,6 +1489,27 @@ impl CredentialPoolRegistry {
         self.record_audit(CredentialPoolAuditEvent::max_concurrent_set(
             key.clone(),
             max,
+            Utc::now(),
+        ));
+        Ok(())
+    }
+
+    /// Set a pool's sticky-strategy controls.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialPoolError::PoolNotFound`] when the pool is absent,
+    /// or [`CredentialPoolError::InvalidStickyMaxUses`] when
+    /// `max_uses_per_stick` is zero.
+    pub fn set_sticky_policy(
+        &mut self,
+        key: &CredentialPoolKey,
+        policy: StickyCredentialPolicy,
+    ) -> Result<(), CredentialPoolError> {
+        self.pool_mut_or_err(key)?.set_sticky_policy(policy)?;
+        self.record_audit(CredentialPoolAuditEvent::sticky_policy_set(
+            key.clone(),
+            policy,
             Utc::now(),
         ));
         Ok(())
@@ -1562,6 +1753,12 @@ pub enum CredentialPoolError {
         /// Invalid value.
         max: u32,
     },
+    /// Sticky max-use bound must be non-zero when configured.
+    #[error("sticky max uses per stick must be greater than zero, got {max}")]
+    InvalidStickyMaxUses {
+        /// Invalid value.
+        max: u32,
+    },
     /// No credential is currently available.
     #[error("credential pool exhausted for {key}")]
     PoolExhausted {
@@ -1788,7 +1985,7 @@ mod tests {
         pool.mark_error(
             cred(0x01),
             CredentialErrorKind::RateLimited,
-            Some(StdDuration::from_secs(120)),
+            Some(StdDuration::from_mins(2)),
             now(),
         )
         .expect("mark cooldown");
@@ -1906,12 +2103,160 @@ mod tests {
         pool.report_error(
             second.token,
             CredentialErrorKind::RateLimited,
-            Some(StdDuration::from_secs(120)),
+            Some(StdDuration::from_mins(2)),
             now(),
         )
         .expect("rate limit sticky credential");
         let third = pool.acquire(now()).expect("fallback lease");
         assert_eq!(third.credential_id, cred(0x02));
+    }
+
+    #[test]
+    fn sticky_default_does_not_restick_after_cooldown_recovery() {
+        let mut pool = three_entry_pool(CredentialPoolStrategy::Sticky);
+        let first = pool.acquire(now()).expect("first lease");
+        pool.report_error(
+            first.token,
+            CredentialErrorKind::RateLimited,
+            Some(StdDuration::from_secs(30)),
+            now(),
+        )
+        .expect("rate limit first");
+
+        let fallback = pool.acquire(now()).expect("fallback lease");
+        assert_eq!(fallback.credential_id, cred(0x02));
+        pool.release(fallback.token).expect("release fallback");
+
+        let after_recovery = pool
+            .acquire(now() + Duration::seconds(31))
+            .expect("sticky fallback persists");
+        assert_eq!(after_recovery.credential_id, cred(0x02));
+    }
+
+    #[test]
+    fn sticky_restick_on_recovery_returns_to_cooldown_credential() {
+        let mut pool = three_entry_pool(CredentialPoolStrategy::Sticky);
+        pool.set_sticky_policy(StickyCredentialPolicy {
+            restick_on_recovery: true,
+            max_uses_per_stick: None,
+        })
+        .expect("set sticky policy");
+        let first = pool.acquire(now()).expect("first lease");
+        pool.report_error(
+            first.token,
+            CredentialErrorKind::RateLimited,
+            Some(StdDuration::from_secs(30)),
+            now(),
+        )
+        .expect("rate limit first");
+
+        let fallback = pool.acquire(now()).expect("fallback lease");
+        assert_eq!(fallback.credential_id, cred(0x02));
+        pool.release(fallback.token).expect("release fallback");
+
+        let recovered = pool
+            .acquire(now() + Duration::seconds(31))
+            .expect("restick to recovered credential");
+        assert_eq!(recovered.credential_id, cred(0x01));
+    }
+
+    #[test]
+    fn sticky_restick_on_recovery_returns_after_active_lease_exhaustion() {
+        let mut pool =
+            three_entry_pool(CredentialPoolStrategy::Sticky).with_max_concurrent_per_credential(1);
+        pool.set_sticky_policy(StickyCredentialPolicy {
+            restick_on_recovery: true,
+            max_uses_per_stick: None,
+        })
+        .expect("set sticky policy");
+
+        let first = pool.acquire(now()).expect("first active lease");
+        let fallback = pool.acquire(now()).expect("fallback while first active");
+        assert_eq!(first.credential_id, cred(0x01));
+        assert_eq!(fallback.credential_id, cred(0x02));
+
+        pool.release(first.token).expect("release first");
+        let restuck = pool.acquire(now()).expect("restick after active release");
+        assert_eq!(restuck.credential_id, cred(0x01));
+    }
+
+    #[test]
+    fn sticky_restick_on_recovery_returns_after_auth_error_clear() {
+        let mut pool = three_entry_pool(CredentialPoolStrategy::Sticky);
+        pool.set_sticky_policy(StickyCredentialPolicy {
+            restick_on_recovery: true,
+            max_uses_per_stick: None,
+        })
+        .expect("set sticky policy");
+        let first = pool.acquire(now()).expect("first lease");
+        pool.report_error(first.token, CredentialErrorKind::AuthFailed, None, now())
+            .expect("auth failure");
+
+        let fallback = pool.acquire(now()).expect("fallback after auth failure");
+        assert_eq!(fallback.credential_id, cred(0x02));
+        pool.release(fallback.token).expect("release fallback");
+
+        pool.clear_cooldown(cred(0x01)).expect("manual clear");
+        let restuck = pool.acquire(now()).expect("restick after auth clear");
+        assert_eq!(restuck.credential_id, cred(0x01));
+    }
+
+    #[test]
+    fn sticky_max_uses_per_stick_rotates_deterministically() {
+        let mut pool = three_entry_pool(CredentialPoolStrategy::Sticky);
+        pool.set_sticky_policy(StickyCredentialPolicy {
+            restick_on_recovery: false,
+            max_uses_per_stick: Some(2),
+        })
+        .expect("set sticky policy");
+
+        let first = pool.acquire(now()).expect("first lease");
+        pool.release(first.token).expect("release first");
+        let second = pool.acquire(now()).expect("second lease");
+        pool.release(second.token).expect("release second");
+        let third = pool.acquire(now()).expect("third lease");
+        pool.release(third.token).expect("release third");
+        let fourth = pool.acquire(now()).expect("fourth lease");
+        pool.release(fourth.token).expect("release fourth");
+        let fifth = pool.acquire(now()).expect("fifth lease");
+
+        assert_eq!(first.credential_id, cred(0x01));
+        assert_eq!(second.credential_id, cred(0x01));
+        assert_eq!(third.credential_id, cred(0x02));
+        assert_eq!(fourth.credential_id, cred(0x02));
+        assert_eq!(fifth.credential_id, cred(0x01));
+    }
+
+    #[test]
+    fn sticky_policy_rejects_zero_max_uses_and_serializes_for_admin_views() {
+        let mut pool = three_entry_pool(CredentialPoolStrategy::Sticky);
+        let err = pool
+            .set_sticky_policy(StickyCredentialPolicy {
+                restick_on_recovery: true,
+                max_uses_per_stick: Some(0),
+            })
+            .expect_err("zero max uses rejected");
+        assert_eq!(err, CredentialPoolError::InvalidStickyMaxUses { max: 0 });
+
+        pool.set_sticky_policy(StickyCredentialPolicy {
+            restick_on_recovery: true,
+            max_uses_per_stick: Some(3),
+        })
+        .expect("set sticky policy");
+        let view = pool.redacted_view(now());
+        assert_eq!(
+            view.sticky_policy,
+            StickyCredentialPolicy {
+                restick_on_recovery: true,
+                max_uses_per_stick: Some(3),
+            }
+        );
+
+        let rendered = serde_json::to_string(&view).expect("serialize view");
+        assert!(rendered.contains("restick_on_recovery"));
+        assert!(rendered.contains("max_uses_per_stick"));
+        assert!(!rendered.contains("secret-"));
+        assert!(!rendered.contains("api_key"));
     }
 
     #[test]
@@ -2154,6 +2499,15 @@ mod tests {
             .set_max_concurrent_per_credential(&pool_key, 1)
             .expect("set max concurrent");
         registry
+            .set_sticky_policy(
+                &pool_key,
+                StickyCredentialPolicy {
+                    restick_on_recovery: true,
+                    max_uses_per_stick: Some(5),
+                },
+            )
+            .expect("set sticky policy");
+        registry
             .set_exhausted_behavior(&pool_key, PoolExhaustedBehavior::Wait)
             .expect("set exhausted behavior");
         registry
@@ -2175,6 +2529,7 @@ mod tests {
                 CredentialPoolAuditOperation::CredentialUpsert,
                 CredentialPoolAuditOperation::StrategySet,
                 CredentialPoolAuditOperation::MaxConcurrentSet,
+                CredentialPoolAuditOperation::StickyPolicySet,
                 CredentialPoolAuditOperation::ExhaustedBehaviorSet,
                 CredentialPoolAuditOperation::CooldownSet,
                 CredentialPoolAuditOperation::CredentialRemove,
@@ -2188,14 +2543,22 @@ mod tests {
             registry.audit_events()[1].outcome,
             Some(CredentialMutationOutcome::Replaced)
         );
+        assert_eq!(
+            registry.audit_events()[4].sticky_policy,
+            Some(StickyCredentialPolicy {
+                restick_on_recovery: true,
+                max_uses_per_stick: Some(5),
+            })
+        );
 
         let rendered =
             serde_json::to_string(registry.audit_events()).expect("serialize audit events");
         assert!(rendered.contains(CREDENTIAL_POOL_AUDIT_EVENT_TYPE));
         assert!(rendered.contains("openai"));
         assert!(rendered.contains("credential_upsert"));
+        assert!(rendered.contains("sticky_policy_set"));
         assert!(rendered.contains("cooldown_set"));
-        assert!(!rendered.contains("payload"));
+        assert!(!rendered.contains("\"payload\":"));
         assert!(!rendered.contains("api_key"));
         assert!(!rendered.contains("secret-"));
         assert!(!rendered.contains("updated-secret"));

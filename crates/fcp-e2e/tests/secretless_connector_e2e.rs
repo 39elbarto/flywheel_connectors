@@ -32,12 +32,10 @@
 //! fake network — every byte that crosses the trait boundary
 //! crosses a real socket.
 //!
-//! The `SecretFetchHook` trait + `InMemorySecretRegistry` impl are
-//! defined in this file as the candidate API surface for future
-//! production secretless-connector wiring. When that contract lands
-//! in `fcp-bootstrap` or `fcp-crypto`, this test file is the
-//! migration target — flip the `use` statements to point at the real
-//! trait and the assertions stay green.
+//! This test now exercises the production `fcp_crypto`
+//! `SecretFetchHook` contract and its test-utils in-memory registry.
+//! The connector-shape client still holds only a `CredentialId`; it
+//! converts that id to the production hook key at egress time.
 //!
 //! ## Logging
 //!
@@ -50,124 +48,18 @@
 
 #![cfg_attr(not(test), allow(dead_code))]
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use fcp_crypto::test_utils::InMemorySecretRegistry;
+use fcp_crypto::{CredentialIdHash, SecretFetchError, SecretFetchHook, ZeroizingSecret};
 use fcp_prelude::CredentialId;
 use fcp_testkit::MockApiServer;
-use zeroize::Zeroizing;
-
-/// Alias for the secret-fetch return type. Uses `zeroize::Zeroizing`
-/// — a public wipe-on-drop wrapper. (`fcp_crypto::ZeroizingSecret`
-/// has the same semantic but a private constructor only accessible
-/// from inside fcp-crypto, so we pick the public crate-level
-/// equivalent here.) When the production secret-fetch trait lands
-/// in fcp-bootstrap or fcp-crypto with a public constructor, this
-/// alias is the one-line migration target.
-type ZeroizingSecret = Zeroizing<Vec<u8>>;
 use serde_json::Value;
 use tracing::Subscriber;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
-
-// ── Candidate secret-fetch contract (will move to fcp-bootstrap or fcp-crypto) ──
-
-/// Test-local candidate trait for the production secret-fetch hook
-/// that future secretless connectors will receive at construction.
-/// Connectors hold a [`CredentialId`] only; they call
-/// `hook.fetch(id)` at egress time and the hook returns the bearer
-/// material as a [`ZeroizingSecret`] that wipes itself on drop.
-trait SecretFetchHook: Send + Sync {
-    /// Resolve the credential's secret material. Returns
-    /// `Err(SecretFetchError::NotFound)` if the credential is unknown
-    /// in this hook (caller should NOT log the credential id at
-    /// error level — it's not sensitive but is correlation-bearing).
-    fn fetch(&self, credential_id: &CredentialId) -> Result<ZeroizingSecret, SecretFetchError>;
-}
-
-#[derive(Debug)]
-enum SecretFetchError {
-    NotFound,
-}
-
-/// In-memory secret registry. Holds bearer material in memory only,
-/// supports rotation, tracks fetch counts per credential. Has NO
-/// file-I/O surface by design — the structural absence of `save()` /
-/// `persist()` / `flush()` etc. is the type-level guarantee that
-/// secrets never reach disk.
-struct InMemorySecretRegistry {
-    inner: Mutex<HashMap<CredentialId, Vec<u8>>>,
-    fetch_count: Mutex<HashMap<CredentialId, u32>>,
-}
-
-impl InMemorySecretRegistry {
-    fn new() -> Self {
-        Self {
-            inner: Mutex::new(HashMap::new()),
-            fetch_count: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn put(&self, id: CredentialId, secret: &[u8]) {
-        self.inner
-            .lock()
-            .expect("registry")
-            .insert(id, secret.to_vec());
-    }
-
-    /// Atomically replace the secret material for `id`. Used by the
-    /// mid-flight rotation tests.
-    fn rotate(&self, id: CredentialId, new_secret: &[u8]) {
-        self.inner
-            .lock()
-            .expect("registry")
-            .insert(id, new_secret.to_vec());
-    }
-
-    fn fetch_count_for(&self, id: &CredentialId) -> u32 {
-        self.fetch_count
-            .lock()
-            .expect("fetch counts")
-            .get(id)
-            .copied()
-            .unwrap_or(0)
-    }
-}
-
-impl SecretFetchHook for InMemorySecretRegistry {
-    fn fetch(&self, credential_id: &CredentialId) -> Result<ZeroizingSecret, SecretFetchError> {
-        // Increment the per-credential fetch counter for audit.
-        *self
-            .fetch_count
-            .lock()
-            .expect("fetch counts")
-            .entry(*credential_id)
-            .or_insert(0) += 1;
-
-        let bytes = self
-            .inner
-            .lock()
-            .expect("registry")
-            .get(credential_id)
-            .cloned()
-            .ok_or(SecretFetchError::NotFound)?;
-        Ok(Zeroizing::new(bytes))
-    }
-}
-
-impl std::fmt::Debug for InMemorySecretRegistry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // MUST NOT expose secret bytes in Debug output. Emits only
-        // counts so operators can inspect registry health without
-        // risk of leak via accidental log/trace.
-        let credentials = self.inner.lock().map(|g| g.len()).unwrap_or(0);
-        f.debug_struct("InMemorySecretRegistry")
-            .field("credentials", &credentials)
-            .field("secret_bytes", &"<redacted>")
-            .finish()
-    }
-}
+use zeroize::ZeroizeOnDrop;
 
 // ── Secretless GitHub-shape client ──────────────────────────────────────
 
@@ -197,15 +89,15 @@ impl SecretlessGitHubClient {
     async fn list_issues(&self, owner: &str, repo: &str) -> Result<Value, ClientError> {
         // Fetch at egress; this is the ONLY moment the secret bytes
         // exist in this client's frame.
-        let secret = self
+        let credential_key = credential_key(&self.credential_id);
+        let material = self
             .hook
-            .fetch(&self.credential_id)
+            .fetch(&credential_key)
             .map_err(|_| ClientError::CredentialNotFound)?;
         // Construct the bearer string in a tightly scoped block so it
-        // lives no longer than the request itself. `Zeroizing<Vec<u8>>`
-        // derefs to &[u8].
-        let bearer =
-            String::from_utf8((*secret).clone()).map_err(|_| ClientError::InvalidSecretEncoding)?;
+        // lives no longer than the request itself.
+        let bearer = String::from_utf8(material.as_bytes().to_vec())
+            .map_err(|_| ClientError::InvalidSecretEncoding)?;
 
         let url = format!("{}/repos/{owner}/{repo}/issues", self.base_url);
         // Avoid logging the bearer at any level — only log the URL
@@ -226,11 +118,11 @@ impl SecretlessGitHubClient {
             .map_err(|e| ClientError::Transport(e.to_string()))?;
         let status = response.status();
 
-        // bearer + secret drop here (Zeroizing<Vec<u8>> zeroes on
-        // drop). Drop BEFORE attempting body parse so the secret
-        // bytes have the shortest possible lifetime in this frame.
+        // bearer + secret drop here. Drop BEFORE attempting body
+        // parse so the secret bytes have the shortest possible
+        // lifetime in this frame.
         drop(bearer);
-        drop(secret);
+        drop(material);
 
         tracing::info!(
             target: "secretless_e2e",
@@ -263,6 +155,18 @@ enum ClientError {
     Transport(String),
     Body(String),
     Status(u16),
+}
+
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CredentialNotFound => f.write_str("credential not found"),
+            Self::InvalidSecretEncoding => f.write_str("invalid secret encoding"),
+            Self::Transport(message) => write!(f, "transport error: {message}"),
+            Self::Body(message) => write!(f, "body error: {message}"),
+            Self::Status(status) => write!(f, "unexpected HTTP status: {status}"),
+        }
+    }
 }
 
 // ── Tracing capture subscriber ──────────────────────────────────────────
@@ -353,9 +257,33 @@ fn find_file_containing(dir: &std::path::Path, needle: &[u8]) -> Option<std::pat
 
 // ── Tests ───────────────────────────────────────────────────────────────
 
-const TEST_BEARER: &str = "ghp_secretless_test_bearer_e99o6_2026";
-const ROTATED_BEARER: &str = "ghp_rotated_test_bearer_e99o6_2026";
+const TEST_BEARER: &str = "primary-e99o6-value";
+const ROTATED_BEARER: &str = "rotated-e99o6-value";
 const ISSUES_RESPONSE_BODY: &str = r#"[{"number":1,"title":"first","body":"hello"}]"#;
+
+fn credential_key(id: &CredentialId) -> String {
+    id.to_string()
+}
+
+fn insert_secret(registry: &InMemorySecretRegistry, id: CredentialId, bearer: &[u8]) {
+    registry.insert(credential_key(&id), bearer.to_vec());
+}
+
+fn rotate_secret(registry: &InMemorySecretRegistry, id: CredentialId, bearer: &[u8]) {
+    registry
+        .rotate(&credential_key(&id), ZeroizingSecret::new(bearer.to_vec()))
+        .expect("credential rotation succeeds");
+}
+
+fn fetch_secret(registry: &InMemorySecretRegistry, id: &CredentialId) -> ZeroizingSecret {
+    registry
+        .fetch(&credential_key(id))
+        .expect("credential fetch succeeds")
+}
+
+fn fetch_count_for(registry: &InMemorySecretRegistry, id: &CredentialId) -> u64 {
+    registry.fetch_count_for(&credential_key(id))
+}
 
 async fn build_wiremock_with_bearer(bearer: &str) -> MockApiServer {
     let mock = MockApiServer::start().await;
@@ -375,7 +303,7 @@ async fn secretless_happy_path_completes_via_real_wiremock_egress() {
     let mock = build_wiremock_with_bearer(TEST_BEARER).await;
     let registry = Arc::new(InMemorySecretRegistry::new());
     let credential_id = CredentialId::new();
-    registry.put(credential_id, TEST_BEARER.as_bytes());
+    insert_secret(&registry, credential_id, TEST_BEARER.as_bytes());
 
     let client = SecretlessGitHubClient::new(
         mock.base_url(),
@@ -389,7 +317,7 @@ async fn secretless_happy_path_completes_via_real_wiremock_egress() {
     assert_eq!(body[0]["number"], 1);
     assert_eq!(body[0]["title"], "first");
     assert_eq!(
-        registry.fetch_count_for(&credential_id),
+        fetch_count_for(&registry, &credential_id),
         1,
         "exactly one hook fetch per request"
     );
@@ -400,7 +328,7 @@ async fn connector_receives_only_credential_id_not_secret_bytes() {
     let mock = build_wiremock_with_bearer(TEST_BEARER).await;
     let registry = Arc::new(InMemorySecretRegistry::new());
     let credential_id = CredentialId::new();
-    registry.put(credential_id, TEST_BEARER.as_bytes());
+    insert_secret(&registry, credential_id, TEST_BEARER.as_bytes());
 
     let client = SecretlessGitHubClient::new(
         mock.base_url(),
@@ -427,7 +355,7 @@ async fn secret_bytes_never_appear_in_tracing_output() {
     let mock = build_wiremock_with_bearer(TEST_BEARER).await;
     let registry = Arc::new(InMemorySecretRegistry::new());
     let credential_id = CredentialId::new();
-    registry.put(credential_id, TEST_BEARER.as_bytes());
+    insert_secret(&registry, credential_id, TEST_BEARER.as_bytes());
 
     let client = SecretlessGitHubClient::new(
         mock.base_url(),
@@ -461,7 +389,7 @@ async fn secret_bytes_never_appear_in_tracing_output() {
 async fn registry_debug_redacts_bearer_bytes() {
     let registry = InMemorySecretRegistry::new();
     let id = CredentialId::new();
-    registry.put(id, TEST_BEARER.as_bytes());
+    insert_secret(&registry, id, TEST_BEARER.as_bytes());
     let debug = format!("{registry:?}");
     assert!(
         !debug.contains(TEST_BEARER),
@@ -497,22 +425,18 @@ async fn in_flight_request_completes_when_credential_rotated_after_fetch() {
     let mock = build_wiremock_with_bearer(TEST_BEARER).await;
     let registry = Arc::new(InMemorySecretRegistry::new());
     let credential_id = CredentialId::new();
-    registry.put(credential_id, TEST_BEARER.as_bytes());
+    insert_secret(&registry, credential_id, TEST_BEARER.as_bytes());
 
     // Step 1: fetch the bearer (this is the snapshot).
-    let snapshot = registry
-        .fetch(&credential_id)
-        .expect("fetch returns OLD bearer");
-    let bearer = String::from_utf8((*snapshot).clone()).expect("utf8");
+    let snapshot = fetch_secret(&registry, &credential_id);
+    let bearer = String::from_utf8(snapshot.as_bytes().to_vec()).expect("utf8");
     drop(snapshot);
 
     // Step 2: rotate the registry mid-flight (between fetch and use).
-    registry.rotate(credential_id, ROTATED_BEARER.as_bytes());
+    rotate_secret(&registry, credential_id, ROTATED_BEARER.as_bytes());
     // Sanity: registry now holds the NEW bearer.
-    let post_rotation = registry
-        .fetch(&credential_id)
-        .expect("fetch returns NEW bearer");
-    assert_eq!(&*post_rotation, ROTATED_BEARER.as_bytes());
+    let post_rotation = fetch_secret(&registry, &credential_id);
+    assert_eq!(post_rotation.as_bytes(), ROTATED_BEARER.as_bytes());
     drop(post_rotation);
 
     // Step 3: issue the egress request WITH the pre-rotation snapshot.
@@ -543,17 +467,17 @@ async fn many_pre_rotation_snapshots_remain_independent_of_post_rotation_state()
     let mock = build_wiremock_with_bearer(TEST_BEARER).await;
     let registry = Arc::new(InMemorySecretRegistry::new());
     let credential_id = CredentialId::new();
-    registry.put(credential_id, TEST_BEARER.as_bytes());
+    insert_secret(&registry, credential_id, TEST_BEARER.as_bytes());
 
     // Take 10 snapshots BEFORE rotation.
     let mut snapshots = Vec::new();
     for _ in 0..10 {
-        let secret = registry.fetch(&credential_id).expect("fetch");
-        snapshots.push(String::from_utf8((*secret).clone()).expect("utf8"));
+        let material = fetch_secret(&registry, &credential_id);
+        snapshots.push(String::from_utf8(material.as_bytes().to_vec()).expect("utf8"));
     }
 
     // Rotate the registry. None of the snapshots above should change.
-    registry.rotate(credential_id, ROTATED_BEARER.as_bytes());
+    rotate_secret(&registry, credential_id, ROTATED_BEARER.as_bytes());
 
     // Issue all requests with the pre-rotation snapshots.
     let url = format!("{}/repos/octocat/hello-world/issues", mock.base_url());
@@ -587,8 +511,8 @@ async fn subsequent_request_after_rotation_uses_new_secret() {
     let mock = build_wiremock_with_bearer(ROTATED_BEARER).await;
     let registry = Arc::new(InMemorySecretRegistry::new());
     let credential_id = CredentialId::new();
-    registry.put(credential_id, TEST_BEARER.as_bytes());
-    registry.rotate(credential_id, ROTATED_BEARER.as_bytes());
+    insert_secret(&registry, credential_id, TEST_BEARER.as_bytes());
+    rotate_secret(&registry, credential_id, ROTATED_BEARER.as_bytes());
 
     let client = SecretlessGitHubClient::new(
         mock.base_url(),
@@ -611,7 +535,7 @@ async fn old_bearer_after_rotation_no_longer_admitted_by_egress_target() {
     let mock = build_wiremock_with_bearer(ROTATED_BEARER).await;
     let registry = Arc::new(InMemorySecretRegistry::new());
     let credential_id = CredentialId::new();
-    registry.put(credential_id, TEST_BEARER.as_bytes());
+    insert_secret(&registry, credential_id, TEST_BEARER.as_bytes());
     // NOTE: NOT rotating here — registry still holds OLD bearer.
 
     let client = SecretlessGitHubClient::new(
@@ -641,7 +565,7 @@ async fn per_test_tempdir_contains_no_file_with_secret_bytes() {
     let mock = build_wiremock_with_bearer(TEST_BEARER).await;
     let registry = Arc::new(InMemorySecretRegistry::new());
     let credential_id = CredentialId::new();
-    registry.put(credential_id, TEST_BEARER.as_bytes());
+    insert_secret(&registry, credential_id, TEST_BEARER.as_bytes());
 
     let client = SecretlessGitHubClient::new(
         mock.base_url(),
@@ -664,17 +588,25 @@ async fn per_test_tempdir_contains_no_file_with_secret_bytes() {
 
 #[fcp_async_core::runtime::test]
 async fn registry_has_no_file_io_surface_by_construction() {
-    // Compile-time / type-level proof that the InMemorySecretRegistry
-    // cannot persist secrets to disk: the trait `SecretFetchHook` has
-    // exactly ONE method, `fetch`, returning `ZeroizingSecret`. No
-    // `save`, `flush`, `persist`, `serialize`, or `as_bytes` method
-    // is callable through the trait. This test exists to make the
-    // structural property explicit + visible in the test inventory
-    // (a future PR that adds a save() to the trait would have to
-    // rationalize that decision against this test).
-    fn assert_only_fetch_method<T: SecretFetchHook>(_: &T) {}
+    // Compile-time / type-level proof that the production in-memory
+    // registry satisfies the secret-fetch hook contract without a
+    // persistence-oriented call path. Runtime Debug output also
+    // redacts both ids and secret bytes.
+    fn assert_secret_fetch_hook_surface<T: SecretFetchHook>(_: &T) {}
     let registry = InMemorySecretRegistry::new();
-    assert_only_fetch_method(&registry);
+    let credential_id = CredentialId::new();
+    insert_secret(&registry, credential_id, TEST_BEARER.as_bytes());
+    assert_secret_fetch_hook_surface(&registry);
+
+    let hook: &dyn SecretFetchHook = &registry;
+    let material = hook
+        .fetch(&credential_key(&credential_id))
+        .expect("credential fetch succeeds");
+    assert_eq!(material.as_bytes(), TEST_BEARER.as_bytes());
+
+    let debug = format!("{registry:?}");
+    assert!(!debug.contains(TEST_BEARER));
+    assert!(!debug.contains(&credential_key(&credential_id)));
 }
 
 #[fcp_async_core::runtime::test]
@@ -682,7 +614,7 @@ async fn hook_fetch_count_increments_per_request_for_audit() {
     let mock = build_wiremock_with_bearer(TEST_BEARER).await;
     let registry = Arc::new(InMemorySecretRegistry::new());
     let credential_id = CredentialId::new();
-    registry.put(credential_id, TEST_BEARER.as_bytes());
+    insert_secret(&registry, credential_id, TEST_BEARER.as_bytes());
 
     let client = SecretlessGitHubClient::new(
         mock.base_url(),
@@ -696,12 +628,12 @@ async fn hook_fetch_count_increments_per_request_for_audit() {
             .expect("each request completes");
     }
     assert_eq!(
-        registry.fetch_count_for(&credential_id),
+        fetch_count_for(&registry, &credential_id),
         5,
         "fetch count must equal request count for audit accountability"
     );
     // Unknown credential id was never fetched.
-    assert_eq!(registry.fetch_count_for(&CredentialId::new()), 0);
+    assert_eq!(fetch_count_for(&registry, &CredentialId::new()), 0);
 }
 
 #[fcp_async_core::runtime::test]
@@ -742,10 +674,76 @@ async fn secret_bytes_dropped_after_fetch_returns_zeroizing_secret() {
     // and break the test.
     let registry = InMemorySecretRegistry::new();
     let id = CredentialId::new();
-    registry.put(id, TEST_BEARER.as_bytes());
-    let secret: ZeroizingSecret = registry.fetch(&id).expect("fetch");
+    insert_secret(&registry, id, TEST_BEARER.as_bytes());
+    let material: ZeroizingSecret = fetch_secret(&registry, &id);
     // Touch the bytes so the compiler keeps the value live to its
     // declared scope, then drop explicitly to invoke ZeroizeOnDrop.
-    assert_eq!(&*secret, TEST_BEARER.as_bytes());
-    drop(secret);
+    assert_eq!(material.as_bytes(), TEST_BEARER.as_bytes());
+    drop(material);
+}
+
+#[test]
+fn production_trait_used() {
+    fn assert_hook_trait_object(_: &Arc<dyn SecretFetchHook>) {}
+
+    let registry = Arc::new(InMemorySecretRegistry::new());
+    let hook: Arc<dyn SecretFetchHook> = registry;
+    assert_hook_trait_object(&hook);
+
+    let trait_name = std::any::type_name::<dyn SecretFetchHook>();
+    assert!(
+        trait_name.contains("fcp_crypto::secret_fetch::SecretFetchHook"),
+        "unexpected SecretFetchHook provider: {trait_name}"
+    );
+}
+
+#[test]
+fn production_zeroizing_secret_drop_zeroes_memory() {
+    fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+
+    assert_zeroize_on_drop::<ZeroizingSecret>();
+    let material = ZeroizingSecret::new(TEST_BEARER.as_bytes().to_vec());
+    assert_eq!(material.as_bytes(), TEST_BEARER.as_bytes());
+    drop(material);
+}
+
+#[test]
+fn production_secret_fetch_error_redacts_credential_id_in_display() {
+    let raw_credential_id = "fcp-e99o6-credential-id";
+    let error = SecretFetchError::not_found(raw_credential_id);
+    let rendered = error.to_string();
+    let hash = CredentialIdHash::from_credential_id(raw_credential_id);
+
+    assert!(
+        !rendered.contains(raw_credential_id),
+        "raw credential id leaked in Display: {rendered}"
+    );
+    assert!(
+        rendered.contains(hash.as_str()),
+        "redacted Display should include credential id hash: {rendered}"
+    );
+    assert!(
+        rendered.contains("credential_id_hash="),
+        "Display should label the redacted credential id hash: {rendered}"
+    );
+}
+
+#[test]
+fn production_registry_test_utils_feature_gated() {
+    let registry = fcp_crypto::test_utils::InMemorySecretRegistry::new();
+    assert!(registry.is_empty());
+
+    let registry_type = std::any::type_name::<fcp_crypto::test_utils::InMemorySecretRegistry>();
+    assert!(
+        registry_type.contains("fcp_crypto::secret_fetch::InMemorySecretRegistry"),
+        "unexpected test-utils registry provider: {registry_type}"
+    );
+}
+
+#[test]
+fn production_trait_send_sync_bounds_satisfied() {
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    assert_send_sync::<InMemorySecretRegistry>();
+    assert_send_sync::<Arc<dyn SecretFetchHook>>();
 }

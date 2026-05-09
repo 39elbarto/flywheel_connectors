@@ -321,7 +321,7 @@ asupersync = { version = "0.3.1", default-features = false, features = ["tls", "
 fcp-kernel = { workspace = true }
 fcp-policy = { workspace = true }
 fcp-evidence = { workspace = true }
-fcp-crypto = { workspace = true }
+fcp-crypto = { workspace = true, features = ["test-utils"] }
 fcp-telemetry = { workspace = true }
 pretty_assertions = { workspace = true }
 reqwest = { workspace = true }
@@ -347,7 +347,7 @@ blake3 = { workspace = true }
 fcp-sandbox = { workspace = true }
 # Secretless-connectors E2E (e99o6): tracing-capture subscriber for
 # verifying that bearer-token bytes never appear in connector log
-# events; zeroize for the wipe-on-drop secret wrapper.
+# events; zeroize for the production ZeroizeOnDrop type-bound proof.
 tracing-subscriber = { workspace = true }
 zeroize = { workspace = true }
 # Real-service e2e harnesses (no mocks): tokio for in-process HTTP

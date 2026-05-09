@@ -340,21 +340,74 @@ fn operation_ids_with_wildcard_network_constraints(manifest: &toml::Value) -> Ve
 fn operation_ids_missing_network_port_allow(manifest: &toml::Value) -> Vec<String> {
     let mut missing = Vec::new();
     for operation_id in canonical_operation_ids(manifest) {
-        let valid_port_allow = operation_network_constraints(manifest, &operation_id)
-            .and_then(|network_constraints| network_constraints.get("port_allow"))
-            .and_then(toml::Value::as_array)
-            .is_some_and(|ports| {
-                !ports.is_empty()
-                    && ports.iter().all(|port| {
-                        port.as_integer()
-                            .is_some_and(|port| (1..=65_535).contains(&port))
+        let valid_port_allow = operation_network_constraints(manifest, &operation_id).is_some_and(
+            |network_constraints| {
+                if network_constraints_declares_no_egress_sentinel(network_constraints) {
+                    return true;
+                }
+                network_constraints
+                    .get("port_allow")
+                    .and_then(toml::Value::as_array)
+                    .is_some_and(|ports| {
+                        !ports.is_empty()
+                            && ports.iter().all(|port| {
+                                port.as_integer()
+                                    .is_some_and(|port| (1..=65_535).contains(&port))
+                            })
                     })
-            });
+            },
+        );
         if !valid_port_allow {
             missing.push(operation_id);
         }
     }
     missing
+}
+
+fn network_constraints_declares_no_egress_sentinel(
+    network_constraints: &toml::map::Map<String, toml::Value>,
+) -> bool {
+    let host_is_sentinel = network_constraints
+        .get("host_allow")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|hosts| {
+            hosts.len() == 1
+                && hosts[0]
+                    .as_str()
+                    .is_some_and(|host| host.trim() == "none.invalid")
+        });
+    let port_is_sentinel = network_constraints
+        .get("port_allow")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|ports| {
+            ports.len() == 1 && ports[0].as_integer().is_some_and(|port| port == 0)
+        });
+    let dns_disabled = network_constraints
+        .get("dns_max_ips")
+        .and_then(toml::Value::as_integer)
+        .is_some_and(|count| count == 0);
+    let require_sni_disabled = network_constraints
+        .get("require_sni")
+        .and_then(toml::Value::as_bool)
+        .is_some_and(|require_sni| !require_sni);
+    let egress_denies_local_networks = [
+        "deny_localhost",
+        "deny_private_ranges",
+        "deny_tailnet_ranges",
+    ]
+    .iter()
+    .all(|field| {
+        network_constraints
+            .get(*field)
+            .and_then(toml::Value::as_bool)
+            .is_some_and(|enabled| enabled)
+    });
+
+    host_is_sentinel
+        && port_is_sentinel
+        && dns_disabled
+        && require_sni_disabled
+        && egress_denies_local_networks
 }
 
 fn operation_ids_missing_network_bool(manifest: &toml::Value, field_name: &str) -> Vec<String> {
@@ -812,7 +865,6 @@ fn expected_network_constraints_gap_connectors() -> Vec<String> {
         "hue",
         "inworld",
         "irc",
-        "llm-router",
         "mattermost",
         "microsoft365",
         "nostr",
@@ -1102,6 +1154,33 @@ id = "legacy.two"
         &legacy_operation_ids(&manifest),
         &vec!["legacy.one".to_owned(), "legacy.two".to_owned()],
         "legacy operation discovery",
+    )
+}
+
+#[test]
+fn no_egress_sentinel_port_zero_satisfies_network_port_allow() -> Result<(), String> {
+    let manifest = parse_manifest(
+        r#"
+[connector]
+id = "fcp.example"
+
+[provides.operations."example.local_only"]
+description = "Local-only helper"
+
+[provides.operations."example.local_only".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+dns_max_ips = 0
+"#,
+    )?;
+
+    require(
+        operation_ids_missing_network_port_allow(&manifest).is_empty(),
+        "explicit no-egress sentinel should not count as a missing port_allow",
     )
 }
 

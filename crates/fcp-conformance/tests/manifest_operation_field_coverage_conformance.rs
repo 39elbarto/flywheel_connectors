@@ -25,7 +25,6 @@ const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
     "hue",
     "inworld",
     "irc",
-    "llm-router",
     "mattermost",
     "microsoft365",
     "nostr",

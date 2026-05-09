@@ -1622,7 +1622,7 @@ mod tests {
     use chrono::{Duration, Utc};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
-    use fcp_manifest::ConnectorManifest;
+    use fcp_manifest::{ConnectorManifest, NetworkConstraints};
     use std::path::PathBuf;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -1679,6 +1679,36 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => message,
             other => format!("unexpected error variant: {other:?}"),
         }
+    }
+
+    const GOOGLE_AI_EXTERNAL_NETWORK_OPS: &[&str] = &[
+        "google-ai.batch_embed_contents",
+        "google-ai.count_tokens",
+        "google-ai.embed_content",
+        "google-ai.generate_content",
+        "google-ai.generate_content_stream",
+        "google-ai.live.create_browser_session",
+        "google-ai.get_model",
+        "google-ai.list_models",
+        "google-ai.tuning.create",
+        "google-ai.tuning.list",
+        "google-ai.tuning.get",
+        "google-ai.tuning.get_operation",
+        "google-ai.tuning.cancel",
+    ];
+
+    fn operation_network_constraints<'a>(
+        manifest: &'a ConnectorManifest,
+        operation: &str,
+    ) -> &'a NetworkConstraints {
+        manifest
+            .provides
+            .operations
+            .get(operation)
+            .unwrap_or_else(|| panic!("manifest missing operation {operation}"))
+            .network_constraints
+            .as_ref()
+            .unwrap_or_else(|| panic!("{operation} missing network_constraints"))
     }
 
     #[fcp_async_core::runtime::test]
@@ -2268,6 +2298,47 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing op {id}"));
             assert_eq!(op["requires_approval"], "elevation_token");
         }
+    }
+
+    #[test]
+    fn manifest_declares_per_operation_network_constraints() {
+        let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
+        let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
+        let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
+
+        assert_eq!(
+            manifest.provides.operations.len(),
+            GOOGLE_AI_EXTERNAL_NETWORK_OPS.len() + 1,
+            "manifest operation set should stay aligned with Google AI egress coverage"
+        );
+
+        for operation in GOOGLE_AI_EXTERNAL_NETWORK_OPS {
+            let constraints = operation_network_constraints(&manifest, operation);
+            assert_eq!(
+                constraints.host_allow,
+                vec!["generativelanguage.googleapis.com".to_owned()],
+                "{operation} should be pinned to the Google AI API host"
+            );
+            assert_eq!(constraints.port_allow, vec![443], "{operation}");
+            assert!(constraints.require_sni, "{operation}");
+            assert!(constraints.deny_localhost, "{operation}");
+            assert!(constraints.deny_private_ranges, "{operation}");
+            assert!(constraints.deny_tailnet_ranges, "{operation}");
+            assert!(constraints.deny_ip_literals, "{operation}");
+            assert!(constraints.require_host_canonicalization, "{operation}");
+        }
+
+        let constraints = operation_network_constraints(&manifest, "google-ai.get_usage");
+        assert_eq!(constraints.host_allow, vec!["none.invalid".to_owned()]);
+        assert_eq!(constraints.port_allow, vec![0]);
+        assert!(!constraints.require_sni);
+        assert_eq!(constraints.dns_max_ips, 0);
+        assert_eq!(constraints.max_redirects, 0);
+        assert!(constraints.deny_localhost);
+        assert!(constraints.deny_private_ranges);
+        assert!(constraints.deny_tailnet_ranges);
+        assert!(constraints.deny_ip_literals);
+        assert!(constraints.require_host_canonicalization);
     }
 
     #[test]

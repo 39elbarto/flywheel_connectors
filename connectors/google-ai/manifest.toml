@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:1edd303f353f9673b0699cdbd302bd70cf9ecd838768ea9e7d7de5712e8dce37"
+interface_hash = "blake3-256:fcp.interface.v2:0e4f4b9bc9e4d5ba3e484bb7879143460f715d4ef9747e941590ed01a5ca8c8f"
 
 [connector]
 id = "fcp.google-ai"
@@ -645,6 +645,24 @@ type = "integer"
 
 [provides.operations."google-ai.get_usage".output_schema.properties.total_output_tokens]
 type = "integer"
+
+[provides.operations."google-ai.get_usage".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
 
 [provides.operations."google-ai.get_usage".ai_hints]
 when_to_use = "Inspect connector token usage counters for the current session."

@@ -7,7 +7,7 @@ id = "fcp.dingtalk"
 name = "DingTalk Enterprise Robot"
 version = "0.1.0"
 description = "Tenant-scoped DingTalk robot connector for DM or group sends, link or file delivery, media upload, Stream Mode frame supervision, session-webhook replies, and health verification"
-archetype = "operational"
+archetypes = ["operational"]
 homepage = "https://open.dingtalk.com/"
 
 [zones]
@@ -31,6 +31,11 @@ input_schema = { type = "object", required = ["to", "content"], additionalProper
 output_schema = { type = "object", additionalProperties = true, properties = { processQueryKey = { type = "string" }, messageId = { type = "string" }, errcode = { type = "integer" }, errmsg = { type = "string" } } }
 network_constraints = { host_allow = ["api.dingtalk.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
+[provides.operations.messages_send_text.ai_hints]
+when_to_use = "Use when an agent needs to send a short DingTalk robot text or markdown-style notification to one user or one group conversation."
+common_mistakes = ["Use user:<userid> for direct sends and chat:<openConversationId> for group sends; bare IDs are treated as direct user IDs.", "Do not use this operation for file attachments or link cards; use messages_send_file or messages_send_link instead.", "This operation sends immediately and is not idempotent, so avoid blind retries after an unknown delivery result."]
+examples = ['{"to":"user:manager01","content":"Build pipeline finished successfully."}', '{"to":"chat:cid-ops","content":"@ops Release candidate is ready for review."}']
+
 [provides.operations.messages_send_link]
 summary = "Send a DingTalk link message"
 capability = "dingtalk.messages.write"
@@ -40,6 +45,11 @@ idempotency = "none"
 input_schema = { type = "object", required = ["to", "title", "text", "message_url"], additionalProperties = false, properties = { to = { type = "string", minLength = 1, pattern = "\\S" }, title = { type = "string", minLength = 1, pattern = "\\S" }, text = { type = "string", minLength = 1, pattern = "\\S" }, message_url = { type = "string", minLength = 1, format = "uri" }, pic_url = { type = "string", minLength = 1, format = "uri" } } }
 output_schema = { type = "object", additionalProperties = true, properties = { processQueryKey = { type = "string" }, messageId = { type = "string" }, errcode = { type = "integer" }, errmsg = { type = "string" } } }
 network_constraints = { host_allow = ["api.dingtalk.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations.messages_send_link.ai_hints]
+when_to_use = "Use when the DingTalk message should present a title, descriptive text, and clickable URL as a robot link card."
+common_mistakes = ["Do not send arbitrary markdown content here; this operation expects title, text, and message_url fields.", "Use a group target prefix when sending to an open conversation ID, otherwise the connector will use the direct-message endpoint.", "Do not assume DingTalk fetches private or localhost URLs from link previews."]
+examples = ['{"to":"chat:cid-ops","title":"Incident runbook","text":"Open the current runbook before acknowledging the alert.","message_url":"https://status.example/runbooks/dingtalk"}']
 
 [provides.operations.messages_send_file]
 summary = "Send a DingTalk file message with a prior media_id"
@@ -51,6 +61,11 @@ input_schema = { type = "object", required = ["to", "media_id", "file_name", "fi
 output_schema = { type = "object", additionalProperties = true, properties = { processQueryKey = { type = "string" }, messageId = { type = "string" }, errcode = { type = "integer" }, errmsg = { type = "string" } } }
 network_constraints = { host_allow = ["api.dingtalk.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
+[provides.operations.messages_send_file.ai_hints]
+when_to_use = "Use after media_upload has returned a DingTalk media_id and the agent needs to deliver that uploaded file to a user or group conversation."
+common_mistakes = ["Do not pass raw bytes or base64 content here; upload the file with media_upload first.", "Keep file_name and file_type aligned with the uploaded media so DingTalk renders the attachment correctly.", "This operation is a send action, so repeated invocations can deliver duplicate files."]
+examples = ['{"to":"chat:cid-ops","media_id":"media-123","file_name":"daily-report.pdf","file_type":"pdf"}']
+
 [provides.operations.media_upload]
 summary = "Upload media to DingTalk"
 capability = "dingtalk.media.write"
@@ -60,6 +75,11 @@ idempotency = "best_effort"
 input_schema = { type = "object", required = ["media_type", "file_name", "content_base64"], additionalProperties = false, properties = { media_type = { type = "string", enum = ["image", "voice", "video", "file"] }, file_name = { type = "string", minLength = 1, pattern = "\\S" }, mime_type = { type = "string", minLength = 1, pattern = "\\S" }, content_base64 = { type = "string", minLength = 1, contentEncoding = "base64" } } }
 output_schema = { type = "object", additionalProperties = true, properties = { media_id = { type = "string" }, mediaId = { type = "string" }, errcode = { type = "integer" }, errmsg = { type = "string" } } }
 network_constraints = { host_allow = ["api.dingtalk.com", "oapi.dingtalk.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations.media_upload.ai_hints]
+when_to_use = "Use to upload image, voice, video, or file content to DingTalk before sending it with a media-backed robot operation."
+common_mistakes = ["The content_base64 field must contain the file bytes encoded as base64, not a local file path.", "Only image, voice, video, and file are accepted media_type values.", "Save the returned media_id for the follow-up send operation; this call does not notify a chat by itself."]
+examples = ['{"media_type":"file","file_name":"daily-report.pdf","mime_type":"application/pdf","content_base64":"UERG"}']
 
 [provides.operations.events_normalize]
 summary = "Normalize a DingTalk robot callback event"
@@ -71,6 +91,11 @@ input_schema = { type = "object", required = ["event"], additionalProperties = f
 output_schema = { type = "object", required = ["event_type", "message_id", "conversation_id", "conversation_type", "sender_id", "sender_name", "text", "timestamp_ms", "at_bot", "raw"], additionalProperties = false, properties = { event_type = { type = "string", enum = ["message"] }, message_id = { type = ["string", "null"] }, conversation_id = { type = ["string", "null"] }, conversation_type = { type = "string", enum = ["private", "group", "unknown"] }, sender_id = { type = ["string", "null"] }, sender_name = { type = ["string", "null"] }, text = { type = ["string", "null"] }, timestamp_ms = { type = ["integer", "null"], minimum = 0 }, at_bot = { type = "boolean" }, raw = { type = "object", additionalProperties = true } } }
 network_constraints = { host_allow = ["none.invalid"], port_allow = [0], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 0, max_redirects = 0, connect_timeout_ms = 1000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
+[provides.operations.events_normalize.ai_hints]
+when_to_use = "Use to convert one raw DingTalk robot callback payload into the connector's normalized message shape without making a network request."
+common_mistakes = ["Pass the provider callback JSON under the event field; do not flatten DingTalk fields at the top level.", "This is a local normalization helper, not a webhook listener or poller.", "Unknown or partial DingTalk payload fields are preserved in raw, so inspect normalized nulls before assuming data loss."]
+examples = ['{"event":{"msgtype":"text","text":{"content":"hello"},"conversationType":"1"}}']
+
 [provides.operations.stream_ingest_message]
 summary = "Policy-gate and normalize one host-forwarded DingTalk Stream Mode message frame"
 capability = "dingtalk.messages.read"
@@ -80,6 +105,11 @@ idempotency = "strict"
 input_schema = { type = "object", required = ["event"], additionalProperties = false, properties = { event = { type = "object", description = "Raw DingTalk Stream Mode ChatbotMessage payload", additionalProperties = true }, is_in_at_list = { type = "boolean" }, isInAtList = { type = "boolean" }, session_webhook = { type = "string", minLength = 1, format = "uri" }, sessionWebhook = { type = "string", minLength = 1, format = "uri" }, session_webhook_expired_time_ms = { type = "integer", minimum = 0 }, sessionWebhookExpiredTime = { type = "integer", minimum = 0 } } }
 output_schema = { type = "object", required = ["stream", "delivery", "policy", "state", "normalized", "event"], additionalProperties = false, properties = { stream = { type = "object", additionalProperties = true }, delivery = { type = "object", additionalProperties = true }, policy = { type = "object", additionalProperties = true }, state = { type = "object", required = ["seen_messages", "cached_session_webhooks", "accepted_events", "rejected_events", "duplicate_events"], additionalProperties = false, properties = { seen_messages = { type = "integer", minimum = 0 }, cached_session_webhooks = { type = "integer", minimum = 0 }, accepted_events = { type = "integer", minimum = 0 }, rejected_events = { type = "integer", minimum = 0 }, duplicate_events = { type = "integer", minimum = 0 } } }, normalized = { anyOf = [{ type = "object", additionalProperties = true }, { type = "null" }] }, event = { anyOf = [{ type = "object", additionalProperties = true }, { type = "null" }] } } }
 network_constraints = { host_allow = ["none.invalid"], port_allow = [0], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 0, max_redirects = 0, connect_timeout_ms = 1000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations.stream_ingest_message.ai_hints]
+when_to_use = "Use when the host has already received a DingTalk Stream Mode ChatbotMessage frame and needs the connector to apply policy, dedupe, normalize, and cache reply metadata."
+common_mistakes = ["Do not use this as a connector-owned WebSocket client; the host forwards exactly one Stream Mode frame per call.", "Set at-mention and session webhook fields from the DingTalk frame so policy gating and future stream_reply calls work.", "Duplicate message IDs are intentionally suppressed and should not be treated as connector failure."]
+examples = ['{"event":{"msgId":"msg-1","chatId":"chat-1","senderNick":"operator","text":{"content":"deploy status?"}},"is_in_at_list":true,"session_webhook":"https://api.dingtalk.com/v1.0/robot/sessionWebhook/example","session_webhook_expired_time_ms":1893456000000}']
 
 [provides.operations.stream_reply]
 summary = "Reply through a validated DingTalk Stream Mode session webhook"
@@ -91,6 +121,11 @@ input_schema = { type = "object", required = ["chat_id", "content"], additionalP
 output_schema = { type = "object", required = ["status", "chat_id_hash", "session_webhook_hash", "session_webhook_source", "reply_to_hash", "response", "redaction_status"], additionalProperties = false, properties = { status = { type = "string", enum = ["sent"] }, chat_id_hash = { type = "string", pattern = "^sha256:[0-9a-f]{16}$" }, session_webhook_hash = { type = "string", pattern = "^sha256:[0-9a-f]{16}$" }, session_webhook_source = { type = "string", enum = ["request", "cache"] }, reply_to_hash = { type = ["string", "null"], pattern = "^sha256:[0-9a-f]{16}$" }, response = { type = "object", additionalProperties = true }, redaction_status = { type = "string" } } }
 network_constraints = { host_allow = ["api.dingtalk.com", "oapi.dingtalk.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
+[provides.operations.stream_reply.ai_hints]
+when_to_use = "Use to reply into a DingTalk Stream Mode conversation through a validated session webhook supplied in the request or cached from a prior accepted ingest frame."
+common_mistakes = ["Call stream_ingest_message first when relying on a cached session webhook.", "Do not use this for ordinary robot sends; messages_send_text is the direct-send path.", "The connector hashes chat and webhook identifiers in output, so do not expect raw delivery metadata back."]
+examples = ['{"chat_id":"chat-1","content":"Deployment is green.","reply_to":"msg-1"}']
+
 [provides.operations.health]
 summary = "Verify DingTalk credentials and token issuance"
 capability = "dingtalk.health.read"
@@ -100,6 +135,11 @@ idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["status", "base_url", "media_base_url", "client_id", "stream_policy_model", "stream_mode_enabled", "stream_state", "manifest_hash"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, base_url = { type = "string", format = "uri" }, media_base_url = { type = "string", format = "uri" }, client_id = { type = "string" }, stream_policy_model = { type = "string", enum = ["host_forwarded_stream_frame_supervision"] }, stream_mode_enabled = { type = "boolean" }, stream_state = { type = "object", required = ["seen_messages", "cached_session_webhooks", "accepted_events", "rejected_events", "duplicate_events"], additionalProperties = false, properties = { seen_messages = { type = "integer", minimum = 0 }, cached_session_webhooks = { type = "integer", minimum = 0 }, accepted_events = { type = "integer", minimum = 0 }, rejected_events = { type = "integer", minimum = 0 }, duplicate_events = { type = "integer", minimum = 0 } } }, manifest_hash = { type = "string", pattern = "^sha256:[0-9a-f]{64}$" } } }
 network_constraints = { host_allow = ["api.dingtalk.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations.health.ai_hints]
+when_to_use = "Use to verify the configured DingTalk credentials can issue an access token and to inspect connector configuration and Stream Mode state."
+common_mistakes = ["This probe does not send a message or validate every downstream permission.", "A healthy token response does not prove a specific chat ID or user ID is deliverable.", "Use the returned stream state for diagnostics, not as durable connector storage."]
+examples = ['{}']
 
 [sandbox]
 profile = "strict"

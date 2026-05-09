@@ -870,7 +870,6 @@ fn expected_sandbox_gap_connectors() -> Vec<String> {
 
 fn expected_ai_hints_gap_connectors() -> Vec<String> {
     connector_names(&[
-        "dingtalk",
         "google-people",
         "google-workspace-events",
         "mastodon",

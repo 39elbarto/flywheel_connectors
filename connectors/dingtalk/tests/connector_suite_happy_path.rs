@@ -14,6 +14,7 @@ use wiremock::{
 
 const OP_SEND_TEXT: &str = "dingtalk.messages.send_text";
 const CAP_MESSAGES_WRITE: &str = "dingtalk.messages.write";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 fn handshake_request(host_public_key: [u8; 32], instance_id: InstanceId) -> HandshakeRequest {
     HandshakeRequest {
@@ -77,6 +78,70 @@ fn send_text_invoke(
         correlation_id: None,
         provenance: None,
         approval_tokens: Vec::new(),
+    }
+}
+
+#[test]
+fn dingtalk_manifest_ai_hints_cover_all_operations() {
+    let manifest: toml::Value = toml::from_str(MANIFEST_TOML).expect("parse manifest");
+    let operations = manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("manifest operations table");
+
+    assert_eq!(
+        operations.len(),
+        8,
+        "DingTalk manifest operation count should stay explicit"
+    );
+
+    for (operation_id, operation) in operations {
+        let ai_hints = operation
+            .get("ai_hints")
+            .unwrap_or_else(|| panic!("{operation_id} must define ai_hints"));
+
+        let when_to_use = ai_hints
+            .get("when_to_use")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            !when_to_use.trim().is_empty(),
+            "{operation_id} must explain when to use the operation"
+        );
+
+        let common_mistakes = ai_hints
+            .get("common_mistakes")
+            .and_then(toml::Value::as_array)
+            .unwrap_or_else(|| panic!("{operation_id} must define common_mistakes"));
+        assert!(
+            !common_mistakes.is_empty(),
+            "{operation_id} must include at least one common mistake"
+        );
+
+        let examples = ai_hints
+            .get("examples")
+            .and_then(toml::Value::as_array)
+            .unwrap_or_else(|| panic!("{operation_id} must define examples"));
+        assert!(
+            !examples.is_empty(),
+            "{operation_id} must include at least one redaction-safe example"
+        );
+
+        for example in examples {
+            let example = example
+                .as_str()
+                .unwrap_or_else(|| panic!("{operation_id} example must be a string"));
+            let lower = example.to_ascii_lowercase();
+            assert!(
+                !lower.contains("token")
+                    && !lower.contains("password")
+                    && !lower.contains("secret"),
+                "{operation_id} example should not contain sensitive-looking fields: {example}"
+            );
+            serde_json::from_str::<serde_json::Value>(example)
+                .unwrap_or_else(|error| panic!("{operation_id} example is not JSON: {error}"));
+        }
     }
 }
 

@@ -41,7 +41,7 @@ hex.workspace = true
 [dev-dependencies]
 chrono.workspace = true
 ciborium.workspace = true
-fcp-e2e = { path = "../../crates/fcp-e2e" }
+fcp-e2e = { path = "../../crates/fcp-e2e", default-features = false }
 fcp-crypto.workspace = true
 fcp-testkit.workspace = true
 jsonschema.workspace = true

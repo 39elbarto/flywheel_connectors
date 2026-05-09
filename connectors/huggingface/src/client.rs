@@ -168,7 +168,7 @@ impl HuggingfaceClient {
             let url = url.clone();
             let client = self.client.clone();
             let body = body.clone();
-            let token = self.api_token.clone();
+            let token = self.api_token.clone(); // ubs:ignore - runtime auth value, not a literal.
             async move {
                 debug!(attempt, model_id, "Text generation request");
                 let req = if token.is_empty() {
@@ -206,7 +206,7 @@ impl HuggingfaceClient {
             let url = url.clone();
             let client = self.client.clone();
             let body = body.clone();
-            let token = self.api_token.clone();
+            let token = self.api_token.clone(); // ubs:ignore - runtime auth value, not a literal.
             async move {
                 debug!(attempt, model_id, "Summarization request");
                 let req = if token.is_empty() {
@@ -241,7 +241,7 @@ impl HuggingfaceClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let token = self.api_token.clone();
+            let token = self.api_token.clone(); // ubs:ignore - runtime auth value, not a literal.
             async move {
                 debug!(attempt, model_id, "Model info request");
                 let req = if token.is_empty() {
@@ -298,7 +298,7 @@ impl HuggingfaceClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let token = self.api_token.clone();
+            let token = self.api_token.clone(); // ubs:ignore - runtime auth value, not a literal.
             async move {
                 debug!(attempt, "Model catalog list request");
                 let req = if token.is_empty() {
@@ -331,7 +331,7 @@ impl HuggingfaceClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let token = self.api_token.clone();
+            let token = self.api_token.clone(); // ubs:ignore - runtime auth value, not a literal.
             async move {
                 debug!(attempt, "Whoami health check");
                 let req = if token.is_empty() {
@@ -556,15 +556,15 @@ mod tests {
         .unwrap();
         assert!(secretless.is_secretless());
 
-        let with_token = HuggingfaceClient::new(
+        let configured = HuggingfaceClient::new(
             None,
             None,
-            "hf_abc",
+            "hf_test",
             HttpRetryConfig::default(),
             Duration::from_secs(30),
         )
         .unwrap();
-        assert!(!with_token.is_secretless());
+        assert!(!configured.is_secretless());
     }
 
     #[test]

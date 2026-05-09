@@ -669,7 +669,7 @@ mod tests {
         let mut connector = HuggingfaceConnector::new();
         let result = connector
             .handle_configure(json!({
-                "api_token": "hf_test_token",
+                "api_token": "hf_test",
                 "inference_url": "http://localhost:9999",
                 "hub_url": "http://localhost:9998"
             }))

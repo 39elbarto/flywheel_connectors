@@ -159,10 +159,10 @@ mod tests {
     fn not_found_maps_to_resource_not_found() {
         let err = HuggingfaceError::NotFound("model gpt2".into());
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::ResourceNotFound { resource } => assert_eq!(resource, "model gpt2"),
-            other => panic!("Expected ResourceNotFound, got {other:?}"),
-        }
+        assert!(matches!(
+            fcp,
+            FcpError::ResourceNotFound { ref resource } if resource == "model gpt2"
+        ));
     }
 
     #[test]
@@ -191,13 +191,10 @@ mod tests {
     fn invalid_input_maps_to_invalid_request() {
         let err = HuggingfaceError::InvalidInput("model_id missing".into());
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1005);
-                assert!(message.contains("model_id"));
-            }
-            other => panic!("Expected InvalidRequest, got {other:?}"),
-        }
+        assert!(matches!(
+            fcp,
+            FcpError::InvalidRequest { code: 1005, ref message } if message.contains("model_id")
+        ));
     }
 
     #[test]
@@ -206,16 +203,13 @@ mod tests {
             retry_after_ms: 3_000,
         };
         let fcp = err.to_fcp_error();
-        match fcp {
+        assert!(matches!(
+            fcp,
             FcpError::RateLimited {
-                retry_after_ms,
-                violation,
-            } => {
-                assert_eq!(retry_after_ms, 3_000);
-                assert!(violation.is_none());
+                retry_after_ms: 3_000,
+                violation: None,
             }
-            other => panic!("Expected RateLimited, got {other:?}"),
-        }
+        ));
     }
 
     #[test]

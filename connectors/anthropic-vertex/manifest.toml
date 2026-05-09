@@ -167,6 +167,24 @@ minLength = 1
 type = "object"
 additionalProperties = true
 
+[provides.operations."anthropic_vertex.models.normalize".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
+
 [provides.operations."anthropic_vertex.models.normalize".ai_hints]
 when_to_use = "Use before invocation to inspect how a user-facing Claude alias maps to a Vertex model resource id."
 common_mistakes = [
@@ -191,6 +209,24 @@ maxProperties = 0
 [provides.operations."anthropic_vertex.health".output_schema]
 type = "object"
 additionalProperties = true
+
+[provides.operations."anthropic_vertex.health".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
 
 [provides.operations."anthropic_vertex.health".ai_hints]
 when_to_use = "Use to inspect configured project, location, endpoint mode, and local model catalog status without making a production Vertex call."

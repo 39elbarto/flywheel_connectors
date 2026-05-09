@@ -9,7 +9,8 @@
 
 use chrono::{Duration, Utc};
 use fcp_anthropic_vertex::connector::{
-    AnthropicVertexConnector, OP_MESSAGES_CREATE, OP_MESSAGES_STREAM, OP_MODELS_NORMALIZE,
+    AnthropicVertexConnector, OP_HEALTH, OP_MESSAGES_CREATE, OP_MESSAGES_STREAM,
+    OP_MODELS_NORMALIZE,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_prelude::{
@@ -163,6 +164,116 @@ fn manifest_ai_hints_cover_all_anthropic_vertex_operations() {
             "{operation_id} missing ai_hints.common_mistakes"
         );
     }
+}
+
+#[test]
+fn manifest_declares_network_constraints_for_all_anthropic_vertex_operations() {
+    let manifest = toml::from_str::<toml::Value>(include_str!("../manifest.toml"))
+        .expect("Anthropic Vertex manifest TOML should parse");
+    let operations = manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("Anthropic Vertex manifest should declare operations");
+
+    for (operation_id, operation) in operations {
+        assert!(
+            operation
+                .get("network_constraints")
+                .and_then(toml::Value::as_table)
+                .is_some(),
+            "{operation_id} missing network_constraints"
+        );
+    }
+
+    assert_vertex_https_constraints(network_constraints(operations, OP_MESSAGES_CREATE));
+    assert_vertex_https_constraints(network_constraints(operations, OP_MESSAGES_STREAM));
+    assert_no_egress_constraints(network_constraints(operations, OP_MODELS_NORMALIZE));
+    assert_no_egress_constraints(network_constraints(operations, OP_HEALTH));
+}
+
+fn network_constraints<'a>(
+    operations: &'a toml::value::Table,
+    operation_id: &str,
+) -> &'a toml::value::Table {
+    operations
+        .get(operation_id)
+        .and_then(toml::Value::as_table)
+        .and_then(|operation| operation.get("network_constraints"))
+        .and_then(toml::Value::as_table)
+        .unwrap_or_else(|| panic!("{operation_id} missing network_constraints"))
+}
+
+fn string_list<'a>(table: &'a toml::value::Table, key: &str) -> Vec<&'a str> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .unwrap_or_else(|| panic!("{key} should be an array"))
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} entries should be strings"))
+        })
+        .collect()
+}
+
+fn integer_list(table: &toml::value::Table, key: &str) -> Vec<i64> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .unwrap_or_else(|| panic!("{key} should be an array"))
+        .iter()
+        .map(|value| {
+            value
+                .as_integer()
+                .unwrap_or_else(|| panic!("{key} entries should be integers"))
+        })
+        .collect()
+}
+
+fn bool_field(table: &toml::value::Table, key: &str) -> bool {
+    table
+        .get(key)
+        .and_then(toml::Value::as_bool)
+        .unwrap_or_else(|| panic!("{key} should be a boolean"))
+}
+
+fn integer_field(table: &toml::value::Table, key: &str) -> i64 {
+    table
+        .get(key)
+        .and_then(toml::Value::as_integer)
+        .unwrap_or_else(|| panic!("{key} should be an integer"))
+}
+
+fn assert_vertex_https_constraints(constraints: &toml::value::Table) {
+    let hosts = string_list(constraints, "host_allow");
+    assert!(hosts.contains(&"aiplatform.googleapis.com"));
+    assert!(hosts.contains(&"*.aiplatform.googleapis.com"));
+    assert_eq!(integer_list(constraints, "port_allow"), [443]);
+    assert!(bool_field(constraints, "deny_localhost"));
+    assert!(bool_field(constraints, "deny_private_ranges"));
+    assert!(bool_field(constraints, "deny_tailnet_ranges"));
+    assert!(bool_field(constraints, "require_sni"));
+    assert!(bool_field(constraints, "deny_ip_literals"));
+    assert!(bool_field(constraints, "require_host_canonicalization"));
+    assert_eq!(integer_field(constraints, "dns_max_ips"), 16);
+    assert_eq!(integer_field(constraints, "max_redirects"), 0);
+}
+
+fn assert_no_egress_constraints(constraints: &toml::value::Table) {
+    assert_eq!(string_list(constraints, "host_allow"), ["none.invalid"]);
+    assert_eq!(integer_list(constraints, "port_allow"), [0]);
+    assert!(bool_field(constraints, "deny_localhost"));
+    assert!(bool_field(constraints, "deny_private_ranges"));
+    assert!(bool_field(constraints, "deny_tailnet_ranges"));
+    assert!(!bool_field(constraints, "require_sni"));
+    assert!(bool_field(constraints, "deny_ip_literals"));
+    assert!(bool_field(constraints, "require_host_canonicalization"));
+    assert_eq!(integer_field(constraints, "dns_max_ips"), 0);
+    assert_eq!(integer_field(constraints, "max_redirects"), 0);
+    assert_eq!(integer_field(constraints, "connect_timeout_ms"), 10_000);
+    assert_eq!(integer_field(constraints, "total_timeout_ms"), 30_000);
 }
 
 #[fcp_async_core::test]

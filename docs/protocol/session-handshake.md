@@ -32,6 +32,13 @@ address different threat models:
 | Initiator deliberately orders offers worst-first | responder-picks |
 | MITM rewrites offered suites in transit | signed transcript |
 
+### Key schedule binding
+
+The selected suite is also mixed into `derive_session_keys` through the
+`FCP2-SESSION-V1` HKDF info string. This keeps Suite1 and Suite2 sessions
+from reusing identical key material when the ECDH secret, session id,
+node ids, and nonces are otherwise equal.
+
 ### Minimum suite floor
 
 `MINIMUM_SUITE` is an explicit lower bound on what `negotiate_suite`

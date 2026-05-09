@@ -851,12 +851,14 @@ impl SessionKeys {
     }
 }
 
-/// Derive session keys from the ECDH shared secret and handshake transcript data.
+/// Derive session keys from the ECDH shared secret, selected suite, and
+/// handshake transcript data.
 ///
 /// # Errors
 /// Returns `SessionError::Crypto` if HKDF expansion fails.
 pub fn derive_session_keys(
     shared_secret: &X25519SharedSecret,
+    suite: SessionCryptoSuite,
     session_id: &MeshSessionId,
     initiator_node_id: &TailscaleNodeId,
     responder_node_id: &TailscaleNodeId,
@@ -865,6 +867,7 @@ pub fn derive_session_keys(
 ) -> Result<SessionKeys, SessionError> {
     let mut info = Vec::new();
     info.extend_from_slice(b"FCP2-SESSION-V1");
+    info.push(suite.id());
 
     let init_bytes = initiator_node_id.as_str().as_bytes();
     info.extend_from_slice(
@@ -1567,6 +1570,7 @@ mod tests {
                 let ack_nonce = SessionNonce([0x02_u8; 16]);
                 let keys1 = derive_session_keys(
                     &shared,
+                    SessionCryptoSuite::Suite1,
                     &session_id,
                     &initiator,
                     &responder,
@@ -1576,6 +1580,7 @@ mod tests {
                 .expect("keys");
                 let keys2 = derive_session_keys(
                     &shared,
+                    SessionCryptoSuite::Suite1,
                     &session_id,
                     &initiator,
                     &responder,
@@ -1587,6 +1592,49 @@ mod tests {
                 assert_ne!(keys1.k_mac_i2r, keys1.k_mac_r2i);
                 assert_ne!(keys1.k_mac_i2r, keys1.k_ctx);
                 assert_ne!(keys1.k_mac_r2i, keys1.k_ctx);
+            },
+        );
+    }
+
+    #[test]
+    fn derive_session_keys_bind_selected_suite() {
+        let initiator = TailscaleNodeId::new("node-initiator");
+        let responder = TailscaleNodeId::new("node-responder");
+        let session_id = MeshSessionId([0x78_u8; 16]);
+        let context = LogContext::new("handshake", "key_derive")
+            .with_session(&session_id)
+            .with_reason("selected_suite_binding");
+        run_logged_test(
+            "derive_session_keys_bind_selected_suite",
+            1,
+            &context,
+            || {
+                let sk_i = X25519SecretKey::from_bytes([0x12_u8; 32]);
+                let sk_r = X25519SecretKey::from_bytes([0x34_u8; 32]);
+                let shared = sk_i.diffie_hellman(&sk_r.public_key()).unwrap();
+                let hello_nonce = SessionNonce([0x01_u8; 16]);
+                let ack_nonce = SessionNonce([0x02_u8; 16]);
+                let suite1_keys = derive_session_keys(
+                    &shared,
+                    SessionCryptoSuite::Suite1,
+                    &session_id,
+                    &initiator,
+                    &responder,
+                    &hello_nonce,
+                    &ack_nonce,
+                )
+                .expect("suite1 keys");
+                let suite2_keys = derive_session_keys(
+                    &shared,
+                    SessionCryptoSuite::Suite2,
+                    &session_id,
+                    &initiator,
+                    &responder,
+                    &hello_nonce,
+                    &ack_nonce,
+                )
+                .expect("suite2 keys");
+                assert_ne!(suite1_keys, suite2_keys);
             },
         );
     }
@@ -2298,6 +2346,7 @@ mod tests {
         let ack_nonce = SessionNonce([0x22; 16]);
         let keys = derive_session_keys(
             &shared_secret,
+            SessionCryptoSuite::Suite1,
             &session_id,
             &initiator,
             &responder,
@@ -2324,6 +2373,7 @@ mod tests {
         let ack_nonce = SessionNonce([0x44; 16]);
         let keys_a = derive_session_keys(
             &shared_secret,
+            SessionCryptoSuite::Suite1,
             &session_id,
             &initiator,
             &responder,
@@ -2333,6 +2383,7 @@ mod tests {
         .expect("derive keys a");
         let keys_b = derive_session_keys(
             &shared_secret,
+            SessionCryptoSuite::Suite1,
             &session_id,
             &initiator,
             &responder,
@@ -3374,6 +3425,7 @@ mod tests {
 
         let keys_a = derive_session_keys(
             &shared,
+            SessionCryptoSuite::Suite1,
             &session_id,
             &initiator,
             &responder,
@@ -3383,6 +3435,7 @@ mod tests {
         .expect("keys a");
         let keys_b = derive_session_keys(
             &shared,
+            SessionCryptoSuite::Suite1,
             &session_id,
             &initiator,
             &responder,
@@ -3407,6 +3460,7 @@ mod tests {
 
         let keys_ab = derive_session_keys(
             &shared,
+            SessionCryptoSuite::Suite1,
             &session_id,
             &node_a,
             &node_b,
@@ -3416,6 +3470,7 @@ mod tests {
         .expect("keys ab");
         let keys_ba = derive_session_keys(
             &shared,
+            SessionCryptoSuite::Suite1,
             &session_id,
             &node_b,
             &node_a,
@@ -3440,6 +3495,7 @@ mod tests {
 
         let keys_a = derive_session_keys(
             &shared,
+            SessionCryptoSuite::Suite1,
             &session_a,
             &initiator,
             &responder,
@@ -3449,6 +3505,7 @@ mod tests {
         .expect("keys a");
         let keys_b = derive_session_keys(
             &shared,
+            SessionCryptoSuite::Suite1,
             &session_b,
             &initiator,
             &responder,

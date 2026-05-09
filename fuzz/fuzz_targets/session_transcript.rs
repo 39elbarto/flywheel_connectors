@@ -46,6 +46,7 @@ fuzz_target!(|data: &[u8]| {
         };
         if let Ok(keys) = derive_session_keys(
             &shared,
+            SessionCryptoSuite::Suite1,
             &session_id,
             &initiator,
             &responder,

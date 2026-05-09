@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! HKDF-SHA256(salt = session_id, ikm = shared_secret,
-//!   info = "FCP2-SESSION-V1" || initiator_node_id || responder_node_id
+//!   info = "FCP2-SESSION-V1" || selected_suite || initiator_node_id || responder_node_id
 //!          || hello_nonce || ack_nonce)
 //! ```
 //!
@@ -19,13 +19,15 @@
 //! Properties pinned:
 //! - determinism (verifier and initiator must agree, twice)
 //! - three-key distinctness (k_mac_i2r, k_mac_r2i, k_ctx all differ)
-//! - input-binding for each of shared_secret, session_id,
+//! - input-binding for each of shared_secret, selected_suite, session_id,
 //!   initiator_node_id, responder_node_id, hello_nonce, ack_nonce
 //! - role asymmetry (initiator/responder swap produces different keys)
 
 use fcp_crypto::{X25519SecretKey, X25519SharedSecret};
 use fcp_prelude::TailscaleNodeId;
-use fcp_protocol::session::{MeshSessionId, SessionKeys, SessionNonce, derive_session_keys};
+use fcp_protocol::session::{
+    MeshSessionId, SessionCryptoSuite, SessionKeys, SessionNonce, derive_session_keys,
+};
 
 const ALICE_SK: [u8; 32] = [0xA1; 32];
 const BOB_SK: [u8; 32] = [0xB2; 32];
@@ -36,6 +38,7 @@ const HELLO_NONCE_1: SessionNonce = SessionNonce([0x71; 16]);
 const HELLO_NONCE_2: SessionNonce = SessionNonce([0x72; 16]);
 const ACK_NONCE_1: SessionNonce = SessionNonce([0xA1; 16]);
 const ACK_NONCE_2: SessionNonce = SessionNonce([0xA2; 16]);
+const BASELINE_SUITE: SessionCryptoSuite = SessionCryptoSuite::Suite1;
 
 fn shared_secret_for(local_sk: [u8; 32], peer_sk: [u8; 32]) -> X25519SharedSecret {
     let local = X25519SecretKey::from_bytes(local_sk);
@@ -56,6 +59,7 @@ fn bob_responder() -> TailscaleNodeId {
 fn baseline_keys() -> SessionKeys {
     derive_session_keys(
         &shared_secret_for(ALICE_SK, BOB_SK),
+        BASELINE_SUITE,
         &SESSION_A,
         &alice_initiator(),
         &bob_responder(),
@@ -101,6 +105,7 @@ fn keys_bind_to_shared_secret() {
     let keys_alice_bob = baseline_keys();
     let keys_alice_charlie = derive_session_keys(
         &shared_secret_for(ALICE_SK, CHARLIE_SK),
+        BASELINE_SUITE,
         &SESSION_A,
         &alice_initiator(),
         &bob_responder(),
@@ -116,6 +121,26 @@ fn keys_bind_to_shared_secret() {
 }
 
 #[test]
+fn keys_bind_to_selected_suite() {
+    let suite1_keys = baseline_keys();
+    let suite2_keys = derive_session_keys(
+        &shared_secret_for(ALICE_SK, BOB_SK),
+        SessionCryptoSuite::Suite2,
+        &SESSION_A,
+        &alice_initiator(),
+        &bob_responder(),
+        &HELLO_NONCE_1,
+        &ACK_NONCE_1,
+    )
+    .expect("alternate-suite derivation");
+    assert_ne!(
+        suite1_keys, suite2_keys,
+        "selected_suite MUST contribute to the schedule — otherwise a Suite1 \
+         transcript and Suite2 transcript can reuse identical key material"
+    );
+}
+
+#[test]
 fn keys_bind_to_session_id() {
     // session_id is the HKDF salt. Two sessions running between the
     // same peers with the same nonces but different session_ids MUST
@@ -124,6 +149,7 @@ fn keys_bind_to_session_id() {
     let keys_a = baseline_keys();
     let keys_b = derive_session_keys(
         &shared_secret_for(ALICE_SK, BOB_SK),
+        BASELINE_SUITE,
         &SESSION_B,
         &alice_initiator(),
         &bob_responder(),
@@ -142,6 +168,7 @@ fn keys_bind_to_initiator_node_id() {
     let keys_alice = baseline_keys();
     let keys_eve = derive_session_keys(
         &shared_secret_for(ALICE_SK, BOB_SK),
+        BASELINE_SUITE,
         &SESSION_A,
         &TailscaleNodeId::new("node-eve"),
         &bob_responder(),
@@ -161,6 +188,7 @@ fn keys_bind_to_responder_node_id() {
     let keys_bob = baseline_keys();
     let keys_dave = derive_session_keys(
         &shared_secret_for(ALICE_SK, BOB_SK),
+        BASELINE_SUITE,
         &SESSION_A,
         &alice_initiator(),
         &TailscaleNodeId::new("node-dave"),
@@ -180,6 +208,7 @@ fn keys_bind_to_hello_nonce() {
     let keys_n1 = baseline_keys();
     let keys_n2 = derive_session_keys(
         &shared_secret_for(ALICE_SK, BOB_SK),
+        BASELINE_SUITE,
         &SESSION_A,
         &alice_initiator(),
         &bob_responder(),
@@ -198,6 +227,7 @@ fn keys_bind_to_ack_nonce() {
     let keys_a1 = baseline_keys();
     let keys_a2 = derive_session_keys(
         &shared_secret_for(ALICE_SK, BOB_SK),
+        BASELINE_SUITE,
         &SESSION_A,
         &alice_initiator(),
         &bob_responder(),
@@ -221,6 +251,7 @@ fn role_swap_produces_different_keys() {
     let alice_to_bob = baseline_keys();
     let bob_to_alice = derive_session_keys(
         &shared_secret_for(ALICE_SK, BOB_SK),
+        BASELINE_SUITE,
         &SESSION_A,
         &bob_responder(),
         &alice_initiator(),
@@ -254,6 +285,7 @@ fn dh_symmetry_yields_identical_keys_for_both_peers() {
 
     let keys_alice = derive_session_keys(
         &shared_alice,
+        BASELINE_SUITE,
         &SESSION_A,
         &alice_initiator(),
         &bob_responder(),
@@ -263,6 +295,7 @@ fn dh_symmetry_yields_identical_keys_for_both_peers() {
     .expect("alice derivation");
     let keys_bob = derive_session_keys(
         &shared_bob,
+        BASELINE_SUITE,
         &SESSION_A,
         &alice_initiator(),
         &bob_responder(),

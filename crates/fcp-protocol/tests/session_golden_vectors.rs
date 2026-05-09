@@ -374,6 +374,7 @@ fn test_generate_key_schedule_vector() {
     let ack_nonce = SessionNonce(ACK_NONCE);
     let keys = derive_session_keys(
         &shared,
+        SessionCryptoSuite::Suite1,
         &session_id,
         &initiator,
         &responder,
@@ -428,6 +429,7 @@ fn test_generate_mac_vectors() {
     let session_id = MeshSessionId(SESSION_ID);
     let keys = derive_session_keys(
         &shared,
+        SessionCryptoSuite::Suite1,
         &session_id,
         &initiator,
         &responder,
@@ -1368,6 +1370,7 @@ mod key_derivation_tests {
 
         let keys1 = derive_session_keys(
             &shared,
+            SessionCryptoSuite::Suite1,
             &session_id,
             &initiator,
             &responder,
@@ -1378,6 +1381,7 @@ mod key_derivation_tests {
 
         let keys2 = derive_session_keys(
             &shared,
+            SessionCryptoSuite::Suite1,
             &session_id,
             &initiator,
             &responder,
@@ -1407,6 +1411,7 @@ mod key_derivation_tests {
 
         let keys = derive_session_keys(
             &shared,
+            SessionCryptoSuite::Suite1,
             &session_id,
             &initiator,
             &responder,
@@ -1440,6 +1445,7 @@ mod key_derivation_tests {
 
         let keys1 = derive_session_keys(
             &shared,
+            SessionCryptoSuite::Suite1,
             &MeshSessionId([0x11_u8; 16]),
             &initiator,
             &responder,
@@ -1450,6 +1456,7 @@ mod key_derivation_tests {
 
         let keys2 = derive_session_keys(
             &shared,
+            SessionCryptoSuite::Suite1,
             &MeshSessionId([0x22_u8; 16]),
             &initiator,
             &responder,
@@ -1459,6 +1466,51 @@ mod key_derivation_tests {
         .expect("keys 2");
 
         assert_ne!(keys1.k_mac_i2r, keys2.k_mac_i2r);
+
+        log = log.pass();
+        log.log();
+    }
+
+    #[test]
+    fn different_selected_suite_yields_different_keys() {
+        let mut log = TestLogEntry::new(
+            "different_selected_suite_yields_different_keys",
+            "key_derive",
+            None,
+        );
+
+        let (initiator, responder) = fixed_node_ids();
+        let (initiator_eph, responder_eph) = fixed_ephemeral_keys();
+        let shared = initiator_eph
+            .diffie_hellman(&responder_eph.public_key())
+            .unwrap();
+        let session_id = MeshSessionId(SESSION_ID);
+
+        let suite1_keys = derive_session_keys(
+            &shared,
+            SessionCryptoSuite::Suite1,
+            &session_id,
+            &initiator,
+            &responder,
+            &SessionNonce(HELLO_NONCE),
+            &SessionNonce(ACK_NONCE),
+        )
+        .expect("suite1 keys");
+
+        let suite2_keys = derive_session_keys(
+            &shared,
+            SessionCryptoSuite::Suite2,
+            &session_id,
+            &initiator,
+            &responder,
+            &SessionNonce(HELLO_NONCE),
+            &SessionNonce(ACK_NONCE),
+        )
+        .expect("suite2 keys");
+
+        assert_ne!(suite1_keys.k_mac_i2r, suite2_keys.k_mac_i2r);
+        assert_ne!(suite1_keys.k_mac_r2i, suite2_keys.k_mac_r2i);
+        assert_ne!(suite1_keys.k_ctx, suite2_keys.k_ctx);
 
         log = log.pass();
         log.log();
@@ -1478,6 +1530,7 @@ mod key_derivation_tests {
 
         let keys1 = derive_session_keys(
             &shared,
+            SessionCryptoSuite::Suite1,
             &session_id,
             &initiator,
             &responder,
@@ -1488,6 +1541,7 @@ mod key_derivation_tests {
 
         let keys2 = derive_session_keys(
             &shared,
+            SessionCryptoSuite::Suite1,
             &session_id,
             &initiator,
             &responder,

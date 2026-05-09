@@ -348,7 +348,7 @@ Symbol Approach:
 High-throughput symbol delivery uses per-session authentication (not per-frame signatures):
 
 1. **Handshake**: X25519 ECDH authenticated by attested node signing keys, with per-party nonces for replay protection and crypto suite negotiation
-2. **Session keys**: HKDF-derived directional MAC keys (k_mac_i2r, k_mac_r2i) from ECDH shared secret, bound to both handshake nonces
+2. **Session keys**: HKDF-derived directional MAC keys (k_mac_i2r, k_mac_r2i) from ECDH shared secret, bound to the selected suite and both handshake nonces
 3. **Per-sender subkeys**: Each sender derives a unique subkey via HKDF including sender_instance_id, eliminating cross-sender and cross-reboot nonce collision risk
 4. **Per-frame MAC**: HMAC-SHA256 or BLAKE3 (negotiated) with per-sender monotonic frame_seq for anti-replay
 

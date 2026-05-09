@@ -6,11 +6,12 @@
 //! # Key Derivation Algorithm (NORMATIVE)
 //!
 //! 1. Compute X25519 shared secret from initiator and responder ephemeral keys
-//! 2. Build info bytes: `"FCP2-SESSION-V1" || initiator_id || responder_id || hello_nonce || ack_nonce`
+//! 2. Build info bytes: `"FCP2-SESSION-V1" || selected_suite || initiator_id || responder_id || hello_nonce || ack_nonce`
 //! 3. PRK = HKDF-SHA256(salt=`session_id`, ikm=`shared_secret`, info=`info`)
 //! 4. OKM = HKDF-SHA256-Expand(prk=PRK, info="FCP2-SESSION-KEYS-V1", length=96)
 //! 5. Split: `k_mac_i2r` = OKM[0:32], `k_mac_r2i` = OKM[32:64], `k_ctx` = OKM[64:96]
 
+use fcp_protocol::session::SessionCryptoSuite;
 use serde::{Deserialize, Serialize};
 
 /// Golden vector for session handshake and key derivation.
@@ -37,6 +38,8 @@ pub struct SessionGoldenVector {
     pub ack_nonce: String,
     /// Session ID (16 bytes hex).
     pub session_id: String,
+    /// Negotiated suite selected for this session.
+    pub selected_suite: SessionCryptoSuite,
     /// Expected X25519 shared secret (32 bytes hex).
     pub expected_shared_secret: String,
 
@@ -90,14 +93,15 @@ impl SessionGoldenVector {
             hello_nonce: "00000000000000000000000000000001".into(),
             ack_nonce: "00000000000000000000000000000002".into(),
             session_id: "deadbeefcafebabe0123456789abcdef".into(),
+            selected_suite: SessionCryptoSuite::Suite1,
             expected_shared_secret:
                 "2ed76ab549b1e73c031eb49c9448f0798aea81b698279a0c3dc3e49fbfc4b953".into(),
             expected_keys: SessionDerivedKeys {
-                k_mac_i2r: "d73072b5f69de39577122e53f0cf1271c9764fb0283edd5dbb56afe121f47c97"
+                k_mac_i2r: "a9f8bcdcc0eecec4fcb83dc10f44c3268ab7cb0e8eca6e0d2141c2aa90e30b3b"
                     .into(),
-                k_mac_r2i: "c90b54d2feaf59870a5d130b264290c2d01ea6947fc2837851c31ad83551d205"
+                k_mac_r2i: "eb5100577a0211ef84db3edf19e20f1dbd29e7abac926060256f8adae4848a4b"
                     .into(),
-                k_ctx: "3ea2facf610100e661ee3ca068b4299171b41cbb9ef4f9f41b46a70f91a23151".into(),
+                k_ctx: "67086f00bb669b69badc822742cb0ba6957279fbcf3a04add10b27d664b9ffb5".into(),
             },
         }
     }
@@ -124,14 +128,15 @@ impl SessionGoldenVector {
             hello_nonce: "a1b2c3d4e5f6071829304050deadbeef".into(),
             ack_nonce: "fedcba9876543210fedcba9876543210".into(),
             session_id: "01234567890abcdef01234567890abcd".into(),
+            selected_suite: SessionCryptoSuite::Suite1,
             expected_shared_secret:
                 "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742".into(),
             expected_keys: SessionDerivedKeys {
-                k_mac_i2r: "ab6e0eb005b6560afd15ff7ae3d20f5ec2869cfbdef52e389bfef501185ad80b"
+                k_mac_i2r: "c34dc7e5272c8e1a048c257431b575f0afea752cbde59d422af0083837f8548b"
                     .into(),
-                k_mac_r2i: "031a56e897644a88406d6bd49c9b5de03f7f4a3f50a2db077531e08cb2c3ce7c"
+                k_mac_r2i: "fe7e0819bed0d29c8979920e9cf2ff2dcbf2b189b87f6e9948a66ea056584de6"
                     .into(),
-                k_ctx: "88bf5d36d4f652c79b9d31d1c7d204d95d9951855b806271ff73d98656de9211".into(),
+                k_ctx: "c06711df8522996e77a881f57ea3c05ddec1ae1f8715bc157b3fcc4e151ff2c7".into(),
             },
         }
     }
@@ -157,16 +162,17 @@ impl SessionGoldenVector {
             hello_nonce: "ffffffffffffffffffffffffffffffff".into(),
             ack_nonce: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into(),
             session_id: "deadbeefcafebabe0123456789abcdef".into(),
+            selected_suite: SessionCryptoSuite::Suite1,
             // Same shared secret as vector 1 (same keys)
             expected_shared_secret:
                 "2ed76ab549b1e73c031eb49c9448f0798aea81b698279a0c3dc3e49fbfc4b953".into(),
             // Different keys due to different nonces
             expected_keys: SessionDerivedKeys {
-                k_mac_i2r: "8126a688dcd8b56fe7e9a3919eeb2a5a091eb2416b77d953f93c2a3418cd535f"
+                k_mac_i2r: "e110e9fcd3e7c88f42c83339b2a5b3e12f17c25df1f55e5eda731d239102a58e"
                     .into(),
-                k_mac_r2i: "a87ea472debd0325d6139e9bf0bc35a23656da8c0f82469a6dccf96235bd85e7"
+                k_mac_r2i: "4e687b3a203cdb14f9040da49cf2096ef2f9dcea49e52927608d0a8534034157"
                     .into(),
-                k_ctx: "1c20523195c51ecabbfc67f4df5fbff02e93758f36bb28283e57b486ae7e5c56".into(),
+                k_ctx: "5dadc81b15e6f33d2f3c281b20c7fd7e9577dac64183a156ed74ba926da1dfe6".into(),
             },
         }
     }
@@ -230,6 +236,7 @@ impl SessionGoldenVector {
 
         let mut info = Vec::new();
         info.extend_from_slice(b"FCP2-SESSION-V1");
+        info.push(self.selected_suite.id());
 
         let init_bytes = self.initiator_id.as_bytes();
         info.extend_from_slice(
@@ -406,6 +413,7 @@ mod tests {
 
         let mut info = Vec::new();
         info.extend_from_slice(b"FCP2-SESSION-V1");
+        info.push(SessionCryptoSuite::Suite1.id());
 
         let init_bytes = b"node.initiator.ts.net";
         info.extend_from_slice(

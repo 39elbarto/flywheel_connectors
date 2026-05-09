@@ -714,6 +714,7 @@ fn derive_session_keys_deterministic() {
 
     let keys1 = fcp_protocol::derive_session_keys(
         &shared,
+        SessionCryptoSuite::Suite1,
         &session_id,
         &init_node,
         &resp_node,
@@ -724,6 +725,7 @@ fn derive_session_keys_deterministic() {
 
     let keys2 = fcp_protocol::derive_session_keys(
         &shared,
+        SessionCryptoSuite::Suite1,
         &session_id,
         &init_node,
         &resp_node,
@@ -743,6 +745,7 @@ fn session_keys_directional() {
 
     let keys = fcp_protocol::derive_session_keys(
         &shared,
+        SessionCryptoSuite::Suite1,
         &MeshSessionId::new(),
         &test_node_id("i"),
         &test_node_id("r"),

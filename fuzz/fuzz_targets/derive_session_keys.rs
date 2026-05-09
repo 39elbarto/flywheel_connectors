@@ -8,7 +8,7 @@
 //! force key collisions across distinct sessions:
 //!
 //!   - `session_id` ↔ HKDF salt
-//!   - `(initiator_id, responder_id, hello_nonce, ack_nonce)` ↔ HKDF info
+//!   - `(selected_suite, initiator_id, responder_id, hello_nonce, ack_nonce)` ↔ HKDF info
 //!
 //! Properties asserted:
 //!
@@ -24,11 +24,13 @@
 //!      `responder_node_id` MUST change the keys (the HKDF info is
 //!      direction-asymmetric so peer A cannot impersonate peer B by
 //!      reusing a derivation).
+//!   6. **Suite binding**: changing the negotiated suite MUST change
+//!      the keys.
 
 use arbitrary::{Arbitrary, Unstructured};
 use fcp_core::TailscaleNodeId;
 use fcp_crypto::X25519SecretKey;
-use fcp_protocol::{MeshSessionId, SessionNonce, derive_session_keys};
+use fcp_protocol::{MeshSessionId, SessionCryptoSuite, SessionNonce, derive_session_keys};
 use libfuzzer_sys::fuzz_target;
 
 const KEY_SIZE: usize = 32;
@@ -78,18 +80,39 @@ fuzz_target!(|data: &[u8]| {
     let hello_nonce = SessionNonce(input.hello_nonce);
     let ack_nonce = SessionNonce(input.ack_nonce);
 
-    let derive = |hello_n: &SessionNonce,
+    let derive = |suite: SessionCryptoSuite,
+                  hello_n: &SessionNonce,
                   ack_n: &SessionNonce,
                   init: &TailscaleNodeId,
                   resp: &TailscaleNodeId| {
-        derive_session_keys(&shared, &session_id, init, resp, hello_n, ack_n)
+        derive_session_keys(
+            &shared,
+            suite,
+            &session_id,
+            init,
+            resp,
+            hello_n,
+            ack_n,
+        )
             .expect("derive_session_keys must succeed for non-degenerate inputs")
     };
 
-    let baseline = derive(&hello_nonce, &ack_nonce, &init_id, &resp_id);
+    let baseline = derive(
+        SessionCryptoSuite::Suite1,
+        &hello_nonce,
+        &ack_nonce,
+        &init_id,
+        &resp_id,
+    );
 
     // ── PROPERTY 1: determinism ────────────────────────────────────────
-    let baseline2 = derive(&hello_nonce, &ack_nonce, &init_id, &resp_id);
+    let baseline2 = derive(
+        SessionCryptoSuite::Suite1,
+        &hello_nonce,
+        &ack_nonce,
+        &init_id,
+        &resp_id,
+    );
     assert_eq!(
         baseline.k_mac_i2r, baseline2.k_mac_i2r,
         "derive_session_keys is not deterministic on k_mac_i2r"
@@ -128,6 +151,7 @@ fuzz_target!(|data: &[u8]| {
     flip_bit(&mut alt_hello_bytes, bit);
     if alt_hello_bytes != input.hello_nonce {
         let alt = derive(
+            SessionCryptoSuite::Suite1,
             &SessionNonce(alt_hello_bytes),
             &ack_nonce,
             &init_id,
@@ -148,6 +172,7 @@ fuzz_target!(|data: &[u8]| {
     flip_bit(&mut alt_ack_bytes, bit);
     if alt_ack_bytes != input.ack_nonce {
         let alt = derive(
+            SessionCryptoSuite::Suite1,
             &hello_nonce,
             &SessionNonce(alt_ack_bytes),
             &init_id,
@@ -167,11 +192,34 @@ fuzz_target!(|data: &[u8]| {
     // Swap init/resp IDs: HKDF info encodes them in order, so the
     // resulting keys MUST diverge.
     if input.swap_ids {
-        let swapped = derive(&hello_nonce, &ack_nonce, &resp_id, &init_id);
+        let swapped = derive(
+            SessionCryptoSuite::Suite1,
+            &hello_nonce,
+            &ack_nonce,
+            &resp_id,
+            &init_id,
+        );
         assert_ne!(
             baseline.k_mac_i2r, swapped.k_mac_i2r,
             "swapping (initiator, responder) did not change k_mac_i2r — \
              HKDF info is direction-symmetric, opens impersonation surface"
         );
     }
+
+    // ── PROPERTY 6: suite binding ──────────────────────────────────────
+    let suite2 = derive(
+        SessionCryptoSuite::Suite2,
+        &hello_nonce,
+        &ack_nonce,
+        &init_id,
+        &resp_id,
+    );
+    assert_ne!(
+        baseline.k_mac_i2r, suite2.k_mac_i2r,
+        "changing the selected suite did not change k_mac_i2r"
+    );
+    assert_ne!(
+        baseline.k_ctx, suite2.k_ctx,
+        "changing the selected suite did not change k_ctx"
+    );
 });

@@ -120,6 +120,7 @@ fn test_transcript_determinism() -> Result<(), String> {
 
         let mut info = Vec::new();
         info.extend_from_slice(b"FCP2-SESSION-V1");
+        info.push(vector.selected_suite.id());
 
         let init_bytes = vector.initiator_id.as_bytes();
         info.extend_from_slice(
@@ -359,6 +360,7 @@ fn test_session_id_binding() -> Result<(), String> {
 
     let mut info = Vec::new();
     info.extend_from_slice(b"FCP2-SESSION-V1");
+    info.push(vector.selected_suite.id());
 
     let init_bytes = vector.initiator_id.as_bytes();
     info.extend_from_slice(

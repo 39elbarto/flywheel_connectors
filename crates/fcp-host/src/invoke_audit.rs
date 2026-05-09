@@ -410,8 +410,7 @@ impl InvokeAuditChain {
                     z.last_occurred_at = Some(occurred_at);
                     z.entries.push(entry.clone());
                     z.metrics.entries = z.entries.len();
-                    z.metrics.optimistic_commits =
-                        z.metrics.optimistic_commits.saturating_add(1);
+                    z.metrics.optimistic_commits = z.metrics.optimistic_commits.saturating_add(1);
                     drop(z);
                     return Ok(entry);
                 }

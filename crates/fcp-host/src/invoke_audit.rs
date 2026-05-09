@@ -37,6 +37,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use fcp_audit::{AuditEntry, AuditEntryBuilder, AuditError, Severity};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 /// Defence-in-depth bound on the optimistic-CAS retry loop.
@@ -185,6 +186,35 @@ struct ZoneChain {
     last_id: Option<String>,
     last_occurred_at: Option<u64>,
     entries: Vec<AuditEntry>,
+    metrics: InvokeAuditChainMetrics,
+}
+
+/// Per-zone append-path counters for [`InvokeAuditChain`].
+///
+/// These counters are intentionally semantic rather than timing-based:
+/// tests and evidence scripts can prove whether an audit storm used the
+/// optimistic path, retried stale heads, fell back to serialized commits,
+/// or exhausted the retry budget without logging raw request payloads.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvokeAuditChainMetrics {
+    /// Entries currently committed in this zone's chain.
+    pub entries: usize,
+    /// Commits that landed through the optimistic snapshot/CAS path.
+    pub optimistic_commits: usize,
+    /// Stale-head retries observed before a later commit or failure.
+    pub stale_head_retries: usize,
+    /// Commits that used the serialized storm fallback.
+    pub serialized_fallbacks: usize,
+    /// Retry-budget exhaustions surfaced as typed contention errors.
+    pub contention_exhaustions: usize,
+}
+
+impl InvokeAuditChainMetrics {
+    /// Number of entries committed through either successful append path.
+    #[must_use]
+    pub const fn committed_entries(self) -> usize {
+        self.optimistic_commits + self.serialized_fallbacks
+    }
 }
 
 /// Per-host hash-linked invoke audit chain.
@@ -379,9 +409,13 @@ impl InvokeAuditChain {
                     z.last_id = Some(real_id);
                     z.last_occurred_at = Some(occurred_at);
                     z.entries.push(entry.clone());
+                    z.metrics.entries = z.entries.len();
+                    z.metrics.optimistic_commits =
+                        z.metrics.optimistic_commits.saturating_add(1);
                     drop(z);
                     return Ok(entry);
                 }
+                z.metrics.stale_head_retries = z.metrics.stale_head_retries.saturating_add(1);
                 // Else: another writer raced us; retry with the
                 // fresh head. Drop the lock and loop.
             }
@@ -409,6 +443,11 @@ impl InvokeAuditChain {
             // canonicalisation bug (which is what the previous
             // `SerializationError` taxonomy implied).
             if attempts > retry_budget {
+                {
+                    let mut z = zone.lock().expect("InvokeAuditChain zone mutex poisoned");
+                    z.metrics.contention_exhaustions =
+                        z.metrics.contention_exhaustions.saturating_add(1);
+                }
                 return Err(AuditError::ContentionExhausted {
                     zone_id: ctx.zone_id.clone(),
                     attempts,
@@ -436,6 +475,8 @@ impl InvokeAuditChain {
         z.last_id = Some(entry.id.clone());
         z.last_occurred_at = Some(occurred_at);
         z.entries.push(entry.clone());
+        z.metrics.entries = z.entries.len();
+        z.metrics.serialized_fallbacks = z.metrics.serialized_fallbacks.saturating_add(1);
         drop(z);
         Ok(entry)
     }
@@ -485,6 +526,28 @@ impl InvokeAuditChain {
             .expect("InvokeAuditChain zone mutex poisoned")
             .entries
             .len()
+    }
+
+    /// Snapshot append-path metrics for `zone_id`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain map or per-zone chain mutex has been poisoned.
+    #[must_use]
+    pub fn metrics_for_zone(&self, zone_id: &str) -> InvokeAuditChainMetrics {
+        let Some(handle) = self
+            .chains
+            .read()
+            .expect("InvokeAuditChain outer rwlock poisoned")
+            .get(zone_id)
+            .cloned()
+        else {
+            return InvokeAuditChainMetrics::default();
+        };
+        handle
+            .lock()
+            .expect("InvokeAuditChain zone mutex poisoned")
+            .metrics
     }
 }
 
@@ -663,6 +726,13 @@ mod tests {
         // Both share the operation_id so an operator can correlate.
         assert_eq!(entries[0].operation_id.as_deref(), Some("op-99"));
         assert_eq!(entries[1].operation_id.as_deref(), Some("op-99"));
+        let metrics = chain.metrics_for_zone("z:work");
+        assert_eq!(metrics.entries, 2);
+        assert_eq!(metrics.optimistic_commits, 2);
+        assert_eq!(metrics.committed_entries(), 2);
+        assert_eq!(metrics.stale_head_retries, 0);
+        assert_eq!(metrics.serialized_fallbacks, 0);
+        assert_eq!(metrics.contention_exhaustions, 0);
     }
 
     #[test]
@@ -875,6 +945,13 @@ mod tests {
 
         let entries = chain.entries_for_zone("z:storm");
         assert_eq!(entries.len(), THREADS * APPENDS_PER);
+        let metrics = chain.metrics_for_zone("z:storm");
+        assert_eq!(metrics.entries, THREADS * APPENDS_PER);
+        assert_eq!(metrics.committed_entries(), THREADS * APPENDS_PER);
+        assert_eq!(
+            metrics.contention_exhaustions, 0,
+            "production fallback must prevent audit loss under same-zone storms"
+        );
         assert!(entries[0].is_genesis());
         for (i, entry) in entries.iter().enumerate() {
             assert_eq!(entry.seq, i as u64, "monotonic seq broken at index {i}");
@@ -986,6 +1063,11 @@ mod tests {
         }
 
         let total = contention_failures.load(Ordering::SeqCst);
+        let metrics = chain.metrics_for_zone("z:contention-storm");
+        assert_eq!(
+            metrics.contention_exhaustions, total,
+            "contention error telemetry must match observed typed failures"
+        );
         assert_eq!(
             unexpected_errors.load(Ordering::SeqCst),
             0,

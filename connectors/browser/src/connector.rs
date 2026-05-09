@@ -1676,6 +1676,15 @@ impl BrowserConnector {
         store.last_lease_seq = lease_seq;
         drop(store);
 
+        client
+            .record_direct_cdp_session_object(
+                "browser.session.save",
+                &state_object_id,
+                lease_seq,
+                domain.as_deref(),
+            )
+            .map_err(|e: BrowserError| e.to_fcp_error())?;
+
         Ok(json!({
             "state_object_id": state_object_id,
             "prev_state_object_id": prev_state_object_id,
@@ -1744,6 +1753,15 @@ impl BrowserConnector {
         let restored_count = client
             .set_cookies(&record.payload.cookies)
             .await
+            .map_err(|e: BrowserError| e.to_fcp_error())?;
+
+        client
+            .record_direct_cdp_session_object(
+                "browser.session.restore",
+                &record.state_object_id,
+                lease_seq,
+                record.payload.domain.as_deref(),
+            )
             .map_err(|e: BrowserError| e.to_fcp_error())?;
 
         Ok(json!({

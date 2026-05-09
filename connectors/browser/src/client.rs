@@ -81,7 +81,7 @@ enum BrowserControlEndpoint {
     DirectCdp(DirectCdpEndpoint),
 }
 
-type DirectCdpSessionFuture<'a, T> = Pin<Box<dyn Future<Output = BrowserResult<T>> + 'a>>;
+type DirectCdpSessionFuture<'a, T> = Pin<Box<dyn Future<Output = BrowserResult<T>> + Send + 'a>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DirectCdpEndpointKind {
@@ -421,7 +421,7 @@ impl DirectCdpTargetSessionManager {
             DirectCdpSessionObjectLease {
                 object_id_hash: object_id_hash.clone(),
                 lease_seq,
-                cookie_scope_hash: cookie_scope_hash.clone(),
+                cookie_scope_hash,
             },
         );
         let recorded =
@@ -509,6 +509,7 @@ impl DirectCdpTargetSessionManager {
     }
 }
 
+#[derive(Debug)]
 struct DirectCdpManagerLease {
     manager: Arc<Mutex<DirectCdpTargetSessionManager>>,
     endpoint: DirectCdpEndpoint,
@@ -553,6 +554,7 @@ impl DirectCdpManagerLease {
             outcome,
             cleanup_result,
         )?;
+        drop(state);
         self.finished = true;
         Ok(())
     }
@@ -3047,6 +3049,34 @@ impl BrowserClient {
         }
     }
 
+    pub(crate) fn record_direct_cdp_session_object(
+        &self,
+        operation_id: &'static str,
+        raw_object_id: &str,
+        lease_seq: u64,
+        cookie_scope: Option<&str>,
+    ) -> BrowserResult<Option<String>> {
+        let BrowserControlEndpoint::DirectCdp(endpoint) = self.control_endpoint()? else {
+            return Ok(None);
+        };
+        let mut manager = lock_direct_cdp_manager(&self.direct_cdp_manager)?;
+        manager
+            .record_session_object(
+                &endpoint,
+                operation_id,
+                raw_object_id,
+                lease_seq,
+                cookie_scope,
+            )
+            .map(Some)
+    }
+
+    #[cfg(test)]
+    fn direct_cdp_manager_events_jsonl(&self) -> BrowserResult<String> {
+        let manager = lock_direct_cdp_manager(&self.direct_cdp_manager)?;
+        Ok(manager.events_jsonl())
+    }
+
     /// Lightweight connectivity probe for the FCP browser-control plane.
     pub async fn health_check(&self) -> BrowserResult<()> {
         if let BrowserControlEndpoint::DirectCdp(endpoint) = self.control_endpoint()? {
@@ -3172,6 +3202,9 @@ impl BrowserClient {
         user_agent: Option<&str>,
     ) -> BrowserResult<NavigateResult> {
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(CONTROL_TIMEOUT_MS_STANDARD));
+        let url = url.to_string();
+        let wait_until = wait_until.map(str::to_string);
+        let user_agent = user_agent.map(str::to_string);
         self.direct_cdp_session_operation(
             endpoint,
             "browser.navigate",
@@ -3180,16 +3213,18 @@ impl BrowserClient {
             CONTROL_RESPONSE_BYTES_STANDARD,
             |cx, session| {
                 Box::pin(async move {
-                    let navigation = session.navigate_page(cx, url, user_agent).await?;
+                    let navigation = session
+                        .navigate_page(cx, &url, user_agent.as_deref())
+                        .await?;
                     let completion = session
-                        .wait_for_navigation(cx, &navigation, wait_until)
+                        .wait_for_navigation(cx, &navigation, wait_until.as_deref())
                         .await?;
                     let title = session
                         .evaluate_expression(cx, "document.title")
                         .await?
                         .result;
                     Ok(NavigateResult {
-                        url: url.to_string(),
+                        url,
                         status: completion.status.unwrap_or(0),
                         title: (!title.is_empty()).then_some(title),
                     })
@@ -3208,6 +3243,8 @@ impl BrowserClient {
         quality: Option<u32>,
     ) -> BrowserResult<ScreenshotResult> {
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_CAPTURE);
+        let selector = selector.map(str::to_string);
+        let format = format.map(str::to_string);
         self.direct_cdp_session_operation(
             endpoint,
             "browser.screenshot",
@@ -3219,9 +3256,9 @@ impl BrowserClient {
                     let response = session
                         .capture_screenshot(
                             cx,
-                            selector,
+                            selector.as_deref(),
                             full_page.unwrap_or(false),
-                            format,
+                            format.as_deref(),
                             quality,
                         )
                         .await?;
@@ -3244,6 +3281,7 @@ impl BrowserClient {
         print_background: Option<bool>,
     ) -> BrowserResult<PdfResult> {
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_CAPTURE);
+        let format = format.map(str::to_string);
         self.direct_cdp_session_operation(
             endpoint,
             "browser.render_pdf",
@@ -3253,7 +3291,7 @@ impl BrowserClient {
             |cx, session| {
                 Box::pin(async move {
                     let response = session
-                        .render_pdf(cx, format, landscape, print_background)
+                        .render_pdf(cx, format.as_deref(), landscape, print_background)
                         .await?;
                     Ok(PdfResult {
                         pdf_data: response.pdf_data,
@@ -3272,6 +3310,7 @@ impl BrowserClient {
         include_hidden: Option<bool>,
     ) -> BrowserResult<TextResult> {
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
+        let selector = selector.map(str::to_string);
         self.direct_cdp_session_operation(
             endpoint,
             "browser.extract_text",
@@ -3279,7 +3318,11 @@ impl BrowserClient {
             timeout,
             CONTROL_RESPONSE_BYTES_STANDARD,
             |cx, session| {
-                Box::pin(async move { session.extract_text(cx, selector, include_hidden).await })
+                Box::pin(async move {
+                    session
+                        .extract_text(cx, selector.as_deref(), include_hidden)
+                        .await
+                })
             },
         )
         .await
@@ -3291,13 +3334,16 @@ impl BrowserClient {
         selector: Option<&str>,
     ) -> BrowserResult<LinksResult> {
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
+        let selector = selector.map(str::to_string);
         self.direct_cdp_session_operation(
             endpoint,
             "browser.extract_links",
             "extract_links",
             timeout,
             CONTROL_RESPONSE_BYTES_STANDARD,
-            |cx, session| Box::pin(async move { session.extract_links(cx, selector).await }),
+            |cx, session| {
+                Box::pin(async move { session.extract_links(cx, selector.as_deref()).await })
+            },
         )
         .await
     }
@@ -3310,6 +3356,8 @@ impl BrowserClient {
         timeout_ms: Option<u64>,
     ) -> BrowserResult<WaitResult> {
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(CONTROL_TIMEOUT_MS_STANDARD));
+        let selector = selector.to_string();
+        let state = state.map(str::to_string);
         self.direct_cdp_session_operation(
             endpoint,
             "browser.wait_for_selector",
@@ -3319,7 +3367,7 @@ impl BrowserClient {
             |cx, session| {
                 Box::pin(async move {
                     session
-                        .wait_for_selector(cx, selector, state, timeout_ms)
+                        .wait_for_selector(cx, &selector, state.as_deref(), timeout_ms)
                         .await
                 })
             },
@@ -3334,13 +3382,14 @@ impl BrowserClient {
         timeout_ms: Option<u64>,
     ) -> BrowserResult<ClickResult> {
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(CONTROL_TIMEOUT_MS_STANDARD));
+        let selector = selector.to_string();
         self.direct_cdp_session_operation(
             endpoint,
             "browser.click",
             "click",
             timeout,
             CONTROL_RESPONSE_BYTES_STANDARD,
-            |cx, session| Box::pin(async move { session.click(cx, selector, timeout_ms).await }),
+            |cx, session| Box::pin(async move { session.click(cx, &selector, timeout_ms).await }),
         )
         .await
     }
@@ -3352,6 +3401,8 @@ impl BrowserClient {
         submit_selector: Option<&str>,
     ) -> BrowserResult<FormResult> {
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
+        let fields = fields.clone();
+        let submit_selector = submit_selector.map(str::to_string);
         self.direct_cdp_session_operation(
             endpoint,
             "browser.fill_form",
@@ -3359,7 +3410,11 @@ impl BrowserClient {
             timeout,
             CONTROL_RESPONSE_BYTES_STANDARD,
             |cx, session| {
-                Box::pin(async move { session.fill_form(cx, fields, submit_selector).await })
+                Box::pin(async move {
+                    session
+                        .fill_form(cx, &fields, submit_selector.as_deref())
+                        .await
+                })
             },
         )
         .await
@@ -3371,6 +3426,7 @@ impl BrowserClient {
         expression: &str,
     ) -> BrowserResult<JsResult> {
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
+        let expression = expression.to_string();
         self.direct_cdp_session_operation(
             endpoint,
             "browser.evaluate_js",
@@ -3379,7 +3435,7 @@ impl BrowserClient {
             CONTROL_RESPONSE_BYTES_STANDARD,
             |cx, session| {
                 Box::pin(async move {
-                    let response = session.evaluate_expression(cx, expression).await?;
+                    let response = session.evaluate_expression(cx, &expression).await?;
                     Ok(JsResult {
                         result: response.result,
                     })
@@ -3395,6 +3451,7 @@ impl BrowserClient {
         domain: Option<&str>,
     ) -> BrowserResult<Vec<Cookie>> {
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
+        let domain = domain.map(str::to_string);
         self.direct_cdp_session_operation(
             endpoint,
             "browser.get_cookies",
@@ -3404,7 +3461,7 @@ impl BrowserClient {
             |cx, session| {
                 Box::pin(async move {
                     session
-                        .get_cookies(cx, domain)
+                        .get_cookies(cx, domain.as_deref())
                         .await
                         .map(|response| response.cookies)
                 })
@@ -3419,6 +3476,7 @@ impl BrowserClient {
         cookies: &[Cookie],
     ) -> BrowserResult<u32> {
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
+        let cookies = cookies.to_vec();
         self.direct_cdp_session_operation(
             endpoint,
             "browser.set_cookies",
@@ -3428,7 +3486,7 @@ impl BrowserClient {
             |cx, session| {
                 Box::pin(async move {
                     session
-                        .set_cookies(cx, cookies)
+                        .set_cookies(cx, &cookies)
                         .await
                         .map(|response| response.set_count)
                 })
@@ -4421,7 +4479,7 @@ mod tests {
             Arc::clone(&manager),
             &replacement,
             "browser.get_cookies",
-            Duration::from_millis(2_000),
+            Duration::from_secs(2),
         )?;
         replacement_lease.finish(&[4], "success", "session_closed_by_scope")?;
 
@@ -4435,6 +4493,7 @@ mod tests {
             Some(replacement.target.id_hash.as_str())
         );
         let jsonl = guard.events_jsonl();
+        drop(guard);
         let artifact_dir = std::env::temp_dir().join("fcp-browser-direct-cdp-manager");
         std::fs::create_dir_all(&artifact_dir).expect("manager artifact dir should be writable");
         let artifact_path = artifact_dir.join("logs.jsonl");
@@ -4489,6 +4548,45 @@ mod tests {
     }
 
     #[test]
+    fn test_direct_cdp_client_records_session_object_leases_only_in_direct_mode()
+    -> BrowserResult<()> {
+        let client = BrowserClient::new(None)?
+            .with_browser_url("ws://localhost:9222/devtools/page/session-client-target-secret");
+        let object_hash = client
+            .record_direct_cdp_session_object(
+                "browser.session.restore",
+                "state-object-secret-123",
+                77,
+                Some("private.example.test"),
+            )?
+            .ok_or_else(|| {
+                BrowserError::InvalidConfig("expected direct CDP session object record".into())
+            })?;
+
+        assert_eq!(object_hash.len(), 16);
+        let jsonl = client.direct_cdp_manager_events_jsonl()?;
+        assert!(jsonl.contains("\"event_kind\":\"session_object_recorded\""));
+        assert!(jsonl.contains("\"operation_id\":\"browser.session.restore\""));
+        assert!(jsonl.contains("\"session_lease_seq\":77"));
+        assert!(!jsonl.contains("state-object-secret-123"));
+        assert!(!jsonl.contains("private.example.test"));
+        assert!(!jsonl.contains("session-client-target-secret"));
+
+        let worker_client = BrowserClient::new(None)?.with_browser_url("http://localhost:9222");
+        assert_eq!(
+            worker_client.record_direct_cdp_session_object(
+                "browser.session.save",
+                "state-object-secret-456",
+                78,
+                Some("worker.example.test"),
+            )?,
+            None
+        );
+        assert_eq!(worker_client.direct_cdp_manager_events_jsonl()?, "");
+        Ok(())
+    }
+
+    #[test]
     fn test_direct_cdp_manager_shutdown_releases_active_lease_without_orphan() -> BrowserResult<()>
     {
         let endpoint =
@@ -4520,8 +4618,7 @@ mod tests {
         .unwrap_err();
         assert!(format!("{rejected}").contains("manager is shut down"));
 
-        let guard = manager.lock().unwrap();
-        let jsonl = guard.events_jsonl();
+        let jsonl = manager.lock().unwrap().events_jsonl();
         assert!(jsonl.contains("\"cleanup_result\":\"lease_dropped_cleanup\""));
         assert!(jsonl.contains("\"cleanup_result\":\"no_active_lease_no_orphan\""));
         assert!(jsonl.contains("\"cancellation_checkpoint\":\"shutdown_signal_observed\""));

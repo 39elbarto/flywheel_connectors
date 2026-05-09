@@ -4,6 +4,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use ed25519_dalek::Signer as _;
 use fcp_crypto::{CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_manifest::{ConnectorManifest, OperationSection};
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, OperationId, ZoneId,
 };
@@ -14,6 +15,24 @@ use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const EXPECTED_OPERATION_COUNT: usize = 11;
+const TELNYX_API_EGRESS_OPERATIONS: &[&str] = &[
+    "telnyx.call.continue",
+    "telnyx.call.end",
+    "telnyx.call.gather",
+    "telnyx.call.initiate",
+    "telnyx.call.speak",
+    "telnyx.call.status",
+    "telnyx.call.transfer",
+];
+const NO_CONNECTOR_EGRESS_OPERATIONS: &[&str] = &[
+    "telnyx.webhook.evaluate_inbound_policy",
+    "telnyx.webhook.ingest_request",
+    "telnyx.webhook.parse_event",
+    "telnyx.webhook.validate_signature",
+];
 
 fn telnyx_signing_key() -> ed25519_dalek::SigningKey {
     ed25519_dalek::SigningKey::from_bytes(&[9_u8; 32])
@@ -216,6 +235,117 @@ fn log_telnyx_e2e(
         "artifact_paths": details.get("artifact_paths").cloned().unwrap_or_else(|| json!([])),
     });
     writeln!(logs, "{body}").expect("write telnyx e2e log");
+}
+
+fn telnyx_manifest() -> ConnectorManifest {
+    ConnectorManifest::parse_str(MANIFEST_TOML).expect("Telnyx manifest should validate")
+}
+
+fn manifest_operation<'a>(manifest: &'a ConnectorManifest, id: &str) -> &'a OperationSection {
+    manifest
+        .provides
+        .operations
+        .get(id)
+        .unwrap_or_else(|| panic!("{id} should be declared in the manifest"))
+}
+
+fn assert_telnyx_api_network_constraints(id: &str, operation: &OperationSection) {
+    let constraints = operation
+        .network_constraints
+        .as_ref()
+        .unwrap_or_else(|| panic!("{id} should declare network_constraints"));
+    assert_eq!(
+        constraints.host_allow,
+        ["api.telnyx.com"],
+        "{id} should only allow the production Telnyx REST API host"
+    );
+    assert_eq!(constraints.port_allow, [443], "{id}");
+    assert!(constraints.ip_allow.is_empty(), "{id}");
+    assert!(constraints.cidr_deny.is_empty(), "{id}");
+    assert!(constraints.require_sni, "{id} should require SNI");
+    assert!(constraints.deny_localhost, "{id} should deny localhost");
+    assert!(
+        constraints.deny_private_ranges,
+        "{id} should deny private ranges"
+    );
+    assert!(
+        constraints.deny_tailnet_ranges,
+        "{id} should deny tailnet ranges"
+    );
+    assert!(constraints.spki_pins.is_empty(), "{id}");
+    assert!(constraints.deny_ip_literals, "{id} should deny IP literals");
+    assert!(
+        constraints.require_host_canonicalization,
+        "{id} should require canonical hostnames"
+    );
+    assert_eq!(constraints.dns_max_ips, 16, "{id}");
+    assert_eq!(constraints.max_redirects, 0, "{id}");
+    assert_eq!(constraints.connect_timeout_ms, 10_000, "{id}");
+    assert_eq!(constraints.total_timeout_ms, 30_000, "{id}");
+    assert_eq!(constraints.max_response_bytes, 1_048_576, "{id}");
+}
+
+fn assert_no_connector_egress_network_constraints(id: &str, operation: &OperationSection) {
+    let constraints = operation
+        .network_constraints
+        .as_ref()
+        .unwrap_or_else(|| panic!("{id} should declare network_constraints"));
+    assert_eq!(
+        constraints.host_allow,
+        ["none.invalid"],
+        "{id} should advertise no connector-owned egress"
+    );
+    assert_eq!(constraints.port_allow, [0], "{id}");
+    assert!(constraints.ip_allow.is_empty(), "{id}");
+    assert!(constraints.cidr_deny.is_empty(), "{id}");
+    assert!(
+        !constraints.require_sni,
+        "{id} should not require SNI for a no-egress sentinel"
+    );
+    assert!(constraints.deny_localhost, "{id} should deny localhost");
+    assert!(
+        constraints.deny_private_ranges,
+        "{id} should deny private ranges"
+    );
+    assert!(
+        constraints.deny_tailnet_ranges,
+        "{id} should deny tailnet ranges"
+    );
+    assert!(constraints.spki_pins.is_empty(), "{id}");
+    assert!(constraints.deny_ip_literals, "{id} should deny IP literals");
+    assert!(
+        constraints.require_host_canonicalization,
+        "{id} should require canonical hostnames"
+    );
+    assert_eq!(constraints.dns_max_ips, 0, "{id}");
+    assert_eq!(constraints.max_redirects, 0, "{id}");
+    assert_eq!(constraints.connect_timeout_ms, 1_000, "{id}");
+    assert_eq!(constraints.total_timeout_ms, 30_000, "{id}");
+    assert_eq!(constraints.max_response_bytes, 1_048_576, "{id}");
+}
+
+#[test]
+fn manifest_declares_strict_per_operation_network_constraints() {
+    let manifest = telnyx_manifest();
+    assert_eq!(
+        manifest.provides.operations.len(),
+        EXPECTED_OPERATION_COUNT,
+        "Telnyx manifest operation count changed; update network-constraint assertions"
+    );
+
+    for id in TELNYX_API_EGRESS_OPERATIONS {
+        assert_telnyx_api_network_constraints(id, manifest_operation(&manifest, id));
+    }
+    for id in NO_CONNECTOR_EGRESS_OPERATIONS {
+        assert_no_connector_egress_network_constraints(id, manifest_operation(&manifest, id));
+    }
+
+    for (id, operation) in &manifest.provides.operations {
+        assert!(
+            operation.network_constraints.is_some(),
+            "{id} should declare per-operation network_constraints"
+        );
+    }
 }
 
 #[fcp_async_core::runtime::test]

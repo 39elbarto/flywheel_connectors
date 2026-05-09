@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:70113b5cb4e4b72efa957f56e1a293c0ef572c98955a0e5dff0e4236d72b2c48"
+interface_hash = "blake3-256:fcp.interface.v2:6d745a88ffc9c6c52b345b077c676267b2db20ad199928ad3c4b62696dbc23c7"
 
 [connector]
 id = "fcp.telnyx"
@@ -237,6 +237,24 @@ idempotency = "best_effort"
 input_schema = { type = "object", required = ["headers", "body"] }
 output_schema = { type = "object" }
 
+[provides.operations."telnyx.webhook.validate_signature".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."telnyx.webhook.evaluate_inbound_policy"]
 description = "Evaluate Telnyx inbound caller policy"
 capability = "telnyx.webhook"
@@ -246,6 +264,24 @@ requires_approval = "none"
 idempotency = "strict"
 input_schema = { type = "object", required = ["body", "inbound_policy"] }
 output_schema = { type = "object" }
+
+[provides.operations."telnyx.webhook.evaluate_inbound_policy".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations."telnyx.webhook.parse_event"]
 description = "Parse a verified Telnyx webhook event"
@@ -257,6 +293,24 @@ idempotency = "strict"
 input_schema = { type = "object", required = ["body"] }
 output_schema = { type = "object" }
 
+[provides.operations."telnyx.webhook.parse_event".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations."telnyx.webhook.ingest_request"]
 description = "Validate, replay-check, parse, policy-check, and ingest a Telnyx webhook"
 capability = "telnyx.webhook"
@@ -266,6 +320,24 @@ requires_approval = "none"
 idempotency = "best_effort"
 input_schema = { type = "object", required = ["headers", "body"] }
 output_schema = { type = "object" }
+
+[provides.operations."telnyx.webhook.ingest_request".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [sandbox]
 profile = "strict"

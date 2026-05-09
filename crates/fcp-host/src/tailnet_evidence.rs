@@ -140,6 +140,83 @@ impl TailnetInvokeLatencySummary {
             p999_ns: nearest_rank(&sorted, 999)?,
         })
     }
+
+    /// Compute percentiles from successful per-invoke attempt records.
+    #[must_use]
+    pub fn from_successful_attempts(attempts: &[TailnetInvokeAttemptEvidence]) -> Option<Self> {
+        Self::from_nanos(attempts.iter().filter_map(|attempt| {
+            (attempt.outcome == TailnetInvokeAttemptOutcome::Success)
+                .then_some(attempt.latency_ns)
+                .flatten()
+        }))
+    }
+}
+
+/// Per-invoke outcome classification for real transport evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TailnetInvokeAttemptOutcome {
+    /// Invoke completed successfully.
+    Success,
+    /// Invoke returned a transport or application error.
+    Error,
+    /// Invoke exceeded its deadline or transport timeout.
+    Timeout,
+    /// Invoke was cancelled by the caller or host control plane.
+    Cancelled,
+}
+
+/// One redaction-safe invoke attempt observed by a real transport harness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailnetInvokeAttemptEvidence {
+    /// Zero-based attempt index within the proof run.
+    pub attempt_index: u64,
+    /// Classified attempt outcome.
+    pub outcome: TailnetInvokeAttemptOutcome,
+    /// End-to-end latency in nanoseconds when measured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ns: Option<u64>,
+    /// Stable error class for non-successful outcomes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<String>,
+    /// Redaction-safe diagnostic detail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl TailnetInvokeAttemptEvidence {
+    /// Record a successful invoke attempt.
+    #[must_use]
+    pub const fn success(attempt_index: u64, latency_ns: u64) -> Self {
+        Self {
+            attempt_index,
+            outcome: TailnetInvokeAttemptOutcome::Success,
+            latency_ns: Some(latency_ns),
+            error_class: None,
+            detail: None,
+        }
+    }
+
+    /// Record a failed, timed-out, or cancelled invoke attempt.
+    #[must_use]
+    pub fn non_success(
+        attempt_index: u64,
+        outcome: TailnetInvokeAttemptOutcome,
+        latency_ns: Option<u64>,
+        error_class: impl Into<String>,
+        detail: impl Into<String>,
+    ) -> Self {
+        debug_assert!(outcome != TailnetInvokeAttemptOutcome::Success);
+        let error_class = error_class.into();
+        let detail = detail.into();
+        Self {
+            attempt_index,
+            outcome,
+            latency_ns,
+            error_class: Some(redact_sensitive_text(&error_class)),
+            detail: Some(redact_sensitive_text(&detail)),
+        }
+    }
 }
 
 /// Redacted node label for evidence output.
@@ -181,6 +258,8 @@ pub struct TailnetInvokeRealTransportInput {
     pub retries: u64,
     /// Latency summary for the real transport run.
     pub latency: TailnetInvokeLatencySummary,
+    /// Per-invoke samples and error classifications.
+    pub attempts: Vec<TailnetInvokeAttemptEvidence>,
 }
 
 /// Live prerequisite observations collected by the executable evidence runner.
@@ -307,6 +386,9 @@ pub struct TailnetInvokeEvidenceRecord {
     /// Latency summary for real transport records.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency: Option<TailnetInvokeLatencySummary>,
+    /// Per-invoke samples for real transport records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempts: Vec<TailnetInvokeAttemptEvidence>,
     /// Full prerequisite diagnostics for structured skip records.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prerequisites: Vec<TailnetInvokePrerequisite>,
@@ -336,6 +418,7 @@ impl TailnetInvokeEvidenceRecord {
             auth_result: redact_sensitive_text(&input.auth_result),
             retries: input.retries,
             latency: Some(input.latency),
+            attempts: input.attempts,
             prerequisites: Vec::new(),
             missing_prerequisites: Vec::new(),
             skip_reason: None,
@@ -379,6 +462,7 @@ impl TailnetInvokeEvidenceRecord {
             auth_result: "not_attempted".to_string(),
             retries: 0,
             latency: None,
+            attempts: Vec::new(),
             prerequisites,
             missing_prerequisites,
             skip_reason,
@@ -476,6 +560,37 @@ mod tests {
     }
 
     #[test]
+    fn latency_summary_uses_successful_attempt_samples_only() {
+        let attempts = vec![
+            TailnetInvokeAttemptEvidence::success(0, 100),
+            TailnetInvokeAttemptEvidence::non_success(
+                1,
+                TailnetInvokeAttemptOutcome::Timeout,
+                Some(500),
+                "timeout",
+                "request deadline elapsed",
+            ),
+            TailnetInvokeAttemptEvidence::non_success(
+                2,
+                TailnetInvokeAttemptOutcome::Cancelled,
+                None,
+                "cancelled",
+                "caller cancelled operation",
+            ),
+            TailnetInvokeAttemptEvidence::success(3, 200),
+        ];
+
+        let summary = TailnetInvokeLatencySummary::from_successful_attempts(&attempts)
+            .expect("successful attempts should produce latency summary");
+
+        assert_eq!(summary.sample_count, 2);
+        assert_eq!(summary.min_ns, 100);
+        assert_eq!(summary.max_ns, 200);
+        assert_eq!(summary.p50_ns, 100);
+        assert_eq!(summary.p99_ns, 200);
+    }
+
+    #[test]
     fn route_mode_parses_cli_labels() {
         assert_eq!(
             TailnetInvokeRouteMode::parse_cli("direct-lan").expect("direct route"),
@@ -506,6 +621,7 @@ mod tests {
         assert_eq!(record.source, TailnetInvokeEvidenceSource::StructuredSkip);
         assert_eq!(record.auth_result, "not_attempted");
         assert!(record.latency.is_none());
+        assert!(record.attempts.is_empty());
         assert_eq!(record.prerequisites.len(), 2);
         assert_eq!(record.missing_prerequisites, vec!["derp-route"]);
         assert_eq!(
@@ -571,8 +687,35 @@ mod tests {
 
     #[test]
     fn real_transport_record_redacts_nodes_and_carries_percentiles() {
-        let latency =
-            TailnetInvokeLatencySummary::from_nanos([10, 20, 30, 40, 50]).expect("latency summary");
+        let attempts = vec![
+            TailnetInvokeAttemptEvidence::success(0, 10),
+            TailnetInvokeAttemptEvidence::success(1, 20),
+            TailnetInvokeAttemptEvidence::non_success(
+                2,
+                TailnetInvokeAttemptOutcome::Error,
+                Some(25),
+                "http_500",
+                "upstream token leaked in detail",
+            ),
+            TailnetInvokeAttemptEvidence::non_success(
+                3,
+                TailnetInvokeAttemptOutcome::Timeout,
+                Some(30),
+                "timeout",
+                "deadline elapsed",
+            ),
+            TailnetInvokeAttemptEvidence::non_success(
+                4,
+                TailnetInvokeAttemptOutcome::Cancelled,
+                None,
+                "cancelled",
+                "caller cancelled",
+            ),
+            TailnetInvokeAttemptEvidence::success(5, 40),
+            TailnetInvokeAttemptEvidence::success(6, 50),
+        ];
+        let latency = TailnetInvokeLatencySummary::from_successful_attempts(&attempts)
+            .expect("latency summary");
         let record = TailnetInvokeEvidenceRecord::real_transport(TailnetInvokeRealTransportInput {
             route_mode: TailnetInvokeRouteMode::DirectLan,
             command_line: vec!["tailnet-proof".to_string(), "--route=direct".to_string()],
@@ -585,11 +728,13 @@ mod tests {
             auth_result: "capability_verified".to_string(),
             retries: 1,
             latency,
+            attempts,
         });
 
         assert_eq!(record.source, TailnetInvokeEvidenceSource::RealTransport);
         assert_eq!(record.missing_prerequisites, Vec::<String>::new());
         assert_eq!(record.latency.expect("latency").p99_ns, 50);
+        assert_eq!(record.attempts.len(), 7);
         assert!(
             record
                 .nodes
@@ -599,6 +744,9 @@ mod tests {
         let jsonl = record.to_jsonl_line().expect("serialize JSONL");
         assert!(!jsonl.contains("alice.tailnet.ts.net"));
         assert!(!jsonl.contains("bob.tailnet.ts.net"));
+        assert!(!jsonl.contains("leaked"));
         assert!(jsonl.contains("\"p99_ns\":50"));
+        assert!(jsonl.contains("\"outcome\":\"timeout\""));
+        assert!(jsonl.contains("\"outcome\":\"cancelled\""));
     }
 }

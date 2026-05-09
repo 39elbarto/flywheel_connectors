@@ -293,6 +293,12 @@ and route prerequisites, and emits a structured skip while the production
 `fcp-host` invoke path remains host-first instead of routed through the
 `fcp-mesh` / `fcp-tailscale` transport boundary.
 
+The real-transport record shape already reserves typed per-invoke attempts for
+the eventual production harness. Each attempt carries a success, error,
+timeout, or cancellation classification plus optional latency and redacted
+diagnostic detail; percentile summaries are derived from successful invoke
+samples only.
+
 ```bash
 cargo run -p fcp-host --bin fcp-tailnet-invoke-evidence -- --route direct-lan
 ```

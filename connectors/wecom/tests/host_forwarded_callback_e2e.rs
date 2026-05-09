@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -166,6 +167,133 @@ fn log_event(path: &Path, event: &Value) {
         .open(path)
         .expect("e2e log should be writable");
     writeln!(file, "{event}").expect("e2e log line should be writable");
+}
+
+#[test]
+fn wecom_manifest_ai_hints_cover_all_operations() {
+    let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
+    let manifest_text = fs::read_to_string(&manifest_path).expect("manifest should be readable");
+    let manifest: toml::Value = toml::from_str(&manifest_text).expect("manifest should parse");
+    let operations = manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("manifest should declare operations");
+
+    let expected_operations = [
+        "messages_send_text",
+        "messages_send_markdown",
+        "messages_send_image",
+        "messages_send_file",
+        "media_upload",
+        "media_download",
+        "users_get",
+        "departments_list",
+        "callback_verify_url",
+        "callback_ingest_event",
+        "health",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    let actual_operations = operations.keys().cloned().collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual_operations, expected_operations,
+        "manifest operation inventory changed; update ai_hints coverage expectations"
+    );
+
+    let mut missing_when_to_use = Vec::new();
+    let mut missing_common_mistakes = Vec::new();
+    let mut missing_examples = Vec::new();
+    let mut invalid_examples = Vec::new();
+    let mut secret_shaped_examples = Vec::new();
+
+    for (operation_id, operation) in operations {
+        let Some(ai_hints) = operation
+            .get("ai_hints")
+            .and_then(toml::Value::as_table)
+        else {
+            missing_when_to_use.push(operation_id.clone());
+            missing_common_mistakes.push(operation_id.clone());
+            missing_examples.push(operation_id.clone());
+            continue;
+        };
+
+        let when_to_use = ai_hints
+            .get("when_to_use")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        if when_to_use.is_empty() {
+            missing_when_to_use.push(operation_id.clone());
+        }
+
+        let common_mistakes = ai_hints
+            .get("common_mistakes")
+            .and_then(toml::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if common_mistakes.is_empty()
+            || common_mistakes
+                .iter()
+                .any(|mistake| mistake.as_str().unwrap_or_default().trim().is_empty())
+        {
+            missing_common_mistakes.push(operation_id.clone());
+        }
+
+        let examples = ai_hints
+            .get("examples")
+            .and_then(toml::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if examples.is_empty() {
+            missing_examples.push(operation_id.clone());
+            continue;
+        }
+
+        for example in examples {
+            let Some(example_text) = example.as_str().map(str::trim) else {
+                invalid_examples.push(format!("{operation_id}: example is not a string"));
+                continue;
+            };
+            if example_text.is_empty() {
+                invalid_examples.push(format!("{operation_id}: example is empty"));
+                continue;
+            }
+            if let Err(error) = serde_json::from_str::<Value>(example_text) {
+                invalid_examples.push(format!("{operation_id}: {error}"));
+            }
+
+            let lower = example_text.to_ascii_lowercase();
+            if ["api_key", "bearer", "password", "secret", "token"]
+                .iter()
+                .any(|needle| lower.contains(needle))
+            {
+                secret_shaped_examples.push(operation_id.clone());
+            }
+        }
+    }
+
+    assert!(
+        missing_when_to_use.is_empty(),
+        "operations missing ai_hints.when_to_use: {missing_when_to_use:?}"
+    );
+    assert!(
+        missing_common_mistakes.is_empty(),
+        "operations missing concrete common_mistakes: {missing_common_mistakes:?}"
+    );
+    assert!(
+        missing_examples.is_empty(),
+        "operations missing realistic examples: {missing_examples:?}"
+    );
+    assert!(
+        invalid_examples.is_empty(),
+        "operations have invalid JSON examples: {invalid_examples:?}"
+    );
+    assert!(
+        secret_shaped_examples.is_empty(),
+        "examples contain secret-shaped values or labels: {secret_shaped_examples:?}"
+    );
 }
 
 #[fcp_async_core::runtime::test]

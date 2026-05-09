@@ -29,7 +29,6 @@ const EXPECTED_AI_HINT_GAPS: &[&str] = &[
     "nostr",
     "qq",
     "telnyx",
-    "wecom",
 ];
 const EXPECTED_SANDBOX_GAPS: &[&str] = &["anthropic-vertex", "inworld"];
 

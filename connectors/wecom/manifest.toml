@@ -43,6 +43,11 @@ input_schema = { type = "object", required = ["content"], anyOf = [{ required = 
 output_schema = { type = "object", additionalProperties = true, properties = { errcode = { type = "integer" }, errmsg = { type = "string" }, msgid = { type = "string" }, invaliduser = { type = "string" }, invalidparty = { type = "string" }, invalidtag = { type = "string" }, response_code = { type = "string" } } }
 network_constraints = { host_allow = ["qyapi.weixin.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
+[provides.operations.messages_send_text.ai_hints]
+when_to_use = "Use when an agent must proactively send a short plain-text notice to WeCom users, departments, or tags from the bound enterprise app."
+common_mistakes = ["Provide exactly the intended WeCom target family: touser, toparty, or totag; an empty target set cannot be delivered.", "Do not use this operation for markdown, image, or file payloads; choose the matching send operation instead.", "This operation sends immediately and is not idempotent, so avoid blind retries after an unknown delivery result."]
+examples = ['{"touser":"alice","content":"Release candidate is ready for review.","enable_duplicate_check":true,"duplicate_check_interval":600}']
+
 [provides.operations.messages_send_markdown]
 summary = "Send a WeCom markdown message"
 capability = "wecom.messages.write"
@@ -52,6 +57,11 @@ idempotency = "none"
 input_schema = { type = "object", required = ["content"], anyOf = [{ required = ["touser"] }, { required = ["toparty"] }, { required = ["totag"] }], additionalProperties = false, properties = { content = { type = "string", minLength = 1, pattern = "\\S" }, touser = { type = "string", minLength = 1, pattern = "\\S" }, toparty = { type = "string", minLength = 1, pattern = "\\S" }, totag = { type = "string", minLength = 1, pattern = "\\S" }, enable_duplicate_check = { anyOf = [{ type = "boolean" }, { type = "integer", enum = [0, 1] }] }, duplicate_check_interval = { type = "integer", minimum = 0, maximum = 4294967295 } } }
 output_schema = { type = "object", additionalProperties = true, properties = { errcode = { type = "integer" }, errmsg = { type = "string" }, msgid = { type = "string" }, invaliduser = { type = "string" }, invalidparty = { type = "string" }, invalidtag = { type = "string" }, response_code = { type = "string" } } }
 network_constraints = { host_allow = ["qyapi.weixin.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations.messages_send_markdown.ai_hints]
+when_to_use = "Use when the WeCom message needs simple rich formatting that the enterprise app can render as markdown."
+common_mistakes = ["Do not assume full GitHub-flavored Markdown support; WeCom renders a narrower markdown subset.", "Keep private links out of markdown bodies unless the recipient tenant can actually reach them.", "Provide one WeCom target family; mixing broad department and tag sends can over-notify."]
+examples = ['{"toparty":"42","content":"**Incident update**: database failover completed."}']
 
 [provides.operations.messages_send_image]
 summary = "Send a WeCom image message"
@@ -63,6 +73,11 @@ input_schema = { type = "object", required = ["media_id"], anyOf = [{ required =
 output_schema = { type = "object", additionalProperties = true, properties = { errcode = { type = "integer" }, errmsg = { type = "string" }, msgid = { type = "string" }, invaliduser = { type = "string" }, invalidparty = { type = "string" }, invalidtag = { type = "string" }, response_code = { type = "string" } } }
 network_constraints = { host_allow = ["qyapi.weixin.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
+[provides.operations.messages_send_image.ai_hints]
+when_to_use = "Use after media_upload returns an image media_id and the agent needs to deliver that image through WeCom."
+common_mistakes = ["Do not pass raw bytes or base64 image data here; upload the image first and pass only media_id.", "Temporary WeCom media identifiers can expire, so do not cache them as durable asset references.", "A repeated call can send duplicate images; enable duplicate checks when the upstream workflow can retry."]
+examples = ['{"touser":"alice","media_id":"media-image-123","safe":0}']
+
 [provides.operations.messages_send_file]
 summary = "Send a WeCom file message"
 capability = "wecom.messages.write"
@@ -72,6 +87,11 @@ idempotency = "none"
 input_schema = { type = "object", required = ["media_id"], anyOf = [{ required = ["touser"] }, { required = ["toparty"] }, { required = ["totag"] }], additionalProperties = false, properties = { media_id = { type = "string", minLength = 1, pattern = "\\S" }, touser = { type = "string", minLength = 1, pattern = "\\S" }, toparty = { type = "string", minLength = 1, pattern = "\\S" }, totag = { type = "string", minLength = 1, pattern = "\\S" }, safe = { anyOf = [{ type = "boolean" }, { type = "integer", enum = [0, 1] }] }, enable_duplicate_check = { anyOf = [{ type = "boolean" }, { type = "integer", enum = [0, 1] }] }, duplicate_check_interval = { type = "integer", minimum = 0, maximum = 4294967295 } } }
 output_schema = { type = "object", additionalProperties = true, properties = { errcode = { type = "integer" }, errmsg = { type = "string" }, msgid = { type = "string" }, invaliduser = { type = "string" }, invalidparty = { type = "string" }, invalidtag = { type = "string" }, response_code = { type = "string" } } }
 network_constraints = { host_allow = ["qyapi.weixin.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations.messages_send_file.ai_hints]
+when_to_use = "Use after media_upload returns a file media_id and the agent needs to deliver that file to a WeCom target."
+common_mistakes = ["Do not pass a local path or file bytes here; upload the file first.", "Make sure the media_id came from the same tenant-bound app configuration.", "Repeated sends are visible to recipients, so avoid retrying without an idempotency decision from the caller."]
+examples = ['{"toparty":"42","media_id":"media-file-123","safe":0}']
 
 [provides.operations.media_upload]
 summary = "Upload temporary media to WeCom"
@@ -83,6 +103,11 @@ input_schema = { type = "object", required = ["media_type", "file_name", "conten
 output_schema = { type = "object", additionalProperties = true, properties = { errcode = { type = "integer" }, errmsg = { type = "string" }, type = { type = "string" }, media_id = { type = "string" }, created_at = { type = "integer", minimum = 0 } } }
 network_constraints = { host_allow = ["qyapi.weixin.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
+[provides.operations.media_upload.ai_hints]
+when_to_use = "Use to create a temporary WeCom media_id before sending an image, voice, video, or file message."
+common_mistakes = ["content_base64 must contain the file bytes encoded as base64, not a filesystem path.", "Only image, voice, video, and file are valid media_type values.", "This operation only uploads media; it does not notify recipients until a send operation uses the returned media_id."]
+examples = ['{"media_type":"file","file_name":"runbook.pdf","mime_type":"application/pdf","content_base64":"JVBERi0xLjQ="}']
+
 [provides.operations.media_download]
 summary = "Download media bytes for a WeCom media_id"
 capability = "wecom.media.read"
@@ -92,6 +117,11 @@ idempotency = "strict"
 input_schema = { type = "object", required = ["media_id"], additionalProperties = false, properties = { media_id = { type = "string", minLength = 1, pattern = "\\S" } } }
 output_schema = { type = "object", required = ["media_id", "content_length", "content_base64", "sha256"], additionalProperties = false, properties = { media_id = { type = "string", minLength = 1 }, file_name = { type = ["string", "null"], minLength = 1 }, mime_type = { type = ["string", "null"], minLength = 1 }, content_length = { type = "integer", minimum = 0 }, content_base64 = { type = "string", contentEncoding = "base64" }, sha256 = { type = "string", pattern = "^[0-9a-f]{64}$" } } }
 network_constraints = { host_allow = ["qyapi.weixin.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 52428800 }
+
+[provides.operations.media_download.ai_hints]
+when_to_use = "Use when an accepted WeCom callback references a media_id and the agent needs the media bytes for inspection or downstream storage."
+common_mistakes = ["Do not use this for public URLs; it only resolves provider media_id values.", "The output body is base64 plus a sha256 digest, so decode only after checking size and policy.", "Media downloaded from workplace conversations can contain sensitive data; keep logs redacted."]
+examples = ['{"media_id":"media-file-123"}']
 
 [provides.operations.users_get]
 summary = "Fetch a WeCom user profile"
@@ -103,6 +133,11 @@ input_schema = { type = "object", required = ["userid"], additionalProperties = 
 output_schema = { type = "object", additionalProperties = true, properties = { errcode = { type = "integer" }, errmsg = { type = "string" }, userid = { type = "string" }, name = { type = "string" }, alias = { type = "string" }, mobile = { type = "string" }, email = { type = "string" }, gender = { type = "string" }, department = { type = "array", items = { type = "integer" } }, position = { type = "string" }, avatar = { type = "string" }, status = { type = "integer" }, enable = { type = "integer" } } }
 network_constraints = { host_allow = ["qyapi.weixin.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
+[provides.operations.users_get.ai_hints]
+when_to_use = "Use for a read-only directory lookup when the agent already has the stable WeCom userid."
+common_mistakes = ["Do not pass a display name, alias, mobile number, or email address when the operation requires userid.", "The bound app can only read users allowed by tenant permissions.", "Returned profile fields may contain workplace personal data and must not be copied into logs unnecessarily."]
+examples = ['{"userid":"alice"}']
+
 [provides.operations.departments_list]
 summary = "List WeCom departments"
 capability = "wecom.departments.read"
@@ -112,6 +147,11 @@ idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false, properties = { id = { type = "integer" } } }
 output_schema = { type = "object", additionalProperties = true, properties = { errcode = { type = "integer" }, errmsg = { type = "string" }, department = { type = "array", items = { type = "object", additionalProperties = true } } } }
 network_constraints = { host_allow = ["qyapi.weixin.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations.departments_list.ai_hints]
+when_to_use = "Use to discover the visible WeCom department hierarchy before targeting department-scoped messages or directory workflows."
+common_mistakes = ["The optional id is a numeric WeCom department id, not a department name.", "Tenant app visibility controls which departments appear in the response.", "Do not treat this as a user search; use users_get when you already know a userid."]
+examples = ['{"id":42}']
 
 [provides.operations.callback_verify_url]
 summary = "Verify a host-forwarded WeCom callback URL challenge"
@@ -123,6 +163,11 @@ input_schema = { type = "object", required = ["msg_signature", "timestamp", "non
 output_schema = { type = "object", required = ["verified", "transport", "receive_id", "challenge", "http_response"], additionalProperties = false, properties = { verified = { type = "boolean" }, transport = { type = "string", enum = ["callback_http_get"] }, receive_id = { type = "string", minLength = 1 }, challenge = { type = "string" }, http_response = { type = "object", required = ["status", "content_type", "body"], additionalProperties = false, properties = { status = { type = "integer", minimum = 100, maximum = 599 }, content_type = { type = "string" }, body = { type = "string" } } } } }
 network_constraints = { host_allow = ["none.invalid"], port_allow = [0], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 0, max_redirects = 0, connect_timeout_ms = 1000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
+[provides.operations.callback_verify_url.ai_hints]
+when_to_use = "Use only when the host has received WeCom's callback verification GET and needs the decrypted challenge response."
+common_mistakes = ["The connector does not own a public listener; the host must forward the GET query fields.", "echostr is an encrypted challenge from WeCom, not arbitrary caller text.", "Do not use this for ordinary callback POST events; use callback_ingest_event instead."]
+examples = ['{"msg_signature":"sha1-signature","timestamp":"1710000000","nonce":"nonce-123","echostr":"encrypted-challenge"}']
+
 [provides.operations.callback_ingest_event]
 summary = "Verify, decrypt, replay-check, policy-gate, and normalize one host-forwarded WeCom callback event"
 capability = "wecom.events.read"
@@ -133,6 +178,11 @@ input_schema = { type = "object", required = ["msg_signature", "timestamp", "non
 output_schema = { type = "object", required = ["delivery", "callback", "policy", "event"], additionalProperties = false, properties = { delivery = { type = "object", required = ["id", "transport", "verified", "msg_signature_hash", "timestamp", "timestamp_skew_secs", "nonce_hash", "nonce_key_hash", "receive_id_hash", "replay"], additionalProperties = false, properties = { id = { type = "string", minLength = 1 }, transport = { type = "string", enum = ["callback_http"] }, verified = { type = "boolean" }, msg_signature_hash = { type = "string", pattern = "^sha256:[0-9a-f]{16}$" }, timestamp = { type = "string" }, timestamp_skew_secs = { type = "integer", minimum = 0 }, nonce_hash = { type = "string", pattern = "^sha256:[0-9a-f]{16}$" }, nonce_key_hash = { type = "string", pattern = "^sha256:[0-9a-f]{16}$" }, message_key_hash = { type = ["string", "null"], pattern = "^sha256:[0-9a-f]{16}$" }, receive_id_hash = { type = "string", pattern = "^sha256:[0-9a-f]{16}$" }, replay = { type = "boolean" } } }, callback = { type = "object", required = ["outer", "message", "plaintext_xml"], additionalProperties = false, properties = { outer = { type = ["object", "null"], additionalProperties = { type = "string" } }, message = { type = ["object", "null"], additionalProperties = { type = "string" } }, plaintext_xml = { type = ["string", "null"] } } }, policy = { type = "object", required = ["model", "decision", "reason", "sender_user_hash", "external_user_hash", "room_hash", "persisted_replay_state", "redaction_status"], additionalProperties = false, properties = { model = { type = "string", enum = ["host_forwarded_callback_replay_and_policy"] }, decision = { type = "string", enum = ["accepted", "rejected", "duplicate"] }, reason = { type = "string" }, sender_user_hash = { type = ["string", "null"], pattern = "^sha256:[0-9a-f]{16}$" }, external_user_hash = { type = ["string", "null"], pattern = "^sha256:[0-9a-f]{16}$" }, room_hash = { type = ["string", "null"], pattern = "^sha256:[0-9a-f]{16}$" }, persisted_replay_state = { type = "boolean" }, redaction_status = { type = "string" } } }, event = { anyOf = [{ type = "object", additionalProperties = true }, { type = "null" }] } } }
 network_constraints = { host_allow = ["none.invalid"], port_allow = [0], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 0, max_redirects = 0, connect_timeout_ms = 1000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
+[provides.operations.callback_ingest_event.ai_hints]
+when_to_use = "Use when the host forwards one signed WeCom callback POST and the agent needs replay-checked, policy-gated event normalization."
+common_mistakes = ["The host must forward the raw XML body or body_xml with query fields intact.", "Duplicate or disallowed callbacks can return an acknowledged policy result without emitting an event.", "Do not bypass sender, room, or mention policy just because the provider signature is valid."]
+examples = ['{"msg_signature":"sha1-signature","timestamp":"1710000000","nonce":"nonce-123","body_xml":"<xml><Encrypt>encrypted-payload</Encrypt></xml>"}']
+
 [provides.operations.health]
 summary = "Verify WeCom credentials and token issuance"
 capability = "wecom.health.read"
@@ -142,6 +192,11 @@ idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["status", "token_issuance_probe", "details"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, token_issuance_probe = { type = "string", enum = ["GET /cgi-bin/gettoken"] }, details = { type = "object", additionalProperties = true } } }
 network_constraints = { host_allow = ["qyapi.weixin.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations.health.ai_hints]
+when_to_use = "Use for a bounded WeCom credential and reachability check before starting a workflow that depends on the bound enterprise app."
+common_mistakes = ["A healthy credential probe does not prove a particular user, department, tag, or media_id is deliverable.", "Do not call this as a webhook validation helper; callback_verify_url and callback_ingest_event cover callback paths.", "Treat the response as diagnostics, not as durable connector state."]
+examples = ['{}']
 
 [sandbox]
 profile = "strict"

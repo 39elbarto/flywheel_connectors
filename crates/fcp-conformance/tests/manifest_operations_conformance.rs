@@ -876,7 +876,6 @@ fn expected_ai_hints_gap_connectors() -> Vec<String> {
         "nostr",
         "qq",
         "telnyx",
-        "wecom",
     ])
 }
 

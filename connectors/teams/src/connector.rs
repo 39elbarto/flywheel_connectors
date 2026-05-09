@@ -2350,20 +2350,24 @@ mod tests {
             assert_eq!(network_constraints.max_redirects, 0);
         }
 
-        assert!(
-            operations
-                .get(OP_INGEST_ACTIVITY)
-                .expect("ingest operation")
+        for operation_id in [OP_INGEST_ACTIVITY, OP_GET_CONVERSATION_STATE] {
+            let operation = operations
+                .get(operation_id)
+                .expect("local operation should be declared");
+            let network_constraints = operation
                 .network_constraints
-                .is_none()
-        );
-        assert!(
-            operations
-                .get(OP_GET_CONVERSATION_STATE)
-                .expect("conversation state operation")
-                .network_constraints
-                .is_none()
-        );
+                .as_ref()
+                .expect("local operation should declare no-egress network metadata");
+            assert_eq!(network_constraints.host_allow, vec!["none.invalid"]);
+            assert_eq!(network_constraints.port_allow, vec![0]);
+            assert!(!network_constraints.require_sni);
+            assert!(network_constraints.deny_localhost);
+            assert!(network_constraints.deny_private_ranges);
+            assert!(network_constraints.deny_tailnet_ranges);
+            assert!(network_constraints.deny_ip_literals);
+            assert_eq!(network_constraints.dns_max_ips, 0);
+            assert_eq!(network_constraints.max_redirects, 0);
+        }
 
         let send = operations
             .get(OP_SEND_CHANNEL_MSG)

@@ -622,6 +622,7 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "best_effort"
 revocation_freshness = "safe"
+network_constraints = { host_allow = ["none.invalid"], port_allow = [0], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 0, max_redirects = 0, connect_timeout_ms = 1000, total_timeout_ms = 10000, max_response_bytes = 65536 }
 
 [provides.operations."teams.ingest_activity".input_schema]
 type = "object"
@@ -684,6 +685,7 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 revocation_freshness = "safe"
+network_constraints = { host_allow = ["none.invalid"], port_allow = [0], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 0, max_redirects = 0, connect_timeout_ms = 1000, total_timeout_ms = 10000, max_response_bytes = 65536 }
 
 [provides.operations."teams.get_conversation_state".input_schema]
 type = "object"

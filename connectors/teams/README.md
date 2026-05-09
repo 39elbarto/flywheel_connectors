@@ -67,7 +67,7 @@ Important runtime truths the contract preserves:
 
 This README documents runtime truth and keeps current drift visible:
 
-- Runtime accepts Microsoft government and China Graph hosts, `/beta`, and test-local hosts, while manifest network constraints list only `graph.microsoft.com`.
+- Runtime accepts Microsoft government and China Graph hosts, `/beta`, and test-local hosts, while manifest Graph operation constraints list only `graph.microsoft.com`; host-forwarded/local operations use an explicit no-egress sentinel.
 - Runtime `bot_service_url_policy` accepts any clean HTTPS origin, not only Microsoft Bot Framework service hosts.
 - Runtime retry config is stored and surfaced in observability, but Graph client calls use direct reqwest requests and do not run through a connector retry loop.
 - Runtime `simulate()` is unconditional and does not mirror invoke authorization or input validation.
@@ -124,6 +124,7 @@ The current Teams README slice documents the existing runtime surface:
 - Runtime follows Graph `@odata.nextLink` pagination for collection reads.
 - Runtime maps `Retry-After` on Graph 429 responses into rate-limit errors but does not retry automatically.
 - Inbound Teams activity ingestion is host-forwarded through `teams.ingest_activity`; no native listener is started.
+- `teams.ingest_activity` and `teams.get_conversation_state` perform no connector-owned network egress and declare `none.invalid:0` manifest constraints.
 - Ingress policy can allowlist sender IDs, Azure AD object IDs, team IDs, and channel/conversation IDs.
 - `bot_user_id` is dropped as a self-message before state mutation.
 - File-consent invoke activities are denied unless `accept_file_consent` is explicitly true.

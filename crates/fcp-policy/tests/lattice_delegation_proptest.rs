@@ -53,6 +53,7 @@ struct FormalPolicyCorrespondenceEvidence<'a> {
 }
 
 #[derive(Debug, Serialize)]
+#[allow(clippy::struct_excessive_bools)] // JSONL proof evidence records independent checks as booleans.
 struct FormalPolicyChecks {
     zone_period_public_key_shape: bool,
     delegation_certificate_claims: bool,
@@ -152,7 +153,7 @@ fn formal_fixture_id_hash(profile: &str) -> String {
     )
 }
 
-fn formal_period() -> DelegationPeriod {
+const fn formal_period() -> DelegationPeriod {
     DelegationPeriod {
         start_unix_ms: 1_700_000_000_000,
         end_unix_ms: 1_700_003_600_000,

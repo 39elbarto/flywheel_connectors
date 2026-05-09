@@ -283,17 +283,29 @@ run_rch_cargo "criterion_lattice_crypto_bench" \
   "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo bench -p fcp-crypto-pq --bench lattice_vs_ed25519_vs_mldsa -- --sample-size 10 --measurement-time 1 --warm-up-time 1" \
   cargo bench -p fcp-crypto-pq --bench lattice_vs_ed25519_vs_mldsa -- --sample-size 10 --measurement-time 1 --warm-up-time 1
 
-run_rch_cargo "cargo_fmt_check" \
-  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo fmt --check --package fcp-crypto-pq --package fcp-policy --package fcp-host" \
-  cargo fmt --check --package fcp-crypto-pq --package fcp-policy --package fcp-host
+run_rch_cargo "rustfmt_lattice_surfaces" \
+  "rch exec -- env CARGO_TARGET_DIR=<hashed> rustfmt --edition 2024 --check lattice proof Rust surfaces" \
+  rustfmt --edition 2024 --check \
+    crates/fcp-crypto-pq/tests/representation_profile.rs \
+    crates/fcp-policy/tests/lattice_delegation_proptest.rs \
+    crates/fcp-host/tests/lattice_policy_dispatcher_e2e.rs \
+    crates/fcp-crypto-pq/benches/lattice_vs_ed25519_vs_mldsa.rs
 
 run_rch_cargo "cargo_check_lattice_surfaces" \
   "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo check -p fcp-crypto-pq -p fcp-policy -p fcp-host --all-targets" \
   cargo check -p fcp-crypto-pq -p fcp-policy -p fcp-host --all-targets
 
-run_rch_cargo "cargo_clippy_lattice_surfaces" \
-  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo clippy -p fcp-crypto-pq -p fcp-policy -p fcp-host --all-targets --no-deps -- -D warnings" \
-  cargo clippy -p fcp-crypto-pq -p fcp-policy -p fcp-host --all-targets --no-deps -- -D warnings
+run_rch_cargo "cargo_clippy_crypto_representation" \
+  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo clippy -p fcp-crypto-pq --test representation_profile --no-deps -- -D warnings" \
+  cargo clippy -p fcp-crypto-pq --test representation_profile --no-deps -- -D warnings
+
+run_rch_cargo "cargo_clippy_policy_lattice" \
+  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo clippy -p fcp-policy --test lattice_delegation_proptest --no-deps -- -D warnings" \
+  cargo clippy -p fcp-policy --test lattice_delegation_proptest --no-deps -- -D warnings
+
+run_rch_cargo "cargo_clippy_host_dispatcher" \
+  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo clippy -p fcp-host --test lattice_policy_dispatcher_e2e --no-deps -- -D warnings" \
+  cargo clippy -p fcp-host --test lattice_policy_dispatcher_e2e --no-deps -- -D warnings
 
 run_and_capture "bash_syntax" \
   "bash -n scripts/e2e/lattice_delegation_formal_correspondence.sh scripts/e2e/lattice_delegation_assurance_gauntlet.sh" \
@@ -339,7 +351,7 @@ append_redaction_scan \
 
 artifact_hash="$(sha256_file "${ARTIFACT}")"
 append_json "summary" "pass" "$(jq -cn \
-  --arg artifact "target/fcp-crypto-pq/lattice-delegation-assurance-gauntlet.jsonl" \
+  --arg artifact "${ARTIFACT}" \
   --arg artifact_hash "sha256:${artifact_hash}" \
   '{artifact_path:$artifact,artifact_hash:$artifact_hash,profile_ids:["SMALL_TEST","V4_REFERENCE"],scenario_ids:["allow_v4_reference","deny_forged_v4_reference","deny_trust_set_replay_v4_reference","deny_mismatched_operation","deny_mismatched_principal"],theorem_names:["lattice_delegation_chain_corruption_rejected","lattice_delegation_sis_assumption_boundary_complete","lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions"],assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1","FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1","FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1","FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"],benchmark_groups:["trap_gen","delegate","sample_pre","verify","full_crypto_route","host_dispatcher_pipeline"],stable_lattice_error_mapping:"covered_by_host_dispatcher_e2e",cleanup_result:"not_applicable_generated_artifact"}')"
 

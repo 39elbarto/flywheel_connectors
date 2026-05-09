@@ -510,11 +510,43 @@ pub fn reconstruct_secret(shares: &[ShamirShare]) -> ShamirResult<ZeroizingSecre
     Ok(ZeroizingSecret(secret))
 }
 
-/// Wrapper for reconstructed secret that zeroizes on drop.
-#[derive(Zeroize, ZeroizeOnDrop)]
+/// Wrapper for secret bytes that zeroizes its owned buffer on drop.
+///
+/// Cloning is deliberate: every clone owns an independent buffer and each
+/// buffer is zeroized when its wrapper is dropped.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct ZeroizingSecret(Vec<u8>);
 
 impl ZeroizingSecret {
+    /// Construct a new zeroizing secret from owned bytes.
+    ///
+    /// The input is moved into this wrapper and will be zeroized when the
+    /// wrapper is dropped.
+    #[must_use]
+    pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
+        Self(bytes.into())
+    }
+
+    /// Construct a new zeroizing secret from a UTF-8 string slice.
+    ///
+    /// This copies the string into an owned byte buffer. The caller still owns
+    /// the original string and is responsible for its lifecycle.
+    #[allow(clippy::should_implement_trait)]
+    #[must_use]
+    pub fn from_str(secret: &str) -> Self {
+        Self(secret.as_bytes().to_vec())
+    }
+
+    /// Construct from an already-owned `Vec<u8>` with explicit zeroize-on-drop
+    /// semantics.
+    ///
+    /// This is equivalent to [`Self::new`] for `Vec<u8>`, but the method name is
+    /// useful at call sites where the security contract should be visible.
+    #[must_use]
+    pub const fn with_zeroize_drop(value: Vec<u8>) -> Self {
+        Self(value)
+    }
+
     /// Access the secret bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
@@ -532,6 +564,43 @@ impl ZeroizingSecret {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Compare two secrets in constant time for equal-length inputs.
+    ///
+    /// Length still affects the result before the constant-time byte
+    /// comparison. This avoids implementing `PartialEq`/`Ord`, whose standard
+    /// contracts do not promise timing behavior suitable for secret material.
+    #[must_use]
+    pub fn constant_time_eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && subtle::ConstantTimeEq::ct_eq(self.0.as_slice(), other.0.as_slice()).into()
+    }
+}
+
+impl From<Vec<u8>> for ZeroizingSecret {
+    fn from(value: Vec<u8>) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<&[u8]> for ZeroizingSecret {
+    fn from(value: &[u8]) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<&str> for ZeroizingSecret {
+    fn from(value: &str) -> Self {
+        Self::from_str(value)
+    }
+}
+
+impl std::str::FromStr for ZeroizingSecret {
+    type Err = std::convert::Infallible;
+
+    fn from_str(secret: &str) -> Result<Self, Self::Err> {
+        Ok(Self(secret.as_bytes().to_vec()))
+    }
 }
 
 impl std::ops::Deref for ZeroizingSecret {
@@ -544,10 +613,13 @@ impl std::ops::Deref for ZeroizingSecret {
 
 impl std::fmt::Debug for ZeroizingSecret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ZeroizingSecret")
-            .field("len", &self.0.len())
-            .field("data", &"[redacted]")
-            .finish()
+        write!(f, "ZeroizingSecret(<redacted, len={}>)", self.0.len())
+    }
+}
+
+impl std::fmt::Display for ZeroizingSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ZeroizingSecret(<redacted, len={}>)", self.0.len())
     }
 }
 
@@ -1001,9 +1073,101 @@ mod tests {
     fn zeroizing_secret_debug_redacts() {
         let secret = ZeroizingSecret(vec![0xDE, 0xAD, 0xBE, 0xEF]);
         let debug = format!("{secret:?}");
-        assert!(debug.contains("[redacted]"));
+        assert!(debug.contains("<redacted"));
         assert!(!debug.contains("dead"));
         assert!(!debug.contains("beef"));
+    }
+
+    #[test]
+    fn zeroizing_secret_new_from_vec_preserves_bytes() {
+        let secret = ZeroizingSecret::new(vec![1, 2, 3, 4]);
+        assert_eq!(secret.as_bytes(), &[1, 2, 3, 4]);
+        assert_eq!(secret.len(), 4);
+    }
+
+    #[test]
+    fn zeroizing_secret_from_str_copies_utf8_bytes() {
+        let secret = ZeroizingSecret::from_str("secret-value");
+        assert_eq!(secret.as_bytes(), b"secret-value");
+    }
+
+    #[test]
+    fn zeroizing_secret_with_zeroize_drop_accepts_owned_vec() {
+        let secret = ZeroizingSecret::with_zeroize_drop(vec![9, 8, 7]);
+        assert_eq!(secret.as_bytes(), &[9, 8, 7]);
+    }
+
+    #[test]
+    fn zeroizing_secret_from_vec_trait_preserves_bytes() {
+        let secret = ZeroizingSecret::from(vec![5, 6, 7]);
+        assert_eq!(secret.as_bytes(), &[5, 6, 7]);
+    }
+
+    #[test]
+    fn zeroizing_secret_from_slice_trait_copies_bytes() {
+        let source = [10, 20, 30];
+        let secret = ZeroizingSecret::from(source.as_slice());
+        assert_eq!(secret.as_bytes(), source);
+    }
+
+    #[test]
+    fn zeroizing_secret_from_str_trait_copies_bytes() {
+        let secret = ZeroizingSecret::from("operator-token");
+        assert_eq!(secret.as_bytes(), b"operator-token");
+    }
+
+    #[test]
+    fn zeroizing_secret_std_from_str_is_infallible() {
+        let secret = <ZeroizingSecret as std::str::FromStr>::from_str("from-std")
+            .expect("constructor is infallible");
+        assert_eq!(secret.as_bytes(), b"from-std");
+    }
+
+    #[test]
+    fn zeroizing_secret_clone_owns_independent_buffer() {
+        let first = ZeroizingSecret::new(vec![1, 2, 3]);
+        let second = first.clone();
+        assert_eq!(first.as_bytes(), second.as_bytes());
+        assert_ne!(first.as_bytes().as_ptr(), second.as_bytes().as_ptr());
+    }
+
+    #[test]
+    fn zeroizing_secret_debug_shape_redacts_and_reports_len() {
+        let secret = ZeroizingSecret::from("abcd");
+        assert_eq!(format!("{secret:?}"), "ZeroizingSecret(<redacted, len=4>)");
+    }
+
+    #[test]
+    fn zeroizing_secret_display_redacts_and_reports_len() {
+        let secret = ZeroizingSecret::from("abcd");
+        assert_eq!(secret.to_string(), "ZeroizingSecret(<redacted, len=4>)");
+    }
+
+    #[test]
+    fn zeroizing_secret_constant_time_eq_accepts_equal_bytes() {
+        let first = ZeroizingSecret::from("same");
+        let second = ZeroizingSecret::from("same");
+        assert!(first.constant_time_eq(&second));
+    }
+
+    #[test]
+    fn zeroizing_secret_constant_time_eq_rejects_same_len_mismatch() {
+        let first = ZeroizingSecret::from("abcd");
+        let second = ZeroizingSecret::from("abce");
+        assert!(!first.constant_time_eq(&second));
+    }
+
+    #[test]
+    fn zeroizing_secret_constant_time_eq_rejects_length_mismatch() {
+        let first = ZeroizingSecret::from("abcd");
+        let second = ZeroizingSecret::from("abc");
+        assert!(!first.constant_time_eq(&second));
+    }
+
+    #[test]
+    fn zeroizing_secret_test_utils_constructs_static_fixture() {
+        let secret = crate::test_utils::unsafe_construct_from_static_test_secret(b"public-fixture");
+        assert_eq!(secret.as_bytes(), b"public-fixture");
     }
 
     #[test]
@@ -1294,21 +1458,21 @@ mod tests {
 
     #[test]
     fn zeroizing_secret_len() {
-        let s = ZeroizingSecret(vec![1, 2, 3]);
+        let s = ZeroizingSecret::new(vec![1, 2, 3]);
         assert_eq!(s.len(), 3);
         assert!(!s.is_empty());
     }
 
     #[test]
     fn zeroizing_secret_empty() {
-        let s = ZeroizingSecret(vec![]);
+        let s = ZeroizingSecret::new(vec![]);
         assert!(s.is_empty());
         assert_eq!(s.len(), 0);
     }
 
     #[test]
     fn zeroizing_secret_deref() {
-        let s = ZeroizingSecret(vec![10, 20, 30]);
+        let s = ZeroizingSecret::new(vec![10, 20, 30]);
         let slice: &[u8] = &s;
         assert_eq!(slice, &[10, 20, 30]);
     }

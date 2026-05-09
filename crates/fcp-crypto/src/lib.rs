@@ -145,3 +145,24 @@ pub use xwing::{
     XWING_SECRET_KEY_SIZE, XWING_SHARED_SECRET_SIZE, XWingKem, XWingProvider, XWingPublicKey,
     XWingSealedBox, XWingSecretKey, XWingStub, XWingWireSize,
 };
+
+/// Common crypto imports for connector and host code.
+pub mod prelude {
+    pub use crate::ZeroizingSecret;
+}
+
+/// Test-only crypto helpers.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils {
+    use crate::ZeroizingSecret;
+
+    /// Construct a zeroizing secret from static test bytes.
+    ///
+    /// This is intentionally named as an unsafe construction path because static
+    /// bytes cannot themselves be wiped. Use only for golden vectors and tests
+    /// where the fixture is already public.
+    #[must_use]
+    pub fn unsafe_construct_from_static_test_secret(bytes: &'static [u8]) -> ZeroizingSecret {
+        ZeroizingSecret::new(bytes)
+    }
+}

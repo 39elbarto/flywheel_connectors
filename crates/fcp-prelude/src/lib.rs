@@ -139,6 +139,7 @@ pub use fcp_core::*;
 // External crate re-exports (mirror fcp-core's compatibility surface).
 pub use async_trait::async_trait;
 pub use chrono::{DateTime, Utc};
+pub use fcp_crypto::ZeroizingSecret;
 pub use uuid::Uuid;
 
 // ── Production-hardening helpers (ptb6n) ───────────────────────────
@@ -208,6 +209,13 @@ mod tests {
         // than at every consumer site.
         let _: DateTime<Utc> = chrono::Utc::now();
         let _: Uuid = Uuid::nil();
+    }
+
+    #[test]
+    fn crypto_re_exports_resolve_zeroizing_secret() {
+        let secret = ZeroizingSecret::from("prelude-secret");
+        assert_eq!(secret.as_bytes(), b"prelude-secret");
+        assert_eq!(secret.to_string(), "ZeroizingSecret(<redacted, len=14>)");
     }
 
     #[test]

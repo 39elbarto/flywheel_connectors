@@ -18,6 +18,7 @@ workspace = true
 # `lib.rs` will switch from `fcp_core::*` to the owner crate without
 # changing what consumers see.
 fcp-core = { path = "../fcp-core" }
+fcp-crypto = { path = "../fcp-crypto" }
 
 # External re-exports the legacy `fcp-core` barrel exposed. Carrying
 # them here lets consumers migrate to fcp-prelude without losing access

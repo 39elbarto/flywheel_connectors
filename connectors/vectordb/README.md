@@ -68,6 +68,7 @@ This README documents runtime truth and keeps current drift visible:
 
 - Manifest operation IDs are unprefixed (`create_collection`, `query_vectors`, and so on), while runtime invoke and introspection use `vectordb.*` operation IDs.
 - Manifest and runtime both document provider network constraints, but runtime operations do not open HTTP or gRPC connections.
+- `list_collections` and `describe_collection` declare no-egress sentinels because their current runtime handlers return local synthetic data instead of provider results.
 - Manifest marks `create_collection`, `upsert_vectors`, and `delete_vectors` as policy-approved and `delete_collection` as interactive approval. Runtime `OperationInfo` includes approval metadata, but invoke checks no approval token.
 - Runtime verifies bound capability tokens for invoke, but it does not bind tokens to collection, namespace, vector IDs, endpoint, or provider resources.
 - Runtime `simulate()` deserializes only canonical `SimulateRequest`, checks configured state and operation existence, and does not verify capability tokens or input schemas.

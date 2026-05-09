@@ -114,6 +114,132 @@ async fn invoke(
         .await
 }
 
+fn manifest() -> Result<toml::Table, String> {
+    include_str!("../manifest.toml")
+        .parse::<toml::Table>()
+        .map_err(|err| format!("manifest.toml should parse: {err}"))
+}
+
+fn manifest_operations(
+    manifest: &toml::Table,
+) -> Result<&toml::map::Map<String, toml::Value>, String> {
+    manifest
+        .get("provides")
+        .and_then(toml::Value::as_table)
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| "manifest should declare provides.operations".to_owned())
+}
+
+fn manifest_operation_network_constraints<'a>(
+    manifest: &'a toml::Table,
+    operation_id: &str,
+) -> Result<&'a toml::map::Map<String, toml::Value>, String> {
+    manifest_operations(manifest)?
+        .get(operation_id)
+        .and_then(toml::Value::as_table)
+        .and_then(|operation| operation.get("network_constraints"))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| format!("{operation_id} should declare network_constraints"))
+}
+
+fn string_array(
+    table: &toml::map::Map<String, toml::Value>,
+    key: &str,
+) -> Result<Vec<String>, String> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| format!("{key} should be an array"))?
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{key} entries should be strings"))
+        })
+        .collect()
+}
+
+fn integer_array(
+    table: &toml::map::Map<String, toml::Value>,
+    key: &str,
+) -> Result<Vec<i64>, String> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| format!("{key} should be an array"))?
+        .iter()
+        .map(|entry| {
+            entry
+                .as_integer()
+                .ok_or_else(|| format!("{key} entries should be integers"))
+        })
+        .collect()
+}
+
+fn bool_value(table: &toml::map::Map<String, toml::Value>, key: &str) -> Result<bool, String> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_bool)
+        .ok_or_else(|| format!("{key} should be a boolean"))
+}
+
+fn integer_value(table: &toml::map::Map<String, toml::Value>, key: &str) -> Result<i64, String> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_integer)
+        .ok_or_else(|| format!("{key} should be an integer"))
+}
+
+fn assert_no_egress_network_constraints(
+    manifest: &toml::Table,
+    operation_id: &str,
+) -> Result<(), String> {
+    let constraints = manifest_operation_network_constraints(manifest, operation_id)?;
+    assert_eq!(
+        string_array(constraints, "host_allow")?,
+        vec!["none.invalid"]
+    );
+    assert_eq!(integer_array(constraints, "port_allow")?, vec![0]);
+    assert!(bool_value(constraints, "deny_localhost")?);
+    assert!(bool_value(constraints, "deny_private_ranges")?);
+    assert!(bool_value(constraints, "deny_tailnet_ranges")?);
+    assert!(!bool_value(constraints, "require_sni")?);
+    assert!(bool_value(constraints, "deny_ip_literals")?);
+    assert!(bool_value(constraints, "require_host_canonicalization")?);
+    assert_eq!(integer_value(constraints, "dns_max_ips")?, 0);
+    assert_eq!(integer_value(constraints, "max_redirects")?, 0);
+    assert_eq!(integer_value(constraints, "connect_timeout_ms")?, 1_000);
+    assert_eq!(integer_value(constraints, "total_timeout_ms")?, 30_000);
+    assert_eq!(integer_value(constraints, "max_response_bytes")?, 1_048_576);
+    Ok(())
+}
+
+#[test]
+fn manifest_declares_per_operation_network_constraints() -> Result<(), String> {
+    let manifest = manifest()?;
+    let operations = manifest_operations(&manifest)?;
+
+    for operation_id in operations.keys() {
+        let constraints = manifest_operation_network_constraints(&manifest, operation_id)?;
+        assert!(
+            !string_array(constraints, "host_allow")?.is_empty(),
+            "{operation_id} host_allow should not be empty"
+        );
+        assert!(
+            !integer_array(constraints, "port_allow")?.is_empty(),
+            "{operation_id} port_allow should not be empty"
+        );
+        let _deny_private_ranges = bool_value(constraints, "deny_private_ranges")?;
+        let _require_sni = bool_value(constraints, "require_sni")?;
+    }
+
+    assert_no_egress_network_constraints(&manifest, "list_collections")?;
+    assert_no_egress_network_constraints(&manifest, "describe_collection")?;
+    Ok(())
+}
+
 // ============================================================================
 // Schema Validation: Collection Names
 // ============================================================================

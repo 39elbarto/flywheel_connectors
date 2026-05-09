@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:58a82020b8b361edebf04f34ce0aa970dc1d6f9945bc4daeb210f6e9420c2f62"
+interface_hash = "blake3-256:fcp.interface.v2:3cb96bd436f78fcd0571b2b369eef261335641868196a89f9bc55ea88a990be2"
 
 [connector]
 id = "fcp.vectordb"
@@ -367,6 +367,24 @@ type = "string"
 [provides.operations.describe_collection.output_schema.properties.vector_count]
 type = "integer"
 
+[provides.operations.describe_collection.network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
 [provides.operations.describe_collection.ai_hints]
 when_to_use = "Use to verify collection exists and check dimension/metric before inserting vectors."
 common_mistakes = ["Inserting vectors with wrong dimension."]
@@ -501,6 +519,24 @@ type = "string"
 
 [provides.operations.list_collections.output_schema.properties.collections.items.properties.vector_count]
 type = "integer"
+
+[provides.operations.list_collections.network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
 
 [provides.operations.list_collections.ai_hints]
 when_to_use = "Use to discover available collections before querying or inserting vectors."

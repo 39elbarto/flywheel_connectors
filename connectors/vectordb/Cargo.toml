@@ -43,3 +43,4 @@ wiremock.workspace = true
 fcp-async-core = { path = "../../crates/fcp-async-core" }
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }
+toml.workspace = true

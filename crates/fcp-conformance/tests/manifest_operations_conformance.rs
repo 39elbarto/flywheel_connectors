@@ -811,7 +811,6 @@ fn expected_network_constraints_gap_connectors() -> Vec<String> {
     connector_names(&[
         "anthropic",
         "anthropic-vertex",
-        "apple-notes",
         "apple-reminders",
         "dingtalk",
         "email-generic",

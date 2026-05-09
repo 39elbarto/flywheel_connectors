@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:a52489d5e27b1f103b7f2dd7972fb3c1dd771a5cc7112b3588da057de9b1b781"
+interface_hash = "blake3-256:fcp.interface.v2:61f33714e5550e231019784ee4dc23225f3c9ba0cdc9d2dbd7e542c80fc7d1ef"
 
 [connector]
 id = "fcp.apple-notes"
@@ -41,6 +41,24 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
+[provides.operations."apple_notes.health".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
+
 [provides.operations."apple_notes.health".input_schema]
 type = "object"
 properties = {}
@@ -73,6 +91,24 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations."apple_notes.list_notes".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
 
 [provides.operations."apple_notes.list_notes".input_schema]
 type = "object"
@@ -114,6 +150,24 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations."apple_notes.search_notes".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
 
 [provides.operations."apple_notes.search_notes".input_schema]
 required = ["query"]
@@ -157,6 +211,24 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
+[provides.operations."apple_notes.get_note".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
+
 [provides.operations."apple_notes.get_note".input_schema]
 required = ["note_id"]
 type = "object"
@@ -195,6 +267,24 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+
+[provides.operations."apple_notes.create_note".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
 
 [provides.operations."apple_notes.create_note".input_schema]
 required = ["title", "body"]

@@ -8,9 +8,9 @@
 
 ## Purpose
 
-This document fixes the operator-facing contract for `fcp.telegram`. The connector exposes the Telegram Bot API surface implemented in this crate: text send, media send, file metadata lookup, callback-query acknowledgement, long-polling event intake, and host-forwarded webhook update ingestion.
+This document fixes the operator-facing contract for `fcp.telegram`. The connector exposes the Telegram Bot API surface implemented in this crate: text send, media send, file metadata lookup, callback-query acknowledgement, chat actions, message reactions, webhook registration management, long-polling event intake, and host-forwarded webhook update ingestion.
 
-The connector is intentionally a bounded bot API bridge. It is not a Telegram client session, MTProto client, bot-management console, payment processor, chat-admin tool, inline-query engine, webhook registration manager, or full Bot API wrapper.
+The connector is intentionally a bounded bot API bridge. It is not a Telegram client session, MTProto client, bot-management console, payment processor, chat-admin tool, inline-query engine, custom-certificate uploader, or full Bot API wrapper.
 
 ## Current Runtime Snapshot
 
@@ -20,6 +20,11 @@ The current crate exposes these runtime operation IDs:
 - `telegram.send_media`
 - `telegram.get_file`
 - `telegram.answer_callback_query`
+- `telegram.send_chat_action`
+- `telegram.set_message_reaction`
+- `telegram.set_webhook`
+- `telegram.delete_webhook`
+- `telegram.get_webhook_info`
 - `telegram.ingest_webhook_update`
 
 Important runtime truths the contract preserves:
@@ -47,7 +52,7 @@ Important runtime truths the contract preserves:
 - Inbound policy defaults to deny before event emission.
 - Inbound policy modes are `deny`, `open`, and `allowlist`.
 - Allowlist policy can constrain sender user IDs, chat IDs, and topic resource URIs.
-- Optional `webhook_secret_token` is checked against the forwarded `secret_token` input for webhook ingestion.
+- Webhook ingestion requires configured `webhook_secret_token` and a matching forwarded `secret_token` input.
 - Handshake requires `zone_dir` for polling cursor and singleton-writer lease persistence.
 - Handshake verifies the bot with `getMe`, installs a bound `CapabilityVerifier`, starts the polling loop, and returns streaming event caps.
 - Runtime `invoke` uses the JSON field `operation`, not `operation_id`.
@@ -62,17 +67,27 @@ The runtime uses these request shapes under `{base_url}`:
 
 | Operation | Runtime request | Required input | Output handling |
 |-----------|-----------------|----------------|-----------------|
-| `telegram.send_message` | `POST /bot{token}/sendMessage` | `chat_id`, `text` | Returns message ID and chat ID after provider success. |
+| `telegram.send_message` | `POST /bot{token}/sendMessage` | `chat_id`, `text` | Returns first message ID, all produced message IDs, chunk count, and chat ID after provider success. |
 | `telegram.send_media` | `POST /bot{token}/sendPhoto`, `sendDocument`, `sendAudio`, `sendVideo`, or `sendVoice` | `chat_id`, `media_type`, `media` | Dispatches by `media_type`; returns message ID and chat ID after provider success. |
 | `telegram.get_file` | `GET /bot{token}/getFile?file_id=...` | `file_id` | Returns Telegram file metadata and locally constructs a file download URL when `file_path` is present. |
 | `telegram.answer_callback_query` | `POST /bot{token}/answerCallbackQuery` | `callback_query_id` | Returns `{ "success": true }` after provider success. |
-| `telegram.ingest_webhook_update` | no connector-owned egress | `payload` | Validates raw Update JSON, optional forwarded secret, inbound policy, duplicate update IDs, and emits an event when allowed. |
+| `telegram.send_chat_action` | `POST /bot{token}/sendChatAction` | `chat_id`, `action` | Returns `{ "success": true }` after provider success. |
+| `telegram.set_message_reaction` | `POST /bot{token}/setMessageReaction` | `chat_id`, `message_id` | Returns `{ "success": true }` after provider success. |
+| `telegram.set_webhook` | `POST /bot{token}/setWebhook` | `url` | Registers a public HTTPS webhook URL using the configured `webhook_secret_token` and returns success without echoing the secret. |
+| `telegram.delete_webhook` | `POST /bot{token}/deleteWebhook` | none | Deletes the current webhook registration, optionally dropping pending updates. |
+| `telegram.get_webhook_info` | `GET /bot{token}/getWebhookInfo` | none | Returns Telegram webhook URL, certificate flag, pending update count, and optional delivery diagnostics. |
+| `telegram.ingest_webhook_update` | no connector-owned egress | `payload`, `secret_token` | Validates raw Update JSON, required forwarded secret, inbound policy, duplicate update IDs, and emits an event when allowed. |
 
 Input and event handling:
 
-- `telegram.send_message` validates the 4096 character Telegram text limit.
+- `telegram.send_message` splits long text into bounded 4096 UTF-16-code-unit Telegram chunks, preserving `message_thread_id` on every chunk and applying `reply_to_message_id` only to the first chunk.
 - `telegram.send_media` validates the 1024 character caption limit.
 - `telegram.send_media` accepts media types `photo`, `document`, `audio`, `video`, and `voice`.
+- `telegram.send_chat_action` accepts Telegram Bot API chat-action enum values such as `typing`, `upload_photo`, and `upload_document`.
+- `telegram.set_message_reaction` accepts at most one non-paid reaction, matching Telegram's bot restriction; omit `reaction` or pass an empty array to clear the bot's reaction.
+- `telegram.set_webhook` accepts only public HTTPS webhook URLs, optional fixed IP address, optional max connections from `1` to `100`, optional allowed update filter, and optional `drop_pending_updates`.
+- `telegram.set_webhook` takes its `secret_token` from connector configuration, so invocation payloads do not carry secret material.
+- `telegram.delete_webhook` and `telegram.get_webhook_info` use the configured bot credential and do not require `webhook_secret_token`.
 - `chat_id` can be a numeric ID, `@username`, some `t.me` links, or a bare username that can be normalized.
 - Invite links are rejected as chat IDs.
 - `message_thread_id` is accepted for message and media sends and is included in resource URI binding.
@@ -88,9 +103,7 @@ Input and event handling:
 This README documents runtime truth and keeps current drift visible:
 
 - Telegram documents `getUpdates` and outgoing webhooks as mutually exclusive update-receive modes. The runtime always starts long polling during handshake when direct-token mode is available, even though it also exposes a host-forwarded webhook ingest operation.
-- The runtime does not call `setWebhook`, `deleteWebhook`, or `getWebhookInfo`.
 - Telegram currently documents more update kinds than the crate-local `KNOWN_ALLOWED_UPDATES` list covers, including newer boost, paid-media, and managed-bot update kinds.
-- Telegram documents webhook `secret_token` as 1 to 256 characters with only `A-Z`, `a-z`, `0-9`, `_`, and `-`. Runtime validates length plus whitespace/control-character constraints, but does not enforce the full Telegram character alphabet.
 - Telegram documents local Bot API servers as supporting local file paths and other local-network behavior. Runtime allows local base URLs for tests, while manifest operation network constraints deny localhost for production egress operations.
 - Manifest `interface_hash` is still the all-zero placeholder value.
 - Runtime handshake response uses a SHA-256 manifest string hash, not the manifest's `blake3-256` placeholder.
@@ -99,11 +112,12 @@ This README documents runtime truth and keeps current drift visible:
 - Runtime capability-token enforcement is wired and bound for both `invoke` and `simulate`.
 - `get_file` uses a manual HTTP path rather than the retry helper used by the generic request method.
 - The client retry helper retries selected HTTP/connect/timeout/provider errors with `max_retries = 2`; manifest rate-limit pools are documented but not enforced locally.
+- Runtime setWebhook support does not upload custom TLS certificates or multipart files.
 - Runtime `subscribe` confirms topics but does not filter them against the advertised Telegram event catalog.
 - Event replay is not supported.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should reconcile Telegram's current update taxonomy, decide whether polling and host-forwarded webhook modes should be mutually exclusive at runtime, wire webhook registration management if needed, enforce the documented webhook secret alphabet, filter handshake grants, expose approval metadata, enforce rate-limit pools, and replace the placeholder interface hash.
+A follow-up parity bead should reconcile Telegram's current update taxonomy, decide whether polling and host-forwarded webhook modes should be mutually exclusive at runtime, add custom-certificate handling if needed, filter handshake grants, expose approval metadata, enforce rate-limit pools, and replace the placeholder interface hash.
 
 ## First-Slice Scope
 
@@ -111,11 +125,11 @@ The current Telegram README slice documents the existing runtime surface:
 
 - bot-token and credential-ID configuration
 - base URL, poll timeout, allowed updates, webhook secret, and inbound policy configuration
-- text send, media send, file lookup, callback acknowledgement, and webhook ingest operations
+- text send, media send, file lookup, callback acknowledgement, chat action, message reaction, webhook management, and webhook ingest operations
 - long-polling state, singleton-writer lease, event emission, duplicate suppression, and shutdown behavior
 - lifecycle, doctor, health, self-check, simulate, introspect, invoke, subscribe, and shutdown behavior
 - provider error handling, retry behavior, local path safety, and message/caption limits
-- runtime/manifest/provider-doc drift around update taxonomy, webhook registration, approval tokens, grant filtering, rate limits, and interface hashes
+- runtime/manifest/provider-doc drift around update taxonomy, approval tokens, grant filtering, rate limits, and interface hashes
 - deterministic WireMock and connector-suite tests
 
 ## Auth And Zone Boundary
@@ -157,9 +171,9 @@ The current Telegram README slice documents the existing runtime surface:
 
 | Capability | Purpose |
 |------------|---------|
-| `telegram.send` | Send text/media messages and answer callback queries. |
+| `telegram.send` | Send text/media messages, answer callback queries, broadcast chat actions, and set message reactions. |
 | `telegram.read` | Read Telegram file metadata and construct safe download URLs. |
-| `telegram.webhook` | Accept host-forwarded Telegram webhook updates into the event stream. |
+| `telegram.webhook` | Manage Telegram webhook registration and accept host-forwarded Telegram webhook updates into the event stream. |
 
 ## Operation Inventory
 
@@ -169,6 +183,11 @@ The current Telegram README slice documents the existing runtime surface:
 | `telegram.send_media` | `POST /sendPhoto` etc. | `telegram.send` | `Risky` | `Medium` | `None` | Sends user-visible media content. |
 | `telegram.get_file` | `GET /getFile` | `telegram.read` | `Safe` | `Low` | `Strict` | Reads metadata and a temporary file path for an existing Telegram file. |
 | `telegram.answer_callback_query` | `POST /answerCallbackQuery` | `telegram.send` | `Safe` | `Low` | `None` | Acknowledges an already-received button press. |
+| `telegram.send_chat_action` | `POST /sendChatAction` | `telegram.send` | `Safe` | `Low` | `None` | Broadcasts transient typing/upload state without creating durable chat content. |
+| `telegram.set_message_reaction` | `POST /setMessageReaction` | `telegram.send` | `Safe` | `Low` | `BestEffort` | Sets or clears the bot's chosen non-paid reaction on an existing message. |
+| `telegram.set_webhook` | `POST /setWebhook` | `telegram.webhook` | `Risky` | `Medium` | `BestEffort` | Changes Telegram's delivery endpoint for this bot. |
+| `telegram.delete_webhook` | `POST /deleteWebhook` | `telegram.webhook` | `Risky` | `Medium` | `BestEffort` | Disables Telegram webhook delivery for this bot. |
+| `telegram.get_webhook_info` | `GET /getWebhookInfo` | `telegram.webhook` | `Safe` | `Low` | `Strict` | Reads Telegram webhook status and delivery diagnostics. |
 | `telegram.ingest_webhook_update` | host-forwarded local ingest | `telegram.webhook` | `Safe` | `Low` | `Strict` | Validates and converts a forwarded Telegram Update to an FCP event. |
 
 ## Resource URIs
@@ -181,7 +200,8 @@ Runtime capability verification binds these resource URI shapes:
 | Topic send | `telegram:chat:{chat_id}:topic:{message_thread_id}` |
 | File lookup | `telegram:file:{file_id}` |
 | Callback acknowledgement | `telegram:callback:{callback_query_id}` |
-| Webhook ingest | `telegram:webhook` |
+| Message reaction | `telegram:chat:{chat_id}:message:{message_id}` |
+| Webhook management and ingest | `telegram:webhook` |
 
 ## Explicit Non-Goals
 
@@ -190,7 +210,7 @@ The current implementation does not include:
 - MTProto user sessions
 - Telegram login widgets
 - Bot creation or BotFather automation
-- Webhook registration or certificate management
+- Webhook custom-certificate management
 - Payment, invoice, shipping, or checkout operations
 - Chat administration, moderation, invite-link, forum-topic, or boost management operations
 - Inline query answering

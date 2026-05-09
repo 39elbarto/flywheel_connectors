@@ -16,7 +16,23 @@ pub const MAX_POLL_TIMEOUT_SECS: i32 = 50;
 pub const MIN_POLL_LEASE_TTL_SECS: u64 = 10;
 pub const MIN_WEBHOOK_SECRET_TOKEN_CHARS: usize = 1;
 pub const MAX_WEBHOOK_SECRET_TOKEN_CHARS: usize = 256;
+pub const MAX_WEBHOOK_URL_CHARS: usize = 2048;
+pub const MIN_WEBHOOK_MAX_CONNECTIONS: i64 = 1;
+pub const MAX_WEBHOOK_MAX_CONNECTIONS: i64 = 100;
 const MAX_REPLY_TO_MESSAGE_DEPTH: usize = 8;
+pub const TELEGRAM_CHAT_ACTIONS: &[&str] = &[
+    "typing",
+    "upload_photo",
+    "record_video",
+    "upload_video",
+    "record_voice",
+    "upload_voice",
+    "upload_document",
+    "choose_sticker",
+    "find_location",
+    "record_video_note",
+    "upload_video_note",
+];
 pub const DEFAULT_TELEGRAM_ALLOWED_UPDATES: &[&str] = &[
     "message",
     "edited_message",
@@ -296,6 +312,79 @@ pub struct SendMessageRequest {
     pub message_thread_id: Option<i64>,
 }
 
+/// Send chat action request parameters.
+#[derive(Debug, Serialize)]
+pub struct SendChatActionRequest {
+    pub chat_id: String,
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_thread_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub business_connection_id: Option<String>,
+}
+
+/// Telegram message reaction type for setMessageReaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReactionType {
+    Emoji { emoji: String },
+    CustomEmoji { custom_emoji_id: String },
+}
+
+/// Set message reaction request parameters.
+#[derive(Debug, Serialize)]
+pub struct SetMessageReactionRequest {
+    pub chat_id: String,
+    pub message_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reaction: Option<Vec<ReactionType>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_big: Option<bool>,
+}
+
+/// setWebhook request parameters.
+#[derive(Debug, Clone, Serialize)]
+pub struct SetWebhookRequest {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_connections: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_updates: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drop_pending_updates: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_token: Option<String>,
+}
+
+/// deleteWebhook request parameters.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeleteWebhookRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drop_pending_updates: Option<bool>,
+}
+
+/// Webhook status returned by getWebhookInfo.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WebhookInfo {
+    pub url: String,
+    pub has_custom_certificate: bool,
+    pub pending_update_count: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error_date: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_synchronization_error_date: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_connections: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_updates: Option<Vec<String>>,
+}
+
 /// Get updates request parameters.
 #[derive(Debug, Serialize)]
 pub struct GetUpdatesRequest {
@@ -554,8 +643,8 @@ pub struct TelegramConfig {
     #[serde(default)]
     pub inbound_policy: TelegramInboundPolicy,
 
-    /// Optional Telegram webhook secret token forwarded from
-    /// X-Telegram-Bot-Api-Secret-Token.
+    /// Telegram webhook secret token forwarded from
+    /// X-Telegram-Bot-Api-Secret-Token for webhook mode.
     #[serde(default)]
     pub webhook_secret_token: Option<String>,
 }
@@ -687,28 +776,7 @@ impl TelegramConfig {
             });
         }
 
-        let mut seen = HashSet::new();
-        for update in &self.allowed_updates {
-            if update.trim().is_empty() {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "allowed_updates entries must not be empty".into(),
-                });
-            }
-            if !seen.insert(update.clone()) {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: format!("allowed_updates contains duplicate value: {update}"),
-                });
-            }
-            if !KNOWN_ALLOWED_UPDATES.contains(&update.as_str()) {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: format!("allowed_updates contains unsupported type: {update}"),
-                });
-            }
-        }
-
+        validate_allowed_updates(&self.allowed_updates)?;
         self.inbound_policy.validate()?;
         if let Some(token) = self.webhook_secret_token.as_deref() {
             validate_webhook_secret_token(token)?;
@@ -752,6 +820,162 @@ pub(crate) fn validate_webhook_secret_token(token: &str) -> FcpResult<()> {
         return Err(FcpError::InvalidRequest {
             code: 1003,
             message: "webhook_secret_token must not contain leading/trailing whitespace or control characters".into(),
+        });
+    }
+    if !token
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message:
+                "webhook_secret_token must contain only ASCII letters, digits, underscore, or hyphen"
+                    .into(),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_allowed_updates(updates: &[String]) -> FcpResult<()> {
+    let mut seen = HashSet::new();
+    for update in updates {
+        if update.trim().is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "allowed_updates entries must not be empty".into(),
+            });
+        }
+        if !seen.insert(update.as_str()) {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("allowed_updates contains duplicate value: {update}"),
+            });
+        }
+        if !KNOWN_ALLOWED_UPDATES.contains(&update.as_str()) {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("allowed_updates contains unsupported type: {update}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_webhook_url(url: &str) -> FcpResult<()> {
+    if url.is_empty() || url.trim() != url || url.len() > MAX_WEBHOOK_URL_CHARS {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "webhook url must be non-empty, trimmed, and at most {MAX_WEBHOOK_URL_CHARS} characters"
+            ),
+        });
+    }
+
+    let parsed = Url::parse(url).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Invalid webhook url: {error}"),
+    })?;
+    if parsed.scheme() != "https" {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "webhook url must use https".into(),
+        });
+    }
+    if parsed.host_str().is_none() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "webhook url must include a host".into(),
+        });
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "webhook url must not include userinfo".into(),
+        });
+    }
+    if parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "webhook url must not include a fragment".into(),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_webhook_max_connections(max_connections: i64) -> FcpResult<()> {
+    if !(MIN_WEBHOOK_MAX_CONNECTIONS..=MAX_WEBHOOK_MAX_CONNECTIONS).contains(&max_connections) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "max_connections must be between {MIN_WEBHOOK_MAX_CONNECTIONS} and {MAX_WEBHOOK_MAX_CONNECTIONS}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_webhook_ip_address(ip_address: &str) -> FcpResult<()> {
+    ip_address
+        .parse::<std::net::IpAddr>()
+        .map(|_| ())
+        .map_err(|error| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("ip_address must be a valid IP address: {error}"),
+        })
+}
+
+pub(crate) fn validate_set_webhook_request(request: &SetWebhookRequest) -> FcpResult<()> {
+    validate_webhook_url(&request.url)?;
+    if let Some(max_connections) = request.max_connections {
+        validate_webhook_max_connections(max_connections)?;
+    }
+    if let Some(allowed_updates) = request.allowed_updates.as_ref() {
+        validate_allowed_updates(allowed_updates)?;
+    }
+    if let Some(ip_address) = request.ip_address.as_deref() {
+        validate_webhook_ip_address(ip_address)?;
+    }
+    if let Some(secret_token) = request.secret_token.as_deref() {
+        validate_webhook_secret_token(secret_token)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_chat_action(action: &str) -> FcpResult<()> {
+    if TELEGRAM_CHAT_ACTIONS.contains(&action) {
+        return Ok(());
+    }
+    Err(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("unsupported Telegram chat action: {action}"),
+    })
+}
+
+pub(crate) fn validate_reactions(reactions: &[ReactionType]) -> FcpResult<()> {
+    if reactions.len() > 1 {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Telegram bots can set at most one non-paid reaction per message".into(),
+        });
+    }
+    for reaction in reactions {
+        match reaction {
+            ReactionType::Emoji { emoji } => validate_reaction_field("emoji", emoji)?,
+            ReactionType::CustomEmoji { custom_emoji_id } => {
+                validate_reaction_field("custom_emoji_id", custom_emoji_id)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_reaction_field(field: &str, value: &str) -> FcpResult<()> {
+    if value.trim() != value || value.is_empty() || value.chars().any(char::is_control) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "{field} must be a non-empty value without surrounding whitespace or control characters"
+            ),
         });
     }
     Ok(())
@@ -1869,7 +2093,7 @@ mod tests {
 
     #[test]
     fn telegram_config_rejects_invalid_webhook_secret_tokens() {
-        for secret in ["", " leading", "trailing ", "line\nbreak"] {
+        for secret in ["", " leading", "trailing ", "line\nbreak", "bad.token"] {
             let config: TelegramConfig = serde_json::from_value(json!({
                 "credential": "123456:ABCDEFGHIJKLMNOPQRSTUVWXyz012345",
                 "webhook_secret_token": secret
@@ -1879,6 +2103,40 @@ mod tests {
                 config.validate_runtime_settings().is_err(),
                 "webhook_secret_token should be rejected: {secret:?}"
             );
+        }
+    }
+
+    #[test]
+    fn set_webhook_request_validation_enforces_telegram_limits() {
+        let valid = SetWebhookRequest {
+            url: "https://example.com/fcp/telegram/webhook".into(),
+            ip_address: Some("203.0.113.10".into()),
+            max_connections: Some(40),
+            allowed_updates: Some(vec!["message".into(), "callback_query".into()]),
+            drop_pending_updates: Some(true),
+            secret_token: Some("telegram-webhook-secret_1".into()),
+        };
+        assert!(validate_set_webhook_request(&valid).is_ok());
+
+        for request in [
+            SetWebhookRequest {
+                url: "http://example.com/hook".into(),
+                ..valid.clone()
+            },
+            SetWebhookRequest {
+                max_connections: Some(101),
+                ..valid.clone()
+            },
+            SetWebhookRequest {
+                allowed_updates: Some(vec!["unknown_update".into()]),
+                ..valid.clone()
+            },
+            SetWebhookRequest {
+                ip_address: Some("not-an-ip".into()),
+                ..valid
+            },
+        ] {
+            assert!(validate_set_webhook_request(&request).is_err());
         }
     }
 

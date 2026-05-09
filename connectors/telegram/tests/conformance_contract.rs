@@ -31,6 +31,42 @@ async fn telegram_schema_operation_and_error_contracts_are_advertised() {
                 required_input_fields: &["callback_query_id"],
                 output_fields: &["success"],
             },
+            OperationContract {
+                id: "telegram.send_chat_action",
+                capability: "telegram.send",
+                required_input_fields: &["chat_id", "action"],
+                output_fields: &["success"],
+            },
+            OperationContract {
+                id: "telegram.set_message_reaction",
+                capability: "telegram.send",
+                required_input_fields: &["chat_id", "message_id"],
+                output_fields: &["success"],
+            },
+            OperationContract {
+                id: "telegram.set_webhook",
+                capability: "telegram.webhook",
+                required_input_fields: &["url"],
+                output_fields: &["success", "url", "secret_token_configured"],
+            },
+            OperationContract {
+                id: "telegram.delete_webhook",
+                capability: "telegram.webhook",
+                required_input_fields: &[],
+                output_fields: &["success"],
+            },
+            OperationContract {
+                id: "telegram.get_webhook_info",
+                capability: "telegram.webhook",
+                required_input_fields: &[],
+                output_fields: &["url", "has_custom_certificate", "pending_update_count"],
+            },
+            OperationContract {
+                id: "telegram.ingest_webhook_update",
+                capability: "telegram.webhook",
+                required_input_fields: &["payload", "secret_token"],
+                output_fields: &["accepted", "event_emitted", "update_id", "secret_verified"],
+            },
         ],
     );
 

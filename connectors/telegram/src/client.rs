@@ -258,6 +258,79 @@ impl TelegramClient {
             .await
     }
 
+    /// Broadcast a typing/upload/etc. chat action.
+    #[instrument(skip_all)]
+    pub async fn send_chat_action(
+        &self,
+        chat_id: impl Into<String>,
+        action: impl Into<String>,
+        message_thread_id: Option<i64>,
+        business_connection_id: Option<String>,
+    ) -> Result<bool, TelegramError> {
+        let action = action.into();
+        validate_chat_action(&action).map_err(|error| TelegramError::from_fcp(&error))?;
+        let request = SendChatActionRequest {
+            chat_id: normalize_chat_id(&chat_id.into())?,
+            action,
+            message_thread_id,
+            business_connection_id,
+        };
+
+        self.request("POST", "sendChatAction", Some(&request), None)
+            .await
+    }
+
+    /// Set or clear the bot's chosen reaction on a message.
+    #[instrument(skip_all)]
+    pub async fn set_message_reaction(
+        &self,
+        chat_id: impl Into<String>,
+        message_id: i64,
+        reaction: Option<Vec<ReactionType>>,
+        is_big: Option<bool>,
+    ) -> Result<bool, TelegramError> {
+        if let Some(reactions) = reaction.as_ref() {
+            validate_reactions(reactions).map_err(|error| TelegramError::from_fcp(&error))?;
+        }
+        let request = SetMessageReactionRequest {
+            chat_id: normalize_chat_id(&chat_id.into())?,
+            message_id,
+            reaction,
+            is_big,
+        };
+
+        self.request("POST", "setMessageReaction", Some(&request), None)
+            .await
+    }
+
+    /// Register the bot webhook with Telegram.
+    #[instrument(skip_all)]
+    pub async fn set_webhook(&self, request: SetWebhookRequest) -> Result<bool, TelegramError> {
+        validate_set_webhook_request(&request).map_err(|error| TelegramError::from_fcp(&error))?;
+        self.request("POST", "setWebhook", Some(&request), None)
+            .await
+    }
+
+    /// Delete the bot webhook registration.
+    #[instrument(skip_all)]
+    pub async fn delete_webhook(
+        &self,
+        drop_pending_updates: Option<bool>,
+    ) -> Result<bool, TelegramError> {
+        let request = DeleteWebhookRequest {
+            drop_pending_updates,
+        };
+        self.request("POST", "deleteWebhook", Some(&request), None)
+            .await
+    }
+
+    /// Fetch the current Telegram webhook registration status.
+    #[instrument(skip_all)]
+    pub async fn get_webhook_info(&self) -> Result<WebhookInfo, TelegramError> {
+        self.request("GET", "getWebhookInfo", None::<&()>, None)
+            .await
+    }
+
     /// Get file information for downloading.
     #[instrument(skip_all)]
     pub async fn get_file(&self, file_id: impl Into<String>) -> Result<File, TelegramError> {
@@ -1008,6 +1081,95 @@ mod tests {
 
         let updates = client.get_updates(request).await.unwrap();
         assert!(updates.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_set_webhook_success() {
+        let (mock_server, client) = setup_mock_client().await;
+
+        Mock::given(method("POST"))
+            .and(path("/bottest_token_12345/setWebhook"))
+            .and(body_json(serde_json::json!({
+                "url": "https://example.com/fcp/telegram/webhook",
+                "ip_address": "203.0.113.10",
+                "max_connections": 40,
+                "allowed_updates": ["message", "callback_query"],
+                "drop_pending_updates": true,
+                "secret_token": "telegram_webhook_secret-1"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": true
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let success = client
+            .set_webhook(SetWebhookRequest {
+                url: "https://example.com/fcp/telegram/webhook".into(),
+                ip_address: Some("203.0.113.10".into()),
+                max_connections: Some(40),
+                allowed_updates: Some(vec!["message".into(), "callback_query".into()]),
+                drop_pending_updates: Some(true),
+                secret_token: Some("telegram_webhook_secret-1".into()),
+            })
+            .await
+            .unwrap();
+
+        assert!(success);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_delete_webhook_success() {
+        let (mock_server, client) = setup_mock_client().await;
+
+        Mock::given(method("POST"))
+            .and(path("/bottest_token_12345/deleteWebhook"))
+            .and(body_json(serde_json::json!({
+                "drop_pending_updates": true
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": true
+            })))
+            .mount(&mock_server)
+            .await;
+
+        assert!(client.delete_webhook(Some(true)).await.unwrap());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_webhook_info_success() {
+        let (mock_server, client) = setup_mock_client().await;
+
+        Mock::given(method("GET"))
+            .and(path("/bottest_token_12345/getWebhookInfo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "url": "https://example.com/fcp/telegram/webhook",
+                    "has_custom_certificate": false,
+                    "pending_update_count": 3,
+                    "ip_address": "203.0.113.10",
+                    "last_error_date": 1_700_000_000,
+                    "last_error_message": "temporary upstream error",
+                    "max_connections": 40,
+                    "allowed_updates": ["message", "callback_query"]
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let info = client.get_webhook_info().await.unwrap();
+        assert_eq!(info.url, "https://example.com/fcp/telegram/webhook");
+        assert!(!info.has_custom_certificate);
+        assert_eq!(info.pending_update_count, 3);
+        assert_eq!(info.ip_address.as_deref(), Some("203.0.113.10"));
+        assert_eq!(info.max_connections, Some(40));
+        assert_eq!(
+            info.allowed_updates,
+            Some(vec!["message".into(), "callback_query".into()])
+        );
     }
 
     #[fcp_async_core::runtime::test]

@@ -4,8 +4,13 @@
 
 // ── Text & Caption ──────────────────────────────────────────────────────
 
-/// Maximum characters allowed in message text (sendMessage).
+/// Maximum UTF-16 code units allowed in one `sendMessage` request.
 pub const MESSAGE_TEXT_MAX_CHARS: usize = 4_096;
+/// Maximum `sendMessage` chunks produced from one logical FCP send request.
+pub const MESSAGE_TEXT_MAX_CHUNKS: usize = 16;
+/// Maximum UTF-16 code units accepted for one logical chunked send request.
+pub const MESSAGE_TEXT_CHUNKED_MAX_UTF16_UNITS: usize =
+    MESSAGE_TEXT_MAX_CHARS * MESSAGE_TEXT_MAX_CHUNKS;
 /// Maximum characters allowed in media captions (photo, video, document, etc.).
 pub const MEDIA_CAPTION_MAX_CHARS: usize = 1_024;
 
@@ -59,6 +64,8 @@ mod tests {
     #[test]
     fn text_limits_within_telegram_spec() {
         assert_eq!(MESSAGE_TEXT_MAX_CHARS, 4096);
+        assert_eq!(MESSAGE_TEXT_MAX_CHUNKS, 16);
+        assert_eq!(MESSAGE_TEXT_CHUNKED_MAX_UTF16_UNITS, 65_536);
         assert_eq!(MEDIA_CAPTION_MAX_CHARS, 1024);
     }
 

@@ -21,7 +21,7 @@ use serde_json::json;
 use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{method, path},
+    matchers::{body_json, method, path},
 };
 
 use fcp_telegram::{connector::TelegramConnector, limits as telegram_limits};
@@ -37,9 +37,14 @@ const TELEGRAM_API_HOST: &str = "api.telegram.org";
 const NO_EGRESS_HOST: &str = "none.invalid";
 const TELEGRAM_EGRESS_OPERATION_IDS: &[&str] = &[
     "telegram.answer_callback_query",
+    "telegram.delete_webhook",
     "telegram.get_file",
+    "telegram.get_webhook_info",
+    "telegram.send_chat_action",
     "telegram.send_media",
     "telegram.send_message",
+    "telegram.set_message_reaction",
+    "telegram.set_webhook",
 ];
 const TELEGRAM_NO_EGRESS_OPERATION_IDS: &[&str] = &["telegram.ingest_webhook_update"];
 
@@ -244,9 +249,15 @@ fn manifest_declares_strict_per_operation_network_constraints() {
 /// Map an operation ID to the capability ID that governs it.
 fn capability_for_operation(op: &str) -> &str {
     match op {
-        "telegram.send_message" | "telegram.send_media" | "telegram.answer_callback_query" => {
-            "telegram.send"
-        }
+        "telegram.send_message"
+        | "telegram.send_media"
+        | "telegram.answer_callback_query"
+        | "telegram.send_chat_action"
+        | "telegram.set_message_reaction" => "telegram.send",
+        "telegram.set_webhook"
+        | "telegram.delete_webhook"
+        | "telegram.get_webhook_info"
+        | "telegram.ingest_webhook_update" => "telegram.webhook",
         _ => "telegram.read",
     }
 }
@@ -411,6 +422,129 @@ async fn send_message_happy_path() {
 }
 
 #[fcp_async_core::test]
+async fn send_message_long_text_splits_utf16_chunks_and_keeps_topic() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.send_message.long_utf16_split");
+    let mut connector = TelegramConnector::new();
+    let (mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_message"]).await;
+
+    let first_chunk = "a".repeat(telegram_limits::MESSAGE_TEXT_MAX_CHARS - 1);
+    let second_chunk = "🙂tail".to_string();
+    let text = format!("{first_chunk}{second_chunk}");
+
+    Mock::given(method("POST"))
+        .and(path(token_path("sendMessage")))
+        .and(body_json(json!({
+            "chat_id": "123456",
+            "text": first_chunk,
+            "reply_to_message_id": 10,
+            "message_thread_id": 77
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": {
+                "message_id": 101,
+                "chat": { "id": 123456, "type": "private", "first_name": "Test" },
+                "date": 1234567890,
+                "text": "first chunk"
+            }
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path(token_path("sendMessage")))
+        .and(body_json(json!({
+            "chat_id": "123456",
+            "text": second_chunk,
+            "message_thread_id": 77
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": {
+                "message_id": 102,
+                "chat": { "id": 123456, "type": "private", "first_name": "Test" },
+                "date": 1234567891,
+                "text": "second chunk"
+            }
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "telegram.send_message",
+            "input": {
+                "chat_id": "123456",
+                "text": text,
+                "reply_to_message_id": 10,
+                "message_thread_id": 77
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("chunked send_message invoke should succeed");
+
+    assert_eq!(result["message_id"], 101);
+    assert_eq!(result["chat_id"], 123456);
+    assert_eq!(result["message_ids"], json!([101, 102]));
+    assert_eq!(result["chunk_count"], 2);
+}
+
+#[fcp_async_core::test]
+async fn send_message_three_chunk_final_returns_all_message_ids() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.send_message.three_chunk_final");
+    let mut connector = TelegramConnector::new();
+    let (mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_message"]).await;
+
+    let first_chunk = "b".repeat(telegram_limits::MESSAGE_TEXT_MAX_CHARS);
+    let second_chunk = "c".repeat(telegram_limits::MESSAGE_TEXT_MAX_CHARS);
+    let third_chunk = "done".to_string();
+    let text = format!("{first_chunk}{second_chunk}{third_chunk}");
+
+    for (message_id, chunk) in [
+        (201, first_chunk.as_str()),
+        (202, second_chunk.as_str()),
+        (203, third_chunk.as_str()),
+    ] {
+        Mock::given(method("POST"))
+            .and(path(token_path("sendMessage")))
+            .and(body_json(json!({
+                "chat_id": "123456",
+                "text": chunk
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "ok": true,
+                "result": {
+                    "message_id": message_id,
+                    "chat": { "id": 123456, "type": "private", "first_name": "Test" },
+                    "date": 1234567890 + message_id,
+                    "text": "chunk"
+                }
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+    }
+
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "telegram.send_message",
+            "input": { "chat_id": "123456", "text": text },
+            "capability_token": capability
+        }))
+        .await
+        .expect("three-chunk send_message invoke should succeed");
+
+    assert_eq!(result["message_id"], 201);
+    assert_eq!(result["message_ids"], json!([201, 202, 203]));
+    assert_eq!(result["chunk_count"], 3);
+}
+
+#[fcp_async_core::test]
 async fn get_file_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("telegram.get_file.happy_path");
     let mut connector = TelegramConnector::new();
@@ -472,6 +606,285 @@ async fn answer_callback_query_happy_path() {
         .expect("answer_callback_query invoke should succeed");
 
     assert_eq!(result["success"], true);
+}
+
+#[fcp_async_core::test]
+async fn send_chat_action_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.send_chat_action.happy_path");
+    let mut connector = TelegramConnector::new();
+    let (mock_server, signing_key) =
+        full_setup(&mut connector, &["telegram.send_chat_action"]).await;
+
+    Mock::given(method("POST"))
+        .and(path(token_path("sendChatAction")))
+        .and(body_json(json!({
+            "chat_id": "123456",
+            "action": "typing",
+            "message_thread_id": 77
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": true
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let capability = generate_valid_token(&signing_key, "telegram.send_chat_action");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "telegram.send_chat_action",
+            "input": {
+                "chat_id": "123456",
+                "action": "typing",
+                "message_thread_id": 77
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("send_chat_action invoke should succeed");
+
+    assert_eq!(result["success"], true);
+}
+
+#[fcp_async_core::test]
+async fn send_chat_action_repeated_401_opens_local_suspension() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.send_chat_action.401_suspension");
+    let mut connector = TelegramConnector::new();
+    let (mock_server, signing_key) =
+        full_setup(&mut connector, &["telegram.send_chat_action"]).await;
+
+    Mock::given(method("POST"))
+        .and(path(token_path("sendChatAction")))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "ok": false,
+            "error_code": 401,
+            "description": "Unauthorized"
+        })))
+        .expect(2)
+        .mount(&mock_server)
+        .await;
+
+    let capability = generate_valid_token(&signing_key, "telegram.send_chat_action");
+    for attempt in 1..=2 {
+        let err = connector
+            .handle_invoke(json!({
+                "operation": "telegram.send_chat_action",
+                "input": {
+                    "chat_id": "123456",
+                    "action": "typing"
+                },
+                "capability_token": capability.clone()
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, FcpError::Unauthorized { code: 2001, .. }),
+            "attempt {attempt} should return Telegram Unauthorized, got {err:?}"
+        );
+    }
+
+    let suspended = connector
+        .handle_invoke(json!({
+            "operation": "telegram.send_chat_action",
+            "input": {
+                "chat_id": "123456",
+                "action": "typing"
+            },
+            "capability_token": capability
+        }))
+        .await
+        .unwrap_err();
+
+    let FcpError::External {
+        service,
+        message,
+        status_code,
+        retryable,
+        retry_after,
+    } = suspended
+    else {
+        panic!("expected local suspension external error, got {suspended:?}");
+    };
+    assert_eq!(service, "telegram");
+    assert!(message.contains("sendChatAction temporarily suspended"));
+    assert_eq!(status_code, Some(401));
+    assert!(retryable);
+    assert!(retry_after.is_some());
+
+    let requests = mock_server.received_requests().await.unwrap_or_default();
+    let chat_action_requests = requests
+        .iter()
+        .filter(|request| request.url.path() == token_path("sendChatAction"))
+        .count();
+    assert_eq!(
+        chat_action_requests, 2,
+        "third sendChatAction should be stopped by the local suspension before HTTP"
+    );
+}
+
+#[fcp_async_core::test]
+async fn set_message_reaction_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.set_message_reaction.happy_path");
+    let mut connector = TelegramConnector::new();
+    let (mock_server, signing_key) =
+        full_setup(&mut connector, &["telegram.set_message_reaction"]).await;
+
+    Mock::given(method("POST"))
+        .and(path(token_path("setMessageReaction")))
+        .and(body_json(json!({
+            "chat_id": "123456",
+            "message_id": 42,
+            "reaction": [{ "type": "emoji", "emoji": "👍" }],
+            "is_big": true
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": true
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let capability = generate_valid_token(&signing_key, "telegram.set_message_reaction");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "telegram.set_message_reaction",
+            "input": {
+                "chat_id": "123456",
+                "message_id": 42,
+                "reaction": [{ "type": "emoji", "emoji": "👍" }],
+                "is_big": true
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("set_message_reaction invoke should succeed");
+
+    assert_eq!(result["success"], true);
+}
+
+#[fcp_async_core::test]
+async fn set_webhook_happy_path_uses_configured_secret() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.set_webhook.happy_path");
+    let mut connector = TelegramConnector::new();
+    let mock_server = MockServer::start().await;
+    mount_get_me_mock(&mock_server).await;
+    connector
+        .handle_configure(json!({
+            "credential": test_bot_credential(),
+            "base_url": mock_server.uri(),
+            "webhook_secret_token": "telegram-webhook-secret_1"
+        }))
+        .await
+        .expect("configure with webhook secret should succeed");
+    let signing_key =
+        setup_handshake(&mut connector, &mock_server, &["telegram.set_webhook"]).await;
+
+    Mock::given(method("POST"))
+        .and(path(token_path("setWebhook")))
+        .and(body_json(json!({
+            "url": "https://fcp.example.com/hooks/telegram",
+            "ip_address": "203.0.113.10",
+            "max_connections": 40,
+            "allowed_updates": ["message", "callback_query"],
+            "drop_pending_updates": true,
+            "secret_token": "telegram-webhook-secret_1"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": true
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let capability = generate_valid_token(&signing_key, "telegram.set_webhook");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "telegram.set_webhook",
+            "input": {
+                "url": "https://fcp.example.com/hooks/telegram",
+                "ip_address": "203.0.113.10",
+                "max_connections": 40,
+                "allowed_updates": ["message", "callback_query"],
+                "drop_pending_updates": true
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("set_webhook invoke should succeed");
+
+    assert_eq!(result["success"], true);
+    assert_eq!(result["url"], "https://fcp.example.com/hooks/telegram");
+    assert_eq!(result["secret_token_configured"], true);
+}
+
+#[fcp_async_core::test]
+async fn delete_webhook_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.delete_webhook.happy_path");
+    let mut connector = TelegramConnector::new();
+    let (mock_server, signing_key) = full_setup(&mut connector, &["telegram.delete_webhook"]).await;
+
+    Mock::given(method("POST"))
+        .and(path(token_path("deleteWebhook")))
+        .and(body_json(json!({
+            "drop_pending_updates": true
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": true
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let capability = generate_valid_token(&signing_key, "telegram.delete_webhook");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "telegram.delete_webhook",
+            "input": { "drop_pending_updates": true },
+            "capability_token": capability
+        }))
+        .await
+        .expect("delete_webhook invoke should succeed");
+
+    assert_eq!(result["success"], true);
+}
+
+#[fcp_async_core::test]
+async fn get_webhook_info_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.get_webhook_info.happy_path");
+    let mut connector = TelegramConnector::new();
+    let (mock_server, signing_key) =
+        full_setup(&mut connector, &["telegram.get_webhook_info"]).await;
+
+    Mock::given(method("GET"))
+        .and(path(token_path("getWebhookInfo")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": {
+                "url": "https://fcp.example.com/hooks/telegram",
+                "has_custom_certificate": false,
+                "pending_update_count": 2,
+                "last_error_date": 1_700_000_000,
+                "last_error_message": "temporary delivery error",
+                "max_connections": 40,
+                "allowed_updates": ["message", "callback_query"]
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let capability = generate_valid_token(&signing_key, "telegram.get_webhook_info");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "telegram.get_webhook_info",
+            "input": {},
+            "capability_token": capability
+        }))
+        .await
+        .expect("get_webhook_info invoke should succeed");
+
+    assert_eq!(result["url"], "https://fcp.example.com/hooks/telegram");
+    assert_eq!(result["pending_update_count"], 2);
+    assert_eq!(result["max_connections"], 40);
 }
 
 // ============================================================================
@@ -665,8 +1078,13 @@ async fn introspect_lists_all_operations() {
     assert!(op_ids.contains(&"telegram.send_media"));
     assert!(op_ids.contains(&"telegram.get_file"));
     assert!(op_ids.contains(&"telegram.answer_callback_query"));
+    assert!(op_ids.contains(&"telegram.send_chat_action"));
+    assert!(op_ids.contains(&"telegram.set_message_reaction"));
+    assert!(op_ids.contains(&"telegram.set_webhook"));
+    assert!(op_ids.contains(&"telegram.delete_webhook"));
+    assert!(op_ids.contains(&"telegram.get_webhook_info"));
     assert!(op_ids.contains(&"telegram.ingest_webhook_update"));
-    assert_eq!(ops.len(), 5);
+    assert_eq!(ops.len(), 10);
 }
 
 #[fcp_async_core::test]
@@ -1581,13 +1999,13 @@ async fn answer_callback_query_missing_id_fails() {
 }
 
 #[fcp_async_core::test]
-async fn send_message_text_exceeds_limit_fails() {
-    let _ctx = AsyncTestContext::for_scenario("telegram.validation.text_too_long");
+async fn send_message_text_exceeds_chunked_limit_fails() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.validation.text_too_long_for_chunks");
     let mut connector = TelegramConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_message"]).await;
     let capability = generate_valid_token(&signing_key, "telegram.send_message");
 
-    let long_text = "a".repeat(telegram_limits::MESSAGE_TEXT_MAX_CHARS + 1);
+    let long_text = "a".repeat(telegram_limits::MESSAGE_TEXT_CHUNKED_MAX_UTF16_UNITS + 1);
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",
@@ -1600,9 +2018,9 @@ async fn send_message_text_exceeds_limit_fails() {
     match result.unwrap_err() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(
-                message.contains(&telegram_limits::MESSAGE_TEXT_MAX_CHARS.to_string())
-                    || message.contains("character limit"),
-                "Error should mention character limit, got: {message}"
+                message.contains(&telegram_limits::MESSAGE_TEXT_MAX_CHUNKS.to_string())
+                    || message.contains("chunks"),
+                "Error should mention chunk limit, got: {message}"
             );
         }
         e => {

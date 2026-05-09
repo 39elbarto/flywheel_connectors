@@ -24,6 +24,19 @@ pub enum TelegramError {
 
     #[error("Invalid file path: {0}")]
     InvalidFilePath(String),
+
+    #[error("Invalid request: {0}")]
+    InvalidRequest(String),
+
+    #[error(
+        "Partial Telegram send after {sent_chunks} chunk(s); failed chunk {failed_chunk_index}: {source}"
+    )]
+    PartialSend {
+        sent_chunks: usize,
+        failed_chunk_index: usize,
+        sent_message_ids: Vec<i64>,
+        source: Box<TelegramError>,
+    },
 }
 
 impl TelegramError {
@@ -35,6 +48,8 @@ impl TelegramError {
             Self::Api { code, .. } => *code == 429 || *code >= 500,
             Self::InvalidChatId(_) => false,
             Self::InvalidFilePath(_) => false,
+            Self::InvalidRequest(_) => false,
+            Self::PartialSend { .. } => false,
         }
     }
 
@@ -92,7 +107,22 @@ impl TelegramError {
                 code: 1003,
                 message: format!("Invalid file path: {message}"),
             },
+            Self::InvalidRequest(message) => FcpError::InvalidRequest {
+                code: 1003,
+                message: message.clone(),
+            },
+            Self::PartialSend { .. } => FcpError::External {
+                service: "telegram".into(),
+                message: self.to_string(),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            },
         }
+    }
+
+    pub(crate) fn from_fcp(error: &FcpError) -> Self {
+        Self::InvalidRequest(error.to_string())
     }
 }
 

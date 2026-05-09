@@ -11,7 +11,7 @@ interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000
 id = "fcp.telegram"
 name = "Telegram Connector"
 version = "0.1.0"
-description = "FCP connector for Telegram Bot API — messaging, media, file retrieval, callback queries, and event streaming"
+description = "FCP connector for Telegram Bot API — messaging, media, file retrieval, callback queries, chat actions, reactions, and event streaming"
 archetypes = [
     "bidirectional",
     "operational",
@@ -74,9 +74,9 @@ description = "Chat ID (numeric) or @username"
 type = ["string", "integer"]
 
 [provides.operations."telegram.send_message".input_schema.properties.text]
-description = "Message text (max 4096 characters)"
+description = "Message text; values over one Telegram sendMessage limit are split into bounded UTF-16 chunks"
 type = "string"
-maxLength = 4096
+maxLength = 65536
 
 [provides.operations."telegram.send_message".input_schema.properties.parse_mode]
 type = "string"
@@ -99,6 +99,16 @@ type = "integer"
 [provides.operations."telegram.send_message".output_schema.properties.chat_id]
 type = "integer"
 
+[provides.operations."telegram.send_message".output_schema.properties.message_ids]
+description = "All Telegram message IDs produced by a chunked logical send"
+type = "array"
+items = { type = "integer" }
+
+[provides.operations."telegram.send_message".output_schema.properties.chunk_count]
+description = "Number of sendMessage chunks sent for the logical request"
+type = "integer"
+minimum = 1
+
 [provides.operations."telegram.send_message".network_constraints]
 host_allow = ["api.telegram.org"]
 port_allow = [443]
@@ -119,7 +129,7 @@ when_to_use = "Send a text message to a Telegram user, group, or channel."
 common_mistakes = [
     "Using invite links instead of chat IDs",
     "Forgetting the @ prefix for usernames",
-    "Exceeding the 4096 character limit",
+    "Assuming long text is sent as one Telegram message instead of bounded follow-up chunks",
 ]
 examples = [
     '{"chat_id": "@username", "text": "Hello!"}',
@@ -310,6 +320,356 @@ common_mistakes = [
     "Forgetting to call this after processing a button press",
 ]
 
+[provides.operations."telegram.send_chat_action"]
+description = "Broadcast a transient chat action such as typing or upload status"
+capability = "telegram.send"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."telegram.send_chat_action".input_schema]
+type = "object"
+required = ["chat_id", "action"]
+
+[provides.operations."telegram.send_chat_action".input_schema.properties.chat_id]
+description = "Chat ID (numeric) or @username"
+type = ["string", "integer"]
+
+[provides.operations."telegram.send_chat_action".input_schema.properties.action]
+description = "Telegram chat action to broadcast"
+type = "string"
+enum = [
+    "typing",
+    "upload_photo",
+    "record_video",
+    "upload_video",
+    "record_voice",
+    "upload_voice",
+    "upload_document",
+    "choose_sticker",
+    "find_location",
+    "record_video_note",
+    "upload_video_note",
+]
+
+[provides.operations."telegram.send_chat_action".input_schema.properties.message_thread_id]
+description = "Telegram forum topic or private-chat topic thread ID"
+type = "integer"
+minimum = 0
+
+[provides.operations."telegram.send_chat_action".input_schema.properties.business_connection_id]
+description = "Optional Telegram business connection identifier"
+type = "string"
+
+[provides.operations."telegram.send_chat_action".output_schema]
+type = "object"
+required = ["success"]
+
+[provides.operations."telegram.send_chat_action".output_schema.properties.success]
+type = "boolean"
+
+[provides.operations."telegram.send_chat_action".network_constraints]
+host_allow = ["api.telegram.org"]
+port_allow = [443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."telegram.send_chat_action".ai_hints]
+when_to_use = "Show a short-lived typing or upload indicator before a delayed reply."
+common_mistakes = [
+    "Using chat actions as durable messages",
+    "Passing an action string that is not in Telegram's Bot API enum",
+]
+examples = [
+    '{"chat_id": "123456", "action": "typing"}',
+    '{"chat_id": "-100123456789", "action": "upload_document", "message_thread_id": 77}',
+]
+
+[provides.operations."telegram.set_message_reaction"]
+description = "Set or clear the bot's chosen non-paid reaction on a Telegram message"
+capability = "telegram.send"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+revocation_freshness = "safe"
+
+[provides.operations."telegram.set_message_reaction".input_schema]
+type = "object"
+required = ["chat_id", "message_id"]
+
+[provides.operations."telegram.set_message_reaction".input_schema.properties.chat_id]
+description = "Chat ID (numeric) or @username"
+type = ["string", "integer"]
+
+[provides.operations."telegram.set_message_reaction".input_schema.properties.message_id]
+description = "Telegram message ID"
+type = "integer"
+minimum = 0
+
+[provides.operations."telegram.set_message_reaction".input_schema.properties.reaction]
+description = "At most one non-paid reaction type; omit or pass an empty array to clear"
+type = "array"
+maxItems = 1
+
+[provides.operations."telegram.set_message_reaction".input_schema.properties.reaction.items]
+type = "object"
+
+[provides.operations."telegram.set_message_reaction".input_schema.properties.is_big]
+description = "Whether the reaction should be shown with a larger animation"
+type = "boolean"
+
+[provides.operations."telegram.set_message_reaction".output_schema]
+type = "object"
+required = ["success"]
+
+[provides.operations."telegram.set_message_reaction".output_schema.properties.success]
+type = "boolean"
+
+[provides.operations."telegram.set_message_reaction".network_constraints]
+host_allow = ["api.telegram.org"]
+port_allow = [443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."telegram.set_message_reaction".ai_hints]
+when_to_use = "React to a Telegram message or clear the bot's prior reaction."
+common_mistakes = [
+    "Trying to set paid reactions; bots cannot use paid reactions",
+    "Sending more than one reaction as a non-premium bot",
+]
+examples = [
+    '{"chat_id": "123456", "message_id": 42, "reaction": [{"type": "emoji", "emoji": "👍"}]}',
+    '{"chat_id": "123456", "message_id": 42, "reaction": []}',
+]
+
+[provides.operations."telegram.set_webhook"]
+description = "Register the Telegram webhook endpoint for this bot"
+capability = "telegram.webhook"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+revocation_freshness = "risky"
+
+[provides.operations."telegram.set_webhook".input_schema]
+type = "object"
+required = ["url"]
+
+[provides.operations."telegram.set_webhook".input_schema.properties.url]
+description = "Public HTTPS endpoint Telegram should deliver updates to"
+type = "string"
+maxLength = 2048
+
+[provides.operations."telegram.set_webhook".input_schema.properties.ip_address]
+description = "Optional fixed IP address Telegram should use for webhook requests"
+type = "string"
+
+[provides.operations."telegram.set_webhook".input_schema.properties.max_connections]
+description = "Maximum simultaneous HTTPS connections Telegram may open"
+type = "integer"
+minimum = 1
+maximum = 100
+
+[provides.operations."telegram.set_webhook".input_schema.properties.allowed_updates]
+description = "Telegram update types to receive"
+type = "array"
+
+[provides.operations."telegram.set_webhook".input_schema.properties.allowed_updates.items]
+type = "string"
+enum = [
+    "message",
+    "edited_message",
+    "channel_post",
+    "edited_channel_post",
+    "business_connection",
+    "business_message",
+    "edited_business_message",
+    "deleted_business_messages",
+    "message_reaction",
+    "message_reaction_count",
+    "inline_query",
+    "chosen_inline_result",
+    "callback_query",
+    "shipping_query",
+    "pre_checkout_query",
+    "poll",
+    "poll_answer",
+    "my_chat_member",
+    "chat_member",
+    "chat_join_request",
+]
+
+[provides.operations."telegram.set_webhook".input_schema.properties.drop_pending_updates]
+description = "Drop pending updates before registering the webhook"
+type = "boolean"
+
+[provides.operations."telegram.set_webhook".output_schema]
+type = "object"
+required = ["success", "url", "secret_token_configured"]
+
+[provides.operations."telegram.set_webhook".output_schema.properties.success]
+type = "boolean"
+
+[provides.operations."telegram.set_webhook".output_schema.properties.url]
+type = "string"
+
+[provides.operations."telegram.set_webhook".output_schema.properties.secret_token_configured]
+type = "boolean"
+
+[provides.operations."telegram.set_webhook".network_constraints]
+host_allow = ["api.telegram.org"]
+port_allow = [443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."telegram.set_webhook".ai_hints]
+when_to_use = "Register or update Telegram delivery to the host webhook ingress URL."
+common_mistakes = [
+    "Calling without configuring webhook_secret_token first",
+    "Passing a non-HTTPS URL",
+]
+examples = [
+    '{"url": "https://example.com/fcp/telegram/webhook", "allowed_updates": ["message", "callback_query"]}',
+]
+
+[provides.operations."telegram.delete_webhook"]
+description = "Delete the Telegram webhook registration for this bot"
+capability = "telegram.webhook"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+revocation_freshness = "risky"
+
+[provides.operations."telegram.delete_webhook".input_schema]
+type = "object"
+
+[provides.operations."telegram.delete_webhook".input_schema.properties.drop_pending_updates]
+description = "Drop pending updates while deleting the webhook"
+type = "boolean"
+
+[provides.operations."telegram.delete_webhook".output_schema]
+type = "object"
+required = ["success"]
+
+[provides.operations."telegram.delete_webhook".output_schema.properties.success]
+type = "boolean"
+
+[provides.operations."telegram.delete_webhook".network_constraints]
+host_allow = ["api.telegram.org"]
+port_allow = [443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."telegram.delete_webhook".ai_hints]
+when_to_use = "Disable Telegram webhook delivery before switching back to polling."
+common_mistakes = [
+    "Assuming pending updates are cleared unless drop_pending_updates is true",
+]
+examples = ['{"drop_pending_updates": true}']
+
+[provides.operations."telegram.get_webhook_info"]
+description = "Read Telegram webhook registration status"
+capability = "telegram.webhook"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."telegram.get_webhook_info".input_schema]
+type = "object"
+
+[provides.operations."telegram.get_webhook_info".output_schema]
+type = "object"
+required = ["url", "has_custom_certificate", "pending_update_count"]
+
+[provides.operations."telegram.get_webhook_info".output_schema.properties.url]
+type = "string"
+
+[provides.operations."telegram.get_webhook_info".output_schema.properties.has_custom_certificate]
+type = "boolean"
+
+[provides.operations."telegram.get_webhook_info".output_schema.properties.pending_update_count]
+type = "integer"
+
+[provides.operations."telegram.get_webhook_info".output_schema.properties.ip_address]
+type = "string"
+
+[provides.operations."telegram.get_webhook_info".output_schema.properties.last_error_date]
+type = "integer"
+
+[provides.operations."telegram.get_webhook_info".output_schema.properties.last_error_message]
+type = "string"
+
+[provides.operations."telegram.get_webhook_info".output_schema.properties.last_synchronization_error_date]
+type = "integer"
+
+[provides.operations."telegram.get_webhook_info".output_schema.properties.max_connections]
+type = "integer"
+
+[provides.operations."telegram.get_webhook_info".output_schema.properties.allowed_updates]
+type = "array"
+
+[provides.operations."telegram.get_webhook_info".network_constraints]
+host_allow = ["api.telegram.org"]
+port_allow = [443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."telegram.get_webhook_info".ai_hints]
+when_to_use = "Inspect Telegram's current webhook URL, pending update count, and last delivery errors."
+common_mistakes = []
+examples = ["{}"]
+
 [provides.operations."telegram.ingest_webhook_update"]
 description = "Validate and ingest a Telegram webhook update forwarded by fcp-host"
 capability = "telegram.webhook"
@@ -339,7 +699,7 @@ max_response_bytes = 1048576
 
 [provides.operations."telegram.ingest_webhook_update".input_schema]
 type = "object"
-required = ["payload"]
+required = ["payload", "secret_token"]
 
 [provides.operations."telegram.ingest_webhook_update".input_schema.properties.payload]
 description = "Raw Telegram Update JSON payload forwarded by fcp-host"
@@ -387,7 +747,7 @@ type = "string"
 when_to_use = "Process Telegram webhook deliveries forwarded by host ingress."
 common_mistakes = [
     "Passing a decoded object instead of the raw payload string",
-    "Omitting secret_token when webhook_secret_token is configured",
+    "Omitting the required forwarded secret_token",
 ]
 
 # --- Events ---
@@ -447,7 +807,7 @@ scope = "instance"
 
 [[rate_limits.pools]]
 id = "telegram.webhook"
-description = "Telegram host-forwarded webhook ingest operations"
+description = "Telegram webhook management and host-forwarded ingest operations"
 requests = 600
 window_ms = 60000
 burst = 100
@@ -457,5 +817,10 @@ scope = "instance"
 "telegram.send_message" = ["telegram.send"]
 "telegram.send_media" = ["telegram.send"]
 "telegram.answer_callback_query" = ["telegram.send"]
+"telegram.send_chat_action" = ["telegram.send"]
+"telegram.set_message_reaction" = ["telegram.send"]
 "telegram.get_file" = ["telegram.read"]
+"telegram.set_webhook" = ["telegram.webhook"]
+"telegram.delete_webhook" = ["telegram.webhook"]
+"telegram.get_webhook_info" = ["telegram.webhook"]
 "telegram.ingest_webhook_update" = ["telegram.webhook"]

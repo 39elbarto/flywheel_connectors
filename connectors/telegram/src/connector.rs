@@ -30,7 +30,10 @@ use tracing::{info, warn};
 
 use crate::client::TelegramClient;
 use crate::error::TelegramError;
-use crate::limits::{MEDIA_CAPTION_MAX_CHARS, MESSAGE_TEXT_MAX_CHARS};
+use crate::limits::{
+    MEDIA_CAPTION_MAX_CHARS, MESSAGE_TEXT_CHUNKED_MAX_UTF16_UNITS, MESSAGE_TEXT_MAX_CHARS,
+    MESSAGE_TEXT_MAX_CHUNKS,
+};
 use crate::types::*;
 
 const TELEGRAM_POLL_CURSOR_FILE: &str = "telegram_poll_cursor.json";
@@ -39,6 +42,8 @@ const TELEGRAM_BOT_ID_MAX_DIGITS: usize = 20;
 const TELEGRAM_BOT_SECRET_MAX_CHARS: usize = 128;
 const MAX_TELEGRAM_WEBHOOK_PAYLOAD_BYTES: usize = 1024 * 1024;
 const TELEGRAM_WEBHOOK_REPLAY_CACHE_ENTRIES: usize = 2048;
+const SEND_CHAT_ACTION_UNAUTHORIZED_SUSPEND_THRESHOLD: u8 = 2;
+const SEND_CHAT_ACTION_UNAUTHORIZED_SUSPEND_FOR: Duration = Duration::from_secs(300);
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 fn default_telegram_chat_coordination_config() -> ChatCoordinationConfig {
@@ -167,6 +172,34 @@ fn current_unix_timestamp_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
+}
+
+fn telegram_utf16_len(value: &str) -> usize {
+    value.encode_utf16().count()
+}
+
+fn split_telegram_text_chunks(text: &str, max_utf16_units: usize) -> Vec<String> {
+    debug_assert!(max_utf16_units > 0);
+
+    let mut chunks = Vec::new();
+    let mut chunk = String::new();
+    let mut chunk_units = 0usize;
+
+    for ch in text.chars() {
+        let char_units = ch.len_utf16();
+        if chunk_units > 0 && chunk_units + char_units > max_utf16_units {
+            chunks.push(std::mem::take(&mut chunk));
+            chunk_units = 0;
+        }
+        chunk.push(ch);
+        chunk_units += char_units;
+    }
+
+    if !chunk.is_empty() || text.is_empty() {
+        chunks.push(chunk);
+    }
+
+    chunks
 }
 
 fn write_json_file_atomic<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
@@ -458,6 +491,39 @@ impl TelegramWebhookReplayCache {
     }
 }
 
+#[derive(Debug, Default)]
+struct SendChatActionCircuit {
+    consecutive_unauthorized: u8,
+    suspended_until: Option<Instant>,
+}
+
+impl SendChatActionCircuit {
+    fn retry_after_if_suspended(&mut self, now: Instant) -> Option<Duration> {
+        let suspended_until = self.suspended_until?;
+        if now >= suspended_until {
+            self.reset();
+            return None;
+        }
+        Some(suspended_until.saturating_duration_since(now))
+    }
+
+    fn record_success(&mut self) {
+        self.reset();
+    }
+
+    fn record_unauthorized(&mut self, now: Instant) {
+        self.consecutive_unauthorized = self.consecutive_unauthorized.saturating_add(1);
+        if self.consecutive_unauthorized >= SEND_CHAT_ACTION_UNAUTHORIZED_SUSPEND_THRESHOLD {
+            self.suspended_until = Some(now + SEND_CHAT_ACTION_UNAUTHORIZED_SUSPEND_FOR);
+        }
+    }
+
+    fn reset(&mut self) {
+        self.consecutive_unauthorized = 0;
+        self.suspended_until = None;
+    }
+}
+
 /// Telegram FCP connector.
 pub struct TelegramConnector {
     base: Arc<BaseConnector>,
@@ -476,6 +542,7 @@ pub struct TelegramConnector {
     // Event broadcast
     event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
     webhook_replay_cache: Arc<RwLock<TelegramWebhookReplayCache>>,
+    send_chat_action_circuit: Arc<RwLock<SendChatActionCircuit>>,
     chat_coordination_config: ChatCoordinationConfig,
     thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
 
@@ -542,11 +609,16 @@ fn is_telegram_or_local_base_url(base_url: &str) -> bool {
 
 fn capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
     let capability = match operation {
-        "telegram.send_message" | "telegram.send_media" | "telegram.answer_callback_query" => {
-            "telegram.send"
-        }
+        "telegram.send_message"
+        | "telegram.send_media"
+        | "telegram.answer_callback_query"
+        | "telegram.send_chat_action"
+        | "telegram.set_message_reaction" => "telegram.send",
         "telegram.get_file" => "telegram.read",
-        "telegram.ingest_webhook_update" => "telegram.webhook",
+        "telegram.set_webhook"
+        | "telegram.delete_webhook"
+        | "telegram.get_webhook_info"
+        | "telegram.ingest_webhook_update" => "telegram.webhook",
         _ => {
             return Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
@@ -554,6 +626,21 @@ fn capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
         }
     };
     Ok(CapabilityId::from_static(capability))
+}
+
+fn is_telegram_unauthorized(error: &TelegramError) -> bool {
+    matches!(error, TelegramError::Api { code: 401, .. })
+}
+
+fn send_chat_action_suspended_error(retry_after: Duration) -> FcpError {
+    FcpError::External {
+        service: "telegram".into(),
+        message: "sendChatAction temporarily suspended after repeated Unauthorized responses"
+            .into(),
+        status_code: Some(401),
+        retryable: true,
+        retry_after: Some(retry_after),
+    }
 }
 
 impl TelegramConnector {
@@ -574,6 +661,7 @@ impl TelegramConnector {
             poll_shutdown_tx: None,
             event_tx,
             webhook_replay_cache: Arc::new(RwLock::new(TelegramWebhookReplayCache::default())),
+            send_chat_action_circuit: Arc::new(RwLock::new(SendChatActionCircuit::default())),
             chat_coordination_config: default_telegram_chat_coordination_config(),
             thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
             start_time: Instant::now(),
@@ -609,6 +697,30 @@ impl TelegramConnector {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
         format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
+    async fn ensure_send_chat_action_not_suspended(&self) -> FcpResult<()> {
+        let retry_after = self
+            .send_chat_action_circuit
+            .write()
+            .await
+            .retry_after_if_suspended(Instant::now());
+        retry_after.map_or(Ok(()), |duration| {
+            Err(send_chat_action_suspended_error(duration))
+        })
+    }
+
+    async fn record_send_chat_action_success(&self) {
+        self.send_chat_action_circuit.write().await.record_success();
+    }
+
+    async fn record_send_chat_action_failure(&self, error: &TelegramError) {
+        if is_telegram_unauthorized(error) {
+            self.send_chat_action_circuit
+                .write()
+                .await
+                .record_unauthorized(Instant::now());
+        }
     }
 
     /// Handle configure method.
@@ -688,6 +800,7 @@ impl TelegramConnector {
         self.config = Some(config);
         self.chat_coordination_config = chat_coordination_config;
         self.webhook_replay_cache.write().await.clear();
+        self.send_chat_action_circuit.write().await.reset();
         self.base.set_configured(true);
 
         info!(auth_mode = ?auth_mode, "Telegram connector configured");
@@ -1050,7 +1163,17 @@ impl TelegramConnector {
             "type": "object",
             "properties": {
                 "message_id": { "type": "integer" },
-                "chat_id": { "type": "integer" }
+                "chat_id": { "type": "integer" },
+                "message_ids": {
+                    "type": "array",
+                    "items": { "type": "integer" },
+                    "description": "All Telegram message IDs produced by a chunked logical send"
+                },
+                "chunk_count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Number of sendMessage chunks sent for the logical request"
+                }
             }
         })
     }
@@ -1122,6 +1245,154 @@ impl TelegramConnector {
         })
     }
 
+    fn send_chat_action_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "chat_id": { "type": ["string", "integer"], "description": "Target Telegram chat ID or @username" },
+                "action": {
+                    "type": "string",
+                    "description": "Telegram chat action to broadcast",
+                    "enum": TELEGRAM_CHAT_ACTIONS
+                },
+                "message_thread_id": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Forum topic or private-chat topic thread ID"
+                },
+                "business_connection_id": {
+                    "type": "string",
+                    "description": "Optional business connection identifier"
+                }
+            },
+            "required": ["chat_id", "action"]
+        })
+    }
+
+    fn set_message_reaction_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "chat_id": { "type": ["string", "integer"], "description": "Target Telegram chat ID or @username" },
+                "message_id": { "type": "integer", "minimum": 0 },
+                "reaction": {
+                    "type": "array",
+                    "maxItems": 1,
+                    "description": "At most one non-paid Telegram reaction type; omit or pass [] to clear",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "required": ["type", "emoji"],
+                                "properties": {
+                                    "type": { "const": "emoji" },
+                                    "emoji": { "type": "string", "minLength": 1 }
+                                }
+                            },
+                            {
+                                "type": "object",
+                                "required": ["type", "custom_emoji_id"],
+                                "properties": {
+                                    "type": { "const": "custom_emoji" },
+                                    "custom_emoji_id": { "type": "string", "minLength": 1 }
+                                }
+                            }
+                        ]
+                    }
+                },
+                "is_big": { "type": "boolean" }
+            },
+            "required": ["chat_id", "message_id"]
+        })
+    }
+
+    fn set_webhook_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "maxLength": MAX_WEBHOOK_URL_CHARS,
+                    "description": "Public HTTPS endpoint Telegram should deliver updates to"
+                },
+                "ip_address": {
+                    "type": "string",
+                    "description": "Optional fixed IP address Telegram should use for webhook requests"
+                },
+                "max_connections": {
+                    "type": "integer",
+                    "minimum": MIN_WEBHOOK_MAX_CONNECTIONS,
+                    "maximum": MAX_WEBHOOK_MAX_CONNECTIONS
+                },
+                "allowed_updates": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": KNOWN_ALLOWED_UPDATES
+                    }
+                },
+                "drop_pending_updates": { "type": "boolean" }
+            },
+            "required": ["url"]
+        })
+    }
+
+    fn delete_webhook_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "drop_pending_updates": { "type": "boolean" }
+            }
+        })
+    }
+
+    fn get_webhook_info_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    fn boolean_success_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "success": { "type": "boolean" }
+            },
+            "required": ["success"]
+        })
+    }
+
+    fn set_webhook_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "success": { "type": "boolean" },
+                "url": { "type": "string" },
+                "secret_token_configured": { "type": "boolean" }
+            },
+            "required": ["success", "url", "secret_token_configured"]
+        })
+    }
+
+    fn webhook_info_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "url": { "type": "string" },
+                "has_custom_certificate": { "type": "boolean" },
+                "pending_update_count": { "type": "integer" },
+                "ip_address": { "type": "string" },
+                "last_error_date": { "type": "integer" },
+                "last_error_message": { "type": "string" },
+                "last_synchronization_error_date": { "type": "integer" },
+                "max_connections": { "type": "integer" },
+                "allowed_updates": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["url", "has_custom_certificate", "pending_update_count"]
+        })
+    }
+
     fn ingest_webhook_update_input_schema() -> serde_json::Value {
         json!({
             "type": "object",
@@ -1140,7 +1411,7 @@ impl TelegramConnector {
                 "delivery_id": { "type": "string" },
                 "received_at": { "type": "integer" }
             },
-            "required": ["payload"]
+            "required": ["payload", "secret_token"]
         })
     }
 
@@ -1190,6 +1461,11 @@ impl TelegramConnector {
             "telegram.send_media" => Some(Self::send_media_input_schema()),
             "telegram.get_file" => Some(Self::get_file_input_schema()),
             "telegram.answer_callback_query" => Some(Self::answer_callback_query_input_schema()),
+            "telegram.send_chat_action" => Some(Self::send_chat_action_input_schema()),
+            "telegram.set_message_reaction" => Some(Self::set_message_reaction_input_schema()),
+            "telegram.set_webhook" => Some(Self::set_webhook_input_schema()),
+            "telegram.delete_webhook" => Some(Self::delete_webhook_input_schema()),
+            "telegram.get_webhook_info" => Some(Self::get_webhook_info_input_schema()),
             "telegram.ingest_webhook_update" => Some(Self::ingest_webhook_update_input_schema()),
             _ => None,
         }
@@ -1201,6 +1477,11 @@ impl TelegramConnector {
             "telegram.send_media" => Some(Self::send_media_output_schema()),
             "telegram.get_file" => Some(Self::get_file_output_schema()),
             "telegram.answer_callback_query" => Some(Self::answer_callback_query_output_schema()),
+            "telegram.send_chat_action" => Some(Self::boolean_success_output_schema()),
+            "telegram.set_message_reaction" => Some(Self::boolean_success_output_schema()),
+            "telegram.set_webhook" => Some(Self::set_webhook_output_schema()),
+            "telegram.delete_webhook" => Some(Self::boolean_success_output_schema()),
+            "telegram.get_webhook_info" => Some(Self::webhook_info_output_schema()),
             "telegram.ingest_webhook_update" => Some(Self::ingest_webhook_update_output_schema()),
             _ => None,
         }
@@ -1229,7 +1510,13 @@ impl TelegramConnector {
         operation: &str,
         input: &serde_json::Value,
     ) -> FcpResult<Vec<String>> {
-        if operation == "telegram.ingest_webhook_update" {
+        if matches!(
+            operation,
+            "telegram.set_webhook"
+                | "telegram.delete_webhook"
+                | "telegram.get_webhook_info"
+                | "telegram.ingest_webhook_update"
+        ) {
             return Ok(vec!["telegram:webhook".into()]);
         }
 
@@ -1254,6 +1541,18 @@ impl TelegramConnector {
 
         if let Some(callback_query_id) = input.get("callback_query_id").and_then(|v| v.as_str()) {
             resource_uris.push(format!("telegram:callback:{callback_query_id}"));
+        }
+
+        if let (Some(chat_id), Some(message_id)) = (
+            input.get("chat_id").and_then(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| value.as_i64().map(|id| id.to_string()))
+            }),
+            input.get("message_id").and_then(|value| value.as_i64()),
+        ) {
+            resource_uris.push(format!("telegram:chat:{chat_id}:message:{message_id}"));
         }
 
         Ok(resource_uris)
@@ -1355,6 +1654,136 @@ impl TelegramConnector {
                     requires_approval: None,
                 },
                 OperationInfo {
+                    id: OperationId::from_static("telegram.send_chat_action"),
+                    summary: "Broadcast a Telegram chat action".into(),
+                    description: Some(
+                        "Sends transient typing/upload/etc. status for slow Telegram responses."
+                            .into(),
+                    ),
+                    input_schema: Self::send_chat_action_input_schema(),
+                    output_schema: Self::boolean_success_output_schema(),
+                    capability: CapabilityId::from_static("telegram.send"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use:
+                            "Show a short-lived typing or upload indicator before a delayed reply."
+                                .into(),
+                        common_mistakes: vec![
+                            "Using chat actions as durable messages".into(),
+                            "Sending actions to channels or unsupported direct-message chats".into(),
+                        ],
+                        examples: vec![
+                            r#"{"chat_id": "123456", "action": "typing"}"#.into(),
+                        ],
+                        related: vec![],
+                    },
+                    rate_limit: None,
+                    requires_approval: None,
+                },
+                OperationInfo {
+                    id: OperationId::from_static("telegram.set_message_reaction"),
+                    summary: "Set or clear a Telegram message reaction".into(),
+                    description: Some(
+                        "Sets the bot's chosen non-paid reaction on a Telegram message.".into(),
+                    ),
+                    input_schema: Self::set_message_reaction_input_schema(),
+                    output_schema: Self::boolean_success_output_schema(),
+                    capability: CapabilityId::from_static("telegram.send"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::BestEffort,
+                    ai_hints: AgentHint {
+                        when_to_use:
+                            "React to a Telegram message or clear the bot's prior reaction."
+                                .into(),
+                        common_mistakes: vec![
+                            "Trying to set paid reactions; bots cannot use paid reactions".into(),
+                            "Sending more than one reaction as a non-premium bot".into(),
+                        ],
+                        examples: vec![
+                            r#"{"chat_id": "123456", "message_id": 42, "reaction": [{"type": "emoji", "emoji": "👍"}]}"#.into(),
+                        ],
+                        related: vec![],
+                    },
+                    rate_limit: None,
+                    requires_approval: None,
+                },
+                OperationInfo {
+                    id: OperationId::from_static("telegram.set_webhook"),
+                    summary: "Register the Telegram webhook endpoint".into(),
+                    description: Some(
+                        "Calls setWebhook using the configured webhook_secret_token.".into(),
+                    ),
+                    input_schema: Self::set_webhook_input_schema(),
+                    output_schema: Self::set_webhook_output_schema(),
+                    capability: CapabilityId::from_static("telegram.webhook"),
+                    risk_level: RiskLevel::Medium,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::BestEffort,
+                    ai_hints: AgentHint {
+                        when_to_use:
+                            "Register or update Telegram delivery to the host webhook ingress URL."
+                                .into(),
+                        common_mistakes: vec![
+                            "Calling without configuring webhook_secret_token first".into(),
+                            "Passing a non-HTTPS URL; Telegram requires HTTPS webhook endpoints"
+                                .into(),
+                        ],
+                        examples: vec![
+                            r#"{"url": "https://example.com/fcp/telegram/webhook", "allowed_updates": ["message", "callback_query"]}"#.into(),
+                        ],
+                        related: vec![],
+                    },
+                    rate_limit: None,
+                    requires_approval: None,
+                },
+                OperationInfo {
+                    id: OperationId::from_static("telegram.delete_webhook"),
+                    summary: "Delete the Telegram webhook registration".into(),
+                    description: Some("Calls deleteWebhook for the configured bot.".into()),
+                    input_schema: Self::delete_webhook_input_schema(),
+                    output_schema: Self::boolean_success_output_schema(),
+                    capability: CapabilityId::from_static("telegram.webhook"),
+                    risk_level: RiskLevel::Medium,
+                    safety_tier: SafetyTier::Risky,
+                    idempotency: IdempotencyClass::BestEffort,
+                    ai_hints: AgentHint {
+                        when_to_use:
+                            "Disable Telegram webhook delivery before switching back to polling."
+                                .into(),
+                        common_mistakes: vec![
+                            "Assuming this clears already queued Telegram updates unless drop_pending_updates is true".into(),
+                        ],
+                        examples: vec![r#"{"drop_pending_updates": true}"#.into()],
+                        related: vec![],
+                    },
+                    rate_limit: None,
+                    requires_approval: None,
+                },
+                OperationInfo {
+                    id: OperationId::from_static("telegram.get_webhook_info"),
+                    summary: "Read Telegram webhook status".into(),
+                    description: Some("Calls getWebhookInfo for the configured bot.".into()),
+                    input_schema: Self::get_webhook_info_input_schema(),
+                    output_schema: Self::webhook_info_output_schema(),
+                    capability: CapabilityId::from_static("telegram.webhook"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use:
+                            "Inspect Telegram's current webhook URL, pending updates, and last delivery errors."
+                                .into(),
+                        common_mistakes: vec![],
+                        examples: vec![r"{}".into()],
+                        related: vec![],
+                    },
+                    rate_limit: None,
+                    requires_approval: None,
+                },
+                OperationInfo {
                     id: OperationId::from_static("telegram.ingest_webhook_update"),
                     summary: "Validate and ingest a Telegram webhook update".into(),
                     description: Some(
@@ -1373,7 +1802,7 @@ impl TelegramConnector {
                                 .into(),
                         common_mistakes: vec![
                             "Passing a decoded object instead of the raw payload string".into(),
-                            "Omitting secret_token when webhook_secret_token is configured".into(),
+                            "Omitting the required forwarded secret_token".into(),
                         ],
                         examples: vec![],
                         related: vec![],
@@ -1527,14 +1956,12 @@ impl TelegramConnector {
             "telegram.send_message" => {
                 let text = input.get("text").and_then(|v| v.as_str());
                 if let Some(text) = text {
-                    // Telegram limit is character-based, not byte-based.
-                    // Using chars().count() correctly handles multi-byte characters (e.g. emojis).
-                    if text.chars().count() > MESSAGE_TEXT_MAX_CHARS {
+                    let text_units = telegram_utf16_len(text);
+                    if text_units > MESSAGE_TEXT_CHUNKED_MAX_UTF16_UNITS {
                         return Err(FcpError::InvalidRequest {
                             code: 1004,
                             message: format!(
-                                "Message text exceeds {MESSAGE_TEXT_MAX_CHARS} character limit (got {} characters)",
-                                text.chars().count()
+                                "Message text exceeds {MESSAGE_TEXT_MAX_CHUNKS} Telegram chunks of {MESSAGE_TEXT_MAX_CHARS} UTF-16 code units (got {text_units} UTF-16 code units)",
                             ),
                         });
                     }
@@ -1542,12 +1969,12 @@ impl TelegramConnector {
             }
             "telegram.send_media" => {
                 if let Some(caption) = input.get("caption").and_then(|v| v.as_str()) {
-                    if caption.chars().count() > MEDIA_CAPTION_MAX_CHARS {
+                    let caption_units = telegram_utf16_len(caption);
+                    if caption_units > MEDIA_CAPTION_MAX_CHARS {
                         return Err(FcpError::InvalidRequest {
                             code: 1004,
                             message: format!(
-                                "Caption exceeds {MEDIA_CAPTION_MAX_CHARS} character limit (got {} characters)",
-                                caption.chars().count()
+                                "Caption exceeds {MEDIA_CAPTION_MAX_CHARS} UTF-16 code unit limit (got {caption_units} UTF-16 code units)",
                             ),
                         });
                     }
@@ -1610,11 +2037,89 @@ impl TelegramConnector {
             "telegram.send_media" => self.invoke_send_media(input).await,
             "telegram.get_file" => self.invoke_get_file(input).await,
             "telegram.answer_callback_query" => self.invoke_answer_callback_query(input).await,
+            "telegram.send_chat_action" => self.invoke_send_chat_action(input).await,
+            "telegram.set_message_reaction" => self.invoke_set_message_reaction(input).await,
+            "telegram.set_webhook" => self.invoke_set_webhook(input).await,
+            "telegram.delete_webhook" => self.invoke_delete_webhook(input).await,
+            "telegram.get_webhook_info" => self.invoke_get_webhook_info(input).await,
             "telegram.ingest_webhook_update" => self.invoke_ingest_webhook_update(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
         }
+    }
+
+    async fn send_message_chunks(
+        client: &TelegramClient,
+        chat_id: &str,
+        text: String,
+        options: SendMessageOptions,
+    ) -> Result<Vec<Message>, TelegramError> {
+        let chunks = split_telegram_text_chunks(&text, MESSAGE_TEXT_MAX_CHARS);
+        if chunks.len() > MESSAGE_TEXT_MAX_CHUNKS {
+            return Err(TelegramError::InvalidRequest(format!(
+                "message requires {} chunks; maximum is {MESSAGE_TEXT_MAX_CHUNKS}",
+                chunks.len()
+            )));
+        }
+
+        let mut sent_messages = Vec::with_capacity(chunks.len());
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            let mut chunk_options = options.clone();
+            if index > 0 {
+                chunk_options.reply_to_message_id = None;
+            }
+
+            match client
+                .send_message(chat_id.to_owned(), chunk, chunk_options)
+                .await
+            {
+                Ok(message) => sent_messages.push(message),
+                Err(source) if sent_messages.is_empty() => return Err(source),
+                Err(source) => {
+                    return Err(TelegramError::PartialSend {
+                        sent_chunks: sent_messages.len(),
+                        failed_chunk_index: index,
+                        sent_message_ids: sent_messages
+                            .iter()
+                            .map(|message| message.message_id)
+                            .collect(),
+                        source: Box::new(source),
+                    });
+                }
+            }
+        }
+
+        Ok(sent_messages)
+    }
+
+    fn send_message_response(
+        messages: &[Message],
+        coordination: &ChatCoordinationSendDecision,
+        backend: ChatCoordinationBackend,
+        claimant_agent_id: &AgentId,
+    ) -> FcpResult<serde_json::Value> {
+        let first = messages.first().ok_or_else(|| FcpError::Internal {
+            message: "Telegram send_message returned no sent messages".into(),
+        })?;
+        let message_ids: Vec<i64> = messages.iter().map(|message| message.message_id).collect();
+        let response = json!({
+            "message_id": first.message_id,
+            "chat_id": first.chat.id,
+            "message_ids": message_ids,
+            "chunk_count": messages.len(),
+            "coordination": telegram_coordination_audit_records(
+                coordination,
+                backend,
+                claimant_agent_id,
+            )
+        });
+
+        if let Some(schema) = Self::output_schema_for("telegram.send_message") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+
+        Ok(response)
     }
 
     async fn invoke_send_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -1665,7 +2170,16 @@ impl TelegramConnector {
             }
         };
 
-        let render = Formatter::render_with_fallback(text, requested_mode);
+        let mut render = Formatter::render_with_fallback(text, requested_mode);
+        if render.parse_mode_used.is_some()
+            && telegram_utf16_len(&render.rendered) > MESSAGE_TEXT_MAX_CHARS
+        {
+            warn!(
+                parse_mode = ?requested_mode,
+                "Telegram formatted message exceeds one sendMessage chunk, sending plaintext chunks"
+            );
+            render = Formatter::render_plaintext_fallback(text, requested_mode);
+        }
 
         let mut options = SendMessageOptions::default();
         options.parse_mode = render
@@ -1695,11 +2209,15 @@ impl TelegramConnector {
 
         let map_external = |err: TelegramError| err.to_fcp_error();
 
-        let message = match client
-            .send_message(chat_id.clone(), render.rendered, options.clone())
-            .await
+        let messages = match Self::send_message_chunks(
+            client,
+            &chat_id,
+            render.rendered.clone(),
+            options.clone(),
+        )
+        .await
         {
-            Ok(message) => message,
+            Ok(messages) => messages,
             Err(err) => {
                 if options.parse_mode.is_some() {
                     if let TelegramError::Api { description, .. } = &err {
@@ -1712,21 +2230,20 @@ impl TelegramConnector {
                                 Formatter::render_plaintext_fallback(text, requested_mode);
                             let mut fallback_options = options.clone();
                             fallback_options.parse_mode = None;
-                            return client
-                                .send_message(chat_id, fallback.rendered, fallback_options)
-                                .await
-                                .map(|msg| {
-                                    json!({
-                                        "message_id": msg.message_id,
-                                        "chat_id": msg.chat.id,
-                                        "coordination": telegram_coordination_audit_records(
-                                            &coordination,
-                                            self.chat_coordination_config.backend(),
-                                            &claimant_agent_id,
-                                        )
-                                    })
-                                })
-                                .map_err(map_external);
+                            let fallback_messages = Self::send_message_chunks(
+                                client,
+                                &chat_id,
+                                fallback.rendered,
+                                fallback_options,
+                            )
+                            .await
+                            .map_err(map_external)?;
+                            return Self::send_message_response(
+                                &fallback_messages,
+                                &coordination,
+                                self.chat_coordination_config.backend(),
+                                &claimant_agent_id,
+                            );
                         }
                     }
                 }
@@ -1735,21 +2252,12 @@ impl TelegramConnector {
             }
         };
 
-        let response = json!({
-            "message_id": message.message_id,
-            "chat_id": message.chat.id,
-            "coordination": telegram_coordination_audit_records(
-                &coordination,
-                self.chat_coordination_config.backend(),
-                &claimant_agent_id,
-            )
-        });
-
-        if let Some(schema) = Self::output_schema_for("telegram.send_message") {
-            validate_output_with_limits(&schema, &response, &Limits::default())?;
-        }
-
-        Ok(response)
+        Self::send_message_response(
+            &messages,
+            &coordination,
+            self.chat_coordination_config.backend(),
+            &claimant_agent_id,
+        )
     }
 
     async fn invoke_send_media(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -1941,6 +2449,208 @@ impl TelegramConnector {
             validate_output_with_limits(&schema, &response, &Limits::default())?;
         }
 
+        Ok(response)
+    }
+
+    async fn invoke_send_chat_action(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let chat_id = chat_id_from_input(&input)?;
+        let action = required_string_field(&input, "action")?;
+        validate_chat_action(action)?;
+        let message_thread_id = Self::message_thread_id_from_input(&input)?;
+        let business_connection_id = input
+            .get("business_connection_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned);
+
+        self.ensure_send_chat_action_not_suspended().await?;
+        let success = match client
+            .send_chat_action(chat_id, action, message_thread_id, business_connection_id)
+            .await
+        {
+            Ok(success) => {
+                self.record_send_chat_action_success().await;
+                success
+            }
+            Err(err) => {
+                self.record_send_chat_action_failure(&err).await;
+                return Err(err.to_fcp_error());
+            }
+        };
+        let response = json!({ "success": success });
+        if let Some(schema) = Self::output_schema_for("telegram.send_chat_action") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+        Ok(response)
+    }
+
+    async fn invoke_set_message_reaction(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let chat_id = chat_id_from_input(&input)?;
+        let message_id = input
+            .get("message_id")
+            .and_then(|value| value.as_i64())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing or invalid message_id".into(),
+            })?;
+        if message_id < 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "message_id must be non-negative".into(),
+            });
+        }
+        let reaction = input
+            .get("reaction")
+            .cloned()
+            .map(serde_json::from_value::<Vec<ReactionType>>)
+            .transpose()
+            .map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid reaction: {error}"),
+            })?;
+        if let Some(reactions) = reaction.as_ref() {
+            validate_reactions(reactions)?;
+        }
+        let is_big = input.get("is_big").and_then(|value| value.as_bool());
+
+        let success = client
+            .set_message_reaction(chat_id, message_id, reaction, is_big)
+            .await
+            .map_err(|err| err.to_fcp_error())?;
+        let response = json!({ "success": success });
+        if let Some(schema) = Self::output_schema_for("telegram.set_message_reaction") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+        Ok(response)
+    }
+
+    async fn invoke_set_webhook(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
+        let secret_token =
+            config
+                .webhook_secret_token
+                .clone()
+                .ok_or_else(|| {
+                    FcpError::InvalidRequest {
+                code: 1003,
+                message:
+                    "telegram.set_webhook requires webhook_secret_token in connector configuration"
+                        .into(),
+            }
+                })?;
+        let url = required_string_field(&input, "url")?.to_owned();
+        let ip_address = input
+            .get("ip_address")
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "ip_address must be a string".into(),
+                    })
+            })
+            .transpose()?;
+        let max_connections = input
+            .get("max_connections")
+            .map(|value| {
+                value.as_i64().ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "max_connections must be an integer".into(),
+                })
+            })
+            .transpose()?;
+        let allowed_updates = input
+            .get("allowed_updates")
+            .cloned()
+            .map(serde_json::from_value::<Vec<String>>)
+            .transpose()
+            .map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("allowed_updates must be an array of strings: {error}"),
+            })?;
+        let drop_pending_updates = input
+            .get("drop_pending_updates")
+            .map(|value| {
+                value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "drop_pending_updates must be a boolean".into(),
+                })
+            })
+            .transpose()?;
+        let request = SetWebhookRequest {
+            url: url.clone(),
+            ip_address,
+            max_connections,
+            allowed_updates,
+            drop_pending_updates,
+            secret_token: Some(secret_token),
+        };
+        validate_set_webhook_request(&request)?;
+
+        let success = client
+            .set_webhook(request)
+            .await
+            .map_err(|err| err.to_fcp_error())?;
+        let response = json!({
+            "success": success,
+            "url": url,
+            "secret_token_configured": true,
+        });
+        if let Some(schema) = Self::output_schema_for("telegram.set_webhook") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+        Ok(response)
+    }
+
+    async fn invoke_delete_webhook(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let drop_pending_updates = input
+            .get("drop_pending_updates")
+            .map(|value| {
+                value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "drop_pending_updates must be a boolean".into(),
+                })
+            })
+            .transpose()?;
+        let success = client
+            .delete_webhook(drop_pending_updates)
+            .await
+            .map_err(|err| err.to_fcp_error())?;
+        let response = json!({ "success": success });
+        if let Some(schema) = Self::output_schema_for("telegram.delete_webhook") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
+        Ok(response)
+    }
+
+    async fn invoke_get_webhook_info(
+        &self,
+        _input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let info = client
+            .get_webhook_info()
+            .await
+            .map_err(|err| err.to_fcp_error())?;
+        let response = serde_json::to_value(info).map_err(|error| FcpError::Internal {
+            message: format!("Failed to serialize webhook info: {error}"),
+        })?;
+        if let Some(schema) = Self::output_schema_for("telegram.get_webhook_info") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
         Ok(response)
     }
 
@@ -2466,6 +3176,27 @@ fn update_message(update: &Update) -> Option<&Message> {
     }
 }
 
+fn chat_id_from_input(input: &serde_json::Value) -> FcpResult<String> {
+    match input.get("chat_id") {
+        Some(serde_json::Value::String(value)) => Ok(value.clone()),
+        Some(serde_json::Value::Number(value)) => value
+            .as_i64()
+            .map(|value| value.to_string())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_id must be an integer or string".into(),
+            }),
+        Some(_) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_id must be an integer or string".into(),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing chat_id".into(),
+        }),
+    }
+}
+
 fn required_string_field<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
     input
         .get(field)
@@ -2481,7 +3212,12 @@ fn verify_forwarded_webhook_secret(
     input: &serde_json::Value,
 ) -> FcpResult<bool> {
     let Some(expected) = config.webhook_secret_token.as_deref() else {
-        return Ok(false);
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message:
+                "Telegram webhook ingest requires webhook_secret_token in connector configuration"
+                    .into(),
+        });
     };
     let Some(supplied) = input.get("secret_token").and_then(|value| value.as_str()) else {
         return Err(FcpError::Unauthorized {
@@ -2681,6 +3417,56 @@ impl FcpConnector for TelegramConnector {
                     IdempotencyClass::None,
                 ),
                 operation(
+                    "telegram.send_chat_action",
+                    "Broadcast a Telegram chat action",
+                    Self::send_chat_action_input_schema(),
+                    Self::boolean_success_output_schema(),
+                    "telegram.send",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::None,
+                ),
+                operation(
+                    "telegram.set_message_reaction",
+                    "Set or clear a Telegram message reaction",
+                    Self::set_message_reaction_input_schema(),
+                    Self::boolean_success_output_schema(),
+                    "telegram.send",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::BestEffort,
+                ),
+                operation(
+                    "telegram.set_webhook",
+                    "Register the Telegram webhook endpoint",
+                    Self::set_webhook_input_schema(),
+                    Self::set_webhook_output_schema(),
+                    "telegram.webhook",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::BestEffort,
+                ),
+                operation(
+                    "telegram.delete_webhook",
+                    "Delete the Telegram webhook registration",
+                    Self::delete_webhook_input_schema(),
+                    Self::boolean_success_output_schema(),
+                    "telegram.webhook",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::BestEffort,
+                ),
+                operation(
+                    "telegram.get_webhook_info",
+                    "Read Telegram webhook status",
+                    Self::get_webhook_info_input_schema(),
+                    Self::webhook_info_output_schema(),
+                    "telegram.webhook",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                ),
+                operation(
                     "telegram.ingest_webhook_update",
                     "Validate and ingest a Telegram webhook update",
                     Self::ingest_webhook_update_input_schema(),
@@ -2782,6 +3568,48 @@ mod tests {
     }
 
     #[test]
+    fn send_chat_action_circuit_suspends_after_repeated_unauthorized() {
+        let mut circuit = SendChatActionCircuit::default();
+        let now = Instant::now();
+
+        assert_eq!(circuit.retry_after_if_suspended(now), None);
+
+        circuit.record_unauthorized(now);
+        assert_eq!(circuit.retry_after_if_suspended(now), None);
+
+        circuit.record_unauthorized(now);
+        let retry_after = circuit
+            .retry_after_if_suspended(now)
+            .expect("second consecutive 401 should suspend chat actions");
+        assert!(retry_after > StdDuration::from_secs(0));
+        assert!(retry_after <= SEND_CHAT_ACTION_UNAUTHORIZED_SUSPEND_FOR);
+    }
+
+    #[test]
+    fn send_chat_action_circuit_resets_on_success_and_expiry() {
+        let mut circuit = SendChatActionCircuit::default();
+        let now = Instant::now();
+
+        circuit.record_unauthorized(now);
+        circuit.record_success();
+        circuit.record_unauthorized(now);
+        assert_eq!(
+            circuit.retry_after_if_suspended(now),
+            None,
+            "success should clear prior 401 history"
+        );
+
+        circuit.record_unauthorized(now);
+        assert!(circuit.retry_after_if_suspended(now).is_some());
+        assert_eq!(
+            circuit.retry_after_if_suspended(now + SEND_CHAT_ACTION_UNAUTHORIZED_SUSPEND_FOR),
+            None,
+            "expired suspension should clear itself"
+        );
+        assert_eq!(circuit.consecutive_unauthorized, 0);
+    }
+
+    #[test]
     fn test_validate_input_early_unicode_length() {
         // Create a string that is below the message limit in characters but above it in bytes.
         // '€' is 3 bytes. 2000 chars * 3 = 6000 bytes.
@@ -2828,10 +3656,15 @@ mod tests {
         instance_id: &InstanceId,
     ) -> fcp_core::CapabilityToken {
         let cap = match op {
-            "telegram.send_message" | "telegram.send_media" | "telegram.answer_callback_query" => {
-                "telegram.send"
-            }
-            "telegram.ingest_webhook_update" => "telegram.webhook",
+            "telegram.send_message"
+            | "telegram.send_media"
+            | "telegram.answer_callback_query"
+            | "telegram.send_chat_action"
+            | "telegram.set_message_reaction" => "telegram.send",
+            "telegram.set_webhook"
+            | "telegram.delete_webhook"
+            | "telegram.get_webhook_info"
+            | "telegram.ingest_webhook_update" => "telegram.webhook",
             _ => "telegram.read",
         };
         let now = Utc::now();
@@ -4668,6 +5501,12 @@ mod tests {
     async fn test_ingest_webhook_update_suppresses_duplicate_update_id() {
         let (mut connector, token, _server) =
             setup_connector_with_token("telegram.ingest_webhook_update").await;
+        let forwarded_header = webhook_test_header_value();
+        connector
+            .config
+            .as_mut()
+            .expect("connector should be configured")
+            .webhook_secret_token = Some(forwarded_header.clone());
         connector
             .config
             .as_mut()
@@ -4703,6 +5542,7 @@ mod tests {
                 "operation": "telegram.ingest_webhook_update",
                 "input": {
                     "payload": payload.clone(),
+                    "secret_token": forwarded_header,
                     "delivery_id": "telegram-delivery-2006-a"
                 },
                 "capability_token": token.clone()
@@ -4732,6 +5572,7 @@ mod tests {
                 "operation": "telegram.ingest_webhook_update",
                 "input": {
                     "payload": payload,
+                    "secret_token": webhook_test_header_value(),
                     "delivery_id": "telegram-delivery-2006-b"
                 },
                 "capability_token": token
@@ -4764,6 +5605,48 @@ mod tests {
             .handle_shutdown(json!({}))
             .await
             .expect("shutdown should stop polling");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_ingest_webhook_update_requires_configured_secret() {
+        let (connector, token, _server) =
+            setup_connector_with_token("telegram.ingest_webhook_update").await;
+
+        let payload = json!({
+            "update_id": 2007,
+            "message": {
+                "message_id": 17,
+                "from": {
+                    "id": 208214988,
+                    "is_bot": false,
+                    "first_name": "Root"
+                },
+                "chat": {
+                    "id": 208214988,
+                    "type": "private",
+                    "first_name": "Root"
+                },
+                "date": 1700000015,
+                "text": "/new"
+            }
+        })
+        .to_string();
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "telegram.ingest_webhook_update",
+                "input": {
+                    "payload": payload,
+                    "secret_token": webhook_test_header_value()
+                },
+                "capability_token": token
+            }))
+            .await;
+
+        let Err(FcpError::InvalidRequest { message, .. }) = result else {
+            panic!("expected InvalidRequest for missing configured webhook secret");
+        };
+        assert!(message.contains("webhook_secret_token"));
     }
 
     #[fcp_async_core::runtime::test]
@@ -4826,6 +5709,12 @@ mod tests {
     async fn test_ingest_webhook_update_drops_unauthorized_sender() {
         let (mut connector, token, _server) =
             setup_connector_with_token("telegram.ingest_webhook_update").await;
+        let forwarded_header = webhook_test_header_value();
+        connector
+            .config
+            .as_mut()
+            .expect("connector should be configured")
+            .webhook_secret_token = Some(forwarded_header.clone());
         connector
             .config
             .as_mut()
@@ -4860,6 +5749,7 @@ mod tests {
                 "operation": "telegram.ingest_webhook_update",
                 "input": {
                     "payload": payload,
+                    "secret_token": forwarded_header,
                     "delivery_id": "telegram-delivery-2005"
                 },
                 "capability_token": token
@@ -5002,10 +5892,10 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_send_message_text_too_long() {
+    async fn test_send_message_text_too_long_for_chunking() {
         let (connector, token, _server) = setup_connector_with_token("telegram.send_message").await;
 
-        let long_text = "x".repeat(MESSAGE_TEXT_MAX_CHARS + 1);
+        let long_text = "x".repeat(MESSAGE_TEXT_CHUNKED_MAX_UTF16_UNITS + 1);
         let input = serde_json::json!({
             "chat_id": "123456789",
             "text": long_text
@@ -5024,8 +5914,8 @@ mod tests {
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
         if let FcpError::InvalidRequest { code, message } = err {
             assert_eq!(code, 1004);
-            assert!(message.contains(&MESSAGE_TEXT_MAX_CHARS.to_string()));
-            assert!(message.contains("character limit"));
+            assert!(message.contains(&MESSAGE_TEXT_MAX_CHUNKS.to_string()));
+            assert!(message.contains("chunks"));
         }
     }
 
@@ -5042,7 +5932,7 @@ mod tests {
         // Now it IS configured.
         // We should mock sendMessage to return success or error as needed.
         // But this test specifically wants to test boundary condition.
-        // If validation passes (<= 4096), it proceeds to call API.
+        // If validation passes (<= one Telegram chunk), it proceeds to call API.
         // If we want to test that validation passed, we can check that it didn't fail with InvalidRequest.
         // If the mock returns 404, that means it TRIED to send, so validation passed.
 
@@ -5443,7 +6333,36 @@ mod tests {
     fn test_telegram_message_length_constant() {
         // Verify our constant matches Telegram's documented limit
         assert_eq!(MESSAGE_TEXT_MAX_CHARS, 4096);
+        assert_eq!(MESSAGE_TEXT_MAX_CHUNKS, 16);
+        assert_eq!(MESSAGE_TEXT_CHUNKED_MAX_UTF16_UNITS, 65_536);
         assert_eq!(MEDIA_CAPTION_MAX_CHARS, 1024);
+    }
+
+    #[test]
+    fn test_split_telegram_text_chunks_respects_utf16_boundaries() {
+        let text = format!("{}🙂tail", "a".repeat(MESSAGE_TEXT_MAX_CHARS - 1));
+
+        let chunks = split_telegram_text_chunks(&text, MESSAGE_TEXT_MAX_CHARS);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(telegram_utf16_len(&chunks[0]), MESSAGE_TEXT_MAX_CHARS - 1);
+        assert_eq!(chunks[1], "🙂tail");
+    }
+
+    #[test]
+    fn test_send_message_rejects_beyond_chunked_limit() {
+        let text = "x".repeat(MESSAGE_TEXT_CHUNKED_MAX_UTF16_UNITS + 1);
+        let input = json!({
+            "chat_id": "123",
+            "text": text
+        });
+
+        let result = TelegramConnector::validate_input_early("telegram.send_message", &input);
+
+        assert!(result.is_err());
+        if let Err(FcpError::InvalidRequest { message, .. }) = result {
+            assert!(message.contains(&MESSAGE_TEXT_MAX_CHUNKS.to_string()));
+        }
     }
 
     #[test]
@@ -5488,18 +6407,23 @@ mod tests {
     }
 
     #[test]
-    fn test_introspect_has_five_operations() {
+    fn test_introspect_has_ten_operations() {
         let rt = fcp_async_core::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let connector = TelegramConnector::new();
             let result = connector.handle_introspect().await.unwrap();
             let ops = result["operations"].as_array().unwrap();
-            assert_eq!(ops.len(), 5, "expected 5 operations, got {}", ops.len());
+            assert_eq!(ops.len(), 10, "expected 10 operations, got {}", ops.len());
             let op_ids: Vec<&str> = ops.iter().filter_map(|o| o["id"].as_str()).collect();
             assert!(op_ids.contains(&"telegram.send_message"));
             assert!(op_ids.contains(&"telegram.send_media"));
             assert!(op_ids.contains(&"telegram.get_file"));
             assert!(op_ids.contains(&"telegram.answer_callback_query"));
+            assert!(op_ids.contains(&"telegram.send_chat_action"));
+            assert!(op_ids.contains(&"telegram.set_message_reaction"));
+            assert!(op_ids.contains(&"telegram.set_webhook"));
+            assert!(op_ids.contains(&"telegram.delete_webhook"));
+            assert!(op_ids.contains(&"telegram.get_webhook_info"));
             assert!(op_ids.contains(&"telegram.ingest_webhook_update"));
         });
     }
@@ -5511,6 +6435,11 @@ mod tests {
         "telegram.send_media",
         "telegram.get_file",
         "telegram.answer_callback_query",
+        "telegram.send_chat_action",
+        "telegram.set_message_reaction",
+        "telegram.set_webhook",
+        "telegram.delete_webhook",
+        "telegram.get_webhook_info",
         "telegram.ingest_webhook_update",
     ];
 
@@ -5673,6 +6602,15 @@ mod tests {
                 .iter()
                 .any(|v| v.as_str().unwrap() == "callback_query_id")
         );
+    }
+
+    #[test]
+    fn test_ingest_webhook_update_requires_payload_and_secret() {
+        let schema = TelegramConnector::input_schema_for("telegram.ingest_webhook_update").unwrap();
+        let required = schema["required"].as_array().unwrap();
+        let required_strs: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required_strs.contains(&"payload"));
+        assert!(required_strs.contains(&"secret_token"));
     }
 
     // ─── Manifest interface hash determinism ───────────────────────────
@@ -6353,6 +7291,11 @@ mod tests {
         assert!(ops.contains_key("telegram.send_media"));
         assert!(ops.contains_key("telegram.get_file"));
         assert!(ops.contains_key("telegram.answer_callback_query"));
+        assert!(ops.contains_key("telegram.send_chat_action"));
+        assert!(ops.contains_key("telegram.set_message_reaction"));
+        assert!(ops.contains_key("telegram.set_webhook"));
+        assert!(ops.contains_key("telegram.delete_webhook"));
+        assert!(ops.contains_key("telegram.get_webhook_info"));
         assert!(ops.contains_key("telegram.ingest_webhook_update"));
 
         let send_message_props = ops["telegram.send_message"]["input_schema"]["properties"]
@@ -6363,11 +7306,46 @@ mod tests {
             .as_table()
             .expect("send_media input properties");
         assert!(send_media_props.contains_key("message_thread_id"));
+        let chat_action_props = ops["telegram.send_chat_action"]["input_schema"]["properties"]
+            .as_table()
+            .expect("send_chat_action input properties");
+        assert!(chat_action_props.contains_key("action"));
+        let reaction_props = ops["telegram.set_message_reaction"]["input_schema"]["properties"]
+            .as_table()
+            .expect("set_message_reaction input properties");
+        assert!(reaction_props.contains_key("reaction"));
+        let set_webhook_props = ops["telegram.set_webhook"]["input_schema"]["properties"]
+            .as_table()
+            .expect("set_webhook input properties");
+        assert!(set_webhook_props.contains_key("url"));
+        assert!(set_webhook_props.contains_key("allowed_updates"));
+        let get_webhook_info_required =
+            ops["telegram.get_webhook_info"]["output_schema"]["required"]
+                .as_array()
+                .expect("get_webhook_info output required fields");
+        assert!(
+            get_webhook_info_required
+                .iter()
+                .any(|item| item.as_str() == Some("url"))
+        );
         let webhook_props = ops["telegram.ingest_webhook_update"]["input_schema"]["properties"]
             .as_table()
             .expect("webhook ingest input properties");
         assert!(webhook_props.contains_key("payload"));
         assert!(webhook_props.contains_key("secret_token"));
+        let webhook_required = ops["telegram.ingest_webhook_update"]["input_schema"]["required"]
+            .as_array()
+            .expect("webhook ingest required inputs");
+        assert!(
+            webhook_required
+                .iter()
+                .any(|item| item.as_str() == Some("payload"))
+        );
+        assert!(
+            webhook_required
+                .iter()
+                .any(|item| item.as_str() == Some("secret_token"))
+        );
 
         // Verify interface_hash field exists with expected prefix
         let hash = table["manifest"]["interface_hash"].as_str().unwrap();

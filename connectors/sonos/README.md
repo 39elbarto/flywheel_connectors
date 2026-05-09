@@ -50,7 +50,7 @@ Important runtime truths the contract preserves:
 This README documents runtime truth and keeps current drift visible:
 
 - The manifest operation keys are unprefixed suffixes such as `play`; runtime operation IDs are fully qualified IDs such as `sonos.play`.
-- The manifest defers exact device host constraints to runtime configuration because the speaker is local-network selected.
+- The manifest declares per-operation network constraints with the runtime-resolved `${sonos_device_host}` placeholder because the speaker is local-network selected.
 - The manifest requires `network.outbound`, while many newer connector contracts use `network.egress`; this README documents the current manifest as-is.
 - Runtime uses direct local device SOAP/UPnP-style paths, not the official Sonos cloud Control API path shape.
 - `health()` can be ready after configuration even if the device is unreachable; `self_check()` is the reachability probe.
@@ -87,6 +87,8 @@ The current Sonos README slice documents the existing runtime surface:
 ## Network And Runtime Invariants
 
 - Runtime target is the configured local Sonos device URL.
+- Manifest operation constraints use `host_allow = ["${sonos_device_host}"]`, `port_allow = [80, 443, 1400]`, `require_sni = false`, zero redirects, and bounded timeouts/response size.
+- Localhost, private ranges, tailnet ranges, and IP literals remain allowed because loopback fixtures and real Sonos speakers are local-network resources.
 - Runtime endpoint shapes:
   - `GET /xml/device_description.xml`
   - `POST /MediaRenderer/AVTransport/Control`

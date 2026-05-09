@@ -21,8 +21,10 @@ required = ["network.dns", "network.outbound"]
 optional = []
 forbidden = ["system.exec", "system.privileged", "network.listen"]
 
-# Sonos devices are local-network resources selected at configuration time, so
-# host-level constraints are intentionally deferred to runtime configuration.
+# Sonos devices are local-network resources selected at configuration time.
+# Per-operation constraints use the runtime-resolved device host and keep
+# local/LAN/tailnet/IP-literal targets available for real speakers and loopback
+# proof fixtures.
 
 [provides.operations.health]
 summary = "Report Sonos device health and identity"
@@ -32,6 +34,7 @@ safety_tier = "safe"
 idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["status", "device_url", "manifest_hash"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, device_url = { type = "string", format = "uri" }, manifest_hash = { type = "string", pattern = "^sha256:[0-9a-f]{64}$" } } }
+network_constraints = { host_allow = ["${sonos_device_host}"], port_allow = [80, 443, 1400], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.health.ai_hints]
 when_to_use = "Use this before playback control when you need to confirm the configured Sonos device endpoint is reachable and identifies as the expected speaker."
@@ -47,6 +50,7 @@ safety_tier = "safe"
 idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["transport_state", "transport_status", "volume"], additionalProperties = false, properties = { transport_state = { type = ["string", "null"] }, transport_status = { type = ["string", "null"] }, volume = { type = ["integer", "null"], minimum = 0, maximum = 100 } } }
+network_constraints = { host_allow = ["${sonos_device_host}"], port_allow = [80, 443, 1400], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.get_status.ai_hints]
 when_to_use = "Use this when you need the current transport state and volume before deciding whether to play, pause, skip, or change loudness."
@@ -62,6 +66,7 @@ safety_tier = "risky"
 idempotency = "best_effort"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["status", "action"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, action = { type = "string", enum = ["play"] } } }
+network_constraints = { host_allow = ["${sonos_device_host}"], port_allow = [80, 443, 1400], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.play.ai_hints]
 when_to_use = "Use this to resume playback on the configured Sonos device after confirming the target room and queue state."
@@ -77,6 +82,7 @@ safety_tier = "risky"
 idempotency = "best_effort"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["status", "action"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, action = { type = "string", enum = ["pause"] } } }
+network_constraints = { host_allow = ["${sonos_device_host}"], port_allow = [80, 443, 1400], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.pause.ai_hints]
 when_to_use = "Use this to pause the currently configured Sonos device after verifying playback is active or the user explicitly asked to stop audio."
@@ -92,6 +98,7 @@ safety_tier = "risky"
 idempotency = "best_effort"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["status", "action"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, action = { type = "string", enum = ["next"] } } }
+network_constraints = { host_allow = ["${sonos_device_host}"], port_allow = [80, 443, 1400], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.next.ai_hints]
 when_to_use = "Use this when the user asks to skip forward in the active Sonos queue on the configured device."
@@ -107,6 +114,7 @@ safety_tier = "risky"
 idempotency = "best_effort"
 input_schema = { type = "object", additionalProperties = false }
 output_schema = { type = "object", required = ["status", "action"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, action = { type = "string", enum = ["previous"] } } }
+network_constraints = { host_allow = ["${sonos_device_host}"], port_allow = [80, 443, 1400], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.previous.ai_hints]
 when_to_use = "Use this when the user asks to return to the previous item in the active Sonos queue."
@@ -122,6 +130,7 @@ safety_tier = "risky"
 idempotency = "best_effort"
 input_schema = { type = "object", required = ["volume"], additionalProperties = false, properties = { volume = { type = "integer", minimum = 0, maximum = 100 } } }
 output_schema = { type = "object", required = ["status", "volume"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, volume = { type = "integer", minimum = 0, maximum = 100 } } }
+network_constraints = { host_allow = ["${sonos_device_host}"], port_allow = [80, 443, 1400], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.set_volume.ai_hints]
 when_to_use = "Use this to set an explicit 0-100 volume level on the configured Sonos device when the user gives a target loudness."

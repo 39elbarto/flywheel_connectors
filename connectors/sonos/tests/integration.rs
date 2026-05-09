@@ -26,6 +26,7 @@ const OP_PAUSE: &str = "sonos.pause";
 const OP_NEXT: &str = "sonos.next";
 const OP_PREVIOUS: &str = "sonos.previous";
 const OP_SET_VOLUME: &str = "sonos.set_volume";
+const SONOS_DEVICE_HOST_PLACEHOLDER: &str = "${sonos_device_host}";
 
 fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
     HandshakeRequest {
@@ -448,6 +449,79 @@ async fn operation_catalog_manifest_and_redaction_preserve_security_posture() {
             .and_then(|operation| operation.get("ai_hints"))
             .and_then(toml::Value::as_table)
             .expect("operation should declare ai_hints");
+        let network_constraints = provides
+            .get(suffix)
+            .and_then(|operation| operation.get("network_constraints"))
+            .and_then(toml::Value::as_table)
+            .expect("operation should declare network_constraints");
+        let host_allow = network_constraints
+            .get("host_allow")
+            .and_then(toml::Value::as_array)
+            .expect("operation should declare host_allow");
+        assert_eq!(host_allow.len(), 1);
+        assert_eq!(host_allow[0].as_str(), Some(SONOS_DEVICE_HOST_PLACEHOLDER));
+        let port_allow = network_constraints
+            .get("port_allow")
+            .and_then(toml::Value::as_array)
+            .expect("operation should declare port_allow")
+            .iter()
+            .map(|port| port.as_integer().expect("port_allow values should be ints"))
+            .collect::<Vec<_>>();
+        assert_eq!(port_allow, vec![80, 443, 1400]);
+        assert_eq!(
+            network_constraints
+                .get("require_sni")
+                .and_then(toml::Value::as_bool),
+            Some(false)
+        );
+        for key in [
+            "deny_localhost",
+            "deny_private_ranges",
+            "deny_tailnet_ranges",
+            "deny_ip_literals",
+        ] {
+            assert_eq!(
+                network_constraints.get(key).and_then(toml::Value::as_bool),
+                Some(false),
+                "{operation} should allow local Sonos device addressing for {key}"
+            );
+        }
+        assert_eq!(
+            network_constraints
+                .get("require_host_canonicalization")
+                .and_then(toml::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            network_constraints
+                .get("dns_max_ips")
+                .and_then(toml::Value::as_integer),
+            Some(16)
+        );
+        assert_eq!(
+            network_constraints
+                .get("max_redirects")
+                .and_then(toml::Value::as_integer),
+            Some(0)
+        );
+        assert_eq!(
+            network_constraints
+                .get("connect_timeout_ms")
+                .and_then(toml::Value::as_integer),
+            Some(10_000)
+        );
+        assert_eq!(
+            network_constraints
+                .get("total_timeout_ms")
+                .and_then(toml::Value::as_integer),
+            Some(30_000)
+        );
+        assert_eq!(
+            network_constraints
+                .get("max_response_bytes")
+                .and_then(toml::Value::as_integer),
+            Some(1_048_576)
+        );
         let when_to_use = hints
             .get("when_to_use")
             .and_then(toml::Value::as_str)

@@ -20,7 +20,7 @@ catalog and tests.
 | `inworld.realtime.audio_turn` | `inworld.realtime.invoke` | Realtime WebSocket `input_audio_buffer.*`, `response.create` |
 | `inworld.tts.context_roundtrip` | `inworld.tts` | TTS WebSocket `create`, `send_text`, `close_context` |
 | `inworld.router.chat_completion` | `inworld.router.chat` | Router REST `POST /v1/chat/completions` |
-| `inworld.health` | `inworld.health.read` | Local health/configuration report |
+| `inworld.health` | `inworld.health.read` | Local health/configuration report (no provider egress) |
 
 ## Configuration
 

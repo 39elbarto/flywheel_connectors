@@ -2,8 +2,9 @@
 //!
 //! # Enforcement Layers
 //!
-//! 1. **AppContainer** (roadmap, not yet wired): Low-integrity process
-//!    isolation with capability-based access
+//! 1. **AppContainer**: Low-integrity child-process isolation with
+//!    capability-based access when launched through
+//!    [`WindowsSandbox::spawn_appcontainer_process`]
 //! 2. **Job Objects**: Resource limits (memory, CPU, process count) — the
 //!    only mechanism active today
 //! 3. **Integrity Levels** (roadmap): Restrict write access to
@@ -18,16 +19,14 @@
 //! which is the coarsest tier. No syscall filter (Linux seccomp-bpf) and
 //! no named-operation profile (macOS SBPL) is in place. Enforcement is
 //! limited to the job object's `ActiveProcessLimit`, `JobMemoryLimit`,
-//! and `PerProcessUserTimeLimit`. A connector that stays inside those
+//! and `PerProcessUserTimeLimit` unless the host uses the Windows-only
+//! AppContainer spawn entrypoint. A connector that stays inside those
 //! budgets can invoke any Win32/NT API the process integrity level
 //! allows. Connectors requiring the full strict-profile guarantee MUST
 //! run under [`WasiRuntime`](crate::WasiRuntime) (no host syscalls
-//! reach the kernel from WASI guests). Tightening this to
-//! `ProfileLevel` via AppContainer / integrity-level enforcement is
-//! tracked in bead `flywheel_connectors-r4qcg` (filed 2026-05-02 by
-//! the /mock-code-finder audit; the prior `flywheel_connectors-459lp`
-//! reference here was a forward-pointer to a bead that was never
-//! filed at that id).
+//! reach the kernel from WASI guests) until the AppContainer, integrity,
+//! firewall, and readiness children under bead `flywheel_connectors-r4qcg`
+//! are all proven end to end.
 //!
 //! # AppContainer
 //!
@@ -45,11 +44,13 @@
 //! - UI restrictions
 
 #![cfg(target_os = "windows")]
+#![allow(non_snake_case)]
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr;
+use std::time::Duration;
 
 use tracing::{debug, info, warn};
 
@@ -71,13 +72,17 @@ type BOOL = i32;
 type DWORD = u32;
 type HRESULT = i32;
 type LPCWSTR = *const u16;
+type LPWSTR = *mut u16;
 type PSID = *mut std::ffi::c_void;
+type SIZE_T = usize;
+type DWORD_PTR = usize;
 
 const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
 const FALSE: BOOL = 0;
 const TRUE: BOOL = 1;
 const S_OK: HRESULT = 0;
 const HRESULT_ERROR_ALREADY_EXISTS: HRESULT = 0x8007_00b7u32 as HRESULT;
+const ERROR_INSUFFICIENT_BUFFER: DWORD = 122;
 
 // Job object limits
 const JOB_OBJECT_LIMIT_PROCESS_MEMORY: DWORD = 0x0100;
@@ -96,6 +101,17 @@ const SECURITY_MANDATORY_HIGH_RID: DWORD = 0x3000;
 
 // Token information class
 const TOKEN_INTEGRITY_LEVEL: DWORD = 25;
+
+// Process creation flags
+const CREATE_SUSPENDED: DWORD = 0x0000_0004;
+const EXTENDED_STARTUPINFO_PRESENT: DWORD = 0x0008_0000;
+const RESUME_THREAD_FAILED: DWORD = DWORD::MAX;
+const WAIT_OBJECT_0: DWORD = 0;
+const WAIT_TIMEOUT: DWORD = 0x0000_0102;
+const WAIT_FAILED: DWORD = DWORD::MAX;
+
+// ProcThreadAttributeValue(9, FALSE, TRUE, FALSE).
+const PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES: DWORD_PTR = 0x0002_0009;
 
 // ============================================================================
 // Windows Sandbox
@@ -127,7 +143,7 @@ impl WindowsSandbox {
         if appcontainer_available {
             info!(
                 env = FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV,
-                "AppContainer opt-in enabled — caller must ensure CreateProcessAsUser path is wired"
+                "AppContainer opt-in enabled; callers may use the STARTUPINFOEX process launch entrypoint"
             );
         } else {
             warn!(
@@ -189,6 +205,118 @@ impl WindowsSandbox {
             "Prepared Windows AppContainer profile"
         );
         Ok(report)
+    }
+
+    /// Launch a child process in a Windows `AppContainer` and attach it to a job object.
+    ///
+    /// This entrypoint is separate from [`Sandbox::apply_to_command`] because
+    /// `std::process::Command` cannot carry the `STARTUPINFOEX` attribute list
+    /// required for `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`.
+    pub fn spawn_appcontainer_process(
+        &self,
+        program: &Path,
+        args: &[&OsStr],
+        policy: &CompiledPolicy,
+    ) -> Result<WindowsAppContainerChild, SandboxError> {
+        if !self.appcontainer_available {
+            return Err(SandboxError::ApplyFailed(
+                "windows AppContainer process launch unavailable: \
+                 windows_appcontainer_not_active_createprocessasuser_path_unwired"
+                    .into(),
+            ));
+        }
+
+        let report = self.prepare_appcontainer_profile(policy)?;
+        if !report.sid_present {
+            return Err(SandboxError::ApplyFailed(
+                "windows AppContainer process launch unavailable: profile SID was not resolved"
+                    .into(),
+            ));
+        }
+
+        let appcontainer_sid = derive_appcontainer_sid(&report.profile.name)?;
+        let mut capabilities = DerivedCapabilitySids::new(&report.profile.capabilities)?;
+        let mut security_capabilities = SECURITY_CAPABILITIES {
+            AppContainerSid: appcontainer_sid.as_ptr(),
+            Capabilities: capabilities.as_mut_ptr(),
+            CapabilityCount: capabilities.count(),
+            Reserved: 0,
+        };
+
+        let mut attributes = ProcThreadAttributeList::new(1)?;
+        attributes.update_security_capabilities(&mut security_capabilities)?;
+
+        let job = OwnedHandle::new(self.create_job_object(policy)?);
+        let mut command_line = build_windows_command_line(program, args);
+        let application_name = to_wide_os_str(program.as_os_str());
+        let mut startup_info = STARTUPINFOEXW::with_attribute_list(attributes.as_mut_ptr())?;
+        let mut process_info = PROCESS_INFORMATION::default();
+
+        let created = unsafe {
+            CreateProcessW(
+                application_name.as_ptr(),
+                command_line.as_mut_ptr(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                FALSE,
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED,
+                ptr::null_mut(),
+                ptr::null(),
+                std::ptr::from_mut(&mut startup_info).cast(),
+                &mut process_info,
+            )
+        };
+
+        if created == FALSE {
+            return Err(SandboxError::SyscallFailed(format!(
+                "CreateProcessW AppContainer launch failed: {}",
+                get_last_error()
+            )));
+        }
+
+        let process_handle = OwnedHandle::new(process_info.hProcess);
+        let thread_handle = OwnedHandle::new(process_info.hThread);
+
+        let assigned = unsafe { AssignProcessToJobObject(job.as_raw(), process_handle.as_raw()) };
+        if assigned == FALSE {
+            unsafe {
+                TerminateProcess(process_handle.as_raw(), 1);
+            }
+            return Err(SandboxError::SyscallFailed(format!(
+                "AssignProcessToJobObject(child) failed: {}",
+                get_last_error()
+            )));
+        }
+
+        let resumed = unsafe { ResumeThread(thread_handle.as_raw()) };
+        if resumed == RESUME_THREAD_FAILED {
+            unsafe {
+                TerminateProcess(process_handle.as_raw(), 1);
+            }
+            return Err(SandboxError::SyscallFailed(format!(
+                "ResumeThread(AppContainer child) failed: {}",
+                get_last_error()
+            )));
+        }
+
+        let launch_evidence = WindowsAppContainerProcessLaunchEvidence::from_lifecycle(
+            &windows_appcontainer_connector_seed(policy),
+            &report,
+            WindowsAppContainerProcessLaunchMechanism::StartupInfoExSecurityCapabilities,
+            true,
+            "launched",
+            Some(process_info.dwProcessId),
+        );
+        if let Ok(jsonl) = launch_evidence.to_jsonl_line() {
+            debug!(evidence_jsonl = %jsonl, "Windows AppContainer process launched");
+        }
+
+        Ok(WindowsAppContainerChild {
+            process_handle: process_handle.into_raw(),
+            thread_handle: thread_handle.into_raw(),
+            job_handle: job.into_raw(),
+            process_id: process_info.dwProcessId,
+        })
     }
 
     /// Create and configure a job object.
@@ -377,6 +505,66 @@ impl WindowsSandbox {
         );
 
         Ok(())
+    }
+}
+
+/// Running Windows `AppContainer` child process plus its lifetime-bound job object.
+#[derive(Debug)]
+pub struct WindowsAppContainerChild {
+    process_handle: HANDLE,
+    thread_handle: HANDLE,
+    job_handle: HANDLE,
+    process_id: DWORD,
+}
+
+impl WindowsAppContainerChild {
+    /// Windows process id of the launched child.
+    #[must_use]
+    pub const fn process_id(&self) -> u32 {
+        self.process_id
+    }
+
+    /// Wait for the child to exit and return its process exit code.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the timeout elapses or Windows fails the wait/exit-code calls.
+    pub fn wait(&self, timeout: Duration) -> Result<u32, SandboxError> {
+        let timeout_ms = DWORD::try_from(timeout.as_millis()).unwrap_or(DWORD::MAX - 1);
+        match unsafe { WaitForSingleObject(self.process_handle, timeout_ms) } {
+            WAIT_OBJECT_0 => {
+                let mut exit_code: DWORD = 0;
+                let ok = unsafe { GetExitCodeProcess(self.process_handle, &mut exit_code) };
+                if ok == FALSE {
+                    Err(SandboxError::SyscallFailed(format!(
+                        "GetExitCodeProcess(AppContainer child) failed: {}",
+                        get_last_error()
+                    )))
+                } else {
+                    Ok(exit_code)
+                }
+            }
+            WAIT_TIMEOUT => Err(SandboxError::ApplyFailed(
+                "Windows AppContainer child did not exit before timeout".into(),
+            )),
+            WAIT_FAILED => Err(SandboxError::SyscallFailed(format!(
+                "WaitForSingleObject(AppContainer child) failed: {}",
+                get_last_error()
+            ))),
+            unexpected => Err(SandboxError::SyscallFailed(format!(
+                "WaitForSingleObject(AppContainer child) returned unexpected status {unexpected}"
+            ))),
+        }
+    }
+}
+
+impl Drop for WindowsAppContainerChild {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.thread_handle);
+            CloseHandle(self.process_handle);
+            CloseHandle(self.job_handle);
+        }
     }
 }
 
@@ -639,6 +827,93 @@ struct TOKEN_MANDATORY_LABEL {
     Label: SID_AND_ATTRIBUTES,
 }
 
+#[repr(C)]
+struct SECURITY_CAPABILITIES {
+    AppContainerSid: PSID,
+    Capabilities: *mut SID_AND_ATTRIBUTES,
+    CapabilityCount: DWORD,
+    Reserved: DWORD,
+}
+
+#[repr(C)]
+struct STARTUPINFOW {
+    cb: DWORD,
+    lpReserved: LPWSTR,
+    lpDesktop: LPWSTR,
+    lpTitle: LPWSTR,
+    dwX: DWORD,
+    dwY: DWORD,
+    dwXSize: DWORD,
+    dwYSize: DWORD,
+    dwXCountChars: DWORD,
+    dwYCountChars: DWORD,
+    dwFillAttribute: DWORD,
+    dwFlags: DWORD,
+    wShowWindow: u16,
+    cbReserved2: u16,
+    lpReserved2: *mut u8,
+    hStdInput: HANDLE,
+    hStdOutput: HANDLE,
+    hStdError: HANDLE,
+}
+
+impl Default for STARTUPINFOW {
+    fn default() -> Self {
+        Self {
+            cb: 0,
+            lpReserved: ptr::null_mut(),
+            lpDesktop: ptr::null_mut(),
+            lpTitle: ptr::null_mut(),
+            dwX: 0,
+            dwY: 0,
+            dwXSize: 0,
+            dwYSize: 0,
+            dwXCountChars: 0,
+            dwYCountChars: 0,
+            dwFillAttribute: 0,
+            dwFlags: 0,
+            wShowWindow: 0,
+            cbReserved2: 0,
+            lpReserved2: ptr::null_mut(),
+            hStdInput: ptr::null_mut(),
+            hStdOutput: ptr::null_mut(),
+            hStdError: ptr::null_mut(),
+        }
+    }
+}
+
+#[repr(C)]
+struct STARTUPINFOEXW {
+    StartupInfo: STARTUPINFOW,
+    lpAttributeList: *mut std::ffi::c_void,
+}
+
+impl STARTUPINFOEXW {
+    fn with_attribute_list(attribute_list: *mut std::ffi::c_void) -> Result<Self, SandboxError> {
+        let cb = DWORD::try_from(std::mem::size_of::<Self>()).map_err(|_| {
+            SandboxError::PolicyCompilationFailed(
+                "STARTUPINFOEXW size does not fit Windows DWORD".into(),
+            )
+        })?;
+        Ok(Self {
+            StartupInfo: STARTUPINFOW {
+                cb,
+                ..STARTUPINFOW::default()
+            },
+            lpAttributeList: attribute_list,
+        })
+    }
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct PROCESS_INFORMATION {
+    hProcess: HANDLE,
+    hThread: HANDLE,
+    dwProcessId: DWORD,
+    dwThreadId: DWORD,
+}
+
 const SE_GROUP_INTEGRITY: DWORD = 0x0000_0020;
 const SE_GROUP_ENABLED: DWORD = 0x0000_0004;
 const TOKEN_ADJUST_DEFAULT: DWORD = 0x0080;
@@ -705,6 +980,46 @@ unsafe extern "system" {
     ) -> BOOL;
 
     fn LocalFree(hMem: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+
+    fn InitializeProcThreadAttributeList(
+        lpAttributeList: *mut std::ffi::c_void,
+        dwAttributeCount: DWORD,
+        dwFlags: DWORD,
+        lpSize: *mut SIZE_T,
+    ) -> BOOL;
+
+    fn UpdateProcThreadAttribute(
+        lpAttributeList: *mut std::ffi::c_void,
+        dwFlags: DWORD,
+        Attribute: DWORD_PTR,
+        lpValue: *mut std::ffi::c_void,
+        cbSize: SIZE_T,
+        lpPreviousValue: *mut std::ffi::c_void,
+        lpReturnSize: *mut SIZE_T,
+    ) -> BOOL;
+
+    fn DeleteProcThreadAttributeList(lpAttributeList: *mut std::ffi::c_void);
+
+    fn CreateProcessW(
+        lpApplicationName: LPCWSTR,
+        lpCommandLine: LPWSTR,
+        lpProcessAttributes: *mut std::ffi::c_void,
+        lpThreadAttributes: *mut std::ffi::c_void,
+        bInheritHandles: BOOL,
+        dwCreationFlags: DWORD,
+        lpEnvironment: *mut std::ffi::c_void,
+        lpCurrentDirectory: LPCWSTR,
+        lpStartupInfo: *mut STARTUPINFOW,
+        lpProcessInformation: *mut PROCESS_INFORMATION,
+    ) -> BOOL;
+
+    fn ResumeThread(hThread: HANDLE) -> DWORD;
+
+    fn TerminateProcess(hProcess: HANDLE, uExitCode: u32) -> BOOL;
+
+    fn WaitForSingleObject(hHandle: HANDLE, dwMilliseconds: DWORD) -> DWORD;
+
+    fn GetExitCodeProcess(hProcess: HANDLE, lpExitCode: *mut DWORD) -> BOOL;
 }
 
 #[link(name = "userenv")]
@@ -869,11 +1184,124 @@ fn delete_appcontainer_profile(profile_name: &str) -> Result<(), SandboxError> {
 
 struct OwnedSid(PSID);
 
+impl OwnedSid {
+    fn as_ptr(&self) -> PSID {
+        self.0
+    }
+}
+
 impl Drop for OwnedSid {
     fn drop(&mut self) {
         if !self.0.is_null() {
             unsafe {
                 FreeSid(self.0);
+            }
+        }
+    }
+}
+
+struct OwnedHandle(HANDLE);
+
+impl OwnedHandle {
+    fn new(handle: HANDLE) -> Self {
+        Self(handle)
+    }
+
+    fn as_raw(&self) -> HANDLE {
+        self.0
+    }
+
+    fn into_raw(mut self) -> HANDLE {
+        let handle = self.0;
+        self.0 = ptr::null_mut();
+        handle
+    }
+}
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+struct ProcThreadAttributeList {
+    storage: Vec<usize>,
+}
+
+impl ProcThreadAttributeList {
+    fn new(attribute_count: DWORD) -> Result<Self, SandboxError> {
+        let mut byte_len: SIZE_T = 0;
+        let probe = unsafe {
+            InitializeProcThreadAttributeList(ptr::null_mut(), attribute_count, 0, &mut byte_len)
+        };
+        if probe != FALSE {
+            return Err(SandboxError::SyscallFailed(
+                "InitializeProcThreadAttributeList size probe unexpectedly succeeded".into(),
+            ));
+        }
+        let last_error = unsafe { GetLastError() };
+        if last_error != ERROR_INSUFFICIENT_BUFFER {
+            return Err(SandboxError::SyscallFailed(format!(
+                "InitializeProcThreadAttributeList size probe failed: error code {last_error}"
+            )));
+        }
+
+        let word_len = byte_len.div_ceil(std::mem::size_of::<usize>());
+        let mut list = Self {
+            storage: vec![0; word_len],
+        };
+        let initialized = unsafe {
+            InitializeProcThreadAttributeList(list.as_mut_ptr(), attribute_count, 0, &mut byte_len)
+        };
+        if initialized == FALSE {
+            return Err(SandboxError::SyscallFailed(format!(
+                "InitializeProcThreadAttributeList failed: {}",
+                get_last_error()
+            )));
+        }
+
+        Ok(list)
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut std::ffi::c_void {
+        self.storage.as_mut_ptr().cast()
+    }
+
+    fn update_security_capabilities(
+        &mut self,
+        security_capabilities: &mut SECURITY_CAPABILITIES,
+    ) -> Result<(), SandboxError> {
+        let updated = unsafe {
+            UpdateProcThreadAttribute(
+                self.as_mut_ptr(),
+                0,
+                PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+                std::ptr::from_mut(security_capabilities).cast(),
+                std::mem::size_of::<SECURITY_CAPABILITIES>(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if updated == FALSE {
+            return Err(SandboxError::SyscallFailed(format!(
+                "UpdateProcThreadAttribute(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES) failed: {}",
+                get_last_error()
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for ProcThreadAttributeList {
+    fn drop(&mut self) {
+        if !self.storage.is_empty() {
+            unsafe {
+                DeleteProcThreadAttributeList(self.as_mut_ptr());
             }
         }
     }
@@ -1031,6 +1459,56 @@ fn to_wide_string(s: &str) -> Vec<u16> {
         .collect()
 }
 
+fn to_wide_os_str(value: &OsStr) -> Vec<u16> {
+    value.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+fn build_windows_command_line(program: &Path, args: &[&OsStr]) -> Vec<u16> {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(quote_windows_command_arg(program.as_os_str()));
+    parts.extend(args.iter().map(|arg| quote_windows_command_arg(arg)));
+    to_wide_string(&parts.join(" "))
+}
+
+fn quote_windows_command_arg(arg: &OsStr) -> String {
+    let value = arg.to_string_lossy();
+    if value.is_empty() {
+        return "\"\"".to_owned();
+    }
+    if !value
+        .chars()
+        .any(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r' | '"'))
+    {
+        return value.into_owned();
+    }
+
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    let mut backslashes = 0usize;
+    for ch in value.chars() {
+        if ch == '\\' {
+            backslashes += 1;
+        } else if ch == '"' {
+            for _ in 0..(backslashes * 2 + 1) {
+                quoted.push('\\');
+            }
+            quoted.push('"');
+            backslashes = 0;
+        } else {
+            for _ in 0..backslashes {
+                quoted.push('\\');
+            }
+            backslashes = 0;
+            quoted.push(ch);
+        }
+    }
+    for _ in 0..(backslashes * 2) {
+        quoted.push('\\');
+    }
+    quoted.push('"');
+    quoted
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -1113,6 +1591,83 @@ mod tests {
             "explicit opt-in via {} must flip AppContainer to active",
             FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV
         );
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV, v),
+                None => std::env::remove_var(FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV),
+            }
+        }
+    }
+
+    #[test]
+    fn windows_command_line_quotes_spaces_quotes_and_trailing_backslashes() {
+        let command_line = build_windows_command_line(
+            Path::new("C:\\Program Files\\FCP\\connector.exe"),
+            &[
+                OsStr::new("simple"),
+                OsStr::new("two words"),
+                OsStr::new("quote\"inside"),
+                OsStr::new("C:\\Temp\\trailing\\"),
+            ],
+        );
+        let rendered = String::from_utf16(
+            &command_line[..command_line.len().checked_sub(1).expect("nul terminator")],
+        )
+        .expect("valid utf16 command line");
+
+        assert_eq!(
+            rendered,
+            "\"C:\\Program Files\\FCP\\connector.exe\" simple \"two words\" \
+             \"quote\\\"inside\" C:\\Temp\\trailing\\"
+        );
+    }
+
+    #[test]
+    fn windows_command_line_quotes_empty_argument() {
+        let command_line =
+            build_windows_command_line(Path::new("C:\\fcp\\connector.exe"), &[OsStr::new("")]);
+        let rendered = String::from_utf16(
+            &command_line[..command_line.len().checked_sub(1).expect("nul terminator")],
+        )
+        .expect("valid utf16 command line");
+
+        assert_eq!(rendered, "C:\\fcp\\connector.exe \"\"");
+    }
+
+    #[test]
+    fn windows_appcontainer_real_process_launch_e2e() {
+        if !matches!(
+            std::env::var("FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E")
+                .ok()
+                .as_deref(),
+            Some("1") | Some("true") | Some("TRUE")
+        ) {
+            eprintln!(
+                "structured_skip: FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E not enabled for real launch"
+            );
+            return;
+        }
+
+        let prev = std::env::var(FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV).ok();
+        unsafe {
+            std::env::set_var(FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV, "1");
+        }
+        let sandbox = WindowsSandbox::new();
+        let policy = test_policy();
+        let child = sandbox
+            .spawn_appcontainer_process(
+                Path::new("C:\\Windows\\System32\\cmd.exe"),
+                &[OsStr::new("/C"), OsStr::new("exit 0")],
+                &policy,
+            )
+            .expect("launch AppContainer child");
+        assert!(child.process_id() > 0);
+        eprintln!("WINDOWS_APPCONTAINER_E2E_PROCESS_ID={}", child.process_id());
+        let exit_code = child
+            .wait(Duration::from_secs(10))
+            .expect("wait for AppContainer child");
+        assert_eq!(exit_code, 0);
+
         unsafe {
             match prev {
                 Some(v) => std::env::set_var(FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV, v),

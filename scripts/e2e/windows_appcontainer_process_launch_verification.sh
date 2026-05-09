@@ -44,14 +44,21 @@ echo "[windows-appcontainer-e2e] cargo test -p fcp-sandbox windows_appcontainer"
   cd "${REPO_ROOT}"
   "${RCH_BIN}" exec -- env \
     "CARGO_TARGET_DIR=${TARGET_DIR}" \
+    "FCP_SANDBOX_WINDOWS_APPCONTAINER=${FCP_SANDBOX_WINDOWS_APPCONTAINER:-}" \
+    "FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E=${FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E:-}" \
     cargo test -p fcp-sandbox windows_appcontainer -- --nocapture
 ) >"${RAW_LOG}" 2>&1
 
 skip_reason=""
+real_launch="false"
 case "${HOST_OS}" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
     if [[ "${FCP_SANDBOX_WINDOWS_APPCONTAINER:-}" == "1" || "${FCP_SANDBOX_WINDOWS_APPCONTAINER:-}" == "true" ]]; then
-      skip_reason="windows_appcontainer_real_launch_worker_not_configured"
+      if [[ "${FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E:-}" == "1" || "${FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E:-}" == "true" ]]; then
+        real_launch="true"
+      else
+        skip_reason="windows_appcontainer_e2e_opt_in_missing"
+      fi
     else
       skip_reason="windows_appcontainer_env_opt_in_missing"
     fi
@@ -60,6 +67,16 @@ case "${HOST_OS}" in
     skip_reason="host_os_not_windows_or_appcontainer_worker_unavailable"
     ;;
 esac
+
+process_id_hash=""
+if [[ "${real_launch}" == "true" ]]; then
+  process_id="$(sed -n 's/^WINDOWS_APPCONTAINER_E2E_PROCESS_ID=//p' "${RAW_LOG}" | tail -n 1)"
+  if [[ -z "${process_id}" ]]; then
+    echo "Windows AppContainer real launch proof did not emit a process id" >&2
+    exit 1
+  fi
+  process_id_hash="$(hash16 "${process_id}")"
+fi
 
 jq -cn \
   --arg command_line "${COMMAND_LINE}" \
@@ -73,6 +90,8 @@ jq -cn \
   --arg summary_json "${SUMMARY_JSON_ARTIFACT}" \
   --arg target_dir_hash "${TARGET_DIR_HASH}" \
   --arg skip_reason "${skip_reason}" \
+  --arg real_launch "${real_launch}" \
+  --arg process_id_hash "${process_id_hash}" \
   '{
     record_type: "windows_appcontainer_process_launch_e2e",
     schema: "fcp.windows_appcontainer_process_launch.script.v1",
@@ -82,14 +101,14 @@ jq -cn \
     connector_id_hash: $connector_id_hash,
     profile_name_hash: $profile_name_hash,
     capability_decision: "mapped",
-    sid_present: false,
-    launch_mechanism: "skipped_inactive",
-    process_id_hash: null,
+    sid_present: ($real_launch == "true"),
+    launch_mechanism: (if $real_launch == "true" then "startup_info_ex_security_capabilities" else "skipped_inactive" end),
+    process_id_hash: (if $process_id_hash == "" then null else $process_id_hash end),
     job_object_id_hash: $job_object_id_hash,
-    job_object_attached: false,
-    job_object_attachment_intent: "none",
-    action_result: "structured_skip",
-    cleanup_result: "none",
+    job_object_attached: ($real_launch == "true"),
+    job_object_attachment_intent: (if $real_launch == "true" then "attach_after_launch" else "none" end),
+    action_result: (if $real_launch == "true" then "launched" else "structured_skip" end),
+    cleanup_result: (if $real_launch == "true" then "drop_closed_handles" else "none" end),
     final_readiness_layer: "process_limit",
     artifact_paths: {
       raw_log: $raw_log,
@@ -97,56 +116,73 @@ jq -cn \
       summary_json: $summary_json,
       target_dir_hash: $target_dir_hash
     },
-    skip_reason: $skip_reason
+    skip_reason: (if $skip_reason == "" then null else $skip_reason end)
   }' >>"${LOG_JSONL}"
 
 jq -e '
-  select(.record_type == "windows_appcontainer_process_launch_e2e")
+  select(.record_type == "windows_appcontainer_process_launch_e2e") as $record
   | [
-      .command_line,
-      .git_revision,
-      .os_build,
-      .connector_id_hash,
-      .profile_name_hash,
-      .capability_decision,
-      .sid_present,
-      .launch_mechanism,
-      .job_object_id_hash,
-      .job_object_attached,
-      .job_object_attachment_intent,
-      .action_result,
-      .cleanup_result,
-      .final_readiness_layer,
-      .artifact_paths.raw_log,
-      .artifact_paths.log_jsonl,
-      .artifact_paths.summary_json,
-      .artifact_paths.target_dir_hash,
-      .skip_reason
+      $record.command_line,
+      $record.git_revision,
+      $record.os_build,
+      $record.connector_id_hash,
+      $record.profile_name_hash,
+      $record.capability_decision,
+      $record.sid_present,
+      $record.launch_mechanism,
+      $record.job_object_id_hash,
+      $record.job_object_attached,
+      $record.job_object_attachment_intent,
+      $record.action_result,
+      $record.cleanup_result,
+      $record.final_readiness_layer,
+      $record.artifact_paths.raw_log,
+      $record.artifact_paths.log_jsonl,
+      $record.artifact_paths.summary_json,
+      $record.artifact_paths.target_dir_hash
     ]
-  | all(. != null)
+    | all(. != null)
+  and (
+    if $record.action_result == "launched" then
+      $record.sid_present == true
+      and $record.job_object_attached == true
+      and $record.job_object_attachment_intent == "attach_after_launch"
+      and $record.process_id_hash != null
+      and $record.skip_reason == null
+    else
+      $record.skip_reason != null
+    end
+  )
 ' "${LOG_JSONL}" >/dev/null
 
-if grep -aE "${CONNECTOR_ID}|${PROFILE_NAME}|Bearer|token|secret|C:\\\\Users|/Users/" "${LOG_JSONL}" >/dev/null; then
+if grep -aE "${CONNECTOR_ID}|${PROFILE_NAME}|Bearer|token|secret|C:\\\\Users|/Users/|WINDOWS_APPCONTAINER_E2E_PROCESS_ID" "${LOG_JSONL}" >/dev/null; then
   echo "Windows AppContainer JSONL leaked a raw identifier, token marker, or private path" >&2
   exit 1
+fi
+
+result="passed_with_structured_skip"
+if [[ "${real_launch}" == "true" ]]; then
+  result="passed_with_real_launch"
 fi
 
 jq -cn \
   --arg run_id "${RUN_ID}" \
   --arg git_revision "${GIT_REVISION}" \
-  --arg result "passed_with_structured_skip" \
+  --arg result "${result}" \
   --arg log_jsonl "${LOG_JSONL_ARTIFACT}" \
   --arg raw_log "${RAW_LOG_ARTIFACT}" \
   --arg target_dir_hash "${TARGET_DIR_HASH}" \
   --arg skip_reason "${skip_reason}" \
+  --arg real_launch "${real_launch}" \
   '{
     run_id: $run_id,
     git_revision: $git_revision,
     result: $result,
+    real_launch: ($real_launch == "true"),
     log_jsonl: $log_jsonl,
     raw_log: $raw_log,
     target_dir_hash: $target_dir_hash,
-    skip_reason: $skip_reason
+    skip_reason: (if $skip_reason == "" then null else $skip_reason end)
   }' >"${SUMMARY_JSON}"
 
 echo "WINDOWS_APPCONTAINER_PROCESS_LAUNCH_JSONL=${LOG_JSONL}"

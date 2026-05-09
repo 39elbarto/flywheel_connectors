@@ -54,9 +54,12 @@ use std::ptr;
 use tracing::{debug, info, warn};
 
 use crate::sandbox::{
-    CompiledPolicy, Sandbox, SandboxError, WindowsAppContainerCreateOutcome,
-    WindowsAppContainerEvidence, WindowsAppContainerLifecycleReport, WindowsAppContainerProfile,
-    WindowsAppContainerProfileApi, prepare_windows_appcontainer_lifecycle,
+    CompiledPolicy, Sandbox, SandboxError, WindowsAppContainerCleanupDecision,
+    WindowsAppContainerCreateOutcome, WindowsAppContainerEvidence,
+    WindowsAppContainerLifecycleAction, WindowsAppContainerLifecycleReport,
+    WindowsAppContainerProcessLaunchEvidence, WindowsAppContainerProcessLaunchMechanism,
+    WindowsAppContainerProfile, WindowsAppContainerProfileApi,
+    prepare_windows_appcontainer_lifecycle,
 };
 
 // ============================================================================
@@ -410,6 +413,21 @@ impl Sandbox for WindowsSandbox {
         if let Ok(jsonl) = appcontainer_evidence.to_jsonl_line() {
             debug!(evidence_jsonl = %jsonl, "Windows AppContainer smoke evidence");
         }
+        let launch_evidence = WindowsAppContainerProcessLaunchEvidence::from_lifecycle(
+            &windows_appcontainer_connector_seed(policy),
+            &appcontainer_report,
+            if appcontainer_report.sid_present {
+                WindowsAppContainerProcessLaunchMechanism::UnsupportedStdCommandMutation
+            } else {
+                WindowsAppContainerProcessLaunchMechanism::SkippedInactive
+            },
+            false,
+            "not_launched_in_process_apply",
+            None,
+        );
+        if let Ok(jsonl) = launch_evidence.to_jsonl_line() {
+            debug!(evidence_jsonl = %jsonl, "Windows AppContainer process-launch evidence");
+        }
 
         // Step 3: Set integrity level
         if let Err(e) = self.set_integrity_level(policy) {
@@ -432,14 +450,44 @@ impl Sandbox for WindowsSandbox {
     fn apply_to_command(
         &self,
         _cmd: &mut std::process::Command,
-        _policy: &CompiledPolicy,
+        policy: &CompiledPolicy,
     ) -> Result<(), SandboxError> {
-        // On Windows, true AppContainer sandboxing must be applied to the process BEFORE it starts
-        // via STARTUPINFOEX attributes. FCP native Windows sandboxing relies on external launch
-        // mechanisms or future integration with process creation attributes.
-        // For now, we return Ok (unsupported directly in Rust Command without sys/windows).
-        warn!("apply_to_command is not fully supported for WindowsSandbox yet");
-        Ok(())
+        let profile = Self::appcontainer_profile(policy)?;
+        let (action, mechanism, skip_reason) = if self.appcontainer_available {
+            (
+                WindowsAppContainerLifecycleAction::LaunchPathUnsupported,
+                WindowsAppContainerProcessLaunchMechanism::UnsupportedStdCommandMutation,
+                "windows_appcontainer_std_command_mutation_unsupported_use_startupinfoex_spawn",
+            )
+        } else {
+            (
+                WindowsAppContainerLifecycleAction::SkippedInactive,
+                WindowsAppContainerProcessLaunchMechanism::SkippedInactive,
+                "windows_appcontainer_not_active_createprocessasuser_path_unwired",
+            )
+        };
+        let report = WindowsAppContainerLifecycleReport {
+            profile,
+            action,
+            sid_present: false,
+            cleanup: WindowsAppContainerCleanupDecision::None,
+            skip_reason: Some(skip_reason.to_owned()),
+        };
+        let launch_evidence = WindowsAppContainerProcessLaunchEvidence::from_lifecycle(
+            &windows_appcontainer_connector_seed(policy),
+            &report,
+            mechanism,
+            false,
+            "rejected",
+            None,
+        );
+        if let Ok(jsonl) = launch_evidence.to_jsonl_line() {
+            debug!(evidence_jsonl = %jsonl, "Windows AppContainer command launch rejected");
+        }
+
+        Err(SandboxError::ApplyFailed(format!(
+            "windows AppContainer process launch unavailable: {skip_reason}"
+        )))
     }
 
     fn is_available(&self) -> bool {

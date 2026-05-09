@@ -326,6 +326,8 @@ pub enum WindowsAppContainerLifecycleAction {
     Created,
     /// An existing profile SID was resolved and reused.
     ReusedExisting,
+    /// The profile metadata was valid, but the requested launch mechanism is unsupported.
+    LaunchPathUnsupported,
 }
 
 /// Cleanup decision for a Windows `AppContainer` lifecycle attempt.
@@ -509,6 +511,125 @@ impl WindowsAppContainerEvidence {
             lifecycle_action: report.action,
             sid_present: report.sid_present,
             job_object_attached,
+            step_order,
+            action_result,
+            cleanup: report.cleanup,
+            skip_reason: report.skip_reason.clone(),
+        }
+    }
+
+    /// Render this record as a single JSONL line.
+    pub fn to_jsonl_line(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+}
+
+/// Process-launch mechanism selected for Windows `AppContainer` enforcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsAppContainerProcessLaunchMechanism {
+    /// No process launch was attempted because `AppContainer` launch is inactive.
+    SkippedInactive,
+    /// `STARTUPINFOEX` security-capability attributes are used for launch.
+    StartupInfoExSecurityCapabilities,
+    /// `std::process::Command` mutation cannot carry `AppContainer` attributes.
+    UnsupportedStdCommandMutation,
+}
+
+/// Intended job-object attachment for a Windows `AppContainer` launched process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsJobObjectAttachmentIntent {
+    /// No child process is expected, so no job object attachment is planned.
+    None,
+    /// Attach the launched child process to a configured job object immediately after launch.
+    AttachAfterLaunch,
+}
+
+/// Redaction-safe JSONL evidence for Windows `AppContainer` process-launch readiness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WindowsAppContainerProcessLaunchEvidence {
+    /// Schema marker for downstream evidence validators.
+    pub schema: &'static str,
+    /// Operating-system family for this evidence record.
+    pub os: &'static str,
+    /// Hashed connector id or connector seed.
+    pub connector_id_hash: String,
+    /// Hashed `AppContainer` profile name.
+    pub profile_name_hash: String,
+    /// Capability names after normalization and deny-policy checks.
+    pub capabilities: Vec<String>,
+    /// Capability mapping decision.
+    pub capability_decision: &'static str,
+    /// Profile lifecycle action observed before launch.
+    pub lifecycle_action: WindowsAppContainerLifecycleAction,
+    /// Whether an `AppContainer` SID was present for launch.
+    pub sid_present: bool,
+    /// Launch mechanism selected by the Windows sandbox.
+    pub launch_mechanism: WindowsAppContainerProcessLaunchMechanism,
+    /// Whether a process was actually attached to a job object.
+    pub job_object_attached: bool,
+    /// Expected job-object attachment behavior.
+    pub job_object_attachment_intent: WindowsJobObjectAttachmentIntent,
+    /// Hashed launched process id when a child process was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_id_hash: Option<String>,
+    /// Final readiness layer this evidence is allowed to claim today.
+    pub final_filter_strength: FilterStrength,
+    /// Stable step ordering for lifecycle, launch, and job attachment.
+    pub step_order: Vec<&'static str>,
+    /// Final result string for the scripted/e2e action.
+    pub action_result: &'static str,
+    /// Cleanup decision.
+    pub cleanup: WindowsAppContainerCleanupDecision,
+    /// Structured skip reason when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
+}
+
+impl WindowsAppContainerProcessLaunchEvidence {
+    /// Build redaction-safe process-launch evidence from a lifecycle report.
+    #[must_use]
+    pub fn from_lifecycle(
+        connector_id: &str,
+        report: &WindowsAppContainerLifecycleReport,
+        launch_mechanism: WindowsAppContainerProcessLaunchMechanism,
+        job_object_attached: bool,
+        action_result: &'static str,
+        process_id: Option<u32>,
+    ) -> Self {
+        let mut step_order = vec!["appcontainer_lifecycle"];
+        if launch_mechanism
+            == WindowsAppContainerProcessLaunchMechanism::StartupInfoExSecurityCapabilities
+        {
+            step_order.push("startupinfoex_security_capabilities");
+        }
+        if job_object_attached {
+            step_order.push("job_object_attach");
+        }
+
+        Self {
+            schema: "fcp.windows_appcontainer_process_launch.v1",
+            os: "windows",
+            connector_id_hash: stable_fnv1a64_hex(connector_id),
+            profile_name_hash: stable_fnv1a64_hex(&report.profile.name),
+            capabilities: report.profile.capabilities.clone(),
+            capability_decision: if report.profile.capabilities.is_empty() {
+                "none_required"
+            } else {
+                "mapped"
+            },
+            lifecycle_action: report.action,
+            sid_present: report.sid_present,
+            launch_mechanism,
+            job_object_attached,
+            job_object_attachment_intent: if report.sid_present {
+                WindowsJobObjectAttachmentIntent::AttachAfterLaunch
+            } else {
+                WindowsJobObjectAttachmentIntent::None
+            },
+            process_id_hash: process_id.map(|pid| stable_fnv1a64_hex(&pid.to_string())),
+            final_filter_strength: FilterStrength::ProcessLimit,
             step_order,
             action_result,
             cleanup: report.cleanup,
@@ -1671,6 +1792,76 @@ mod tests {
             evidence.cleanup,
             WindowsAppContainerCleanupDecision::RetainProfile
         );
+    }
+
+    #[test]
+    fn test_windows_appcontainer_process_launch_evidence_records_startupinfoex_path() {
+        let profile = fake_windows_appcontainer_profile();
+        let report = WindowsAppContainerLifecycleReport::active(
+            profile,
+            WindowsAppContainerLifecycleAction::Created,
+        );
+        let evidence = WindowsAppContainerProcessLaunchEvidence::from_lifecycle(
+            "connector",
+            &report,
+            WindowsAppContainerProcessLaunchMechanism::StartupInfoExSecurityCapabilities,
+            true,
+            "launched",
+            Some(4242),
+        );
+        let line = evidence.to_jsonl_line().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(
+            value["schema"],
+            "fcp.windows_appcontainer_process_launch.v1"
+        );
+        assert_eq!(
+            value["launch_mechanism"],
+            "startup_info_ex_security_capabilities"
+        );
+        assert_eq!(value["job_object_attachment_intent"], "attach_after_launch");
+        assert_eq!(value["job_object_attached"].as_bool(), Some(true));
+        assert_eq!(value["final_filter_strength"], "process_limit");
+        assert!(value["process_id_hash"].as_str().is_some());
+        assert_eq!(
+            evidence.step_order,
+            vec![
+                "appcontainer_lifecycle",
+                "startupinfoex_security_capabilities",
+                "job_object_attach"
+            ]
+        );
+        assert!(!line.contains("4242"));
+    }
+
+    #[test]
+    fn test_windows_appcontainer_process_launch_evidence_redacts_skip_names() {
+        let profile = WindowsAppContainerProfile {
+            name: "fcp-secret-customer-0123456789abcdef".into(),
+            capabilities: vec!["custom.capability".into()],
+        };
+        let report = WindowsAppContainerLifecycleReport::inactive(profile);
+        let evidence = WindowsAppContainerProcessLaunchEvidence::from_lifecycle(
+            "secret-customer@example.com",
+            &report,
+            WindowsAppContainerProcessLaunchMechanism::SkippedInactive,
+            false,
+            "skip",
+            None,
+        );
+        let line = evidence.to_jsonl_line().unwrap();
+
+        assert!(line.contains("fcp.windows_appcontainer_process_launch.v1"));
+        assert!(line.contains("windows_appcontainer_not_active"));
+        assert!(!line.contains("secret-customer@example.com"));
+        assert!(!line.contains("fcp-secret-customer"));
+        assert_eq!(
+            evidence.job_object_attachment_intent,
+            WindowsJobObjectAttachmentIntent::None
+        );
+        assert!(evidence.process_id_hash.is_none());
+        assert_eq!(evidence.final_filter_strength, FilterStrength::ProcessLimit);
     }
 
     #[test]

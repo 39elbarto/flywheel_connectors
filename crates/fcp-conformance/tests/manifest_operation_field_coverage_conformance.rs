@@ -30,7 +30,6 @@ const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
     "inworld",
     "irc",
     "llm-router",
-    "mastodon",
     "mattermost",
     "microsoft365",
     "nostr",

@@ -817,7 +817,6 @@ fn expected_network_constraints_gap_connectors() -> Vec<String> {
         "inworld",
         "irc",
         "llm-router",
-        "mastodon",
         "mattermost",
         "microsoft365",
         "nostr",

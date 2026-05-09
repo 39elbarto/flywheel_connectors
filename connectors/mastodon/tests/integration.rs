@@ -94,6 +94,86 @@ fn operation_schema(manifest: &toml::Value, operation_key: &str, schema_key: &st
     serde_json::to_value(schema).expect("manifest schema should convert to JSON")
 }
 
+fn operation_network_constraints<'a>(
+    manifest: &'a toml::Value,
+    operation_key: &str,
+) -> &'a toml::Table {
+    manifest_operations(manifest)
+        .get(operation_key)
+        .and_then(|operation| operation.get("network_constraints"))
+        .and_then(toml::Value::as_table)
+        .unwrap_or_else(|| panic!("{operation_key} should define network_constraints"))
+}
+
+fn network_string_list<'a>(constraints: &'a toml::Table, key: &str) -> Vec<&'a str> {
+    constraints
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .unwrap_or_else(|| panic!("{key} should be an array"))
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} entries should be strings"))
+        })
+        .collect()
+}
+
+fn network_integer_list(constraints: &toml::Table, key: &str) -> Vec<i64> {
+    constraints
+        .get(key)
+        .and_then(toml::Value::as_array)
+        .unwrap_or_else(|| panic!("{key} should be an array"))
+        .iter()
+        .map(|value| {
+            value
+                .as_integer()
+                .unwrap_or_else(|| panic!("{key} entries should be integers"))
+        })
+        .collect()
+}
+
+fn network_bool_field(constraints: &toml::Table, key: &str) -> bool {
+    constraints
+        .get(key)
+        .and_then(toml::Value::as_bool)
+        .unwrap_or_else(|| panic!("{key} should be a boolean"))
+}
+
+fn network_integer_field(constraints: &toml::Table, key: &str) -> i64 {
+    constraints
+        .get(key)
+        .and_then(toml::Value::as_integer)
+        .unwrap_or_else(|| panic!("{key} should be an integer"))
+}
+
+fn assert_instance_egress_constraints(constraints: &toml::Table) {
+    assert_eq!(
+        network_string_list(constraints, "host_allow"),
+        ["${mastodon_instance_host}"]
+    );
+    assert_eq!(network_integer_list(constraints, "port_allow"), [80, 443]);
+    assert!(network_bool_field(constraints, "deny_localhost"));
+    assert!(network_bool_field(constraints, "deny_private_ranges"));
+    assert!(network_bool_field(constraints, "deny_tailnet_ranges"));
+    assert!(network_bool_field(constraints, "require_sni"));
+    assert!(network_bool_field(constraints, "deny_ip_literals"));
+    assert!(network_bool_field(
+        constraints,
+        "require_host_canonicalization"
+    ));
+    assert_eq!(network_integer_field(constraints, "dns_max_ips"), 16);
+    assert_eq!(network_integer_field(constraints, "max_redirects"), 0);
+    assert_eq!(
+        network_integer_field(constraints, "connect_timeout_ms"),
+        10_000
+    );
+    assert_eq!(
+        network_integer_field(constraints, "total_timeout_ms"),
+        60_000
+    );
+}
+
 fn assert_schema_accepts(schema: &Value, payload: Value) {
     let validator = jsonschema::validator_for(schema).expect("schema should compile");
     let errors = validator
@@ -715,6 +795,22 @@ fn manifest_operation_schemas_compile_and_validate_core_payloads() {
     let health_output = operation_schema(&manifest, "health", "output_schema");
     assert_schema_accepts(&health_output, instance());
     assert_schema_rejects(&health_output, json!({ "title": "FCP Mastodon" }));
+}
+
+#[test]
+fn manifest_declares_instance_scoped_network_constraints() {
+    init_logging();
+
+    let manifest = mastodon_manifest();
+    let operations = manifest_operations(&manifest);
+    assert_eq!(
+        operations.len(),
+        EXPECTED_MANIFEST_SCHEMA_OPS.len(),
+        "manifest operation set should stay aligned with expected operation coverage"
+    );
+    for (operation_key, _operation_id) in EXPECTED_MANIFEST_SCHEMA_OPS {
+        assert_instance_egress_constraints(operation_network_constraints(&manifest, operation_key));
+    }
 }
 
 #[test]

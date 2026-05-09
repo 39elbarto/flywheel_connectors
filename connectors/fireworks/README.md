@@ -1,9 +1,9 @@
 # Fireworks Connector V3 Contract
 
 > **Status**: manifest/runtime contract documented
-> **Bead**: `flywheel_connectors-4kw5f.12`
+> **Bead**: `flywheel_connectors-4kw5f.2.9.2.8`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/fireworks_connector_verification.sh`
 > **Primary upstream**: https://docs.fireworks.ai/
 
 ## Purpose
@@ -171,17 +171,19 @@ The deterministic integration evidence is anchored on WireMock and connector-loc
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/fireworks_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The closeout bundle is anchored on `scripts/e2e/fireworks_connector_verification.sh`. It writes artifacts under `artifacts/e2e/fireworks/<run_id>` by default and offloads Cargo work through `rch`.
 
 The verification surface captures:
 
-- manifest/runtime contract tests
-- deterministic WireMock integration coverage
-- provider-contract coverage
+- manifest checks through `fwc` or `rch exec -- cargo run -p fwc`
+- `rch exec -- cargo check -p fcp-fireworks --all-targets`
+- `rch exec -- cargo fmt --package fcp-fireworks --check`
+- deterministic WireMock JSONL loopback coverage
 - live provider smoke tests gated by `FIREWORKS_API_KEY`
+- JSONL extraction for fixture and live records
 - base URL, auth, model validation, embeddings, rate-limit, cancellation, and redaction tests
-- formatting, check, and clippy proof through `rch`
-- UBS on changed files before commit
+- `rch exec -- cargo clippy -p fcp-fireworks --all-targets --no-deps -- -D warnings`
+- replay script and environment metadata
 
 ## Operator Guidance
 
@@ -217,6 +219,7 @@ The verification surface captures:
 
 **Rerun commands**:
 
+- `scripts/e2e/fireworks_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-fireworks-e2e cargo check -p fcp-fireworks --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-fireworks-e2e cargo test -p fcp-fireworks --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-fireworks-e2e cargo test -p fcp-fireworks --test live_verification -- --nocapture`

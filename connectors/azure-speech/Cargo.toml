@@ -40,7 +40,10 @@ tracing-subscriber.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+ciborium.workspace = true
+fcp-crypto = { workspace = true }
 fcp-testkit = { path = "../../crates/fcp-testkit" }
+chrono.workspace = true
 jsonschema.workspace = true
 toml.workspace = true
 wiremock.workspace = true

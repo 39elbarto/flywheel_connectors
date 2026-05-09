@@ -8,7 +8,7 @@ This connector implements the core Azure Speech REST surface for FCP:
 - REST text-to-speech synthesis through `/cognitiveservices/v1`
 - Speech-to-text fast and batch transcription through `2025-10-15`
 
-Realtime WebSocket sessions, custom speech project/model lifecycle, and connector-local IMDS/MSAL token acquisition are intentionally separate follow-up surfaces.
+Realtime WebSocket sessions, custom speech project/model lifecycle, and connector-local IMDS/MSAL token acquisition are intentionally separate follow-up surfaces: `flywheel_connectors-4kw5f.2.9.6.1.2`, `flywheel_connectors-4kw5f.2.9.6.2`, and `flywheel_connectors-4kw5f.2.9.6.3`.
 
 ## Enterprise Auth Status
 
@@ -20,11 +20,13 @@ Realtime WebSocket sessions, custom speech project/model lifecycle, and connecto
 
 The connector validates Azure Cognitive Services resource IDs, tracks optional `entra_token_expires_in_seconds`, refuses expired Entra tokens with refresh guidance, and redacts access tokens, subscription keys, tenant/resource identifiers, and provider SAS URLs from connector outputs.
 
+All invoke paths require a bound FCP capability token after handshake. The connector verifies the token zone, target instance, operation, capability, and resource constraints before any provider request is built, so a wrong-zone or wrong-instance grant is denied without contacting Azure.
+
 ## Speech-to-text REST Status
 
 `flywheel_connectors-4kw5f.2.9.6.1.3` covers the current `2025-10-15` REST paths that are explicit in Microsoft Learn: fast transcription via `/speechtotext/transcriptions:transcribe` and batch transcription submit/status/files via `/speechtotext/transcriptions:submit` plus the transcription resource and files links returned by that API. Batch input accepts storage URLs or a Blob container URL; runtime output redacts provider URLs and SAS-bearing file links into hashes/descriptors.
 
-Custom speech projects, dataset/model training, deployment endpoints, and webhook management are not part of this connector slice.
+Custom speech projects, dataset/model training, deployment endpoints, and webhook management are not part of this connector slice; they are tracked in `flywheel_connectors-4kw5f.2.9.6.2`.
 
 ## Realtime WebSocket Status
 
@@ -40,3 +42,9 @@ Current docs:
 - <https://learn.microsoft.com/en-us/azure/ai-services/speech-service/rest-text-to-speech#authentication>
 - <https://learn.microsoft.com/en-us/azure/ai-services/speech-service/how-to-configure-azure-ad-auth>
 - <https://learn.microsoft.com/en-us/azure/ai-services/speech-service/llm-speech>
+
+## Verification
+
+The closeout proof lane is `scripts/e2e/azure_speech_connector_verification.sh`. It runs the no-live-credential loopback matrix through the production connector boundary and emits redacted JSONL records for token issue, voices.list, TTS synth, STT fast transcription, batch submit/get/files, provider error redaction, rate-limit retry, timeout, malformed input, unsupported format, oversized audio, capability-token zone and instance denial, harness cancellation, streaming blocker disposition, shutdown cleanup, and optional live-smoke skip/pass state.
+
+The JSONL contract records command line, git revision, connector id, operation id, capability, zone, instance id, fixture/live mode, region and endpoint class, auth mode, voice/language/model id, content type, audio byte counts, transcript length only, stream chunk count, HTTP status, retry/backoff decision, FCP error mapping, latency, result, audit receipt id, cleanup result, and skip reason. It deliberately rejects keys, bearer tokens, tenant/resource IDs, SAS URLs, SSML/text content, transcripts, raw audio bytes, provider bodies, local absolute paths, and PII.

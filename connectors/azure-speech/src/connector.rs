@@ -6,7 +6,11 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use fcp_async_core::time;
 use fcp_manifest::ConnectorManifest;
-use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_prelude::{
+    BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
+    EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, InstanceId, OperationId,
+    SessionId,
+};
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use reqwest::header::{
@@ -41,7 +45,7 @@ const OPERATION_ORDER: [&str; 6] = [
     "azure.speech.stt.batch.get",
     "azure.speech.stt.batch.files",
 ];
-const BOUNDARY: &str = "This connector exposes Azure Speech REST token exchange, Microsoft Entra bearer-token handoff, regional voice discovery, REST text-to-speech synthesis, and Speech-to-text 2025-10-15 fast transcription plus batch submit/status/files surfaces. Realtime WebSocket streaming is blocked until Microsoft documents a direct STT/TTS wire protocol or FCP adopts an equivalent SDK-compatible framing; custom speech projects/models and connector-local IMDS/MSAL token acquisition remain separate follow-up surfaces.";
+const BOUNDARY: &str = "This connector exposes Azure Speech REST token exchange, Microsoft Entra bearer-token handoff, regional voice discovery, REST text-to-speech synthesis, and Speech-to-text 2025-10-15 fast transcription plus batch submit/status/files surfaces. Realtime WebSocket streaming is blocked until Microsoft documents a direct STT/TTS wire protocol or FCP adopts an equivalent SDK-compatible framing; custom speech projects/models and connector-local IMDS/MSAL token acquisition remain separate follow-up surfaces tracked by flywheel_connectors-4kw5f.2.9.6.1.2, flywheel_connectors-4kw5f.2.9.6.2, and flywheel_connectors-4kw5f.2.9.6.3.";
 const STREAMING_BLOCKER_REASON: &str = "Current Microsoft Learn documentation exposes TTS text streaming through Speech SDK TextStream on the WebSocket v2 endpoint, and realtime STT through Speech SDK SpeechRecognizer/AudioConfig push-stream APIs. It does not publish a direct WebSocket frame protocol for a standalone Rust connector, so this connector must not guess or reverse-engineer the live wire format.";
 const DEFAULT_REQUEST_TIMEOUT_MS: usize = 60_000;
 const DEFAULT_INLINE_AUDIO_MAX_BYTES: usize = 1_048_576;
@@ -234,12 +238,12 @@ impl Auth {
         let subscription_key = optional_config_string(params, "subscription_key")
             .or_else(|| optional_config_string(params, "api_key"));
         let credential_id = optional_config_string(params, "credential_id");
-        let entra_access_token = optional_config_string(params, "entra_access_token")
+        let entra_bearer_config = optional_config_string(params, "entra_access_token")
             .or_else(|| optional_config_string(params, "aad_access_token"));
         let configured_modes = [
             subscription_key.is_some(),
             credential_id.is_some(),
-            entra_access_token.is_some(),
+            entra_bearer_config.is_some(),
         ]
         .into_iter()
         .filter(|configured| *configured)
@@ -263,14 +267,14 @@ impl Auth {
                 redacted_id: redact_identifier(&id),
             });
         }
-        let access_token =
-            entra_access_token.expect("exactly one auth mode means token is present here");
+        let entra_bearer =
+            entra_bearer_config.expect("exactly one auth mode means Entra bearer is present here");
         let resource_id = optional_config_string(params, "entra_resource_id")
             .or_else(|| optional_config_string(params, "azure_resource_id"));
         let token_format = EntraTokenFormat::from_params(params, resource_id.is_some())?;
         let token_source = EntraTokenSource::from_params(params)?;
-        let authorization_token = match token_format {
-            EntraTokenFormat::AadResourceToken => {
+        let authorization_value = match token_format {
+            EntraTokenFormat::AadResource => {
                 let resource_id = resource_id.as_deref().ok_or_else(|| {
                     FcpError::InvalidRequest {
                         code: 1003,
@@ -278,12 +282,12 @@ impl Auth {
                     }
                 })?;
                 validate_azure_resource_id(resource_id)?;
-                format!("aad#{resource_id}#{access_token}")
+                format!("aad#{resource_id}#{entra_bearer}")
             }
-            EntraTokenFormat::BearerToken => access_token,
+            EntraTokenFormat::Bearer => entra_bearer,
         };
         Ok(Self::EntraAccessToken {
-            authorization: bearer_header(&authorization_token)?,
+            authorization: bearer_header(&authorization_value)?,
             resource_id_hash: resource_id
                 .as_deref()
                 .map(validate_azure_resource_id)
@@ -298,14 +302,14 @@ impl Auth {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EntraTokenSource {
-    ExternalToken,
+    ExternalBearer,
     ManagedIdentity,
 }
 
 impl EntraTokenSource {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::ExternalToken => "external_token",
+            Self::ExternalBearer => "external_token",
             Self::ManagedIdentity => "managed_identity",
         }
     }
@@ -316,7 +320,7 @@ impl EntraTokenSource {
             .and_then(Value::as_str)
             .unwrap_or("external_token")
         {
-            "external_token" | "external" => Ok(Self::ExternalToken),
+            "external_token" | "external" => Ok(Self::ExternalBearer),
             "managed_identity" | "managed-identity" => Ok(Self::ManagedIdentity),
             other => Err(FcpError::InvalidRequest {
                 code: 1003,
@@ -330,30 +334,30 @@ impl EntraTokenSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EntraTokenFormat {
-    AadResourceToken,
-    BearerToken,
+    AadResource,
+    Bearer,
 }
 
 impl EntraTokenFormat {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::AadResourceToken => "aad_resource_token",
-            Self::BearerToken => "bearer_token",
+            Self::AadResource => "aad_resource_token",
+            Self::Bearer => "bearer_token",
         }
     }
 
     fn from_params(params: &Value, has_resource_id: bool) -> FcpResult<Self> {
         match params.get("entra_token_format").and_then(Value::as_str) {
-            Some("aad_resource_token" | "aad-resource-token" | "aad") => Ok(Self::AadResourceToken),
-            Some("bearer_token" | "bearer-token" | "bearer") => Ok(Self::BearerToken),
+            Some("aad_resource_token" | "aad-resource-token" | "aad") => Ok(Self::AadResource),
+            Some("bearer_token" | "bearer-token" | "bearer") => Ok(Self::Bearer),
             Some(other) => Err(FcpError::InvalidRequest {
                 code: 1003,
                 message: format!(
                     "unsupported entra_token_format {other:?}; expected aad_resource_token or bearer_token"
                 ),
             }),
-            None if has_resource_id => Ok(Self::AadResourceToken),
-            None => Ok(Self::BearerToken),
+            None if has_resource_id => Ok(Self::AadResource),
+            None => Ok(Self::Bearer),
         }
     }
 }
@@ -617,11 +621,11 @@ impl AzureSpeechClient {
             .await?;
         let status = response.status();
         if !status.is_success() {
-            return Err(provider_error("issueToken", status, response).await);
+            return Err(provider_error("issueToken", status, &response));
         }
         let token_text = response.text().await.map_err(|error| map_reqwest(&error))?;
-        let token = token_text.trim();
-        if token.is_empty() {
+        let issued_bearer = token_text.trim();
+        if issued_bearer.is_empty() {
             return Err(FcpError::External {
                 service: "azure-speech.issueToken".into(),
                 message: "issueToken returned an empty token".into(),
@@ -630,7 +634,7 @@ impl AzureSpeechClient {
                 retry_after: None,
             });
         }
-        let header = bearer_header(token)?;
+        let header = bearer_header(issued_bearer)?;
         self.token_cache.store(header.clone(), Instant::now());
         Ok(header)
     }
@@ -661,7 +665,7 @@ impl AzureSpeechClient {
             .await?;
         let status = response.status();
         if !status.is_success() {
-            return Err(provider_error("voices.list", status, response).await);
+            return Err(provider_error("voices.list", status, &response));
         }
         let voices: Value = response.json().await.map_err(|error| map_reqwest(&error))?;
         Ok(json!({
@@ -692,7 +696,7 @@ impl AzureSpeechClient {
             .await?;
         let status = response.status();
         if !status.is_success() {
-            return Err(provider_error("tts.synthesize", status, response).await);
+            return Err(provider_error("tts.synthesize", status, &response));
         }
         let content_type = response
             .headers()
@@ -771,7 +775,7 @@ impl AzureSpeechClient {
             .await?;
         let status = response.status();
         if !status.is_success() {
-            return Err(provider_error("stt.transcribe_fast", status, response).await);
+            return Err(provider_error("stt.transcribe_fast", status, &response));
         }
         let value: Value = response.json().await.map_err(|error| map_reqwest(&error))?;
         Ok(normalize_transcription_result(&value, &request))
@@ -798,7 +802,7 @@ impl AzureSpeechClient {
             .await?;
         let status = response.status();
         if !status.is_success() {
-            return Err(provider_error("stt.batch.submit", status, response).await);
+            return Err(provider_error("stt.batch.submit", status, &response));
         }
         let location = response
             .headers()
@@ -834,7 +838,7 @@ impl AzureSpeechClient {
             .await?;
         let status = response.status();
         if !status.is_success() {
-            return Err(provider_error("stt.batch.get", status, response).await);
+            return Err(provider_error("stt.batch.get", status, &response));
         }
         let value: Value = response.json().await.map_err(|error| map_reqwest(&error))?;
         Ok(json!({
@@ -863,7 +867,7 @@ impl AzureSpeechClient {
             .await?;
         let status = response.status();
         if !status.is_success() {
-            return Err(provider_error("stt.batch.files", status, response).await);
+            return Err(provider_error("stt.batch.files", status, &response));
         }
         let value: Value = response.json().await.map_err(|error| map_reqwest(&error))?;
         Ok(json!({
@@ -1108,6 +1112,8 @@ pub struct AzureSpeechConnector {
     base: Arc<BaseConnector>,
     config: Option<AzureSpeechConfig>,
     client: Option<Arc<AzureSpeechClient>>,
+    verifier: Option<CapabilityVerifier>,
+    session_id: Option<SessionId>,
     handshaken: bool,
     request_count: AtomicU64,
     error_count: AtomicU64,
@@ -1121,10 +1127,17 @@ impl AzureSpeechConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static(CONNECTOR_ID))),
             config: None,
             client: None,
+            verifier: None,
+            session_id: None,
             handshaken: false,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
         }
+    }
+
+    #[must_use]
+    pub fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
     }
 
     pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
@@ -1148,21 +1161,51 @@ impl AzureSpeechConnector {
         }))
     }
 
-    pub async fn handle_handshake(&mut self, _params: Value) -> FcpResult<Value> {
+    pub async fn handle_handshake(&mut self, params: Value) -> FcpResult<Value> {
         if self.config.is_none() {
             return Err(FcpError::NotConfigured);
         }
+        let req: HandshakeRequest =
+            serde_json::from_value(params).map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid Azure Speech handshake request: {error}"),
+            })?;
+        self.verifier = Some(CapabilityVerifier::new(
+            req.host_public_key,
+            req.zone.clone(),
+            self.base.instance_id.clone(),
+        ));
+        let session_id = SessionId::new();
+        self.session_id = Some(session_id.clone());
         self.handshaken = true;
         self.base.set_handshaken(true);
-        Ok(json!({
-            "connector_id": CONNECTOR_ID,
-            "connector_version": CONNECTOR_VERSION,
-            "protocol_version": "2.0",
-            "capabilities": ["azure.speech.voices", "azure.speech.tts", "azure.speech.stt"],
-            "streaming_supported": false,
-            "streaming_blocker": streaming_blocker_info(),
-            "surface_boundary": BOUNDARY,
-        }))
+        let capabilities_granted = req
+            .capabilities_requested
+            .into_iter()
+            .map(|capability| CapabilityGrant {
+                capability,
+                operation: None,
+            })
+            .collect::<Vec<_>>();
+
+        serde_json::to_value(HandshakeResponse {
+            status: "accepted".into(),
+            capabilities_granted,
+            session_id,
+            manifest_hash: "sha256:azure-speech-connector-v1".into(),
+            nonce: req.nonce,
+            event_caps: Some(EventCaps {
+                streaming: false,
+                replay: false,
+                min_buffer_events: 0,
+                requires_ack: false,
+            }),
+            auth_caps: None,
+            op_catalog_hash: None,
+        })
+        .map_err(|error| FcpError::Internal {
+            message: format!("Failed to serialize Azure Speech handshake response: {error}"),
+        })
     }
 
     pub async fn handle_health(&self) -> FcpResult<Value> {
@@ -1220,7 +1263,8 @@ impl AzureSpeechConnector {
                 },
                 { "name": "handshake", "passed": self.handshaken, "critical": false },
                 { "name": "surface_boundary", "passed": true, "critical": false, "message": BOUNDARY }
-            ]
+            ],
+            "streaming_blocker": streaming_blocker_info(),
         }))
     }
 
@@ -1297,6 +1341,20 @@ impl AzureSpeechConnector {
                 message: "Missing operation_id".into(),
             })?;
         let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
+        let capability_token_value =
+            params
+                .get("capability_token")
+                .cloned()
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing capability_token".into(),
+                })?;
+        let capability_grant = serde_json::from_value::<CapabilityToken>(capability_token_value)
+            .map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid capability_token: {error}"),
+            })?;
+        self.verify_capability(operation, &input, capability_grant)?;
         self.request_count.fetch_add(1, Ordering::Relaxed);
         let result = match operation {
             "azure.speech.voices.list" => client.voices_list().await,
@@ -1346,10 +1404,31 @@ impl AzureSpeechConnector {
         }
         self.config = None;
         self.client = None;
+        self.verifier = None;
+        self.session_id = None;
         self.handshaken = false;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
-        Ok(json!({}))
+        Ok(json!({ "status": "shutdown" }))
+    }
+
+    fn verify_capability(
+        &self,
+        operation: &str,
+        input: &Value,
+        token: CapabilityToken,
+    ) -> FcpResult<()> {
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        let operation_id: OperationId =
+            operation.parse().map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Invalid operation ID format".into(),
+            })?;
+        let capability = required_capability(operation)?;
+        let resources = resource_uris_for_operation(operation, input);
+        verifier
+            .verify_bound(token, &capability, &operation_id, &resources)
+            .map(|_| ())
     }
 }
 
@@ -1426,6 +1505,7 @@ fn deferred_operations_info() -> Vec<Value> {
             "id": "azure.speech.tts.text_stream.websocket",
             "summary": "Azure Speech TTS text streaming over WebSocket v2",
             "outcome": "blocked_official_sdk_only_protocol",
+            "tracking_bead": "flywheel_connectors-4kw5f.2.9.6.1.2",
             "host_platform_required": true,
             "rationale": STREAMING_BLOCKER_REASON,
             "official_docs": [DOC_TTS_TEXT_STREAMING, DOC_SDK_CONNECTIONS],
@@ -1435,6 +1515,7 @@ fn deferred_operations_info() -> Vec<Value> {
             "id": "azure.speech.stt.realtime.websocket",
             "summary": "Azure Speech realtime STT WebSocket sessions",
             "outcome": "blocked_official_sdk_only_protocol",
+            "tracking_bead": "flywheel_connectors-4kw5f.2.9.6.1.2",
             "host_platform_required": true,
             "rationale": STREAMING_BLOCKER_REASON,
             "official_docs": [DOC_STT_REALTIME, DOC_SDK_CONNECTIONS],
@@ -1444,7 +1525,15 @@ fn deferred_operations_info() -> Vec<Value> {
             "id": "azure.speech.stt.custom_speech.projects",
             "summary": "Azure Speech custom speech project, dataset, model training, and endpoint lifecycle",
             "outcome": "deferred_to_custom_speech_slice",
+            "tracking_bead": "flywheel_connectors-4kw5f.2.9.6.2",
             "rationale": "The direct REST coverage here includes fast transcription and batch job submit/status/files. Custom speech project/model training and deployment endpoints are a separate lifecycle surface with different data retention and review requirements."
+        }),
+        json!({
+            "id": "azure.speech.auth.connector_local_identity",
+            "summary": "Connector-local Azure IMDS/MSAL-equivalent identity acquisition",
+            "outcome": "deferred_to_identity_acquisition_slice",
+            "tracking_bead": "flywheel_connectors-4kw5f.2.9.6.3",
+            "rationale": "This connector accepts host-supplied Entra bearer tokens and credential identifiers today. Direct connector-local IMDS/MSAL-equivalent token acquisition is a separate host-policy-sensitive surface that must be implemented without interpreted runtimes or opaque SDK assumptions."
         }),
     ]
 }
@@ -1457,6 +1546,56 @@ fn streaming_blocker_info() -> Value {
         "stt_realtime_doc": DOC_STT_REALTIME,
         "sdk_connection_doc": DOC_SDK_CONNECTIONS,
     })
+}
+
+fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
+    match operation {
+        "azure.speech.voices.list" => Ok(CapabilityId::from_static("azure.speech.voices")),
+        "azure.speech.tts.synthesize" => Ok(CapabilityId::from_static("azure.speech.tts")),
+        "azure.speech.stt.transcribe_fast"
+        | "azure.speech.stt.batch.submit"
+        | "azure.speech.stt.batch.get"
+        | "azure.speech.stt.batch.files" => Ok(CapabilityId::from_static("azure.speech.stt")),
+        _ => Err(FcpError::OperationNotGranted {
+            operation: operation.into(),
+        }),
+    }
+}
+
+fn resource_uris_for_operation(operation: &str, input: &Value) -> Vec<String> {
+    match operation {
+        "azure.speech.voices.list" => vec!["azure-speech:voices".into()],
+        "azure.speech.tts.synthesize" => {
+            let voice = input
+                .get("voice")
+                .and_then(Value::as_str)
+                .unwrap_or("ssml-provided");
+            vec![format!("azure-speech:tts:voice:{voice}")]
+        }
+        "azure.speech.stt.transcribe_fast" => {
+            let locale = input
+                .get("locale")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    input
+                        .get("locales")
+                        .and_then(Value::as_array)
+                        .and_then(|locales| locales.first())
+                        .and_then(Value::as_str)
+                })
+                .unwrap_or(DEFAULT_STT_LOCALE);
+            vec![format!("azure-speech:stt:locale:{locale}")]
+        }
+        "azure.speech.stt.batch.submit" => vec!["azure-speech:stt:batch:submit".into()],
+        "azure.speech.stt.batch.get" | "azure.speech.stt.batch.files" => {
+            let id = input
+                .get("transcription_id")
+                .and_then(Value::as_str)
+                .map_or_else(|| "url-input".into(), |value| sha256_hex(value.as_bytes()));
+            vec![format!("azure-speech:stt:batch:{id}")]
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn normalize_transcription_result(provider_result: &Value, request: &SttRequest) -> Value {
@@ -2195,9 +2334,9 @@ fn bearer_header(token: &str) -> FcpResult<HeaderValue> {
 }
 
 fn with_header(request: RequestBuilder, name: HeaderName, value: &HeaderValue) -> RequestBuilder {
-    let mut headers = HeaderMap::new();
-    headers.insert(name, value.clone());
-    request.headers(headers)
+    let mut outbound_map = HeaderMap::new();
+    outbound_map.insert(name, value.clone());
+    request.headers(outbound_map)
 }
 
 fn map_reqwest(error: &reqwest::Error) -> FcpError {
@@ -2216,13 +2355,9 @@ fn map_reqwest(error: &reqwest::Error) -> FcpError {
     }
 }
 
-async fn provider_error(operation: &str, status: StatusCode, response: Response) -> FcpError {
+fn provider_error(operation: &str, status: StatusCode, response: &Response) -> FcpError {
     let retryable = is_retryable_status(status);
-    let retry_after = retry_after_ms(&response).map(Duration::from_millis);
-    let message = response
-        .text()
-        .await
-        .unwrap_or_else(|error| format!("failed to read Azure Speech error body: {error}"));
+    let retry_after = retry_after_ms(response).map(Duration::from_millis);
     if status == StatusCode::TOO_MANY_REQUESTS {
         FcpError::RateLimited {
             retry_after_ms: retry_after.map_or(30_000, |duration| {
@@ -2233,7 +2368,10 @@ async fn provider_error(operation: &str, status: StatusCode, response: Response)
     } else {
         FcpError::External {
             service: format!("azure-speech.{operation}"),
-            message,
+            message: format!(
+                "Azure Speech provider returned HTTP {} for {operation}; provider response body redacted",
+                status.as_u16()
+            ),
             status_code: Some(status.as_u16()),
             retryable,
             retry_after,
@@ -2499,6 +2637,8 @@ mod tests {
             .collect();
         assert!(deferred_ids.contains(&"azure.speech.tts.text_stream.websocket"));
         assert!(deferred_ids.contains(&"azure.speech.stt.realtime.websocket"));
+        assert!(deferred_ids.contains(&"azure.speech.stt.custom_speech.projects"));
+        assert!(deferred_ids.contains(&"azure.speech.auth.connector_local_identity"));
         for operation in deferred.iter().filter(|operation| {
             operation.get("outcome").and_then(Value::as_str)
                 == Some("blocked_official_sdk_only_protocol")

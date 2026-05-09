@@ -2757,8 +2757,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "chrono",
+ "ciborium",
  "fcp-async-core",
  "fcp-core",
+ "fcp-crypto",
  "fcp-manifest",
  "fcp-prelude",
  "fcp-sdk",

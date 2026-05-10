@@ -16,7 +16,160 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::{ObjectHeader, ObjectId, PrincipalId, ZoneId};
+use crate::{FcpError, FcpResult, ObjectHeader, ObjectId, PrincipalId, ZoneId};
+
+const RAW_SECRET_CONFIG_FIELDS: &[&str] = &[
+    "token",
+    "access_token",
+    "app_token",
+    "bearer",
+    "api_key",
+    "client_secret",
+    "refresh_token",
+    "password",
+    "secret_key",
+];
+
+const SLACK_SECRET_PREFIXES: &[&str] = &["xoxb-", "xoxa-", "xoxp-", "xoxs-", "xoxr-"];
+
+/// Reject raw secret material at connector configuration boundaries.
+///
+/// Connector configuration may carry credential references and non-sensitive
+/// setup hints, but it must not carry provider tokens, passwords, API keys, or
+/// obvious token-shaped values. The returned error hashes the field name and
+/// records only a stable detector label.
+///
+/// # Errors
+/// Returns [`FcpError::ConfigurationLeakedSecret`] when a blocked field name or
+/// token-shaped value is found anywhere in the JSON tree.
+pub fn reject_secret_config_material(value: &serde_json::Value) -> FcpResult<()> {
+    reject_secret_config_material_inner(value, None)
+}
+
+fn reject_secret_config_material_inner(
+    value: &serde_json::Value,
+    field_name: Option<&str>,
+) -> FcpResult<()> {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (field_name, field_value) in map {
+                if RAW_SECRET_CONFIG_FIELDS
+                    .iter()
+                    .any(|blocked| field_name.eq_ignore_ascii_case(blocked))
+                {
+                    return Err(FcpError::configuration_leaked_secret(
+                        field_name,
+                        "raw_secret_config_field",
+                    ));
+                }
+                reject_secret_config_material_inner(field_value, Some(field_name))?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                reject_secret_config_material_inner(item, field_name)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::String(raw) => {
+            if let Some(detector) = detect_raw_secret_config_value(raw) {
+                return Err(FcpError::configuration_leaked_secret(
+                    field_name.unwrap_or("value"),
+                    detector,
+                ));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn detect_raw_secret_config_value(raw: &str) -> Option<&'static str> {
+    let value = raw.trim();
+    if is_bearer_secret_value(value) {
+        return Some("raw_secret_config_value_bearer");
+    }
+    if is_jwt_secret_value(value) {
+        return Some("raw_secret_config_value_jwt");
+    }
+    if is_openai_secret_value(value) {
+        return Some("raw_secret_config_value_openai");
+    }
+    if is_slack_secret_value(value) {
+        return Some("raw_secret_config_value_slack");
+    }
+    if is_github_secret_value(value) {
+        return Some("raw_secret_config_value_github");
+    }
+    if is_aws_access_key_value(value) {
+        return Some("raw_secret_config_value_aws");
+    }
+    None
+}
+
+fn is_bearer_secret_value(value: &str) -> bool {
+    value
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer "))
+        && value[7..].trim().len() >= 8
+}
+
+fn is_jwt_secret_value(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let Some(header) = parts.next() else {
+        return false;
+    };
+    let Some(payload) = parts.next() else {
+        return false;
+    };
+    let Some(signature) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+    header.starts_with("eyJ")
+        && payload.starts_with("eyJ")
+        && signature.len() >= 8
+        && [header, payload, signature]
+            .into_iter()
+            .all(is_base64url_token_segment)
+}
+
+fn is_base64url_token_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
+fn is_openai_secret_value(value: &str) -> bool {
+    value.starts_with("sk-") && value.len() > 3
+}
+
+fn is_slack_secret_value(value: &str) -> bool {
+    SLACK_SECRET_PREFIXES
+        .iter()
+        .any(|prefix| value.starts_with(prefix) && value.len() > prefix.len())
+}
+
+fn is_github_secret_value(value: &str) -> bool {
+    ["ghp_", "ghs_"].into_iter().any(|prefix| {
+        value
+            .strip_prefix(prefix)
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_alphanumeric()))
+    })
+}
+
+fn is_aws_access_key_value(value: &str) -> bool {
+    value.strip_prefix("AKIA").is_some_and(|rest| {
+        rest.len() >= 4
+            && rest
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    })
+}
 
 /// Canonical secret identifier (NORMATIVE).
 ///
@@ -600,6 +753,7 @@ mod tests {
     use crate::Provenance;
     use fcp_cbor::SchemaId;
     use semver::Version;
+    use serde_json::json;
 
     fn test_header() -> ObjectHeader {
         ObjectHeader {
@@ -616,6 +770,79 @@ mod tests {
 
     fn test_principal() -> PrincipalId {
         PrincipalId::new("user:alice").expect("valid principal")
+    }
+
+    #[test]
+    fn secret_config_rejects_blocked_field_names() {
+        for &field_name in RAW_SECRET_CONFIG_FIELDS {
+            let mut nested = serde_json::Map::new();
+            nested.insert(field_name.to_string(), json!("redacted"));
+            let config = json!({
+                "credential_id": Uuid::new_v4().to_string(),
+                "nested": nested
+            });
+
+            let error = reject_secret_config_material(&config)
+                .expect_err("blocked field name must be rejected");
+            match error {
+                FcpError::ConfigurationLeakedSecret {
+                    field_name_hash,
+                    detector,
+                } => {
+                    assert_eq!(detector, "raw_secret_config_field");
+                    assert_eq!(field_name_hash.len(), 64);
+                    assert!(!field_name_hash.contains(field_name));
+                }
+                other => panic!("Expected ConfigurationLeakedSecret, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn secret_config_rejects_token_shaped_values() {
+        let cases = [
+            ("Bearer abcdefgh123", "raw_secret_config_value_bearer"),
+            (
+                "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxMjMifQ.abcdefgh",
+                "raw_secret_config_value_jwt",
+            ),
+            ("sk-live-test", "raw_secret_config_value_openai"),
+            ("xoxb-1234567890abcdef", "raw_secret_config_value_slack"),
+            ("ghp_ABCdef123456", "raw_secret_config_value_github"),
+            ("AKIAIOSFODNN7EXAMPLE", "raw_secret_config_value_aws"),
+        ];
+
+        for (value, expected_detector) in cases {
+            let config = json!({
+                "credential_id": Uuid::new_v4().to_string(),
+                "metadata": {
+                    "sample": value
+                }
+            });
+
+            let error = reject_secret_config_material(&config)
+                .expect_err("token-shaped value must be rejected");
+            match error {
+                FcpError::ConfigurationLeakedSecret { detector, .. } => {
+                    assert_eq!(detector, expected_detector);
+                }
+                other => panic!("Expected ConfigurationLeakedSecret, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn secret_config_allows_credential_references_and_public_values() {
+        let config = json!({
+            "credential_id": Uuid::new_v4().to_string(),
+            "base_url": "https://api.github.com",
+            "required_scopes": ["read:user"],
+            "metadata": {
+                "label": "operator-owned credential reference"
+            }
+        });
+
+        reject_secret_config_material(&config).expect("safe config should be accepted");
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -13,6 +13,7 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{ThrottleViolation, UsageMetricKind};
@@ -128,6 +129,17 @@ pub enum FcpError {
 
     #[error("Streaming not supported")]
     StreamingNotSupported,
+
+    #[error(
+        "Configuration leaked secret material: field_name_hash={field_name_hash}, detector={detector}"
+    )]
+    ConfigurationLeakedSecret {
+        /// SHA-256 digest of the rejected configuration field name.
+        field_name_hash: String,
+        /// Redaction-safe detector label, such as `named_secret_field` or
+        /// `secret_like_value`.
+        detector: String,
+    },
 
     // ─────────────────────────────────────────────────────────────────────────
     // Resource errors (FCP-6xxx)
@@ -349,7 +361,25 @@ impl std::fmt::Display for CapabilityConstraintErrorKind {
     }
 }
 
+fn configuration_field_name_hash(field_name: &str) -> String {
+    let digest = Sha256::digest(field_name.as_bytes());
+    hex::encode(digest)
+}
+
 impl FcpError {
+    /// Construct a redaction-safe configuration secret-leak error.
+    ///
+    /// `field_name` is immediately hashed and is not retained. `detector` must
+    /// be a stable redaction-safe label, not a raw secret value or provider
+    /// error string.
+    #[must_use]
+    pub fn configuration_leaked_secret(field_name: &str, detector: impl Into<String>) -> Self {
+        Self::ConfigurationLeakedSecret {
+            field_name_hash: configuration_field_name_hash(field_name),
+            detector: detector.into(),
+        }
+    }
+
     /// Returns the error category for classification.
     #[must_use]
     pub const fn category(&self) -> ErrorCategory {
@@ -379,7 +409,8 @@ impl FcpError {
             | Self::NotConfigured
             | Self::NotHandshaken
             | Self::HealthCheckFailed { .. }
-            | Self::StreamingNotSupported => ErrorCategory::Connector,
+            | Self::StreamingNotSupported
+            | Self::ConfigurationLeakedSecret { .. } => ErrorCategory::Connector,
 
             Self::ResourceNotFound { .. }
             | Self::ResourceExhausted { .. }
@@ -430,6 +461,7 @@ impl FcpError {
             Self::NotHandshaken => 5003,
             Self::HealthCheckFailed { .. } => 5004,
             Self::StreamingNotSupported => 5005,
+            Self::ConfigurationLeakedSecret { .. } => 5006,
 
             Self::ResourceNotFound { .. } => 6001,
             Self::ResourceExhausted { .. } => 6002,
@@ -608,6 +640,10 @@ impl FcpError {
                 "FCP-5005".into(),
                 Some("This connector does not support streaming subscriptions. Use request-response operations instead, or choose a connector that supports the streaming archetype.".into()),
             ),
+            Self::ConfigurationLeakedSecret { .. } => (
+                "FCP-5006".into(),
+                Some("Connector configuration contained raw secret material. Replace raw secret fields with credential_id references owned by the host credential backend, then retry configure().".into()),
+            ),
 
             // ─────────────────────────────────────────────────────────────────
             // Resource errors (FCP-6xxx)
@@ -759,6 +795,13 @@ impl FcpError {
                 "capability": capability,
                 "ttl_seconds": ttl_seconds,
             })),
+            Self::ConfigurationLeakedSecret {
+                field_name_hash,
+                detector,
+            } => Some(serde_json::json!({
+                "field_name_hash": field_name_hash,
+                "detector": detector,
+            })),
             Self::External {
                 service,
                 status_code,
@@ -904,6 +947,10 @@ mod tests {
             FcpError::StreamingNotSupported.category(),
             ErrorCategory::Connector
         );
+        assert_eq!(
+            FcpError::configuration_leaked_secret("token", "named_secret_field").category(),
+            ErrorCategory::Connector
+        );
     }
 
     #[test]
@@ -1002,6 +1049,10 @@ mod tests {
 
         // Connector: 5000-5999
         assert_eq!(FcpError::NotConfigured.numeric_code(), 5002);
+        assert_eq!(
+            FcpError::configuration_leaked_secret("token", "named_secret_field").numeric_code(),
+            5006
+        );
 
         // Resource: 6000-6999
         assert_eq!(
@@ -1120,6 +1171,7 @@ mod tests {
                 reason: "timeout".into(),
             },
             FcpError::StreamingNotSupported,
+            FcpError::configuration_leaked_secret("token", "named_secret_field"),
             FcpError::ResourceNotFound {
                 resource: "file.txt".into(),
             },
@@ -1703,6 +1755,7 @@ mod tests {
             FcpError::NotConfigured,
             FcpError::NotHandshaken,
             FcpError::StreamingNotSupported,
+            FcpError::configuration_leaked_secret("token", "named_secret_field"),
             FcpError::RateLimited {
                 retry_after_ms: 1000,
                 violation: None,
@@ -2000,6 +2053,17 @@ mod tests {
             FcpError::StreamingNotSupported.to_string(),
             "Streaming not supported"
         );
+    }
+
+    #[test]
+    fn display_configuration_leaked_secret_redacts_field_name() {
+        let err = FcpError::configuration_leaked_secret("token", "named_secret_field");
+        let rendered = err.to_string();
+
+        assert!(rendered.contains("field_name_hash="));
+        assert!(rendered.contains("detector=named_secret_field"));
+        assert!(!rendered.contains("token"));
+        assert!(!format!("{err:?}").contains("token"));
     }
 
     #[test]
@@ -2394,6 +2458,7 @@ mod tests {
                 reason: "timeout".into(),
             },
             FcpError::StreamingNotSupported,
+            FcpError::configuration_leaked_secret("token", "named_secret_field"),
         ];
         for err in errors {
             let json = serde_json::to_string(&err).unwrap();
@@ -2756,6 +2821,21 @@ mod tests {
         let details = err.details().unwrap();
         assert_eq!(details["capability"], "cap.exec");
         assert_eq!(details["reason"], "policy violation");
+    }
+
+    #[test]
+    fn details_configuration_leaked_secret_are_redaction_safe() {
+        let err = FcpError::configuration_leaked_secret("token", "named_secret_field");
+        let details = err.details().unwrap();
+
+        assert_eq!(
+            details["field_name_hash"],
+            "3c469e9d6c5875d37a43f353d4f88e61fcf812c66eee3457465a40b0da4153e0"
+        );
+        assert_eq!(details["detector"], "named_secret_field");
+        assert!(!details.to_string().contains("token"));
+        assert_eq!(err.error_code(), "FCP-5006");
+        assert!(!err.is_retryable());
     }
 
     #[test]

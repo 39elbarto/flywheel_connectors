@@ -26,7 +26,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use base64::Engine;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use fcp_async_core::channel::{mpsc, oneshot};
 use fcp_async_core::hyper_bridge::{HyperExecutor, HyperIo};
 use fcp_async_core::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -64,13 +64,13 @@ use fcp_host::{
     ConnectorInventoryApplyReport, ConnectorInventoryMutationKind,
     ConnectorInventoryMutationRequest, ConnectorInventoryMutationResponse,
     ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary, CredentialCooldown,
-    CredentialLease, CredentialMutationOutcome, CredentialPoolError, CredentialPoolKey,
-    CredentialPoolRegistry, CredentialPoolStrategy, CredentialPoolView, CredentialUpsertMode,
-    DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest,
-    DoctorService, EventAcknowledgeRequest, EventAcknowledgeResponse, EventQueryRequest,
-    EventQueryResponse, GateOutcome, HostAdminStateStore, HostHealthResponse, HostHealthStatus,
-    HostPreflightRequest, HostSimulateRequest, HostSimulateResponse, IntrospectionResponse,
-    JournalQueryRequest, JournalQueryResponse, LifecycleTransitionRequest,
+    CredentialLease, CredentialMutationOutcome, CredentialPayload, CredentialPoolError,
+    CredentialPoolKey, CredentialPoolRegistry, CredentialPoolStrategy, CredentialPoolView,
+    CredentialUpsertMode, DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport,
+    DoctorRequest, DoctorService, EventAcknowledgeRequest, EventAcknowledgeResponse,
+    EventQueryRequest, EventQueryResponse, GateOutcome, HostAdminStateStore, HostHealthResponse,
+    HostHealthStatus, HostPreflightRequest, HostSimulateRequest, HostSimulateResponse,
+    IntrospectionResponse, JournalQueryRequest, JournalQueryResponse, LifecycleTransitionRequest,
     LifecycleTransitionResponse, LogQueryRequest, LogQueryResponse, ManagedConnectorConfig,
     ManagedNetworkConstraints, ManagedPortConstraint, MeshQuorumSignals,
     NativeProxyOnlySandboxDecision, NativeProxyOnlySandboxSupport, OperationResult,
@@ -81,11 +81,14 @@ use fcp_host::{
     RuntimeNetworkEnforcement, SafetyTierExt, SanitizedConnectorConfig, SimulateCostConfidence,
     SimulateCostEstimate, SimulatePhase, SimulateReceipt, SimulateReceiptQueryRequest,
     SimulateReceiptQueryResponse, SimulateResourceAvailability, StartupReconciliationReport,
-    StickyCredentialPolicy, SupplyChainGate, SupplyChainGateConfig, ToolDescriptor,
-    admit_safety_tier, capability_constraint_audit_descriptor, classify_deployment_mode,
-    diff_sanitized_config_values, emit_boot_log, emit_capability_constraint_denial_audit_event,
-    merge_connector_health, native_proxy_only_sandbox_decision, validate_runtime_network_claim,
-    wasi_config_for_operation_network_policy,
+    StickyCredentialPolicy, SupplyChainGate, SupplyChainGateConfig,
+    TRUTH_PRECEDENCE_BOOT_CONFIG_EXIT_CODE, ToolDescriptor, TruthPrecedenceBootError,
+    TruthPrecedenceBootResolution, TruthPrecedenceBootSelection, V2_DEFAULT_GRADUATED_ENV,
+    V2_INSUFFICIENT_PEERS_BEHAVIOR_ENV, V2_MIN_HEALTHY_MESH_PEERS_ENV, admit_safety_tier,
+    capability_constraint_audit_descriptor, classify_deployment_mode, diff_sanitized_config_values,
+    emit_boot_log, emit_capability_constraint_denial_audit_event, merge_connector_health,
+    native_proxy_only_sandbox_decision, resolve_truth_precedence_boot_resolution,
+    validate_runtime_network_claim, wasi_config_for_operation_network_policy,
 };
 use fcp_host::{DeploymentClassification, DeploymentTierRefusal, HostError, HostResult};
 use fcp_kernel::{
@@ -101,10 +104,8 @@ use fcp_manifest::{
     NetworkConstraints,
 };
 use fcp_policy::{
-    CapabilityConstraintEnforcer, ConstraintEvaluation, DefaultConstraintEnforcer,
-    OperationalModelSelection, PrincipalId, RequestDescriptor,
-    TRUTH_PRECEDENCE_ACCEPT_DEGRADED_SINGLE_HOST_ENV, TRUTH_PRECEDENCE_DEFAULT_ENV,
-    select_operational_model_from_env_for_deployment,
+    CapabilityConstraintEnforcer, ConstraintEvaluation, DefaultConstraintEnforcer, PrincipalId,
+    RequestDescriptor, TRUTH_PRECEDENCE_DEFAULT_ENV,
 };
 use fcp_prelude::{
     ApprovalToken, CapabilityConstraints, CapabilityVerifier, CorrelationId,
@@ -3471,60 +3472,160 @@ fn current_deployment_classification() -> DeploymentClassification {
     classify_deployment_mode(MeshQuorumSignals::single_host_evaluation())
 }
 
-fn select_host_operational_model_from_env_values(
-    classification: &DeploymentClassification,
+fn select_host_truth_precedence_boot_from_env_values(
+    signals: MeshQuorumSignals,
     default_env: Option<&str>,
-    accept_degraded_env: Option<&str>,
-) -> OperationalModelSelection {
-    select_operational_model_from_env_for_deployment(
+    insufficient_peers_behavior_env: Option<&str>,
+    default_graduated_env: Option<&str>,
+    min_healthy_peers_env: Option<&str>,
+) -> Result<TruthPrecedenceBootResolution, TruthPrecedenceBootError> {
+    resolve_truth_precedence_boot_resolution(
+        signals,
         default_env,
-        accept_degraded_env,
-        classification.signals.healthy_peer_count == 0,
+        insufficient_peers_behavior_env,
+        default_graduated_env,
+        min_healthy_peers_env,
     )
 }
 
-fn current_operational_model_selection(
-    classification: &DeploymentClassification,
-) -> HostResult<OperationalModelSelection> {
-    let default_env = read_optional_trimmed_env_string(TRUTH_PRECEDENCE_DEFAULT_ENV)?;
-    let accept_degraded_env =
-        read_optional_trimmed_env_string(TRUTH_PRECEDENCE_ACCEPT_DEGRADED_SINGLE_HOST_ENV)?;
-    Ok(select_host_operational_model_from_env_values(
-        classification,
-        default_env.as_deref(),
-        accept_degraded_env.as_deref(),
-    ))
+fn read_optional_trimmed_truth_precedence_env(
+    name: &'static str,
+) -> Result<Option<String>, TruthPrecedenceBootError> {
+    read_optional_trimmed_env_string(name).map_err(|error| {
+        TruthPrecedenceBootError::InvalidEnvValue {
+            var: name,
+            value: error.to_string(),
+            expected: "valid unicode environment value",
+        }
+    })
 }
 
-fn emit_operational_model_selection_log(selection: &OperationalModelSelection) {
-    if let Some(warning) = selection.warning {
+fn current_truth_precedence_boot_resolution()
+-> Result<TruthPrecedenceBootResolution, TruthPrecedenceBootError> {
+    let default_env = read_optional_trimmed_truth_precedence_env(TRUTH_PRECEDENCE_DEFAULT_ENV)?;
+    let insufficient_peers_behavior_env =
+        read_optional_trimmed_truth_precedence_env(V2_INSUFFICIENT_PEERS_BEHAVIOR_ENV)?;
+    let default_graduated_env =
+        read_optional_trimmed_truth_precedence_env(V2_DEFAULT_GRADUATED_ENV)?;
+    let min_healthy_peers_env =
+        read_optional_trimmed_truth_precedence_env(V2_MIN_HEALTHY_MESH_PEERS_ENV)?;
+    let signals = MeshQuorumSignals::single_host_evaluation();
+    select_host_truth_precedence_boot_from_env_values(
+        signals,
+        default_env.as_deref(),
+        insufficient_peers_behavior_env.as_deref(),
+        default_graduated_env.as_deref(),
+        min_healthy_peers_env.as_deref(),
+    )
+}
+
+fn boot_event_timestamp() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn emit_truth_precedence_boot_error(error: &TruthPrecedenceBootError) {
+    let timestamp = boot_event_timestamp();
+    match error {
+        TruthPrecedenceBootError::InvalidEnvValue {
+            var,
+            value,
+            expected,
+        } => {
+            tracing::error!(
+                target: "fcp_host::deployment_mode",
+                event = "fcp.host.boot_refused_truth_precedence",
+                event_type = "fcp.host.boot_refused_truth_precedence",
+                bead_id = "flywheel_connectors-hr0rr.2.6",
+                actor = "host",
+                redaction_scope = "public",
+                correlation_id = "boot",
+                timestamp = %timestamp,
+                env_var = *var,
+                env_value = %value,
+                expected = *expected,
+                exit_code = TRUTH_PRECEDENCE_BOOT_CONFIG_EXIT_CODE,
+                "fcp-host truth-precedence boot configuration is invalid"
+            );
+        }
+        TruthPrecedenceBootError::RefusedBoot {
+            observed,
+            required,
+            behavior,
+            reason,
+        } => {
+            tracing::error!(
+                target: "fcp_host::deployment_mode",
+                event = "fcp.host.boot_refused_truth_precedence",
+                event_type = "fcp.host.boot_refused_truth_precedence",
+                bead_id = "flywheel_connectors-hr0rr.2.6",
+                actor = "host",
+                redaction_scope = "public",
+                correlation_id = "boot",
+                timestamp = %timestamp,
+                precedence_default = "v2_requested",
+                behavior_chosen = behavior.label(),
+                mesh_peer_count = *observed,
+                min_healthy_peers = *required,
+                exit_code = TRUTH_PRECEDENCE_BOOT_CONFIG_EXIT_CODE,
+                reason = *reason,
+                "fcp-host refused V2 mesh-native boot"
+            );
+        }
+    }
+}
+
+fn emit_operational_model_selection_log(selection: &TruthPrecedenceBootSelection) {
+    let timestamp = boot_event_timestamp();
+    if let Some(warning) = selection.warning.as_deref() {
         tracing::warn!(
             target: "fcp_host::deployment_mode",
-            event = "single_host_v2_fallback",
+            event = "fcp.host.boot_truth_precedence",
+            event_type = "fcp.host.boot_truth_precedence",
+            bead_id = "flywheel_connectors-hr0rr.2.6",
+            actor = "host",
+            redaction_scope = "public",
+            correlation_id = "boot",
+            timestamp = %timestamp,
+            precedence_default = if selection.requested == fcp_policy::OperationalModelVersion::V2MeshNative {
+                "v2_requested"
+            } else {
+                "v1_requested"
+            },
             requested_model = selection.requested.label(),
             effective_model = selection.effective.label(),
-            single_host_detected = selection.single_host_detected,
-            degraded_v2_opt_in = selection.degraded_v2_opt_in,
+            behavior_chosen = selection.behavior_chosen.label(),
+            mesh_peer_count = selection.mesh_peer_count,
+            min_healthy_peers = selection.min_healthy_peers,
+            insufficient_peers = selection.insufficient_peers,
+            explicit_v2_requested = selection.explicit_v2_requested,
+            graduated_v2_default = selection.graduated_v2_default,
+            degraded_from = selection.degraded_from.as_deref().unwrap_or("none"),
             "{warning}"
-        );
-    } else if selection.degraded_v2_opt_in {
-        tracing::warn!(
-            target: "fcp_host::deployment_mode",
-            event = "single_host_v2_degraded_opt_in",
-            requested_model = selection.requested.label(),
-            effective_model = selection.effective.label(),
-            single_host_detected = selection.single_host_detected,
-            degraded_v2_opt_in = selection.degraded_v2_opt_in,
-            "V2MeshNative degraded single-host mode accepted by explicit operator opt-in"
         );
     } else {
         tracing::info!(
             target: "fcp_host::deployment_mode",
-            event = "operational_model_selection",
+            event = "fcp.host.boot_truth_precedence",
+            event_type = "fcp.host.boot_truth_precedence",
+            bead_id = "flywheel_connectors-hr0rr.2.6",
+            actor = "host",
+            redaction_scope = "public",
+            correlation_id = "boot",
+            timestamp = %timestamp,
+            precedence_default = if selection.requested == fcp_policy::OperationalModelVersion::V2MeshNative {
+                "v2_requested"
+            } else {
+                "v1_requested"
+            },
             requested_model = selection.requested.label(),
             effective_model = selection.effective.label(),
-            single_host_detected = selection.single_host_detected,
-            degraded_v2_opt_in = selection.degraded_v2_opt_in,
+            behavior_chosen = selection.behavior_chosen.label(),
+            mesh_peer_count = selection.mesh_peer_count,
+            min_healthy_peers = selection.min_healthy_peers,
+            insufficient_peers = selection.insufficient_peers,
+            explicit_v2_requested = selection.explicit_v2_requested,
+            graduated_v2_default = selection.graduated_v2_default,
+            degraded_from = selection.degraded_from.as_deref().unwrap_or("none"),
             "fcp-host operational model selected"
         );
     }
@@ -5047,10 +5148,15 @@ async fn async_main() -> HostResult<()> {
     if loaded_configs.configs.is_empty() {
         tracing::warn!("no connectors configured; doctor self-checks will fail");
     }
-    let deployment_classification = current_deployment_classification();
-    emit_boot_log(&deployment_classification);
-    let operational_model = current_operational_model_selection(&deployment_classification)?;
-    emit_operational_model_selection_log(&operational_model);
+    let truth_precedence_boot = match current_truth_precedence_boot_resolution() {
+        Ok(resolution) => resolution,
+        Err(error) => {
+            emit_truth_precedence_boot_error(&error);
+            std::process::exit(TRUTH_PRECEDENCE_BOOT_CONFIG_EXIT_CODE);
+        }
+    };
+    emit_boot_log(&truth_precedence_boot.classification);
+    emit_operational_model_selection_log(&truth_precedence_boot.selection);
     let zone_policies = load_zone_policies()?;
 
     let registry = Arc::new(
@@ -9296,7 +9402,7 @@ impl HostCredentialInjector {
         Self { lease }
     }
 
-    fn lease_payload(&self, credential_id: &str) -> Result<&Value, EgressError> {
+    fn lease_payload(&self, credential_id: &str) -> Result<&CredentialPayload, EgressError> {
         let lease = self.lease.as_ref().ok_or_else(|| {
             EgressError::CredentialError(format!("credential `{credential_id}` was not leased"))
         })?;
@@ -9305,14 +9411,98 @@ impl HostCredentialInjector {
                 "credential `{credential_id}` does not match leased credential"
             )));
         }
-        lease.payload.as_raw_json().ok_or_else(|| {
-            EgressError::CredentialError(format!(
-                "credential `{credential_id}` does not expose legacy host-egress JSON material"
-            ))
+        Ok(&lease.payload)
+    }
+
+    fn lease_raw_json_payload(&self, credential_id: &str) -> Result<&Value, EgressError> {
+        self.lease_payload(credential_id)?
+            .as_raw_json()
+            .ok_or_else(|| {
+                EgressError::CredentialError(format!(
+                    "credential `{credential_id}` does not expose legacy host-egress JSON material"
+                ))
+            })
+    }
+
+    fn remove_connector_credential_headers(headers: &mut Vec<HttpHeader>) {
+        headers.retain(|header| {
+            !header.name.eq_ignore_ascii_case("x-fcp-credential-id")
+                && !header.name.eq_ignore_ascii_case("authorization")
+        });
+    }
+
+    fn auth_profile_host_allow(payload: &CredentialPayload) -> Result<Vec<String>, EgressError> {
+        let Some(host_allow) = payload.auth_profile_host_allow() else {
+            return Err(EgressError::CredentialError(
+                "credential payload is not an auth profile".to_string(),
+            ));
+        };
+        Ok(host_allow.to_vec())
+    }
+
+    fn auth_profile_http_headers(profile: &AuthProfile) -> Result<Vec<HttpHeader>, EgressError> {
+        match &profile.method {
+            AuthMethodKind::ApiKey(method) => {
+                let value = method.value_prefix.as_deref().map_or_else(
+                    || method.key.expose_secret().to_string(),
+                    |prefix| format!("{prefix} {}", method.key.expose_secret()),
+                );
+                Ok(vec![HttpHeader {
+                    name: method.header_name.clone(),
+                    value,
+                }])
+            }
+            AuthMethodKind::OAuthDeviceCode(method) => {
+                if let Some(expires_at) = method.expires_at
+                    && Utc::now() >= expires_at
+                {
+                    return Err(EgressError::CredentialError(
+                        "oauth_device access token is expired".to_string(),
+                    ));
+                }
+                let token = method.access_token.as_ref().ok_or_else(|| {
+                    EgressError::CredentialError("oauth_device access token is missing".to_string())
+                })?;
+                Ok(vec![HttpHeader {
+                    name: "Authorization".to_string(),
+                    value: format!("Bearer {}", token.expose_secret()),
+                }])
+            }
+            AuthMethodKind::OAuthAuthCode(method) => {
+                if let Some(expires_at) = method.expires_at
+                    && Utc::now() >= expires_at
+                {
+                    return Err(EgressError::CredentialError(
+                        "oauth_auth_code access token is expired".to_string(),
+                    ));
+                }
+                let token = method.access_token.as_ref().ok_or_else(|| {
+                    EgressError::CredentialError(
+                        "oauth_auth_code access token is missing".to_string(),
+                    )
+                })?;
+                Ok(vec![HttpHeader {
+                    name: "Authorization".to_string(),
+                    value: format!("Bearer {}", token.expose_secret()),
+                }])
+            }
+            other => Err(EgressError::CredentialError(format!(
+                "auth profile method `{}` is not supported for host-egress HTTP injection",
+                other.id()
+            ))),
+        }
+    }
+
+    fn auth_profile_is_refreshable(payload: &CredentialPayload) -> bool {
+        payload.as_auth_profile().is_some_and(|profile| {
+            matches!(
+                profile.method,
+                AuthMethodKind::OAuthDeviceCode(_) | AuthMethodKind::OAuthAuthCode(_)
+            )
         })
     }
 
-    fn payload_host_allow(payload: &Value) -> Vec<String> {
+    fn raw_json_host_allow(payload: &Value) -> Vec<String> {
         [
             "/host_allow",
             "/allowed_hosts",
@@ -9326,7 +9516,7 @@ impl HostCredentialInjector {
         .collect()
     }
 
-    fn payload_http_headers(payload: &Value) -> Result<Vec<HttpHeader>, EgressError> {
+    fn raw_json_http_headers(payload: &Value) -> Result<Vec<HttpHeader>, EgressError> {
         let mut headers = Vec::new();
         if let Some(values) = payload.pointer("/http/headers").and_then(Value::as_array) {
             for value in values {
@@ -9375,7 +9565,7 @@ impl HostCredentialInjector {
         Ok(headers)
     }
 
-    fn payload_tcp_auth(payload: &Value) -> Result<Option<Vec<u8>>, EgressError> {
+    fn raw_json_tcp_auth(payload: &Value) -> Result<Option<Vec<u8>>, EgressError> {
         let Some(raw) = payload
             .pointer("/tcp/auth")
             .or_else(|| payload.pointer("/tcp/auth_b64"))
@@ -9412,7 +9602,11 @@ impl CredentialInjector for HostCredentialInjector {
 
     fn is_host_allowed(&self, credential_id: &str, host: &str) -> Result<bool, EgressError> {
         let payload = self.lease_payload(credential_id)?;
-        let host_allow = Self::payload_host_allow(payload);
+        let host_allow = if let Some(raw) = payload.as_raw_json() {
+            Self::raw_json_host_allow(raw)
+        } else {
+            Self::auth_profile_host_allow(payload)?
+        };
         Ok(!host_allow.is_empty() && host_matches_allow_list(host, &host_allow))
     }
 
@@ -9422,13 +9616,22 @@ impl CredentialInjector for HostCredentialInjector {
         headers: &mut Vec<HttpHeader>,
     ) -> Result<(), EgressError> {
         let payload = self.lease_payload(credential_id)?;
-        headers.extend(Self::payload_http_headers(payload)?);
+        Self::remove_connector_credential_headers(headers);
+        if let Some(raw) = payload.as_raw_json() {
+            headers.extend(Self::raw_json_http_headers(raw)?);
+        } else if let Some(profile) = payload.as_auth_profile() {
+            headers.extend(Self::auth_profile_http_headers(profile)?);
+        } else {
+            return Err(EgressError::CredentialError(format!(
+                "credential `{credential_id}` did not contain injectable host-egress material"
+            )));
+        }
         Ok(())
     }
 
     fn get_tcp_auth(&self, credential_id: &str) -> Result<Option<Vec<u8>>, EgressError> {
-        let payload = self.lease_payload(credential_id)?;
-        Self::payload_tcp_auth(payload)
+        let payload = self.lease_raw_json_payload(credential_id)?;
+        Self::raw_json_tcp_auth(payload)
     }
 }
 
@@ -9448,16 +9651,14 @@ async fn host_egress_http_handler(
     )
     .await
     .map_err(map_host_error)?;
-    let injector = HostCredentialInjector::new(lease.clone());
-    let noop = NoOpCredentialInjector;
-    let injector_ref: &dyn CredentialInjector = if request.credential_id.is_some() {
-        &injector
-    } else {
-        &noop
-    };
-    let result =
-        authorize_and_perform_host_http_egress(&authorized, request, injector_ref, started_at)
-            .await;
+    let result = authorize_and_perform_host_http_egress(
+        &state,
+        &authorized,
+        request,
+        lease.as_ref(),
+        started_at,
+    )
+    .await;
     if let Some(lease) = lease {
         release_host_egress_credential_lease(&state, lease).await;
     }
@@ -9465,8 +9666,47 @@ async fn host_egress_http_handler(
 }
 
 async fn authorize_and_perform_host_http_egress(
+    state: &Arc<AppState>,
     authorized: &AuthorizedHostEgress,
     request: HostEgressHttpRequest,
+    lease: Option<&CredentialLease>,
+    started_at: Instant,
+) -> HostResult<HostEgressHttpResponse> {
+    let leased_injector = HostCredentialInjector::new(lease.cloned());
+    let noop = NoOpCredentialInjector;
+    let injector_ref: &dyn CredentialInjector = if request.credential_id.is_some() {
+        &leased_injector
+    } else {
+        &noop
+    };
+    let response =
+        perform_authorized_host_http_egress_once(authorized, &request, injector_ref, started_at)
+            .await?;
+    if response.status != 401 {
+        return Ok(response);
+    }
+
+    let Some(lease) = lease else {
+        return Ok(response);
+    };
+    let Some(credential_id) = request.credential_id.as_deref() else {
+        return Ok(response);
+    };
+    if !HostCredentialInjector::auth_profile_is_refreshable(&lease.payload) {
+        return Ok(response);
+    }
+
+    let refreshed_lease =
+        refresh_host_egress_credential_after_unauthorized(state, authorized, credential_id, lease)
+            .await?;
+    let refreshed_injector = HostCredentialInjector::new(Some(refreshed_lease));
+    perform_authorized_host_http_egress_once(authorized, &request, &refreshed_injector, started_at)
+        .await
+}
+
+async fn perform_authorized_host_http_egress_once(
+    authorized: &AuthorizedHostEgress,
+    request: &HostEgressHttpRequest,
     injector: &dyn CredentialInjector,
     started_at: Instant,
 ) -> HostResult<HostEgressHttpResponse> {
@@ -9490,8 +9730,17 @@ async fn authorize_and_perform_host_http_egress(
         &mut guard_request,
         injector,
     )?;
+    let total_timeout = Duration::from_millis(u64::from(authorized.constraints.total_timeout_ms));
+    let remaining_timeout = total_timeout
+        .checked_sub(started_at.elapsed())
+        .ok_or_else(|| {
+            HostError::PreflightFailed(format!(
+                "host-egress HTTP request to `{}` timed out after {}ms",
+                decision.canonical_host, authorized.constraints.total_timeout_ms
+            ))
+        })?;
     let response = fcp_async_core::time::timeout(
-        Duration::from_millis(u64::from(authorized.constraints.total_timeout_ms)),
+        remaining_timeout,
         perform_host_http_egress(&guard_request, &mut decision, &authorized.constraints),
     )
     .await
@@ -9506,6 +9755,81 @@ async fn authorize_and_perform_host_http_egress(
         headers: response.headers,
         body: response.body,
         egress: authorized.metadata(&decision, started_at.elapsed().as_millis()),
+    })
+}
+
+async fn refresh_host_egress_credential_after_unauthorized(
+    state: &Arc<AppState>,
+    authorized: &AuthorizedHostEgress,
+    credential_id: &str,
+    lease: &CredentialLease,
+) -> HostResult<CredentialLease> {
+    let requested = CredentialId::parse(credential_id).map_err(|err| {
+        HostError::PreflightFailed(format!(
+            "host-egress credential id `{credential_id}` is invalid during refresh: {err}"
+        ))
+    })?;
+    if requested != lease.credential_id {
+        return Err(HostError::PreflightFailed(format!(
+            "host-egress credential id `{credential_id}` does not match leased credential during refresh"
+        )));
+    }
+
+    let host_allow = lease
+        .payload
+        .auth_profile_host_allow()
+        .map(<[String]>::to_vec)
+        .unwrap_or_default();
+    let mut profile = lease.payload.as_auth_profile().cloned().ok_or_else(|| {
+        HostError::PreflightFailed(
+            "host-egress credential refresh requires an auth-profile payload".to_string(),
+        )
+    })?;
+    let transport = BlockingOAuthTransport::new().map_err(|err| {
+        HostError::PreflightFailed(format!("host-egress OAuth refresh transport failed: {err}"))
+    })?;
+    let cx = fcp_async_core::Cx::for_testing();
+    let refresh_result = match &mut profile.method {
+        AuthMethodKind::OAuthDeviceCode(method) => {
+            method.refresh_with_transport(&cx, &transport).await
+        }
+        AuthMethodKind::OAuthAuthCode(method) => {
+            method.refresh_with_transport(&cx, &transport).await
+        }
+        other => {
+            return Err(HostError::PreflightFailed(format!(
+                "host-egress credential method `{}` is not refreshable after 401",
+                other.id()
+            )));
+        }
+    };
+    refresh_result.map_err(|err| {
+        HostError::PreflightFailed(format!(
+            "host-egress OAuth credential refresh failed: {err}"
+        ))
+    })?;
+
+    let refreshed_payload = CredentialPayload::auth_profile_with_allowed_hosts(profile, host_allow);
+    state
+        .credential_pools
+        .lock()
+        .await
+        .replace_payload_in_zone(
+            &authorized.zone_id,
+            lease.credential_id,
+            refreshed_payload.clone(),
+        )
+        .map_err(|err| {
+            HostError::PreflightFailed(format!(
+                "host-egress refreshed credential could not be persisted: {err}"
+            ))
+        })?;
+
+    Ok(CredentialLease {
+        token: lease.token,
+        credential_id: lease.credential_id,
+        payload: refreshed_payload,
+        pool_key: lease.pool_key.clone(),
     })
 }
 
@@ -14440,6 +14764,49 @@ deny_ptrace = true
         (addr, task)
     }
 
+    async fn e99o6_gmail_refresh_retry_server() -> (SocketAddr, JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind e99o6 Gmail loopback");
+        let addr = listener.local_addr().expect("listener local addr");
+        let task = task::spawn(async move {
+            let mut observed = Vec::new();
+            let responses = [
+                ("401 Unauthorized", r#"{"error":"invalid_token"}"#),
+                ("200 OK", r#"{"messages":[]}"#),
+            ];
+
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().await.expect("accept Gmail egress");
+                let mut request_bytes = Vec::new();
+                let mut buf = [0_u8; 1024];
+                loop {
+                    let read = stream.read(&mut buf).await.expect("read Gmail request");
+                    if read == 0 {
+                        break;
+                    }
+                    request_bytes.extend_from_slice(&buf[..read]);
+                    if request_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                observed.push(String::from_utf8_lossy(&request_bytes).into_owned());
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write Gmail response");
+                stream.flush().await.expect("flush Gmail response");
+            }
+
+            observed
+        });
+        (addr, task)
+    }
+
     async fn d9us6_one_shot_tcp_server(
         observed_bytes: Arc<StdMutex<Vec<u8>>>,
     ) -> (SocketAddr, JoinHandle<()>) {
@@ -15888,6 +16255,193 @@ deny_ptrace = true
             !serialized.contains("redaction-sentinel-http-secret"),
             "host egress response must not echo injected HTTP credentials"
         );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_e99o6_1_4_gmail_host_egress_refreshes_after_401_without_leaking_tokens() {
+        let (gmail_addr, gmail_task) = e99o6_gmail_refresh_retry_server().await;
+        let oauth = HostOAuthLoopbackServer::start(vec![HostOAuthLoopbackExpectedRequest {
+            method: "POST",
+            path: "/token",
+            body_contains: vec![
+                "grant_type=refresh_token",
+                "refresh_token=refresh-gmail-old",
+                "client_id=gmail-client",
+                "client_secret=gmail-client-secret",
+            ],
+            response: json!({
+                "access_token": "access-gmail-new",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "refresh_token": "refresh-gmail-new",
+                "scope": "https://www.googleapis.com/auth/gmail.readonly"
+            }),
+        }]);
+        let connector_id = "fcp.gmail";
+        let operation_id = "gmail.list_messages";
+        let credential_id =
+            CredentialId::parse("e99e99e9-0001-4000-8000-000000000014").expect("credential id");
+        let mut oauth_method = OAuthAuthCodeAuth::confidential_client(
+            "gmail-client",
+            "gmail-client-secret",
+            "https://accounts.google.com/o/oauth2/v2/auth",
+            format!("{}/token", oauth.base_url),
+            "http://127.0.0.1/oauth/gmail/callback",
+            "https://www.googleapis.com/auth/gmail.readonly",
+            false,
+        )
+        .expect("valid Gmail auth-code profile");
+        oauth_method.apply_tokens(
+            OAuthTokens::bearer(
+                "access-gmail-old",
+                Some(Duration::from_secs(3600)),
+                Some("refresh-gmail-old"),
+                Some("https://www.googleapis.com/auth/gmail.readonly"),
+            )
+            .expect("valid Gmail token set"),
+        );
+        let profile = AuthProfile::new(
+            "gmail-primary",
+            "gmail",
+            AuthMethodKind::OAuthAuthCode(oauth_method),
+            "Gmail primary",
+            0,
+        )
+        .expect("valid Gmail auth profile");
+        let (state, signing_key) = d9us6_host_egress_state(
+            connector_id,
+            operation_id,
+            gmail_addr.port(),
+            credential_id,
+            json!({"host_allow": ["127.0.0.1"], "http": {"bearer_token": "unused-before-auth-profile"}}),
+        )
+        .await;
+        state
+            .credential_pools
+            .lock()
+            .await
+            .replace_payload_in_zone(
+                &ZoneId::work(),
+                credential_id,
+                CredentialPayload::auth_profile_with_allowed_hosts(profile, ["127.0.0.1"]),
+            )
+            .expect("install Gmail auth-profile credential payload");
+        let token = d9us6_token_with_credentials(&signing_key, operation_id, vec![credential_id]);
+
+        let response = host_egress_http_handler(
+            State(Arc::clone(&state)),
+            Json(HostEgressHttpRequest {
+                context: d9us6_host_egress_context(
+                    connector_id,
+                    operation_id,
+                    "req-e99o6-gmail-refresh",
+                    "corr-e99o6-gmail-refresh",
+                    &token,
+                ),
+                url: format!(
+                    "http://127.0.0.1:{}/gmail/v1/users/me/messages",
+                    gmail_addr.port()
+                ),
+                method: "GET".to_string(),
+                headers: vec![
+                    HostEgressHttpHeader {
+                        name: "Authorization".to_string(),
+                        value: "Bearer connector-supplied-token".to_string(),
+                    },
+                    HostEgressHttpHeader {
+                        name: "x-fcp-credential-id".to_string(),
+                        value: credential_id.to_string(),
+                    },
+                ],
+                body: None,
+                credential_id: Some(credential_id.to_string()),
+            }),
+        )
+        .await
+        .expect("Gmail host egress should refresh and retry")
+        .0;
+
+        let observed_gmail_requests = gmail_task.await.expect("Gmail server task");
+        let observed_oauth_requests = oauth.join();
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            serde_json::from_slice::<Value>(response.body.as_bytes())
+                .expect("Gmail response body parses"),
+            json!({"messages": []})
+        );
+        assert!(response.egress.credential_injected);
+        assert_eq!(observed_gmail_requests.len(), 2);
+        assert!(
+            observed_gmail_requests[0]
+                .to_ascii_lowercase()
+                .contains("authorization: bearer access-gmail-old"),
+            "first Gmail request should use the initially leased access token"
+        );
+        assert!(
+            observed_gmail_requests[1]
+                .to_ascii_lowercase()
+                .contains("authorization: bearer access-gmail-new"),
+            "retried Gmail request should use the refreshed access token"
+        );
+        for request in &observed_gmail_requests {
+            let lower = request.to_ascii_lowercase();
+            assert!(
+                !lower.contains("x-fcp-credential-id:"),
+                "host egress must strip connector-local credential routing headers"
+            );
+            assert!(
+                !lower.contains("connector-supplied-token"),
+                "host egress must replace connector-supplied Authorization headers"
+            );
+        }
+        assert_eq!(observed_oauth_requests.len(), 1);
+
+        let refreshed_payload = {
+            let mut pools = state.credential_pools.lock().await;
+            let lease = pools
+                .acquire_specific_in_zone(&ZoneId::work(), credential_id, Utc::now())
+                .expect("refreshed Gmail credential can be leased");
+            let payload = lease.payload.clone();
+            pools
+                .release(&lease.pool_key, lease.token)
+                .expect("release refreshed Gmail credential lease");
+            payload
+        };
+        let refreshed_profile = refreshed_payload
+            .as_auth_profile()
+            .expect("refreshed credential remains an auth profile");
+        let AuthMethodKind::OAuthAuthCode(refreshed_method) = &refreshed_profile.method else {
+            panic!("Gmail credential should remain oauth_auth_code");
+        };
+        assert_eq!(
+            refreshed_method
+                .access_token
+                .as_ref()
+                .expect("refreshed access token")
+                .expose_secret(),
+            "access-gmail-new"
+        );
+        assert_eq!(
+            refreshed_method
+                .refresh_token
+                .as_ref()
+                .expect("rotated refresh token")
+                .expose_secret(),
+            "refresh-gmail-new"
+        );
+        let serialized = serde_json::to_string(&response).expect("serialize Gmail response");
+        for leaked in [
+            "access-gmail-old",
+            "access-gmail-new",
+            "refresh-gmail-old",
+            "refresh-gmail-new",
+            "gmail-client-secret",
+        ] {
+            assert!(
+                !serialized.contains(leaked),
+                "host egress response must not echo Gmail OAuth material"
+            );
+        }
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
@@ -17644,35 +18198,56 @@ deny_ptrace = true
     }
 
     #[test]
-    fn single_host_v2_default_falls_back_to_v1_with_warning() {
-        let classification = classify_deployment_mode(MeshQuorumSignals::single_host_evaluation());
-        let selection = select_host_operational_model_from_env_values(&classification, None, None);
+    fn single_host_default_uses_v1_without_degradation_warning() {
+        let resolution = select_host_truth_precedence_boot_from_env_values(
+            MeshQuorumSignals::single_host_evaluation(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("default single-host truth precedence should resolve");
+        let selection = resolution.selection;
 
-        assert_eq!(selection.requested, OperationalModelVersion::V2MeshNative);
+        assert_eq!(selection.requested, OperationalModelVersion::V1HostFirst);
         assert_eq!(selection.effective, OperationalModelVersion::V1HostFirst);
-        assert!(selection.single_host_detected);
-        assert!(!selection.degraded_v2_opt_in);
-        assert!(
-            selection
-                .warning
-                .is_some_and(|warning| warning.contains("falling back to V1HostFirst"))
-        );
+        assert!(selection.insufficient_peers);
+        assert!(!selection.explicit_v2_requested);
+        assert!(!selection.graduated_v2_default);
+        assert_eq!(selection.warning, None);
+        assert_eq!(selection.degraded_from, None);
     }
 
     #[test]
-    fn single_host_v2_explicit_accept_degraded_keeps_v2() {
-        let classification = classify_deployment_mode(MeshQuorumSignals::single_host_evaluation());
-        let selection = select_host_operational_model_from_env_values(
-            &classification,
+    fn single_host_v2_explicit_opt_in_keeps_v2_with_warning() {
+        let resolution = select_host_truth_precedence_boot_from_env_values(
+            MeshQuorumSignals::single_host_evaluation(),
             Some("v2"),
-            Some("true"),
-        );
+            Some("explicit-opt-in"),
+            None,
+            None,
+        )
+        .expect("explicit V2 opt-in should resolve");
+        let selection = resolution.selection;
 
         assert_eq!(selection.requested, OperationalModelVersion::V2MeshNative);
         assert_eq!(selection.effective, OperationalModelVersion::V2MeshNative);
-        assert!(selection.single_host_detected);
-        assert!(selection.degraded_v2_opt_in);
-        assert_eq!(selection.warning, None);
+        assert_eq!(
+            selection.behavior_chosen,
+            fcp_host::V2InsufficientPeersBehavior::ExplicitOptIn
+        );
+        assert!(selection.insufficient_peers);
+        assert!(selection.explicit_v2_requested);
+        assert!(!selection.graduated_v2_default);
+        assert!(
+            selection
+                .warning
+                .is_some_and(|warning| warning.contains("explicit operator opt-in"))
+        );
+        assert_eq!(
+            selection.degraded_from.as_deref(),
+            Some("v2-insufficient-peers-explicit-opt-in")
+        );
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

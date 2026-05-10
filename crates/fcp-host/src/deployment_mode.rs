@@ -47,7 +47,7 @@
 //! | What mode am I actually running in right now?  | `DeploymentMode` (this enum) |
 //!
 //! A zone configured with `V2MeshNative` precedence whose host
-//! cannot reach 2 healthy mesh peers will run in `Evaluation`
+//! cannot reach one healthy mesh peer will run in `Evaluation`
 //! [`DeploymentMode`] until the mesh quorum stabilizes.
 //!
 //! ## Acceptance criteria status (from bead)
@@ -65,17 +65,17 @@
 //!
 //! ## Threshold rationale
 //!
-//! [`MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE`] = 2 matches the bead's
-//! sequence step 2 — "transition to `MeshActive` only when ≥2 healthy
-//! mesh peers exist". Two is the smallest count that survives one
-//! peer being lost mid-operation without immediate quorum loss; it
-//! is intentionally NOT the same as
-//! `EMERGENCY_QUORUM_WITNESSES = 3` (which is about
-//! after-the-fact quorum proof, not about routine availability).
+//! [`MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE`] = 1 matches
+//! `flywheel_connectors-hr0rr.2.6`: zero peers cannot distinguish an
+//! active mesh from an isolated single host, while one healthy peer is
+//! the minimum external attestation boundary for V2 mesh-native mode.
 
 use fcp_crypto::ed25519::{Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey};
 use fcp_crypto::error::CryptoError;
 use fcp_crypto::kid::KeyId;
+use fcp_policy::{
+    OperationalModelVersion, truth_precedence_env_requests_v1, truth_precedence_env_requests_v2,
+};
 use fcp_prelude::SafetyTier;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -83,15 +83,239 @@ use thiserror::Error;
 /// Minimum number of healthy mesh peers required to transition out
 /// of [`DeploymentMode::Evaluation`].
 ///
-/// Matches bead hr0rr.1 §"Sequence" step 2: "transition to
-/// `MeshActive` only when ≥2 healthy mesh peers exist". Counted
-/// exclusive of self.
-pub const MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE: u32 = 2;
+/// Matches bead `flywheel_connectors-hr0rr.2.6`: zero healthy peers
+/// means V2 mesh-native truth precedence cannot be distinguished from
+/// an isolated single-host deployment. Counted exclusive of self.
+pub const MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE: u32 = 1;
+
+/// Environment variable selecting how fcp-host behaves when V2 is
+/// requested but the healthy-peer count is below the active threshold.
+pub const V2_INSUFFICIENT_PEERS_BEHAVIOR_ENV: &str = "FCP_V2_INSUFFICIENT_PEERS_BEHAVIOR";
+
+/// Environment variable for the future project-wide V2 default flip.
+/// It has higher precedence than `FCP_TRUTH_PRECEDENCE_DEFAULT`.
+pub const V2_DEFAULT_GRADUATED_ENV: &str = "FCP_V2_DEFAULT_GRADUATED";
+
+/// Environment variable overriding the healthy-peer threshold.
+pub const V2_MIN_HEALTHY_MESH_PEERS_ENV: &str = "FCP_V2_MIN_HEALTHY_MESH_PEERS";
+
+/// Boot/configuration failures for the V2 insufficient-peer guard exit
+/// with `EX_CONFIG` so supervisors can distinguish operator config from
+/// runtime crashes.
+pub const TRUTH_PRECEDENCE_BOOT_CONFIG_EXIT_CODE: i32 = 78;
 
 /// Operator-visible warning string emitted every health-check while
 /// running in [`DeploymentMode::Evaluation`]. Stable across releases
 /// because operator runbooks and log-search dashboards key off it.
 pub const EVALUATION_MODE_HEALTH_WARNING: &str = "WARN: Host-first mode is for evaluation only. Production deployments require mesh-active mode.";
+
+/// Operator-selected behavior when V2 is requested without enough
+/// healthy peers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum V2InsufficientPeersBehavior {
+    /// Run with effective V1 host-first truth precedence and annotate
+    /// truth output as degraded once the A.5 `fwc` surface is wired.
+    #[default]
+    DegradeToV1,
+    /// Refuse host boot with `EX_CONFIG`.
+    RefuseBoot,
+    /// Allow degraded V2 only when `FCP_TRUTH_PRECEDENCE_DEFAULT=v2`
+    /// is explicitly present.
+    ExplicitOptIn,
+}
+
+impl V2InsufficientPeersBehavior {
+    /// Stable label used in logs and docs.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::DegradeToV1 => "degrade-to-v1",
+            Self::RefuseBoot => "refuse-boot",
+            Self::ExplicitOptIn => "explicit-opt-in",
+        }
+    }
+}
+
+/// Resolved host boot selection for truth-precedence behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TruthPrecedenceBootSelection {
+    /// Model requested after applying env-var precedence.
+    pub requested: OperationalModelVersion,
+    /// Model the host will actually run.
+    pub effective: OperationalModelVersion,
+    /// Behavior selected for insufficient peers.
+    pub behavior_chosen: V2InsufficientPeersBehavior,
+    /// Whether `FCP_TRUTH_PRECEDENCE_DEFAULT=v2` was explicitly set.
+    pub explicit_v2_requested: bool,
+    /// Whether `FCP_V2_DEFAULT_GRADUATED=true` requested V2.
+    pub graduated_v2_default: bool,
+    /// Whether the observed peer count is below the threshold.
+    pub insufficient_peers: bool,
+    /// Observed healthy peer count.
+    pub mesh_peer_count: u32,
+    /// Required healthy peer count for V2 active mode.
+    pub min_healthy_peers: u32,
+    /// Operator-visible warning to log, if a downgrade/opt-in happened.
+    pub warning: Option<String>,
+    /// Machine-readable downgrade reason for A.5 `fwc` annotations.
+    pub degraded_from: Option<String>,
+}
+
+/// Full boot resolution: deployment classification plus the effective
+/// truth-precedence model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TruthPrecedenceBootResolution {
+    /// Deployment classification using the configured peer threshold.
+    pub classification: DeploymentClassification,
+    /// Truth-precedence selection after insufficient-peer policy.
+    pub selection: TruthPrecedenceBootSelection,
+}
+
+/// Errors returned while resolving V2 boot behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum TruthPrecedenceBootError {
+    /// A recognized env var was present with an unsupported value.
+    #[error("{var}={value:?} is invalid; expected {expected}")]
+    InvalidEnvValue {
+        /// Env var name.
+        var: &'static str,
+        /// Raw operator-provided value.
+        value: String,
+        /// Human-readable accepted values.
+        expected: &'static str,
+    },
+    /// V2 was requested but the selected behavior refuses boot with
+    /// the current peer count.
+    #[error(
+        "V2 mesh-native boot refused: healthy_peer_count={observed} is below min_healthy_peers={required} ({reason})"
+    )]
+    RefusedBoot {
+        /// Observed healthy peer count.
+        observed: u32,
+        /// Required healthy peer count.
+        required: u32,
+        /// Behavior that produced the refusal.
+        behavior: V2InsufficientPeersBehavior,
+        /// Stable reason for logs and tests.
+        reason: &'static str,
+    },
+}
+
+/// Parse `FCP_V2_INSUFFICIENT_PEERS_BEHAVIOR`.
+///
+/// # Errors
+///
+/// Returns [`TruthPrecedenceBootError::InvalidEnvValue`] when the value
+/// is not one of the documented behavior labels.
+pub fn parse_v2_insufficient_peers_behavior(
+    raw: Option<&str>,
+) -> Result<V2InsufficientPeersBehavior, TruthPrecedenceBootError> {
+    let Some(raw) = raw else {
+        return Ok(V2InsufficientPeersBehavior::default());
+    };
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(V2InsufficientPeersBehavior::default());
+    }
+    match normalized.as_str() {
+        "degrade-to-v1" | "degrade_to_v1" | "degrade" => {
+            Ok(V2InsufficientPeersBehavior::DegradeToV1)
+        }
+        "refuse-boot" | "refuse_boot" | "refuse" => Ok(V2InsufficientPeersBehavior::RefuseBoot),
+        "explicit-opt-in" | "explicit_opt_in" | "explicit" => {
+            Ok(V2InsufficientPeersBehavior::ExplicitOptIn)
+        }
+        _ => Err(TruthPrecedenceBootError::InvalidEnvValue {
+            var: V2_INSUFFICIENT_PEERS_BEHAVIOR_ENV,
+            value: raw.to_string(),
+            expected: "degrade-to-v1 | refuse-boot | explicit-opt-in",
+        }),
+    }
+}
+
+/// Parse `FCP_V2_DEFAULT_GRADUATED`.
+///
+/// # Errors
+///
+/// Returns [`TruthPrecedenceBootError::InvalidEnvValue`] when the value
+/// is not a documented boolean token.
+pub fn parse_v2_default_graduated(raw: Option<&str>) -> Result<bool, TruthPrecedenceBootError> {
+    let Some(raw) = raw else {
+        return Ok(false);
+    };
+    let normalized = raw.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(false);
+    }
+    match normalized.as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(TruthPrecedenceBootError::InvalidEnvValue {
+            var: V2_DEFAULT_GRADUATED_ENV,
+            value: raw.to_string(),
+            expected: "true | false",
+        }),
+    }
+}
+
+/// Parse `FCP_V2_MIN_HEALTHY_MESH_PEERS`.
+///
+/// # Errors
+///
+/// Returns [`TruthPrecedenceBootError::InvalidEnvValue`] when the value
+/// is not a non-zero `u32`.
+pub fn parse_v2_min_healthy_mesh_peers(raw: Option<&str>) -> Result<u32, TruthPrecedenceBootError> {
+    let Some(raw) = raw else {
+        return Ok(MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE);
+    };
+    let normalized = raw.trim();
+    if normalized.is_empty() {
+        return Ok(MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE);
+    }
+    let parsed =
+        normalized
+            .parse::<u32>()
+            .map_err(|_| TruthPrecedenceBootError::InvalidEnvValue {
+                var: V2_MIN_HEALTHY_MESH_PEERS_ENV,
+                value: raw.to_string(),
+                expected: "integer >= 1",
+            })?;
+    if parsed == 0 {
+        return Err(TruthPrecedenceBootError::InvalidEnvValue {
+            var: V2_MIN_HEALTHY_MESH_PEERS_ENV,
+            value: raw.to_string(),
+            expected: "integer >= 1",
+        });
+    }
+    Ok(parsed)
+}
+
+/// Resolve the requested model from `FCP_TRUTH_PRECEDENCE_DEFAULT`.
+/// Unset means V1 unless the graduated-default flag is set.
+///
+/// # Errors
+///
+/// Returns [`TruthPrecedenceBootError::InvalidEnvValue`] when the value
+/// is neither a documented V1 nor V2 token.
+pub fn requested_truth_precedence_from_env(
+    raw: Option<&str>,
+) -> Result<OperationalModelVersion, TruthPrecedenceBootError> {
+    let Some(raw) = raw else {
+        return Ok(OperationalModelVersion::V1HostFirst);
+    };
+    if truth_precedence_env_requests_v1(Some(raw)) {
+        return Ok(OperationalModelVersion::V1HostFirst);
+    }
+    if truth_precedence_env_requests_v2(Some(raw)) {
+        return Ok(OperationalModelVersion::V2MeshNative);
+    }
+    Err(TruthPrecedenceBootError::InvalidEnvValue {
+        var: fcp_policy::TRUTH_PRECEDENCE_DEFAULT_ENV,
+        value: raw.to_string(),
+        expected: "v1 | v1-host-first | host-first | v2 | v2-mesh-native | mesh-native",
+    })
+}
 
 /// Runtime classification of how the host is currently deployed.
 ///
@@ -182,6 +406,96 @@ impl MeshQuorumSignals {
             revocation_snapshot_fresh: true,
         }
     }
+}
+
+/// Resolve deployment classification and effective truth-precedence
+/// model from raw env values plus observed mesh signals.
+///
+/// Env-var precedence is:
+///
+/// 1. `FCP_V2_DEFAULT_GRADUATED`
+/// 2. `FCP_TRUTH_PRECEDENCE_DEFAULT`
+/// 3. `FCP_V2_INSUFFICIENT_PEERS_BEHAVIOR`
+/// 4. documented defaults
+///
+/// # Errors
+///
+/// Returns [`TruthPrecedenceBootError`] for invalid env values or a
+/// selected fail-closed boot refusal.
+pub fn resolve_truth_precedence_boot_resolution(
+    signals: MeshQuorumSignals,
+    default_env: Option<&str>,
+    insufficient_peers_behavior_env: Option<&str>,
+    default_graduated_env: Option<&str>,
+    min_healthy_peers_env: Option<&str>,
+) -> Result<TruthPrecedenceBootResolution, TruthPrecedenceBootError> {
+    let min_healthy_peers = parse_v2_min_healthy_mesh_peers(min_healthy_peers_env)?;
+    let classification = classify_deployment_mode_with_min_peers(signals, min_healthy_peers);
+    let behavior_chosen = parse_v2_insufficient_peers_behavior(insufficient_peers_behavior_env)?;
+    let graduated_v2_default = parse_v2_default_graduated(default_graduated_env)?;
+    let explicit_v2_requested = truth_precedence_env_requests_v2(default_env);
+    let requested = if graduated_v2_default {
+        OperationalModelVersion::V2MeshNative
+    } else {
+        requested_truth_precedence_from_env(default_env)?
+    };
+    let insufficient_peers = signals.healthy_peer_count < min_healthy_peers;
+
+    let mut selection = TruthPrecedenceBootSelection {
+        requested,
+        effective: requested,
+        behavior_chosen,
+        explicit_v2_requested,
+        graduated_v2_default,
+        insufficient_peers,
+        mesh_peer_count: signals.healthy_peer_count,
+        min_healthy_peers,
+        warning: None,
+        degraded_from: None,
+    };
+
+    if requested == OperationalModelVersion::V2MeshNative && insufficient_peers {
+        match behavior_chosen {
+            V2InsufficientPeersBehavior::DegradeToV1 => {
+                selection.effective = OperationalModelVersion::V1HostFirst;
+                selection.warning = Some(
+                    "V2MeshNative requested with insufficient healthy mesh peers; running effective V1HostFirst."
+                        .to_string(),
+                );
+                selection.degraded_from = Some("v2-insufficient-peers".to_string());
+            }
+            V2InsufficientPeersBehavior::RefuseBoot => {
+                return Err(TruthPrecedenceBootError::RefusedBoot {
+                    observed: signals.healthy_peer_count,
+                    required: min_healthy_peers,
+                    behavior: behavior_chosen,
+                    reason: "insufficient healthy mesh peers and behavior=refuse-boot",
+                });
+            }
+            V2InsufficientPeersBehavior::ExplicitOptIn => {
+                if explicit_v2_requested {
+                    selection.warning = Some(
+                        "V2MeshNative running with insufficient healthy mesh peers by explicit operator opt-in."
+                            .to_string(),
+                    );
+                    selection.degraded_from =
+                        Some("v2-insufficient-peers-explicit-opt-in".to_string());
+                } else {
+                    return Err(TruthPrecedenceBootError::RefusedBoot {
+                        observed: signals.healthy_peer_count,
+                        required: min_healthy_peers,
+                        behavior: behavior_chosen,
+                        reason: "behavior=explicit-opt-in requires FCP_TRUTH_PRECEDENCE_DEFAULT=v2",
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(TruthPrecedenceBootResolution {
+        classification,
+        selection,
+    })
 }
 
 /// Receipt from [`classify_deployment_mode`] — pairs the verdict
@@ -461,6 +775,22 @@ where
 /// 4. Otherwise → `MeshActive`.
 #[must_use]
 pub const fn classify_deployment_mode(signals: MeshQuorumSignals) -> DeploymentClassification {
+    classify_deployment_mode_with_min_peers(signals, MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE)
+}
+
+/// Pure classifier with an explicit healthy-peer threshold.
+///
+/// The host boot path uses this to apply `FCP_V2_MIN_HEALTHY_MESH_PEERS`.
+#[must_use]
+pub const fn classify_deployment_mode_with_min_peers(
+    signals: MeshQuorumSignals,
+    min_healthy_peers: u32,
+) -> DeploymentClassification {
+    let min_healthy_peers = if min_healthy_peers == 0 {
+        MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE
+    } else {
+        min_healthy_peers
+    };
     if !signals.revocation_snapshot_fresh {
         return DeploymentClassification {
             mode: DeploymentMode::Evaluation,
@@ -475,13 +805,13 @@ pub const fn classify_deployment_mode(signals: MeshQuorumSignals) -> DeploymentC
             reason: DeploymentClassificationReason::LeaseCoordinatorUnreachable,
         };
     }
-    if signals.healthy_peer_count < MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE {
+    if signals.healthy_peer_count < min_healthy_peers {
         return DeploymentClassification {
             mode: DeploymentMode::Evaluation,
             signals,
             reason: DeploymentClassificationReason::InsufficientMeshQuorum {
                 observed: signals.healthy_peer_count,
-                required: MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE,
+                required: min_healthy_peers,
             },
         };
     }
@@ -607,11 +937,90 @@ pub fn emit_boot_log(classification: &DeploymentClassification) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn parse_v2_insufficient_peers_behavior_defaults_to_degrade() {
+        assert_eq!(
+            parse_v2_insufficient_peers_behavior(None).unwrap(),
+            V2InsufficientPeersBehavior::DegradeToV1
+        );
+        assert_eq!(
+            parse_v2_insufficient_peers_behavior(Some("refuse-boot")).unwrap(),
+            V2InsufficientPeersBehavior::RefuseBoot
+        );
+        assert_eq!(
+            parse_v2_insufficient_peers_behavior(Some("explicit_opt_in")).unwrap(),
+            V2InsufficientPeersBehavior::ExplicitOptIn
+        );
+    }
+
+    #[test]
+    fn parse_v2_insufficient_peers_behavior_rejects_typos() {
+        let error = parse_v2_insufficient_peers_behavior(Some("refus-boot"))
+            .expect_err("behavior typo must fail closed");
+        assert!(matches!(
+            error,
+            TruthPrecedenceBootError::InvalidEnvValue {
+                var: V2_INSUFFICIENT_PEERS_BEHAVIOR_ENV,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn requested_truth_precedence_defaults_to_v1_until_graduated_flag() {
+        assert_eq!(
+            requested_truth_precedence_from_env(None).unwrap(),
+            OperationalModelVersion::V1HostFirst
+        );
+        assert_eq!(
+            requested_truth_precedence_from_env(Some("v2")).unwrap(),
+            OperationalModelVersion::V2MeshNative
+        );
+    }
+
+    #[test]
+    fn resolve_truth_precedence_graduated_flag_overrides_explicit_v1() {
+        let resolution = resolve_truth_precedence_boot_resolution(
+            MeshQuorumSignals::fully_active(1),
+            Some("v1"),
+            None,
+            Some("true"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            resolution.selection.requested,
+            OperationalModelVersion::V2MeshNative
+        );
+        assert!(resolution.selection.graduated_v2_default);
+    }
+
+    #[test]
+    fn resolve_truth_precedence_refuse_boot_exits_config_path() {
+        let error = resolve_truth_precedence_boot_resolution(
+            MeshQuorumSignals::single_host_evaluation(),
+            Some("v2"),
+            Some("refuse-boot"),
+            None,
+            None,
+        )
+        .expect_err("refuse-boot must reject insufficient peers");
+        assert!(matches!(
+            error,
+            TruthPrecedenceBootError::RefusedBoot {
+                observed: 0,
+                required: MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE,
+                behavior: V2InsufficientPeersBehavior::RefuseBoot,
+                ..
+            }
+        ));
+    }
+
     // ── classify_deployment_mode: input matrix per bead step 2 ─────
 
     #[test]
     fn classifier_returns_mesh_active_when_all_signals_healthy() {
-        let signals = MeshQuorumSignals::fully_active(2);
+        let signals = MeshQuorumSignals::fully_active(1);
         let result = classify_deployment_mode(signals);
         assert_eq!(result.mode, DeploymentMode::MeshActive);
         assert_eq!(
@@ -642,19 +1051,15 @@ mod tests {
     }
 
     #[test]
-    fn classifier_returns_evaluation_with_one_peer_below_threshold() {
+    fn classifier_returns_mesh_active_with_one_peer_default_threshold() {
         let signals = MeshQuorumSignals::fully_active(1);
         let result = classify_deployment_mode(signals);
-        assert_eq!(result.mode, DeploymentMode::Evaluation);
-        assert!(matches!(
-            result.reason,
-            DeploymentClassificationReason::InsufficientMeshQuorum { observed: 1, .. }
-        ));
+        assert_eq!(result.mode, DeploymentMode::MeshActive);
     }
 
     #[test]
     fn classifier_returns_evaluation_at_exact_threshold_minus_one() {
-        // Threshold is 2; observing 1 is below threshold.
+        // Threshold is 1; observing 0 is below threshold.
         let signals = MeshQuorumSignals {
             healthy_peer_count: MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE - 1,
             lease_coordinator_reachable: Some(true),
@@ -666,7 +1071,7 @@ mod tests {
 
     #[test]
     fn classifier_returns_mesh_active_at_exact_threshold() {
-        // Threshold is 2; observing 2 satisfies the predicate.
+        // Threshold is 1; observing 1 satisfies the predicate.
         let signals = MeshQuorumSignals {
             healthy_peer_count: MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE,
             lease_coordinator_reachable: Some(true),
@@ -934,7 +1339,7 @@ mod tests {
                 mode: DeploymentMode::Evaluation,
                 reason: DeploymentClassificationReason::InsufficientMeshQuorum {
                     observed: 0,
-                    required: 2,
+                    required: MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE,
                 },
             },
             DeploymentTierRefusal::TierForbidden {
@@ -953,7 +1358,7 @@ mod tests {
         let probes = [
             DeploymentClassificationReason::InsufficientMeshQuorum {
                 observed: 0,
-                required: 2,
+                required: MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE,
             },
             DeploymentClassificationReason::LeaseCoordinatorUnreachable,
             DeploymentClassificationReason::RevocationSnapshotStale,
@@ -978,7 +1383,7 @@ mod tests {
                 mode: DeploymentMode::Evaluation,
                 reason: DeploymentClassificationReason::InsufficientMeshQuorum {
                     observed: 0,
-                    required: 2,
+                    required: MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE,
                 },
             },
             DeploymentTierRefusal::TierForbidden {
@@ -1003,7 +1408,7 @@ mod tests {
         assert_eq!(healthy.mode, DeploymentMode::MeshActive);
 
         // Peer lost; count drops below threshold.
-        let degraded = classify_deployment_mode(MeshQuorumSignals::fully_active(1));
+        let degraded = classify_deployment_mode(MeshQuorumSignals::single_host_evaluation());
         assert_eq!(degraded.mode, DeploymentMode::Evaluation);
     }
 
@@ -1023,7 +1428,7 @@ mod tests {
         // (InsufficientMeshQuorum) from "stale revocation" so an
         // audit replay can reconstruct what happened.
         let healthy = classify_deployment_mode(MeshQuorumSignals::fully_active(2));
-        let lost_peers = classify_deployment_mode(MeshQuorumSignals::fully_active(1));
+        let lost_peers = classify_deployment_mode(MeshQuorumSignals::single_host_evaluation());
         assert_ne!(healthy.reason, lost_peers.reason);
         assert!(matches!(
             lost_peers.reason,

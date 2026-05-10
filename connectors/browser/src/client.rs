@@ -4262,7 +4262,15 @@ fn validate_fcp_browser_control_health(body: &serde_json::Value) -> Result<(), S
 
 fn validate_fcp_browser_control_proxy_support(body: &serde_json::Value) -> Result<(), String> {
     let operations = validate_fcp_browser_control_metadata(body)?;
-    validate_fcp_browser_control_health(body)?;
+
+    for required in REQUIRED_BROWSER_CONTROL_OPERATIONS
+        .iter()
+        .filter(|operation| !is_proxy_browser_control_operation(operation.id))
+    {
+        let operation = find_browser_control_operation(operations, required.id)
+            .ok_or_else(|| format!("missing required operation `{}`", required.id))?;
+        validate_browser_control_operation(operation, required)?;
+    }
 
     let mut missing = Vec::new();
     for required in PROXY_BROWSER_CONTROL_OPERATIONS {

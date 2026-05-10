@@ -23,7 +23,9 @@ use wiremock::{
     matchers::{method, path},
 };
 
+use fcp_browser::client::BrowserClient;
 use fcp_browser::connector::BrowserConnector;
+use fcp_browser::types::ProxyConfig;
 
 // ============================================================================
 // Helpers
@@ -159,13 +161,100 @@ async fn browser_control_contract_response() -> serde_json::Value {
 }
 
 async fn mount_browser_control_health(mock_server: &MockServer) {
+    mount_browser_control_health_body(mock_server, browser_control_contract_response().await).await;
+}
+
+async fn mount_browser_control_health_body(mock_server: &MockServer, body: serde_json::Value) {
     Mock::given(method("GET"))
         .and(path("/health"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(browser_control_contract_response().await),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
         .mount(mock_server)
         .await;
+}
+
+async fn browser_control_contract_without_proxy_operations() -> serde_json::Value {
+    let mut descriptor = browser_control_contract_response().await;
+    descriptor["operations"]
+        .as_array_mut()
+        .expect("contract operations should be an array")
+        .retain(|operation| {
+            !matches!(
+                operation.get("id").and_then(serde_json::Value::as_str),
+                Some("browser.set_proxy" | "browser.clear_proxy")
+            )
+        });
+    descriptor
+}
+
+async fn browser_control_contract_with_invalid_proxy_policy() -> serde_json::Value {
+    let mut descriptor = browser_control_contract_response().await;
+    let set_proxy = descriptor["operations"]
+        .as_array_mut()
+        .expect("contract operations should be an array")
+        .iter_mut()
+        .find(|operation| operation["id"] == "browser.set_proxy")
+        .expect("contract should include browser.set_proxy");
+    set_proxy["implementation"]
+        .as_object_mut()
+        .expect("proxy implementation should be an object")
+        .remove("redaction_contract");
+    descriptor
+}
+
+fn advertised_worker_operations(contract: &serde_json::Value) -> Vec<String> {
+    contract["operations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|operation| operation.get("id").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+fn proxy_descriptor_hash(input: &serde_json::Value) -> String {
+    let bytes = serde_json::to_vec(input).expect("proxy descriptor should serialize");
+    let digest = blake3::hash(&bytes);
+    format!(
+        "blake3:{}",
+        digest.to_hex().chars().take(16).collect::<String>()
+    )
+}
+
+fn proxy_proof_git_revision() -> &'static str {
+    option_env!("GIT_COMMIT")
+        .or(option_env!("VERGEN_GIT_SHA"))
+        .unwrap_or("unknown")
+}
+
+fn emit_proxy_control_evidence(run_id: &str, scenario: &str, mut evidence: serde_json::Value) {
+    let object = evidence
+        .as_object_mut()
+        .expect("proxy evidence should be a JSON object");
+    object.insert(
+        "schema_version".to_string(),
+        json!("fcp-browser-proxy-control-mode-evidence.v1"),
+    );
+    object.insert("run_id".to_string(), json!(run_id));
+    object.insert("scenario".to_string(), json!(scenario));
+    object.insert(
+        "command_line".to_string(),
+        json!(
+            "cargo test -p fcp-browser --test integration test_browser_proxy_control_mode_e2e_jsonl -- --nocapture"
+        ),
+    );
+    object.insert(
+        "git_revision".to_string(),
+        json!(proxy_proof_git_revision()),
+    );
+    object.insert(
+        "redaction".to_string(),
+        json!({
+            "raw_proxy_descriptor_logged": false,
+            "raw_cdp_endpoint_logged": false,
+            "proxy_descriptor_hash_only": true
+        }),
+    );
+    println!("BROWSER_PROXY_CONTROL_MODE_JSONL {evidence}");
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -839,6 +928,341 @@ async fn test_browser_control_connector_boundary_full_flow_e2e_logs() {
     assert!(log_jsonl.contains("\"retry_decision\""));
     assert!(log_jsonl.contains("\"cleanup_result\""));
     capture.assert_valid();
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_browser_proxy_control_mode_e2e_jsonl() {
+    let ctx = AsyncTestContext::for_scenario("browser-proxy-control-mode-e2e");
+    let run_id = ctx.run_id().to_string();
+    let proxy_input = json!({
+        "server": "http://proxy.example.com:8080",
+        "bypass_list": ["localhost"]
+    });
+    let proxy_hash = proxy_descriptor_hash(&proxy_input);
+
+    let proxy_capable_contract = browser_control_contract_response().await;
+    let proxy_capable_server = MockServer::start().await;
+    mount_browser_control_health_body(&proxy_capable_server, proxy_capable_contract.clone()).await;
+    Mock::given(method("POST"))
+        .and(path("/proxy/set"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "enabled": true,
+            "mode": "fixed_servers",
+            "server": "http://proxy.example.com:8080"
+        })))
+        .mount(&proxy_capable_server)
+        .await;
+
+    let mut proxy_capable_connector = BrowserConnector::new();
+    let proxy_capable_key =
+        setup_handshake(&mut proxy_capable_connector, &["browser.set_proxy"]).await;
+    setup_configure(&mut proxy_capable_connector, &proxy_capable_server.uri()).await;
+    let proxy_capable_token = generate_valid_token(
+        &proxy_capable_key,
+        &proxy_capable_connector,
+        "browser.set_proxy",
+    );
+    let proxy_capable_approval = generate_execution_approval("browser.set_proxy", &proxy_input);
+    let proxy_capable_result = proxy_capable_connector
+        .handle_invoke(json!({
+            "operation": "browser.set_proxy",
+            "input": proxy_input.clone(),
+            "capability_token": proxy_capable_token,
+            "approval_token": proxy_capable_approval
+        }))
+        .await
+        .expect("proxy-capable worker should accept set_proxy");
+    assert_eq!(proxy_capable_result["enabled"], true);
+    let proxy_capable_requests = proxy_capable_server
+        .received_requests()
+        .await
+        .unwrap_or_default();
+    let proxy_capable_worker_request = proxy_capable_requests
+        .iter()
+        .find(|request| request.url.path() == "/proxy/set")
+        .expect("proxy-capable worker should receive set_proxy");
+    emit_proxy_control_evidence(
+        &run_id,
+        "proxy_capable_worker_acceptance",
+        json!({
+            "control_mode": "fcp_browser_control",
+            "operation_id": "browser.set_proxy",
+            "advertised_worker_operations": advertised_worker_operations(&proxy_capable_contract),
+            "capability_decision": "granted",
+            "approval_decision": "granted",
+            "proxy_descriptor_hash": proxy_hash,
+            "endpoint_kind": "worker_policy",
+            "deny_reason": null,
+            "timeout_checkpoint": {
+                "health_preflight": "completed",
+                "worker_timeout_ms": request_header(proxy_capable_worker_request, "X-FCP-Browser-Timeout-Ms")
+            },
+            "cancellation_checkpoint": "not_cancelled",
+            "cleanup_result": "worker_request_completed",
+            "skip_reason": null,
+            "worker_request_sent": true
+        }),
+    );
+
+    let non_proxy_contract = browser_control_contract_without_proxy_operations().await;
+    let non_proxy_server = MockServer::start().await;
+    mount_browser_control_health_body(&non_proxy_server, non_proxy_contract.clone()).await;
+    let mut non_proxy_connector = BrowserConnector::new();
+    let non_proxy_key = setup_handshake(&mut non_proxy_connector, &["browser.set_proxy"]).await;
+    setup_configure(&mut non_proxy_connector, &non_proxy_server.uri()).await;
+    let non_proxy_token =
+        generate_valid_token(&non_proxy_key, &non_proxy_connector, "browser.set_proxy");
+    let non_proxy_approval = generate_execution_approval("browser.set_proxy", &proxy_input);
+    let non_proxy_error = non_proxy_connector
+        .handle_invoke(json!({
+            "operation": "browser.set_proxy",
+            "input": proxy_input.clone(),
+            "capability_token": non_proxy_token,
+            "approval_token": non_proxy_approval
+        }))
+        .await
+        .expect_err("worker without proxy operations should fail proxy dispatch");
+    let non_proxy_error = format!("{non_proxy_error:?}");
+    assert!(non_proxy_error.contains("proxy_unavailable_worker_contract"));
+    assert!(
+        non_proxy_server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .all(|request| request.url.path() != "/proxy/set")
+    );
+    emit_proxy_control_evidence(
+        &run_id,
+        "non_proxy_worker_preserved",
+        json!({
+            "control_mode": "fcp_browser_control",
+            "operation_id": "browser.set_proxy",
+            "advertised_worker_operations": advertised_worker_operations(&non_proxy_contract),
+            "capability_decision": "granted",
+            "approval_decision": "granted",
+            "proxy_descriptor_hash": proxy_descriptor_hash(&proxy_input),
+            "endpoint_kind": "worker_policy",
+            "deny_reason": "proxy_unavailable_worker_contract",
+            "timeout_checkpoint": {
+                "health_preflight": "completed",
+                "worker_timeout_ms": null
+            },
+            "cancellation_checkpoint": "not_started",
+            "cleanup_result": "no_worker_request_sent",
+            "skip_reason": null,
+            "worker_request_sent": false
+        }),
+    );
+
+    let invalid_policy_contract = browser_control_contract_with_invalid_proxy_policy().await;
+    let invalid_policy_server = MockServer::start().await;
+    mount_browser_control_health_body(&invalid_policy_server, invalid_policy_contract.clone())
+        .await;
+    let mut invalid_policy_connector = BrowserConnector::new();
+    let invalid_policy_key =
+        setup_handshake(&mut invalid_policy_connector, &["browser.set_proxy"]).await;
+    setup_configure(&mut invalid_policy_connector, &invalid_policy_server.uri()).await;
+    let invalid_policy_token = generate_valid_token(
+        &invalid_policy_key,
+        &invalid_policy_connector,
+        "browser.set_proxy",
+    );
+    let invalid_policy_approval = generate_execution_approval("browser.set_proxy", &proxy_input);
+    let invalid_policy_error = invalid_policy_connector
+        .handle_invoke(json!({
+            "operation": "browser.set_proxy",
+            "input": proxy_input.clone(),
+            "capability_token": invalid_policy_token,
+            "approval_token": invalid_policy_approval
+        }))
+        .await
+        .expect_err("invalid worker proxy policy should fail proxy dispatch");
+    let invalid_policy_error = format!("{invalid_policy_error:?}");
+    assert!(invalid_policy_error.contains("proxy_invalid_worker_contract"));
+    emit_proxy_control_evidence(
+        &run_id,
+        "worker_policy_rejection",
+        json!({
+            "control_mode": "fcp_browser_control",
+            "operation_id": "browser.set_proxy",
+            "advertised_worker_operations": advertised_worker_operations(&invalid_policy_contract),
+            "capability_decision": "granted",
+            "approval_decision": "granted",
+            "proxy_descriptor_hash": proxy_descriptor_hash(&proxy_input),
+            "endpoint_kind": "worker_policy",
+            "deny_reason": "proxy_invalid_worker_contract",
+            "timeout_checkpoint": {
+                "health_preflight": "completed",
+                "worker_timeout_ms": null
+            },
+            "cancellation_checkpoint": "not_started",
+            "cleanup_result": "no_worker_request_sent",
+            "skip_reason": null,
+            "worker_request_sent": false
+        }),
+    );
+
+    let direct_client = BrowserClient::new(None)
+        .expect("browser client should construct")
+        .with_browser_url("ws://127.0.0.1:9222/devtools/page/proxy-proof-target");
+    let direct_proxy = ProxyConfig {
+        server: "http://proxy.example.com:8080".into(),
+        bypass_list: Some(vec!["localhost".into()]),
+        username: None,
+        password: None,
+    };
+    let direct_set_error = direct_client
+        .set_proxy(&direct_proxy)
+        .await
+        .expect_err("direct CDP set_proxy should fail closed");
+    assert!(format!("{direct_set_error}").contains("proxy_unavailable_direct_cdp"));
+    emit_proxy_control_evidence(
+        &run_id,
+        "direct_cdp_set_proxy_fail_closed",
+        json!({
+            "control_mode": "direct_cdp_websocket",
+            "operation_id": "browser.set_proxy",
+            "advertised_worker_operations": [],
+            "capability_decision": "not_applicable_client_direct",
+            "approval_decision": "not_applicable_client_direct",
+            "proxy_descriptor_hash": proxy_descriptor_hash(&proxy_input),
+            "endpoint_kind": "direct_cdp_websocket",
+            "deny_reason": "proxy_unavailable_direct_cdp",
+            "timeout_checkpoint": "not_started",
+            "cancellation_checkpoint": "not_started",
+            "cleanup_result": "no_network_request_started",
+            "skip_reason": null,
+            "worker_request_sent": false
+        }),
+    );
+
+    let direct_clear_error = direct_client
+        .clear_proxy()
+        .await
+        .expect_err("direct CDP clear_proxy should fail closed");
+    assert!(format!("{direct_clear_error}").contains("proxy_unavailable_direct_cdp"));
+    emit_proxy_control_evidence(
+        &run_id,
+        "direct_cdp_clear_proxy_fail_closed",
+        json!({
+            "control_mode": "direct_cdp_websocket",
+            "operation_id": "browser.clear_proxy",
+            "advertised_worker_operations": [],
+            "capability_decision": "not_applicable_client_direct",
+            "approval_decision": "not_applicable_client_direct",
+            "proxy_descriptor_hash": proxy_descriptor_hash(&json!({})),
+            "endpoint_kind": "direct_cdp_websocket",
+            "deny_reason": "proxy_unavailable_direct_cdp",
+            "timeout_checkpoint": "not_started",
+            "cancellation_checkpoint": "not_started",
+            "cleanup_result": "no_network_request_started",
+            "skip_reason": null,
+            "worker_request_sent": false
+        }),
+    );
+
+    let approval_denial_server = MockServer::start().await;
+    let mut approval_denial_connector = BrowserConnector::new();
+    let approval_denial_key =
+        setup_handshake(&mut approval_denial_connector, &["browser.set_proxy"]).await;
+    setup_configure(
+        &mut approval_denial_connector,
+        &approval_denial_server.uri(),
+    )
+    .await;
+    let approval_denial_token = generate_valid_token(
+        &approval_denial_key,
+        &approval_denial_connector,
+        "browser.set_proxy",
+    );
+    let approval_denial_error = approval_denial_connector
+        .handle_invoke(json!({
+            "operation": "browser.set_proxy",
+            "input": proxy_input.clone(),
+            "capability_token": approval_denial_token
+        }))
+        .await
+        .expect_err("proxy mutation should require approval before worker dispatch");
+    assert!(format!("{approval_denial_error:?}").contains("ApprovalToken"));
+    assert!(
+        approval_denial_server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    );
+    emit_proxy_control_evidence(
+        &run_id,
+        "approval_denial_before_dispatch",
+        json!({
+            "control_mode": "pre_dispatch",
+            "operation_id": "browser.set_proxy",
+            "advertised_worker_operations": [],
+            "capability_decision": "granted",
+            "approval_decision": "denied_before_worker_route",
+            "proxy_descriptor_hash": proxy_descriptor_hash(&proxy_input),
+            "endpoint_kind": "none",
+            "deny_reason": "missing_approval_token",
+            "timeout_checkpoint": "not_started",
+            "cancellation_checkpoint": "not_started",
+            "cleanup_result": "no_worker_request_sent",
+            "skip_reason": null,
+            "worker_request_sent": false
+        }),
+    );
+
+    let capability_denial_server = MockServer::start().await;
+    let mut capability_denial_connector = BrowserConnector::new();
+    let capability_denial_key =
+        setup_handshake(&mut capability_denial_connector, &["browser.navigate"]).await;
+    setup_configure(
+        &mut capability_denial_connector,
+        &capability_denial_server.uri(),
+    )
+    .await;
+    let wrong_capability_token = generate_valid_token(
+        &capability_denial_key,
+        &capability_denial_connector,
+        "browser.navigate",
+    );
+    let capability_denial_approval = generate_execution_approval("browser.set_proxy", &proxy_input);
+    let capability_denial_error = capability_denial_connector
+        .handle_invoke(json!({
+            "operation": "browser.set_proxy",
+            "input": proxy_input.clone(),
+            "capability_token": wrong_capability_token,
+            "approval_token": capability_denial_approval
+        }))
+        .await
+        .expect_err("wrong capability should fail before worker dispatch");
+    assert!(format!("{capability_denial_error:?}").contains("OperationNotGranted"));
+    assert!(
+        capability_denial_server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    );
+    emit_proxy_control_evidence(
+        &run_id,
+        "capability_denial_before_dispatch",
+        json!({
+            "control_mode": "pre_dispatch",
+            "operation_id": "browser.set_proxy",
+            "advertised_worker_operations": [],
+            "capability_decision": "denied_before_worker_route",
+            "approval_decision": "not_evaluated",
+            "proxy_descriptor_hash": proxy_descriptor_hash(&proxy_input),
+            "endpoint_kind": "none",
+            "deny_reason": "operation_not_granted",
+            "timeout_checkpoint": "not_started",
+            "cancellation_checkpoint": "not_started",
+            "cleanup_result": "no_worker_request_sent",
+            "skip_reason": null,
+            "worker_request_sent": false
+        }),
+    );
 }
 
 #[fcp_async_core::runtime::test]

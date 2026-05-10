@@ -227,7 +227,12 @@ pub enum CredentialPayload {
     /// Legacy JSON credential material accepted by existing admin routes.
     RawJson(Value),
     /// Provider-auth profile selected from the pool.
-    AuthProfile(Box<AuthProfile>),
+    AuthProfile {
+        /// Provider-auth profile selected from the pool.
+        profile: Box<AuthProfile>,
+        /// Destination hosts that may receive material from this profile.
+        host_allow: Vec<String>,
+    },
 }
 
 impl CredentialPayload {
@@ -240,7 +245,23 @@ impl CredentialPayload {
     /// Construct an auth-profile payload.
     #[must_use]
     pub fn auth_profile(profile: AuthProfile) -> Self {
-        Self::AuthProfile(Box::new(profile))
+        Self::AuthProfile {
+            profile: Box::new(profile),
+            host_allow: Vec::new(),
+        }
+    }
+
+    /// Construct an auth-profile payload with destination host bindings.
+    #[must_use]
+    pub fn auth_profile_with_allowed_hosts<I, S>(profile: AuthProfile, hosts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self::AuthProfile {
+            profile: Box::new(profile),
+            host_allow: hosts.into_iter().map(Into::into).collect(),
+        }
     }
 
     /// Return the redaction-safe payload class.
@@ -248,7 +269,7 @@ impl CredentialPayload {
     pub const fn kind(&self) -> CredentialPayloadKind {
         match self {
             Self::RawJson(_) => CredentialPayloadKind::RawJson,
-            Self::AuthProfile(_) => CredentialPayloadKind::AuthProfile,
+            Self::AuthProfile { .. } => CredentialPayloadKind::AuthProfile,
         }
     }
 
@@ -257,7 +278,7 @@ impl CredentialPayload {
     pub const fn as_raw_json(&self) -> Option<&Value> {
         match self {
             Self::RawJson(payload) => Some(payload),
-            Self::AuthProfile(_) => None,
+            Self::AuthProfile { .. } => None,
         }
     }
 
@@ -266,7 +287,16 @@ impl CredentialPayload {
     pub fn as_auth_profile(&self) -> Option<&AuthProfile> {
         match self {
             Self::RawJson(_) => None,
-            Self::AuthProfile(profile) => Some(profile.as_ref()),
+            Self::AuthProfile { profile, .. } => Some(profile.as_ref()),
+        }
+    }
+
+    /// Borrow destination host bindings for an auth-profile payload.
+    #[must_use]
+    pub const fn auth_profile_host_allow(&self) -> Option<&[String]> {
+        match self {
+            Self::RawJson(_) => None,
+            Self::AuthProfile { host_allow, .. } => Some(host_allow.as_slice()),
         }
     }
 
@@ -275,7 +305,7 @@ impl CredentialPayload {
     pub fn into_auth_profile(self) -> Option<AuthProfile> {
         match self {
             Self::RawJson(_) => None,
-            Self::AuthProfile(profile) => Some(*profile),
+            Self::AuthProfile { profile, .. } => Some(*profile),
         }
     }
 }
@@ -290,12 +320,16 @@ impl fmt::Debug for CredentialPayload {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RawJson(_) => f.write_str("CredentialPayload::RawJson([redacted])"),
-            Self::AuthProfile(profile) => f
+            Self::AuthProfile {
+                profile,
+                host_allow,
+            } => f
                 .debug_struct("CredentialPayload::AuthProfile")
                 .field("provider", &profile.provider)
                 .field("profile_id", &profile.id)
                 .field("method", &profile.method.id())
                 .field("label", &profile.label)
+                .field("host_allow_count", &host_allow.len())
                 .finish(),
         }
     }
@@ -878,6 +912,25 @@ impl CredentialPool {
             self.round_robin_cursor %= self.entries.len();
         }
         Ok(CredentialMutationOutcome::Added)
+    }
+
+    /// Replace the payload for an existing credential without changing its
+    /// routing metadata or active lease bookkeeping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialPoolError::CredentialNotFound`] when the credential
+    /// is not part of this pool.
+    pub fn replace_payload(
+        &mut self,
+        credential_id: CredentialId,
+        payload: CredentialPayload,
+    ) -> Result<(), CredentialPoolError> {
+        let Some(entry) = self.entry_mut(credential_id) else {
+            return Err(CredentialPoolError::CredentialNotFound { credential_id });
+        };
+        entry.payload = payload;
+        Ok(())
     }
 
     /// Remove a credential entry and any active lease bookkeeping for it.
@@ -1608,6 +1661,50 @@ impl CredentialPoolRegistry {
 
         self.pool_mut_or_err(&key)?
             .acquire_specific(credential_id, now)
+    }
+
+    /// Replace payload material for an explicit credential id within a zone.
+    ///
+    /// The lookup is deterministic across providers and records a redacted
+    /// mutation audit event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CredentialPoolError::CredentialNotFound`] when no pool in the
+    /// zone contains the credential, or the underlying replacement error.
+    pub fn replace_payload_in_zone(
+        &mut self,
+        zone_id: &ZoneId,
+        credential_id: CredentialId,
+        payload: CredentialPayload,
+    ) -> Result<(), CredentialPoolError> {
+        let mut matching_keys = self
+            .pools
+            .iter()
+            .filter(|(key, pool)| {
+                key.zone_id == *zone_id && pool.contains_credential(credential_id)
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        matching_keys.sort_by(|left, right| {
+            left.provider
+                .as_str()
+                .cmp(right.provider.as_str())
+                .then_with(|| left.zone_id.as_str().cmp(right.zone_id.as_str()))
+        });
+        let Some(key) = matching_keys.into_iter().next() else {
+            return Err(CredentialPoolError::CredentialNotFound { credential_id });
+        };
+
+        self.pool_mut_or_err(&key)?
+            .replace_payload(credential_id, payload)?;
+        self.record_audit(CredentialPoolAuditEvent::credential_upsert(
+            key,
+            credential_id,
+            CredentialMutationOutcome::Replaced,
+            Utc::now(),
+        ));
+        Ok(())
     }
 
     /// Release a previously acquired registry lease.

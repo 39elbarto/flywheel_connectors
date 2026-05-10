@@ -2102,19 +2102,50 @@ fn connector_zone_state_dir(root: &StdPath, connector_id: &ConnectorId, zone: &Z
     connector_state_cache_dir(root, connector_id).join(sanitize_state_path_segment(zone.as_ref()))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConnectorStateCacheMarkerStatus {
+    Created,
+    Present,
+}
+
+impl ConnectorStateCacheMarkerStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Present => "present",
+        }
+    }
+}
+
 fn prepare_connector_zone_state_dir(
     root: &StdPath,
     connector_id: &ConnectorId,
     zone: &ZoneId,
 ) -> HostResult<PathBuf> {
     let cache_dir = connector_state_cache_dir(root, connector_id);
-    ensure_connector_state_cache_marker(&cache_dir)?;
+    let cache_marker_status = ensure_connector_state_cache_marker(&cache_dir)?;
+    record_connector_state_cache_marker(
+        connector_id,
+        zone,
+        "connector_cache",
+        &cache_dir,
+        cache_marker_status,
+    );
     let zone_dir = connector_zone_state_dir(root, connector_id, zone);
-    ensure_connector_state_cache_marker(&zone_dir)?;
+    let zone_marker_status = ensure_connector_state_cache_marker(&zone_dir)?;
+    record_connector_state_cache_marker(
+        connector_id,
+        zone,
+        "zone_cache",
+        &zone_dir,
+        zone_marker_status,
+    );
     Ok(zone_dir)
 }
 
-fn ensure_connector_state_cache_marker(dir: &StdPath) -> HostResult<()> {
+fn ensure_connector_state_cache_marker(
+    dir: &StdPath,
+) -> HostResult<ConnectorStateCacheMarkerStatus> {
     std::fs::create_dir_all(dir).map_err(|error| {
         HostError::RegistryError(format!(
             "failed to create connector state cache directory `{}`: {error}",
@@ -2138,11 +2169,12 @@ fn ensure_connector_state_cache_marker(dir: &StdPath) -> HostResult<()> {
                         "failed to write connector state cache marker `{}`: {error}",
                         marker_path.display()
                     ))
-                })
+                })?;
+            Ok(ConnectorStateCacheMarkerStatus::Created)
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             if marker_path.is_file() {
-                Ok(())
+                Ok(ConnectorStateCacheMarkerStatus::Present)
             } else {
                 Err(HostError::RegistryError(format!(
                     "connector state cache marker `{}` exists but is not a file",
@@ -2155,6 +2187,26 @@ fn ensure_connector_state_cache_marker(dir: &StdPath) -> HostResult<()> {
             marker_path.display()
         ))),
     }
+}
+
+fn record_connector_state_cache_marker(
+    connector_id: &ConnectorId,
+    zone: &ZoneId,
+    cache_scope: &'static str,
+    cache_dir: &StdPath,
+    status: ConnectorStateCacheMarkerStatus,
+) {
+    tracing::info!(
+        target: fcp_store::CONNECTOR_STATE_TRACING_TARGET,
+        event_type = "fcp.connector_state.cache_marker",
+        connector_id = %connector_id,
+        zone_id = %zone,
+        cache_scope,
+        cache_marker_status = status.as_str(),
+        cache_marker = fcp_store::CONNECTOR_STATE_CACHE_MARKER,
+        cache_path = %cache_dir.display(),
+        canonical_storage = "fcp-store",
+    );
 }
 
 fn sanitize_state_path_segment(value: &str) -> String {
@@ -13196,6 +13248,17 @@ deny_ptrace = true
         let tempdir = tempfile::tempdir().expect("connector state tempdir");
         let connector_id = ConnectorId::from_static("fcp.test:state:1.0.0");
         let zone_id: ZoneId = "z:project:alpha".parse().expect("zone should parse");
+        let marker_probe_dir = tempdir.path().join("marker-probe");
+        assert_eq!(
+            ensure_connector_state_cache_marker(&marker_probe_dir)
+                .expect("first marker creation should succeed"),
+            ConnectorStateCacheMarkerStatus::Created
+        );
+        assert_eq!(
+            ensure_connector_state_cache_marker(&marker_probe_dir)
+                .expect("second marker creation should be idempotent"),
+            ConnectorStateCacheMarkerStatus::Present
+        );
 
         let zone_dir = prepare_connector_zone_state_dir(tempdir.path(), &connector_id, &zone_id)
             .expect("prepare connector state cache directory");

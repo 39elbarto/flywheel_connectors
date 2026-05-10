@@ -2751,7 +2751,7 @@ mod tests {
         };
         let resp = executor.execute_sync(&req, selective_handler).unwrap();
         // Because all are in the same tier, at least some execute before abort.
-        assert!(resp.status == BatchStatus::Aborted);
+        assert_eq!(resp.status, BatchStatus::Aborted);
         assert!(resp.failed >= 1);
     }
 

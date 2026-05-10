@@ -903,7 +903,7 @@ mod tests {
         let op_id = OperationId::from_static("test.cancel.op");
         let ctrl = CancellationController::new();
         ctrl.track_with_owner(op_id.as_str(), None);
-        assert!(ctrl.tracked_count() == 1);
+        assert_eq!(ctrl.tracked_count(), 1);
         let req = cancel_request(op_id.as_str(), CancelReason::UserRequested);
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
         assert_eq!(resp.outcome, CancellationOutcome::Cancelled);

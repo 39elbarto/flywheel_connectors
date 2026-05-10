@@ -88,14 +88,14 @@ impl Signature {
 impl fmt::Debug for Signature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Signature")
-            .field(&format!("{}...", &hex::encode(&self.0[..8])))
+            .field(&format!("{}...", hex::encode(&self.0[..8])))
             .finish()
     }
 }
 
 impl fmt::Display for Signature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}...", &hex::encode(&self.0[..8]))
+        write!(f, "{}...", hex::encode(&self.0[..8]))
     }
 }
 

@@ -25,6 +25,7 @@ windows-appcontainer = []
 anyhow.workspace = true
 fcp-async-core.workspace = true
 fcp-core.workspace = true
+fcp-crypto.workspace = true
 fcp-manifest.workspace = true
 idna = "1.0"
 ipnet = "2.9"

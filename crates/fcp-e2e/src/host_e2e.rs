@@ -220,7 +220,7 @@ impl SessionE2eRunner {
         let run_id = format!(
             "run-{}-{}",
             Utc::now().format("%Y%m%dT%H%M%SZ"),
-            &config.scenario_id
+            config.scenario_id
         );
         let correlation_id = format!("sess-e2e-{}-{}", config.connector_id, config.scenario_id);
         Self {

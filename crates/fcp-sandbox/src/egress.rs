@@ -5,8 +5,9 @@
 //! the connector manifest and provides credential injection without exposing
 //! raw secrets to connector processes.
 
-use std::net::IpAddr;
+use std::{collections::BTreeMap, net::IpAddr, sync::Arc};
 
+use fcp_crypto::SecretFetchHook;
 use fcp_manifest::NetworkConstraints;
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
@@ -973,6 +974,110 @@ impl<I: CredentialInjector> CredentialInjector for AllowAllHosts<I> {
     }
 }
 
+/// Credential injector backed by the host secret-fetch hook.
+///
+/// The connector-visible request carries only a credential identifier. This
+/// adapter fetches the corresponding secret at the egress boundary, applies it
+/// as a bearer token, and removes connector-local credential headers before the
+/// request leaves the guard.
+#[derive(Clone)]
+pub struct SecretFetchCredentialInjector {
+    hook: Arc<dyn SecretFetchHook>,
+    allowed_hosts: BTreeMap<String, Vec<String>>,
+}
+
+impl SecretFetchCredentialInjector {
+    /// Create a secret-fetch backed credential injector.
+    #[must_use]
+    pub fn new(hook: Arc<dyn SecretFetchHook>) -> Self {
+        Self {
+            hook,
+            allowed_hosts: BTreeMap::new(),
+        }
+    }
+
+    /// Bind a credential identifier to allowed destination host patterns.
+    #[must_use]
+    pub fn with_allowed_hosts<I, S>(mut self, credential_id: impl Into<String>, hosts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let allowed = self.allowed_hosts.entry(credential_id.into()).or_default();
+        allowed.extend(hosts.into_iter().map(Into::into));
+        self
+    }
+
+    fn fetch_bearer_header(&self, credential_id: &str) -> Result<HttpHeader, EgressError> {
+        let secret = self.hook.fetch(credential_id).map_err(|error| {
+            EgressError::CredentialError(format!("secret fetch failed: {error}"))
+        })?;
+        let value = secret.with_bytes(|bytes| {
+            std::str::from_utf8(bytes)
+                .map(|token| format!("Bearer {token}"))
+                .map_err(|_| {
+                    EgressError::CredentialError(
+                        "secret fetch returned non-UTF-8 bearer token".to_string(),
+                    )
+                })
+        })?;
+        Ok(HttpHeader {
+            name: "Authorization".to_string(),
+            value,
+        })
+    }
+}
+
+impl std::fmt::Debug for SecretFetchCredentialInjector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretFetchCredentialInjector")
+            .field("hook", &"<SecretFetchHook>")
+            .field("allowed_credentials", &self.allowed_hosts.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CredentialInjector for SecretFetchCredentialInjector {
+    fn is_authorized(
+        &self,
+        credential_id: &str,
+        _operation_id: &str,
+        credential_allow: &[String],
+    ) -> Result<bool, EgressError> {
+        Ok(credential_allow
+            .iter()
+            .any(|allowed| allowed == credential_id))
+    }
+
+    fn is_host_allowed(&self, credential_id: &str, host: &str) -> Result<bool, EgressError> {
+        Ok(self
+            .allowed_hosts
+            .get(credential_id)
+            .is_some_and(|allowed| host_matches_allow_list(host, allowed)))
+    }
+
+    fn inject_http(
+        &self,
+        credential_id: &str,
+        headers: &mut Vec<HttpHeader>,
+    ) -> Result<(), EgressError> {
+        let authorization = self.fetch_bearer_header(credential_id)?;
+        headers.retain(|header| {
+            !header.name.eq_ignore_ascii_case("authorization")
+                && !header.name.eq_ignore_ascii_case("x-fcp-credential-id")
+        });
+        headers.push(authorization);
+        Ok(())
+    }
+
+    fn get_tcp_auth(&self, credential_id: &str) -> Result<Option<Vec<u8>>, EgressError> {
+        let secret = self.hook.fetch(credential_id).map_err(|error| {
+            EgressError::CredentialError(format!("secret fetch failed: {error}"))
+        })?;
+        Ok(Some(secret.with_bytes(<[u8]>::to_vec)))
+    }
+}
+
 /// No-op credential injector for testing or when credentials are disabled.
 #[derive(Debug, Default)]
 pub struct NoOpCredentialInjector;
@@ -1078,6 +1183,49 @@ impl TlsVerifier for DefaultTlsVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct StaticSecretHook {
+        credential_id: String,
+        secret: Vec<u8>,
+    }
+
+    impl StaticSecretHook {
+        fn new(credential_id: &str, secret: &[u8]) -> Self {
+            Self {
+                credential_id: credential_id.to_string(),
+                secret: secret.to_vec(),
+            }
+        }
+    }
+
+    impl fcp_crypto::SecretFetchHook for StaticSecretHook {
+        fn fetch(
+            &self,
+            credential_id: &str,
+        ) -> Result<fcp_crypto::ZeroizingSecret, fcp_crypto::SecretFetchError> {
+            if credential_id == self.credential_id {
+                Ok(fcp_crypto::ZeroizingSecret::new(self.secret.clone()))
+            } else {
+                Err(fcp_crypto::SecretFetchError::not_found(credential_id))
+            }
+        }
+
+        fn rotate(
+            &self,
+            _credential_id: &str,
+            _new_secret: fcp_crypto::ZeroizingSecret,
+        ) -> Result<(), fcp_crypto::SecretFetchError> {
+            Err(fcp_crypto::SecretFetchError::redacted(
+                "static test hook is read-only",
+            ))
+        }
+
+        fn revoke(&self, _credential_id: &str) -> Result<(), fcp_crypto::SecretFetchError> {
+            Err(fcp_crypto::SecretFetchError::redacted(
+                "static test hook is read-only",
+            ))
+        }
+    }
 
     // ------------------------------------------------------------------------
     // Hostname Canonicalization Tests
@@ -1505,6 +1653,87 @@ mod tests {
             let roundtrip: DenyReason = serde_json::from_str(&json).unwrap();
             assert_eq!(roundtrip, reason);
         }
+    }
+
+    #[test]
+    fn test_secret_fetch_credential_injector_injects_bearer_and_strips_local_headers() {
+        let injector = SecretFetchCredentialInjector::new(std::sync::Arc::new(
+            StaticSecretHook::new("cred-1", b"secret-token"),
+        ))
+        .with_allowed_hosts("cred-1", ["api.example.com"]);
+        let credential_allow = vec!["cred-1".to_string()];
+        let mut headers = vec![
+            HttpHeader {
+                name: "Authorization".to_string(),
+                value: "Bearer connector-supplied".to_string(),
+            },
+            HttpHeader {
+                name: "x-fcp-credential-id".to_string(),
+                value: "cred-1".to_string(),
+            },
+            HttpHeader {
+                name: "x-request-id".to_string(),
+                value: "req-1".to_string(),
+            },
+        ];
+
+        assert!(
+            injector
+                .is_authorized("cred-1", "gmail.list_messages", &credential_allow)
+                .unwrap()
+        );
+        assert!(
+            injector
+                .is_host_allowed("cred-1", "api.example.com")
+                .unwrap()
+        );
+
+        injector.inject_http("cred-1", &mut headers).unwrap();
+
+        assert!(headers.iter().any(|header| {
+            header.name.eq_ignore_ascii_case("authorization")
+                && header.value == "Bearer secret-token"
+        }));
+        assert!(headers.iter().any(|header| {
+            header.name.eq_ignore_ascii_case("x-request-id") && header.value == "req-1"
+        }));
+        assert!(
+            !headers
+                .iter()
+                .any(|header| header.name.eq_ignore_ascii_case("x-fcp-credential-id"))
+        );
+        assert!(!headers.iter().any(|header| {
+            header.name.eq_ignore_ascii_case("authorization")
+                && header.value == "Bearer connector-supplied"
+        }));
+        assert_eq!(
+            injector.get_tcp_auth("cred-1").unwrap(),
+            Some(b"secret-token".to_vec())
+        );
+    }
+
+    #[test]
+    fn test_secret_fetch_credential_injector_fails_closed_for_unbound_hosts() {
+        let injector = SecretFetchCredentialInjector::new(std::sync::Arc::new(
+            StaticSecretHook::new("cred-1", b"secret-token"),
+        ))
+        .with_allowed_hosts("cred-1", ["api.example.com"]);
+
+        assert!(
+            !injector
+                .is_authorized("cred-2", "gmail.list_messages", &["cred-1".to_string()])
+                .unwrap()
+        );
+        assert!(
+            !injector
+                .is_host_allowed("cred-1", "evil.example.com")
+                .unwrap()
+        );
+        assert!(
+            !injector
+                .is_host_allowed("cred-2", "api.example.com")
+                .unwrap()
+        );
     }
 
     #[test]

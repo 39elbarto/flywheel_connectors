@@ -10,8 +10,8 @@
 //! synchronous in the wasmtime integration we use today, so the egress trait
 //! must be sync to keep that integration working.
 //!
-//! Backends that benefit from native async I/O (HashiCorp Vault, AWS Secrets
-//! Manager, GCP Secret Manager, Azure Key Vault) implement
+//! Backends that benefit from native async I/O (`HashiCorp Vault`,
+//! `AWS Secrets Manager`, `GCP Secret Manager`, `Azure Key Vault`) implement
 //! [`AsyncSecretFetchHook`] and are wrapped via [`AsyncToSyncSecretFetchHook`]
 //! so they can satisfy the sync trait. The wrapper holds a small TTL cache to
 //! amortize network round-trips and uses a tokio runtime handle to drive the
@@ -346,10 +346,7 @@ pub trait AsyncSecretFetchHook: Send + Sync + 'static {
     /// Returns [`SecretFetchError`] when the credential is missing or the
     /// backend cannot satisfy the request. Implementations must not include
     /// the credential identifier verbatim in error messages.
-    async fn fetch_async(
-        &self,
-        credential_id: &str,
-    ) -> Result<ZeroizingSecret, SecretFetchError>;
+    async fn fetch_async(&self, credential_id: &str) -> Result<ZeroizingSecret, SecretFetchError>;
 
     /// Async-replace the secret for a credential identifier.
     ///
@@ -383,10 +380,7 @@ impl<T> AsyncSecretFetchHook for T
 where
     T: SecretFetchHook + 'static,
 {
-    async fn fetch_async(
-        &self,
-        credential_id: &str,
-    ) -> Result<ZeroizingSecret, SecretFetchError> {
+    async fn fetch_async(&self, credential_id: &str) -> Result<ZeroizingSecret, SecretFetchError> {
         SecretFetchHook::fetch(self, credential_id)
     }
 
@@ -437,7 +431,7 @@ where
 {
     /// Wrap an async hook with a runtime handle so it can satisfy the sync
     /// [`SecretFetchHook`] trait.
-    pub fn new(inner: std::sync::Arc<A>, runtime: tokio::runtime::Handle) -> Self {
+    pub const fn new(inner: std::sync::Arc<A>, runtime: tokio::runtime::Handle) -> Self {
         Self { inner, runtime }
     }
 }

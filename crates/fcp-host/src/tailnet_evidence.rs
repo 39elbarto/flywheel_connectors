@@ -206,7 +206,7 @@ impl TailnetInvokeAttemptEvidence {
         error_class: impl Into<String>,
         detail: impl Into<String>,
     ) -> Self {
-        debug_assert!(outcome != TailnetInvokeAttemptOutcome::Success);
+        debug_assert_ne!(outcome, TailnetInvokeAttemptOutcome::Success);
         let error_class = error_class.into();
         let detail = detail.into();
         Self {

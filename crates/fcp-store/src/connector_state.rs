@@ -7,8 +7,13 @@
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use ciborium::de::from_reader_with_recursion_limit;
+use ciborium::value::Value as CborValue;
 use fcp_async_core::channel::broadcast;
-use fcp_cbor::{CanonicalSerializer, SchemaId, SerializationError};
+use fcp_cbor::{
+    CanonicalSerializer, MAX_CANONICAL_OBJECT_BYTES, MAX_CANONICALIZATION_DEPTH,
+    MAX_DESERIALIZATION_RECURSION_LIMIT, SchemaId, SerializationError,
+};
 use fcp_prelude::{
     ConnectorId, ConnectorStateAppendOutcome, ConnectorStateChange, ConnectorStateChangeKind,
     ConnectorStateChangeStream, ConnectorStateError, ConnectorStateModel, ConnectorStateObject,
@@ -107,6 +112,10 @@ pub enum ConnectorStateStoreError {
     /// A state object carries no canonical state bytes.
     #[error("connector state object has empty state_cbor")]
     EmptyStateCbor,
+
+    /// A state object carries malformed or non-canonical CBOR state bytes.
+    #[error("connector state object has invalid state_cbor: {0}")]
+    InvalidStateCbor(SerializationError),
 
     /// A state object used a sequence number that does not follow the head.
     #[error("connector state sequence mismatch: expected {expected}, got {got}")]
@@ -765,12 +774,59 @@ impl FcpStoreConnectorStateStore {
         if state.state_cbor.is_empty() {
             return Err(ConnectorStateStoreError::EmptyStateCbor);
         }
+        Self::validate_state_cbor(&state.state_cbor)?;
         if !state.header.refs.contains(&state.lease_object_id) {
             return Err(ConnectorStateStoreError::MissingLeaseReference(
                 state.lease_object_id,
             ));
         }
         Ok(())
+    }
+
+    fn validate_state_cbor(state_cbor: &[u8]) -> Result<()> {
+        if state_cbor.len() > MAX_CANONICAL_OBJECT_BYTES {
+            return Err(ConnectorStateStoreError::InvalidStateCbor(
+                SerializationError::PayloadTooLarge {
+                    len: state_cbor.len(),
+                    max: MAX_CANONICAL_OBJECT_BYTES,
+                },
+            ));
+        }
+
+        let mut reader = state_cbor;
+        let value = from_reader_with_recursion_limit::<CborValue, _>(
+            &mut reader,
+            MAX_DESERIALIZATION_RECURSION_LIMIT,
+        )
+        .map_err(Self::invalid_state_cbor_decode)?;
+        if !reader.is_empty() {
+            return Err(ConnectorStateStoreError::InvalidStateCbor(
+                SerializationError::TrailingBytes,
+            ));
+        }
+
+        let canonical = fcp_cbor::to_canonical_cbor(&value)
+            .map_err(ConnectorStateStoreError::InvalidStateCbor)?;
+        if canonical != state_cbor {
+            return Err(ConnectorStateStoreError::InvalidStateCbor(
+                SerializationError::NonCanonicalEncoding,
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn invalid_state_cbor_decode(
+        err: ciborium::de::Error<std::io::Error>,
+    ) -> ConnectorStateStoreError {
+        let err = match err {
+            ciborium::de::Error::RecursionLimitExceeded => SerializationError::DepthExceeded {
+                depth: MAX_DESERIALIZATION_RECURSION_LIMIT + 1,
+                max: MAX_CANONICALIZATION_DEPTH,
+            },
+            other => SerializationError::CborDeserialize(other),
+        };
+        ConnectorStateStoreError::InvalidStateCbor(err)
     }
 
     fn validate_stored_state_object(
@@ -983,6 +1039,7 @@ impl FcpStoreConnectorStateStore {
             | ConnectorStateStoreError::ContentIdMismatch { .. }
             | ConnectorStateStoreError::MissingLeaseReference(_)
             | ConnectorStateStoreError::EmptyStateCbor
+            | ConnectorStateStoreError::InvalidStateCbor(_)
             | ConnectorStateStoreError::SequenceMismatch { .. }
             | ConnectorStateStoreError::SequenceOverflow(_)
             | ConnectorStateStoreError::Serialization(_) => ConnectorStateError::MalformedState {
@@ -1446,6 +1503,48 @@ mod tests {
         incoming.state_cbor.clear();
         let err = run_async(state_store.append_object(incoming)).unwrap_err();
         assert!(matches!(err, ConnectorStateStoreError::EmptyStateCbor));
+    }
+
+    #[test]
+    fn append_rejects_invalid_state_cbor() {
+        let state_store = test_store(store());
+        let mut incoming = state(0, None, lease_id(1));
+        incoming.state_cbor = vec![0xff];
+        let err = run_async(state_store.append_object(incoming)).unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorStateStoreError::InvalidStateCbor(SerializationError::CborDeserialize(_))
+        ));
+    }
+
+    #[test]
+    fn append_rejects_noncanonical_state_cbor() {
+        let state_store = test_store(store());
+        let mut incoming = state(0, None, lease_id(1));
+        incoming.state_cbor = vec![0x18, 0x17];
+        let err = run_async(state_store.append_object(incoming)).unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorStateStoreError::InvalidStateCbor(SerializationError::NonCanonicalEncoding)
+        ));
+    }
+
+    #[test]
+    fn trait_append_maps_invalid_state_cbor_to_malformed_state() {
+        let state_store = test_store(store());
+        let mut incoming = state(0, None, lease_id(1));
+        incoming.state_cbor = vec![0xff];
+
+        let err = run_async(
+            <FcpStoreConnectorStateStore as ConnectorStateStore>::append_object(
+                &state_store,
+                &connector_id(),
+                incoming,
+            ),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ConnectorStateError::MalformedState { .. }));
     }
 
     #[test]

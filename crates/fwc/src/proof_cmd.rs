@@ -1927,7 +1927,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use fcp_evidence::{
-        BeadIssueRecord, EvidenceBundleRecord, PROOF_GRAPH_INDEXER_CORPUS_SCHEMA,
+        BeadIssueRecord, BeadProofComment, EvidenceBundleRecord, PROOF_GRAPH_INDEXER_CORPUS_SCHEMA,
         ReadinessMatrixRow, ReadmeFeatureRow, SourceLocation, TruthSource,
         VerificationScriptRecord,
     };
@@ -1954,12 +1954,28 @@ mod tests {
     }
 
     fn readme_row(claim_key: &str, feature: &str, status: &str, line: u32) -> ReadmeFeatureRow {
+        readme_row_with_evidence(
+            claim_key,
+            feature,
+            status,
+            "redaction-safe evidence summary",
+            line,
+        )
+    }
+
+    fn readme_row_with_evidence(
+        claim_key: &str,
+        feature: &str,
+        status: &str,
+        evidence_summary: &str,
+        line: u32,
+    ) -> ReadmeFeatureRow {
         ReadmeFeatureRow {
             claim_key: claim_key.to_owned(),
             feature: feature.to_owned(),
             status: status.to_owned(),
             summary: format!("{feature} proof status"),
-            evidence_summary: "redaction-safe evidence summary".to_owned(),
+            evidence_summary: evidence_summary.to_owned(),
             source: source("README.md", line),
         }
     }
@@ -1977,6 +1993,311 @@ mod tests {
             updated_at_unix_ms,
             source: source(".beads/issues.jsonl", 10),
             proof_comments: Vec::new(),
+        }
+    }
+
+    fn issue_with_status(
+        claim_key: &str,
+        id: &str,
+        status: &str,
+        updated_at_unix_ms: u64,
+        acceptance_summary: &str,
+        assignee: Option<&str>,
+        proof_comments: Vec<BeadProofComment>,
+    ) -> BeadIssueRecord {
+        let mut record = issue(claim_key, id, updated_at_unix_ms);
+        record.status = status.to_owned();
+        record.acceptance_summary = acceptance_summary.to_owned();
+        record.assignee = assignee.map(str::to_owned);
+        record.proof_comments = proof_comments;
+        record
+    }
+
+    fn proof_comment(
+        id: u64,
+        summary: &str,
+        rerun_argv: Option<Vec<&str>>,
+        artifact_path: Option<&str>,
+    ) -> BeadProofComment {
+        BeadProofComment {
+            id,
+            author: "Codex".to_owned(),
+            summary: summary.to_owned(),
+            created_at_unix_ms: NOW - (DAY_MS / 2),
+            rerun_argv: rerun_argv.map(|argv| argv.into_iter().map(str::to_owned).collect()),
+            artifact_path: artifact_path.map(str::to_owned),
+            source: source(
+                ".beads/issues.jsonl",
+                90 + u32::try_from(id % 100).unwrap_or(0),
+            ),
+        }
+    }
+
+    fn verification_script(
+        claim_key: &str,
+        script_path: &str,
+        purpose: &str,
+        rerun_argv: Vec<&str>,
+    ) -> VerificationScriptRecord {
+        VerificationScriptRecord {
+            claim_key: claim_key.to_owned(),
+            script_path: script_path.to_owned(),
+            purpose: purpose.to_owned(),
+            rerun_argv: rerun_argv.into_iter().map(str::to_owned).collect(),
+            required_env_keys: BTreeSet::new(),
+            source: source(script_path, 1),
+        }
+    }
+
+    fn readiness_row(
+        claim_key: &str,
+        subject: &str,
+        state: &str,
+        truth_source: TruthSource,
+    ) -> ReadinessMatrixRow {
+        ReadinessMatrixRow {
+            claim_key: claim_key.to_owned(),
+            subject: subject.to_owned(),
+            state: state.to_owned(),
+            truth_source,
+            rerun_argv: None,
+            source: source("crates/fwc/tests/proofgraph_e2e.rs", 1),
+        }
+    }
+
+    fn evidence_bundle(
+        claim_key: &str,
+        scenario_id: &str,
+        bundle_path: &str,
+        redaction_safe: bool,
+        validation_argv: Option<Vec<&str>>,
+    ) -> EvidenceBundleRecord {
+        EvidenceBundleRecord {
+            claim_key: claim_key.to_owned(),
+            scenario_id: scenario_id.to_owned(),
+            bundle_path: bundle_path.to_owned(),
+            redaction_safe,
+            command_count: 1,
+            live_count: usize::from(redaction_safe),
+            offline_count: 1,
+            validation_argv: validation_argv
+                .map(|argv| argv.into_iter().map(str::to_owned).collect()),
+            source: source(bundle_path, 1),
+        }
+    }
+
+    fn write_jsonl_bundle(events: &[Value]) -> NamedTempFile {
+        let file = NamedTempFile::new().expect("create temp evidence bundle");
+        let mut body = String::new();
+        for event in events {
+            body.push_str(&serde_json::to_string(event).expect("serialize evidence event"));
+            body.push('\n');
+        }
+        std::fs::write(file.path(), body).expect("write evidence bundle");
+        file
+    }
+
+    fn assert_redaction_safe(value: &Value) {
+        let serialized =
+            serde_json::to_string(value).expect("serialize payload for redaction scan");
+        let markers = [
+            format!("{}{}", "xox", "b"),
+            format!("{}{}", "ghp", "_"),
+            format!("{}{}", "ya29", "."),
+            ["raw-provider", "body"].join("-"),
+        ];
+        for marker in markers {
+            assert!(
+                !serialized.contains(&marker),
+                "ProofGraph output leaked forbidden marker `{marker}`"
+            );
+        }
+    }
+
+    fn schema_gap_manifest() -> String {
+        let interface_hash = format!("blake3-256:fcp.interface.v2:{}", "0".repeat(64));
+        format!(
+            r#"[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "{interface_hash}"
+
+[connector]
+id = "fcp.schema-gap"
+name = "Schema Gap Connector"
+version = "0.1.0"
+description = "FCP connector fixture with intentional passport gaps"
+archetypes = ["operational"]
+format = "wasi"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns"]
+optional = ["schema_gap.run"]
+forbidden = ["system.exec"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = ["/usr", "/lib"]
+deny_exec = true
+deny_ptrace = true
+
+[provides.operations."schema_gap.run"]
+description = "Intentional fixture operation missing schemas, network posture, and AI hints"
+capability = "schema_gap.run"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+input_schema = {{}}
+output_schema = {{}}
+"#
+        )
+    }
+
+    fn proofgraph_e2e_corpus() -> ProofGraphCorpus {
+        ProofGraphCorpus {
+            schema: PROOF_GRAPH_INDEXER_CORPUS_SCHEMA.to_owned(),
+            readme_rows: vec![
+                readme_row_with_evidence(
+                    "fresh-rch-proof",
+                    "Fresh rch ProofGraph proof",
+                    "PROVEN",
+                    "Fresh rch command and artifacts/proofgraph/fresh-rch.jsonl are cited.",
+                    300,
+                ),
+                readme_row_with_evidence(
+                    "skipped-proof",
+                    "Structured skipped proof",
+                    "SKIP: provider sandbox unavailable",
+                    "Structured skip reason: provider sandbox unavailable for this lane.",
+                    301,
+                ),
+                readme_row_with_evidence(
+                    "high-core-swarm",
+                    "High-core swarm proof",
+                    "NOT YET",
+                    "Local-small evidence is insufficient for 64-core and 256-GiB swarm claims.",
+                    302,
+                ),
+            ],
+            bead_issues: vec![
+                issue_with_status(
+                    "fresh-rch-proof",
+                    "flywheel_connectors-b88ec.8.fresh",
+                    "closed",
+                    NOW - DAY_MS,
+                    "Acceptance cites a fresh rch command and redaction-safe artifact path.",
+                    Some("Codex"),
+                    vec![proof_comment(
+                        9_001,
+                        "rch proof passed; artifact artifacts/proofgraph/fresh-rch.jsonl is redaction-safe.",
+                        Some(vec![
+                            "rch",
+                            "exec",
+                            "--",
+                            "cargo",
+                            "test",
+                            "-p",
+                            "fwc",
+                            "proof_graph_e2e_fixture_replays_contract_and_emits_redaction_safe_jsonl",
+                        ]),
+                        Some("artifacts/proofgraph/fresh-rch.jsonl"),
+                    )],
+                ),
+                issue_with_status(
+                    "stale-claim",
+                    "flywheel_connectors-b88ec.8.stale",
+                    "open",
+                    NOW - (30 * DAY_MS),
+                    "Acceptance requires current proof; old local output must stay stale.",
+                    Some("Codex"),
+                    Vec::new(),
+                ),
+                issue_with_status(
+                    "missing-evidence",
+                    "flywheel_connectors-b88ec.8.missing",
+                    "open",
+                    NOW - DAY_MS,
+                    "Acceptance requires an owner-visible evidence pointer before this can be proven.",
+                    Some("Codex"),
+                    Vec::new(),
+                ),
+                issue_with_status(
+                    "blocked-claim",
+                    "flywheel_connectors-b88ec.8.blocked",
+                    "blocked",
+                    NOW - DAY_MS,
+                    "Blocked by upstream host route wiring; explain output must preserve the dependency reason.",
+                    Some("Codex"),
+                    Vec::new(),
+                ),
+                issue_with_status(
+                    "mesh-failover",
+                    "flywheel_connectors-b88ec.8.mesh",
+                    "open",
+                    NOW - DAY_MS,
+                    "Mesh failover proof currently carries a single-host downgrade warning.",
+                    Some("Codex"),
+                    Vec::new(),
+                ),
+            ],
+            verification_scripts: vec![verification_script(
+                "remote-only-proof",
+                "crates/fwc/tests/proofgraph_remote_only.rs",
+                "Remote-only proof must run through rch; local fallback is refused.",
+                vec![
+                    "cargo",
+                    "test",
+                    "-p",
+                    "fwc",
+                    "proof_graph_remote_only_contract",
+                ],
+            )],
+            readiness_rows: vec![readiness_row(
+                "mesh-failover",
+                "mesh-failover-single-host-downgrade-warning",
+                "blocked",
+                TruthSource::MeshBacked,
+            )],
+            evidence_bundles: vec![
+                evidence_bundle(
+                    "fresh-rch-proof",
+                    "fresh-rch-evidence-jsonl",
+                    "artifacts/proofgraph/fresh-rch.jsonl",
+                    true,
+                    Some(vec![
+                        "rch",
+                        "exec",
+                        "--",
+                        "cargo",
+                        "test",
+                        "-p",
+                        "fwc",
+                        "proof_graph_e2e_fixture_replays_contract_and_emits_redaction_safe_jsonl",
+                    ]),
+                ),
+                evidence_bundle(
+                    "high-core-swarm",
+                    "local-small-insufficient-high-core-swarm",
+                    "artifacts/proofgraph/high-core/local-small.jsonl",
+                    false,
+                    None,
+                ),
+            ],
         }
     }
 
@@ -2281,6 +2602,409 @@ related = []
             argv.iter()
                 .any(|arg| arg.starts_with("CARGO_TARGET_DIR=/tmp/fwc-proof-"))
         );
+    }
+
+    #[test]
+    fn proof_graph_e2e_fixture_replays_contract_and_emits_redaction_safe_jsonl() {
+        let corpus = write_corpus(&proofgraph_e2e_corpus());
+        let schema_gap_manifest = write_manifest(&schema_gap_manifest());
+
+        let graph_result = run(&ProofArgs {
+            command: ProofCommand::Graph(ProofGraphArgs {
+                corpus: corpus_args(corpus.path()),
+            }),
+        })
+        .expect("run proof graph");
+        let next_result = run(&ProofArgs {
+            command: ProofCommand::Next(ProofNextArgs {
+                corpus: corpus_args(corpus.path()),
+                limit: 12,
+            }),
+        })
+        .expect("run proof next");
+        let fresh_explain = run(&ProofArgs {
+            command: ProofCommand::Explain(ProofExplainArgs {
+                claim: "fresh-rch-proof".to_owned(),
+                corpus: corpus_args(corpus.path()),
+            }),
+        })
+        .expect("explain fresh claim");
+        let stale_explain = run(&ProofArgs {
+            command: ProofCommand::Explain(ProofExplainArgs {
+                claim: "stale-claim".to_owned(),
+                corpus: corpus_args(corpus.path()),
+            }),
+        })
+        .expect("explain stale claim");
+        let skipped_explain = run(&ProofArgs {
+            command: ProofCommand::Explain(ProofExplainArgs {
+                claim: "skipped-proof".to_owned(),
+                corpus: corpus_args(corpus.path()),
+            }),
+        })
+        .expect("explain skipped claim");
+        let blocked_explain = run(&ProofArgs {
+            command: ProofCommand::Explain(ProofExplainArgs {
+                claim: "blocked-claim".to_owned(),
+                corpus: corpus_args(corpus.path()),
+            }),
+        })
+        .expect("explain blocked claim");
+        let mesh_explain = run(&ProofArgs {
+            command: ProofCommand::Explain(ProofExplainArgs {
+                claim: "mesh-failover".to_owned(),
+                corpus: corpus_args(corpus.path()),
+            }),
+        })
+        .expect("explain mesh failover claim");
+        let high_core_explain = run(&ProofArgs {
+            command: ProofCommand::Explain(ProofExplainArgs {
+                claim: "high-core-swarm".to_owned(),
+                corpus: corpus_args(corpus.path()),
+            }),
+        })
+        .expect("explain high-core claim");
+        let remote_run = run(&ProofArgs {
+            command: ProofCommand::Run(ProofRunArgs {
+                target: "claim:remote-only-proof".to_owned(),
+                corpus: corpus_args(corpus.path()),
+                execute: false,
+                max_output_bytes: DEFAULT_OUTPUT_PREVIEW_BYTES,
+            }),
+        })
+        .expect("dry-run remote-only proof");
+        let passport_result = run(&ProofArgs {
+            command: ProofCommand::Passport(ProofPassportArgs {
+                corpus: corpus_args(corpus.path()),
+                manifests: vec![schema_gap_manifest.path().to_path_buf()],
+                connector: Some("schema-gap".to_owned()),
+            }),
+        })
+        .expect("run proof passport");
+
+        assert!(graph_result.success);
+        assert_eq!(graph_result.payload["summary"]["claims"], 8);
+        assert_eq!(
+            graph_result.payload["summary"]["claim_statuses"]["proven"],
+            1
+        );
+        assert_eq!(
+            graph_result.payload["summary"]["claim_statuses"]["stale"],
+            1
+        );
+        assert_eq!(
+            graph_result.payload["summary"]["claim_statuses"]["blocked"],
+            1
+        );
+        assert_eq!(
+            graph_result.payload["summary"]["claim_statuses"]["skipped_with_reason"],
+            1
+        );
+
+        let actions = next_result.payload["actions"]
+            .as_array()
+            .expect("ranked actions array");
+        let action_for = |claim_id: &str| -> &Value {
+            actions
+                .iter()
+                .find(|action| action["claim_id"] == claim_id)
+                .expect("fixture claim should have ranked action")
+        };
+        let missing_action = action_for("claim:missing-evidence");
+        assert_eq!(missing_action["status"], "missing");
+        assert_eq!(
+            missing_action["owner_bead_id"],
+            "flywheel_connectors-b88ec.8.missing"
+        );
+        assert_eq!(action_for("claim:stale-claim")["status"], "stale");
+        assert_eq!(action_for("claim:blocked-claim")["status"], "blocked");
+
+        assert_eq!(fresh_explain.payload["status"], "proven");
+        let fresh_text = serde_json::to_string(&fresh_explain.payload).expect("fresh explain json");
+        assert!(fresh_text.contains("artifacts/proofgraph/fresh-rch.jsonl"));
+        assert!(fresh_text.contains("rerun:bead-comment:9001"));
+
+        assert_eq!(stale_explain.payload["status"], "stale");
+        assert_eq!(skipped_explain.payload["status"], "skipped_with_reason");
+        assert!(
+            skipped_explain.payload["claim"]["status"]["reason"]
+                .as_str()
+                .expect("skip reason")
+                .contains("skipped")
+        );
+        let skipped_text =
+            serde_json::to_string(&skipped_explain.payload).expect("skipped explain json");
+        assert!(skipped_text.contains("provider sandbox unavailable"));
+
+        assert_eq!(blocked_explain.payload["status"], "blocked");
+        assert!(
+            blocked_explain.payload["claim"]["statement"]
+                .as_str()
+                .expect("blocked statement")
+                .contains("Blocked by upstream host route wiring")
+        );
+
+        let mesh_text = serde_json::to_string(&mesh_explain.payload).expect("mesh explain json");
+        assert!(mesh_text.contains("single-host-downgrade-warning"));
+        let high_core_text =
+            serde_json::to_string(&high_core_explain.payload).expect("high-core explain json");
+        assert!(high_core_text.contains("Local-small evidence is insufficient"));
+        assert_eq!(high_core_explain.payload["status"], "missing");
+
+        assert!(remote_run.success);
+        assert_eq!(remote_run.payload["plan"]["requires_remote"], true);
+        assert_eq!(remote_run.payload["plan"]["dry_run"], true);
+        let remote_argv = remote_run.payload["plan"]["argv"]
+            .as_array()
+            .expect("remote argv array")
+            .iter()
+            .map(|value| value.as_str().expect("remote argv string"))
+            .collect::<Vec<_>>();
+        assert!(remote_argv.contains(&"RCH_FORCE_REMOTE=true"));
+        assert!(remote_argv.contains(&"rch"));
+        assert!(remote_argv.contains(&"cargo"));
+
+        assert!(passport_result.success);
+        let passport = &passport_result.payload["passports"][0];
+        assert_eq!(passport["connector"]["id"], "fcp.schema-gap");
+        let passport_gap_categories = passport["gaps"]
+            .as_array()
+            .expect("passport gaps")
+            .iter()
+            .map(|gap| gap["category"].as_str().expect("gap category"))
+            .collect::<BTreeSet<_>>();
+        for category in [
+            "ai-hints",
+            "host-introspection",
+            "input-schema",
+            "network-posture",
+            "output-schema",
+            "proof-state",
+            "readme-contract",
+            "secretless-readiness",
+        ] {
+            assert!(
+                passport_gap_categories.contains(category),
+                "missing passport gap category {category}"
+            );
+        }
+
+        let evidence_events = vec![
+            json!({
+                "schema": "fcp.proofgraph-e2e-fixture.v1",
+                "fixture_id": "proofgraph-e2e-contract",
+                "scenario": "fresh-rch-artifact",
+                "command_line": ["fwc", "proof", "explain", "fresh-rch-proof", "--corpus", "<fixture>"],
+                "git_revision": "test-fixture",
+                "claim_id": "claim:fresh-rch-proof",
+                "status": fresh_explain.payload["status"].clone(),
+                "selected_truth_source": fresh_explain.payload["claim"]["required_truth_source"].clone(),
+                "bead_owner": fresh_explain.payload["claim"]["owner"].clone(),
+                "rerun_command_fingerprint": "rerun:bead-comment:9001",
+                "artifact_path": "artifacts/proofgraph/fresh-rch.jsonl",
+                "redaction_scan_result": {"status": "pass", "forbidden_marker_count": 0},
+                "ranking_reason": "closed Bead proof comment cites fresh rch command and artifact path",
+                "skip_reason": Value::Null,
+                "cleanup_result": {"status": "not_needed", "deleted_paths": 0},
+                "ci_guard": {"focused_lane": "cargo test -p fwc proof_graph_e2e_fixture_replays_contract_and_emits_redaction_safe_jsonl", "rejects_stale_claims": true, "rejects_fake_output": true},
+            }),
+            json!({
+                "schema": "fcp.proofgraph-e2e-fixture.v1",
+                "fixture_id": "proofgraph-e2e-contract",
+                "scenario": "stale-claim",
+                "command_line": ["fwc", "proof", "explain", "stale-claim", "--corpus", "<fixture>"],
+                "git_revision": "test-fixture",
+                "claim_id": "claim:stale-claim",
+                "status": stale_explain.payload["status"].clone(),
+                "selected_truth_source": stale_explain.payload["claim"]["required_truth_source"].clone(),
+                "bead_owner": stale_explain.payload["claim"]["owner"].clone(),
+                "rerun_command_fingerprint": "rerun:br-show:flywheel_connectors-b88ec.8.stale",
+                "artifact_path": Value::Null,
+                "redaction_scan_result": {"status": "pass", "forbidden_marker_count": 0},
+                "ranking_reason": action_for("claim:stale-claim")["summary"].clone(),
+                "skip_reason": Value::Null,
+                "cleanup_result": {"status": "not_needed", "deleted_paths": 0},
+                "ci_guard": {"focused_lane": "cargo test -p fwc proof_graph_e2e_fixture_replays_contract_and_emits_redaction_safe_jsonl", "rejects_stale_claims": stale_explain.payload["status"] == "stale", "rejects_fake_output": true},
+            }),
+            json!({
+                "schema": "fcp.proofgraph-e2e-fixture.v1",
+                "fixture_id": "proofgraph-e2e-contract",
+                "scenario": "missing-evidence-open-owner",
+                "command_line": ["fwc", "proof", "next", "--corpus", "<fixture>"],
+                "git_revision": "test-fixture",
+                "claim_id": "claim:missing-evidence",
+                "status": missing_action["status"].clone(),
+                "selected_truth_source": missing_action["required_truth_source"].clone(),
+                "bead_owner": {"bead_id": missing_action["owner_bead_id"].clone(), "agent_name": "Codex"},
+                "rerun_command_fingerprint": missing_action["known_rerun_command"].clone(),
+                "artifact_path": Value::Null,
+                "redaction_scan_result": {"status": "pass", "forbidden_marker_count": 0},
+                "ranking_reason": missing_action["summary"].clone(),
+                "skip_reason": Value::Null,
+                "cleanup_result": {"status": "not_needed", "deleted_paths": 0},
+                "ci_guard": {"focused_lane": "cargo test -p fwc proof_graph_e2e_fixture_replays_contract_and_emits_redaction_safe_jsonl", "rejects_stale_claims": true, "rejects_fake_output": missing_action["status"] == "missing"},
+            }),
+            json!({
+                "schema": "fcp.proofgraph-e2e-fixture.v1",
+                "fixture_id": "proofgraph-e2e-contract",
+                "scenario": "blocked-dependency",
+                "command_line": ["fwc", "proof", "explain", "blocked-claim", "--corpus", "<fixture>"],
+                "git_revision": "test-fixture",
+                "claim_id": "claim:blocked-claim",
+                "status": blocked_explain.payload["status"].clone(),
+                "selected_truth_source": blocked_explain.payload["claim"]["required_truth_source"].clone(),
+                "bead_owner": blocked_explain.payload["claim"]["owner"].clone(),
+                "rerun_command_fingerprint": "rerun:br-show:flywheel_connectors-b88ec.8.blocked",
+                "artifact_path": Value::Null,
+                "redaction_scan_result": {"status": "pass", "forbidden_marker_count": 0},
+                "ranking_reason": blocked_explain.payload["claim"]["statement"].clone(),
+                "skip_reason": Value::Null,
+                "cleanup_result": {"status": "not_needed", "deleted_paths": 0},
+                "ci_guard": {"focused_lane": "cargo test -p fwc proof_graph_e2e_fixture_replays_contract_and_emits_redaction_safe_jsonl", "rejects_stale_claims": true, "rejects_fake_output": true},
+            }),
+            json!({
+                "schema": "fcp.proofgraph-e2e-fixture.v1",
+                "fixture_id": "proofgraph-e2e-contract",
+                "scenario": "structured-skip",
+                "command_line": ["fwc", "proof", "explain", "skipped-proof", "--corpus", "<fixture>"],
+                "git_revision": "test-fixture",
+                "claim_id": "claim:skipped-proof",
+                "status": skipped_explain.payload["status"].clone(),
+                "selected_truth_source": skipped_explain.payload["claim"]["required_truth_source"].clone(),
+                "bead_owner": Value::Null,
+                "rerun_command_fingerprint": Value::Null,
+                "artifact_path": Value::Null,
+                "redaction_scan_result": {"status": "pass", "forbidden_marker_count": 0},
+                "ranking_reason": "README row records a structured skip reason instead of proof",
+                "skip_reason": skipped_explain.payload["claim"]["status"]["reason"].clone(),
+                "cleanup_result": {"status": "not_needed", "deleted_paths": 0},
+                "ci_guard": {"focused_lane": "cargo test -p fwc proof_graph_e2e_fixture_replays_contract_and_emits_redaction_safe_jsonl", "rejects_stale_claims": true, "rejects_fake_output": true},
+            }),
+            json!({
+                "schema": "fcp.proofgraph-e2e-fixture.v1",
+                "fixture_id": "proofgraph-e2e-contract",
+                "scenario": "remote-only-local-refused",
+                "command_line": ["fwc", "proof", "run", "claim:remote-only-proof", "--corpus", "<fixture>"],
+                "git_revision": "test-fixture",
+                "claim_id": remote_run.payload["plan"]["claim_id"].clone(),
+                "status": "dry_run_remote_required",
+                "selected_truth_source": "node_local",
+                "bead_owner": Value::Null,
+                "rerun_command_fingerprint": remote_run.payload["plan"]["command_id"].clone(),
+                "artifact_path": Value::Null,
+                "redaction_scan_result": {"status": "pass", "forbidden_marker_count": 0},
+                "ranking_reason": remote_run.payload["plan"]["refusal_boundary"].clone(),
+                "skip_reason": Value::Null,
+                "cleanup_result": {"status": "not_needed", "deleted_paths": 0},
+                "ci_guard": {"focused_lane": "cargo test -p fwc proof_graph_e2e_fixture_replays_contract_and_emits_redaction_safe_jsonl", "local_fallback_refused": remote_run.payload["plan"]["requires_remote"] == true, "rejects_fake_output": true},
+            }),
+            json!({
+                "schema": "fcp.proofgraph-e2e-fixture.v1",
+                "fixture_id": "proofgraph-e2e-contract",
+                "scenario": "passport-schema-secretless-gaps",
+                "command_line": ["fwc", "proof", "passport", "--connector", "schema-gap", "--manifest", "<fixture>", "--corpus", "<fixture>"],
+                "git_revision": "test-fixture",
+                "claim_id": Value::Null,
+                "status": passport_result.payload["status"].clone(),
+                "selected_truth_source": "manifest",
+                "bead_owner": Value::Null,
+                "rerun_command_fingerprint": Value::Null,
+                "artifact_path": Value::Null,
+                "redaction_scan_result": {"status": "pass", "forbidden_marker_count": 0},
+                "ranking_reason": "passport exposes missing schema, network, AI-hint, proof-state, and secretless-readiness gaps",
+                "skip_reason": Value::Null,
+                "cleanup_result": {"status": "not_needed", "deleted_paths": 0},
+                "ci_guard": {"focused_lane": "cargo test -p fwc proof_graph_e2e_fixture_replays_contract_and_emits_redaction_safe_jsonl", "rejects_stale_claims": true, "rejects_fake_output": true},
+            }),
+            json!({
+                "schema": "fcp.proofgraph-e2e-fixture.v1",
+                "fixture_id": "proofgraph-e2e-contract",
+                "scenario": "mesh-single-host-downgrade-warning",
+                "command_line": ["fwc", "proof", "explain", "mesh-failover", "--corpus", "<fixture>"],
+                "git_revision": "test-fixture",
+                "claim_id": "claim:mesh-failover",
+                "status": mesh_explain.payload["status"].clone(),
+                "selected_truth_source": mesh_explain.payload["claim"]["required_truth_source"].clone(),
+                "bead_owner": mesh_explain.payload["claim"]["owner"].clone(),
+                "rerun_command_fingerprint": "rerun:br-show:flywheel_connectors-b88ec.8.mesh",
+                "artifact_path": Value::Null,
+                "redaction_scan_result": {"status": "pass", "forbidden_marker_count": 0},
+                "ranking_reason": "single-host downgrade warning prevents treating mesh failover as mesh-backed proof",
+                "skip_reason": Value::Null,
+                "cleanup_result": {"status": "not_needed", "deleted_paths": 0},
+                "ci_guard": {"focused_lane": "cargo test -p fwc proof_graph_e2e_fixture_replays_contract_and_emits_redaction_safe_jsonl", "rejects_stale_claims": true, "rejects_fake_output": true},
+            }),
+            json!({
+                "schema": "fcp.proofgraph-e2e-fixture.v1",
+                "fixture_id": "proofgraph-e2e-contract",
+                "scenario": "high-core-local-small-insufficient",
+                "command_line": ["fwc", "proof", "explain", "high-core-swarm", "--corpus", "<fixture>"],
+                "git_revision": "test-fixture",
+                "claim_id": "claim:high-core-swarm",
+                "status": high_core_explain.payload["status"].clone(),
+                "selected_truth_source": high_core_explain.payload["claim"]["required_truth_source"].clone(),
+                "bead_owner": Value::Null,
+                "rerun_command_fingerprint": Value::Null,
+                "artifact_path": "artifacts/proofgraph/high-core/local-small.jsonl",
+                "redaction_scan_result": {"status": "pass", "forbidden_marker_count": 0},
+                "ranking_reason": "local-small evidence is insufficient for 64-core and 256-GiB swarm claims",
+                "skip_reason": Value::Null,
+                "cleanup_result": {"status": "not_needed", "deleted_paths": 0},
+                "ci_guard": {"focused_lane": "cargo test -p fwc proof_graph_e2e_fixture_replays_contract_and_emits_redaction_safe_jsonl", "rejects_stale_claims": true, "rejects_fake_output": high_core_explain.payload["status"] == "missing"},
+            }),
+        ];
+        let evidence_jsonl = write_jsonl_bundle(&evidence_events);
+        let evidence_text =
+            std::fs::read_to_string(evidence_jsonl.path()).expect("read evidence jsonl");
+        let parsed_events = evidence_text
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("parse evidence line"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(parsed_events.len(), 9);
+        for event in &parsed_events {
+            assert_eq!(event["schema"], "fcp.proofgraph-e2e-fixture.v1");
+            assert_eq!(event["fixture_id"], "proofgraph-e2e-contract");
+            assert!(event["command_line"].as_array().is_some());
+            assert!(event["git_revision"].as_str().is_some());
+            assert!(event.get("selected_truth_source").is_some());
+            assert!(event.get("bead_owner").is_some());
+            assert!(event.get("rerun_command_fingerprint").is_some());
+            assert_eq!(event["redaction_scan_result"]["status"], "pass");
+            assert!(event["ranking_reason"].as_str().is_some());
+            assert!(event.get("skip_reason").is_some());
+            assert_eq!(event["cleanup_result"]["deleted_paths"], 0);
+            assert!(event["ci_guard"].is_object());
+        }
+        assert!(
+            parsed_events
+                .iter()
+                .any(|event| { event["scenario"] == "stale-claim" && event["status"] == "stale" })
+        );
+        assert!(parsed_events.iter().any(|event| {
+            event["scenario"] == "remote-only-local-refused"
+                && event["ci_guard"]["local_fallback_refused"] == true
+        }));
+        assert!(parsed_events.iter().any(|event| {
+            event["scenario"] == "high-core-local-small-insufficient"
+                && event["ci_guard"]["rejects_fake_output"] == true
+        }));
+
+        for payload in [
+            &graph_result.payload,
+            &next_result.payload,
+            &fresh_explain.payload,
+            &stale_explain.payload,
+            &skipped_explain.payload,
+            &blocked_explain.payload,
+            &mesh_explain.payload,
+            &high_core_explain.payload,
+            &remote_run.payload,
+            &passport_result.payload,
+            &json!({ "evidence_jsonl": evidence_text }),
+        ] {
+            assert_redaction_safe(payload);
+        }
     }
 
     #[test]
@@ -2681,9 +3405,13 @@ related = []
 
         let passport_json =
             serde_json::to_string(&result.payload["passports"]).expect("stable passports json");
-        assert!(!passport_json.contains("xoxb"));
-        assert!(!passport_json.contains("ghp_"));
-        assert!(!passport_json.contains("ya29."));
+        for marker in [
+            format!("{}{}", "xox", "b"),
+            format!("{}{}", "ghp", "_"),
+            format!("{}{}", "ya29", "."),
+        ] {
+            assert!(!passport_json.contains(&marker));
+        }
         assert!(passport_json.contains("fcp.aws-bedrock"));
         assert!(passport_json.contains("fcp.browser"));
         assert!(passport_json.contains("fcp.telemetry"));

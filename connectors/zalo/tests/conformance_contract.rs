@@ -188,14 +188,8 @@ fn assert_schema_accepts(schema: &Value, payload: &Value) {
 
 fn assert_schema_rejects(schema: &Value, payload: &Value) {
     let validator = jsonschema::validator_for(schema).expect("schema should compile");
-    let errors = validator
-        .iter_errors(payload)
-        .map(|error| error.to_string())
-        .collect::<Vec<_>>();
-    assert!(
-        !errors.is_empty(),
-        "schema should reject payload {payload:#}"
-    );
+    let has_error = validator.iter_errors(payload).next().is_some();
+    assert!(has_error, "schema should reject payload {payload:#}");
 }
 
 fn input_schema<'a>(manifest: &'a ConnectorManifest, operation_id: &str) -> &'a Value {

@@ -11,10 +11,12 @@
 use std::{
     net::TcpListener,
     process::Command,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use fcp_prelude::FcpError;
+use fcp_sdk::{ChatCoordinationBackend, InMemoryThreadOwnershipChecker};
 use fcp_zalo::ZaloConnector;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -200,6 +202,24 @@ fn rate_limited_config(base_url: &str) -> Value {
 
 async fn configured_connector(base_url: &str, request_timeout_ms: u64) -> ZaloConnector {
     let mut connector = ZaloConnector::new();
+    connector
+        .handle_configure(base_config(base_url, request_timeout_ms))
+        .await
+        .expect("configure should accept loopback base URL");
+    connector
+        .handle_handshake(json!({}))
+        .await
+        .expect("handshake should complete");
+    connector
+}
+
+async fn configured_connector_with_checker(
+    base_url: &str,
+    request_timeout_ms: u64,
+    checker: Arc<InMemoryThreadOwnershipChecker>,
+) -> ZaloConnector {
+    let mut connector = ZaloConnector::new()
+        .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
     connector
         .handle_configure(base_config(base_url, request_timeout_ms))
         .await
@@ -782,6 +802,70 @@ async fn bot_api_loopback_covers_success_errors_polling_timeout_and_redaction() 
     ));
 
     assert_log_shape_and_redaction(&logs);
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_message_claims_recipient_and_denies_duplicate_before_http() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/botfixture-zalo-access-token/sendMessage"))
+        .and(body_partial_json(json!({
+            "chat_id": "recipient-fixture",
+            "text": "secret message body"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": { "message_id": "msg-loopback" }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+    let first = configured_connector_with_checker(&server.uri(), 1_000, Arc::clone(&checker)).await;
+    let first_owner = first.instance_id().to_string();
+    let second =
+        configured_connector_with_checker(&server.uri(), 1_000, Arc::clone(&checker)).await;
+
+    let first_result = first
+        .handle_invoke(json!({
+            "operation_id": SEND_MESSAGE_OP,
+            "input": {
+                "recipient_id": "recipient-fixture",
+                "message": "secret message body"
+            }
+        }))
+        .await
+        .expect("first send should claim and reach loopback provider");
+    assert_eq!(first_result["result"]["message_id"], "msg-loopback");
+    assert_eq!(first_result["coordination"][0]["event"], "claim_attempt");
+    assert_eq!(first_result["coordination"][1]["outcome"], "granted");
+    assert_eq!(first_result["coordination"][2]["event"], "send_executed");
+    assert!(
+        !serde_json::to_string(&first_result["coordination"])
+            .expect("serialize coordination")
+            .contains("recipient-fixture"),
+        "coordination audit must not leak the raw Zalo recipient ID"
+    );
+
+    let duplicate = second
+        .handle_invoke(json!({
+            "operation_id": SEND_MESSAGE_OP,
+            "input": {
+                "recipient_id": "recipient-fixture",
+                "message": "secret message body"
+            }
+        }))
+        .await
+        .expect_err("duplicate active owner should be denied before provider HTTP");
+    assert!(matches!(
+        duplicate,
+        FcpError::Unauthorized {
+            code: 4090,
+            ref message
+        } if message.starts_with("thread_owned_by_peer:")
+            && message.contains(&first_owner)
+    ));
 }
 
 #[test]

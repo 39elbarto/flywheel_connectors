@@ -7,9 +7,15 @@ use std::{
 };
 
 use crate::error::ZaloError;
-use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult, ZoneId};
+use fcp_sdk::{
+    AgentId, ChannelId, ChatCoordinationAuditRecord, ChatCoordinationBackend,
+    ChatCoordinationConfig, ChatCoordinationSendDecision, ChatCoordinationSendRequest, DmMode,
+    InMemoryThreadOwnershipChecker, ThreadId, ThreadOwnershipChecker,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tracing::warn;
 use url::{Host, Url};
 
 const CONNECTOR_ID: &str = "fcp.zalo";
@@ -62,6 +68,8 @@ pub struct ZaloConnector {
     config: Option<ZaloConfig>,
     client: reqwest::Client,
     inbound_state: Mutex<ZaloInboundState>,
+    chat_coordination_config: ChatCoordinationConfig,
+    thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
 }
 
 #[derive(Clone, Debug)]
@@ -142,6 +150,148 @@ enum PublicUrlKind {
     Webhook,
 }
 
+fn default_zalo_chat_coordination_config() -> ChatCoordinationConfig {
+    ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
+}
+
+fn parse_zalo_chat_coordination_config(
+    value: Option<&Value>,
+    base: ChatCoordinationConfig,
+) -> FcpResult<ChatCoordinationConfig> {
+    let Some(value) = value else {
+        return Ok(base);
+    };
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "chat_coordination must be an object".into(),
+    })?;
+
+    let mut config = base;
+    if let Some(enabled) = object.get("enabled") {
+        config = config.with_enabled(json_bool(enabled, "chat_coordination.enabled")?);
+    }
+    if let Some(ttl_seconds) = object.get("ttl_seconds") {
+        let seconds = ttl_seconds
+            .as_u64()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be an integer".into(),
+            })?;
+        if seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be greater than zero".into(),
+            });
+        }
+        config = config.with_ttl(Duration::from_secs(seconds));
+    }
+    if let Some(fail_open) = object.get("fail_open") {
+        config = config.with_fail_open(json_bool(fail_open, "chat_coordination.fail_open")?);
+    }
+    if let Some(allowlist) = object.get("allowlist_channels") {
+        let channels = allowlist
+            .as_array()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels must be an array".into(),
+            })?;
+        let mut normalized = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let raw = channel.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels entries must be strings".into(),
+            })?;
+            let channel_id = raw.trim();
+            if channel_id.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_coordination.allowlist_channels entries must not be empty"
+                        .into(),
+                });
+            }
+            normalized.push(ChannelId::new(channel_id.to_owned()));
+        }
+        config = config.with_allowlist_channels(normalized);
+    }
+    if let Some(backend) = object.get("backend") {
+        config = config.with_backend(parse_chat_coordination_backend(backend)?);
+    }
+    if let Some(dm_mode) = object.get("dm_mode") {
+        config = config.with_dm_mode(parse_chat_coordination_dm_mode(dm_mode)?);
+    }
+    Ok(config)
+}
+
+fn json_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a boolean"),
+    })
+}
+
+fn parse_chat_coordination_backend(value: &Value) -> FcpResult<ChatCoordinationBackend> {
+    match value.as_str() {
+        Some("agent_mail") => Ok(ChatCoordinationBackend::AgentMail),
+        Some("mesh_gossip") => Ok(ChatCoordinationBackend::MeshGossip),
+        Some("in_memory") => Ok(ChatCoordinationBackend::InMemory),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.backend: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.backend must be a string".into(),
+        }),
+    }
+}
+
+fn parse_chat_coordination_dm_mode(value: &Value) -> FcpResult<DmMode> {
+    match value.as_str() {
+        Some("skip") => Ok(DmMode::Skip),
+        Some("treat_as_thread") => Ok(DmMode::TreatAsThread),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.dm_mode: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.dm_mode must be a string".into(),
+        }),
+    }
+}
+
+fn zalo_coordination_audit_records(
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> Vec<ChatCoordinationAuditRecord> {
+    let mut records = decision.audit_records().to_vec();
+    if let Some(record) = decision.send_executed_audit_record(backend, claimant_agent_id) {
+        records.push(record);
+    }
+    records
+}
+
+fn zalo_insert_coordination(
+    output: &mut Value,
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> FcpResult<()> {
+    let object = output.as_object_mut().ok_or_else(|| FcpError::Internal {
+        message: "Serialized Zalo send response was not an object".into(),
+    })?;
+    object.insert(
+        "coordination".into(),
+        json!(zalo_coordination_audit_records(
+            decision,
+            backend,
+            claimant_agent_id,
+        )),
+    );
+    Ok(())
+}
+
 // Zalo's planned FCP handlers share async signatures before live invoke support lands.
 #[allow(clippy::missing_errors_doc, clippy::unused_async)]
 impl ZaloConnector {
@@ -155,7 +305,20 @@ impl ZaloConnector {
             config: None,
             client: reqwest::Client::new(),
             inbound_state: Mutex::new(ZaloInboundState::default()),
+            chat_coordination_config: default_zalo_chat_coordination_config(),
+            thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
         }
+    }
+
+    #[must_use]
+    pub fn with_thread_ownership_checker(
+        mut self,
+        checker: Arc<dyn ThreadOwnershipChecker>,
+        backend: ChatCoordinationBackend,
+    ) -> Self {
+        self.thread_ownership_checker = checker;
+        self.chat_coordination_config = self.chat_coordination_config.with_backend(backend);
+        self
     }
 
     #[must_use]
@@ -184,6 +347,10 @@ impl ZaloConnector {
             validate_access_token(value)?;
         }
         let inbound = parse_zalo_inbound_config(&params)?;
+        let chat_coordination_config = parse_zalo_chat_coordination_config(
+            params.get("chat_coordination"),
+            self.chat_coordination_config.clone(),
+        )?;
 
         self.webhook_verify_challenge =
             if let Some(token) = optional_trimmed_string(&params, "webhook_verify_challenge")? {
@@ -207,6 +374,7 @@ impl ZaloConnector {
             rate_limit_window_ms: inbound.rate_limit_window_ms,
             rate_limit_max: inbound.rate_limit_max,
         });
+        self.chat_coordination_config = chat_coordination_config;
         *self
             .inbound_state
             .get_mut()
@@ -528,11 +696,34 @@ impl ZaloConnector {
     async fn invoke_send_message(&self, input: &Value) -> FcpResult<Value> {
         let chat_id = required_any_string(input, &["recipient_id", "chat_id"], "recipient_id")?;
         let text = required_string(input, "message")?;
+        let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+        let coordination = self
+            .claim_before_zalo_send(
+                zone_id,
+                ChannelId::new(chat_id.clone()),
+                None,
+                claimant_agent_id.clone(),
+            )
+            .await;
+        if let Some(error) = coordination.denial_error() {
+            warn!(
+                operation_id = SEND_MESSAGE_OPERATION_ID,
+                "Zalo send denied by chat coordination"
+            );
+            return Err(error.clone());
+        }
         let body = json!({
             "chat_id": chat_id,
             "text": truncate_chars(&text, MAX_MESSAGE_CHARS),
         });
-        self.call_zalo_api("sendMessage", Some(body), None).await
+        let mut response = self.call_zalo_api("sendMessage", Some(body), None).await?;
+        zalo_insert_coordination(
+            &mut response,
+            &coordination,
+            self.chat_coordination_config.backend(),
+            &claimant_agent_id,
+        )?;
+        Ok(response)
     }
 
     async fn invoke_send_photo(&self, input: &Value) -> FcpResult<Value> {
@@ -540,6 +731,22 @@ impl ZaloConnector {
         let photo = required_any_string(input, &["photo_url", "photo"], "photo_url")?;
         let photo = validate_public_https_url(&photo, PublicUrlKind::Photo)
             .map_err(|error| error.to_fcp_error())?;
+        let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+        let coordination = self
+            .claim_before_zalo_send(
+                zone_id,
+                ChannelId::new(chat_id.clone()),
+                None,
+                claimant_agent_id.clone(),
+            )
+            .await;
+        if let Some(error) = coordination.denial_error() {
+            warn!(
+                operation_id = SEND_PHOTO_OPERATION_ID,
+                "Zalo photo send denied by chat coordination"
+            );
+            return Err(error.clone());
+        }
         let mut body = json!({
             "chat_id": chat_id,
             "photo": photo,
@@ -547,7 +754,14 @@ impl ZaloConnector {
         if let Some(caption) = optional_input_string(input, "caption")? {
             body["caption"] = json!(truncate_chars(&caption, MAX_MESSAGE_CHARS));
         }
-        self.call_zalo_api("sendPhoto", Some(body), None).await
+        let mut response = self.call_zalo_api("sendPhoto", Some(body), None).await?;
+        zalo_insert_coordination(
+            &mut response,
+            &coordination,
+            self.chat_coordination_config.backend(),
+            &claimant_agent_id,
+        )?;
+        Ok(response)
     }
 
     async fn invoke_poll_updates(&self, input: &Value) -> FcpResult<Value> {
@@ -848,6 +1062,36 @@ impl ZaloConnector {
             |state| inbound_state_counts_json(&state),
         )
     }
+
+    fn chat_coordination_context(&self) -> (ZoneId, AgentId) {
+        (
+            ZoneId::community(),
+            AgentId::new(self.base.instance_id.as_str().to_owned()),
+        )
+    }
+
+    async fn claim_before_zalo_send(
+        &self,
+        zone_id: ZoneId,
+        channel_id: ChannelId,
+        thread_id: Option<ThreadId>,
+        claimant_agent_id: AgentId,
+    ) -> ChatCoordinationSendDecision {
+        let cx = fcp_async_core::compatibility_cx();
+        self.chat_coordination_config
+            .claim_before_send(
+                &cx,
+                self.thread_ownership_checker.as_ref(),
+                ChatCoordinationSendRequest::new(
+                    zone_id,
+                    ConnectorId::from_static(CONNECTOR_ID),
+                    channel_id,
+                    thread_id,
+                    claimant_agent_id,
+                ),
+            )
+            .await
+    }
 }
 
 fn zalo_operation_catalog() -> Vec<Value> {
@@ -855,6 +1099,21 @@ fn zalo_operation_catalog() -> Vec<Value> {
     operations.extend(webhook_management_operation_catalog());
     operations.extend(webhook_ingest_operation_catalog());
     operations
+}
+
+fn send_with_coordination_output_schema() -> Value {
+    object_schema(
+        json!({
+            "ok": { "type": "boolean" },
+            "result": { "type": "object" },
+            "coordination": {
+                "type": "array",
+                "description": "Redaction-safe chat thread ownership audit records",
+                "items": { "type": "object" }
+            }
+        }),
+        &[],
+    )
 }
 
 fn message_operation_catalog() -> Vec<Value> {
@@ -891,7 +1150,7 @@ fn message_operation_catalog() -> Vec<Value> {
                 }),
                 &["recipient_id", "message"],
             ),
-            object_schema(json!({ "message_id": { "type": "string" } }), &[]),
+            send_with_coordination_output_schema(),
             "When you need to send a text message to a Zalo user through the bot.",
             &[],
         ),
@@ -915,7 +1174,7 @@ fn message_operation_catalog() -> Vec<Value> {
                 }),
                 &["recipient_id", "photo_url"],
             ),
-            object_schema(json!({ "message_id": { "type": "string" } }), &[]),
+            send_with_coordination_output_schema(),
             "When you need to send a photo message through the Zalo bot.",
             &["Passing a non-HTTPS photo URL."],
         ),

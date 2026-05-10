@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:a85ca41d35bbb0e0b79559063dee527c99cb9b7afa90261c1a13d6be6099b67c"
+interface_hash = "blake3-256:fcp.interface.v2:ed96bb8c03ab5ca7c36a21418cb2fd1ae5d766563b8f7174638e83b9be79a86a"
 
 [connector]
 id = "fcp.zalo"
@@ -95,8 +95,18 @@ type = "string"
 [provides.operations."zalo.messages.send".output_schema]
 type = "object"
 
-[provides.operations."zalo.messages.send".output_schema.properties.message_id]
-type = "string"
+[provides.operations."zalo.messages.send".output_schema.properties.ok]
+type = "boolean"
+
+[provides.operations."zalo.messages.send".output_schema.properties.result]
+type = "object"
+
+[provides.operations."zalo.messages.send".output_schema.properties.coordination]
+description = "Redaction-safe chat thread ownership audit records"
+type = "array"
+
+[provides.operations."zalo.messages.send".output_schema.properties.coordination.items]
+type = "object"
 
 [provides.operations."zalo.messages.send".ai_hints]
 when_to_use = "When you need to send a text message to a Zalo user through the bot."
@@ -146,8 +156,18 @@ type = "string"
 [provides.operations."zalo.messages.send_photo".output_schema]
 type = "object"
 
-[provides.operations."zalo.messages.send_photo".output_schema.properties.message_id]
-type = "string"
+[provides.operations."zalo.messages.send_photo".output_schema.properties.ok]
+type = "boolean"
+
+[provides.operations."zalo.messages.send_photo".output_schema.properties.result]
+type = "object"
+
+[provides.operations."zalo.messages.send_photo".output_schema.properties.coordination]
+description = "Redaction-safe chat thread ownership audit records"
+type = "array"
+
+[provides.operations."zalo.messages.send_photo".output_schema.properties.coordination.items]
+type = "object"
 
 [provides.operations."zalo.messages.send_photo".ai_hints]
 when_to_use = "When you need to send a photo message through the Zalo bot."

@@ -84,7 +84,8 @@ The current no-live-credential OTLP proof entrypoint is:
 scripts/e2e/telemetry_otlp_exporter_verification.sh
 ```
 
-It runs the loopback collector fixture and the unavailable-collector fixture through `rch`.
+It runs the loopback collector fixture, the unavailable-collector fixture, and
+the collector-backpressure fixture through `rch`.
 
 Set `FCP_TELEMETRY_OTLP_EVIDENCE=/path/to/evidence.jsonl` to append redaction-safe JSONL evidence. The fixture records command line, git revision, endpoint class, signal type, batch or signal counts, retry decision, dropped count, gRPC status, error mapping, cleanup result, and skip reason.
 
@@ -96,6 +97,9 @@ rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telemetry-otlp \
 
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telemetry-otlp-unavailable \
   cargo test -p fcp-telemetry --test otlp_unavailable_fixture --features otlp -- --nocapture
+
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telemetry-otlp-backpressure \
+  cargo test -p fcp-telemetry --test otlp_backpressure_fixture --features otlp -- --nocapture
 
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telemetry-otlp-clippy \
   cargo clippy -p fcp-telemetry --all-targets --features otlp -- -D warnings
@@ -112,4 +116,6 @@ rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-fwc-telemetry-readiness \
 
 This crate provides the OTLP exporter and proof fixtures. Host/fwc admin wiring is still tracked by the OTLP bead and should not be implied complete until an operator can query the host readiness surface and see the same redaction-safe readiness contract.
 
-The current fixtures cover successful trace, metric, and log export plus unavailable collector mapping. Remaining closeout work includes broader retry, backpressure/drop-accounting, cancellation, and host/admin integration evidence.
+The current fixtures cover successful trace, metric, and log export, unavailable
+collector mapping, and collector backpressure/drop-accounting. Remaining closeout
+work includes broader retry/cancellation and host/admin integration evidence.

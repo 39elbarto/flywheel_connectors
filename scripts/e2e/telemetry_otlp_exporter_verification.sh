@@ -29,3 +29,4 @@ run_fixture() {
 
 run_fixture otlp_collector_fixture
 run_fixture otlp_unavailable_fixture
+run_fixture otlp_backpressure_fixture

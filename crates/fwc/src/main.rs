@@ -918,37 +918,33 @@ struct MeshAvailabilityArgs {
 
 #[derive(Args, Debug, Serialize)]
 struct MeshCutoverGatesArgs {
+    /// Optional fcp-host TOML config containing [mesh.cutover_gates].
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
+    /// Optional zone whose cutover-gate overrides should be applied.
+    #[arg(long)]
+    zone: Option<String>,
+
     /// Minimum connectors that must satisfy connector-level gates.
-    #[arg(long, default_value_t = mesh_cmd::DEFAULT_CUTOVER_GATE_CONNECTOR_COUNT)]
-    min_connectors: usize,
+    #[arg(long)]
+    min_connectors: Option<usize>,
 
     /// Minimum mesh replicas required per connector/state object.
-    #[arg(long, default_value_t = mesh_cmd::DEFAULT_CUTOVER_GATE_REPLICA_COUNT)]
-    replica_count: usize,
+    #[arg(long)]
+    replica_count: Option<usize>,
 
     /// Maximum state-replication staleness in seconds.
-    #[arg(long, default_value_t = mesh_cmd::DEFAULT_CUTOVER_GATE_STALENESS_SECONDS)]
-    state_staleness_seconds: u64,
+    #[arg(long)]
+    state_staleness_seconds: Option<u64>,
 
     /// Maximum audit checkpoint staleness in seconds.
-    #[arg(long, default_value_t = mesh_cmd::DEFAULT_CUTOVER_GATE_STALENESS_SECONDS)]
-    audit_staleness_seconds: u64,
+    #[arg(long)]
+    audit_staleness_seconds: Option<u64>,
 
     /// Minimum peers that must hold verified policy bundles.
-    #[arg(long, default_value_t = mesh_cmd::DEFAULT_CUTOVER_GATE_POLICY_PEER_COUNT)]
-    policy_peer_count: usize,
-}
-
-impl From<&MeshCutoverGatesArgs> for mesh_cmd::MeshCutoverGateArgs {
-    fn from(args: &MeshCutoverGatesArgs) -> Self {
-        Self {
-            min_connectors: args.min_connectors,
-            replica_count: args.replica_count,
-            state_staleness_seconds: args.state_staleness_seconds,
-            audit_staleness_seconds: args.audit_staleness_seconds,
-            policy_peer_count: args.policy_peer_count,
-        }
-    }
+    #[arg(long)]
+    policy_peer_count: Option<usize>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -7898,6 +7894,36 @@ const CUTOVER_GATE_TELEMETRY_ACTOR: &str = "fwc";
 const CUTOVER_GATE_TELEMETRY_REDACTION_SCOPE: &str = "public";
 const CUTOVER_GATE_STATUS_METRIC_NAME: &str = "fcp_cutover_gate_status";
 
+#[derive(Clone, Debug, Default, Deserialize)]
+struct MeshCutoverGateThresholdConfig {
+    min_connectors_with_mesh_replicas: Option<usize>,
+    min_replica_count: Option<usize>,
+    max_state_replication_staleness_secs: Option<u64>,
+    max_audit_checkpoint_staleness_secs: Option<u64>,
+    min_policy_peer_count: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct MeshCutoverGateConfig {
+    min_connectors_with_mesh_replicas: Option<usize>,
+    min_replica_count: Option<usize>,
+    max_state_replication_staleness_secs: Option<u64>,
+    max_audit_checkpoint_staleness_secs: Option<u64>,
+    min_policy_peer_count: Option<usize>,
+    #[serde(default)]
+    zone_overrides: BTreeMap<String, MeshCutoverGateThresholdConfig>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct MeshCutoverGateMeshConfig {
+    cutover_gates: Option<MeshCutoverGateConfig>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct MeshCutoverGateHostConfig {
+    mesh: Option<MeshCutoverGateMeshConfig>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct CutoverGateTelemetryRecord {
     event_type: &'static str,
@@ -7972,8 +7998,148 @@ fn emit_cutover_gate_telemetry(gates: &[mesh_cmd::MeshCutoverGate], evaluated_in
     }
 }
 
+fn resolve_mesh_cutover_gate_args(
+    args: &MeshCutoverGatesArgs,
+) -> std::result::Result<mesh_cmd::MeshCutoverGateArgs, DispatchOutcome> {
+    let mut gate_args = mesh_cmd::MeshCutoverGateArgs::default();
+
+    if let Some(config_path) = &args.config {
+        let config = match load_mesh_cutover_gate_config(config_path) {
+            Ok(config) => config,
+            Err(message) => return Err(invalid_cutover_gate_config_dispatch(config_path, message)),
+        };
+        apply_mesh_cutover_gate_config(&mut gate_args, &config);
+
+        if let Some(zone) = args.zone.as_deref() {
+            if let Some(zone_config) = config.zone_overrides.get(zone) {
+                apply_mesh_cutover_gate_threshold_config(&mut gate_args, zone_config);
+            }
+        }
+    }
+
+    if let Some(value) = args.min_connectors {
+        gate_args.min_connectors = value;
+    }
+    if let Some(value) = args.replica_count {
+        gate_args.replica_count = value;
+    }
+    if let Some(value) = args.state_staleness_seconds {
+        gate_args.state_staleness_seconds = value;
+    }
+    if let Some(value) = args.audit_staleness_seconds {
+        gate_args.audit_staleness_seconds = value;
+    }
+    if let Some(value) = args.policy_peer_count {
+        gate_args.policy_peer_count = value;
+    }
+
+    Ok(gate_args)
+}
+
+fn load_mesh_cutover_gate_config(
+    config_path: &Path,
+) -> std::result::Result<MeshCutoverGateConfig, String> {
+    let raw = std::fs::read_to_string(config_path)
+        .map_err(|error| format!("failed to read `{}`: {error}", config_path.display()))?;
+    let config: MeshCutoverGateHostConfig = toml::from_str(&raw).map_err(|error| {
+        format!(
+            "failed to parse `{}` as TOML: {error}",
+            config_path.display()
+        )
+    })?;
+    Ok(config
+        .mesh
+        .and_then(|mesh| mesh.cutover_gates)
+        .unwrap_or_default())
+}
+
+fn apply_mesh_cutover_gate_config(
+    gate_args: &mut mesh_cmd::MeshCutoverGateArgs,
+    config: &MeshCutoverGateConfig,
+) {
+    let threshold_config = MeshCutoverGateThresholdConfig {
+        min_connectors_with_mesh_replicas: config.min_connectors_with_mesh_replicas,
+        min_replica_count: config.min_replica_count,
+        max_state_replication_staleness_secs: config.max_state_replication_staleness_secs,
+        max_audit_checkpoint_staleness_secs: config.max_audit_checkpoint_staleness_secs,
+        min_policy_peer_count: config.min_policy_peer_count,
+    };
+    apply_mesh_cutover_gate_threshold_config(gate_args, &threshold_config);
+}
+
+fn apply_mesh_cutover_gate_threshold_config(
+    gate_args: &mut mesh_cmd::MeshCutoverGateArgs,
+    config: &MeshCutoverGateThresholdConfig,
+) {
+    if let Some(value) = config.min_connectors_with_mesh_replicas {
+        gate_args.min_connectors = value;
+    }
+    if let Some(value) = config.min_replica_count {
+        gate_args.replica_count = value;
+    }
+    if let Some(value) = config.max_state_replication_staleness_secs {
+        gate_args.state_staleness_seconds = value;
+    }
+    if let Some(value) = config.max_audit_checkpoint_staleness_secs {
+        gate_args.audit_staleness_seconds = value;
+    }
+    if let Some(value) = config.min_policy_peer_count {
+        gate_args.policy_peer_count = value;
+    }
+}
+
+fn invalid_cutover_gate_config_dispatch(config_path: &Path, message: String) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": "mesh",
+            "subcommand": "cutover-gates",
+            "error": {
+                "type": "invalid-cutover-gates-config",
+                "message": message,
+                "recoverable": true,
+            },
+            "config_path": config_path.display().to_string(),
+            "next_actions": [
+                "Fix the fcp-host TOML and rerun `fwc mesh cutover-gates --config <path> --json`.",
+                "Use docs/configuration/cutover_gates.md as the cutover-gate config shape reference."
+            ],
+        }),
+        exit_code: CliExitCode::Validation,
+    }
+}
+
+fn mesh_cutover_gates_data_hash(
+    gate_args: &mesh_cmd::MeshCutoverGateArgs,
+    overall_status: mesh_cmd::CutoverGateStatus,
+    red_gate_ids: &[String],
+    gates: &[mesh_cmd::MeshCutoverGate],
+) -> String {
+    let hash_input = json!({
+        "schema_version": mesh_cmd::MESH_CUTOVER_GATES_SCHEMA_VERSION,
+        "overall_status": overall_status.tag(),
+        "red_gate_ids": red_gate_ids,
+        "targets": {
+            "min_connectors": gate_args.min_connectors,
+            "replica_count": gate_args.replica_count,
+            "state_staleness_seconds": gate_args.state_staleness_seconds,
+            "audit_staleness_seconds": gate_args.audit_staleness_seconds,
+            "policy_peer_count": gate_args.policy_peer_count,
+        },
+        "gates": gates,
+    });
+    sha256_prefixed(
+        serde_json::to_string(&hash_input)
+            .unwrap_or_default()
+            .as_bytes(),
+    )
+}
+
 fn mesh_cutover_gates_dispatch(args: &MeshCutoverGatesArgs) -> Result<DispatchOutcome> {
-    let gate_args = mesh_cmd::MeshCutoverGateArgs::from(args);
+    let gate_args = match resolve_mesh_cutover_gate_args(args) {
+        Ok(gate_args) => gate_args,
+        Err(dispatch) => return Ok(dispatch),
+    };
     let started_at = std::time::Instant::now();
     let gates = mesh_cmd::mesh_cutover_gates(&gate_args);
     let evaluated_in_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -7984,12 +8150,14 @@ fn mesh_cutover_gates_dispatch(args: &MeshCutoverGatesArgs) -> Result<DispatchOu
         .filter(|gate| matches!(gate.status, mesh_cmd::CutoverGateStatus::Red))
         .map(|gate| gate.gate_id.clone())
         .collect::<Vec<_>>();
+    let data_hash = mesh_cutover_gates_data_hash(&gate_args, overall_status, &red_gate_ids, &gates);
     let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "mesh");
     let mut payload = json!({
         "status": "ok",
         "command": "mesh",
         "subcommand": "cutover-gates",
         "schema_version": mesh_cmd::MESH_CUTOVER_GATES_SCHEMA_VERSION,
+        "data_hash": data_hash,
         "overall_status": overall_status.tag(),
         "gate_count": gates.len(),
         "red_gate_ids": red_gate_ids,
@@ -27343,6 +27511,82 @@ mod tests {
         );
         assert!(output.contains("README graduation: requires all gates green"));
         assert!(!output.trim_start().starts_with('{'));
+    }
+
+    #[test]
+    fn mesh_cutover_gates_json_includes_stable_data_hash() {
+        let (first_exit, first) = execute_json(&["fwc", "--json", "mesh", "cutover-gates"]);
+        let (second_exit, second) = execute_json(&["fwc", "--json", "mesh", "cutover-gates"]);
+
+        assert_eq!(first_exit, std::process::ExitCode::SUCCESS);
+        assert_eq!(second_exit, std::process::ExitCode::SUCCESS);
+        assert_eq!(first["schema_version"], "1.1.0");
+        assert!(first["data_hash"].as_str().unwrap().starts_with("sha256:"));
+        assert_eq!(first["data_hash"], second["data_hash"]);
+    }
+
+    #[test]
+    fn mesh_cutover_gates_config_and_cli_overrides_targets() {
+        let tempdir = tempfile::tempdir().expect("cutover config tempdir");
+        let config_path = tempdir.path().join("fcp-host.toml");
+        fs::write(
+            &config_path,
+            r#"
+[mesh.cutover_gates]
+min_connectors_with_mesh_replicas = 3
+min_replica_count = 2
+max_state_replication_staleness_secs = 60
+max_audit_checkpoint_staleness_secs = 60
+min_policy_peer_count = 2
+
+[mesh.cutover_gates.zone_overrides."z:community"]
+min_connectors_with_mesh_replicas = 5
+max_state_replication_staleness_secs = 120
+"#,
+        )
+        .expect("cutover config fixture should write");
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "mesh",
+            "cutover-gates",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--zone",
+            "z:community",
+            "--replica-count",
+            "4",
+        ]);
+
+        assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
+        assert_eq!(payload["targets"]["min_connectors"], 5);
+        assert_eq!(payload["targets"]["replica_count"], 4);
+        assert_eq!(payload["targets"]["state_staleness_seconds"], 120);
+        assert_eq!(payload["targets"]["audit_staleness_seconds"], 60);
+        assert_eq!(payload["targets"]["policy_peer_count"], 2);
+    }
+
+    #[test]
+    fn mesh_cutover_gates_malformed_config_returns_typed_error() {
+        let tempdir = tempfile::tempdir().expect("cutover config tempdir");
+        let config_path = tempdir.path().join("broken.toml");
+        fs::write(&config_path, "[mesh.cutover_gates\n").expect("broken config should write");
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "mesh",
+            "cutover-gates",
+            "--config",
+            config_path.to_str().unwrap(),
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "mesh");
+        assert_eq!(payload["subcommand"], "cutover-gates");
+        assert_eq!(payload["error"]["type"], "invalid-cutover-gates-config");
+        assert_eq!(payload["error"]["recoverable"], true);
     }
 
     fn temp_auth_store() -> (TempDir, super::CredentialStore) {

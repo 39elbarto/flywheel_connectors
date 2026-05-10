@@ -21,7 +21,7 @@ default until every gate is green from live telemetry.
 ## Recovery
 
 1. Run `fwc mesh cutover-gates --json` and record `overall_status`,
-   `red_gate_ids`, and each gate's `measured_value`.
+   `data_hash`, `red_gate_ids`, and each gate's `measured_value`.
 2. For `mesh-inventory-placement`, run
    `fwc mesh explain-availability <connector> --host <endpoint> --json` for the
    candidate connectors and confirm `placement.has_mesh_replica` plus

@@ -10,6 +10,7 @@
     "command",
     "subcommand",
     "schema_version",
+    "data_hash",
     "overall_status",
     "gate_count",
     "red_gate_ids",
@@ -23,7 +24,11 @@
     "status": { "const": "ok" },
     "command": { "const": "mesh" },
     "subcommand": { "const": "cutover-gates" },
-    "schema_version": { "const": "1.0.0" },
+    "schema_version": { "const": "1.1.0" },
+    "data_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
     "overall_status": { "$ref": "#/$defs/cutover_gate_status" },
     "gate_count": {
       "type": "integer",

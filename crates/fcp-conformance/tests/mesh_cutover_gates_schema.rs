@@ -46,6 +46,7 @@ fn valid_cutover_gates_payload() -> Value {
         "command": "mesh",
         "subcommand": "cutover-gates",
         "schema_version": MESH_CUTOVER_GATES_SCHEMA_VERSION,
+        "data_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "overall_status": cutover_gate_overall_status(&gates).tag(),
         "gate_count": gates.len(),
         "red_gate_ids": red_gate_ids,
@@ -101,7 +102,11 @@ fn mesh_cutover_gates_schema_validates_skip_payload() {
     let payload = valid_cutover_gates_payload();
 
     assert_valid(&payload);
-    assert_eq!(payload["schema_version"], "1.0.0");
+    assert_eq!(payload["schema_version"], "1.1.0");
+    assert_eq!(
+        payload["data_hash"],
+        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    );
     assert_eq!(payload["overall_status"], "skip");
     assert_eq!(payload["gates"].as_array().map(Vec::len), Some(4));
 }
@@ -115,6 +120,25 @@ fn mesh_cutover_gates_schema_rejects_missing_schema_version() {
         .remove("schema_version");
 
     assert_invalid(&payload, "schema_version is required");
+}
+
+#[test]
+fn mesh_cutover_gates_schema_rejects_missing_data_hash() {
+    let mut payload = valid_cutover_gates_payload();
+    payload
+        .as_object_mut()
+        .expect("payload must be an object")
+        .remove("data_hash");
+
+    assert_invalid(&payload, "data_hash is required for snapshot stability");
+}
+
+#[test]
+fn mesh_cutover_gates_schema_rejects_malformed_data_hash() {
+    let mut payload = valid_cutover_gates_payload();
+    payload["data_hash"] = json!("not-a-sha256");
+
+    assert_invalid(&payload, "data_hash must be a prefixed sha256 digest");
 }
 
 #[test]

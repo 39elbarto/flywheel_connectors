@@ -64,6 +64,7 @@ without mesh placement and replication fields.
 
 ```bash
 fwc mesh cutover-gates --json
+fwc mesh cutover-gates --config /etc/fcp-host/config.toml --zone z:community --json
 fwc mesh cutover-gates --min-connectors 5 --replica-count 3 --json
 fwc mesh explain-availability github --host "$FCP_HOST" --json
 ```
@@ -71,4 +72,6 @@ fwc mesh explain-availability github --host "$FCP_HOST" --json
 The JSON schema lives at
 `crates/fwc/schemas/mesh_cutover_gates.schema.json`. Schema changes follow
 semantic versioning: removing or renaming a field is a major version bump;
-adding a field is a minor version bump.
+adding a field is a minor version bump. Operators can rely on `data_hash` as a
+stable SHA-256 digest of the evaluated targets and gate records; repeated
+evaluations against the same snapshot must return the same digest.

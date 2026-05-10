@@ -5,6 +5,7 @@
 //! benchmarks and integration tests without restructuring the CLI.
 
 pub mod access_cmd;
+pub mod connector_state;
 pub mod mesh_cmd;
 pub mod pipe;
 pub mod readiness;

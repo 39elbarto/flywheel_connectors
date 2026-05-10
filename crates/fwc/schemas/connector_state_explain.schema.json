@@ -1,0 +1,251 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "fcp://schemas/fwc/connector-state-explain/v1",
+  "title": "FWC Connector State Explain v1",
+  "description": "Stable JSON output schema for `fwc connector state explain --json`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "status",
+    "command",
+    "subcommand",
+    "schema_version",
+    "source",
+    "message",
+    "connector",
+    "state_root",
+    "canonical_storage",
+    "last_canonical_seq",
+    "mesh_replica_count",
+    "local_cache_path",
+    "local_cache_present",
+    "local_cache_marker_present",
+    "cache_marker",
+    "zone",
+    "live_host",
+    "evidence_handles",
+    "warnings",
+    "next_actions",
+    "availability"
+  ],
+  "properties": {
+    "status": { "const": "ok" },
+    "command": { "const": "connector" },
+    "subcommand": { "const": "state explain" },
+    "schema_version": { "const": "1.0.0" },
+    "source": { "const": "local-cache-markers" },
+    "message": { "$ref": "#/$defs/non_empty_string" },
+    "connector": { "$ref": "#/$defs/connector" },
+    "state_root": { "$ref": "#/$defs/state_root" },
+    "canonical_storage": {
+      "type": "string",
+      "enum": ["local", "mesh", "both"]
+    },
+    "last_canonical_seq": { "$ref": "#/$defs/nullable_non_negative_integer" },
+    "mesh_replica_count": { "$ref": "#/$defs/nullable_non_negative_integer" },
+    "local_cache_path": { "$ref": "#/$defs/non_empty_string" },
+    "local_cache_present": { "type": "boolean" },
+    "local_cache_marker_present": { "type": "boolean" },
+    "cache_marker": { "$ref": "#/$defs/cache_marker" },
+    "zone": { "$ref": "#/$defs/zone" },
+    "live_host": { "$ref": "#/$defs/live_host" },
+    "evidence_handles": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "$ref": "#/$defs/evidence_handle" }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/non_empty_string" }
+    },
+    "next_actions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/non_empty_string" }
+    },
+    "availability": { "$ref": "#/$defs/command_availability" }
+  },
+  "$defs": {
+    "non_empty_string": {
+      "type": "string",
+      "minLength": 1
+    },
+    "non_negative_integer": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "nullable_non_empty_string": {
+      "anyOf": [
+        { "$ref": "#/$defs/non_empty_string" },
+        { "type": "null" }
+      ]
+    },
+    "nullable_boolean": {
+      "anyOf": [
+        { "type": "boolean" },
+        { "type": "null" }
+      ]
+    },
+    "nullable_non_negative_integer": {
+      "anyOf": [
+        { "$ref": "#/$defs/non_negative_integer" },
+        { "type": "null" }
+      ]
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "connector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requested_selector",
+        "slug",
+        "canonical_id",
+        "name",
+        "version",
+        "manifest_path"
+      ],
+      "properties": {
+        "requested_selector": { "$ref": "#/$defs/non_empty_string" },
+        "slug": { "$ref": "#/$defs/non_empty_string" },
+        "canonical_id": { "$ref": "#/$defs/non_empty_string" },
+        "name": { "$ref": "#/$defs/non_empty_string" },
+        "version": { "$ref": "#/$defs/non_empty_string" },
+        "manifest_path": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "state_root": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "source"],
+      "properties": {
+        "path": { "$ref": "#/$defs/non_empty_string" },
+        "source": {
+          "type": "string",
+          "enum": [
+            "argument",
+            "env:FCP_CONNECTOR_STATE",
+            "env:FCP_CONFIG_DIR",
+            "env:HOME",
+            "relative-default"
+          ]
+        }
+      }
+    },
+    "cache_marker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["filename", "path", "present"],
+      "properties": {
+        "filename": { "const": ".fcp-cache-only" },
+        "path": { "$ref": "#/$defs/non_empty_string" },
+        "present": { "type": "boolean" }
+      }
+    },
+    "zone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requested",
+        "supported_by_manifest",
+        "supported_zones",
+        "local_cache_path",
+        "local_cache_marker_present"
+      ],
+      "properties": {
+        "requested": { "$ref": "#/$defs/nullable_non_empty_string" },
+        "supported_by_manifest": { "$ref": "#/$defs/nullable_boolean" },
+        "supported_zones": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/non_empty_string" }
+        },
+        "local_cache_path": { "$ref": "#/$defs/nullable_non_empty_string" },
+        "local_cache_marker_present": { "type": "boolean" }
+      }
+    },
+    "live_host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested", "state", "route_available"],
+      "properties": {
+        "requested": { "type": "boolean" },
+        "endpoint_hash": { "$ref": "#/$defs/sha256" },
+        "state": {
+          "type": "string",
+          "enum": ["not-requested", "not-queried", "reachable", "unavailable"]
+        },
+        "route_available": { "type": "boolean" },
+        "reason": { "$ref": "#/$defs/non_empty_string" }
+      }
+    },
+    "evidence_handle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["workspace-manifest", "connector-state-cache-marker"]
+        },
+        "connector_id": { "$ref": "#/$defs/non_empty_string" },
+        "manifest_path": { "$ref": "#/$defs/non_empty_string" },
+        "scope": {
+          "type": "string",
+          "enum": ["connector", "zone"]
+        },
+        "path": { "$ref": "#/$defs/non_empty_string" },
+        "present": { "type": "boolean" }
+      },
+      "oneOf": [
+        {
+          "required": ["kind", "connector_id", "manifest_path"],
+          "properties": {
+            "kind": { "const": "workspace-manifest" }
+          }
+        },
+        {
+          "required": ["kind", "scope", "path", "present"],
+          "properties": {
+            "kind": { "const": "connector-state-cache-marker" }
+          }
+        }
+      ]
+    },
+    "command_availability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "availability",
+        "command",
+        "authoritative",
+        "explanation",
+        "recoverable",
+        "next_actions"
+      ],
+      "properties": {
+        "availability": {
+          "type": "string",
+          "enum": [
+            "live-runtime",
+            "offline-artifact",
+            "unsupported",
+            "planned",
+            "unavailable",
+            "denied",
+            "unknown"
+          ]
+        },
+        "command": { "$ref": "#/$defs/non_empty_string" },
+        "authoritative": { "type": "boolean" },
+        "explanation": { "$ref": "#/$defs/non_empty_string" },
+        "recoverable": { "type": "boolean" },
+        "next_actions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/non_empty_string" }
+        }
+      }
+    }
+  }
+}

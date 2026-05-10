@@ -127,6 +127,15 @@ pub const COMMAND_CLASSIFICATIONS: &[CommandClassification] = &[
         transport_note: "Local agent-mail coordination surface and inbox rendering",
     },
     CommandClassification {
+        command: "proof",
+        truth_source: CommandTruthSource::OfflineArtifact,
+        execution_mode: CommandExecutionMode::LocalOnly,
+        host_absent: HostAbsentBehavior::Unaffected,
+        requires_capability_token: false,
+        may_need_approval: false,
+        transport_note: "Local ProofGraph inspection and redaction-safe rerun planning over known evidence commands",
+    },
+    CommandClassification {
         command: "auth",
         truth_source: CommandTruthSource::OfflineArtifact,
         execution_mode: CommandExecutionMode::LocalOnly,
@@ -3450,6 +3459,7 @@ pub const COMMANDS: &[&str] = &[
     "task",
     "session",
     "agent",
+    "proof",
     "lifecycle",
     "auth",
     "plan",
@@ -3600,7 +3610,7 @@ pub fn guide_payload(command: Option<&str>) -> Value {
                     },
                     {
                         "name": "evidence",
-                        "commands": ["supply-chain", "audit", "manifest", "net", "trace", "policy", "package"],
+                        "commands": ["proof", "supply-chain", "audit", "manifest", "net", "trace", "policy", "package"],
                     },
                     {
                         "name": "lifecycle",
@@ -3713,6 +3723,17 @@ fn command_contract(command: &str) -> Option<Value> {
             "Coordinate local multi-agent work through the fwc agent-mail hub.",
             "An inbox/outbox and reservation surface for short coordination messages, local file claims, and collaborator discovery.",
         )),
+        "proof" => Some(json!({
+            "family": "evidence",
+            "summary": "Inspect, rank, explain, and safely rerun ProofGraph claims.",
+            "intended_shape": "Machine-readable ProofGraph views and fail-closed rerun plans built only from redaction-safe corpus artifacts and known rerun commands.",
+            "next_beads": ["flywheel_connectors-b88ec.3"],
+            "workflow_handoff": [
+                "Use `fwc proof graph --corpus <path>` to render the indexed graph.",
+                "Use `fwc proof next --corpus <path>` to pick deterministic proof debt.",
+                "Use `fwc proof run <claim-or-command> --corpus <path>` for a dry-run rerun plan before explicit execution."
+            ],
+        })),
         "auth" => Some(json!({
             "family": "auth",
             "summary": "Manage locally stored connector credentials with redacted inspection and structural validation.",

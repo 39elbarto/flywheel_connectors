@@ -1462,7 +1462,7 @@ pub fn resume_access(args: &AccessResumeArgs) -> Result<AccessBundle, String> {
 
     let bundle = AccessBundle::new(&args.handle)
         .with_status(BundleStatus::Active)
-        .with_receipt(format!("resumed-{}", &args.handle));
+        .with_receipt(format!("resumed-{}", args.handle));
 
     Ok(bundle)
 }

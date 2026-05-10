@@ -222,6 +222,7 @@ mod pipeline_recipes;
 mod policy_cmd;
 #[allow(dead_code)] // Prerequisite onboarding, repair, and drift detection.
 mod prerequisite;
+mod proof_cmd;
 #[allow(dead_code, clippy::cast_precision_loss)]
 mod rate_forecast;
 #[allow(dead_code)]
@@ -548,6 +549,9 @@ enum Commands {
     /// Inspect replayable swarm decision cards and evidence bundles.
     #[command(name = "swarm-evidence", visible_alias = "swarm")]
     SwarmEvidence(swarm_evidence_cmd::SwarmEvidenceArgs),
+
+    /// Inspect, rank, explain, and rerun ProofGraph claims.
+    Proof(proof_cmd::ProofArgs),
 
     /// Validate and repair connector manifests.
     Manifest(manifest_cmd::ManifestArgs),
@@ -3555,6 +3559,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Bootstrap(args) => bootstrap_dispatch(args)?,
         Commands::Audit(args) => audit_dispatch(args)?,
         Commands::SwarmEvidence(args) => swarm_evidence_dispatch(args)?,
+        Commands::Proof(args) => proof_dispatch(args)?,
         Commands::Manifest(_) => passthrough_only_dispatch("manifest"),
         Commands::Net(_) => passthrough_only_dispatch("net"),
         Commands::Trace(_) => passthrough_only_dispatch("trace"),
@@ -7391,6 +7396,21 @@ fn swarm_evidence_dispatch(
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
+    })
+}
+
+fn proof_dispatch(args: &proof_cmd::ProofArgs) -> Result<DispatchOutcome> {
+    let result = proof_cmd::run(args)?;
+    let mut payload = result.payload;
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "proof");
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: if result.success {
+            CliExitCode::Success
+        } else {
+            CliExitCode::Validation
+        },
     })
 }
 

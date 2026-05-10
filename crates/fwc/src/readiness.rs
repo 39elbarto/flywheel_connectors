@@ -5775,9 +5775,9 @@ mod tests {
         assert!(GapSeverity::Blocking < GapSeverity::Cosmetic);
         assert!(GapSeverity::Degraded < GapSeverity::Cosmetic);
         // Reflexivity
-        assert!(GapSeverity::Blocking == GapSeverity::Blocking);
-        assert!(GapSeverity::Degraded == GapSeverity::Degraded);
-        assert!(GapSeverity::Cosmetic == GapSeverity::Cosmetic);
+        assert_eq!(GapSeverity::Blocking, GapSeverity::Blocking);
+        assert_eq!(GapSeverity::Degraded, GapSeverity::Degraded);
+        assert_eq!(GapSeverity::Cosmetic, GapSeverity::Cosmetic);
         // Sorting
         let mut v = vec![
             GapSeverity::Cosmetic,

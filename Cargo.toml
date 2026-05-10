@@ -379,6 +379,7 @@ fcp-telemetry = { path = "crates/fcp-telemetry" }
 fcp-testkit = { path = "crates/fcp-testkit" }
 fcp-voice-call = { path = "crates/fcp-voice-call" }
 fcp-webhook = { path = "crates/fcp-webhook" }
+fwc = { path = "crates/fwc" }
 
 [workspace.lints.rust]
 # Default deny, but allow override for crates that legitimately need unsafe (e.g., fcp-sandbox)

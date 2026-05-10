@@ -30,6 +30,7 @@ pub enum MeshNodeState {
 
 impl MeshNodeState {
     /// Machine-readable tag for this state.
+    #[must_use]
     pub const fn tag(self) -> &'static str {
         match self {
             Self::Active => "active",
@@ -607,6 +608,7 @@ pub enum CutoverGateStatus {
 
 impl CutoverGateStatus {
     /// Machine-readable tag for this status.
+    #[must_use]
     pub const fn tag(self) -> &'static str {
         match self {
             Self::Green => "green",

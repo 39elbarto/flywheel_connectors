@@ -46,3 +46,4 @@ wiremock.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }
+fcp-webhook = { path = "../../crates/fcp-webhook" }

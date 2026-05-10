@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use fcp_async_core::http::{HttpClient, HttpClientBuilder, HttpResponse, Method};
 use fcp_async_core::time;
+use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };
@@ -24,11 +25,47 @@ use crate::{
 /// Default Slack API base URL.
 const DEFAULT_BASE_URL: &str = "https://slack.com/api";
 const JSON_CONTENT_TYPE: &str = "application/json";
+const FCP_CREDENTIAL_ID_HEADER: &str = "X-FCP-Credential-ID";
+
+/// Authentication mode for Slack Web API calls.
+#[derive(Clone)]
+pub enum SlackAuth {
+    /// Direct bot/user/app token for low-level client tests and live diagnostics.
+    Token(String),
+    /// Secretless credential injection via the host egress boundary.
+    CredentialId(CredentialId),
+}
+
+impl std::fmt::Debug for SlackAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Token(_) => f.debug_tuple("Token").field(&"[REDACTED]").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
+
+impl SlackAuth {
+    /// Return a redaction-safe label for diagnostics.
+    #[must_use]
+    pub const fn redacted_label(&self) -> &'static str {
+        match self {
+            Self::Token(_) => "token",
+            Self::CredentialId(_) => "credential_id",
+        }
+    }
+
+    /// Return whether this auth mode requires host-side credential injection.
+    #[must_use]
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
 
 /// Slack Web API client with retry logic and rate limit awareness.
 pub struct SlackClient {
     client: HttpClient,
-    token: String,
+    auth: SlackAuth,
     base_url: String,
     runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
@@ -50,12 +87,17 @@ impl std::fmt::Debug for SlackClient {
 impl SlackClient {
     /// Create a new Slack client with a bot or user token.
     pub fn new(token: impl Into<String>) -> SlackResult<Self> {
+        Self::new_with_auth(SlackAuth::Token(token.into()))
+    }
+
+    /// Create a new Slack client with explicit auth mode.
+    pub fn new_with_auth(auth: SlackAuth) -> SlackResult<Self> {
         let request_timeout = Duration::from_secs(30);
         Ok(Self {
             client: HttpClientBuilder::new()
                 .user_agent("fcp-slack/0.1.0")
                 .build(),
-            token: token.into(),
+            auth,
             base_url: DEFAULT_BASE_URL.into(),
             runtime: ConnectorRuntime::new(
                 ConnectorRuntimeConfig::default().with_request_timeout(request_timeout),
@@ -107,6 +149,12 @@ impl SlackClient {
     #[must_use]
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// Get current auth mode.
+    #[must_use]
+    pub const fn auth(&self) -> &SlackAuth {
+        &self.auth
     }
 
     /// Open a Slack Socket Mode connection and return the websocket URL.
@@ -543,13 +591,18 @@ impl SlackClient {
         url: &str,
         body: Vec<u8>,
     ) -> SlackResult<HttpResponse> {
-        let mut headers = vec![
-            (
-                "Authorization".to_string(),
-                format!("Bearer {}", self.token),
-            ),
-            ("Accept".to_string(), JSON_CONTENT_TYPE.to_string()),
-        ];
+        let mut headers = vec![("Accept".to_string(), JSON_CONTENT_TYPE.to_string())];
+        match &self.auth {
+            SlackAuth::Token(token) => {
+                headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+            }
+            SlackAuth::CredentialId(credential_id) => {
+                headers.push((
+                    FCP_CREDENTIAL_ID_HEADER.to_string(),
+                    credential_id.to_string(),
+                ));
+            }
+        }
         if !body.is_empty() {
             headers.push(("Content-Type".to_string(), JSON_CONTENT_TYPE.to_string()));
         }

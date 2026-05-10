@@ -393,6 +393,51 @@ related = ["slack.list_channels"]
 
 # ────────────────────────────────────────────────────────────────
 
+[provides.operations."slack.handle_events_api"]
+description = "Handle a Slack Events API payload after host-side signature and replay verification"
+capability = "slack.read"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+revocation_freshness = "safe"
+
+[provides.operations."slack.handle_events_api".input_schema]
+required = ["payload", "signature_result"]
+type = "object"
+[provides.operations."slack.handle_events_api".input_schema.properties.payload]
+type = "object"
+[provides.operations."slack.handle_events_api".input_schema.properties.signature_result]
+type = "string"
+enum = ["verified"]
+
+[provides.operations."slack.handle_events_api".output_schema]
+required = ["status", "acknowledged", "signature_result"]
+type = "object"
+[provides.operations."slack.handle_events_api".output_schema.properties.status]
+type = "string"
+[provides.operations."slack.handle_events_api".output_schema.properties.acknowledged]
+type = "boolean"
+[provides.operations."slack.handle_events_api".output_schema.properties.event_emitted]
+type = "boolean"
+[provides.operations."slack.handle_events_api".output_schema.properties.challenge]
+type = "string"
+[provides.operations."slack.handle_events_api".output_schema.properties.event_topic]
+type = "string"
+[provides.operations."slack.handle_events_api".output_schema.properties.event]
+type = "object"
+
+[provides.operations."slack.handle_events_api".ai_hints]
+when_to_use = "Process a Slack Events API URL verification challenge or event callback only after fcp-webhook/host has verified the raw HTTP request signature and replay window."
+common_mistakes = [
+    "Passing unverified Slack HTTP requests directly to the connector.",
+    "Adding network.listen to the Slack connector instead of using the host webhook boundary.",
+]
+examples = ['{"payload":{"type":"url_verification","challenge":"challenge"},"signature_result":"verified"}']
+related = ["slack.get_channel_history"]
+
+# ────────────────────────────────────────────────────────────────
+
 [provides.operations."slack.upload_file"]
 description = "Upload a file to a Slack channel"
 capability = "slack.files.write"

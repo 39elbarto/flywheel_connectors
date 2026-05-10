@@ -27,6 +27,7 @@ use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_prelude::CapabilityConstraints;
 use fcp_testkit::AsyncTestContext;
+use fcp_webhook::{HmacSha256Verifier, SlackWebhook};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -58,6 +59,9 @@ const SLACK_LOOPBACK_E2E_ARTIFACT_ENV: &str = "SLACK_LOOPBACK_E2E_ARTIFACT";
 const DEFAULT_SLACK_LOOPBACK_E2E_ARTIFACT: &str = "target/fcp-slack/loopback-evidence.jsonl";
 const SLACK_LOOPBACK_COMMAND_LINE: &str =
     "cargo test -p fcp-slack --test integration slack_loopback_e2e_jsonl_matrix -- --nocapture";
+const TEST_BOT_CREDENTIAL_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+const TEST_SOCKET_CREDENTIAL_ID: &str = "660e8400-e29b-41d4-a716-446655440000";
+const TEST_SLACK_SIGNING_SECRET: &str = "slack_signing_secret_2026";
 
 // ============================================================================
 // Helpers
@@ -152,7 +156,7 @@ fn slack_loopback_e2e_records(git_revision: &str, artifact_path: &str) -> Vec<se
             "event_id_hash": "hash:event-fixture",
             "thread_ts_hash": "hash:thread-fixture",
             "route": route,
-            "signature_result": "not_applicable_socket_mode",
+            "signature_result": if route == "http_events_api" { "verified" } else { "not_applicable_socket_mode" },
             "sender_policy_decision": sender_policy_decision,
             "capability_decision": capability_decision,
             "retry_backoff": retry_backoff,
@@ -169,16 +173,14 @@ fn slack_loopback_e2e_records(git_revision: &str, artifact_path: &str) -> Vec<se
         common(
             "url_verification_http_events_api",
             "http_events_api",
-            "not_supported",
-            "not_run",
-            "not_run",
-            None,
+            "not_applicable",
+            "bound_capability_verified",
+            "not_needed",
+            Some(200),
             Some("slack.url_verification"),
-            "not_run",
+            "none",
             "no_cleanup_required",
-            Some(
-                "Slack connector currently exposes Socket Mode and does not open an inbound HTTP Events API listener",
-            ),
+            None,
         ),
         common(
             "authorized_inbound_event",
@@ -344,6 +346,7 @@ fn slack_loopback_e2e_jsonl_matrix_redacts_sensitive_fixture_values() {
     }
     assert!(rendered.contains("\"event\":\"slack_loopback_e2e\""));
     assert!(rendered.contains("\"signature_result\":\"not_applicable_socket_mode\""));
+    assert!(rendered.contains("\"signature_result\":\"verified\""));
 }
 
 #[test]
@@ -441,11 +444,24 @@ async fn setup_handshake(connector: &mut SlackConnector, caps: &[&str]) -> Ed255
 async fn setup_configure(connector: &mut SlackConnector, base_url: &str) {
     connector
         .handle_configure(json!({
-            "token": "xoxb-test-token-xyz",
+            "credential_id": TEST_BOT_CREDENTIAL_ID,
             "base_url": base_url
         }))
         .await
         .expect("configure should succeed");
+}
+
+fn signed_slack_headers(body: &[u8]) -> HashMap<String, String> {
+    let timestamp = Utc::now().timestamp();
+    let base = format!("v0:{timestamp}:{}", String::from_utf8_lossy(body));
+    let signature = HmacSha256Verifier::new(TEST_SLACK_SIGNING_SECRET).compute(base.as_bytes());
+    let mut headers = HashMap::new();
+    headers.insert("x-slack-signature".to_string(), format!("v0={signature}"));
+    headers.insert(
+        "x-slack-request-timestamp".to_string(),
+        timestamp.to_string(),
+    );
+    headers
 }
 
 /// Standard Slack message response.
@@ -705,8 +721,11 @@ async fn post_message_happy_path() {
         assert_eq!(request.method, "POST");
         assert_eq!(request.path, "/chat.postMessage");
         assert_eq!(
-            request.headers.get("authorization").map(String::as_str),
-            Some("Bearer xoxb-test-token-xyz")
+            request
+                .headers
+                .get("x-fcp-credential-id")
+                .map(String::as_str),
+            Some(TEST_BOT_CREDENTIAL_ID)
         );
         assert_eq!(
             request.headers.get("accept").map(String::as_str),
@@ -1195,8 +1214,11 @@ async fn progress_draft_text_sends_then_edits() {
     let fake_server = StructuredFakeHttpServer::spawn(2, |idx, request| {
         assert_eq!(request.method, "POST");
         assert_eq!(
-            request.headers.get("authorization").map(String::as_str),
-            Some("Bearer xoxb-test-token-xyz")
+            request
+                .headers
+                .get("x-fcp-credential-id")
+                .map(String::as_str),
+            Some(TEST_BOT_CREDENTIAL_ID)
         );
         let body: serde_json::Value =
             serde_json::from_slice(&request.body).expect("slack draft body json");
@@ -1597,8 +1619,11 @@ async fn list_channels_happy_path() {
             Some("public_channel")
         );
         assert_eq!(
-            request.headers.get("authorization").map(String::as_str),
-            Some("Bearer xoxb-test-token-xyz")
+            request
+                .headers
+                .get("x-fcp-credential-id")
+                .map(String::as_str),
+            Some(TEST_BOT_CREDENTIAL_ID)
         );
         assert_eq!(
             request.headers.get("accept").map(String::as_str),
@@ -2269,6 +2294,159 @@ async fn read_operations_have_no_receipt() {
         .expect("invoke should succeed");
 
     assert!(result.get("receipt").is_none());
+}
+
+#[fcp_async_core::runtime::test]
+async fn events_api_url_verification_uses_verified_webhook_payload() {
+    let _ctx = AsyncTestContext::for_scenario("slack.events_api.url_verification");
+    let body = br#"{"type":"url_verification","challenge":"challenge-fixture"}"#;
+    let headers = signed_slack_headers(body);
+    let webhook = SlackWebhook::new(TEST_SLACK_SIGNING_SECRET);
+    let verified = webhook
+        .verify_and_parse(&headers, body)
+        .expect("Slack URL verification payload should verify");
+    assert_eq!(verified.event_type, "url_verification");
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.read"]).await;
+    let cap = generate_valid_token_for_operation(&key, "slack.read", "slack.handle_events_api");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "slack.handle_events_api",
+            "input": {
+                "payload": verified.payload,
+                "signature_result": "verified"
+            },
+            "capability_token": cap
+        }))
+        .await
+        .expect("verified URL challenge should succeed");
+
+    assert_eq!(result["status"], "url_verified");
+    assert_eq!(result["acknowledged"], true);
+    assert_eq!(result["event_emitted"], false);
+    assert_eq!(result["challenge"], "challenge-fixture");
+    assert_eq!(result["event_topic"], "slack.url_verification");
+    assert_eq!(result["signature_result"], "verified");
+    assert_eq!(result["fcp_error_mapping"], "none");
+}
+
+#[fcp_async_core::runtime::test]
+async fn events_api_event_callback_emits_after_monitor_policy() {
+    let _ctx = AsyncTestContext::for_scenario("slack.events_api.event_callback.allowed");
+    let mock_server = MockServer::start().await;
+    let body = br#"{"type":"event_callback","event_id":"EvHttp01","team_id":"T_HTTP_1","event":{"type":"message","user":"U_HTTP_1","channel":"C_HTTP_1","channel_type":"channel","text":"hello through events api","ts":"1700000000.000001"}}"#;
+    let headers = signed_slack_headers(body);
+    let webhook = SlackWebhook::new(TEST_SLACK_SIGNING_SECRET);
+    let verified = webhook
+        .verify_and_parse(&headers, body)
+        .expect("Slack event callback should verify");
+    assert_eq!(verified.event_type, "message");
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.read"]).await;
+    connector
+        .handle_configure(json!({
+            "credential_id": TEST_BOT_CREDENTIAL_ID,
+            "base_url": mock_server.uri(),
+            "monitor_policy": { "require_mention": false }
+        }))
+        .await
+        .expect("configure");
+
+    let mut event_rx = connector.subscribe_events();
+    let cap = generate_valid_token_for_operation(&key, "slack.read", "slack.handle_events_api");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "slack.handle_events_api",
+            "input": {
+                "payload": verified.payload,
+                "signature_result": "verified"
+            },
+            "capability_token": cap
+        }))
+        .await
+        .expect("verified event callback should succeed");
+
+    assert_eq!(result["status"], "event_emitted");
+    assert_eq!(result["acknowledged"], true);
+    assert_eq!(result["event_emitted"], true);
+    assert_eq!(result["event_topic"], "slack.message.new");
+    assert_eq!(result["sender_policy_decision"], "allowed");
+    assert_eq!(result["capability_decision"], "bound_capability_verified");
+    assert_eq!(result["event"]["topic"], "slack.message.new");
+    assert_eq!(result["event"]["cursor"], "EvHttp01");
+
+    let event = fcp_async_core::time::timeout(StdDuration::from_secs(1), event_rx.recv())
+        .await
+        .expect("timeout waiting for Events API event")
+        .expect("broadcast receive")
+        .expect("event payload");
+    assert_eq!(event.topic, "slack.message.new");
+    assert_eq!(event.cursor, "EvHttp01");
+    assert!(
+        event
+            .data
+            .resource_uris
+            .iter()
+            .any(|uri| uri == "slack:channel:C_HTTP_1")
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn events_api_event_callback_denied_by_monitor_policy_before_emit() {
+    let _ctx = AsyncTestContext::for_scenario("slack.events_api.event_callback.denied");
+    let mock_server = MockServer::start().await;
+    let body = br#"{"type":"event_callback","event_id":"EvHttp02","team_id":"T_HTTP_1","event":{"type":"message","user":"U_DENIED","channel":"C_DENIED","channel_type":"channel","text":"blocked events api message","ts":"1700000000.000002"}}"#;
+    let headers = signed_slack_headers(body);
+    let webhook = SlackWebhook::new(TEST_SLACK_SIGNING_SECRET);
+    let verified = webhook
+        .verify_and_parse(&headers, body)
+        .expect("Slack event callback should verify");
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.read"]).await;
+    connector
+        .handle_configure(json!({
+            "credential_id": TEST_BOT_CREDENTIAL_ID,
+            "base_url": mock_server.uri(),
+            "monitor_policy": {
+                "require_mention": false,
+                "allowed_channels": ["C_ALLOWED"]
+            }
+        }))
+        .await
+        .expect("configure");
+
+    let mut event_rx = connector.subscribe_events();
+    let cap = generate_valid_token_for_operation(&key, "slack.read", "slack.handle_events_api");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "slack.handle_events_api",
+            "input": {
+                "payload": verified.payload,
+                "signature_result": "verified"
+            },
+            "capability_token": cap
+        }))
+        .await
+        .expect("policy-denied event callback should acknowledge and drop");
+
+    assert_eq!(result["status"], "event_dropped");
+    assert_eq!(result["acknowledged"], true);
+    assert_eq!(result["event_emitted"], false);
+    assert_eq!(result["event_topic"], "slack.message.new");
+    assert_eq!(result["sender_policy_decision"], "denied");
+    assert_eq!(
+        result["fcp_error_mapping"],
+        "suppressed_before_event_envelope"
+    );
+    assert!(
+        fcp_async_core::time::timeout(StdDuration::from_millis(100), event_rx.recv())
+            .await
+            .is_err(),
+        "policy-denied Events API payload must not emit an EventEnvelope"
+    );
 }
 
 // ============================================================================
@@ -3006,7 +3184,7 @@ async fn lifecycle_introspect_lists_all_operations() {
     let result = connector.handle_introspect().await.unwrap();
 
     let ops = result["operations"].as_array().unwrap();
-    assert_eq!(ops.len(), 11);
+    assert_eq!(ops.len(), 12);
 
     let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
     for expected in &[
@@ -3017,6 +3195,7 @@ async fn lifecycle_introspect_lists_all_operations() {
         "slack.search_messages",
         "slack.list_channels",
         "slack.get_user_info",
+        "slack.handle_events_api",
         "slack.upload_file",
         "slack.download_file",
         "slack.add_reaction",
@@ -3108,8 +3287,8 @@ async fn socket_mode_subscribe_emits_event_envelope_and_ack() {
     let _key = setup_handshake(&mut connector, &["slack.read"]).await;
     connector
         .handle_configure(json!({
-            "token": "xoxb-test-token-xyz",
-            "app_token": "xapp-test-token-xyz",
+            "credential_id": TEST_BOT_CREDENTIAL_ID,
+            "socket_mode_credential_id": TEST_SOCKET_CREDENTIAL_ID,
             "base_url": mock_server.uri(),
             "monitor_policy": { "require_mention": false }
         }))
@@ -3230,8 +3409,8 @@ async fn socket_mode_monitor_policy_acks_but_drops_unauthorized_message() {
     let _key = setup_handshake(&mut connector, &["slack.read"]).await;
     connector
         .handle_configure(json!({
-            "token": "xoxb-test-token-xyz",
-            "app_token": "xapp-test-token-xyz",
+            "credential_id": TEST_BOT_CREDENTIAL_ID,
+            "socket_mode_credential_id": TEST_SOCKET_CREDENTIAL_ID,
             "base_url": mock_server.uri(),
             "monitor_policy": {
                 "bot_user_id": "U_BOT",
@@ -3385,8 +3564,8 @@ async fn socket_mode_monitor_policy_filters_commands_and_interactions() {
     let _key = setup_handshake(&mut connector, &["slack.read"]).await;
     connector
         .handle_configure(json!({
-            "token": "xoxb-test-token-xyz",
-            "app_token": "xapp-test-token-xyz",
+            "credential_id": TEST_BOT_CREDENTIAL_ID,
+            "socket_mode_credential_id": TEST_SOCKET_CREDENTIAL_ID,
             "base_url": mock_server.uri(),
             "monitor_policy": {
                 "require_mention": false,
@@ -3551,8 +3730,8 @@ async fn socket_mode_subscribe_reuses_single_connection() {
     let _key = setup_handshake(&mut connector, &["slack.read"]).await;
     connector
         .handle_configure(json!({
-            "token": "xoxb-test-token-xyz",
-            "app_token": "xapp-test-token-xyz",
+            "credential_id": TEST_BOT_CREDENTIAL_ID,
+            "socket_mode_credential_id": TEST_SOCKET_CREDENTIAL_ID,
             "base_url": mock_server.uri()
         }))
         .await
@@ -3685,8 +3864,11 @@ async fn socket_mode_reconnects_after_websocket_close_and_shutdown_cleans_up() {
         assert_eq!(request.method, "POST");
         assert_eq!(request.path, "/apps.connections.open");
         assert_eq!(
-            request.headers.get("authorization").map(String::as_str),
-            Some("Bearer xapp-test-token-xyz")
+            request
+                .headers
+                .get("x-fcp-credential-id")
+                .map(String::as_str),
+            Some(TEST_SOCKET_CREDENTIAL_ID)
         );
         StructuredHttpResponse::json(
             200,
@@ -3701,8 +3883,8 @@ async fn socket_mode_reconnects_after_websocket_close_and_shutdown_cleans_up() {
     let _key = setup_handshake(&mut connector, &["slack.read"]).await;
     connector
         .handle_configure(json!({
-            "token": "xoxb-test-token-xyz",
-            "app_token": "xapp-test-token-xyz",
+            "credential_id": TEST_BOT_CREDENTIAL_ID,
+            "socket_mode_credential_id": TEST_SOCKET_CREDENTIAL_ID,
             "base_url": fake_server.url(),
             "monitor_policy": { "require_mention": false }
         }))
@@ -3850,11 +4032,11 @@ async fn validate_add_reaction_missing_name() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn validate_configure_missing_token() {
-    let _ctx = AsyncTestContext::for_scenario("slack.validation.missing_token");
+async fn validate_configure_missing_credential_id() {
+    let _ctx = AsyncTestContext::for_scenario("slack.validation.missing_credential_id");
     let mut connector = SlackConnector::new();
     let result = connector.handle_configure(json!({})).await;
-    assert_invalid_request_contains(result, "token");
+    assert_invalid_request_contains(result, "credential_id");
 }
 
 #[fcp_async_core::runtime::test]

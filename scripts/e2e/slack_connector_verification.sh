@@ -31,7 +31,11 @@ promote_status() {
 
 classify_failure() {
   local log_path="$1"
-  if grep -Eq 'No space left on device|timeout: failed to execute process|RCH-E|connection reset by peer|missing worker system package|failed to execute process' "${log_path}"; then
+  if [[ ! -f "${log_path}" ]]; then
+    echo "infra_blocked"
+    return
+  fi
+  if grep -Eq 'No space left on device|timeout: failed to execute process|RCH-E|connection reset by peer|missing worker system package|failed to execute process|failed to get successful HTTP response from `https://index\.crates\.io/|Backend unavailable|unable to update registry `crates-io`|spurious network error' "${log_path}"; then
     echo "infra_blocked"
   else
     echo "failed"
@@ -92,7 +96,7 @@ live_skip_status="${LAST_STEP_STATUS}"
 run_rch_cargo_step clippy \
   cargo clippy -p fcp-slack --test integration --test live_verification --no-deps -- -D warnings
 clippy_status="${LAST_STEP_STATUS}"
-run_step diff_check git diff --check -- connectors/slack/tests/integration.rs connectors/slack/tests/live_verification.rs connectors/slack/README.md scripts/e2e/slack_connector_verification.sh
+run_step diff_check git diff --check -- connectors/slack/Cargo.toml connectors/slack/manifest.toml connectors/slack/src/connector.rs connectors/slack/tests/integration.rs connectors/slack/tests/live_verification.rs connectors/slack/README.md scripts/e2e/slack_connector_verification.sh
 diff_check_status="${LAST_STEP_STATUS}"
 
 if grep -a "^${SLACK_LOOPBACK_E2E_JSONL_PREFIX:-SLACK_LOOPBACK_E2E_JSONL} " "${OUT_ROOT}/logs/loopback_jsonl.log" \

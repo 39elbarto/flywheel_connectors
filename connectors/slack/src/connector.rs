@@ -11,10 +11,10 @@ use fcp_async_core::channel::{broadcast, watch};
 use fcp_async_core::sync::RwLock;
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult,
+    ConnectorId, CredentialId, EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult,
     HandshakeRequest, HandshakeResponse, IdempotencyClass, Introspection, ObjectId, OperationId,
     OperationInfo, Principal, RiskLevel, SafetyTier, SelfCheckReport, SessionId, SimulateRequest,
-    SimulateResponse, ThreadInfo, TrustLevel, ZoneId,
+    SimulateResponse, ThreadInfo, TrustLevel, ZoneId, reject_secret_config_material,
 };
 use fcp_sdk::{
     AgentId, ChannelId, ChatCoordinationAuditRecord, ChatCoordinationBackend,
@@ -28,12 +28,11 @@ use tracing::{info, instrument, warn};
 use url::Url;
 
 use crate::{
-    client::SlackClient,
+    client::{SlackAuth, SlackClient},
     error::SlackError,
     types::{DoctorCheck, DoctorReport, OperationReceipt},
 };
 
-const SLACK_API_HOST: &str = "slack.com";
 const SOCKET_EVENT_BUFFER_CAPACITY: usize = 200;
 const SOCKET_TOPIC_COMPONENT_MAX_CHARS: usize = 64;
 const SOCKET_SUBSCRIBE_TOPIC_MAX_CHARS: usize = 128;
@@ -49,6 +48,8 @@ const SLACK_PROGRESS_LINE_FALLBACK_MAX_CHARS: usize = 72;
 const SLACK_PROGRESS_FIELD_MAX_CHARS: usize = 1_800;
 const SLACK_PROGRESS_DETAIL_MAX_CHARS: usize = 48;
 const SLACK_PROGRESS_DRAFT_MIN_THROTTLE_MS: u64 = 250;
+const SLACK_EVENTS_API_OPERATION: &str = "slack.handle_events_api";
+const SLACK_EVENTS_API_VERIFIED_SIGNATURE_RESULT: &str = "verified";
 
 fn is_local_test_host(host: &str) -> bool {
     (cfg!(test) || cfg!(debug_assertions)) && matches!(host, "localhost" | "127.0.0.1" | "::1")
@@ -56,10 +57,9 @@ fn is_local_test_host(host: &str) -> bool {
 
 /// Validate a Slack `base_url` override.
 ///
-/// Direct-token mode pins the host to `slack.com`.
 /// Empty/whitespace overrides fall through to the client default upstream.
-/// Custom vault-proxy hosts are not supported here -
-/// Slack's connector does not yet have a `credential_id` auth mode.
+/// Secretless mode permits custom HTTPS hosts so tests and operator egress
+/// boundaries can inject the real bearer outside the connector process.
 fn validate_slack_base_url(raw: &str) -> FcpResult<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -89,13 +89,12 @@ fn validate_slack_base_url(raw: &str) -> FcpResult<String> {
         });
     }
     let local = is_local_test_host(host);
-    let host_ok = host.eq_ignore_ascii_case(SLACK_API_HOST) || local;
     let scheme_ok = parsed.scheme() == "https" || local;
-    if !host_ok || !scheme_ok {
+    if !scheme_ok {
         return Err(FcpError::InvalidRequest {
             code: 1003,
             message: format!(
-                "base_url must use https and {SLACK_API_HOST} (localhost/127.0.0.1/::1 allowed only in test/debug builds): {trimmed}"
+                "base_url must use https (localhost/127.0.0.1/::1 allowed only in test/debug builds): {trimmed}"
             ),
         });
     }
@@ -254,7 +253,7 @@ async fn connect_socket_mode_websocket(
 pub struct SlackConnector {
     base: Arc<BaseConnector>,
     client: Option<SlackClient>,
-    socket_mode_bearer: Option<String>,
+    socket_mode_bearer: Option<SlackAuth>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
     socket_mode_running: Arc<RwLock<bool>>,
@@ -327,36 +326,53 @@ impl SlackConnector {
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         self.stop_socket_mode().await;
+        reject_secret_config_material(&params)?;
 
-        let bot_auth = params
-            .get("token")
+        let bot_credential_id = params
+            .get("credential_id")
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .ok_or(FcpError::InvalidRequest {
                 code: 1003,
-                message: "Missing token in configuration".into(),
+                message: "Missing credential_id in configuration".into(),
+            })
+            .and_then(|raw| {
+                CredentialId::parse(raw).map_err(|e| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid credential_id: {e}"),
+                })
             })?;
 
         let base_url = match params.get("base_url").and_then(|v| v.as_str()) {
             Some(raw) => Some(validate_slack_base_url(raw)?),
             None => None,
         };
-        let app_auth = params
-            .get("app_token")
+
+        let socket_mode_credential_id = params
+            .get("socket_mode_credential_id")
             .and_then(|v| v.as_str())
             .map(str::trim)
-            .filter(|v| !v.is_empty());
-        let socket_mode_auth = app_auth.unwrap_or(bot_auth).to_string();
+            .filter(|v| !v.is_empty())
+            .map(|raw| {
+                CredentialId::parse(raw).map_err(|e| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid socket_mode_credential_id: {e}"),
+                })
+            })
+            .transpose()?;
+        let socket_mode_auth =
+            SlackAuth::CredentialId(socket_mode_credential_id.unwrap_or(bot_credential_id));
         let monitor_policy = SlackMonitorPolicy::from_config(params.get("monitor_policy"))?;
         let chat_coordination_config = parse_slack_chat_coordination_config(
             params.get("chat_coordination"),
             self.chat_coordination_config.clone(),
         )?;
 
-        let mut client = SlackClient::new(bot_auth).map_err(|e| FcpError::Internal {
-            message: format!("Failed to create HTTP client: {e}"),
-        })?;
+        let mut client = SlackClient::new_with_auth(SlackAuth::CredentialId(bot_credential_id))
+            .map_err(|e| FcpError::Internal {
+                message: format!("Failed to create HTTP client: {e}"),
+            })?;
 
         if let Some(url) = base_url {
             client = client.with_base_url(url);
@@ -373,7 +389,9 @@ impl SlackConnector {
 
         Ok(json!({
             "status": "configured",
-            "socket_mode_auth": if app_auth.is_some() { "app_token" } else { "bot_token_fallback" },
+            "auth_mode": "credential_id",
+            "credential_id": bot_credential_id.to_string(),
+            "socket_mode_auth": if socket_mode_credential_id.is_some() { "socket_mode_credential_id" } else { "bot_credential_id_fallback" },
             "monitor_policy": monitor_policy.to_redacted_json(),
         }))
     }
@@ -682,6 +700,45 @@ impl SlackConnector {
                     },
                 ),
                 op_info(
+                    SLACK_EVENTS_API_OPERATION,
+                    "Handle a host-verified Slack Events API payload",
+                    json!({
+                        "type": "object",
+                        "required": ["payload", "signature_result"],
+                        "properties": {
+                            "payload": { "type": "object", "description": "Slack Events API JSON payload after host-side signature/replay verification" },
+                            "signature_result": { "type": "string", "enum": ["verified"], "description": "Host webhook verifier result; unverified payloads are rejected" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["status", "acknowledged", "signature_result"],
+                        "properties": {
+                            "status": { "type": "string" },
+                            "acknowledged": { "type": "boolean" },
+                            "event_emitted": { "type": "boolean" },
+                            "challenge": { "type": "string" },
+                            "event_topic": { "type": "string" },
+                            "event": { "type": "object" }
+                        }
+                    }),
+                    "slack.read",
+                    RiskLevel::Medium,
+                    SafetyTier::Safe,
+                    IdempotencyClass::BestEffort,
+                    AgentHint {
+                        when_to_use: "Finish Slack Events API URL verification or event-callback ingestion after the host webhook verifier has authenticated the request.".into(),
+                        common_mistakes: vec![
+                            "Passing raw unverified HTTP payloads directly to the connector".into(),
+                            "Adding an inbound listener to this connector instead of using the host webhook boundary".into(),
+                        ],
+                        examples: vec![
+                            r#"{"payload":{"type":"url_verification","challenge":"challenge"},"signature_result":"verified"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("slack.get_channel_history")],
+                    },
+                ),
+                op_info(
                     "slack.upload_file",
                     "Upload host-resolved object content to Slack channels",
                     json!({
@@ -826,6 +883,7 @@ impl SlackConnector {
             message: format!("Failed to serialize introspection: {e}"),
         })?;
         if let Value::Object(map) = &mut value {
+            map.insert("secretless".to_string(), json!(true));
             map.insert(
                 "monitor_policy".to_string(),
                 self.monitor_policy.read().await.to_redacted_json(),
@@ -981,11 +1039,11 @@ impl SlackConnector {
                 .clone()
                 .ok_or_else(|| FcpError::InvalidRequest {
                     code: 1003,
-                    message: "Socket Mode token not configured".into(),
+                    message: "Socket Mode credential_id not configured".into(),
                 })?;
 
         let mut socket_client =
-            SlackClient::new(socket_mode_auth).map_err(|e| FcpError::Internal {
+            SlackClient::new_with_auth(socket_mode_auth).map_err(|e| FcpError::Internal {
                 message: format!("Failed to create Socket Mode HTTP client: {e}"),
             })?;
         socket_client = socket_client.with_base_url(http_client.base_url().to_string());
@@ -1231,6 +1289,7 @@ impl SlackConnector {
         };
 
         match operation {
+            SLACK_EVENTS_API_OPERATION => self.invoke_handle_events_api(input).await,
             "slack.post_message" => {
                 self.invoke_post_message(input, zone_id, claimant_agent_id)
                     .await
@@ -1258,6 +1317,110 @@ impl SlackConnector {
     }
 
     // ── Operation implementations ─────────────────────────────────
+
+    async fn invoke_handle_events_api(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let payload = require_object_value(&input, "payload")?;
+        let signature_result = require_str(&input, "signature_result")?;
+        if signature_result != SLACK_EVENTS_API_VERIFIED_SIGNATURE_RESULT {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "slack.handle_events_api requires signature_result=\"verified\" from the host webhook verifier".into(),
+            });
+        }
+
+        let payload_type =
+            payload
+                .get("type")
+                .and_then(Value::as_str)
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Slack Events API payload requires a string type".into(),
+                })?;
+
+        match payload_type {
+            "url_verification" => {
+                let challenge = payload.get("challenge").and_then(Value::as_str).ok_or(
+                    FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "Slack url_verification payload requires challenge".into(),
+                    },
+                )?;
+                Ok(json!({
+                    "status": "url_verified",
+                    "acknowledged": true,
+                    "event_emitted": false,
+                    "challenge": challenge,
+                    "event_topic": "slack.url_verification",
+                    "signature_result": signature_result,
+                    "sender_policy_decision": "not_applicable",
+                    "capability_decision": "bound_capability_verified",
+                    "fcp_error_mapping": "none",
+                }))
+            }
+            "event_callback" => {
+                self.handle_verified_events_api_callback(payload, signature_result)
+                    .await
+            }
+            other => Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Unsupported Slack Events API payload type: {other}"),
+            }),
+        }
+    }
+
+    async fn handle_verified_events_api_callback(
+        &self,
+        payload: &Value,
+        signature_result: &str,
+    ) -> FcpResult<serde_json::Value> {
+        let topic = socket_frame_topic("events_api", payload);
+        let policy_allowed = {
+            let policy = self.monitor_policy.read().await;
+            policy.allows_payload(&topic, payload)
+        };
+        if !policy_allowed {
+            info!(%topic, "Slack Events API payload suppressed by monitor policy");
+            return Ok(json!({
+                "status": "event_dropped",
+                "acknowledged": true,
+                "event_emitted": false,
+                "event_topic": topic,
+                "signature_result": signature_result,
+                "sender_policy_decision": "denied",
+                "capability_decision": "bound_capability_verified",
+                "fcp_error_mapping": "suppressed_before_event_envelope",
+            }));
+        }
+
+        let seq = self.next_event_seq.fetch_add(1, Ordering::Relaxed);
+        let event = socket_frame_to_event(
+            "events_api",
+            payload.get("event_id").and_then(Value::as_str),
+            payload,
+            &self.base.id,
+            &self.base.instance_id,
+            seq,
+        );
+        self.base.record_event();
+        if self.event_tx.send(Ok(event.clone())).is_err() {
+            warn!("Slack Events API event dropped: no active subscribers");
+        }
+
+        Ok(json!({
+            "status": "event_emitted",
+            "acknowledged": true,
+            "event_emitted": true,
+            "event_topic": topic,
+            "signature_result": signature_result,
+            "sender_policy_decision": "allowed",
+            "capability_decision": "bound_capability_verified",
+            "fcp_error_mapping": "none",
+            "event": event,
+        }))
+    }
 
     async fn invoke_post_message(
         &self,
@@ -1801,9 +1964,9 @@ impl SlackConnector {
             name: "token_present".into(),
             passed: client_present,
             message: if client_present {
-                "Bot token is configured".into()
+                "Credential reference is configured".into()
             } else {
-                "No token configured — call configure with a valid bot token".into()
+                "No credential_id configured — call configure with a credential_id".into()
             },
         });
 
@@ -1827,6 +1990,22 @@ impl SlackConnector {
                 message: format!("Failed to serialize doctor report: {e}"),
             });
         };
+
+        if client.auth().is_secretless() {
+            checks.push(DoctorCheck {
+                name: "credential_injection".into(),
+                passed: false,
+                message: "credential_id configured; live auth.test requires host egress injection"
+                    .into(),
+            });
+            let report = DoctorReport {
+                ready: false,
+                checks,
+            };
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize doctor report: {e}"),
+            });
+        }
 
         // Check 2: Token validity via auth.test (also proves network reachability)
         match client.auth_test().await {
@@ -1908,6 +2087,16 @@ impl SlackConnector {
                 message: format!("Failed to serialize self-check report: {e}"),
             });
         };
+
+        if client.auth().is_secretless() {
+            let report = SelfCheckReport::degraded(
+                "credential_injection_required",
+                "Secretless mode requires host egress credential injection",
+            );
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize self-check report: {e}"),
+            });
+        }
 
         let report = match client.auth_test().await {
             Ok((auth_info, scopes)) => {
@@ -3076,6 +3265,7 @@ fn socket_payload_principal(payload: &Value) -> Principal {
 
 fn required_capability_for_operation(operation: &str) -> &str {
     match operation {
+        SLACK_EVENTS_API_OPERATION => "slack.read",
         "slack.update_progress_draft" => "slack.write",
         "slack.upload_file" => "slack.files.write",
         "slack.download_file" => "slack.files.read",
@@ -3086,7 +3276,8 @@ fn required_capability_for_operation(operation: &str) -> &str {
 fn is_supported_operation(operation: &str) -> bool {
     matches!(
         operation,
-        "slack.post_message"
+        SLACK_EVENTS_API_OPERATION
+            | "slack.post_message"
             | "slack.reply_thread"
             | "slack.update_progress_draft"
             | "slack.get_channel_history"
@@ -3102,6 +3293,16 @@ fn is_supported_operation(operation: &str) -> bool {
 
 fn validate_simulate_input(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
     match operation {
+        SLACK_EVENTS_API_OPERATION => {
+            require_object_value(input, "payload")?;
+            let signature_result = require_str(input, "signature_result")?;
+            if signature_result != SLACK_EVENTS_API_VERIFIED_SIGNATURE_RESULT {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "slack.handle_events_api requires signature_result=\"verified\" from the host webhook verifier".into(),
+                });
+            }
+        }
         "slack.post_message" => {
             require_str(input, "channel")?;
             require_str(input, "text")?;
@@ -3185,6 +3386,18 @@ fn resource_uris_for_operation(
     };
 
     match operation {
+        SLACK_EVENTS_API_OPERATION => {
+            let payload = require_object_value(input, "payload")?;
+            if let Some(channel) = socket_payload_channel(payload) {
+                push_unique(format!("slack:channel:{channel}"));
+            }
+            if let Some(user) = socket_payload_user(payload) {
+                push_unique(format!("slack:user:{user}"));
+            }
+            if let Some(team_id) = payload.get("team_id").and_then(Value::as_str) {
+                push_unique(format!("slack:team:{team_id}"));
+            }
+        }
         "slack.post_message" => {
             let channel = require_str(input, "channel")?;
             push_unique(format!("slack:channel:{channel}"));
@@ -3257,6 +3470,21 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
             code: 1003,
             message: format!("Missing required field: {field}"),
         })
+}
+
+fn require_object_value<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a Value> {
+    let value = input.get(field).ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Missing required field: {field}"),
+    })?;
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Field `{field}` must be an object"),
+        })
+    }
 }
 
 fn optional_slack_thread_ts<'a>(
@@ -3392,17 +3620,10 @@ mod tests {
     }
 
     #[test]
-    fn validate_slack_base_url_rejects_other_hosts() {
-        let err = validate_slack_base_url("https://evil.example.com/api").unwrap_err();
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("slack.com"), "got: {message}");
-            }
-            other => assert!(
-                matches!(other, FcpError::InvalidRequest { .. }),
-                "expected InvalidRequest, got {other:?}"
-            ),
-        }
+    fn validate_slack_base_url_accepts_custom_https_hosts_for_secretless() {
+        let normalized = validate_slack_base_url("https://proxy.example.com/api/")
+            .expect("custom https host is allowed for secretless egress");
+        assert_eq!(normalized, "https://proxy.example.com/api");
     }
 
     #[test]
@@ -3412,10 +3633,10 @@ mod tests {
     }
 
     #[test]
-    fn validate_slack_base_url_rejects_substring_smuggle() {
-        // "api.slack.com" subdomain-like smuggling via evil host containing the string
-        let err = validate_slack_base_url("https://evil.com/slack.com").unwrap_err();
-        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    fn validate_slack_base_url_accepts_custom_https_path_components() {
+        let normalized = validate_slack_base_url("https://proxy.example.com/slack/api")
+            .expect("custom https proxy paths are allowed for secretless egress");
+        assert_eq!(normalized, "https://proxy.example.com/slack/api");
     }
 
     #[test]
@@ -3717,7 +3938,7 @@ mod tests {
                 .unwrap()
                 .with_base_url("http://localhost:9999"),
         );
-        connector.socket_mode_bearer = Some("xapp-test-token".to_string());
+        connector.socket_mode_bearer = Some(SlackAuth::Token("xapp-test-token".to_string()));
         connector.base.set_configured(true);
 
         let err = connector
@@ -4011,11 +4232,12 @@ mod tests {
         assert!(op_ids.contains(&"slack.search_messages"));
         assert!(op_ids.contains(&"slack.list_channels"));
         assert!(op_ids.contains(&"slack.get_user_info"));
+        assert!(op_ids.contains(&SLACK_EVENTS_API_OPERATION));
         assert!(op_ids.contains(&"slack.upload_file"));
         assert!(op_ids.contains(&"slack.download_file"));
         assert!(op_ids.contains(&"slack.add_reaction"));
         assert!(op_ids.contains(&"slack.set_channel_topic"));
-        assert_eq!(ops.len(), 11);
+        assert_eq!(ops.len(), 12);
     }
 
     // ── Doctor / Provisioning tests ──────────────────────────────
@@ -4623,6 +4845,7 @@ mod tests {
             ("slack.get_channel_history", &["channel"]),
             ("slack.search_messages", &["query"]),
             ("slack.get_user_info", &["user"]),
+            (SLACK_EVENTS_API_OPERATION, &["payload", "signature_result"]),
             (
                 "slack.upload_file",
                 &["channels", "content_object_id", "resolved_content"],
@@ -5274,7 +5497,7 @@ mod tests {
     // ── Configure test ───────────────────────────────────────────
 
     #[fcp_async_core::runtime::test]
-    async fn test_configure_missing_token() {
+    async fn test_configure_missing_credential_id() {
         let mut connector = SlackConnector::new();
         let result = connector.handle_configure(json!({})).await;
         assert!(result.is_err());
@@ -5282,6 +5505,105 @@ mod tests {
             result.unwrap_err(),
             FcpError::InvalidRequest { .. }
         ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_raw_token_fields() {
+        let mut connector = SlackConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "token": "xoxb-test-token",
+                "credential_id": CredentialId::new().to_string()
+            }))
+            .await;
+        assert!(matches!(
+            result,
+            Err(FcpError::ConfigurationLeakedSecret { .. })
+        ));
+
+        let result = connector
+            .handle_configure(json!({
+                "app_token": "xapp-test-token",
+                "credential_id": CredentialId::new().to_string()
+            }))
+            .await;
+        assert!(matches!(
+            result,
+            Err(FcpError::ConfigurationLeakedSecret { .. })
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_secret_shaped_values() {
+        let cases = [
+            ("Bearer abcdefgh123", "raw_secret_config_value_bearer"),
+            (
+                "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxMjMifQ.abcdefgh",
+                "raw_secret_config_value_jwt",
+            ),
+            ("sk-live-test", "raw_secret_config_value_openai"),
+            ("xoxb-1234567890abcdef", "raw_secret_config_value_slack"),
+            ("ghp_ABCdef123456", "raw_secret_config_value_github"),
+            ("AKIAIOSFODNN7EXAMPLE", "raw_secret_config_value_aws"),
+        ];
+
+        for (sample, expected_detector) in cases {
+            let mut connector = SlackConnector::new();
+            let result = connector
+                .handle_configure(json!({
+                    "credential_id": CredentialId::new().to_string(),
+                    "metadata": sample
+                }))
+                .await;
+
+            match result {
+                Err(FcpError::ConfigurationLeakedSecret { detector, .. }) => {
+                    assert_eq!(detector, expected_detector);
+                }
+                other => panic!("Expected ConfigurationLeakedSecret, got {other:?}"),
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_credential_id_sets_secretless_auth() {
+        let mut connector = SlackConnector::new();
+        let credential_id = CredentialId::new();
+        let socket_mode_credential_id = CredentialId::new();
+        let result = connector
+            .handle_configure(json!({
+                "credential_id": credential_id.to_string(),
+                "socket_mode_credential_id": socket_mode_credential_id.to_string(),
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["status"], "configured");
+        assert_eq!(result["auth_mode"], "credential_id");
+        assert_eq!(result["socket_mode_auth"], "socket_mode_credential_id");
+        assert!(connector.client.as_ref().unwrap().auth().is_secretless());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_with_credential_id_requires_injection() {
+        let mut connector = SlackConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": CredentialId::new().to_string(),
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
+
+        let value = connector.handle_doctor().await.unwrap();
+        assert_eq!(value["ready"], false);
+        let checks = value["checks"].as_array().unwrap();
+        assert!(
+            checks.iter().any(|check| {
+                check["name"] == "credential_injection" && check["passed"] == false
+            })
+        );
     }
 
     // ── Require_str helper ───────────────────────────────────────
@@ -5325,6 +5647,22 @@ mod tests {
         let value = connector.handle_self_check().await.unwrap();
         assert_eq!(value["status"], "degraded");
         assert_eq!(value["reason_code"], "not_configured");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_with_credential_id_degraded() {
+        let mut connector = SlackConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": CredentialId::new().to_string(),
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
+
+        let value = connector.handle_self_check().await.unwrap();
+        assert_eq!(value["status"], "degraded");
+        assert_eq!(value["reason_code"], "credential_injection_required");
     }
 
     #[fcp_async_core::runtime::test]

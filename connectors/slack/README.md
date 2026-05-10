@@ -140,7 +140,7 @@ The current Slack README slice documents the existing runtime surface:
 - Chat coordination defaults to in-memory coordination and can parse `agent_mail`, `mesh_gossip`, or `in_memory` backend configuration.
 - Progress draft IDs are caller-owned and bound to a channel/thread after first use.
 - Progress draft updates can be skipped as empty, duplicate, throttled, stopped, or sealed.
-- The connector does not open inbound HTTP sockets, run a Slack app installer, or store durable event cursors.
+- The connector does not open inbound HTTP sockets, run a Slack app installer, or store durable event cursors. Slack Events API requests are verified by the host/fcp-webhook boundary and handed to `slack.handle_events_api` as verified payloads.
 
 ## Operation Inventory
 
@@ -153,6 +153,7 @@ The current Slack README slice documents the existing runtime surface:
 | `slack.search_messages` | `search.messages` | `slack.search_messages` | `slack.read` | `Safe` | `Low` | `Strict` | `query` |
 | `slack.list_channels` | `conversations.list` | `slack.list_channels` | `slack.read` | `Safe` | `Low` | `Strict` | optional `types` |
 | `slack.get_user_info` | `users.info` | `slack.get_user_info` | `slack.read` | `Safe` | `Low` | `Strict` | `user` |
+| `slack.handle_events_api` | Host/fcp-webhook verified Events API payload | `slack.read` | `slack.read` | `Safe` | `Medium` | `BestEffort` | `payload`, `signature_result="verified"` |
 | `slack.upload_file` | `files.upload` | `slack.files.write` | `slack.files.write` | `Risky` | `Medium` | `None` | `channels`, `content_object_id`, `resolved_content` |
 | `slack.download_file` | `files.info` metadata | `slack.files.read` | `slack.files.read` | `Safe` | `Low` | `Strict` | `file_id` |
 | `slack.add_reaction` | `reactions.add` | `slack.add_reaction` | `slack.write` | `Safe` | `Low` | `BestEffort` | `channel`, `timestamp`, `name` |
@@ -165,7 +166,7 @@ The current implementation does not include:
 - Slack OAuth installation, token refresh, app manifest creation, or workspace provisioning
 - Slack admin, audit logs, SCIM, user-group, Enterprise Grid, Workflow Builder, Canvas, Lists, or app-management APIs
 - durable event replay, durable subscriptions, message cursors, queueing, dead-letter storage, or exactly-once Socket Mode processing
-- public HTTP Events API request verification or inbound HTTP request URL handling
+- connector-owned public HTTP Events API request verification or inbound HTTP request URL handling
 - full file byte download, durable file storage, file upload streaming, multipart upload, or external object-store integration
 - arbitrary Slack Web API proxying, granular per-channel policy storage, or rate-limit pool enforcement
 - approval-token verification for message/file/topic mutations
@@ -230,7 +231,7 @@ rch exec -- cargo fmt --check
 
 - Use a bot token with only the Slack scopes required by the operations you plan to invoke.
 - Use a real app-level `xapp` token for Socket Mode; bot-token fallback is only a runtime fallback, not proof that Socket Mode will work.
-- `scripts/e2e/slack_connector_verification.sh` is the redaction-safe replay bundle for no-live-credential loopback evidence. It runs Cargo proof through `rch`, captures `SLACK_LOOPBACK_E2E_JSONL` and `SLACK_LIVE_E2E_JSONL` rows, and records structured skip rows for surfaces that require live Slack credentials or an HTTP Events API listener.
+- `scripts/e2e/slack_connector_verification.sh` is the redaction-safe replay bundle for no-live-credential loopback evidence. It runs Cargo proof through `rch`, captures `SLACK_LOOPBACK_E2E_JSONL` and `SLACK_LIVE_E2E_JSONL` rows, covers Slack Events API URL verification through a host-verified connector payload, and records structured skip rows only for live Slack credential surfaces.
 - The optional live-smoke evidence lane for canary reply and mention-gating is intentionally side-effect gated. Without an operator credential lease and explicit write approval, `cargo test -p fcp-slack --test live_verification slack_live_smoke_structured_skip_jsonl -- --nocapture` emits redaction-safe `SLACK_LIVE_E2E_JSONL` skip rows and writes `target/fcp-slack/live-smoke-evidence.jsonl` unless `SLACK_LIVE_E2E_ARTIFACT` is set.
 - Treat message, file, and topic operations as high-review until approval verification is implemented.
 - Keep `monitor_policy.require_mention` enabled for public channels unless the channel is explicitly allowed for free response.

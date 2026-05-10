@@ -5,6 +5,7 @@
 //! that host and SDK code can share as the mesh-native path lands.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use fcp_cbor::{CanonicalSerializer, SchemaId, SerializationError};
 use fcp_prelude::{
@@ -26,6 +27,28 @@ use crate::{ObjectStore, ObjectStoreError};
 /// name here gives host adapters one canonical spelling when they expose the
 /// cache-vs-canonical distinction to operators.
 pub const CONNECTOR_STATE_CACHE_MARKER: &str = ".fcp-cache-only";
+
+/// Tracing target for connector-state storage events.
+pub const CONNECTOR_STATE_TRACING_TARGET: &str = "fcp.connector_state";
+/// Structured event name emitted for connector-state reads.
+pub const CONNECTOR_STATE_READ_EVENT: &str = "fcp.connector_state.read";
+/// Structured event name emitted for connector-state writes.
+pub const CONNECTOR_STATE_WRITE_EVENT: &str = "fcp.connector_state.write";
+/// Structured event name emitted for connector-state snapshots.
+pub const CONNECTOR_STATE_SNAPSHOT_EVENT: &str = "fcp.connector_state.snapshot";
+/// Structured event name emitted for connector-state compaction.
+pub const CONNECTOR_STATE_COMPACT_EVENT: &str = "fcp.connector_state.compact";
+/// Structured event name reserved for host cache fall-through paths.
+pub const CONNECTOR_STATE_FALL_THROUGH_EVENT: &str = "fcp.connector_state.fall_through";
+/// Counter for connector-state writes by result.
+pub const CONNECTOR_STATE_WRITES_TOTAL_METRIC: &str = "fcp_connector_state_writes_total";
+/// Counter for host-local connector-state cache hits.
+pub const CONNECTOR_STATE_CACHE_HITS_TOTAL_METRIC: &str = "fcp_connector_state_cache_hits_total";
+/// Counter for cache misses falling through to canonical storage.
+pub const CONNECTOR_STATE_FALL_THROUGH_TOTAL_METRIC: &str =
+    "fcp_connector_state_fall_through_total";
+/// Histogram for connector-state operation latency in seconds.
+pub const CONNECTOR_STATE_LATENCY_SECONDS_METRIC: &str = "fcp_connector_state_latency_seconds";
 
 /// Errors returned by [`FcpStoreConnectorStateStore`].
 #[derive(Debug, Error)]
@@ -187,6 +210,23 @@ impl FcpStoreConnectorStateStore {
     /// Returns an error if a matching root object is malformed or fails
     /// content-id verification.
     pub async fn read_root(&self) -> Result<Option<(ObjectId, ConnectorStateRoot)>> {
+        let started = Instant::now();
+        let result = self.read_root_inner().await;
+        let telemetry_result = match &result {
+            Ok(Some(_)) => "hit",
+            Ok(None) => "miss",
+            Err(_) => "error",
+        };
+        self.record_operation_telemetry(
+            CONNECTOR_STATE_READ_EVENT,
+            "read",
+            telemetry_result,
+            started,
+        );
+        result
+    }
+
+    async fn read_root_inner(&self) -> Result<Option<(ObjectId, ConnectorStateRoot)>> {
         let mut best: Option<(ObjectId, ConnectorStateRoot)> = None;
 
         for object_id in self.object_store.list_zone(&self.zone_id).await {
@@ -237,6 +277,30 @@ impl FcpStoreConnectorStateStore {
         &self,
         state_obj: ConnectorStateObject,
     ) -> Result<ConnectorStateAppendOutcome> {
+        let started = Instant::now();
+        let result = self.append_object_inner(state_obj).await;
+        let telemetry_result = match &result {
+            Ok(ConnectorStateAppendOutcome::Committed { .. }) => "committed",
+            Ok(ConnectorStateAppendOutcome::Conflict { .. }) => "conflict",
+            Err(_) => "error",
+        };
+        fcp_telemetry::metrics::increment_counter(
+            CONNECTOR_STATE_WRITES_TOTAL_METRIC,
+            &[("result", telemetry_result)],
+        );
+        self.record_operation_telemetry(
+            CONNECTOR_STATE_WRITE_EVENT,
+            "write",
+            telemetry_result,
+            started,
+        );
+        result
+    }
+
+    async fn append_object_inner(
+        &self,
+        state_obj: ConnectorStateObject,
+    ) -> Result<ConnectorStateAppendOutcome> {
         self.validate_incoming_state_object(&state_obj)?;
 
         let current = self.current_head().await?;
@@ -280,6 +344,27 @@ impl FcpStoreConnectorStateStore {
     /// # Errors
     /// Returns an error if a state object for this connector is malformed.
     pub async fn read_chain(
+        &self,
+        after_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<(ObjectId, ConnectorStateObject)>> {
+        let started = Instant::now();
+        let result = self.read_chain_inner(after_seq, limit).await;
+        let telemetry_result = match &result {
+            Ok(states) if states.is_empty() => "miss",
+            Ok(_) => "hit",
+            Err(_) => "error",
+        };
+        self.record_operation_telemetry(
+            CONNECTOR_STATE_READ_EVENT,
+            "read",
+            telemetry_result,
+            started,
+        );
+        result
+    }
+
+    async fn read_chain_inner(
         &self,
         after_seq: Option<u64>,
         limit: usize,
@@ -374,6 +459,19 @@ impl FcpStoreConnectorStateStore {
     /// # Errors
     /// Returns an error if state loading or retention updates fail.
     pub async fn compact(&self, before_seq: u64) -> Result<usize> {
+        let started = Instant::now();
+        let result = self.compact_inner(before_seq).await;
+        let telemetry_result = if result.is_ok() { "ok" } else { "error" };
+        self.record_operation_telemetry(
+            CONNECTOR_STATE_COMPACT_EVENT,
+            "compact",
+            telemetry_result,
+            started,
+        );
+        result
+    }
+
+    async fn compact_inner(&self, before_seq: u64) -> Result<usize> {
         let states = self.read_chain(None, usize::MAX).await?;
         let mut updated = 0;
         for (object_id, state) in states {
@@ -456,6 +554,23 @@ impl FcpStoreConnectorStateStore {
     }
 
     async fn emit_snapshot(
+        &self,
+        covers_head: ObjectId,
+        state_obj: &ConnectorStateObject,
+    ) -> Result<ObjectId> {
+        let started = Instant::now();
+        let result = self.emit_snapshot_inner(covers_head, state_obj).await;
+        let telemetry_result = if result.is_ok() { "emitted" } else { "error" };
+        self.record_operation_telemetry(
+            CONNECTOR_STATE_SNAPSHOT_EVENT,
+            "snapshot",
+            telemetry_result,
+            started,
+        );
+        result
+    }
+
+    async fn emit_snapshot_inner(
         &self,
         covers_head: ObjectId,
         state_obj: &ConnectorStateObject,
@@ -733,6 +848,31 @@ impl FcpStoreConnectorStateStore {
         })
     }
 
+    fn record_operation_telemetry(
+        &self,
+        event_type: &'static str,
+        operation: &'static str,
+        result: &'static str,
+        started: Instant,
+    ) {
+        let latency_seconds = started.elapsed().as_secs_f64();
+        fcp_telemetry::metrics::record_histogram(
+            CONNECTOR_STATE_LATENCY_SECONDS_METRIC,
+            latency_seconds,
+            &[("operation", operation), ("result", result)],
+        );
+        tracing::info!(
+            target: CONNECTOR_STATE_TRACING_TARGET,
+            event_type,
+            connector_id = %self.connector_id,
+            zone_id = %self.zone_id,
+            operation,
+            result,
+            latency_seconds,
+            metric_name = CONNECTOR_STATE_LATENCY_SECONDS_METRIC,
+        );
+    }
+
     fn to_connector_state_error(&self, err: ConnectorStateStoreError) -> ConnectorStateError {
         match err {
             ConnectorStateStoreError::ObjectStore(err) => ConnectorStateError::StorageUnavailable {
@@ -1007,6 +1147,37 @@ mod tests {
     #[test]
     fn cache_marker_name_is_canonical() {
         assert_eq!(CONNECTOR_STATE_CACHE_MARKER, ".fcp-cache-only");
+    }
+
+    #[test]
+    fn telemetry_contract_names_match_connector_state_acceptance() {
+        assert_eq!(CONNECTOR_STATE_READ_EVENT, "fcp.connector_state.read");
+        assert_eq!(CONNECTOR_STATE_WRITE_EVENT, "fcp.connector_state.write");
+        assert_eq!(
+            CONNECTOR_STATE_SNAPSHOT_EVENT,
+            "fcp.connector_state.snapshot"
+        );
+        assert_eq!(CONNECTOR_STATE_COMPACT_EVENT, "fcp.connector_state.compact");
+        assert_eq!(
+            CONNECTOR_STATE_FALL_THROUGH_EVENT,
+            "fcp.connector_state.fall_through"
+        );
+        assert_eq!(
+            CONNECTOR_STATE_WRITES_TOTAL_METRIC,
+            "fcp_connector_state_writes_total"
+        );
+        assert_eq!(
+            CONNECTOR_STATE_CACHE_HITS_TOTAL_METRIC,
+            "fcp_connector_state_cache_hits_total"
+        );
+        assert_eq!(
+            CONNECTOR_STATE_FALL_THROUGH_TOTAL_METRIC,
+            "fcp_connector_state_fall_through_total"
+        );
+        assert_eq!(
+            CONNECTOR_STATE_LATENCY_SECONDS_METRIC,
+            "fcp_connector_state_latency_seconds"
+        );
     }
 
     #[test]

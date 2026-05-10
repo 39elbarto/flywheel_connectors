@@ -52,7 +52,12 @@ pub use compatibility_ledger::{
     MemoryCompatibilityLedgerStore,
 };
 pub use connector_state::{
-    CONNECTOR_STATE_CACHE_MARKER, ConnectorStateStoreError, FcpStoreConnectorStateStore,
+    CONNECTOR_STATE_CACHE_HITS_TOTAL_METRIC, CONNECTOR_STATE_CACHE_MARKER,
+    CONNECTOR_STATE_COMPACT_EVENT, CONNECTOR_STATE_FALL_THROUGH_EVENT,
+    CONNECTOR_STATE_FALL_THROUGH_TOTAL_METRIC, CONNECTOR_STATE_LATENCY_SECONDS_METRIC,
+    CONNECTOR_STATE_READ_EVENT, CONNECTOR_STATE_SNAPSHOT_EVENT, CONNECTOR_STATE_TRACING_TARGET,
+    CONNECTOR_STATE_WRITE_EVENT, CONNECTOR_STATE_WRITES_TOTAL_METRIC, ConnectorStateStoreError,
+    FcpStoreConnectorStateStore,
 };
 pub use coverage::{CoverageEvaluation, CoverageHealth, SymbolDistribution};
 pub use durable::{

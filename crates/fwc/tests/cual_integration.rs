@@ -4384,12 +4384,17 @@ fn e2e_mesh_cutover_gates_reports_skip_schema_for_missing_telemetry() {
     let payload = run_json_ok(&["--json", "mesh", "cutover-gates"]);
     assert_eq!(payload["command"], "mesh");
     assert_eq!(payload["subcommand"], "cutover-gates");
-    assert_eq!(payload["schema_version"], "1.1.0");
+    assert_eq!(payload["schema_version"], "1.2.0");
     assert!(
         payload["data_hash"]
             .as_str()
             .is_some_and(|hash| hash.starts_with("sha256:") && hash.len() == 71),
         "cutover gates payload must include a stable sha256-prefixed data_hash"
+    );
+    assert_eq!(payload["live_telemetry"]["state"], "not-requested");
+    assert_eq!(
+        payload["live_telemetry"]["reason_code"],
+        "host-not-requested"
     );
     assert_eq!(payload["overall_status"], "skip");
     assert_eq!(payload["gate_count"], 4);
@@ -4454,12 +4459,73 @@ fn e2e_mesh_cutover_gates_concurrent_snapshot_hash_is_stable() {
 
     assert_eq!(first["status"], "ok");
     assert_eq!(second["status"], "ok");
-    assert_eq!(first["schema_version"], "1.1.0");
-    assert_eq!(second["schema_version"], "1.1.0");
+    assert_eq!(first["schema_version"], "1.2.0");
+    assert_eq!(second["schema_version"], "1.2.0");
     assert_eq!(first["gate_count"], second["gate_count"]);
     assert_eq!(
         first["data_hash"], second["data_hash"],
         "same-snapshot concurrent cutover-gates runs must agree on data_hash"
+    );
+}
+
+#[test]
+fn e2e_mesh_cutover_gates_network_failure_skips_with_logged_reason() {
+    let (exit_code, payload, _stderr) = run_json(&[
+        "--json",
+        "--host",
+        "http://127.0.0.1:9",
+        "mesh",
+        "cutover-gates",
+    ]);
+
+    assert_eq!(
+        exit_code, 0,
+        "unreachable host should produce skipped gates rather than fail open or abort"
+    );
+    assert_eq!(payload["schema_version"], "1.2.0");
+    assert_eq!(payload["overall_status"], "skip");
+    assert_eq!(payload["live_telemetry"]["state"], "unavailable");
+    assert_eq!(
+        payload["live_telemetry"]["reason_code"],
+        "host-admin-api-unreachable"
+    );
+    assert!(
+        payload["gates"]
+            .as_array()
+            .expect("gates must be an array")
+            .iter()
+            .all(|gate| gate["measured_value"]["skip_reason"] == "host-admin-api-unreachable")
+    );
+}
+
+#[test]
+fn e2e_mesh_cutover_gates_restart_recovery_preserves_snapshot_hash() {
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub", 12, "safe");
+    let routes = vec![(
+        "POST /rpc/discover".to_owned(),
+        mock_discovery_response_json(std::slice::from_ref(&github_connector)),
+    )];
+
+    let (host_before, server_before) = spawn_mock_host_sequence(routes.clone());
+    let before = run_json_ok(&["--json", "--host", &host_before, "mesh", "cutover-gates"]);
+    server_before
+        .join()
+        .expect("pre-restart mock host should complete");
+
+    let (host_after, server_after) = spawn_mock_host_sequence(routes);
+    let after = run_json_ok(&["--json", "--host", &host_after, "mesh", "cutover-gates"]);
+    server_after
+        .join()
+        .expect("post-restart mock host should complete");
+
+    assert_eq!(before["schema_version"], "1.2.0");
+    assert_eq!(after["schema_version"], "1.2.0");
+    assert_eq!(before["live_telemetry"]["state"], "reachable");
+    assert_eq!(after["live_telemetry"]["state"], "reachable");
+    assert_eq!(
+        before["data_hash"], after["data_hash"],
+        "host restart with the same catalog snapshot must preserve cutover-gate data_hash"
     );
 }
 

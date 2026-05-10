@@ -20,8 +20,9 @@ default until every gate is green from live telemetry.
 
 ## Recovery
 
-1. Run `fwc mesh cutover-gates --json` and record `overall_status`,
-   `data_hash`, `red_gate_ids`, and each gate's `measured_value`.
+1. Run `fwc --host <endpoint> mesh cutover-gates --json` and record
+   `overall_status`, `data_hash`, `live_telemetry`, `red_gate_ids`, and each
+   gate's `measured_value`.
 2. For `mesh-inventory-placement`, run
    `fwc mesh explain-availability <connector> --host <endpoint> --json` for the
    candidate connectors and confirm `placement.has_mesh_replica` plus
@@ -41,13 +42,14 @@ default until every gate is green from live telemetry.
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | All gates report `skip`. | Live mesh/audit/policy telemetry routes are unavailable to `fwc`. | Wire the missing host routes before using cutover status as a graduation signal. |
+| `live_telemetry.state = "unavailable"`. | The host-admin probe failed during evaluation, commonly because the host was down, restarting, or unreachable. | Re-run after host recovery and compare `data_hash`; the same snapshot after restart must keep the same digest. |
 | One gate reports `red`. | The route exists, but the measured value misses its target. | Fix the underlying replication, quorum, or distribution issue; do not lower the target unless the zone SLO explicitly allows it. |
 | JSON schema validation fails. | The CLI output changed without a matching schema bump. | Update `crates/fwc/schemas/mesh_cutover_gates.schema.json` and the conformance test in the same change. |
 
 ## Redacted Log Examples
 
 ```json
-{"event_type":"fcp.cutover_gate.evaluated","bead_id":"flywheel_connectors-hr0rr.2.1","actor":"fwc","redaction_scope":"public","correlation_id":"cutover-20260510T000000Z","timestamp":"2026-05-10T00:00:00.000Z","gate_id":"mesh-inventory-placement","status":"skip","measured_value":{"telemetry_state":"unavailable"},"target":{"connectors_meeting_predicate":3,"placement.replica_count":2},"evaluated_in_ms":3,"metric_name":"fcp_cutover_gate_status","metric_type":"gauge","metric_label_gate_id":"mesh-inventory-placement","metric_value":1}
+{"event_type":"fcp.cutover_gate.evaluated","bead_id":"flywheel_connectors-hr0rr.2.1","actor":"fwc","redaction_scope":"public","correlation_id":"cutover-20260510T000000Z","timestamp":"2026-05-10T00:00:00.000Z","gate_id":"mesh-inventory-placement","status":"skip","measured_value":{"telemetry_state":"unavailable","skip_reason":"host-admin-api-unreachable","live_telemetry":{"source":"host-admin-api","state":"unavailable","reason_code":"host-admin-api-unreachable","direct_gate_telemetry_available":false,"catalog_connector_count":null}},"target":{"connectors_meeting_predicate":3,"placement.replica_count":2},"evaluated_in_ms":3,"metric_name":"fcp_cutover_gate_status","metric_type":"gauge","metric_label_gate_id":"mesh-inventory-placement","metric_value":1}
 {"event_type":"fcp.cutover_gate.evaluated","bead_id":"flywheel_connectors-hr0rr.2.1","actor":"fwc","redaction_scope":"public","correlation_id":"cutover-20260510T000001Z","timestamp":"2026-05-10T00:00:01.000Z","gate_id":"mesh-audit-chain-quorum","status":"red","measured_value":{"quorum_signed_checkpoints":0,"quorum_signers":1},"target":{"quorum_signed_checkpoints":1,"quorum_signers":2},"evaluated_in_ms":4,"metric_name":"fcp_cutover_gate_status","metric_type":"gauge","metric_label_gate_id":"mesh-audit-chain-quorum","metric_value":0}
 ```
 

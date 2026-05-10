@@ -11,6 +11,7 @@
     "subcommand",
     "schema_version",
     "data_hash",
+    "live_telemetry",
     "overall_status",
     "gate_count",
     "red_gate_ids",
@@ -24,11 +25,12 @@
     "status": { "const": "ok" },
     "command": { "const": "mesh" },
     "subcommand": { "const": "cutover-gates" },
-    "schema_version": { "const": "1.1.0" },
+    "schema_version": { "const": "1.2.0" },
     "data_hash": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
     },
+    "live_telemetry": { "$ref": "#/$defs/live_telemetry" },
     "overall_status": { "$ref": "#/$defs/cutover_gate_status" },
     "gate_count": {
       "type": "integer",
@@ -101,6 +103,58 @@
     },
     "json_object": {
       "type": "object"
+    },
+    "nullable_non_negative_integer": {
+      "anyOf": [
+        { "$ref": "#/$defs/non_negative_integer" },
+        { "type": "null" }
+      ]
+    },
+    "nullable_sha256": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        { "type": "null" }
+      ]
+    },
+    "live_telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "state",
+        "reason_code",
+        "direct_gate_telemetry_available",
+        "endpoint_hash",
+        "catalog_connector_count",
+        "missing_routes",
+        "message"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": ["none", "host-admin-api"]
+        },
+        "state": {
+          "type": "string",
+          "enum": ["not-requested", "reachable", "unavailable"]
+        },
+        "reason_code": { "$ref": "#/$defs/non_empty_string" },
+        "direct_gate_telemetry_available": { "type": "boolean" },
+        "endpoint_hash": { "$ref": "#/$defs/nullable_sha256" },
+        "catalog_connector_count": { "$ref": "#/$defs/nullable_non_negative_integer" },
+        "missing_routes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/non_empty_string" }
+        },
+        "error_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "message": { "$ref": "#/$defs/non_empty_string" }
+      }
     },
     "cutover_gate": {
       "type": "object",

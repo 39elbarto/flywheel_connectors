@@ -64,14 +64,23 @@ without mesh placement and replication fields.
 
 ```bash
 fwc mesh cutover-gates --json
+fwc --host "$FCP_HOST" mesh cutover-gates --json
 fwc mesh cutover-gates --config /etc/fcp-host/config.toml --zone z:community --json
 fwc mesh cutover-gates --min-connectors 5 --replica-count 3 --json
 fwc mesh explain-availability github --host "$FCP_HOST" --json
 ```
+
+When `--host` is provided, the command performs a redaction-safe host-admin
+probe and reports it under `live_telemetry`. A reachable host does not make any
+gate green by itself; green still requires the direct per-gate mesh, audit, and
+policy telemetry routes. An unreachable host records `state = "unavailable"`
+and leaves every gate skipped with `skip_reason = "host-admin-api-unreachable"`.
 
 The JSON schema lives at
 `crates/fwc/schemas/mesh_cutover_gates.schema.json`. Schema changes follow
 semantic versioning: removing or renaming a field is a major version bump;
 adding a field is a minor version bump. Operators can rely on `data_hash` as a
 stable SHA-256 digest of the evaluated targets and gate records; repeated
-evaluations against the same snapshot must return the same digest.
+evaluations against the same snapshot must return the same digest. Host endpoint
+hashes are reported for triage but are excluded from `data_hash`, so a host
+restart with the same cutover snapshot preserves the digest.

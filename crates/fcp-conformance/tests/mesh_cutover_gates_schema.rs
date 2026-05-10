@@ -47,6 +47,20 @@ fn valid_cutover_gates_payload() -> Value {
         "subcommand": "cutover-gates",
         "schema_version": MESH_CUTOVER_GATES_SCHEMA_VERSION,
         "data_hash": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "live_telemetry": {
+            "source": "none",
+            "state": "not-requested",
+            "reason_code": "host-not-requested",
+            "direct_gate_telemetry_available": false,
+            "endpoint_hash": Value::Null,
+            "catalog_connector_count": Value::Null,
+            "missing_routes": [
+                "connector-state-root-replication",
+                "audit-chain-quorum",
+                "policy-object-distribution"
+            ],
+            "message": "No live host endpoint was provided, so cutover gates remain a fail-closed offline contract."
+        },
         "overall_status": cutover_gate_overall_status(&gates).tag(),
         "gate_count": gates.len(),
         "red_gate_ids": red_gate_ids,
@@ -102,12 +116,13 @@ fn mesh_cutover_gates_schema_validates_skip_payload() {
     let payload = valid_cutover_gates_payload();
 
     assert_valid(&payload);
-    assert_eq!(payload["schema_version"], "1.1.0");
+    assert_eq!(payload["schema_version"], "1.2.0");
     assert_eq!(
         payload["data_hash"],
         "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     );
     assert_eq!(payload["overall_status"], "skip");
+    assert_eq!(payload["live_telemetry"]["state"], "not-requested");
     assert_eq!(payload["gates"].as_array().map(Vec::len), Some(4));
 }
 
@@ -139,6 +154,25 @@ fn mesh_cutover_gates_schema_rejects_malformed_data_hash() {
     payload["data_hash"] = json!("not-a-sha256");
 
     assert_invalid(&payload, "data_hash must be a prefixed sha256 digest");
+}
+
+#[test]
+fn mesh_cutover_gates_schema_rejects_missing_live_telemetry() {
+    let mut payload = valid_cutover_gates_payload();
+    payload
+        .as_object_mut()
+        .expect("payload must be an object")
+        .remove("live_telemetry");
+
+    assert_invalid(&payload, "live telemetry is required for skip provenance");
+}
+
+#[test]
+fn mesh_cutover_gates_schema_rejects_unknown_live_telemetry_state() {
+    let mut payload = valid_cutover_gates_payload();
+    payload["live_telemetry"]["state"] = json!("maybe");
+
+    assert_invalid(&payload, "live telemetry state is a closed enum");
 }
 
 #[test]

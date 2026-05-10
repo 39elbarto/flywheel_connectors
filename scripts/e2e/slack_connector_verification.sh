@@ -90,7 +90,7 @@ run_rch_cargo_step live_smoke_skip_jsonl \
   cargo test -p fcp-slack --test live_verification slack_live_smoke_structured_skip_jsonl -- --nocapture
 live_skip_status="${LAST_STEP_STATUS}"
 run_rch_cargo_step clippy \
-  cargo clippy -p fcp-slack --test integration --test live_verification -- -D warnings
+  cargo clippy -p fcp-slack --test integration --test live_verification --no-deps -- -D warnings
 clippy_status="${LAST_STEP_STATUS}"
 run_step diff_check git diff --check -- connectors/slack/tests/integration.rs connectors/slack/tests/live_verification.rs connectors/slack/README.md scripts/e2e/slack_connector_verification.sh
 diff_check_status="${LAST_STEP_STATUS}"

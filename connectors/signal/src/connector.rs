@@ -22,10 +22,15 @@ use fcp_sdk::runtime::{
     InMemoryStreamingSession, StreamingConnection, StreamingError, StreamingSession,
     StreamingSupervisor, SupervisorConfig,
 };
+use fcp_sdk::{
+    AgentId, ChannelId, ChatCoordinationAuditRecord, ChatCoordinationBackend,
+    ChatCoordinationConfig, ChatCoordinationSendDecision, ChatCoordinationSendRequest, DmMode,
+    InMemoryThreadOwnershipChecker, ThreadId, ThreadOwnershipChecker,
+};
 use fcp_streaming::{SseClient, SseConfig, SseEvent, SseStream};
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
@@ -60,6 +65,148 @@ const SIGNAL_SSE_MAX_BUFFER_BYTES: usize = 1024 * 1024;
 const CAP_SEND: &str = "signal.send";
 const CAP_READ: &str = "signal.read";
 const CAP_ADMIN: &str = "signal.admin";
+
+fn default_signal_chat_coordination_config() -> ChatCoordinationConfig {
+    ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
+}
+
+fn parse_signal_chat_coordination_config(
+    value: Option<&Value>,
+    base: ChatCoordinationConfig,
+) -> FcpResult<ChatCoordinationConfig> {
+    let Some(value) = value else {
+        return Ok(base);
+    };
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "chat_coordination must be an object".into(),
+    })?;
+
+    let mut config = base;
+    if let Some(enabled) = object.get("enabled") {
+        config = config.with_enabled(json_bool(enabled, "chat_coordination.enabled")?);
+    }
+    if let Some(ttl_seconds) = object.get("ttl_seconds") {
+        let seconds = ttl_seconds
+            .as_u64()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be an integer".into(),
+            })?;
+        if seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be greater than zero".into(),
+            });
+        }
+        config = config.with_ttl(Duration::from_secs(seconds));
+    }
+    if let Some(fail_open) = object.get("fail_open") {
+        config = config.with_fail_open(json_bool(fail_open, "chat_coordination.fail_open")?);
+    }
+    if let Some(allowlist) = object.get("allowlist_channels") {
+        let channels = allowlist
+            .as_array()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels must be an array".into(),
+            })?;
+        let mut normalized = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let raw = channel.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels entries must be strings".into(),
+            })?;
+            let channel_id = raw.trim();
+            if channel_id.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_coordination.allowlist_channels entries must not be empty"
+                        .into(),
+                });
+            }
+            normalized.push(ChannelId::new(channel_id.to_owned()));
+        }
+        config = config.with_allowlist_channels(normalized);
+    }
+    if let Some(backend) = object.get("backend") {
+        config = config.with_backend(parse_chat_coordination_backend(backend)?);
+    }
+    if let Some(dm_mode) = object.get("dm_mode") {
+        config = config.with_dm_mode(parse_chat_coordination_dm_mode(dm_mode)?);
+    }
+    Ok(config)
+}
+
+fn json_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a boolean"),
+    })
+}
+
+fn parse_chat_coordination_backend(value: &Value) -> FcpResult<ChatCoordinationBackend> {
+    match value.as_str() {
+        Some("agent_mail") => Ok(ChatCoordinationBackend::AgentMail),
+        Some("mesh_gossip") => Ok(ChatCoordinationBackend::MeshGossip),
+        Some("in_memory") => Ok(ChatCoordinationBackend::InMemory),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.backend: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.backend must be a string".into(),
+        }),
+    }
+}
+
+fn parse_chat_coordination_dm_mode(value: &Value) -> FcpResult<DmMode> {
+    match value.as_str() {
+        Some("skip") => Ok(DmMode::Skip),
+        Some("treat_as_thread") => Ok(DmMode::TreatAsThread),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.dm_mode: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.dm_mode must be a string".into(),
+        }),
+    }
+}
+
+fn signal_coordination_audit_records(
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> Vec<ChatCoordinationAuditRecord> {
+    let mut records = decision.audit_records().to_vec();
+    if let Some(record) = decision.send_executed_audit_record(backend, claimant_agent_id) {
+        records.push(record);
+    }
+    records
+}
+
+fn signal_insert_coordination(
+    output: &mut Value,
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> FcpResult<()> {
+    let object = output.as_object_mut().ok_or_else(|| FcpError::Internal {
+        message: "Serialized Signal send response was not an object".into(),
+    })?;
+    object.insert(
+        "coordination".into(),
+        json!(signal_coordination_audit_records(
+            decision,
+            backend,
+            claimant_agent_id,
+        )),
+    );
+    Ok(())
+}
 
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
@@ -135,7 +282,6 @@ impl DoctorResult {
 }
 
 /// Signal connector state.
-#[derive(Debug)]
 pub struct SignalConnector {
     base: Arc<BaseConnector>,
     config: Option<SignalConfig>,
@@ -149,6 +295,29 @@ pub struct SignalConnector {
     next_event_seq: Arc<AtomicU64>,
     subscribed_topics: Arc<Mutex<Vec<String>>>,
     stream: Arc<SignalStreamRuntime>,
+    chat_coordination_config: ChatCoordinationConfig,
+    thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
+}
+
+impl std::fmt::Debug for SignalConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignalConnector")
+            .field("base", &self.base)
+            .field("config", &self.config)
+            .field("client", &self.client)
+            .field("runtime", &self.runtime)
+            .field("retry_config", &self.retry_config)
+            .field("started_at", &self.started_at)
+            .field("verifier", &self.verifier)
+            .field("bridge", &self.bridge)
+            .field("event_tx", &"<broadcast-sender>")
+            .field("next_event_seq", &self.next_event_seq)
+            .field("subscribed_topics", &self.subscribed_topics)
+            .field("stream", &self.stream)
+            .field("chat_coordination_config", &self.chat_coordination_config)
+            .field("thread_ownership_checker", &"<thread-ownership-checker>")
+            .finish()
+    }
 }
 
 impl SignalConnector {
@@ -169,7 +338,21 @@ impl SignalConnector {
             next_event_seq: Arc::new(AtomicU64::new(1)),
             subscribed_topics: Arc::new(Mutex::new(Vec::new())),
             stream: Arc::new(SignalStreamRuntime::new()),
+            chat_coordination_config: default_signal_chat_coordination_config(),
+            thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
         }
+    }
+
+    /// Replace the thread-ownership checker used by outbound chat coordination.
+    #[must_use]
+    pub fn with_thread_ownership_checker(
+        mut self,
+        checker: Arc<dyn ThreadOwnershipChecker>,
+        backend: ChatCoordinationBackend,
+    ) -> Self {
+        self.thread_ownership_checker = checker;
+        self.chat_coordination_config = self.chat_coordination_config.with_backend(backend);
+        self
     }
 
     /// Return a reference to the bridge manager, if initialized.
@@ -584,7 +767,12 @@ pub fn operations_info() -> Vec<OperationInfo> {
             output_schema: json!({
                 "type": "object",
                 "properties": {
-                    "timestamp": { "type": "integer" }
+                    "timestamp": { "type": "integer" },
+                    "coordination": {
+                        "type": "array",
+                        "description": "Redaction-safe chat coordination audit records for the send attempt",
+                        "items": { "type": "object" }
+                    }
                 }
             }),
             capability: CapabilityId::from_static(CAP_SEND),
@@ -1155,6 +1343,10 @@ impl FcpConnector for SignalConnector {
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
         self.stop_stream();
+        let chat_coordination_config = parse_signal_chat_coordination_config(
+            config.get("chat_coordination"),
+            self.chat_coordination_config.clone(),
+        )?;
         let config = SignalConfig::from_value(config)?;
 
         self.retry_config = config.retry.clone();
@@ -1173,6 +1365,7 @@ impl FcpConnector for SignalConnector {
         })?;
         self.bridge = Some(Arc::new(bridge));
 
+        self.chat_coordination_config = chat_coordination_config;
         self.client = Some(client);
         self.config = Some(config);
         self.base.set_configured(true);
@@ -1402,6 +1595,19 @@ impl SignalConnector {
                 let input: SendMessageRequest = parse_input(&req.input, operation)?;
                 input.validate()?;
                 self.validate_attachment_payloads(&input.attachments)?;
+                let claimant_agent_id = self.chat_coordination_agent_id();
+                let coordination = self
+                    .claim_before_signal_send(
+                        req.zone_id.clone(),
+                        signal_coordination_channel_id(&input),
+                        signal_coordination_thread_id(&input),
+                        claimant_agent_id.clone(),
+                    )
+                    .await;
+                if let Some(error) = coordination.denial_error() {
+                    warn!(operation, "Signal send_message denied by chat coordination");
+                    return Err(error.clone());
+                }
                 self.ensure_bridge_ready(client).await?;
 
                 let resp = client
@@ -1409,9 +1615,16 @@ impl SignalConnector {
                     .await
                     .map_err(|e| e.to_fcp_error())?;
 
-                serde_json::to_value(&resp).map_err(|e| FcpError::Internal {
+                let mut output = serde_json::to_value(&resp).map_err(|e| FcpError::Internal {
                     message: format!("Failed to serialize response: {e}"),
-                })?
+                })?;
+                signal_insert_coordination(
+                    &mut output,
+                    &coordination,
+                    self.chat_coordination_config.backend(),
+                    &claimant_agent_id,
+                )?;
+                output
             }
             OP_RECEIVE_MESSAGES => {
                 let input: ReceiveMessagesRequest = parse_input(&req.input, operation)?;
@@ -1509,6 +1722,60 @@ impl SignalConnector {
 
         Ok(InvokeResponse::ok(req.id, output))
     }
+
+    fn chat_coordination_agent_id(&self) -> AgentId {
+        AgentId::new(self.base.instance_id.as_str().to_owned())
+    }
+
+    async fn claim_before_signal_send(
+        &self,
+        zone_id: ZoneId,
+        channel_id: ChannelId,
+        thread_id: Option<ThreadId>,
+        claimant_agent_id: AgentId,
+    ) -> ChatCoordinationSendDecision {
+        let cx = fcp_async_core::compatibility_cx();
+        self.chat_coordination_config
+            .claim_before_send(
+                &cx,
+                self.thread_ownership_checker.as_ref(),
+                ChatCoordinationSendRequest::new(
+                    zone_id,
+                    self.base.id.clone(),
+                    channel_id,
+                    thread_id,
+                    claimant_agent_id,
+                ),
+            )
+            .await
+    }
+}
+
+fn signal_coordination_channel_id(input: &SendMessageRequest) -> ChannelId {
+    let mut recipients = input
+        .recipients
+        .iter()
+        .map(|recipient| recipient.trim())
+        .collect::<Vec<_>>();
+    recipients.sort_unstable();
+
+    let mut hasher = Sha256::new();
+    for recipient in recipients {
+        hasher.update(recipient.len().to_string().as_bytes());
+        hasher.update(b":");
+        hasher.update(recipient.as_bytes());
+        hasher.update(b";");
+    }
+    ChannelId::new(format!(
+        "signal:conversation:{}",
+        hex::encode(hasher.finalize())
+    ))
+}
+
+fn signal_coordination_thread_id(input: &SendMessageRequest) -> Option<ThreadId> {
+    input
+        .quote_timestamp
+        .map(|timestamp| ThreadId::new(format!("quote:{timestamp}")))
 }
 
 #[cfg(test)]
@@ -2256,6 +2523,100 @@ mod tests {
 
         let error = connector.invoke(req).await.unwrap_err();
         assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_send_message_denies_duplicate_claim_before_network() {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/v1/about"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v2/send"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "timestamp": 1_700_000_004_000_u64
+                })),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let checker: Arc<dyn ThreadOwnershipChecker> =
+            Arc::new(InMemoryThreadOwnershipChecker::new());
+        let mut first = SignalConnector::new()
+            .with_thread_ownership_checker(Arc::clone(&checker), ChatCoordinationBackend::InMemory);
+        let mut second = SignalConnector::new()
+            .with_thread_ownership_checker(Arc::clone(&checker), ChatCoordinationBackend::InMemory);
+
+        for connector in [&mut first, &mut second] {
+            connector
+                .configure(json!({
+                    "daemon_url": mock_server.uri(),
+                    "phone_number": "+15551234567"
+                }))
+                .await
+                .unwrap();
+        }
+
+        let (first_handshake, first_capability) =
+            signed_token_for(CAP_SEND, OP_SEND_MESSAGE, &first.base.instance_id);
+        first.handshake(first_handshake).await.unwrap();
+        let (second_handshake, second_capability) =
+            signed_token_for(CAP_SEND, OP_SEND_MESSAGE, &second.base.instance_id);
+        second.handshake(second_handshake).await.unwrap();
+
+        let mut first_req = InvokeRequest {
+            capability_token: first_capability,
+            ..base_invoke(first.id(), OP_SEND_MESSAGE)
+        };
+        first_req.input = json!({
+            "recipients": ["+15559876543"],
+            "message": "sensitive Signal body",
+            "quote_timestamp": 1_700_000_003_000_u64
+        });
+
+        let first_response = first.invoke(first_req).await.unwrap();
+        let first_result = first_response.result.as_ref().expect("first result");
+        assert_eq!(first_result["timestamp"], 1_700_000_004_000_u64);
+        assert_eq!(first_result["coordination"][0]["event"], "claim_attempt");
+        assert_eq!(first_result["coordination"][1]["outcome"], "granted");
+        assert_eq!(first_result["coordination"][2]["event"], "send_executed");
+        let coordination_text =
+            serde_json::to_string(&first_result["coordination"]).expect("serialize coordination");
+        assert!(
+            !coordination_text.contains("+15559876543"),
+            "coordination audit must not leak raw Signal recipients"
+        );
+        assert!(
+            !coordination_text.contains("sensitive Signal body"),
+            "coordination audit must not leak Signal message bodies"
+        );
+
+        let mut second_req = InvokeRequest {
+            capability_token: second_capability,
+            ..base_invoke(second.id(), OP_SEND_MESSAGE)
+        };
+        second_req.input = json!({
+            "recipients": ["+15559876543"],
+            "message": "sensitive Signal body",
+            "quote_timestamp": 1_700_000_003_000_u64
+        });
+
+        let duplicate = second
+            .invoke(second_req)
+            .await
+            .expect_err("duplicate active owner should be denied before provider HTTP");
+        assert!(matches!(
+            duplicate,
+            FcpError::Unauthorized {
+                code: 4090,
+                ref message
+            } if message.starts_with("thread_owned_by_peer:")
+                && message.contains(first.base.instance_id.as_str())
+        ));
     }
 
     #[fcp_async_core::runtime::test]

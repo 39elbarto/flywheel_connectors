@@ -349,11 +349,18 @@ type = "array"
 type = "string"
 
 [provides.operations."signal.send_message".output_schema]
-required = ["timestamp"]
+required = ["timestamp", "coordination"]
 type = "object"
 
 [provides.operations."signal.send_message".output_schema.properties.timestamp]
 type = "integer"
+
+[provides.operations."signal.send_message".output_schema.properties.coordination]
+description = "Redaction-safe chat coordination audit records for the send attempt"
+type = "array"
+
+[provides.operations."signal.send_message".output_schema.properties.coordination.items]
+type = "object"
 
 [provides.operations."signal.send_message".network_constraints]
 host_allow = [

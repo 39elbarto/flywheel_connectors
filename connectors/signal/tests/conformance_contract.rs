@@ -41,7 +41,7 @@ fn signal_schema_operation_event_and_error_contracts_are_advertised() {
                 id: OP_SEND_MESSAGE,
                 capability: CAP_SEND,
                 required_input_fields: &["recipients", "message"],
-                output_fields: &["timestamp"],
+                output_fields: &["timestamp", "coordination"],
             },
             OperationContract {
                 id: OP_RECEIVE_MESSAGES,

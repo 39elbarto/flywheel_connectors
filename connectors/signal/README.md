@@ -42,6 +42,8 @@ Important runtime truths the contract preserves:
 - `receive_timeout_ms` defaults to `10_000` and is rounded up to whole seconds for `receive_messages`.
 - `poll_interval_ms`, `max_reconnect_delay_ms`, `health_check_interval_ms`, and `max_attachment_bytes` must be greater than zero.
 - `send_message` posts to `/v2/send` with `number`, `recipients`, `message`, `base64_attachments`, and optional `quote_timestamp`.
+- `send_message` claims chat-thread ownership before any daemon health check or `/v2/send` call, using a hashed Signal conversation key plus `quote_timestamp` thread key when present.
+- Successful `send_message` responses include `coordination` audit records (`claim_attempt`, `claim_outcome`, and `send_executed`) that do not contain raw recipients or message bodies.
 - `receive_messages` polls `GET /v1/receive/{number}` with a `timeout` query parameter and advances an in-memory receive cursor from observed message timestamps.
 - `list_groups` and `get_group` use `GET /v1/groups/{number}`.
 - `get_identity` uses `GET /v1/identities/{number}/{target}`.
@@ -93,6 +95,7 @@ The current Signal README slice documents the implemented runtime surface:
   - `signal.send` gates `signal.send_message`.
   - `signal.read` gates `signal.receive_messages`, `signal.list_groups`, `signal.get_group`, `signal.get_identity`, and event subscriptions.
   - `signal.admin` gates `signal.trust_identity`.
+- Outbound chat coordination defaults to the in-memory thread-ownership checker. Operators may override `chat_coordination.enabled`, `ttl_seconds`, `fail_open`, `allowlist_channels`, `backend`, and `dm_mode`; allowlist entries must use the connector's redaction-safe hashed channel identifiers.
 - The connector does not persist Signal messages, group lists, identities, attachments, daemon responses, receive cursors, event resume hints, or daemon error bodies beyond process memory.
 - Signal phone numbers, usernames, group IDs, group names, safety numbers, message bodies, quote context, attachments, receipts, typing indicators, and sender display names are private data. Treat all live request and response data as private-zone data.
 
@@ -209,6 +212,7 @@ The verification surface captures:
 - deterministic WireMock coverage for signal-cli REST paths
 - deterministic local SSE coverage for event policy
 - capability-token enforcement in invoke and subscribe
+- chat-thread coordination coverage proving duplicate send claims are denied before provider HTTP
 - local readiness, validation, provider error, and retryability behavior
 - formatting, check, test, and clippy proof through `rch`
 - UBS on changed files before commit

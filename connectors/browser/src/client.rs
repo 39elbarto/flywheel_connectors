@@ -55,6 +55,11 @@ const CONTROL_TARGET_SELECTION_HEADER: &str = "X-FCP-Browser-Target-Selection";
 const CONTROL_STALE_TARGET_RECOVERY_HEADER: &str = "X-FCP-Browser-Stale-Target-Recovery";
 const CONTROL_CURRENT_TAB_GUARD_HEADER: &str = "X-FCP-Browser-Current-Tab-Guard";
 const CONTROL_EXPORT_GUARD_HEADER: &str = "X-FCP-Browser-Export-Guard";
+const PROXY_DESCRIPTOR_MAX_BYTES: usize = 4_096;
+const PROXY_BYPASS_MAX_ENTRIES: usize = 128;
+const PROXY_BYPASS_ENTRY_MAX_BYTES: usize = 256;
+const PROXY_REDACTION_CONTRACT: &str =
+    "proxy credentials, target URLs, local paths, cookies, and raw CDP endpoints must be redacted";
 
 #[derive(Clone, Copy)]
 struct BrowserControlOperation {
@@ -793,6 +798,7 @@ impl BrowserControlImplementation {
             Self::WorkerPolicy { description } => serde_json::json!({
                 "kind": "worker_policy",
                 "description": description,
+                "redaction_contract": PROXY_REDACTION_CONTRACT,
                 "methods": [],
             }),
         }
@@ -801,7 +807,9 @@ impl BrowserControlImplementation {
     fn summary(self) -> String {
         match self {
             Self::Cdp { methods } => format!("cdp methods [{}]", methods.join(", ")),
-            Self::WorkerPolicy { .. } => "worker_policy".to_string(),
+            Self::WorkerPolicy { description } => format!(
+                "worker_policy description `{description}` with redaction_contract `{PROXY_REDACTION_CONTRACT}`"
+            ),
         }
     }
 }
@@ -2900,6 +2908,9 @@ const REQUIRED_BROWSER_CONTROL_OPERATIONS: &[BrowserControlOperation] = &[
     WORKER_CLEAR_PROXY,
 ];
 
+const PROXY_BROWSER_CONTROL_OPERATIONS: &[BrowserControlOperation] =
+    &[WORKER_SET_PROXY, WORKER_CLEAR_PROXY];
+
 const BROWSER_CONNECTOR_OPERATIONS: &[BrowserConnectorOperation] = &[
     BrowserConnectorOperation {
         id: "browser.navigate",
@@ -2988,6 +2999,25 @@ pub(crate) fn browser_control_contract_descriptor() -> serde_json::Value {
     serde_json::json!({
         "control_plane": "fcp-browser-control",
         "protocol_version": BROWSER_CONTROL_PROTOCOL_VERSION,
+        "control_modes": {
+            "direct_cdp_websocket": {
+                "page_operations": "available",
+                "proxy_support": "proxy_unavailable_direct_cdp",
+                "remediation": "use a proxy-capable fcp-browser-control worker or future Rust-owned launcher for browser.set_proxy/browser.clear_proxy",
+            },
+            "fcp_browser_control": {
+                "page_operations": "available",
+                "proxy_support": "available_when_proxy_operations_advertised",
+                "proxy_operations": PROXY_BROWSER_CONTROL_OPERATIONS
+                    .iter()
+                    .map(|operation| operation.id)
+                    .collect::<Vec<_>>(),
+            },
+            "rust_owned_launcher": {
+                "status": "planned",
+                "proxy_support": "not_implemented_in_this_connector",
+            },
+        },
         "operations": REQUIRED_BROWSER_CONTROL_OPERATIONS
             .iter()
             .map(|operation| operation.descriptor())
@@ -3813,12 +3843,16 @@ impl BrowserClient {
     /// Configure outbound proxy for browser traffic.
     pub async fn set_proxy(&self, proxy: &ProxyConfig) -> BrowserResult<ProxyResult> {
         if let BrowserControlEndpoint::DirectCdp(_) = self.control_endpoint()? {
-            return Err(BrowserError::InvalidConfig(
-                "browser.set_proxy requires the fcp-browser-control worker policy path; direct CDP WebSocket mode cannot reconfigure browser launch proxy"
-                    .into(),
+            return Err(proxy_unavailable_error(
+                "browser.set_proxy",
+                "direct_cdp_websocket",
+                "proxy_unavailable_direct_cdp",
             ));
         }
 
+        validate_proxy_config(proxy)?;
+        self.ensure_proxy_control_plane_available("browser.set_proxy")
+            .await?;
         let body = serde_json::to_value(proxy)?;
         let data = self.post_json(WORKER_SET_PROXY, &body).await?;
         Ok(serde_json::from_value(data)?)
@@ -3827,12 +3861,15 @@ impl BrowserClient {
     /// Clear outbound proxy configuration.
     pub async fn clear_proxy(&self) -> BrowserResult<ProxyResult> {
         if let BrowserControlEndpoint::DirectCdp(_) = self.control_endpoint()? {
-            return Err(BrowserError::InvalidConfig(
-                "browser.clear_proxy requires the fcp-browser-control worker policy path; direct CDP WebSocket mode cannot reconfigure browser launch proxy"
-                    .into(),
+            return Err(proxy_unavailable_error(
+                "browser.clear_proxy",
+                "direct_cdp_websocket",
+                "proxy_unavailable_direct_cdp",
             ));
         }
 
+        self.ensure_proxy_control_plane_available("browser.clear_proxy")
+            .await?;
         let data = self
             .post_json(WORKER_CLEAR_PROXY, &serde_json::json!({}))
             .await?;
@@ -3840,6 +3877,22 @@ impl BrowserClient {
     }
 
     // -- HTTP helpers --
+
+    async fn ensure_proxy_control_plane_available(
+        &self,
+        operation_id: &'static str,
+    ) -> BrowserResult<()> {
+        let url = format!("{}/health", self.browser_url);
+        let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_SHORT);
+        let body = self
+            .execute(CONTROL_RESPONSE_BYTES_STANDARD, timeout, || {
+                self.http.get(&url).timeout(timeout)
+            })
+            .await?;
+
+        validate_fcp_browser_control_proxy_support(&body)
+            .map_err(|reason| proxy_unavailable_error(operation_id, "fcp_browser_control", &reason))
+    }
 
     fn worker_endpoint(&self, operation: BrowserControlOperation) -> String {
         debug_assert_eq!(operation.method, "POST");
@@ -4188,6 +4241,51 @@ fn decode_cdp_response_text(
 }
 
 fn validate_fcp_browser_control_health(body: &serde_json::Value) -> Result<(), String> {
+    let operations = validate_fcp_browser_control_metadata(body)?;
+    for required in REQUIRED_BROWSER_CONTROL_OPERATIONS
+        .iter()
+        .filter(|operation| !is_proxy_browser_control_operation(operation.id))
+    {
+        let operation = find_browser_control_operation(operations, required.id)
+            .ok_or_else(|| format!("missing required operation `{}`", required.id))?;
+        validate_browser_control_operation(operation, required)?;
+    }
+
+    for proxy_operation in PROXY_BROWSER_CONTROL_OPERATIONS {
+        if let Some(operation) = find_browser_control_operation(operations, proxy_operation.id) {
+            validate_browser_control_operation(operation, proxy_operation)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_fcp_browser_control_proxy_support(body: &serde_json::Value) -> Result<(), String> {
+    let operations = validate_fcp_browser_control_metadata(body)?;
+    validate_fcp_browser_control_health(body)?;
+
+    let mut missing = Vec::new();
+    for required in PROXY_BROWSER_CONTROL_OPERATIONS {
+        match find_browser_control_operation(operations, required.id) {
+            Some(operation) => validate_browser_control_operation(operation, required)
+                .map_err(|reason| format!("proxy_invalid_worker_contract {reason}"))?,
+            None => missing.push(required.id),
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "proxy_unavailable_worker_contract missing required proxy operations [{}]",
+            missing.join(", ")
+        ))
+    }
+}
+
+fn validate_fcp_browser_control_metadata(
+    body: &serde_json::Value,
+) -> Result<&[serde_json::Value], String> {
     let control_plane = body
         .get("control_plane")
         .or_else(|| body.get("service"))
@@ -4213,17 +4311,22 @@ fn validate_fcp_browser_control_health(body: &serde_json::Value) -> Result<(), S
         .get("operations")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| "missing operations array".to_string())?;
-    for required in REQUIRED_BROWSER_CONTROL_OPERATIONS {
-        let operation = operations
-            .iter()
-            .find(|operation| {
-                operation.get("id").and_then(serde_json::Value::as_str) == Some(required.id)
-            })
-            .ok_or_else(|| format!("missing required operation `{}`", required.id))?;
-        validate_browser_control_operation(operation, required)?;
-    }
+    Ok(operations.as_slice())
+}
 
-    Ok(())
+fn find_browser_control_operation<'a>(
+    operations: &'a [serde_json::Value],
+    operation_id: &str,
+) -> Option<&'a serde_json::Value> {
+    operations.iter().find(|operation| {
+        operation.get("id").and_then(serde_json::Value::as_str) == Some(operation_id)
+    })
+}
+
+fn is_proxy_browser_control_operation(operation_id: &str) -> bool {
+    PROXY_BROWSER_CONTROL_OPERATIONS
+        .iter()
+        .any(|operation| operation.id == operation_id)
 }
 
 fn validate_browser_control_operation(
@@ -4292,7 +4395,7 @@ fn browser_control_implementation_matches(
                     .get("methods")
                     .is_some_and(|advertised| advertised == &serde_json::json!(methods))
         }
-        BrowserControlImplementation::WorkerPolicy { .. } => {
+        BrowserControlImplementation::WorkerPolicy { description } => {
             implementation
                 .get("kind")
                 .and_then(serde_json::Value::as_str)
@@ -4304,9 +4407,132 @@ fn browser_control_implementation_matches(
                 && implementation
                     .get("description")
                     .and_then(serde_json::Value::as_str)
-                    .is_some_and(|description| !description.is_empty())
+                    .is_some_and(|advertised| advertised == description)
+                && implementation
+                    .get("redaction_contract")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|advertised| advertised == PROXY_REDACTION_CONTRACT)
         }
     }
+}
+
+fn validate_proxy_config(proxy: &ProxyConfig) -> BrowserResult<()> {
+    let descriptor_len = serde_json::to_vec(proxy)?.len();
+    if descriptor_len > PROXY_DESCRIPTOR_MAX_BYTES {
+        return Err(proxy_descriptor_error("proxy_descriptor_too_large"));
+    }
+
+    reject_proxy_control_chars("server", &proxy.server)?;
+    if let Some(username) = &proxy.username {
+        reject_proxy_control_chars("username", username)?;
+    }
+    if let Some(password) = &proxy.password {
+        reject_proxy_control_chars("password", password)?;
+    }
+
+    let server = reqwest::Url::parse(&proxy.server)
+        .map_err(|_| proxy_descriptor_error("proxy_invalid_server_url"))?;
+    match server.scheme() {
+        "http" | "https" | "socks5" | "socks5h" => {}
+        _ => return Err(proxy_descriptor_error("proxy_invalid_scheme")),
+    }
+    if !server.username().is_empty() || server.password().is_some() {
+        return Err(proxy_descriptor_error("proxy_embedded_credentials"));
+    }
+
+    let host = server
+        .host_str()
+        .ok_or_else(|| proxy_descriptor_error("proxy_missing_host"))?;
+    if proxy_host_is_disallowed(host) {
+        return Err(proxy_descriptor_error("proxy_private_or_internal_host"));
+    }
+
+    if let Some(bypass_list) = &proxy.bypass_list {
+        if bypass_list.len() > PROXY_BYPASS_MAX_ENTRIES {
+            return Err(proxy_descriptor_error("proxy_bypass_list_too_large"));
+        }
+        for entry in bypass_list {
+            if entry.is_empty() || entry.len() > PROXY_BYPASS_ENTRY_MAX_BYTES {
+                return Err(proxy_descriptor_error("proxy_invalid_bypass_entry"));
+            }
+            reject_proxy_control_chars("bypass_list", entry)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn reject_proxy_control_chars(field: &'static str, value: &str) -> BrowserResult<()> {
+    if value.chars().any(char::is_control) {
+        Err(BrowserError::InvalidConfig(format!(
+            "proxy descriptor rejected: reason_code=proxy_descriptor_control_char field={field}"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn proxy_host_is_disallowed(host: &str) -> bool {
+    let normalized = host
+        .trim_matches(|ch| ch == '[' || ch == ']')
+        .to_ascii_lowercase();
+    if normalized == "localhost"
+        || proxy_host_has_suffix_label(&normalized, "localhost")
+        || proxy_host_has_suffix_label(&normalized, "local")
+        || proxy_host_has_suffix_label(&normalized, "internal")
+    {
+        return true;
+    }
+
+    normalized
+        .parse::<IpAddr>()
+        .is_ok_and(disallowed_proxy_ip_address)
+}
+
+fn proxy_host_has_suffix_label(host: &str, suffix_label: &str) -> bool {
+    host.strip_suffix(suffix_label)
+        .is_some_and(|prefix| prefix.ends_with('.'))
+}
+
+fn disallowed_proxy_ip_address(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || (octets[0] == 100 && (octets[1] & 0b1100_0000) == 64)
+        }
+        IpAddr::V6(ip) => {
+            let segments = ip.segments();
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || (segments[0] & 0xfe00) == 0xfc00
+                || (segments[0] & 0xffc0) == 0xfe80
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        }
+    }
+}
+
+fn proxy_descriptor_error(reason_code: &'static str) -> BrowserError {
+    BrowserError::InvalidConfig(format!(
+        "proxy descriptor rejected: reason_code={reason_code}"
+    ))
+}
+
+fn proxy_unavailable_error(
+    operation_id: &'static str,
+    control_mode: &'static str,
+    reason: &str,
+) -> BrowserError {
+    let reason_code = reason.split_whitespace().next().unwrap_or(reason);
+    BrowserError::InvalidConfig(format!(
+        "{operation_id} proxy_unavailable control_mode={control_mode} reason_code={reason_code}; {reason}; remediation=configure a proxy-capable fcp-browser-control worker that advertises browser.set_proxy and browser.clear_proxy contract v{BROWSER_CONTROL_PROTOCOL_VERSION}"
+    ))
 }
 
 fn looks_like_chrome_cdp_version(body: &serde_json::Value) -> bool {
@@ -4330,6 +4556,20 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path},
     };
+
+    fn browser_control_contract_without_proxy_operations() -> serde_json::Value {
+        let mut descriptor = browser_control_contract_descriptor();
+        descriptor["operations"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|operation| {
+                operation
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(|id| !is_proxy_browser_control_operation(id))
+            });
+        descriptor
+    }
 
     #[derive(Debug, Default)]
     struct FakeCdpTransport {
@@ -4866,8 +5106,12 @@ mod tests {
         let set_error = client.set_proxy(&proxy).await.unwrap_err();
         let clear_error = client.clear_proxy().await.unwrap_err();
 
-        assert!(format!("{set_error}").contains("worker policy path"));
-        assert!(format!("{clear_error}").contains("worker policy path"));
+        let set_error = format!("{set_error}");
+        let clear_error = format!("{clear_error}");
+        assert!(set_error.contains("reason_code=proxy_unavailable_direct_cdp"));
+        assert!(clear_error.contains("reason_code=proxy_unavailable_direct_cdp"));
+        assert!(set_error.contains("remediation=configure a proxy-capable"));
+        assert!(clear_error.contains("remediation=configure a proxy-capable"));
     }
 
     #[fcp_async_core::runtime::test]
@@ -4898,6 +5142,18 @@ mod tests {
             .with_browser_url(&mock_server.uri());
 
         client.health_check().await.unwrap();
+    }
+
+    #[test]
+    fn test_health_contract_accepts_worker_without_proxy_for_non_proxy_operations() {
+        let descriptor = browser_control_contract_without_proxy_operations();
+
+        validate_fcp_browser_control_health(&descriptor).unwrap();
+
+        let err = validate_fcp_browser_control_proxy_support(&descriptor).unwrap_err();
+        assert!(err.contains("proxy_unavailable_worker_contract"));
+        assert!(err.contains("browser.set_proxy"));
+        assert!(err.contains("browser.clear_proxy"));
     }
 
     #[test]
@@ -6565,6 +6821,24 @@ mod tests {
     }
 
     #[test]
+    fn test_proxy_contract_rejects_policy_operation_without_redaction_contract() {
+        let mut body = browser_control_contract_descriptor();
+        let operations = body["operations"].as_array_mut().unwrap();
+        let clear_proxy = operations
+            .iter_mut()
+            .find(|operation| operation["id"] == "browser.clear_proxy")
+            .unwrap();
+        clear_proxy["implementation"]
+            .as_object_mut()
+            .unwrap()
+            .remove("redaction_contract");
+
+        let err = validate_fcp_browser_control_proxy_support(&body).unwrap_err();
+        assert!(err.contains("browser.clear_proxy"));
+        assert!(err.contains("redaction_contract"));
+    }
+
+    #[test]
     fn test_health_contract_rejects_wrong_protocol_version() {
         let mut body = browser_control_contract_descriptor();
         body["protocol_version"] = serde_json::Value::Number(2.into());
@@ -6841,6 +7115,13 @@ mod tests {
     async fn test_set_proxy() {
         let mock_server = MockServer::start().await;
 
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(browser_control_contract_descriptor()),
+            )
+            .mount(&mock_server)
+            .await;
         Mock::given(method("POST"))
             .and(path("/proxy/set"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -6871,9 +7152,104 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_set_proxy_rejects_worker_without_proxy_contract_before_post() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(browser_control_contract_without_proxy_operations()),
+            )
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/proxy/set"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "enabled": true,
+                "mode": "fixed_servers",
+                "server": "http://proxy.example.com:8080"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = BrowserClient::new(None)
+            .unwrap()
+            .with_browser_url(&mock_server.uri());
+        let proxy = ProxyConfig {
+            server: "http://proxy.example.com:8080".into(),
+            bypass_list: None,
+            username: None,
+            password: None,
+        };
+
+        let err = client.set_proxy(&proxy).await.unwrap_err();
+        let err = format!("{err}");
+        assert!(err.contains("reason_code=proxy_unavailable_worker_contract"));
+        assert!(err.contains("browser.set_proxy"));
+        assert!(err.contains("browser.clear_proxy"));
+
+        let requests = mock_server.received_requests().await.unwrap();
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.url.path() != "/proxy/set")
+        );
+    }
+
+    #[test]
+    fn test_proxy_config_rejects_untrusted_descriptors() {
+        let mut proxy = ProxyConfig {
+            server: "http://proxy.example.com:8080".into(),
+            bypass_list: None,
+            username: None,
+            password: None,
+        };
+        validate_proxy_config(&proxy).unwrap();
+
+        for (server, reason_code) in [
+            ("ftp://proxy.example.com:21", "proxy_invalid_scheme"),
+            (
+                "http://user:pass@proxy.example.com:8080",
+                "proxy_embedded_credentials",
+            ),
+            ("http://127.0.0.1:8080", "proxy_private_or_internal_host"),
+            ("http://10.0.0.10:8080", "proxy_private_or_internal_host"),
+            ("http://localhost:8080", "proxy_private_or_internal_host"),
+            (
+                "http://proxy.example.com:8080\nx",
+                "proxy_descriptor_control_char",
+            ),
+        ] {
+            proxy.server = server.into();
+            let err = validate_proxy_config(&proxy).unwrap_err();
+            assert!(
+                format!("{err}").contains(reason_code),
+                "expected {reason_code} for {server:?}, got {err}"
+            );
+        }
+
+        proxy.server = "http://proxy.example.com:8080".into();
+        proxy.bypass_list = Some(vec!["example.com\nInjected-Header: value".into()]);
+        let err = validate_proxy_config(&proxy).unwrap_err();
+        assert!(format!("{err}").contains("proxy_descriptor_control_char"));
+
+        proxy.bypass_list = Some(vec!["example.com".into(); PROXY_BYPASS_MAX_ENTRIES + 1]);
+        let err = validate_proxy_config(&proxy).unwrap_err();
+        assert!(format!("{err}").contains("proxy_bypass_list_too_large"));
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_clear_proxy() {
         let mock_server = MockServer::start().await;
 
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(browser_control_contract_descriptor()),
+            )
+            .mount(&mock_server)
+            .await;
         Mock::given(method("POST"))
             .and(path("/proxy/clear"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({

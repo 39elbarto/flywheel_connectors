@@ -148,6 +148,26 @@ async fn setup_configure(connector: &mut BrowserConnector, base_url: &str) {
         .expect("configure should succeed");
 }
 
+async fn browser_control_contract_response() -> serde_json::Value {
+    BrowserConnector::new()
+        .handle_health()
+        .await
+        .expect("browser health should serialize")
+        .get("browser_control_contract")
+        .cloned()
+        .expect("health should include browser control contract")
+}
+
+async fn mount_browser_control_health(mock_server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/health"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(browser_control_contract_response().await),
+        )
+        .mount(mock_server)
+        .await;
+}
+
 #[derive(Debug, Clone, Copy)]
 struct BrowserE2eRouteExpectation {
     connector_operation: &'static str,
@@ -158,6 +178,8 @@ struct BrowserE2eRouteExpectation {
 }
 
 async fn mount_full_flow_browser_control(mock_server: &MockServer) {
+    mount_browser_control_health(mock_server).await;
+
     for (route, body) in [
         (
             "/navigate",
@@ -241,7 +263,7 @@ async fn mount_full_flow_browser_control(mock_server: &MockServer) {
             json!({
                 "enabled": true,
                 "mode": "fixed_servers",
-                "server": "http://proxy.local:8080",
+                "server": "http://proxy.example.com:8080",
                 "target_id": "target-proxy-set-1"
             }),
         ),
@@ -372,6 +394,14 @@ async fn test_browser_control_connector_boundary_full_flow_e2e_logs() {
     assert_eq!(
         health["browser_control_contract"]["control_plane"],
         "fcp-browser-control"
+    );
+    assert_eq!(
+        health["browser_control_contract"]["control_modes"]["direct_cdp_websocket"]["proxy_support"],
+        "proxy_unavailable_direct_cdp"
+    );
+    assert_eq!(
+        health["browser_control_contract"]["control_modes"]["fcp_browser_control"]["proxy_support"],
+        "available_when_proxy_operations_advertised"
     );
     push_browser_e2e_log(
         &capture,
@@ -535,7 +565,7 @@ async fn test_browser_control_connector_boundary_full_flow_e2e_logs() {
         (
             "browser.set_proxy",
             json!({
-                "server": "http://proxy.local:8080",
+                "server": "http://proxy.example.com:8080",
                 "bypass_list": ["localhost", "127.0.0.1"]
             }),
             true,
@@ -566,7 +596,13 @@ async fn test_browser_control_connector_boundary_full_flow_e2e_logs() {
     assert_eq!(results[14].1["enabled"], true);
     assert_eq!(results[15].1["enabled"], false);
 
-    let requests = mock_server.received_requests().await.unwrap_or_default();
+    let requests = mock_server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|request| request.url.path() != "/health")
+        .collect::<Vec<_>>();
     let expected_routes = [
         BrowserE2eRouteExpectation {
             connector_operation: "browser.navigate",
@@ -1484,6 +1520,7 @@ async fn test_set_proxy() {
     let _ctx = AsyncTestContext::for_scenario("browser-set-proxy");
     let mock_server = MockServer::start().await;
 
+    mount_browser_control_health(&mock_server).await;
     Mock::given(method("POST"))
         .and(path("/proxy/set"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -1525,6 +1562,7 @@ async fn test_clear_proxy() {
     let _ctx = AsyncTestContext::for_scenario("browser-clear-proxy");
     let mock_server = MockServer::start().await;
 
+    mount_browser_control_health(&mock_server).await;
     Mock::given(method("POST"))
         .and(path("/proxy/clear"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({

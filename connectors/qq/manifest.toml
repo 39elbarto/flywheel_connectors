@@ -28,7 +28,7 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
 input_schema = { type = "object", required = ["channel_id", "content"], additionalProperties = false, properties = { channel_id = { type = "string", minLength = 1, pattern = "^[^/\\\\]+$", not = { pattern = "\\.\\.|%2[fFeE]|%5[cC]" } }, content = { type = "string", minLength = 1, pattern = "\\S" }, msg_id = { type = "string" } } }
-output_schema = { type = "object", additionalProperties = true, properties = { id = { type = "string" }, timestamp = { type = "string" } } }
+output_schema = { type = "object", additionalProperties = true, properties = { id = { type = "string" }, timestamp = { type = "string" }, coordination = { type = "array", description = "Redacted chat coordination audit records" } } }
 network_constraints = { host_allow = ["api.sgroup.qq.com", "bots.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.messages_send_channel.ai_hints]
@@ -47,7 +47,7 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
 input_schema = { type = "object", required = ["group_openid", "content"], additionalProperties = false, properties = { group_openid = { type = "string", minLength = 1, pattern = "^[^/\\\\]+$", not = { pattern = "\\.\\.|%2[fFeE]|%5[cC]" } }, content = { type = "string", minLength = 1, pattern = "\\S" }, msg_id = { type = "string" } } }
-output_schema = { type = "object", additionalProperties = true, properties = { id = { type = "string" }, timestamp = { type = "string" } } }
+output_schema = { type = "object", additionalProperties = true, properties = { id = { type = "string" }, timestamp = { type = "string" }, coordination = { type = "array", description = "Redacted chat coordination audit records" } } }
 network_constraints = { host_allow = ["api.sgroup.qq.com", "bots.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.messages_send_group.ai_hints]
@@ -66,7 +66,7 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
 input_schema = { type = "object", required = ["openid", "content"], additionalProperties = false, properties = { openid = { type = "string", minLength = 1, pattern = "^[^/\\\\]+$", not = { pattern = "\\.\\.|%2[fFeE]|%5[cC]" } }, content = { type = "string", minLength = 1, pattern = "\\S" }, msg_id = { type = "string" } } }
-output_schema = { type = "object", additionalProperties = true, properties = { id = { type = "string" }, timestamp = { type = "string" } } }
+output_schema = { type = "object", additionalProperties = true, properties = { id = { type = "string" }, timestamp = { type = "string" }, coordination = { type = "array", description = "Redacted chat coordination audit records" } } }
 network_constraints = { host_allow = ["api.sgroup.qq.com", "bots.qq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.messages_send_c2c.ai_hints]

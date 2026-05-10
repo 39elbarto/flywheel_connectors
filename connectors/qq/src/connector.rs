@@ -1,6 +1,9 @@
 //! Tencent `QQ` bot connector.
 
-use std::time::Instant;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use fcp_prelude::{
@@ -9,11 +12,12 @@ use fcp_prelude::{
     HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest,
     InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest,
+    UnsubscribeRequest, ZoneId,
 };
 use fcp_sdk::prelude::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tracing::warn;
 
 use crate::client::{
     QqClient, channel_message_body, direct_message_body, normalize_message_event,
@@ -27,6 +31,161 @@ use crate::types::{
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
+#[derive(Clone, Copy)]
+struct QqSendOperationSpec {
+    target_field: &'static str,
+    path_prefix: &'static str,
+    target_kind: &'static str,
+    log_operation: &'static str,
+    body: fn(&str, Option<&str>) -> Value,
+}
+
+const QQ_SEND_CHANNEL_SPEC: QqSendOperationSpec = QqSendOperationSpec {
+    target_field: "channel_id",
+    path_prefix: "/channels/",
+    target_kind: "channel",
+    log_operation: "send_channel",
+    body: channel_message_body,
+};
+
+const QQ_SEND_GROUP_SPEC: QqSendOperationSpec = QqSendOperationSpec {
+    target_field: "group_openid",
+    path_prefix: "/v2/groups/",
+    target_kind: "group",
+    log_operation: "send_group",
+    body: direct_message_body,
+};
+
+const QQ_SEND_C2C_SPEC: QqSendOperationSpec = QqSendOperationSpec {
+    target_field: "openid",
+    path_prefix: "/v2/users/",
+    target_kind: "c2c",
+    log_operation: "send_c2c",
+    body: direct_message_body,
+};
+
+fn default_qq_chat_coordination_config() -> ChatCoordinationConfig {
+    ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
+}
+
+fn parse_qq_chat_coordination_config(
+    value: Option<&Value>,
+    base: ChatCoordinationConfig,
+) -> FcpResult<ChatCoordinationConfig> {
+    let Some(value) = value else {
+        return Ok(base);
+    };
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "chat_coordination must be an object".into(),
+    })?;
+
+    let mut config = base;
+    if let Some(enabled) = object.get("enabled") {
+        config = config.with_enabled(json_bool(enabled, "chat_coordination.enabled")?);
+    }
+    if let Some(ttl_seconds) = object.get("ttl_seconds") {
+        let seconds = ttl_seconds
+            .as_u64()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be an integer".into(),
+            })?;
+        if seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be greater than zero".into(),
+            });
+        }
+        config = config.with_ttl(Duration::from_secs(seconds));
+    }
+    if let Some(fail_open) = object.get("fail_open") {
+        config = config.with_fail_open(json_bool(fail_open, "chat_coordination.fail_open")?);
+    }
+    if let Some(allowlist) = object.get("allowlist_channels") {
+        let channels = allowlist
+            .as_array()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels must be an array".into(),
+            })?;
+        let mut normalized = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let raw = channel.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels entries must be strings".into(),
+            })?;
+            let channel_id = raw.trim();
+            if channel_id.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_coordination.allowlist_channels entries must not be empty"
+                        .into(),
+                });
+            }
+            normalized.push(ChannelId::new(channel_id.to_owned()));
+        }
+        config = config.with_allowlist_channels(normalized);
+    }
+    if let Some(backend) = object.get("backend") {
+        config = config.with_backend(parse_chat_coordination_backend(backend)?);
+    }
+    if let Some(dm_mode) = object.get("dm_mode") {
+        config = config.with_dm_mode(parse_chat_coordination_dm_mode(dm_mode)?);
+    }
+    Ok(config)
+}
+
+fn json_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a boolean"),
+    })
+}
+
+fn parse_chat_coordination_backend(value: &Value) -> FcpResult<ChatCoordinationBackend> {
+    match value.as_str() {
+        Some("agent_mail") => Ok(ChatCoordinationBackend::AgentMail),
+        Some("mesh_gossip") => Ok(ChatCoordinationBackend::MeshGossip),
+        Some("in_memory") => Ok(ChatCoordinationBackend::InMemory),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.backend: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.backend must be a string".into(),
+        }),
+    }
+}
+
+fn parse_chat_coordination_dm_mode(value: &Value) -> FcpResult<DmMode> {
+    match value.as_str() {
+        Some("skip") => Ok(DmMode::Skip),
+        Some("treat_as_thread") => Ok(DmMode::TreatAsThread),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.dm_mode: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.dm_mode must be a string".into(),
+        }),
+    }
+}
+
+fn qq_coordination_audit_records(
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> Vec<ChatCoordinationAuditRecord> {
+    let mut records = decision.audit_records().to_vec();
+    if let Some(record) = decision.send_executed_audit_record(backend, claimant_agent_id) {
+        records.push(record);
+    }
+    records
+}
 
 fn empty_input_schema() -> Value {
     json!({
@@ -60,7 +219,11 @@ fn send_message_output_schema() -> Value {
         "additionalProperties": true,
         "properties": {
             "id": { "type": "string" },
-            "timestamp": { "type": "string" }
+            "timestamp": { "type": "string" },
+            "coordination": {
+                "type": "array",
+                "description": "Redacted chat coordination audit records"
+            }
         }
     })
 }
@@ -371,12 +534,25 @@ impl DoctorResult {
     }
 }
 
-#[derive(Debug)]
 pub struct QqConnector {
     base: BaseConnector,
     client: Option<QqClient>,
     verifier: Option<CapabilityVerifier>,
     started_at: Instant,
+    chat_coordination_config: ChatCoordinationConfig,
+    thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
+}
+
+impl std::fmt::Debug for QqConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QqConnector")
+            .field("base", &self.base)
+            .field("client_configured", &self.client.is_some())
+            .field("verifier_configured", &self.verifier.is_some())
+            .field("started_at", &self.started_at)
+            .field("chat_coordination_config", &self.chat_coordination_config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl QqConnector {
@@ -387,7 +563,26 @@ impl QqConnector {
             client: None,
             verifier: None,
             started_at: Instant::now(),
+            chat_coordination_config: default_qq_chat_coordination_config(),
+            thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
         }
+    }
+
+    #[must_use]
+    pub const fn instance_id(&self) -> &fcp_prelude::InstanceId {
+        &self.base.instance_id
+    }
+
+    /// Replace the thread ownership checker used by outbound chat coordination.
+    #[must_use]
+    pub fn with_thread_ownership_checker(
+        mut self,
+        checker: Arc<dyn ThreadOwnershipChecker>,
+        backend: ChatCoordinationBackend,
+    ) -> Self {
+        self.thread_ownership_checker = checker;
+        self.chat_coordination_config = self.chat_coordination_config.with_backend(backend);
+        self
     }
 
     fn manifest_hash() -> String {
@@ -538,46 +733,16 @@ impl QqConnector {
 
         let output = match req.operation.as_str() {
             OP_SEND_CHANNEL => {
-                let channel_id = required_string(&req.input, "channel_id")?;
-                let path = message_path("/channels/", channel_id, "channel_id")?;
-                let content = required_string(&req.input, "content")?;
-                let msg_id = optional_string(&req.input, "msg_id")?;
-                client
-                    .api_request(
-                        reqwest::Method::POST,
-                        &path,
-                        Some(channel_message_body(content, msg_id)),
-                    )
-                    .await
-                    .map_err(|e| e.to_fcp_error())?
+                self.invoke_send_message(client, &req.input, QQ_SEND_CHANNEL_SPEC)
+                    .await?
             }
             OP_SEND_GROUP => {
-                let group_openid = required_string(&req.input, "group_openid")?;
-                let path = message_path("/v2/groups/", group_openid, "group_openid")?;
-                let content = required_string(&req.input, "content")?;
-                let msg_id = optional_string(&req.input, "msg_id")?;
-                client
-                    .api_request(
-                        reqwest::Method::POST,
-                        &path,
-                        Some(direct_message_body(content, msg_id)),
-                    )
-                    .await
-                    .map_err(|e| e.to_fcp_error())?
+                self.invoke_send_message(client, &req.input, QQ_SEND_GROUP_SPEC)
+                    .await?
             }
             OP_SEND_C2C => {
-                let openid = required_string(&req.input, "openid")?;
-                let path = message_path("/v2/users/", openid, "openid")?;
-                let content = required_string(&req.input, "content")?;
-                let msg_id = optional_string(&req.input, "msg_id")?;
-                client
-                    .api_request(
-                        reqwest::Method::POST,
-                        &path,
-                        Some(direct_message_body(content, msg_id)),
-                    )
-                    .await
-                    .map_err(|e| e.to_fcp_error())?
+                self.invoke_send_message(client, &req.input, QQ_SEND_C2C_SPEC)
+                    .await?
             }
             OP_GET_GATEWAY => client
                 .api_request(reqwest::Method::GET, "/gateway", None)
@@ -620,6 +785,84 @@ impl QqConnector {
 
         Ok(InvokeResponse::ok(req.id, output))
     }
+
+    async fn invoke_send_message(
+        &self,
+        client: &QqClient,
+        input: &Value,
+        spec: QqSendOperationSpec,
+    ) -> FcpResult<Value> {
+        let target_id = required_string(input, spec.target_field)?;
+        let path = message_path(spec.path_prefix, target_id, spec.target_field)?;
+        let content = required_string(input, "content")?;
+        let msg_id = optional_string(input, "msg_id")?;
+        let (claim_channel_id, thread_id) = qq_claim_target(spec.target_kind, target_id, msg_id);
+        let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+        let coordination = self
+            .claim_before_qq_send(
+                zone_id,
+                claim_channel_id,
+                thread_id,
+                claimant_agent_id.clone(),
+            )
+            .await;
+        if let Some(error) = coordination.denial_error() {
+            warn!(
+                error = %error,
+                operation = spec.log_operation,
+                "QQ send denied by chat coordination"
+            );
+            return Err(error.clone());
+        }
+
+        let mut output = client
+            .api_request(
+                reqwest::Method::POST,
+                &path,
+                Some((spec.body)(content, msg_id)),
+            )
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+        qq_insert_coordination(
+            &mut output,
+            &coordination,
+            self.chat_coordination_config.backend(),
+            &claimant_agent_id,
+        )?;
+        Ok(output)
+    }
+
+    fn chat_coordination_context(&self) -> (ZoneId, AgentId) {
+        let zone_id = self
+            .verifier
+            .as_ref()
+            .map_or_else(ZoneId::work, |verifier| verifier.zone_id.clone());
+        let claimant_agent_id = AgentId::new(self.base.instance_id.as_str().to_owned());
+        (zone_id, claimant_agent_id)
+    }
+
+    async fn claim_before_qq_send(
+        &self,
+        zone_id: ZoneId,
+        channel_id: ChannelId,
+        thread_id: Option<ThreadId>,
+        claimant_agent_id: AgentId,
+    ) -> ChatCoordinationSendDecision {
+        let cx = fcp_async_core::compatibility_cx();
+        self.chat_coordination_config
+            .claim_before_send(
+                &cx,
+                self.thread_ownership_checker.as_ref(),
+                ChatCoordinationSendRequest::new(
+                    zone_id,
+                    self.base.id.clone(),
+                    channel_id,
+                    thread_id,
+                    claimant_agent_id,
+                ),
+            )
+            .await
+    }
 }
 
 impl Default for QqConnector {
@@ -637,12 +880,17 @@ impl FcpConnector for QqConnector {
     }
 
     async fn configure(&mut self, config: Value) -> FcpResult<()> {
+        let chat_coordination_config = parse_qq_chat_coordination_config(
+            config.get("chat_coordination"),
+            self.chat_coordination_config.clone(),
+        )?;
         let config: QqConfig =
             serde_json::from_value(config).map_err(|error| FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("invalid QQ configuration: {error}"),
             })?;
         self.client = Some(QqClient::new(config).map_err(|e| e.to_fcp_error())?);
+        self.chat_coordination_config = chat_coordination_config;
         self.base.set_configured(true);
         self.base.set_handshaken(false);
         self.verifier = None;
@@ -945,6 +1193,37 @@ fn optional_string<'a>(value: &'a Value, field: &str) -> FcpResult<Option<&'a st
 fn message_path(prefix: &str, target_id: &str, field: &str) -> FcpResult<String> {
     let safe_id = sanitize_path_segment(target_id, field).map_err(|e| e.to_fcp_error())?;
     Ok(format!("{prefix}{safe_id}/messages"))
+}
+
+fn qq_claim_target(
+    target_kind: &str,
+    target_id: &str,
+    msg_id: Option<&str>,
+) -> (ChannelId, Option<ThreadId>) {
+    (
+        ChannelId::new(format!("{target_kind}:{target_id}")),
+        msg_id.map(|msg_id| ThreadId::new(msg_id.to_owned())),
+    )
+}
+
+fn qq_insert_coordination(
+    output: &mut Value,
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> FcpResult<()> {
+    let output = output.as_object_mut().ok_or_else(|| FcpError::Internal {
+        message: "QQ send output was not an object".into(),
+    })?;
+    output.insert(
+        "coordination".into(),
+        json!(qq_coordination_audit_records(
+            decision,
+            backend,
+            claimant_agent_id,
+        )),
+    );
+    Ok(())
 }
 
 fn qq_events_info() -> Vec<EventInfo> {

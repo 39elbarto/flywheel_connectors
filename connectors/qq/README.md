@@ -44,6 +44,7 @@ Important implementation truths from `connector.rs`, `main.rs`, and `manifest.to
 - Channel sends call `POST /channels/{channel_id}/messages`.
 - Group sends call `POST /v2/groups/{group_openid}/messages`.
 - C2C sends call `POST /v2/users/{openid}/messages`.
+- Outbound channel, group, and C2C sends claim SDK chat ownership before the QQ HTTP call and append redacted `coordination` audit records on successful dispatch.
 - The current send bodies only expose plain `content`; they do not surface the broader QQ message-type matrix even though the upstream API supports markdown, ark, embed, keyboard, and media payloads.
 - Direct and group sends currently hard-code `msg_type = 0` and `msg_seq = 1`, and only optionally thread through `msg_id`.
 - `qq.gateway.get` is a plain `GET /gateway` discovery call. The connector does not actually open the websocket session yet.
@@ -123,6 +124,25 @@ This slice is intentionally closer to "outbound bot message dispatch plus connec
 
 The projection operation does not log `client_secret`, access tokens, or raw transport credentials. It returns the normalized message payload already present in the incoming gateway frame, a policy decision, and a runtime snapshot with counters and bounded state sizes.
 
+## Chat Coordination Configuration
+
+Outbound sends support the shared FCP chat thread-ownership guard through optional `chat_coordination` configuration:
+
+```json
+{
+  "chat_coordination": {
+    "enabled": true,
+    "ttl_seconds": 900,
+    "fail_open": true,
+    "backend": "in_memory",
+    "dm_mode": "treat_as_thread",
+    "allowlist_channels": ["channel:CHANNEL_ID", "group:GROUP_OPENID", "c2c:OPENID"]
+  }
+}
+```
+
+The connector coordinates before network dispatch. Claim targets are namespaced as `channel:<channel_id>`, `group:<group_openid>`, and `c2c:<openid>`; optional `msg_id` values become native thread IDs. Successful outputs include only redacted audit hashes and claim outcomes, not QQ target identifiers, content, or raw agent instance IDs. A duplicate active claim is denied before the QQ token or message endpoint is called.
+
 ## Network And Runtime Invariants
 
 - Production API host: `api.sgroup.qq.com`
@@ -151,9 +171,9 @@ The projection operation does not log `client_secret`, access tokens, or raw tra
 
 | Operation | Endpoint shape | Capability | SafetyTier | RiskLevel | Idempotency | Notes |
 |-----------|----------------|------------|------------|-----------|-------------|-------|
-| `qq.messages.send_channel` | `POST /channels/{channel_id}/messages` | `qq.messages.write` | `Risky` | `Medium` | `None` | Sends plain-text content to one text subchannel. The current connector does not expose richer QQ message types. |
-| `qq.messages.send_group` | `POST /v2/groups/{group_openid}/messages` | `qq.messages.write` | `Risky` | `Medium` | `None` | Sends plain-text content to one QQ group target. `msg_id` may be supplied, but full passive-reply semantics are not modeled. |
-| `qq.messages.send_c2c` | `POST /v2/users/{openid}/messages` | `qq.messages.write` | `Risky` | `Medium` | `None` | Sends plain-text content to one C2C target. The first slice does not expose wake-up or richer reply fields. |
+| `qq.messages.send_channel` | `POST /channels/{channel_id}/messages` | `qq.messages.write` | `Risky` | `Medium` | `None` | Sends plain-text content to one text subchannel after a chat-coordination claim. The current connector does not expose richer QQ message types. |
+| `qq.messages.send_group` | `POST /v2/groups/{group_openid}/messages` | `qq.messages.write` | `Risky` | `Medium` | `None` | Sends plain-text content to one QQ group target after a chat-coordination claim. `msg_id` may be supplied, but full passive-reply semantics are not modeled. |
+| `qq.messages.send_c2c` | `POST /v2/users/{openid}/messages` | `qq.messages.write` | `Risky` | `Medium` | `None` | Sends plain-text content to one C2C target after a chat-coordination claim. The first slice does not expose wake-up or richer reply fields. |
 | `qq.gateway.get` | `GET /gateway` | `qq.gateway.read` | `Safe` | `Low` | `Strict` | Returns the official gateway URL for later websocket ingestion work. |
 | `qq.events.normalize` | local decode | `qq.events.read` | `Safe` | `Low` | `Strict` | Normalizes raw QQ Bot gateway message events without mutating runtime state. |
 | `qq.gateway.project_event` | local projection | `qq.events.read` | `Safe` | `Low` | `Strict` | Stateful host-fed gateway projection with sequence/replay/policy decisions and redaction-safe runtime snapshot. |

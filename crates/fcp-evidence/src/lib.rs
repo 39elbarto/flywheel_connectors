@@ -137,6 +137,16 @@ pub use proof_graph::{
     SuggestedNextAction, SupportEdge, SupportRelationship, TruthSource,
 };
 
+// ── Proof Graph Indexer (b88ec.2) ─────────────────────────────────
+
+pub mod proof_graph_indexer;
+
+pub use proof_graph_indexer::{
+    BeadIssueRecord, BeadProofComment, EvidenceBundleRecord, PROOF_GRAPH_INDEXER_CORPUS_SCHEMA,
+    ProofGraphCorpus, ProofGraphIndexError, ProofGraphIndexer, ReadinessMatrixRow,
+    ReadmeFeatureRow, SourceLocation, VerificationScriptRecord,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

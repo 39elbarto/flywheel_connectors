@@ -5,6 +5,67 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/aws_bedrock/${RUN_ID}}"
+RUN_MODE="${AWS_BEDROCK_VERIFY_MODE:-}"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/e2e/aws_bedrock_connector_verification.sh [--mode replay|live]
+
+Modes:
+  replay  Run deterministic WireMock-backed evidence only. This is the default.
+  live    Also run the gated live AWS Bedrock smoke test. Requires AWS_BEDROCK_* vars.
+
+Legacy compatibility:
+  AWS_BEDROCK_E2E=1 without --mode still selects live mode.
+EOF
+}
+
+while (($#)); do
+  case "$1" in
+    --mode)
+      if [[ $# -lt 2 ]]; then
+        echo "--mode requires replay or live" >&2
+        exit 64
+      fi
+      RUN_MODE="$2"
+      shift 2
+      ;;
+    --mode=*)
+      RUN_MODE="${1#--mode=}"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      usage >&2
+      exit 64
+      ;;
+  esac
+done
+
+if [[ -z "${RUN_MODE}" ]]; then
+  if [[ "${AWS_BEDROCK_E2E:-}" == "1" ]]; then
+    RUN_MODE="live"
+  else
+    RUN_MODE="replay"
+  fi
+fi
+
+case "${RUN_MODE}" in
+  replay)
+    unset AWS_BEDROCK_E2E
+    ;;
+  live)
+    export AWS_BEDROCK_E2E=1
+    ;;
+  *)
+    echo "invalid --mode: ${RUN_MODE}; expected replay or live" >&2
+    exit 64
+    ;;
+esac
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
@@ -50,7 +111,7 @@ run_logged() {
   shift
   local log_path="${OUT_ROOT}/logs/${name}.log"
 
-  echo "[aws-bedrock-verification] ${name}: $*"
+  echo "[aws-bedrock-verification] ${name}: $*" >&2
   (
     cd "${REPO_ROOT}"
     "$@"
@@ -85,7 +146,7 @@ if command -v "${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
     manifest_status="$(classify_failure "${OUT_ROOT}/logs/manifest_check.log")"
     promote_overall_status "${manifest_status}"
     cat >"${OUT_ROOT}/evidence/manifest_check.json" <<EOF
-{"status":"${manifest_status}","log":"${OUT_ROOT}/logs/manifest_check.log"}
+{"schema_version":"1.0.0","status":"${manifest_status}","redaction_scope":"public","log":"${OUT_ROOT}/logs/manifest_check.log"}
 EOF
   fi
 else
@@ -100,7 +161,7 @@ else
     manifest_status="$(classify_failure "${OUT_ROOT}/logs/manifest_check.log")"
     promote_overall_status "${manifest_status}"
     cat >"${OUT_ROOT}/evidence/manifest_check.json" <<EOF
-{"status":"${manifest_status}","log":"${OUT_ROOT}/logs/manifest_check.log"}
+{"schema_version":"1.0.0","status":"${manifest_status}","redaction_scope":"public","log":"${OUT_ROOT}/logs/manifest_check.log"}
 EOF
   fi
 fi
@@ -118,7 +179,7 @@ then
   else
     fixture_boundary_status="failed"
     cat >"${OUT_ROOT}/evidence/fixture_boundary.jsonl" <<EOF
-{"event":"bedrock_fixture_missing_jsonl","status":"failed","reason":"integration suite emitted no AWS_BEDROCK_FIXTURE_JSONL records","git_revision":"${git_revision}","fixture_mode":"wiremock","log":"${OUT_ROOT}/logs/integration_suite.log"}
+{"schema_version":"1.0.0","event":"bedrock_fixture_missing_jsonl","status":"failed","reason":"integration suite emitted no AWS_BEDROCK_FIXTURE_JSONL records","git_revision":"${git_revision}","fixture_mode":"wiremock","redaction_scope":"public","log":"${OUT_ROOT}/logs/integration_suite.log"}
 EOF
     if [[ "${integration_status}" == "passed" ]]; then
       promote_overall_status failed
@@ -127,7 +188,7 @@ EOF
 else
   fixture_boundary_status="${integration_status}"
   cat >"${OUT_ROOT}/evidence/fixture_boundary.jsonl" <<EOF
-{"event":"bedrock_fixture_missing_jsonl","status":"${fixture_boundary_status}","reason":"integration suite did not produce extractable AWS_BEDROCK_FIXTURE_JSONL records","git_revision":"${git_revision}","fixture_mode":"wiremock","log":"${OUT_ROOT}/logs/integration_suite.log"}
+{"schema_version":"1.0.0","event":"bedrock_fixture_missing_jsonl","status":"${fixture_boundary_status}","reason":"integration suite did not produce extractable AWS_BEDROCK_FIXTURE_JSONL records","git_revision":"${git_revision}","fixture_mode":"wiremock","redaction_scope":"public","log":"${OUT_ROOT}/logs/integration_suite.log"}
 EOF
   if [[ "${integration_status}" == "passed" ]]; then
     fixture_boundary_status="failed"
@@ -135,7 +196,7 @@ EOF
   fi
 fi
 
-if [[ "${AWS_BEDROCK_E2E:-}" == "1" ]]; then
+if [[ "${RUN_MODE}" == "live" ]]; then
   live_smoke_status="$(run_step live_smoke rch exec -- cargo test -p fcp-aws-bedrock --test live_verification -- --nocapture)"
   if grep -a '^AWS_BEDROCK_E2E_JSONL ' "${OUT_ROOT}/logs/live_smoke.log" \
     | sed 's/^AWS_BEDROCK_E2E_JSONL //' >"${OUT_ROOT}/evidence/live_smoke.jsonl"
@@ -145,7 +206,7 @@ if [[ "${AWS_BEDROCK_E2E:-}" == "1" ]]; then
     fi
   else
     cat >"${OUT_ROOT}/evidence/live_smoke.jsonl" <<EOF
-{"event":"bedrock_live_smoke_missing_jsonl","status":"${live_smoke_status}","reason":"live verification command did not emit AWS_BEDROCK_E2E_JSONL records","git_revision":"${git_revision}","fixture_mode":"live","region":"${AWS_BEDROCK_REGION:-unset}","log":"${OUT_ROOT}/logs/live_smoke.log"}
+{"schema_version":"1.0.0","event":"bedrock_live_smoke_missing_jsonl","status":"${live_smoke_status}","reason":"live verification command did not emit AWS_BEDROCK_E2E_JSONL records","git_revision":"${git_revision}","fixture_mode":"live","region":"${AWS_BEDROCK_REGION:-unset}","redaction_scope":"public","log":"${OUT_ROOT}/logs/live_smoke.log"}
 EOF
     if [[ "${live_smoke_status}" == "passed" ]]; then
       live_smoke_status="failed"
@@ -155,20 +216,22 @@ EOF
 else
   live_smoke_status="skipped"
   cat >"${OUT_ROOT}/evidence/live_smoke.jsonl" <<EOF
-{"event":"bedrock_live_smoke_skipped","status":"skipped","skip_reason":"AWS_BEDROCK_E2E is not set to 1","git_revision":"${git_revision}","fixture_mode":"wiremock","region":"${AWS_BEDROCK_REGION:-unset}","api_styles":["converse","converse_stream","invoke_model","invoke_model_stream","models.list"],"redaction":"no prompts, completions, AWS keys, session tokens, or full signatures are emitted"}
+{"schema_version":"1.0.0","event":"bedrock_live_smoke_skipped","status":"skipped","skip_reason":"verification mode is replay; pass --mode live with AWS_BEDROCK_* variables for real Bedrock proof","git_revision":"${git_revision}","fixture_mode":"wiremock","region":"${AWS_BEDROCK_REGION:-unset}","api_styles":["converse","converse_stream","invoke_model","invoke_model_stream","models.list"],"redaction_scope":"hashed","redaction":"no prompts, completions, AWS keys, session tokens, or full signatures are emitted"}
 EOF
 fi
 
 cat >"${OUT_ROOT}/environment.json" <<EOF
 {
+  "schema_version": "1.0.0",
   "run_id": "${RUN_ID}",
   "connector": "fcp-aws-bedrock",
   "repo_root": "${REPO_ROOT}",
   "verification_script": "scripts/e2e/aws_bedrock_connector_verification.sh",
   "artifact_root": "${OUT_ROOT}",
   "git_revision": "${git_revision}",
+  "verification_mode": "${RUN_MODE}",
   "manifest_check_runner": "${manifest_check_runner}",
-  "aws_bedrock_e2e_enabled": "$([[ "${AWS_BEDROCK_E2E:-}" == "1" ]] && echo true || echo false)"
+  "aws_bedrock_e2e_enabled": "$([[ "${RUN_MODE}" == "live" ]] && echo true || echo false)"
 }
 EOF
 
@@ -194,8 +257,10 @@ chmod +x "${OUT_ROOT}/replay.sh"
 
 cat >"${OUT_ROOT}/summary.json" <<EOF
 {
+  "schema_version": "1.0.0",
   "run_id": "${RUN_ID}",
   "connector": "fcp-aws-bedrock",
+  "verification_mode": "${RUN_MODE}",
   "overall_status": "${OVERALL_STATUS}",
   "artifacts_root": "${OUT_ROOT}",
   "steps": {

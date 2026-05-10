@@ -1,7 +1,7 @@
 # AWS Bedrock Connector V1 Contract
 
 > **Status**: Bedrock Runtime, Bedrock Mantle Anthropic Messages, and control-plane slices documented with SigV4, bearer-token, event-stream/SSE, and verification-bundle boundaries
-> **Bead**: `flywheel_connectors-4kw5f.12`
+> **Bead**: `flywheel_connectors-4kw5f.2.9.2.13.1`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: `scripts/e2e/aws_bedrock_connector_verification.sh`
 > **Converse upstream**: https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html
@@ -177,6 +177,13 @@ The tracked verification bundle runs:
 
 The deterministic integration evidence is anchored on WireMock and fixture JSONL coverage for SigV4 headers, Converse, InvokeModel, stream frame decoding, model listing, provider error mapping, and connector-boundary behavior.
 
+The verification script has two explicit modes:
+
+- `--mode replay` is the default. It runs the deterministic WireMock-backed proof lane, writes schema-versioned JSON artifacts under the selected `OUT_ROOT`, and emits a structured live-skip record instead of touching AWS.
+- `--mode live` also runs `tests/live_verification.rs` with `AWS_BEDROCK_E2E=1`. It requires a sealed Bedrock test account and the `AWS_BEDROCK_*` variables documented in [aws_bedrock_e2e_test_account.md](../../docs/runbooks/aws_bedrock_e2e_test_account.md).
+
+UBS disposition for this connector lives in [UBS_DISPOSITION.md](UBS_DISPOSITION.md). The current scanner run reports zero critical findings; remaining warnings are test panic inventories, checked parser/index invariants, and performance/style inventories that do not block replay proof.
+
 ## Source Notes
 
 - `connectors/aws-bedrock/src/types.rs` defines credentials, request bodies, model-family body builders, foundation model summaries, and stream response shapes.
@@ -201,7 +208,7 @@ LC_ALL=C rg -n '[^ -~]' connectors/aws-bedrock/README.md
 For source or behavior changes, use the tracked verification bundle:
 
 ```bash
-scripts/e2e/aws_bedrock_connector_verification.sh
+scripts/e2e/aws_bedrock_connector_verification.sh --mode replay
 ```
 
 Direct proof commands from the bundle are:
@@ -215,6 +222,15 @@ rch exec -- cargo clippy -p fcp-aws-bedrock --all-targets -- -D warnings
 ```
 
 Set `AWS_BEDROCK_E2E=1` only for a disposable verification account with cheapest-model smoke settings before running the live smoke suite.
+The preferred live invocation is:
+
+```bash
+AWS_BEDROCK_ACCESS_KEY_ID=... \
+AWS_BEDROCK_SECRET_ACCESS_KEY=... \
+AWS_BEDROCK_REGION=us-east-1 \
+AWS_BEDROCK_MODEL_ID=anthropic.claude-3-haiku-20240307-v1:0 \
+scripts/e2e/aws_bedrock_connector_verification.sh --mode live
+```
 
 ## Operator Guidance
 

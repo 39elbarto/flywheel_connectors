@@ -84,8 +84,20 @@ impl LiveEnv {
     }
 }
 
+fn live_jsonl_record(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = value.as_object_mut() {
+        object
+            .entry("schema_version")
+            .or_insert_with(|| json!("1.0.0"));
+        object
+            .entry("redaction_scope")
+            .or_insert_with(|| json!("hashed"));
+    }
+    value
+}
+
 fn emit_jsonl(value: serde_json::Value) {
-    println!("AWS_BEDROCK_E2E_JSONL {value}");
+    println!("AWS_BEDROCK_E2E_JSONL {}", live_jsonl_record(value));
 }
 
 fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
@@ -184,6 +196,16 @@ async fn setup_connector(env: &LiveEnv) -> (BedrockConnector, Ed25519SigningKey)
 fn digest16(input: &str) -> String {
     let digest = Sha256::digest(input.as_bytes());
     hex::encode(&digest[..8])
+}
+
+#[test]
+fn live_jsonl_records_are_schema_versioned_and_redacted() {
+    let record = live_jsonl_record(json!({
+        "event": "bedrock_live_contract_check"
+    }));
+    assert_eq!(record["schema_version"], "1.0.0");
+    assert_eq!(record["redaction_scope"], "hashed");
+    assert_eq!(record["event"], "bedrock_live_contract_check");
 }
 
 #[fcp_async_core::runtime::test]

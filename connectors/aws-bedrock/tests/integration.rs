@@ -267,8 +267,20 @@ fn assert_mantle_bearer_headers(request: &wiremock::Request) {
     assert!(request.headers.get("x-aws-secret-access-key").is_none());
 }
 
+fn fixture_jsonl_record(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = value.as_object_mut() {
+        object
+            .entry("schema_version")
+            .or_insert_with(|| json!("1.0.0"));
+        object
+            .entry("redaction_scope")
+            .or_insert_with(|| json!("hashed"));
+    }
+    value
+}
+
 fn emit_fixture_jsonl(value: serde_json::Value) {
-    println!("AWS_BEDROCK_FIXTURE_JSONL {value}");
+    println!("AWS_BEDROCK_FIXTURE_JSONL {}", fixture_jsonl_record(value));
 }
 
 fn digest16(input: &str) -> String {
@@ -308,6 +320,16 @@ fn signature_prefix_hash(request: &Request) -> String {
         .expect("SigV4 signature should be present");
     let first8 = &signature[..signature.len().min(8)];
     digest16(first8)
+}
+
+#[test]
+fn fixture_jsonl_records_are_schema_versioned_and_redacted() {
+    let record = fixture_jsonl_record(json!({
+        "event": "bedrock_fixture_contract_check"
+    }));
+    assert_eq!(record["schema_version"], "1.0.0");
+    assert_eq!(record["redaction_scope"], "hashed");
+    assert_eq!(record["event"], "bedrock_fixture_contract_check");
 }
 
 fn foundation_models_response() -> serde_json::Value {

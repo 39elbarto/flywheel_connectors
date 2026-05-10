@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:348f916c7839be0a2ef8e87a61d1b50ebcdd5309b3ec89389fb4e52649c94a56"
+interface_hash = "blake3-256:fcp.interface.v2:020ad78a6c5c96683e5e29f46efa0d4d7d749d9eba6a5985dfe8a699e6b3b04d"
 
 [connector]
 id = "fcp.aws-bedrock"

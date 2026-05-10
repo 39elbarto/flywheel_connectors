@@ -4384,7 +4384,13 @@ fn e2e_mesh_cutover_gates_reports_skip_schema_for_missing_telemetry() {
     let payload = run_json_ok(&["--json", "mesh", "cutover-gates"]);
     assert_eq!(payload["command"], "mesh");
     assert_eq!(payload["subcommand"], "cutover-gates");
-    assert_eq!(payload["schema_version"], "1.0.0");
+    assert_eq!(payload["schema_version"], "1.1.0");
+    assert!(
+        payload["data_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:") && hash.len() == 71),
+        "cutover gates payload must include a stable sha256-prefixed data_hash"
+    );
     assert_eq!(payload["overall_status"], "skip");
     assert_eq!(payload["gate_count"], 4);
     assert_eq!(

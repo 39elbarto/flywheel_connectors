@@ -9,14 +9,17 @@
     clippy::unused_async
 )]
 
+use std::sync::Arc;
+
 use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_line::connector::{LineConnector, operations_info};
 use fcp_prelude::{
     ApprovalMode, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
-    HandshakeRequest, IdempotencyClass, InstanceId, InvokeRequest, InvokeStatus, OperationId,
-    RequestId, SafetyTier, ZoneId,
+    FcpError, HandshakeRequest, IdempotencyClass, InstanceId, InvokeRequest, InvokeStatus,
+    OperationId, RequestId, SafetyTier, ZoneId,
 };
+use fcp_sdk::{ChatCoordinationBackend, InMemoryThreadOwnershipChecker};
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
 };
@@ -115,7 +118,18 @@ fn invoke_req(
 }
 
 async fn setup_connector(base_url: &str) -> (LineConnector, Ed25519SigningKey, InstanceId) {
-    let mut connector = LineConnector::new();
+    setup_connector_with_checker(base_url, None).await
+}
+
+async fn setup_connector_with_checker(
+    base_url: &str,
+    checker: Option<Arc<InMemoryThreadOwnershipChecker>>,
+) -> (LineConnector, Ed25519SigningKey, InstanceId) {
+    let mut connector = match checker {
+        Some(checker) => LineConnector::new()
+            .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory),
+        None => LineConnector::new(),
+    };
     let signing_key = Ed25519SigningKey::generate();
     let instance_id = InstanceId::new();
     connector
@@ -341,6 +355,70 @@ async fn invoke_push_sends_flex_message_json() {
     assert_eq!(body["messages"][0]["type"], "flex");
     assert_eq!(body["messages"][0]["altText"], "Status card");
     assert_eq!(body["messages"][0]["contents"]["type"], "bubble");
+    let result = response.result.expect("push result");
+    assert_eq!(result["coordination"][0]["event"], "claim_attempt");
+    assert_eq!(result["coordination"][1]["outcome"], "granted");
+    assert_eq!(result["coordination"][2]["event"], "send_executed");
+    assert!(
+        !serde_json::to_string(&result["coordination"])
+            .unwrap()
+            .contains("U123")
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_push_claims_recipient_and_denies_duplicate_before_http() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/bot/message/push"))
+        .and(header("authorization", &format!("Bearer {TOKEN}")))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+    let (connector_a, signing_key_a, instance_id_a) =
+        setup_connector_with_checker(&server.uri(), Some(checker.clone())).await;
+    let (connector_b, signing_key_b, instance_id_b) =
+        setup_connector_with_checker(&server.uri(), Some(checker)).await;
+
+    let input = json!({
+        "to": "Ucoord",
+        "messages": [{ "type": "text", "text": "claimed once" }]
+    });
+    let first = connector_a
+        .invoke(invoke_req(
+            OP_PUSH,
+            input.clone(),
+            generate_valid_token(&signing_key_a, &instance_id_a, OP_PUSH),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.status, InvokeStatus::Ok);
+
+    let err = connector_b
+        .invoke(invoke_req(
+            OP_PUSH,
+            input,
+            generate_valid_token(&signing_key_b, &instance_id_b, OP_PUSH),
+        ))
+        .await
+        .unwrap_err();
+    match err {
+        FcpError::Unauthorized { code, message } => {
+            assert_eq!(code, 4090);
+            assert!(message.starts_with("thread_owned_by_peer:"));
+            assert!(message.contains(instance_id_a.as_str()));
+        }
+        other => panic!("expected duplicate claim unauthorized error, got {other:?}"),
+    }
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        1,
+        "duplicate claim must be denied before HTTP"
+    );
 }
 
 #[fcp_async_core::runtime::test]

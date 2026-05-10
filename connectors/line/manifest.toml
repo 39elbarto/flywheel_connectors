@@ -66,6 +66,13 @@ type = "object"
 [provides.operations."line.messages.push".output_schema.properties.sent_messages]
 type = "array"
 
+[provides.operations."line.messages.push".output_schema.properties.coordination]
+description = "Redaction-safe chat thread ownership audit records for claim attempt, outcome, and send execution."
+type = "array"
+
+[provides.operations."line.messages.push".output_schema.properties.coordination.items]
+type = "object"
+
 [provides.operations."line.messages.push".ai_hints]
 when_to_use = "Use for proactive outbound messages when the recipient ID is already known and a live side effect is intended."
 common_mistakes = [
@@ -121,6 +128,13 @@ type = "object"
 
 [provides.operations."line.messages.reply".output_schema.properties.sent_messages]
 type = "array"
+
+[provides.operations."line.messages.reply".output_schema.properties.coordination]
+description = "Redaction-safe chat thread ownership audit records for claim attempt, outcome, and send execution."
+type = "array"
+
+[provides.operations."line.messages.reply".output_schema.properties.coordination.items]
+type = "object"
 
 [provides.operations."line.messages.reply".ai_hints]
 when_to_use = "Use immediately after a webhook event when you must answer with the one-time reply token."
@@ -180,6 +194,13 @@ type = "object"
 
 [provides.operations."line.messages.multicast".output_schema.properties.sent_messages]
 type = "array"
+
+[provides.operations."line.messages.multicast".output_schema.properties.coordination]
+description = "Redaction-safe chat thread ownership audit records for claim attempt, outcome, and send execution."
+type = "array"
+
+[provides.operations."line.messages.multicast".output_schema.properties.coordination.items]
+type = "object"
 
 [provides.operations."line.messages.multicast".ai_hints]
 when_to_use = "Use when you need to send the same message payload to multiple LINE users at once."

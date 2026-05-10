@@ -41,6 +41,7 @@ Important implementation truths from `connector.rs`, `client.rs`, and `manifest.
 - `line.health` and `self_check()` are grounded in `GET /v2/bot/info`, and the readiness surface now emits operator guidance, verification-script references, provisioning details, and structured self-check evidence.
 - `line.messages.reply` depends on a reply token supplied from an external webhook flow, but the connector itself doesn't receive webhooks, verify signatures, or persist webhook state.
 - `line.messages.multicast` is implemented only for user IDs, not group chats or multi-person chats.
+- `line.messages.push`, `line.messages.reply`, and `line.messages.multicast` now run chat thread-ownership coordination before the LINE HTTP request. Duplicate active claims return `FcpError::Unauthorized` code `4090` before provider dispatch, and successful sends include redaction-safe `coordination` audit records.
 - `line.group.members` is implemented against the group-member-ID endpoint and therefore inherits the upstream verified-or-premium-account restriction.
 - The current rich-menu slice manages only rich-menu metadata objects. It does not upload rich-menu images, assign menus to users, set aliases, or manage default rich menus.
 - The runtime doesn't map `InvokeRequest.idempotency_key` to `X-Line-Retry-Key`, so provider-supported retry keys aren't part of the current connector contract.
@@ -84,6 +85,7 @@ This slice is intentionally closer to "outbound bot operations" than to "complet
 - Multicast is narrower: it targets user IDs only.
 - Group-member enumeration is only available to verified or premium official accounts according to LINE's user-ID documentation.
 - Reply tokens are single-use and should be consumed promptly; LINE documents that they are intended to be used within roughly one minute of receiving the webhook and shouldn't be treated as durable credentials.
+- Optional `chat_coordination` config supports `enabled`, `ttl_seconds`, `fail_open`, `allowlist_channels`, `backend`, and `dm_mode`. Empty allowlist means all LINE send targets are coordinated; reply-token and multicast coordination use SHA-256 fingerprints rather than plaintext tokens or recipient lists.
 
 ## Network And Runtime Invariants
 
@@ -116,9 +118,9 @@ This slice is intentionally closer to "outbound bot operations" than to "complet
 
 | Operation | Endpoint shape | Capability | SafetyTier | RiskLevel | Idempotency | Notes |
 |-----------|----------------|------------|------------|-----------|-------------|-------|
-| `line.messages.push` | `POST /v2/bot/message/push` | `line.messages.write` | `Risky` | `Medium` | `BestEffort` | Sends a real outbound message to one `userId`, `groupId`, or `roomId`. LINE supports retry keys, but the connector doesn't currently wire them. |
-| `line.messages.reply` | `POST /v2/bot/message/reply` | `line.messages.write` | `Risky` | `Medium` | `None` | Consumes a short-lived, single-use reply token originating from a webhook event handled elsewhere. |
-| `line.messages.multicast` | `POST /v2/bot/message/multicast` | `line.messages.write` | `Risky` | `Medium` | `BestEffort` | Sends the same payload to multiple user IDs only. Group and room targets are out of scope for this operation. |
+| `line.messages.push` | `POST /v2/bot/message/push` | `line.messages.write` | `Risky` | `Medium` | `BestEffort` | Claims ownership for the recipient conversation before dispatch, then sends a real outbound message to one `userId`, `groupId`, or `roomId`. LINE supports retry keys, but the connector doesn't currently wire them. |
+| `line.messages.reply` | `POST /v2/bot/message/reply` | `line.messages.write` | `Risky` | `Medium` | `None` | Claims ownership using a reply-token fingerprint before dispatch, then consumes a short-lived, single-use reply token originating from a webhook event handled elsewhere. |
+| `line.messages.multicast` | `POST /v2/bot/message/multicast` | `line.messages.write` | `Risky` | `Medium` | `BestEffort` | Claims ownership for a fingerprint of the sorted recipient set before dispatch, then sends the same payload to multiple user IDs only. Group and room targets are out of scope for this operation. |
 | `line.profile.get` | `GET /v2/bot/profile/{userId}` | `line.profile.read` | `Safe` | `Low` | `Strict` | Canonical point lookup for user identity and display metadata. |
 | `line.group.profile` | `GET /v2/bot/group/{groupId}/summary` | `line.profile.read` | `Safe` | `Low` | `Strict` | Canonical group-summary lookup. |
 | `line.group.members` | `GET /v2/bot/group/{groupId}/members/ids` | `line.profile.read` | `Safe` | `Low` | `Strict` | Read-only group member ID enumeration with pagination. Upstream account-tier restrictions apply. |

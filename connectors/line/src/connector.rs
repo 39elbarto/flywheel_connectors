@@ -1,6 +1,7 @@
 //! LINE connector implementation.
 
 use std::{
+    sync::Arc,
     sync::atomic::Ordering,
     time::{Duration, Instant},
 };
@@ -16,8 +17,9 @@ use fcp_prelude::{
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_sdk::prelude::*;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tracing::warn;
 
 use crate::client::LineClient;
 use crate::types::{Message, RichMenu, validate_messages};
@@ -56,6 +58,148 @@ const VERIFY_COMMANDS: [&str; 7] = [
     "rch exec -- cargo test -p fcp-line -- --nocapture",
     "rch exec -- cargo clippy -p fcp-line --all-targets -- -D warnings",
 ];
+
+fn default_line_chat_coordination_config() -> ChatCoordinationConfig {
+    ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
+}
+
+fn parse_line_chat_coordination_config(
+    value: Option<&Value>,
+    base: ChatCoordinationConfig,
+) -> FcpResult<ChatCoordinationConfig> {
+    let Some(value) = value else {
+        return Ok(base);
+    };
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "chat_coordination must be an object".into(),
+    })?;
+
+    let mut config = base;
+    if let Some(enabled) = object.get("enabled") {
+        config = config.with_enabled(json_bool(enabled, "chat_coordination.enabled")?);
+    }
+    if let Some(ttl_seconds) = object.get("ttl_seconds") {
+        let seconds = ttl_seconds
+            .as_u64()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be an integer".into(),
+            })?;
+        if seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be greater than zero".into(),
+            });
+        }
+        config = config.with_ttl(Duration::from_secs(seconds));
+    }
+    if let Some(fail_open) = object.get("fail_open") {
+        config = config.with_fail_open(json_bool(fail_open, "chat_coordination.fail_open")?);
+    }
+    if let Some(allowlist) = object.get("allowlist_channels") {
+        let channels = allowlist
+            .as_array()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels must be an array".into(),
+            })?;
+        let mut normalized = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let raw = channel.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels entries must be strings".into(),
+            })?;
+            let channel_id = raw.trim();
+            if channel_id.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_coordination.allowlist_channels entries must not be empty"
+                        .into(),
+                });
+            }
+            normalized.push(ChannelId::new(channel_id.to_owned()));
+        }
+        config = config.with_allowlist_channels(normalized);
+    }
+    if let Some(backend) = object.get("backend") {
+        config = config.with_backend(parse_chat_coordination_backend(backend)?);
+    }
+    if let Some(dm_mode) = object.get("dm_mode") {
+        config = config.with_dm_mode(parse_chat_coordination_dm_mode(dm_mode)?);
+    }
+    Ok(config)
+}
+
+fn json_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a boolean"),
+    })
+}
+
+fn parse_chat_coordination_backend(value: &Value) -> FcpResult<ChatCoordinationBackend> {
+    match value.as_str() {
+        Some("agent_mail") => Ok(ChatCoordinationBackend::AgentMail),
+        Some("mesh_gossip") => Ok(ChatCoordinationBackend::MeshGossip),
+        Some("in_memory") => Ok(ChatCoordinationBackend::InMemory),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.backend: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.backend must be a string".into(),
+        }),
+    }
+}
+
+fn parse_chat_coordination_dm_mode(value: &Value) -> FcpResult<DmMode> {
+    match value.as_str() {
+        Some("skip") => Ok(DmMode::Skip),
+        Some("treat_as_thread") => Ok(DmMode::TreatAsThread),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.dm_mode: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.dm_mode must be a string".into(),
+        }),
+    }
+}
+
+fn line_coordination_audit_records(
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> Vec<ChatCoordinationAuditRecord> {
+    let mut records = decision.audit_records().to_vec();
+    if let Some(record) = decision.send_executed_audit_record(backend, claimant_agent_id) {
+        records.push(record);
+    }
+    records
+}
+
+fn line_insert_coordination(
+    output: &mut Value,
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> FcpResult<()> {
+    let object = output.as_object_mut().ok_or_else(|| FcpError::Internal {
+        message: "Serialized LINE send response was not an object".into(),
+    })?;
+    object.insert(
+        "coordination".into(),
+        json!(line_coordination_audit_records(
+            decision,
+            backend,
+            claimant_agent_id,
+        )),
+    );
+    Ok(())
+}
 
 /// LINE connector configuration.
 #[derive(Clone, Deserialize)]
@@ -347,7 +491,6 @@ fn contract_details(config: Option<&LineConfig>) -> serde_json::Value {
 }
 
 /// LINE connector state.
-#[derive(Debug)]
 pub struct LineConnector {
     base: BaseConnector,
     config: Option<LineConfig>,
@@ -356,6 +499,8 @@ pub struct LineConnector {
     retry_config: HttpRetryConfig,
     started_at: Instant,
     verifier: Option<CapabilityVerifier>,
+    chat_coordination_config: ChatCoordinationConfig,
+    thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
 }
 
 impl LineConnector {
@@ -370,7 +515,20 @@ impl LineConnector {
             retry_config: HttpRetryConfig::default(),
             started_at: Instant::now(),
             verifier: None,
+            chat_coordination_config: default_line_chat_coordination_config(),
+            thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
         }
+    }
+
+    #[must_use]
+    pub fn with_thread_ownership_checker(
+        mut self,
+        checker: Arc<dyn ThreadOwnershipChecker>,
+        backend: ChatCoordinationBackend,
+    ) -> Self {
+        self.thread_ownership_checker = checker;
+        self.chat_coordination_config = self.chat_coordination_config.with_backend(backend);
+        self
     }
 
     fn manifest_hash() -> String {
@@ -737,6 +895,20 @@ fn parse_messages(input: &serde_json::Value) -> FcpResult<Vec<Message>> {
     Ok(messages)
 }
 
+fn line_message_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "sent_messages": { "type": "array" },
+            "coordination": {
+                "type": "array",
+                "description": "Redaction-safe chat thread ownership audit records",
+                "items": { "type": "object", "additionalProperties": true }
+            }
+        }
+    })
+}
+
 /// Build the typed operations catalog.
 pub fn operations_info() -> Vec<OperationInfo> {
     vec![
@@ -752,12 +924,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "messages": message_array_schema()
                 }
             }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "sent_messages": { "type": "array" }
-                }
-            }),
+            output_schema: line_message_output_schema(),
             capability: CapabilityId::from_static(CAP_MSG_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
@@ -786,12 +953,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "messages": message_array_schema()
                 }
             }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "sent_messages": { "type": "array" }
-                }
-            }),
+            output_schema: line_message_output_schema(),
             capability: CapabilityId::from_static(CAP_MSG_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
@@ -824,12 +986,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "messages": message_array_schema()
                 }
             }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "sent_messages": { "type": "array" }
-                }
-            }),
+            output_schema: line_message_output_schema(),
             capability: CapabilityId::from_static(CAP_MSG_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
@@ -1077,6 +1234,10 @@ impl FcpConnector for LineConnector {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
+        let chat_coordination_config = parse_line_chat_coordination_config(
+            config.get("chat_coordination"),
+            self.chat_coordination_config.clone(),
+        )?;
         let mut config: LineConfig =
             serde_json::from_value(config).map_err(|e| FcpError::InvalidRequest {
                 code: 1001,
@@ -1104,6 +1265,7 @@ impl FcpConnector for LineConnector {
 
         self.client = Some(client);
         self.config = Some(config);
+        self.chat_coordination_config = chat_coordination_config;
         self.verifier = None;
         self.base.set_configured(true);
         self.base.set_handshaken(false);
@@ -1296,14 +1458,38 @@ impl LineConnector {
                     },
                 )?;
                 let messages = parse_messages(&req.input)?;
+                let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+                let coordination = self
+                    .claim_before_line_send(
+                        zone_id,
+                        line_push_channel_id(to),
+                        None,
+                        claimant_agent_id.clone(),
+                    )
+                    .await;
+                if let Some(error) = coordination.denial_error() {
+                    warn!(
+                        error = %error,
+                        operation = OP_PUSH,
+                        "LINE push denied by chat coordination"
+                    );
+                    return Err(error.clone());
+                }
 
                 let resp = client
                     .push_message(runtime, to, messages)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+                let mut output = serde_json::to_value(resp).map_err(|e| FcpError::Internal {
                     message: format!("Failed to serialize response: {e}"),
-                })?
+                })?;
+                line_insert_coordination(
+                    &mut output,
+                    &coordination,
+                    self.chat_coordination_config.backend(),
+                    &claimant_agent_id,
+                )?;
+                output
             }
             OP_REPLY => {
                 let reply_token = req
@@ -1315,14 +1501,38 @@ impl LineConnector {
                         message: "Missing 'reply_token' field".into(),
                     })?;
                 let messages = parse_messages(&req.input)?;
+                let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+                let coordination = self
+                    .claim_before_line_send(
+                        zone_id,
+                        line_reply_channel_id(reply_token),
+                        None,
+                        claimant_agent_id.clone(),
+                    )
+                    .await;
+                if let Some(error) = coordination.denial_error() {
+                    warn!(
+                        error = %error,
+                        operation = OP_REPLY,
+                        "LINE reply denied by chat coordination"
+                    );
+                    return Err(error.clone());
+                }
 
                 let resp = client
                     .reply_message(runtime, reply_token, messages)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+                let mut output = serde_json::to_value(resp).map_err(|e| FcpError::Internal {
                     message: format!("Failed to serialize response: {e}"),
-                })?
+                })?;
+                line_insert_coordination(
+                    &mut output,
+                    &coordination,
+                    self.chat_coordination_config.backend(),
+                    &claimant_agent_id,
+                )?;
+                output
             }
             OP_MULTICAST => {
                 let to: Vec<String> = req
@@ -1339,14 +1549,38 @@ impl LineConnector {
                         message: "Missing 'to' field".into(),
                     })?;
                 let messages = parse_messages(&req.input)?;
+                let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+                let coordination = self
+                    .claim_before_line_send(
+                        zone_id,
+                        line_multicast_channel_id(&to),
+                        None,
+                        claimant_agent_id.clone(),
+                    )
+                    .await;
+                if let Some(error) = coordination.denial_error() {
+                    warn!(
+                        error = %error,
+                        operation = OP_MULTICAST,
+                        "LINE multicast denied by chat coordination"
+                    );
+                    return Err(error.clone());
+                }
 
                 let resp = client
                     .multicast(runtime, &to, messages)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+                let mut output = serde_json::to_value(resp).map_err(|e| FcpError::Internal {
                     message: format!("Failed to serialize response: {e}"),
-                })?
+                })?;
+                line_insert_coordination(
+                    &mut output,
+                    &coordination,
+                    self.chat_coordination_config.backend(),
+                    &claimant_agent_id,
+                )?;
+                output
             }
             OP_PROFILE_GET => {
                 let user_id = req.input.get("user_id").and_then(|v| v.as_str()).ok_or(
@@ -1445,6 +1679,62 @@ impl LineConnector {
 
         Ok(InvokeResponse::ok(req.id, output))
     }
+
+    fn chat_coordination_context(&self) -> (ZoneId, AgentId) {
+        let zone_id = self
+            .verifier
+            .as_ref()
+            .map_or_else(ZoneId::work, |verifier| verifier.zone_id.clone());
+        let claimant_agent_id = AgentId::new(self.base.instance_id.as_str().to_owned());
+        (zone_id, claimant_agent_id)
+    }
+
+    async fn claim_before_line_send(
+        &self,
+        zone_id: ZoneId,
+        channel_id: ChannelId,
+        thread_id: Option<ThreadId>,
+        claimant_agent_id: AgentId,
+    ) -> ChatCoordinationSendDecision {
+        let cx = fcp_async_core::compatibility_cx();
+        self.chat_coordination_config
+            .claim_before_send(
+                &cx,
+                self.thread_ownership_checker.as_ref(),
+                ChatCoordinationSendRequest::new(
+                    zone_id,
+                    self.base.id.clone(),
+                    channel_id,
+                    thread_id,
+                    claimant_agent_id,
+                ),
+            )
+            .await
+    }
+}
+
+fn line_push_channel_id(to: &str) -> ChannelId {
+    ChannelId::new(format!("recipient:{}", to.trim()))
+}
+
+fn line_reply_channel_id(reply_token: &str) -> ChannelId {
+    ChannelId::new(format!(
+        "reply_token_sha256:{}",
+        sha256_hex(reply_token.trim())
+    ))
+}
+
+fn line_multicast_channel_id(to: &[String]) -> ChannelId {
+    let mut recipients = to.iter().map(String::as_str).collect::<Vec<_>>();
+    recipients.sort_unstable();
+    let canonical = serde_json::to_string(&recipients).unwrap_or_else(|_| recipients.join("\n"));
+    ChannelId::new(format!("multicast_sha256:{}", sha256_hex(&canonical)))
+}
+
+fn sha256_hex(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 #[cfg(test)]
@@ -1932,6 +2222,16 @@ mod tests {
             .find(|op| op.id.as_str() == OP_MULTICAST)
             .unwrap();
         assert_eq!(mc.capability, CapabilityId::from_static(CAP_MSG_WRITE));
+    }
+
+    #[test]
+    fn test_multicast_coordination_channel_hashes_sorted_recipients() {
+        let left = line_multicast_channel_id(&["U2".into(), "U1".into()]);
+        let right = line_multicast_channel_id(&["U1".into(), "U2".into()]);
+        assert_eq!(left, right);
+        assert!(left.as_str().starts_with("multicast_sha256:"));
+        assert!(!left.as_str().contains("U1"));
+        assert!(!left.as_str().contains("U2"));
     }
 
     #[test]

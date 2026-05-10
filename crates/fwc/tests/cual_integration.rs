@@ -4421,6 +4421,48 @@ fn e2e_mesh_cutover_gates_reports_skip_schema_for_missing_telemetry() {
     );
 }
 
+#[test]
+fn e2e_mesh_cutover_gates_malformed_config_returns_typed_error() {
+    let tempdir = tempdir().expect("cutover config tempdir");
+    let config_path = tempdir.path().join("broken-fcp-host.toml");
+    fs::write(&config_path, "[mesh.cutover_gates\n").expect("broken config fixture should write");
+
+    let (exit_code, payload, _stderr) = run_json(&[
+        "--json",
+        "mesh",
+        "cutover-gates",
+        "--config",
+        config_path.to_str().expect("config path should be UTF-8"),
+    ]);
+
+    assert_ne!(exit_code, 0, "malformed cutover config must fail closed");
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "mesh");
+    assert_eq!(payload["subcommand"], "cutover-gates");
+    assert_eq!(payload["error"]["type"], "invalid-cutover-gates-config");
+    assert_eq!(payload["error"]["recoverable"], true);
+    assert_eq!(payload["config_path"], config_path.display().to_string());
+}
+
+#[test]
+fn e2e_mesh_cutover_gates_concurrent_snapshot_hash_is_stable() {
+    let first = thread::spawn(|| run_json_ok(&["--json", "mesh", "cutover-gates"]));
+    let second = thread::spawn(|| run_json_ok(&["--json", "mesh", "cutover-gates"]));
+
+    let first = first.join().expect("first cutover-gates run should join");
+    let second = second.join().expect("second cutover-gates run should join");
+
+    assert_eq!(first["status"], "ok");
+    assert_eq!(second["status"], "ok");
+    assert_eq!(first["schema_version"], "1.1.0");
+    assert_eq!(second["schema_version"], "1.1.0");
+    assert_eq!(first["gate_count"], second["gate_count"]);
+    assert_eq!(
+        first["data_hash"], second["data_hash"],
+        "same-snapshot concurrent cutover-gates runs must agree on data_hash"
+    );
+}
+
 // ── P6.5: Offline and node-local trust path acceptance tests ───────────
 
 /// Verify that offline `show` exposes manifest safety metadata without

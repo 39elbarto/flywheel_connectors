@@ -99,20 +99,26 @@ clippy_status="${LAST_STEP_STATUS}"
 run_step diff_check git diff --check -- connectors/slack/Cargo.toml connectors/slack/manifest.toml connectors/slack/src/connector.rs connectors/slack/tests/integration.rs connectors/slack/tests/live_verification.rs connectors/slack/README.md scripts/e2e/slack_connector_verification.sh
 diff_check_status="${LAST_STEP_STATUS}"
 
+loopback_jsonl_path="${OUT_ROOT}/evidence/loopback_policy_matrix.jsonl"
+loopback_stdout_jsonl_path="${OUT_ROOT}/evidence/loopback_stdout.jsonl"
 if grep -a "^${SLACK_LOOPBACK_E2E_JSONL_PREFIX:-SLACK_LOOPBACK_E2E_JSONL} " "${OUT_ROOT}/logs/loopback_jsonl.log" \
-  | sed "s/^${SLACK_LOOPBACK_E2E_JSONL_PREFIX:-SLACK_LOOPBACK_E2E_JSONL} //" >"${OUT_ROOT}/evidence/loopback_stdout.jsonl"; then
-  if [[ ! -s "${OUT_ROOT}/evidence/loopback_stdout.jsonl" ]]; then
+  | sed "s/^${SLACK_LOOPBACK_E2E_JSONL_PREFIX:-SLACK_LOOPBACK_E2E_JSONL} //" >"${loopback_stdout_jsonl_path}"; then
+  if [[ ! -s "${loopback_stdout_jsonl_path}" ]]; then
     promote_status failed
-    printf '{"event":"slack_loopback_missing_jsonl","status":"failed","git_revision":"%s"}\n' "${git_revision}" >"${OUT_ROOT}/evidence/loopback_stdout.jsonl"
+    printf '{"event":"slack_loopback_missing_jsonl","status":"failed","git_revision":"%s"}\n' "${git_revision}" >"${loopback_stdout_jsonl_path}"
   fi
+  cp "${loopback_stdout_jsonl_path}" "${loopback_jsonl_path}"
 fi
 
+live_skip_jsonl_path="${OUT_ROOT}/evidence/live_smoke_skip.jsonl"
+live_skip_stdout_jsonl_path="${OUT_ROOT}/evidence/live_smoke_skip_stdout.jsonl"
 if grep -a '^SLACK_LIVE_E2E_JSONL ' "${OUT_ROOT}/logs/live_smoke_skip_jsonl.log" \
-  | sed 's/^SLACK_LIVE_E2E_JSONL //' >"${OUT_ROOT}/evidence/live_smoke_skip_stdout.jsonl"; then
-  if [[ ! -s "${OUT_ROOT}/evidence/live_smoke_skip_stdout.jsonl" ]]; then
+  | sed 's/^SLACK_LIVE_E2E_JSONL //' >"${live_skip_stdout_jsonl_path}"; then
+  if [[ ! -s "${live_skip_stdout_jsonl_path}" ]]; then
     promote_status failed
-    printf '{"event":"slack_live_smoke_missing_jsonl","status":"failed","git_revision":"%s"}\n' "${git_revision}" >"${OUT_ROOT}/evidence/live_smoke_skip_stdout.jsonl"
+    printf '{"event":"slack_live_smoke_missing_jsonl","status":"failed","git_revision":"%s"}\n' "${git_revision}" >"${live_skip_stdout_jsonl_path}"
   fi
+  cp "${live_skip_stdout_jsonl_path}" "${live_skip_jsonl_path}"
 fi
 
 if grep -R -E 'xoxb-|xapp-|private slack message|TSECRET|CSECRET|USECRET|1700000000\.000001' "${OUT_ROOT}/evidence" >/dev/null 2>&1; then

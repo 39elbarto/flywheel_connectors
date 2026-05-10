@@ -9,6 +9,7 @@ use std::{
     collections::BTreeMap,
     future::Future,
     net::IpAddr,
+    path::Path,
     pin::Pin,
     sync::{Arc, Mutex, MutexGuard},
     time::Duration,
@@ -60,6 +61,79 @@ const PROXY_BYPASS_MAX_ENTRIES: usize = 128;
 const PROXY_BYPASS_ENTRY_MAX_BYTES: usize = 256;
 const PROXY_REDACTION_CONTRACT: &str =
     "proxy credentials, target URLs, local paths, cookies, and raw CDP endpoints must be redacted";
+const RUST_LAUNCHER_COMMAND_LINE: &str = "fcp-browser rust-owned-launcher-supervisor";
+pub(crate) const RUST_LAUNCHER_DEFAULT_READINESS_TIMEOUT_MS: u64 = 10_000;
+const RUST_LAUNCHER_MAX_ARGS: usize = 32;
+const RUST_LAUNCHER_ARG_MAX_BYTES: usize = 512;
+const RUST_LAUNCHER_PROFILE_ARG: &str = "--user-data-dir=fcp-runtime-profile-dir";
+
+/// Runtime mode for the Rust-owned browser launcher supervisor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserLauncherMode {
+    /// Build and validate a native browser launch plan.
+    Native,
+    /// Deterministic in-process fixture mode for proof lanes.
+    Fixture,
+}
+
+impl BrowserLauncherMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Fixture => "fixture",
+        }
+    }
+}
+
+/// Configuration for the opt-in Rust-owned launcher supervisor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserLauncherConfig {
+    mode: BrowserLauncherMode,
+    browser_binary_path: Option<String>,
+    readiness_timeout_ms: u64,
+}
+
+impl BrowserLauncherConfig {
+    /// Native launcher mode using an optional configured browser binary path.
+    pub fn native(
+        browser_binary_path: Option<String>,
+        readiness_timeout_ms: u64,
+    ) -> BrowserResult<Self> {
+        let config = Self {
+            mode: BrowserLauncherMode::Native,
+            browser_binary_path,
+            readiness_timeout_ms,
+        };
+        validate_rust_owned_launcher_config(&config)?;
+        Ok(config)
+    }
+
+    /// Deterministic fixture mode for test/proof lanes.
+    #[must_use]
+    pub fn fixture(readiness_timeout_ms: u64) -> Self {
+        Self {
+            mode: BrowserLauncherMode::Fixture,
+            browser_binary_path: None,
+            readiness_timeout_ms,
+        }
+    }
+
+    #[must_use]
+    pub const fn mode(&self) -> BrowserLauncherMode {
+        self.mode
+    }
+
+    #[must_use]
+    pub fn browser_binary_path(&self) -> Option<&str> {
+        self.browser_binary_path.as_deref()
+    }
+
+    #[must_use]
+    pub const fn readiness_timeout_ms(&self) -> u64 {
+        self.readiness_timeout_ms
+    }
+}
 
 #[derive(Clone, Copy)]
 struct BrowserControlOperation {
@@ -584,6 +658,306 @@ impl DirectCdpTargetSessionManager {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct RustOwnedLauncherEvent {
+    schema_version: &'static str,
+    command_line: &'static str,
+    git_revision: String,
+    run_id: String,
+    platform: &'static str,
+    browser_binary_descriptor_hash: String,
+    launch_mode: &'static str,
+    control_endpoint_kind: &'static str,
+    operation_id: &'static str,
+    capability_decision: &'static str,
+    approval_decision: &'static str,
+    proxy_descriptor_hash: Option<String>,
+    target_session_id_hash: String,
+    readiness_checkpoint: &'static str,
+    timeout_cancellation_checkpoint: &'static str,
+    cleanup_result: &'static str,
+    artifact_paths: Vec<String>,
+    skip_reason: Option<&'static str>,
+    reason_code: Option<&'static str>,
+    launch_args_hash: String,
+}
+
+#[derive(Debug, Default)]
+struct RustOwnedLauncherState {
+    run_id: String,
+    launched: bool,
+    shutdown: bool,
+    current_proxy_hash: Option<String>,
+    target_session_id_hash: Option<String>,
+    launch_generation: u64,
+    events: Vec<RustOwnedLauncherEvent>,
+}
+
+#[derive(Debug)]
+struct RustOwnedLauncherSupervisor {
+    config: BrowserLauncherConfig,
+    state: RustOwnedLauncherState,
+}
+
+impl RustOwnedLauncherSupervisor {
+    fn new(config: BrowserLauncherConfig) -> BrowserResult<Self> {
+        validate_rust_owned_launcher_config(&config)?;
+        Ok(Self {
+            config,
+            state: RustOwnedLauncherState {
+                run_id: rust_owned_redaction_hash("fcp.browser.rust-owned-launcher.v1"),
+                ..RustOwnedLauncherState::default()
+            },
+        })
+    }
+
+    fn descriptor(&self) -> serde_json::Value {
+        serde_json::json!({
+            "enabled": true,
+            "mode": self.config.mode().as_str(),
+            "control_endpoint_kind": "rust_owned_launcher",
+            "readiness_timeout_ms": self.config.readiness_timeout_ms(),
+            "browser_binary_descriptor_hash": self.browser_binary_descriptor_hash(),
+            "proxy_support": match self.config.mode() {
+                BrowserLauncherMode::Fixture => "fixture_available",
+                BrowserLauncherMode::Native => "native_spawn_not_wired",
+            },
+            "redaction_contract": PROXY_REDACTION_CONTRACT,
+            "platform": std::env::consts::OS,
+        })
+    }
+
+    fn health_check(&self) -> BrowserResult<()> {
+        validate_rust_owned_launcher_config(&self.config)?;
+        if self.config.mode() == BrowserLauncherMode::Native {
+            return Err(rust_owned_launcher_error(
+                "browser.launch",
+                "launcher_native_spawn_not_wired",
+                "native browser process spawn and readiness detection are not wired in this connector build",
+            ));
+        }
+        Ok(())
+    }
+
+    fn set_proxy(
+        &mut self,
+        proxy: &ProxyConfig,
+        runtime_shutting_down: bool,
+    ) -> BrowserResult<ProxyResult> {
+        self.ensure_can_operate("browser.set_proxy", runtime_shutting_down)?;
+        let proxy_hash = Some(proxy_config_descriptor_hash(proxy)?);
+        let launch_args = build_rust_owned_launcher_args(Some(proxy))?;
+        let launch_args_hash = rust_owned_redaction_hash(&launch_args.join("\0"));
+        let readiness_checkpoint = self.readiness_checkpoint();
+        if let Some((reason_code, reason)) = readiness_failure(readiness_checkpoint) {
+            self.push_event(
+                "browser.set_proxy",
+                proxy_hash,
+                if reason_code == "launcher_readiness_timeout" {
+                    "timeout_before_ready"
+                } else {
+                    "not_started"
+                },
+                "launch_not_started",
+                Some(reason_code),
+                &launch_args_hash,
+            );
+            return Err(rust_owned_launcher_error(
+                "browser.set_proxy",
+                reason_code,
+                reason,
+            ));
+        }
+
+        self.state.launched = true;
+        self.state.launch_generation = self.state.launch_generation.saturating_add(1);
+        let target_session_id_hash = self.next_target_session_id_hash();
+        self.state.target_session_id_hash = Some(target_session_id_hash);
+        self.state.current_proxy_hash.clone_from(&proxy_hash);
+        self.push_event(
+            "browser.set_proxy",
+            proxy_hash,
+            "not_cancelled",
+            "proxy_state_applied_supervisor_alive",
+            None,
+            &launch_args_hash,
+        );
+
+        Ok(ProxyResult {
+            enabled: true,
+            mode: "fixed_servers".to_string(),
+            server: Some(proxy.server.clone()),
+        })
+    }
+
+    fn clear_proxy(&mut self, runtime_shutting_down: bool) -> BrowserResult<ProxyResult> {
+        self.ensure_can_operate("browser.clear_proxy", runtime_shutting_down)?;
+        let launch_args = build_rust_owned_launcher_args(None)?;
+        let launch_args_hash = rust_owned_redaction_hash(&launch_args.join("\0"));
+        let readiness_checkpoint = self.readiness_checkpoint();
+        if let Some((reason_code, reason)) = readiness_failure(readiness_checkpoint) {
+            self.push_event(
+                "browser.clear_proxy",
+                None,
+                if reason_code == "launcher_readiness_timeout" {
+                    "timeout_before_ready"
+                } else {
+                    "not_started"
+                },
+                "launch_not_started",
+                Some(reason_code),
+                &launch_args_hash,
+            );
+            return Err(rust_owned_launcher_error(
+                "browser.clear_proxy",
+                reason_code,
+                reason,
+            ));
+        }
+
+        self.state.launched = true;
+        self.state.current_proxy_hash = None;
+        if self.state.target_session_id_hash.is_none() {
+            self.state.launch_generation = self.state.launch_generation.saturating_add(1);
+            self.state.target_session_id_hash = Some(self.next_target_session_id_hash());
+        }
+        self.push_event(
+            "browser.clear_proxy",
+            None,
+            "not_cancelled",
+            "proxy_state_cleared_supervisor_alive",
+            None,
+            &launch_args_hash,
+        );
+
+        Ok(ProxyResult {
+            enabled: false,
+            mode: "direct".to_string(),
+            server: None,
+        })
+    }
+
+    fn shutdown(&mut self) {
+        if self.state.shutdown {
+            return;
+        }
+        self.state.shutdown = true;
+        self.state.launched = false;
+        self.state.current_proxy_hash = None;
+        let launch_args_hash = rust_owned_redaction_hash("shutdown");
+        self.push_event(
+            "browser.shutdown",
+            None,
+            "shutdown_signal_observed",
+            "launcher_shutdown_no_orphan",
+            None,
+            &launch_args_hash,
+        );
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn events_jsonl(&self) -> String {
+        self.state
+            .events
+            .iter()
+            .map(|event| serde_json::to_string(event).expect("launcher event should serialize"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn ensure_can_operate(
+        &mut self,
+        operation_id: &'static str,
+        runtime_shutting_down: bool,
+    ) -> BrowserResult<()> {
+        if runtime_shutting_down || self.state.shutdown {
+            self.push_event(
+                operation_id,
+                None,
+                "shutdown_signal_observed",
+                "operation_not_started",
+                Some("launcher_cancelled"),
+                &rust_owned_redaction_hash("cancelled"),
+            );
+            return Err(rust_owned_launcher_error(
+                operation_id,
+                "launcher_cancelled",
+                "connector runtime is shutting down",
+            ));
+        }
+        validate_rust_owned_launcher_config(&self.config)
+    }
+
+    fn readiness_checkpoint(&self) -> &'static str {
+        if self.config.readiness_timeout_ms() == 0 {
+            "readiness_timeout"
+        } else {
+            match self.config.mode() {
+                BrowserLauncherMode::Fixture => "fixture_ready",
+                BrowserLauncherMode::Native => "native_spawn_not_wired",
+            }
+        }
+    }
+
+    fn browser_binary_descriptor_hash(&self) -> String {
+        let descriptor = self
+            .config
+            .browser_binary_path()
+            .map_or_else(rust_owned_platform_discovery_descriptor, |path| {
+                format!("configured:{path}")
+            });
+        format!("blake3:{}", rust_owned_redaction_hash(&descriptor))
+    }
+
+    fn next_target_session_id_hash(&self) -> String {
+        format!(
+            "blake3:{}",
+            rust_owned_redaction_hash(&format!(
+                "{}:{}",
+                self.state.run_id, self.state.launch_generation
+            ))
+        )
+    }
+
+    fn push_event(
+        &mut self,
+        operation_id: &'static str,
+        proxy_descriptor_hash: Option<String>,
+        timeout_cancellation_checkpoint: &'static str,
+        cleanup_result: &'static str,
+        reason_code: Option<&'static str>,
+        launch_args_hash: &str,
+    ) {
+        let target_session_id_hash = self
+            .state
+            .target_session_id_hash
+            .clone()
+            .unwrap_or_else(|| "blake3:not_applicable".to_string());
+        self.state.events.push(RustOwnedLauncherEvent {
+            schema_version: "fcp-browser-rust-owned-launcher-evidence.v1",
+            command_line: RUST_LAUNCHER_COMMAND_LINE,
+            git_revision: direct_cdp_git_revision(),
+            run_id: self.state.run_id.clone(),
+            platform: std::env::consts::OS,
+            browser_binary_descriptor_hash: self.browser_binary_descriptor_hash(),
+            launch_mode: self.config.mode().as_str(),
+            control_endpoint_kind: "rust_owned_launcher",
+            operation_id,
+            capability_decision: "granted_by_connector_before_launcher",
+            approval_decision: "granted_by_connector_before_launcher",
+            proxy_descriptor_hash,
+            target_session_id_hash,
+            readiness_checkpoint: self.readiness_checkpoint(),
+            timeout_cancellation_checkpoint,
+            cleanup_result,
+            artifact_paths: Vec::new(),
+            skip_reason: None,
+            reason_code,
+            launch_args_hash: format!("blake3:{launch_args_hash}"),
+        });
+    }
+}
+
 #[derive(Debug)]
 struct DirectCdpManagerLease {
     manager: Arc<Mutex<DirectCdpTargetSessionManager>>,
@@ -930,6 +1304,172 @@ fn direct_cdp_git_revision() -> String {
         .to_string()
 }
 
+fn rust_owned_redaction_hash(value: &str) -> String {
+    direct_cdp_redaction_hash(value)
+}
+
+fn rust_owned_platform_discovery_descriptor() -> String {
+    rust_owned_platform_discovery_candidates().join("|")
+}
+
+fn rust_owned_platform_discovery_candidates() -> &'static [&'static str] {
+    #[cfg(target_os = "macos")]
+    {
+        &[
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ]
+    }
+    #[cfg(target_os = "linux")]
+    {
+        &[
+            "/usr/bin/google-chrome",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/microsoft-edge",
+        ]
+    }
+    #[cfg(target_os = "windows")]
+    {
+        &[
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        ]
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        &[]
+    }
+}
+
+fn validate_rust_owned_launcher_config(config: &BrowserLauncherConfig) -> BrowserResult<()> {
+    match config.mode() {
+        BrowserLauncherMode::Fixture => Ok(()),
+        BrowserLauncherMode::Native => {
+            if let Some(path) = config.browser_binary_path() {
+                validate_rust_owned_browser_binary_path(path)?;
+            } else if rust_owned_platform_discovery_candidates().is_empty() {
+                return Err(rust_owned_launcher_error(
+                    "browser.launch",
+                    "launcher_unsupported_platform",
+                    "no documented browser discovery paths exist for this platform",
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_rust_owned_browser_binary_path(path: &str) -> BrowserResult<()> {
+    if path.is_empty() {
+        return Err(rust_owned_launcher_error(
+            "browser.launch",
+            "launcher_invalid_binary_path",
+            "browser binary path must not be empty",
+        ));
+    }
+    if !Path::new(path).is_absolute() {
+        return Err(rust_owned_launcher_error(
+            "browser.launch",
+            "launcher_invalid_binary_path",
+            "browser binary path must be absolute",
+        ));
+    }
+    reject_launcher_arg_injection("browser_binary_path", path)
+}
+
+fn readiness_failure(checkpoint: &'static str) -> Option<(&'static str, &'static str)> {
+    match checkpoint {
+        "readiness_timeout" => Some((
+            "launcher_readiness_timeout",
+            "browser readiness did not complete before the configured timeout",
+        )),
+        "native_spawn_not_wired" => Some((
+            "launcher_native_spawn_not_wired",
+            "native browser process spawn and readiness detection are not wired in this connector build",
+        )),
+        _ => None,
+    }
+}
+
+fn build_rust_owned_launcher_args(proxy: Option<&ProxyConfig>) -> BrowserResult<Vec<String>> {
+    let mut args = vec![
+        "--headless=new".to_string(),
+        "--disable-background-networking".to_string(),
+        "--disable-sync".to_string(),
+        "--no-first-run".to_string(),
+        "--remote-debugging-address=127.0.0.1".to_string(),
+        "--remote-debugging-port=0".to_string(),
+        RUST_LAUNCHER_PROFILE_ARG.to_string(),
+    ];
+
+    if let Some(proxy) = proxy {
+        args.push(format!("--proxy-server={}", proxy.server));
+        if let Some(bypass_list) = &proxy.bypass_list {
+            if !bypass_list.is_empty() {
+                args.push(format!("--proxy-bypass-list={}", bypass_list.join(",")));
+            }
+        }
+    }
+
+    deduplicate_and_validate_launcher_args(args)
+}
+
+fn deduplicate_and_validate_launcher_args(args: Vec<String>) -> BrowserResult<Vec<String>> {
+    if args.len() > RUST_LAUNCHER_MAX_ARGS {
+        return Err(rust_owned_launcher_error(
+            "browser.launch",
+            "launcher_too_many_arguments",
+            "browser launch argument count exceeds the bounded policy",
+        ));
+    }
+
+    let mut deduplicated = Vec::with_capacity(args.len());
+    for arg in args {
+        reject_launcher_arg_injection("browser_launch_arg", &arg)?;
+        if !deduplicated.iter().any(|existing| existing == &arg) {
+            deduplicated.push(arg);
+        }
+    }
+    Ok(deduplicated)
+}
+
+fn reject_launcher_arg_injection(field: &'static str, value: &str) -> BrowserResult<()> {
+    if value.len() > RUST_LAUNCHER_ARG_MAX_BYTES {
+        return Err(rust_owned_launcher_error(
+            "browser.launch",
+            "launcher_argument_too_large",
+            "browser launch argument exceeds the bounded byte policy",
+        ));
+    }
+    if value
+        .chars()
+        .any(|ch| ch.is_control() || matches!(ch, ';' | '`' | '$' | '|' | '&' | '<' | '>'))
+    {
+        return Err(rust_owned_launcher_error(
+            "browser.launch",
+            "launcher_argument_injection",
+            &format!("{field} contains shell metacharacters or control characters"),
+        ));
+    }
+    Ok(())
+}
+
+fn proxy_config_descriptor_hash(proxy: &ProxyConfig) -> BrowserResult<String> {
+    let bytes = serde_json::to_vec(proxy)?;
+    Ok(format!(
+        "blake3:{}",
+        blake3::hash(&bytes)
+            .to_hex()
+            .as_str()
+            .chars()
+            .take(16)
+            .collect::<String>()
+    ))
+}
+
 fn duration_millis_u64(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
@@ -939,6 +1479,15 @@ fn lock_direct_cdp_manager(
 ) -> BrowserResult<MutexGuard<'_, DirectCdpTargetSessionManager>> {
     manager.lock().map_err(|_| BrowserError::Api {
         message: "direct CDP target/session manager lock was poisoned".into(),
+        status_code: None,
+    })
+}
+
+fn lock_rust_owned_launcher(
+    launcher: &Arc<Mutex<Option<RustOwnedLauncherSupervisor>>>,
+) -> BrowserResult<MutexGuard<'_, Option<RustOwnedLauncherSupervisor>>> {
+    launcher.lock().map_err(|_| BrowserError::Api {
+        message: "rust-owned browser launcher supervisor lock was poisoned".into(),
         status_code: None,
     })
 }
@@ -3014,8 +3563,11 @@ pub(crate) fn browser_control_contract_descriptor() -> serde_json::Value {
                     .collect::<Vec<_>>(),
             },
             "rust_owned_launcher": {
-                "status": "planned",
-                "proxy_support": "not_implemented_in_this_connector",
+                "status": "fixture_available_native_spawn_guarded",
+                "page_operations": "delegated_to_configured_browser_url",
+                "proxy_support": "fixture_only_until_native_spawn_readiness_is_wired",
+                "redaction_contract": PROXY_REDACTION_CONTRACT,
+                "modes": ["native", "fixture"],
             },
         },
         "operations": REQUIRED_BROWSER_CONTROL_OPERATIONS
@@ -3073,6 +3625,7 @@ pub struct BrowserClient {
     runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
     direct_cdp_manager: Arc<Mutex<DirectCdpTargetSessionManager>>,
+    rust_owned_launcher: Arc<Mutex<Option<RustOwnedLauncherSupervisor>>>,
 }
 
 impl std::fmt::Debug for BrowserClient {
@@ -3138,6 +3691,7 @@ impl BrowserClient {
                 ..HttpRetryConfig::default()
             },
             direct_cdp_manager: Arc::new(Mutex::new(DirectCdpTargetSessionManager::default())),
+            rust_owned_launcher: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -3146,6 +3700,11 @@ impl BrowserClient {
         self.runtime.shutdown();
         if let Ok(mut manager) = self.direct_cdp_manager.lock() {
             manager.shutdown();
+        }
+        if let Ok(mut launcher) = self.rust_owned_launcher.lock() {
+            if let Some(launcher) = launcher.as_mut() {
+                launcher.shutdown();
+            }
         }
     }
 
@@ -3177,8 +3736,22 @@ impl BrowserClient {
         Ok(manager.events_jsonl())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn rust_owned_launcher_events_jsonl(&self) -> BrowserResult<String> {
+        let launcher = lock_rust_owned_launcher(&self.rust_owned_launcher)?;
+        Ok(launcher
+            .as_ref()
+            .map_or_else(String::new, |launcher| launcher.events_jsonl()))
+    }
+
     /// Lightweight connectivity probe for the FCP browser-control plane.
     pub async fn health_check(&self) -> BrowserResult<()> {
+        if let Some(result) =
+            self.inspect_rust_owned_launcher(|launcher| launcher.health_check())?
+        {
+            return Ok(result);
+        }
+
         if let BrowserControlEndpoint::DirectCdp(endpoint) = self.control_endpoint()? {
             return self.direct_cdp_health_check(&endpoint).await;
         }
@@ -3215,6 +3788,21 @@ impl BrowserClient {
         self
     }
 
+    /// Enable the Rust-owned browser launcher supervisor for proxy operations.
+    pub fn with_rust_owned_launcher(
+        mut self,
+        config: BrowserLauncherConfig,
+    ) -> BrowserResult<Self> {
+        self.rust_owned_launcher =
+            Arc::new(Mutex::new(Some(RustOwnedLauncherSupervisor::new(config)?)));
+        Ok(self)
+    }
+
+    /// Redaction-safe descriptor for the configured Rust-owned launcher, if any.
+    pub fn rust_owned_launcher_descriptor(&self) -> BrowserResult<Option<serde_json::Value>> {
+        self.inspect_rust_owned_launcher(|launcher| Ok(launcher.descriptor()))
+    }
+
     /// Set the maximum number of retries.
     #[must_use]
     pub fn with_retry_config(mut self, max_retries: u32) -> Self {
@@ -3228,6 +3816,22 @@ impl BrowserClient {
 
     fn control_endpoint(&self) -> BrowserResult<BrowserControlEndpoint> {
         browser_control_endpoint_for_url(&self.browser_url)
+    }
+
+    fn inspect_rust_owned_launcher<T>(
+        &self,
+        f: impl FnOnce(&RustOwnedLauncherSupervisor) -> BrowserResult<T>,
+    ) -> BrowserResult<Option<T>> {
+        let launcher = lock_rust_owned_launcher(&self.rust_owned_launcher)?;
+        launcher.as_ref().map(f).transpose()
+    }
+
+    fn with_rust_owned_launcher_mut<T>(
+        &self,
+        f: impl FnOnce(&mut RustOwnedLauncherSupervisor) -> BrowserResult<T>,
+    ) -> BrowserResult<Option<T>> {
+        let mut launcher = lock_rust_owned_launcher(&self.rust_owned_launcher)?;
+        launcher.as_mut().map(f).transpose()
     }
 
     async fn direct_cdp_session_operation<T, F>(
@@ -3842,6 +4446,13 @@ impl BrowserClient {
 
     /// Configure outbound proxy for browser traffic.
     pub async fn set_proxy(&self, proxy: &ProxyConfig) -> BrowserResult<ProxyResult> {
+        validate_proxy_config(proxy)?;
+        if let Some(result) = self.with_rust_owned_launcher_mut(|launcher| {
+            launcher.set_proxy(proxy, self.runtime.is_shutting_down())
+        })? {
+            return Ok(result);
+        }
+
         if let BrowserControlEndpoint::DirectCdp(_) = self.control_endpoint()? {
             return Err(proxy_unavailable_error(
                 "browser.set_proxy",
@@ -3850,7 +4461,6 @@ impl BrowserClient {
             ));
         }
 
-        validate_proxy_config(proxy)?;
         self.ensure_proxy_control_plane_available("browser.set_proxy")
             .await?;
         let body = serde_json::to_value(proxy)?;
@@ -3860,6 +4470,12 @@ impl BrowserClient {
 
     /// Clear outbound proxy configuration.
     pub async fn clear_proxy(&self) -> BrowserResult<ProxyResult> {
+        if let Some(result) = self.with_rust_owned_launcher_mut(|launcher| {
+            launcher.clear_proxy(self.runtime.is_shutting_down())
+        })? {
+            return Ok(result);
+        }
+
         if let BrowserControlEndpoint::DirectCdp(_) = self.control_endpoint()? {
             return Err(proxy_unavailable_error(
                 "browser.clear_proxy",
@@ -4543,6 +5159,16 @@ fn proxy_unavailable_error(
     ))
 }
 
+fn rust_owned_launcher_error(
+    operation_id: &'static str,
+    reason_code: &'static str,
+    reason: &str,
+) -> BrowserError {
+    BrowserError::InvalidConfig(format!(
+        "{operation_id} rust_owned_launcher_unavailable control_mode=rust_owned_launcher reason_code={reason_code}; {reason}; remediation=configure a safe browser binary path or use the existing proxy-capable fcp-browser-control worker path"
+    ))
+}
+
 fn looks_like_chrome_cdp_version(body: &serde_json::Value) -> bool {
     body.get("webSocketDebuggerUrl")
         .and_then(serde_json::Value::as_str)
@@ -5120,6 +5746,177 @@ mod tests {
         assert!(clear_error.contains("reason_code=proxy_unavailable_direct_cdp"));
         assert!(set_error.contains("remediation=configure a proxy-capable"));
         assert!(clear_error.contains("remediation=configure a proxy-capable"));
+    }
+
+    #[test]
+    fn test_rust_owned_launcher_binary_policy_accepts_safe_paths_and_discovery() {
+        let configured = BrowserLauncherConfig::native(
+            Some("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".into()),
+            RUST_LAUNCHER_DEFAULT_READINESS_TIMEOUT_MS,
+        )
+        .expect("absolute configured browser path should be policy-safe");
+        assert_eq!(configured.mode(), BrowserLauncherMode::Native);
+
+        let discovery =
+            BrowserLauncherConfig::native(None, RUST_LAUNCHER_DEFAULT_READINESS_TIMEOUT_MS)
+                .expect("documented platform discovery should be policy-safe");
+        assert!(discovery.browser_binary_path().is_none());
+    }
+
+    #[test]
+    fn test_rust_owned_launcher_binary_policy_rejects_injection() {
+        for path in [
+            "relative/chrome",
+            "/Applications/Chrome.app/Contents/MacOS/Chrome;rm",
+            "/Applications/Chrome.app/Contents/MacOS/Chrome\nInjected",
+        ] {
+            let error = BrowserLauncherConfig::native(
+                Some(path.into()),
+                RUST_LAUNCHER_DEFAULT_READINESS_TIMEOUT_MS,
+            )
+            .unwrap_err();
+            let error = format!("{error}");
+            assert!(
+                error.contains("launcher_invalid_binary_path")
+                    || error.contains("launcher_argument_injection"),
+                "{path:?} should fail binary policy, got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rust_owned_launcher_args_are_bounded_ordered_and_redaction_safe() {
+        let proxy = ProxyConfig {
+            server: "http://proxy.example.com:8080".into(),
+            bypass_list: Some(vec!["localhost".into(), "127.0.0.1".into()]),
+            username: Some("proxy-user".into()),
+            password: Some("proxy-password".into()),
+        };
+
+        let args = build_rust_owned_launcher_args(Some(&proxy)).unwrap();
+
+        assert_eq!(args[0], "--headless=new");
+        assert!(args.iter().any(|arg| arg == "--remote-debugging-port=0"));
+        assert!(
+            args.iter()
+                .any(|arg| arg == "--proxy-server=http://proxy.example.com:8080")
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg == "--proxy-bypass-list=localhost,127.0.0.1")
+        );
+        assert!(!args.iter().any(|arg| arg.contains("proxy-password")));
+
+        let rejected = deduplicate_and_validate_launcher_args(vec![
+            "--headless=new".into(),
+            "--headless=new".into(),
+            "--proxy-server=http://proxy.example.com:8080;touch".into(),
+        ])
+        .unwrap_err();
+        assert!(format!("{rejected}").contains("launcher_argument_injection"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_rust_owned_launcher_fixture_set_clear_shutdown_jsonl() {
+        let client = BrowserClient::new(None)
+            .unwrap()
+            .with_browser_url("ws://127.0.0.1:9222/devtools/page/page-1")
+            .with_rust_owned_launcher(BrowserLauncherConfig::fixture(
+                RUST_LAUNCHER_DEFAULT_READINESS_TIMEOUT_MS,
+            ))
+            .unwrap();
+        let proxy = ProxyConfig {
+            server: "http://proxy.example.com:8080".into(),
+            bypass_list: Some(vec!["localhost".into()]),
+            username: Some("proxy-user".into()),
+            password: Some("proxy-password".into()),
+        };
+
+        let set = client.set_proxy(&proxy).await.unwrap();
+        assert!(set.enabled);
+        assert_eq!(set.mode, "fixed_servers");
+        let cleared = client.clear_proxy().await.unwrap();
+        assert!(!cleared.enabled);
+        client.shutdown();
+
+        let jsonl = client.rust_owned_launcher_events_jsonl().unwrap();
+        assert!(jsonl.contains("fcp-browser-rust-owned-launcher-evidence.v1"));
+        assert!(jsonl.contains("\"operation_id\":\"browser.set_proxy\""));
+        assert!(jsonl.contains("\"operation_id\":\"browser.clear_proxy\""));
+        assert!(jsonl.contains("\"operation_id\":\"browser.shutdown\""));
+        assert!(jsonl.contains("\"control_endpoint_kind\":\"rust_owned_launcher\""));
+        assert!(jsonl.contains("\"cleanup_result\":\"launcher_shutdown_no_orphan\""));
+        assert!(!jsonl.contains("proxy.example.com:8080"));
+        assert!(!jsonl.contains("proxy-user"));
+        assert!(!jsonl.contains("proxy-password"));
+        assert!(!jsonl.contains("page-1"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_rust_owned_launcher_readiness_timeout_fails_closed() {
+        let client = BrowserClient::new(None)
+            .unwrap()
+            .with_rust_owned_launcher(BrowserLauncherConfig::fixture(0))
+            .unwrap();
+        let proxy = ProxyConfig {
+            server: "http://proxy.example.com:8080".into(),
+            bypass_list: None,
+            username: None,
+            password: None,
+        };
+
+        let error = client.set_proxy(&proxy).await.unwrap_err();
+        assert!(format!("{error}").contains("launcher_readiness_timeout"));
+        let jsonl = client.rust_owned_launcher_events_jsonl().unwrap();
+        assert!(jsonl.contains("\"reason_code\":\"launcher_readiness_timeout\""));
+        assert!(jsonl.contains("\"timeout_cancellation_checkpoint\":\"timeout_before_ready\""));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_rust_owned_launcher_native_mode_fails_closed_until_spawn_is_wired() {
+        let client = BrowserClient::new(None)
+            .unwrap()
+            .with_rust_owned_launcher(
+                BrowserLauncherConfig::native(None, RUST_LAUNCHER_DEFAULT_READINESS_TIMEOUT_MS)
+                    .unwrap(),
+            )
+            .unwrap();
+        let proxy = ProxyConfig {
+            server: "http://proxy.example.com:8080".into(),
+            bypass_list: None,
+            username: None,
+            password: None,
+        };
+
+        let health_error = client.health_check().await.unwrap_err();
+        assert!(format!("{health_error}").contains("launcher_native_spawn_not_wired"));
+        let error = client.set_proxy(&proxy).await.unwrap_err();
+        assert!(format!("{error}").contains("launcher_native_spawn_not_wired"));
+        let jsonl = client.rust_owned_launcher_events_jsonl().unwrap();
+        assert!(jsonl.contains("\"reason_code\":\"launcher_native_spawn_not_wired\""));
+        assert!(jsonl.contains("\"readiness_checkpoint\":\"native_spawn_not_wired\""));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_rust_owned_launcher_shutdown_preempts_proxy_dispatch() {
+        let client = BrowserClient::new(None)
+            .unwrap()
+            .with_rust_owned_launcher(BrowserLauncherConfig::fixture(
+                RUST_LAUNCHER_DEFAULT_READINESS_TIMEOUT_MS,
+            ))
+            .unwrap();
+        client.shutdown();
+        let proxy = ProxyConfig {
+            server: "http://proxy.example.com:8080".into(),
+            bypass_list: None,
+            username: None,
+            password: None,
+        };
+
+        let error = client.set_proxy(&proxy).await.unwrap_err();
+        assert!(format!("{error}").contains("launcher_cancelled"));
+        let jsonl = client.rust_owned_launcher_events_jsonl().unwrap();
+        assert!(jsonl.contains("\"timeout_cancellation_checkpoint\":\"shutdown_signal_observed\""));
     }
 
     #[fcp_async_core::runtime::test]

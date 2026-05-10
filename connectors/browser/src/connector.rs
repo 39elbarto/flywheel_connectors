@@ -17,7 +17,8 @@ use tracing::{info, instrument};
 
 use crate::{
     client::{
-        BrowserAuth, BrowserClient, DEFAULT_BROWSER_URL, browser_control_contract_descriptor,
+        BrowserAuth, BrowserClient, BrowserLauncherConfig, BrowserLauncherMode,
+        DEFAULT_BROWSER_URL, browser_control_contract_descriptor,
     },
     error::BrowserError,
     types::{Cookie, ProxyConfig},
@@ -32,6 +33,7 @@ struct ExecutionApprovalContext {
 struct BrowserConfig {
     auth: BrowserAuth,
     browser_url: String,
+    rust_owned_launcher: Option<BrowserLauncherConfig>,
 }
 
 const BROWSER_CONTROL_HOST_ALLOWLIST: &[&str] = &[
@@ -120,8 +122,13 @@ impl BrowserConfig {
             .unwrap_or(DEFAULT_BROWSER_URL)
             .to_string();
         validate_browser_control_endpoint_url(&browser_url)?;
+        let rust_owned_launcher = parse_rust_owned_launcher_config(params)?;
 
-        Ok(Self { auth, browser_url })
+        Ok(Self {
+            auth,
+            browser_url,
+            rust_owned_launcher,
+        })
     }
 }
 
@@ -212,11 +219,19 @@ impl BrowserConnector {
     ) -> FcpResult<serde_json::Value> {
         let config = BrowserConfig::from_params(&params)?;
 
-        let client = BrowserClient::new_with_auth(config.auth.clone())
+        let mut client = BrowserClient::new_with_auth(config.auth.clone())
             .map_err(|e| FcpError::Internal {
                 message: format!("Failed to create HTTP client: {e}"),
             })?
             .with_browser_url(&config.browser_url);
+        if let Some(launcher_config) = config.rust_owned_launcher.clone() {
+            client = client
+                .with_rust_owned_launcher(launcher_config)
+                .map_err(|e| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid rust_owned_launcher config: {e}"),
+                })?;
+        }
 
         info!(auth = %config.auth.redacted_label(), "Browser connector configured");
 
@@ -309,6 +324,17 @@ impl BrowserConnector {
                 "control_plane_host": host,
                 "allowlisted": allowlisted,
             });
+        }
+        if let Some(client) = &self.client {
+            if let Some(descriptor) =
+                client
+                    .rust_owned_launcher_descriptor()
+                    .map_err(|e| FcpError::Internal {
+                        message: format!("Failed to inspect rust-owned launcher: {e}"),
+                    })?
+            {
+                health["rust_owned_launcher"] = descriptor;
+            }
         }
         Ok(health)
     }
@@ -2093,6 +2119,85 @@ fn browser_placement_profile() -> BrowserPlacementProfile {
             cpu_percent: BROWSER_SANDBOX_CPU_PERCENT,
             wall_clock_timeout_ms: BROWSER_SANDBOX_WALL_CLOCK_TIMEOUT_MS,
         },
+    }
+}
+
+fn parse_rust_owned_launcher_config(
+    params: &serde_json::Value,
+) -> FcpResult<Option<BrowserLauncherConfig>> {
+    let Some(value) = params.get("rust_owned_launcher") else {
+        return Ok(None);
+    };
+
+    if value.as_bool() == Some(false) {
+        return Ok(None);
+    }
+
+    let (mode, browser_binary_path, readiness_timeout_ms) = if value.as_bool() == Some(true) {
+        (
+            BrowserLauncherMode::Native,
+            None,
+            crate::client::RUST_LAUNCHER_DEFAULT_READINESS_TIMEOUT_MS,
+        )
+    } else {
+        let object = value.as_object().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "rust_owned_launcher must be a boolean or object".into(),
+        })?;
+        let enabled = object
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        if !enabled {
+            return Ok(None);
+        }
+        let mode = match object
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("native")
+        {
+            "native" => BrowserLauncherMode::Native,
+            "fixture" => BrowserLauncherMode::Fixture,
+            other => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!(
+                        "rust_owned_launcher.mode must be native or fixture, got {other}"
+                    ),
+                });
+            }
+        };
+        let browser_binary_path = match object.get("browser_binary_path") {
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .ok_or(FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "rust_owned_launcher.browser_binary_path must be a string".into(),
+                    })?
+                    .to_string(),
+            ),
+            None => None,
+        };
+        let readiness_timeout_ms = object
+            .get("readiness_timeout_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(crate::client::RUST_LAUNCHER_DEFAULT_READINESS_TIMEOUT_MS);
+        (mode, browser_binary_path, readiness_timeout_ms)
+    };
+
+    match mode {
+        BrowserLauncherMode::Native => {
+            BrowserLauncherConfig::native(browser_binary_path, readiness_timeout_ms)
+                .map(Some)
+                .map_err(|e| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid rust_owned_launcher config: {e}"),
+                })
+        }
+        BrowserLauncherMode::Fixture => {
+            Ok(Some(BrowserLauncherConfig::fixture(readiness_timeout_ms)))
+        }
     }
 }
 

@@ -220,6 +220,16 @@ fn proxy_descriptor_hash(input: &serde_json::Value) -> String {
     )
 }
 
+fn rust_owned_launcher_fixture_session_hash(generation: u64) -> String {
+    let run_id = blake3::hash("fcp.browser.rust-owned-launcher.v1".as_bytes());
+    let run_id = run_id.to_hex().chars().take(16).collect::<String>();
+    let session = blake3::hash(format!("{run_id}:{generation}").as_bytes());
+    format!(
+        "blake3:{}",
+        session.to_hex().chars().take(16).collect::<String>()
+    )
+}
+
 fn proxy_proof_git_revision() -> &'static str {
     option_env!("GIT_COMMIT")
         .or(option_env!("VERGEN_GIT_SHA"))
@@ -255,6 +265,43 @@ fn emit_proxy_control_evidence(run_id: &str, scenario: &str, mut evidence: serde
         }),
     );
     println!("BROWSER_PROXY_CONTROL_MODE_JSONL {evidence}");
+}
+
+fn emit_rust_owned_launcher_evidence(
+    run_id: &str,
+    scenario: &str,
+    mut evidence: serde_json::Value,
+) {
+    let object = evidence
+        .as_object_mut()
+        .expect("launcher evidence should be a JSON object");
+    object.insert(
+        "schema_version".to_string(),
+        json!("fcp-browser-rust-owned-launcher-evidence.v1"),
+    );
+    object.insert("run_id".to_string(), json!(run_id));
+    object.insert("scenario".to_string(), json!(scenario));
+    object.insert(
+        "command_line".to_string(),
+        json!(
+            "cargo test -p fcp-browser --test integration test_browser_rust_owned_launcher_supervisor_e2e_jsonl -- --nocapture"
+        ),
+    );
+    object.insert(
+        "git_revision".to_string(),
+        json!(proxy_proof_git_revision()),
+    );
+    object.insert(
+        "redaction".to_string(),
+        json!({
+            "raw_proxy_descriptor_logged": false,
+            "raw_browser_binary_path_logged": false,
+            "raw_target_session_id_logged": false,
+            "raw_cdp_endpoint_logged": false,
+            "proxy_descriptor_hash_only": true
+        }),
+    );
+    println!("BROWSER_RUST_LAUNCHER_JSONL {evidence}");
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1261,6 +1308,370 @@ async fn test_browser_proxy_control_mode_e2e_jsonl() {
             "cleanup_result": "no_worker_request_sent",
             "skip_reason": null,
             "worker_request_sent": false
+        }),
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_browser_rust_owned_launcher_supervisor_e2e_jsonl() {
+    let ctx = AsyncTestContext::for_scenario("browser-rust-owned-launcher-e2e");
+    let run_id = ctx.run_id().to_string();
+    let proxy_input = json!({
+        "server": "http://proxy.example.com:8080",
+        "bypass_list": ["localhost"]
+    });
+    let proxy_hash = proxy_descriptor_hash(&proxy_input);
+    let launcher_session_hash = rust_owned_launcher_fixture_session_hash(1);
+
+    let mut launcher_connector = BrowserConnector::new();
+    let launcher_key = setup_handshake(
+        &mut launcher_connector,
+        &["browser.set_proxy", "browser.clear_proxy"],
+    )
+    .await;
+    launcher_connector
+        .handle_configure(json!({
+            "browser_url": "ws://127.0.0.1:9222/devtools/page/rust-launch-target",
+            "rust_owned_launcher": {
+                "mode": "fixture",
+                "readiness_timeout_ms": 1_000
+            }
+        }))
+        .await
+        .expect("rust-owned launcher configure should succeed");
+    let health = launcher_connector.handle_health().await.unwrap();
+    assert_eq!(
+        health["rust_owned_launcher"]["control_endpoint_kind"],
+        "rust_owned_launcher"
+    );
+
+    let set_token = generate_valid_token(&launcher_key, &launcher_connector, "browser.set_proxy");
+    let set_approval = generate_execution_approval("browser.set_proxy", &proxy_input);
+    let set_result = launcher_connector
+        .handle_invoke(json!({
+            "operation": "browser.set_proxy",
+            "input": proxy_input.clone(),
+            "capability_token": set_token,
+            "approval_token": set_approval
+        }))
+        .await
+        .expect("rust-owned launcher should accept set_proxy");
+    assert_eq!(set_result["enabled"], true);
+    emit_rust_owned_launcher_evidence(
+        &run_id,
+        "launch_success",
+        json!({
+            "platform": std::env::consts::OS,
+            "browser_binary_descriptor_hash": health["rust_owned_launcher"]["browser_binary_descriptor_hash"].clone(),
+            "launch_mode": "fixture",
+            "control_endpoint_kind": "rust_owned_launcher",
+            "operation_id": "browser.set_proxy",
+            "capability_decision": "granted",
+            "approval_decision": "granted",
+            "proxy_descriptor_hash": proxy_hash,
+            "target_session_id_hash": launcher_session_hash.clone(),
+            "readiness_checkpoint": "fixture_ready",
+            "timeout_cancellation_checkpoint": "not_cancelled",
+            "cleanup_result": "proxy_state_applied_supervisor_alive",
+            "artifact_paths": [],
+            "skip_reason": null
+        }),
+    );
+
+    let clear_token =
+        generate_valid_token(&launcher_key, &launcher_connector, "browser.clear_proxy");
+    let clear_approval = generate_execution_approval("browser.clear_proxy", &json!({}));
+    let clear_result = launcher_connector
+        .handle_invoke(json!({
+            "operation": "browser.clear_proxy",
+            "input": {},
+            "capability_token": clear_token,
+            "approval_token": clear_approval
+        }))
+        .await
+        .expect("rust-owned launcher should accept clear_proxy");
+    assert_eq!(clear_result["enabled"], false);
+    emit_rust_owned_launcher_evidence(
+        &run_id,
+        "proxy_clear",
+        json!({
+            "platform": std::env::consts::OS,
+            "browser_binary_descriptor_hash": health["rust_owned_launcher"]["browser_binary_descriptor_hash"].clone(),
+            "launch_mode": "fixture",
+            "control_endpoint_kind": "rust_owned_launcher",
+            "operation_id": "browser.clear_proxy",
+            "capability_decision": "granted",
+            "approval_decision": "granted",
+            "proxy_descriptor_hash": proxy_descriptor_hash(&json!({})),
+            "target_session_id_hash": launcher_session_hash,
+            "readiness_checkpoint": "fixture_ready",
+            "timeout_cancellation_checkpoint": "not_cancelled",
+            "cleanup_result": "proxy_state_cleared_supervisor_alive",
+            "artifact_paths": [],
+            "skip_reason": null
+        }),
+    );
+
+    let mut timeout_connector = BrowserConnector::new();
+    let timeout_key = setup_handshake(&mut timeout_connector, &["browser.set_proxy"]).await;
+    timeout_connector
+        .handle_configure(json!({
+            "rust_owned_launcher": {
+                "mode": "fixture",
+                "readiness_timeout_ms": 0
+            }
+        }))
+        .await
+        .expect("timeout fixture configure should succeed");
+    let timeout_error = timeout_connector
+        .handle_invoke(json!({
+            "operation": "browser.set_proxy",
+            "input": proxy_input.clone(),
+            "capability_token": generate_valid_token(&timeout_key, &timeout_connector, "browser.set_proxy"),
+            "approval_token": generate_execution_approval("browser.set_proxy", &proxy_input)
+        }))
+        .await
+        .expect_err("readiness timeout should fail closed");
+    assert!(format!("{timeout_error:?}").contains("launcher_readiness_timeout"));
+    emit_rust_owned_launcher_evidence(
+        &run_id,
+        "readiness_timeout",
+        json!({
+            "platform": std::env::consts::OS,
+            "browser_binary_descriptor_hash": "blake3:fixture",
+            "launch_mode": "fixture",
+            "control_endpoint_kind": "rust_owned_launcher",
+            "operation_id": "browser.set_proxy",
+            "capability_decision": "granted",
+            "approval_decision": "granted",
+            "proxy_descriptor_hash": proxy_descriptor_hash(&proxy_input),
+            "target_session_id_hash": "blake3:not_applicable",
+            "readiness_checkpoint": "readiness_timeout",
+            "timeout_cancellation_checkpoint": "timeout_before_ready",
+            "cleanup_result": "launch_not_started",
+            "artifact_paths": [],
+            "skip_reason": null
+        }),
+    );
+
+    let malformed_proxy = json!({
+        "server": "http://127.0.0.1:8080"
+    });
+    let malformed_error = launcher_connector
+        .handle_invoke(json!({
+            "operation": "browser.set_proxy",
+            "input": malformed_proxy.clone(),
+            "capability_token": generate_valid_token(&launcher_key, &launcher_connector, "browser.set_proxy"),
+            "approval_token": generate_execution_approval("browser.set_proxy", &malformed_proxy)
+        }))
+        .await
+        .expect_err("malformed proxy should fail before launcher dispatch");
+    assert!(format!("{malformed_error:?}").contains("proxy_private_or_internal_host"));
+    emit_rust_owned_launcher_evidence(
+        &run_id,
+        "malformed_proxy_config",
+        json!({
+            "platform": std::env::consts::OS,
+            "browser_binary_descriptor_hash": health["rust_owned_launcher"]["browser_binary_descriptor_hash"].clone(),
+            "launch_mode": "fixture",
+            "control_endpoint_kind": "rust_owned_launcher",
+            "operation_id": "browser.set_proxy",
+            "capability_decision": "granted",
+            "approval_decision": "granted",
+            "proxy_descriptor_hash": proxy_descriptor_hash(&malformed_proxy),
+            "target_session_id_hash": "blake3:not_applicable",
+            "readiness_checkpoint": "not_started",
+            "timeout_cancellation_checkpoint": "not_started",
+            "cleanup_result": "launcher_not_called",
+            "artifact_paths": [],
+            "skip_reason": null
+        }),
+    );
+
+    let approval_denial_error = launcher_connector
+        .handle_invoke(json!({
+            "operation": "browser.set_proxy",
+            "input": proxy_input.clone(),
+            "capability_token": generate_valid_token(&launcher_key, &launcher_connector, "browser.set_proxy")
+        }))
+        .await
+        .expect_err("approval denial should preempt launcher dispatch");
+    assert!(format!("{approval_denial_error:?}").contains("ApprovalToken"));
+    emit_rust_owned_launcher_evidence(
+        &run_id,
+        "approval_denial",
+        json!({
+            "platform": std::env::consts::OS,
+            "browser_binary_descriptor_hash": health["rust_owned_launcher"]["browser_binary_descriptor_hash"].clone(),
+            "launch_mode": "fixture",
+            "control_endpoint_kind": "none",
+            "operation_id": "browser.set_proxy",
+            "capability_decision": "granted",
+            "approval_decision": "denied_before_launcher",
+            "proxy_descriptor_hash": proxy_descriptor_hash(&proxy_input),
+            "target_session_id_hash": "blake3:not_applicable",
+            "readiness_checkpoint": "not_started",
+            "timeout_cancellation_checkpoint": "not_started",
+            "cleanup_result": "launcher_not_called",
+            "artifact_paths": [],
+            "skip_reason": null
+        }),
+    );
+
+    let mut capability_denial_connector = BrowserConnector::new();
+    let capability_denial_key =
+        setup_handshake(&mut capability_denial_connector, &["browser.navigate"]).await;
+    capability_denial_connector
+        .handle_configure(json!({
+            "rust_owned_launcher": {
+                "mode": "fixture",
+                "readiness_timeout_ms": 1_000
+            }
+        }))
+        .await
+        .expect("capability denial connector should configure");
+    let capability_denial_error = capability_denial_connector
+        .handle_invoke(json!({
+            "operation": "browser.set_proxy",
+            "input": proxy_input.clone(),
+            "capability_token": generate_valid_token(&capability_denial_key, &capability_denial_connector, "browser.navigate"),
+            "approval_token": generate_execution_approval("browser.set_proxy", &proxy_input)
+        }))
+        .await
+        .expect_err("capability denial should preempt launcher dispatch");
+    assert!(format!("{capability_denial_error:?}").contains("OperationNotGranted"));
+    emit_rust_owned_launcher_evidence(
+        &run_id,
+        "capability_denial",
+        json!({
+            "platform": std::env::consts::OS,
+            "browser_binary_descriptor_hash": "blake3:fixture",
+            "launch_mode": "fixture",
+            "control_endpoint_kind": "none",
+            "operation_id": "browser.set_proxy",
+            "capability_decision": "denied_before_launcher",
+            "approval_decision": "not_evaluated",
+            "proxy_descriptor_hash": proxy_descriptor_hash(&proxy_input),
+            "target_session_id_hash": "blake3:not_applicable",
+            "readiness_checkpoint": "not_started",
+            "timeout_cancellation_checkpoint": "not_started",
+            "cleanup_result": "launcher_not_called",
+            "artifact_paths": [],
+            "skip_reason": null
+        }),
+    );
+
+    let mut shutdown_connector = BrowserConnector::new();
+    let shutdown_key = setup_handshake(&mut shutdown_connector, &["browser.set_proxy"]).await;
+    shutdown_connector
+        .handle_configure(json!({
+            "rust_owned_launcher": {
+                "mode": "fixture",
+                "readiness_timeout_ms": 1_000
+            }
+        }))
+        .await
+        .expect("shutdown connector should configure");
+    shutdown_connector.handle_shutdown(json!({})).await.unwrap();
+    let shutdown_error = shutdown_connector
+        .handle_invoke(json!({
+            "operation": "browser.set_proxy",
+            "input": proxy_input.clone(),
+            "capability_token": generate_valid_token(&shutdown_key, &shutdown_connector, "browser.set_proxy"),
+            "approval_token": generate_execution_approval("browser.set_proxy", &proxy_input)
+        }))
+        .await
+        .expect_err("shutdown should cancel launcher dispatch");
+    assert!(format!("{shutdown_error:?}").contains("launcher_cancelled"));
+    emit_rust_owned_launcher_evidence(
+        &run_id,
+        "cancellation_and_cleanup",
+        json!({
+            "platform": std::env::consts::OS,
+            "browser_binary_descriptor_hash": "blake3:fixture",
+            "launch_mode": "fixture",
+            "control_endpoint_kind": "rust_owned_launcher",
+            "operation_id": "browser.set_proxy",
+            "capability_decision": "granted",
+            "approval_decision": "granted",
+            "proxy_descriptor_hash": proxy_descriptor_hash(&proxy_input),
+            "target_session_id_hash": "blake3:not_applicable",
+            "readiness_checkpoint": "fixture_ready",
+            "timeout_cancellation_checkpoint": "shutdown_signal_observed",
+            "cleanup_result": "launcher_shutdown_no_orphan",
+            "artifact_paths": [],
+            "skip_reason": null
+        }),
+    );
+
+    let non_proxy_contract = browser_control_contract_without_proxy_operations().await;
+    let non_proxy_server = MockServer::start().await;
+    mount_browser_control_health_body(&non_proxy_server, non_proxy_contract.clone()).await;
+    let stale_worker_client = BrowserClient::new(None)
+        .expect("browser client should construct")
+        .with_browser_url(&non_proxy_server.uri());
+    let stale_worker_error = stale_worker_client
+        .set_proxy(&ProxyConfig {
+            server: "http://proxy.example.com:8080".into(),
+            bypass_list: None,
+            username: None,
+            password: None,
+        })
+        .await
+        .expect_err("non-proxy worker should still be rejected for proxy dispatch");
+    assert!(format!("{stale_worker_error}").contains("proxy_unavailable_worker_contract"));
+    emit_rust_owned_launcher_evidence(
+        &run_id,
+        "stale_worker_rejection",
+        json!({
+            "platform": std::env::consts::OS,
+            "browser_binary_descriptor_hash": "blake3:not_applicable",
+            "launch_mode": "none",
+            "control_endpoint_kind": "fcp_browser_control",
+            "operation_id": "browser.set_proxy",
+            "capability_decision": "not_applicable_client_direct",
+            "approval_decision": "not_applicable_client_direct",
+            "proxy_descriptor_hash": proxy_descriptor_hash(&proxy_input),
+            "target_session_id_hash": "blake3:not_applicable",
+            "readiness_checkpoint": "worker_health_checked",
+            "timeout_cancellation_checkpoint": "not_started",
+            "cleanup_result": "no_worker_request_sent",
+            "artifact_paths": [],
+            "skip_reason": null
+        }),
+    );
+
+    let direct_client = BrowserClient::new(None)
+        .expect("browser client should construct")
+        .with_browser_url("ws://127.0.0.1:9222/devtools/page/direct-preserved-target");
+    let direct_error = direct_client
+        .set_proxy(&ProxyConfig {
+            server: "http://proxy.example.com:8080".into(),
+            bypass_list: None,
+            username: None,
+            password: None,
+        })
+        .await
+        .expect_err("direct CDP without launcher should remain fail-closed for proxy");
+    assert!(format!("{direct_error}").contains("proxy_unavailable_direct_cdp"));
+    emit_rust_owned_launcher_evidence(
+        &run_id,
+        "direct_cdp_fail_closed_preserved",
+        json!({
+            "platform": std::env::consts::OS,
+            "browser_binary_descriptor_hash": "blake3:not_applicable",
+            "launch_mode": "none",
+            "control_endpoint_kind": "direct_cdp_websocket",
+            "operation_id": "browser.set_proxy",
+            "capability_decision": "not_applicable_client_direct",
+            "approval_decision": "not_applicable_client_direct",
+            "proxy_descriptor_hash": proxy_descriptor_hash(&proxy_input),
+            "target_session_id_hash": "blake3:not_applicable",
+            "readiness_checkpoint": "not_started",
+            "timeout_cancellation_checkpoint": "not_started",
+            "cleanup_result": "no_network_request_started",
+            "artifact_paths": [],
+            "skip_reason": null
         }),
     );
 }

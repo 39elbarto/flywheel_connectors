@@ -14,15 +14,17 @@ Options:
   --run-id <id>      Run identifier for artifact paths
   --out-root <path>  Artifact root (default: artifacts/e2e/browser_target_session_manager/<run-id>)
   --proxy-only       Run only the Browser proxy/control-mode JSONL proof lane
+  --launcher-only    Run only the Rust-owned launcher/supervisor JSONL proof lane
   -h, --help         Show this help
 
 Runs deterministic Browser direct-CDP target/session-manager and
-proxy/control-mode proof tests through rch, extracts redaction-safe JSONL
+proxy/control-mode and launcher/supervisor proof tests through rch, extracts redaction-safe JSONL
 events from test stdout, and writes an operator replay bundle.
 EOF
 }
 
 proxy_only="0"
+launcher_only="0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -36,6 +38,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --proxy-only)
       proxy_only="1"
+      shift
+      ;;
+    --launcher-only)
+      launcher_only="1"
       shift
       ;;
     -h|--help)
@@ -69,9 +75,11 @@ mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 TEST_LOG="${OUT_ROOT}/logs/target_session_manager_test.log"
 HOST_TEST_LOG="${OUT_ROOT}/logs/host_supervised_session_test.log"
 PROXY_TEST_LOG="${OUT_ROOT}/logs/proxy_control_mode_test.log"
+LAUNCHER_TEST_LOG="${OUT_ROOT}/logs/rust_owned_launcher_test.log"
 EVENTS_JSONL="${OUT_ROOT}/evidence/manager-events.jsonl"
 HOST_EVENTS_JSONL="${OUT_ROOT}/evidence/host-concurrency.jsonl"
 PROXY_EVENTS_JSONL="${OUT_ROOT}/evidence/proxy-control-mode.jsonl"
+LAUNCHER_EVENTS_JSONL="${OUT_ROOT}/evidence/rust-owned-launcher.jsonl"
 SUMMARY_JSON="${OUT_ROOT}/evidence/manager-summary.json"
 ENVIRONMENT_JSON="${OUT_ROOT}/environment.json"
 REPLAY_SH="${OUT_ROOT}/replay.sh"
@@ -85,11 +93,14 @@ host_events_status="passed"
 summary_status="passed"
 proxy_test_status="passed"
 proxy_events_status="passed"
+launcher_test_status="passed"
+launcher_events_status="passed"
 event_count="0"
 host_event_count="0"
 proxy_event_count="0"
+launcher_event_count="0"
 
-if [[ "${proxy_only}" == "1" ]]; then
+if [[ "${proxy_only}" == "1" || "${launcher_only}" == "1" ]]; then
   test_status="skipped"
   host_test_status="skipped"
   events_status="skipped"
@@ -164,37 +175,75 @@ else
   fi
 fi
 
-echo "[browser-target-session-manager] running proxy/control-mode proof"
-if ! (
-  cd "${REPO_ROOT}"
-  env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
-    RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}" \
-    CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-browser-target-session-manager}" \
-    CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" \
-    CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
-    CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}" \
-    CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}" \
-    RUSTFLAGS="${RUSTFLAGS:--Cdebuginfo=0}" \
-    cargo test -p fcp-browser --test integration test_browser_proxy_control_mode_e2e_jsonl -- --nocapture
-) >"${PROXY_TEST_LOG}" 2>&1; then
-  proxy_test_status="failed"
-fi
-
-if ! grep -a '^BROWSER_PROXY_CONTROL_MODE_JSONL ' "${PROXY_TEST_LOG}" \
-  | sed 's/^BROWSER_PROXY_CONTROL_MODE_JSONL //' >"${PROXY_EVENTS_JSONL}"
-then
-  proxy_events_status="failed"
-fi
-
-if [[ ! -s "${PROXY_EVENTS_JSONL}" ]] || ! jq -c . "${PROXY_EVENTS_JSONL}" >/dev/null; then
-  proxy_events_status="failed"
+if [[ "${launcher_only}" == "1" ]]; then
+  proxy_test_status="skipped"
+  proxy_events_status="skipped"
 else
-  proxy_event_count="$(wc -l <"${PROXY_EVENTS_JSONL}" | tr -d ' ')"
+  echo "[browser-target-session-manager] running proxy/control-mode proof"
+  if ! (
+    cd "${REPO_ROOT}"
+    env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
+      RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}" \
+      CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-browser-target-session-manager}" \
+      CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" \
+      CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
+      CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}" \
+      CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}" \
+      RUSTFLAGS="${RUSTFLAGS:--Cdebuginfo=0}" \
+      cargo test -p fcp-browser --test integration test_browser_proxy_control_mode_e2e_jsonl -- --nocapture
+  ) >"${PROXY_TEST_LOG}" 2>&1; then
+    proxy_test_status="failed"
+  fi
+
+  if ! grep -a '^BROWSER_PROXY_CONTROL_MODE_JSONL ' "${PROXY_TEST_LOG}" \
+    | sed 's/^BROWSER_PROXY_CONTROL_MODE_JSONL //' >"${PROXY_EVENTS_JSONL}"
+  then
+    proxy_events_status="failed"
+  fi
+
+  if [[ ! -s "${PROXY_EVENTS_JSONL}" ]] || ! jq -c . "${PROXY_EVENTS_JSONL}" >/dev/null; then
+    proxy_events_status="failed"
+  else
+    proxy_event_count="$(wc -l <"${PROXY_EVENTS_JSONL}" | tr -d ' ')"
+  fi
+fi
+
+if [[ "${proxy_only}" == "1" ]]; then
+  launcher_test_status="skipped"
+  launcher_events_status="skipped"
+else
+  echo "[browser-target-session-manager] running Rust-owned launcher/supervisor proof"
+  if ! (
+    cd "${REPO_ROOT}"
+    env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
+      RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}" \
+      CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-browser-target-session-manager}" \
+      CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" \
+      CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
+      CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}" \
+      CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}" \
+      RUSTFLAGS="${RUSTFLAGS:--Cdebuginfo=0}" \
+      cargo test -p fcp-browser --test integration test_browser_rust_owned_launcher_supervisor_e2e_jsonl -- --nocapture
+  ) >"${LAUNCHER_TEST_LOG}" 2>&1; then
+    launcher_test_status="failed"
+  fi
+
+  if ! grep -a '^BROWSER_RUST_LAUNCHER_JSONL ' "${LAUNCHER_TEST_LOG}" \
+    | sed 's/^BROWSER_RUST_LAUNCHER_JSONL //' >"${LAUNCHER_EVENTS_JSONL}"
+  then
+    launcher_events_status="failed"
+  fi
+
+  if [[ ! -s "${LAUNCHER_EVENTS_JSONL}" ]] || ! jq -c . "${LAUNCHER_EVENTS_JSONL}" >/dev/null; then
+    launcher_events_status="failed"
+  else
+    launcher_event_count="$(wc -l <"${LAUNCHER_EVENTS_JSONL}" | tr -d ' ')"
+  fi
 fi
 
 overall_status="passed"
 exit_code=0
-if [[ "${test_status}" == "failed" || "${host_test_status}" == "failed" || "${events_status}" == "failed" || "${host_events_status}" == "failed" || "${summary_status}" == "failed" || "${proxy_test_status}" == "failed" || "${proxy_events_status}" == "failed" ]]; then
+if [[ "${test_status}" == "failed" || "${host_test_status}" == "failed" || "${events_status}" == "failed" || "${host_events_status}" == "failed" || "${summary_status}" == "failed" || "${proxy_test_status}" == "failed" || "${proxy_events_status}" == "failed" || "${launcher_test_status}" == "failed" || "${launcher_events_status}" == "failed" ]]; then
   overall_status="failed"
   exit_code=1
 fi
@@ -208,6 +257,7 @@ jq -n \
   --arg target_dir "${CARGO_TARGET_DIR:-/tmp/fcp-browser-target-session-manager}" \
   --arg rch_require_remote "${RCH_REQUIRE_REMOTE:-1}" \
   --arg proxy_only "${proxy_only}" \
+  --arg launcher_only "${launcher_only}" \
   '{
     run_id: $run_id,
     script: $script,
@@ -217,7 +267,8 @@ jq -n \
     cargo_target_dir: $target_dir,
     rch_require_remote: $rch_require_remote,
     proxy_only: ($proxy_only == "1"),
-    redaction: "manager and proxy events include hashes and omit raw target ids, raw proxy descriptors, raw direct-CDP endpoints, cookie scopes, URLs, credentials, and local paths"
+    launcher_only: ($launcher_only == "1"),
+    redaction: "manager, proxy, and launcher events include hashes and omit raw target ids, raw proxy descriptors, raw direct-CDP endpoints, browser binary paths, cookie scopes, URLs, credentials, and local paths"
   }' >"${ENVIRONMENT_JSON}"
 
 cat >"${REPLAY_SH}" <<'EOF'
@@ -253,6 +304,16 @@ env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
   CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}" \
   RUSTFLAGS="${RUSTFLAGS:--Cdebuginfo=0}" \
   cargo test -p fcp-browser --test integration test_browser_proxy_control_mode_e2e_jsonl -- --nocapture
+
+env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
+  RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}" \
+  CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-browser-target-session-manager}" \
+  CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" \
+  CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
+  CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}" \
+  CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}" \
+  RUSTFLAGS="${RUSTFLAGS:--Cdebuginfo=0}" \
+  cargo test -p fcp-browser --test integration test_browser_rust_owned_launcher_supervisor_e2e_jsonl -- --nocapture
 EOF
 chmod +x "${REPLAY_SH}"
 
@@ -266,24 +327,31 @@ jq -n \
   --arg summary_status "${summary_status}" \
   --arg proxy_test_status "${proxy_test_status}" \
   --arg proxy_events_status "${proxy_events_status}" \
+  --arg launcher_test_status "${launcher_test_status}" \
+  --arg launcher_events_status "${launcher_events_status}" \
   --arg event_count "${event_count}" \
   --arg host_event_count "${host_event_count}" \
   --arg proxy_event_count "${proxy_event_count}" \
+  --arg launcher_event_count "${launcher_event_count}" \
   --arg events_jsonl "${EVENTS_JSONL}" \
   --arg host_events_jsonl "${HOST_EVENTS_JSONL}" \
   --arg proxy_events_jsonl "${PROXY_EVENTS_JSONL}" \
+  --arg launcher_events_jsonl "${LAUNCHER_EVENTS_JSONL}" \
   --arg manager_summary "${SUMMARY_JSON}" \
   --arg test_log "${TEST_LOG}" \
   --arg host_test_log "${HOST_TEST_LOG}" \
   --arg proxy_test_log "${PROXY_TEST_LOG}" \
+  --arg launcher_test_log "${LAUNCHER_TEST_LOG}" \
   --arg environment "${ENVIRONMENT_JSON}" \
   --arg replay "${REPLAY_SH}" \
   --arg proxy_only "${proxy_only}" \
+  --arg launcher_only "${launcher_only}" \
   '{
     run_id: $run_id,
     connector: "fcp-browser",
     scenario: "browser_target_session_manager_and_proxy_control_mode",
     proxy_only: ($proxy_only == "1"),
+    launcher_only: ($launcher_only == "1"),
     overall_status: $overall_status,
     steps: {
       cargo_test: $test_status,
@@ -292,19 +360,24 @@ jq -n \
       host_concurrency_jsonl: $host_events_status,
       manager_summary: $summary_status,
       proxy_control_test: $proxy_test_status,
-      proxy_control_jsonl: $proxy_events_status
+      proxy_control_jsonl: $proxy_events_status,
+      rust_owned_launcher_test: $launcher_test_status,
+      rust_owned_launcher_jsonl: $launcher_events_status
     },
     manager_event_count: ($event_count | tonumber),
     host_event_count: ($host_event_count | tonumber),
     proxy_event_count: ($proxy_event_count | tonumber),
+    launcher_event_count: ($launcher_event_count | tonumber),
     artifacts: {
       manager_events_jsonl: $events_jsonl,
       host_concurrency_jsonl: $host_events_jsonl,
       proxy_control_jsonl: $proxy_events_jsonl,
+      rust_owned_launcher_jsonl: $launcher_events_jsonl,
       manager_summary: $manager_summary,
       test_log: $test_log,
       host_test_log: $host_test_log,
       proxy_test_log: $proxy_test_log,
+      launcher_test_log: $launcher_test_log,
       environment: $environment,
       replay: $replay
     }

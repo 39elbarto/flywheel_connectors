@@ -53,8 +53,9 @@ Important runtime truths the contract preserves:
 - The manager records current-tab ownership, stale-target recovery, command IDs, timeout/cancellation checkpoints, retry decisions, shutdown cleanup, and redacted session/cookie ownership metadata.
 - Raw Chrome DevTools discovery endpoints such as `/json` and `/json/version` are rejected as `browser_url` values.
 - `wss://` direct DevTools WebSocket URLs are rejected until TLS WebSocket support is wired.
-- Direct Chrome DevTools WebSocket mode preserves page, cookie, and session operations, but `browser.set_proxy` and `browser.clear_proxy` fail closed with `proxy_unavailable_direct_cdp`; proxy mutation requires a proxy-capable `fcp-browser-control` worker.
+- Direct Chrome DevTools WebSocket mode preserves page, cookie, and session operations, but `browser.set_proxy` and `browser.clear_proxy` fail closed with `proxy_unavailable_direct_cdp` unless the opt-in Rust-owned launcher supervisor is configured.
 - `fcp-browser-control` workers that do not advertise proxy operations remain valid for non-proxy operations. Proxy dispatch is allowed only after `/health` advertises exact `browser.set_proxy` and `browser.clear_proxy` worker-policy descriptors, timeout budgets, response budgets, target policy, and the proxy redaction contract.
+- The Rust-owned launcher supervisor currently has a deterministic fixture mode for launcher/proxy policy proof and a native mode that validates binary/path policy but fails closed with `launcher_native_spawn_not_wired` until real browser process spawn and readiness detection are wired.
 - Proxy descriptors reject invalid schemes, embedded URL credentials, private/internal proxy targets, malformed bypass entries, oversized descriptors, and newline/control-character injection before any proxy worker dispatch.
 - Runtime request timeout is 30 seconds.
 - The browser client uses `fcp-browser/0.1.0` as its user agent.
@@ -205,7 +206,7 @@ These are excluded on purpose:
 
 - configuration, auth mode, browser-control URL, host allowlist state, and request metrics
 - browser-control contract health and raw DevTools discovery rejection
-- control-mode split for direct CDP, proxy-capable `fcp-browser-control`, non-proxy workers, and planned Rust-owned launcher support
+- control-mode split for direct CDP, proxy-capable `fcp-browser-control`, non-proxy workers, Rust-owned launcher fixture mode, and guarded native launcher mode
 - credential-reference degraded state when host token injection is required
 - sandbox, placement, network guard, and execution-planner profiles
 - operation metadata with capability, risk, safety tier, idempotency, approval mode, schemas, and hints
@@ -219,6 +220,7 @@ The deterministic integration evidence is anchored on connector-local tests cove
 - all 16 runtime operations through deterministic HTTP fixtures
 - direct-CDP target/session manager unit fixtures for single-owner leasing, target attach/detach state, stale target recovery, command-id logging, timeout/cancellation markers, shutdown/no-orphan cleanup, and redacted session/cookie metadata
 - proxy control-mode fixtures for direct-CDP fail-closed errors, proxy-capable worker acceptance, non-proxy worker preservation with `proxy_unavailable`, worker-policy rejection, and proxy descriptor validation
+- Rust-owned launcher supervisor fixtures for launch success, proxy set/clear, readiness timeout, malformed proxy config, approval/capability pre-dispatch denial, shutdown cleanup, stale worker rejection, and direct-CDP fail-closed preservation
 - control-plane request headers, timeouts, response budgets, and target-guard metadata
 - bound capability-token checks for invoke
 - execution-approval token checks, expiry, connector ID, operation pattern, and input constraints

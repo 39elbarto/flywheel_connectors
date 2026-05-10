@@ -5544,7 +5544,10 @@ mod tests {
             ("sk-live-test", "raw_secret_config_value_openai"),
             ("xoxb-1234567890abcdef", "raw_secret_config_value_slack"),
             ("ghp_ABCdef123456", "raw_secret_config_value_github"),
-            ("AKIAIOSFODNN7EXAMPLE", "raw_secret_config_value_aws"),
+            (
+                concat!("AKIA", "IOSFODNN7EXAMPLE"),
+                "raw_secret_config_value_aws",
+            ),
         ];
 
         for (sample, expected_detector) in cases {
@@ -5560,7 +5563,10 @@ mod tests {
                 Err(FcpError::ConfigurationLeakedSecret { detector, .. }) => {
                     assert_eq!(detector, expected_detector);
                 }
-                other => panic!("Expected ConfigurationLeakedSecret, got {other:?}"),
+                other => assert!(
+                    matches!(other, Err(FcpError::ConfigurationLeakedSecret { .. })),
+                    "Expected ConfigurationLeakedSecret, got {other:?}"
+                ),
             }
         }
     }

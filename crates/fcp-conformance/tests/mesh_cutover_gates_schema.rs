@@ -127,6 +127,46 @@ fn mesh_cutover_gates_schema_validates_skip_payload() {
 }
 
 #[test]
+fn mesh_cutover_gates_schema_validates_direct_green_payload() {
+    let mut payload = valid_cutover_gates_payload();
+    payload["overall_status"] = json!("green");
+    payload["live_telemetry"] = json!({
+        "source": "host-admin-api",
+        "state": "reachable",
+        "reason_code": "direct-cutover-telemetry-available",
+        "direct_gate_telemetry_available": true,
+        "endpoint_hash": "sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+        "catalog_connector_count": 3,
+        "missing_routes": [],
+        "message": "The host admin API exposed direct live cutover-gate telemetry."
+    });
+    for gate in payload["gates"]
+        .as_array_mut()
+        .expect("gates must be mutable array")
+    {
+        gate["status"] = json!("green");
+        gate["measured_value"] = json!({
+            "telemetry_state": "available",
+            "node_count": 3,
+            "live_telemetry": {
+                "source": "host-admin-api",
+                "state": "reachable",
+                "reason_code": "direct-cutover-telemetry-available",
+                "direct_gate_telemetry_available": true,
+                "catalog_connector_count": 3
+            }
+        });
+    }
+
+    assert_valid(&payload);
+    assert_eq!(payload["overall_status"], "green");
+    assert_eq!(
+        payload["live_telemetry"]["direct_gate_telemetry_available"],
+        true
+    );
+}
+
+#[test]
 fn mesh_cutover_gates_schema_rejects_missing_schema_version() {
     let mut payload = valid_cutover_gates_payload();
     payload

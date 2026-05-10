@@ -23,17 +23,23 @@ default until every gate is green from live telemetry.
 1. Run `fwc --host <endpoint> mesh cutover-gates --json` and record
    `overall_status`, `data_hash`, `live_telemetry`, `red_gate_ids`, and each
    gate's `measured_value`.
-2. For `mesh-inventory-placement`, run
+2. Confirm `live_telemetry.reason_code` is
+   `direct-cutover-telemetry-available`. If it is
+   `direct-cutover-telemetry-unavailable`, the host has no
+   `GET /rpc/mesh/cutover-gates` route yet. If it is
+   `direct-cutover-telemetry-invalid`, the route exists but did not return the
+   four stable gate records.
+3. For `mesh-inventory-placement`, run
    `fwc mesh explain-availability <connector> --host <endpoint> --json` for the
    candidate connectors and confirm `placement.has_mesh_replica` plus
    `placement.replica_count` are exposed.
-3. For `mesh-lifecycle-state-replication`, inspect the future
+4. For `mesh-lifecycle-state-replication`, inspect the future
    `fwc mesh state status --json` route and confirm `ConnectorStateRoot`
    replica count and sequence age are current.
-4. For `mesh-audit-chain-quorum`, inspect
+5. For `mesh-audit-chain-quorum`, inspect
    `fwc audit chain status --json` and confirm quorum signer and checkpoint
    counts.
-5. For `mesh-policy-object-distribution`, inspect
+6. For `mesh-policy-object-distribution`, inspect
    `fwc policy distribution --json` and confirm peer distribution plus owner
    signature verification.
 
@@ -43,6 +49,7 @@ default until every gate is green from live telemetry.
 |---------|--------------|-----|
 | All gates report `skip`. | Live mesh/audit/policy telemetry routes are unavailable to `fwc`. | Wire the missing host routes before using cutover status as a graduation signal. |
 | `live_telemetry.state = "unavailable"`. | The host-admin probe failed during evaluation, commonly because the host was down, restarting, or unreachable. | Re-run after host recovery and compare `data_hash`; the same snapshot after restart must keep the same digest. |
+| `live_telemetry.reason_code = "direct-cutover-telemetry-invalid"`. | The host returned a direct cutover-gates snapshot that did not contain exactly the four stable gate records. | Fix the `GET /rpc/mesh/cutover-gates` response before treating any gate as green. |
 | One gate reports `red`. | The route exists, but the measured value misses its target. | Fix the underlying replication, quorum, or distribution issue; do not lower the target unless the zone SLO explicitly allows it. |
 | JSON schema validation fails. | The CLI output changed without a matching schema bump. | Update `crates/fwc/schemas/mesh_cutover_gates.schema.json` and the conformance test in the same change. |
 

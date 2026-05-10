@@ -71,10 +71,16 @@ fwc mesh explain-availability github --host "$FCP_HOST" --json
 ```
 
 When `--host` is provided, the command performs a redaction-safe host-admin
-probe and reports it under `live_telemetry`. A reachable host does not make any
-gate green by itself; green still requires the direct per-gate mesh, audit, and
-policy telemetry routes. An unreachable host records `state = "unavailable"`
-and leaves every gate skipped with `skip_reason = "host-admin-api-unreachable"`.
+probe and reports it under `live_telemetry`. The probe first confirms the host
+catalog is reachable, then reads `GET /rpc/mesh/cutover-gates` for direct
+per-gate live telemetry. A reachable catalog does not make any gate green by
+itself; green requires that direct route to return all four gate records with
+measured values that came from mesh, audit, and policy telemetry. An unreachable
+host records `state = "unavailable"` and leaves every gate skipped with
+`skip_reason = "host-admin-api-unreachable"`. A reachable host with a missing
+or malformed direct route remains skipped with
+`reason_code = "direct-cutover-telemetry-unavailable"` or
+`reason_code = "direct-cutover-telemetry-invalid"`.
 
 The JSON schema lives at
 `crates/fwc/schemas/mesh_cutover_gates.schema.json`. Schema changes follow

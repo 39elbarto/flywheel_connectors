@@ -680,8 +680,7 @@ pub struct MeshCutoverGate {
 }
 
 impl MeshCutoverGate {
-    fn new(
-        status: CutoverGateStatus,
+    fn skip(
         gate_id: &str,
         name: &str,
         predicate_text: String,
@@ -694,33 +693,12 @@ impl MeshCutoverGate {
             gate_id: gate_id.to_owned(),
             name: name.to_owned(),
             predicate_text,
-            status,
+            status: CutoverGateStatus::Skip,
             measured_value,
             target,
             how_measured,
             remediation: remediation.to_owned(),
         }
-    }
-
-    fn skip(
-        gate_id: &str,
-        name: &str,
-        predicate_text: String,
-        measured_value: Value,
-        target: Value,
-        how_measured: Vec<String>,
-        remediation: &str,
-    ) -> Self {
-        Self::new(
-            CutoverGateStatus::Skip,
-            gate_id,
-            name,
-            predicate_text,
-            measured_value,
-            target,
-            how_measured,
-            remediation,
-        )
     }
 }
 

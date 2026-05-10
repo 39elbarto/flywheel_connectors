@@ -16,6 +16,7 @@ use fcp_host::{
 };
 use fcp_manifest::ConnectorManifest;
 use fcp_prelude::{CapabilityToken, ConnectorHealth, InvokeResponse, RequestId};
+use fwc::mesh_cmd::{CutoverGateStatus, MeshCutoverGateArgs, mesh_cutover_gates};
 use fwc::readiness::CommandAvailability;
 use fwc::test_observability::{
     ArtifactManifest, BundleOutcome, ScenarioLayer, TraceCategory, TraceEntry, TraceLevel,
@@ -1153,6 +1154,51 @@ fn mock_discovery_response_json(connectors: &[Value]) -> Value {
         "supports_streaming": true,
         "supports_batching": true,
         "timestamp": "2026-03-10T00:00:00Z"
+    })
+}
+
+fn mock_direct_green_cutover_gate_snapshot_json() -> Value {
+    let mut gates = mesh_cutover_gates(&MeshCutoverGateArgs::default());
+    for gate in &mut gates {
+        gate.status = CutoverGateStatus::Green;
+        gate.measured_value = match gate.gate_id.as_str() {
+            "mesh-inventory-placement" => json!({
+                "telemetry_state": "available",
+                "connectors_meeting_predicate": 3,
+                "placement.has_mesh_replica": true,
+                "placement.replica_count": 2,
+                "node_count": 3,
+            }),
+            "mesh-lifecycle-state-replication" => json!({
+                "telemetry_state": "available",
+                "connectors_meeting_predicate": 3,
+                "replica_count": 2,
+                "last_replicated_seq": 42,
+                "last_replicated_age_seconds": 5,
+                "node_count": 3,
+            }),
+            "mesh-audit-chain-quorum" => json!({
+                "telemetry_state": "available",
+                "quorum_signed_checkpoints": 1,
+                "quorum_signers": 2,
+                "checkpoint_age_seconds": 5,
+                "node_count": 3,
+            }),
+            "mesh-policy-object-distribution" => json!({
+                "telemetry_state": "available",
+                "peer_count": 2,
+                "verified_owner_signatures": true,
+                "node_count": 3,
+            }),
+            unknown => panic!("unexpected cutover gate id {unknown}"),
+        };
+    }
+
+    json!({
+        "schema_version": "fcp-host-cutover-gates/v1",
+        "catalog_connector_count": 3,
+        "node_count": 3,
+        "gates": gates,
     })
 }
 
@@ -4499,13 +4545,67 @@ fn e2e_mesh_cutover_gates_network_failure_skips_with_logged_reason() {
 }
 
 #[test]
+fn e2e_mesh_cutover_gates_three_node_direct_telemetry_turns_green() {
+    let connectors = [
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub", 12, "safe"),
+        mock_connector_summary_json("fcp.slack:team:v1", "Slack", 9, "safe"),
+        mock_connector_summary_json("fcp.discord:guild:v1", "Discord", 8, "safe"),
+    ];
+    let routes = vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&connectors),
+        ),
+        (
+            "GET /rpc/mesh/cutover-gates".to_owned(),
+            mock_direct_green_cutover_gate_snapshot_json(),
+        ),
+    ];
+
+    let (host, server) = spawn_mock_host_sequence(routes);
+    let payload = run_json_ok(&["--json", "--host", &host, "mesh", "cutover-gates"]);
+    server
+        .join()
+        .expect("three-node cutover-gate mock host should complete");
+
+    assert_eq!(payload["schema_version"], "1.2.0");
+    assert_eq!(payload["overall_status"], "green");
+    assert_eq!(payload["red_gate_ids"].as_array().map(Vec::len), Some(0));
+    assert_eq!(
+        payload["live_telemetry"]["reason_code"],
+        "direct-cutover-telemetry-available"
+    );
+    assert_eq!(
+        payload["live_telemetry"]["direct_gate_telemetry_available"],
+        true
+    );
+    assert_eq!(payload["live_telemetry"]["catalog_connector_count"], 3);
+    assert!(
+        payload["gates"]
+            .as_array()
+            .expect("gates must be an array")
+            .iter()
+            .all(|gate| gate["status"] == "green"
+                && gate["measured_value"]["node_count"] == 3
+                && gate["measured_value"]["live_telemetry"]["reason_code"]
+                    == "direct-cutover-telemetry-available")
+    );
+}
+
+#[test]
 fn e2e_mesh_cutover_gates_restart_recovery_preserves_snapshot_hash() {
     let github_connector =
         mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub", 12, "safe");
-    let routes = vec![(
-        "POST /rpc/discover".to_owned(),
-        mock_discovery_response_json(std::slice::from_ref(&github_connector)),
-    )];
+    let routes = vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(std::slice::from_ref(&github_connector)),
+        ),
+        (
+            "GET /rpc/mesh/cutover-gates".to_owned(),
+            json!({"status": "planned"}),
+        ),
+    ];
 
     let (host_before, server_before) = spawn_mock_host_sequence(routes.clone());
     let before = run_json_ok(&["--json", "--host", &host_before, "mesh", "cutover-gates"]);

@@ -4561,6 +4561,10 @@ impl HostAdminClient {
         Ok((HostConnectorCatalog::from_response(&response), response))
     }
 
+    fn cutover_gates_snapshot(&self) -> Result<Value> {
+        self.get_json("/rpc/mesh/cutover-gates")
+    }
+
     fn discover(&self, filter: Option<&HostDiscoveryFilter>) -> Result<HostDiscoveryResponse> {
         self.post_json("/rpc/discover", &json!({ "filter": filter }))
     }
@@ -7893,6 +7897,12 @@ const CUTOVER_GATE_TELEMETRY_BEAD_ID: &str = "flywheel_connectors-hr0rr.2.1";
 const CUTOVER_GATE_TELEMETRY_ACTOR: &str = "fwc";
 const CUTOVER_GATE_TELEMETRY_REDACTION_SCOPE: &str = "public";
 const CUTOVER_GATE_STATUS_METRIC_NAME: &str = "fcp_cutover_gate_status";
+const MESH_CUTOVER_GATE_IDS: [&str; 4] = [
+    "mesh-inventory-placement",
+    "mesh-lifecycle-state-replication",
+    "mesh-audit-chain-quorum",
+    "mesh-policy-object-distribution",
+];
 
 #[derive(Clone, Debug, Default, Deserialize)]
 struct MeshCutoverGateThresholdConfig {
@@ -7922,6 +7932,12 @@ struct MeshCutoverGateMeshConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 struct MeshCutoverGateHostConfig {
     mesh: Option<MeshCutoverGateMeshConfig>,
+}
+
+#[derive(Clone, Debug)]
+struct CutoverGateLiveTelemetry {
+    summary: Value,
+    direct_gates: Option<Vec<mesh_cmd::MeshCutoverGate>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -8138,77 +8154,159 @@ fn annotate_cutover_gates_with_live_telemetry(
     }
 }
 
-fn cutover_gate_live_telemetry(explicit_host: Option<&str>) -> Value {
-    let Some(host) = explicit_host.map(str::trim).filter(|host| !host.is_empty()) else {
-        return json!({
-            "source": "none",
-            "state": "not-requested",
-            "reason_code": "host-not-requested",
-            "direct_gate_telemetry_available": false,
-            "endpoint_hash": Value::Null,
-            "catalog_connector_count": Value::Null,
-            "missing_routes": [
-                "connector-state-root-replication",
-                "audit-chain-quorum",
-                "policy-object-distribution"
-            ],
-            "message": "No live host endpoint was provided, so cutover gates remain a fail-closed offline contract.",
-        });
-    };
+fn parse_direct_cutover_gate_snapshot(
+    snapshot: &Value,
+) -> std::result::Result<Vec<mesh_cmd::MeshCutoverGate>, String> {
+    let gates_value = snapshot
+        .get("gates")
+        .cloned()
+        .ok_or_else(|| "direct cutover-gate snapshot is missing `gates`".to_owned())?;
+    let gates =
+        serde_json::from_value::<Vec<mesh_cmd::MeshCutoverGate>>(gates_value).map_err(|error| {
+            format!("direct cutover-gate snapshot has invalid gate records: {error}")
+        })?;
 
-    let endpoint_hash = sha256_prefixed(host.as_bytes());
-    let client = match HostAdminClient::new(host) {
-        Ok(client) => client,
-        Err(error) => {
-            return json!({
-                "source": "host-admin-api",
-                "state": "unavailable",
-                "reason_code": "invalid-host-endpoint",
+    if gates.len() != MESH_CUTOVER_GATE_IDS.len() {
+        return Err(format!(
+            "direct cutover-gate snapshot has {} gate(s), expected {}",
+            gates.len(),
+            MESH_CUTOVER_GATE_IDS.len()
+        ));
+    }
+
+    let actual_ids = gates
+        .iter()
+        .map(|gate| gate.gate_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let expected_ids = MESH_CUTOVER_GATE_IDS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if actual_ids != expected_ids {
+        return Err(format!(
+            "direct cutover-gate snapshot gate ids {:?} do not match expected {:?}",
+            actual_ids, expected_ids
+        ));
+    }
+
+    Ok(gates)
+}
+
+fn cutover_gate_live_telemetry(explicit_host: Option<&str>) -> CutoverGateLiveTelemetry {
+    let Some(host) = explicit_host.map(str::trim).filter(|host| !host.is_empty()) else {
+        return CutoverGateLiveTelemetry {
+            summary: json!({
+                "source": "none",
+                "state": "not-requested",
+                "reason_code": "host-not-requested",
                 "direct_gate_telemetry_available": false,
-                "endpoint_hash": endpoint_hash,
+                "endpoint_hash": Value::Null,
                 "catalog_connector_count": Value::Null,
                 "missing_routes": [
                     "connector-state-root-replication",
                     "audit-chain-quorum",
                     "policy-object-distribution"
                 ],
-                "error_hash": sha256_prefixed(format!("{error:#}").as_bytes()),
-                "message": "The provided host endpoint could not be normalized for a cutover-gate probe; gates remain skipped.",
-            });
+                "message": "No live host endpoint was provided, so cutover gates remain a fail-closed offline contract.",
+            }),
+            direct_gates: None,
+        };
+    };
+
+    let endpoint_hash = sha256_prefixed(host.as_bytes());
+    let client = match HostAdminClient::new(host) {
+        Ok(client) => client,
+        Err(error) => {
+            return CutoverGateLiveTelemetry {
+                summary: json!({
+                    "source": "host-admin-api",
+                    "state": "unavailable",
+                    "reason_code": "invalid-host-endpoint",
+                    "direct_gate_telemetry_available": false,
+                    "endpoint_hash": endpoint_hash,
+                    "catalog_connector_count": Value::Null,
+                    "missing_routes": [
+                        "connector-state-root-replication",
+                        "audit-chain-quorum",
+                        "policy-object-distribution"
+                    ],
+                    "error_hash": sha256_prefixed(format!("{error:#}").as_bytes()),
+                    "message": "The provided host endpoint could not be normalized for a cutover-gate probe; gates remain skipped.",
+                }),
+                direct_gates: None,
+            };
         }
     };
 
     match client.catalog(None) {
-        Ok((catalog, _response)) => json!({
-            "source": "host-admin-api",
-            "state": "reachable",
-            "reason_code": "direct-cutover-telemetry-unavailable",
-            "direct_gate_telemetry_available": false,
-            "endpoint_hash": endpoint_hash,
-            "catalog_connector_count": catalog.connectors.len(),
-            "missing_routes": [
-                "connector-state-root-replication",
-                "audit-chain-quorum",
-                "policy-object-distribution"
-            ],
-            "message": "The host admin API is reachable, but it does not yet expose every direct live telemetry route required to turn cutover gates green.",
-        }),
-        Err(error) => json!({
-            "source": "host-admin-api",
-            "state": "unavailable",
-            "reason_code": "host-admin-api-unreachable",
-            "direct_gate_telemetry_available": false,
-            "endpoint_hash": endpoint_hash,
-            "catalog_connector_count": Value::Null,
-            "missing_routes": [
-                "connector-inventory",
-                "connector-state-root-replication",
-                "audit-chain-quorum",
-                "policy-object-distribution"
-            ],
-            "error_hash": sha256_prefixed(format!("{error:#}").as_bytes()),
-            "message": "The host admin API could not be reached during cutover-gate evaluation; gates remain skipped instead of failing open.",
-        }),
+        Ok((catalog, _response)) => match client.cutover_gates_snapshot() {
+            Ok(snapshot) => match parse_direct_cutover_gate_snapshot(&snapshot) {
+                Ok(gates) => CutoverGateLiveTelemetry {
+                    summary: json!({
+                        "source": "host-admin-api",
+                        "state": "reachable",
+                        "reason_code": "direct-cutover-telemetry-available",
+                        "direct_gate_telemetry_available": true,
+                        "endpoint_hash": endpoint_hash,
+                        "catalog_connector_count": catalog.connectors.len(),
+                        "missing_routes": [],
+                        "message": "The host admin API exposed direct live cutover-gate telemetry.",
+                    }),
+                    direct_gates: Some(gates),
+                },
+                Err(error) => CutoverGateLiveTelemetry {
+                    summary: json!({
+                        "source": "host-admin-api",
+                        "state": "reachable",
+                        "reason_code": "direct-cutover-telemetry-invalid",
+                        "direct_gate_telemetry_available": false,
+                        "endpoint_hash": endpoint_hash,
+                        "catalog_connector_count": catalog.connectors.len(),
+                        "missing_routes": ["valid-cutover-gate-snapshot"],
+                        "error_hash": sha256_prefixed(error.as_bytes()),
+                        "message": "The host admin API is reachable, but its direct cutover-gate telemetry snapshot is malformed; gates remain skipped.",
+                    }),
+                    direct_gates: None,
+                },
+            },
+            Err(error) => CutoverGateLiveTelemetry {
+                summary: json!({
+                    "source": "host-admin-api",
+                    "state": "reachable",
+                    "reason_code": "direct-cutover-telemetry-unavailable",
+                    "direct_gate_telemetry_available": false,
+                    "endpoint_hash": endpoint_hash,
+                    "catalog_connector_count": catalog.connectors.len(),
+                    "missing_routes": [
+                        "connector-state-root-replication",
+                        "audit-chain-quorum",
+                        "policy-object-distribution"
+                    ],
+                    "error_hash": sha256_prefixed(format!("{error:#}").as_bytes()),
+                    "message": "The host admin API is reachable, but it does not yet expose every direct live telemetry route required to turn cutover gates green.",
+                }),
+                direct_gates: None,
+            },
+        },
+        Err(error) => CutoverGateLiveTelemetry {
+            summary: json!({
+                "source": "host-admin-api",
+                "state": "unavailable",
+                "reason_code": "host-admin-api-unreachable",
+                "direct_gate_telemetry_available": false,
+                "endpoint_hash": endpoint_hash,
+                "catalog_connector_count": Value::Null,
+                "missing_routes": [
+                    "connector-inventory",
+                    "connector-state-root-replication",
+                    "audit-chain-quorum",
+                    "policy-object-distribution"
+                ],
+                "error_hash": sha256_prefixed(format!("{error:#}").as_bytes()),
+                "message": "The host admin API could not be reached during cutover-gate evaluation; gates remain skipped instead of failing open.",
+            }),
+            direct_gates: None,
+        },
     }
 }
 
@@ -8248,7 +8346,11 @@ fn mesh_cutover_gates_dispatch(
     };
     let started_at = std::time::Instant::now();
     let live_telemetry = cutover_gate_live_telemetry(explicit_host);
-    let mut gates = mesh_cmd::mesh_cutover_gates(&gate_args);
+    let CutoverGateLiveTelemetry {
+        summary: live_telemetry,
+        direct_gates,
+    } = live_telemetry;
+    let mut gates = direct_gates.unwrap_or_else(|| mesh_cmd::mesh_cutover_gates(&gate_args));
     annotate_cutover_gates_with_live_telemetry(&mut gates, &live_telemetry);
     let evaluated_in_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     emit_cutover_gate_telemetry(&gates, evaluated_in_ms);
@@ -27573,6 +27675,52 @@ mod tests {
         (outcome.exit_code, outcome.text)
     }
 
+    fn mock_direct_green_cutover_gate_snapshot() -> Value {
+        let mut gates =
+            super::mesh_cmd::mesh_cutover_gates(&super::mesh_cmd::MeshCutoverGateArgs::default());
+        for gate in &mut gates {
+            gate.status = super::mesh_cmd::CutoverGateStatus::Green;
+            gate.measured_value = match gate.gate_id.as_str() {
+                "mesh-inventory-placement" => json!({
+                    "telemetry_state": "available",
+                    "connectors_meeting_predicate": 3,
+                    "placement.has_mesh_replica": true,
+                    "placement.replica_count": 2,
+                    "node_count": 3,
+                }),
+                "mesh-lifecycle-state-replication" => json!({
+                    "telemetry_state": "available",
+                    "connectors_meeting_predicate": 3,
+                    "replica_count": 2,
+                    "last_replicated_seq": 42,
+                    "last_replicated_age_seconds": 5,
+                    "node_count": 3,
+                }),
+                "mesh-audit-chain-quorum" => json!({
+                    "telemetry_state": "available",
+                    "quorum_signed_checkpoints": 1,
+                    "quorum_signers": 2,
+                    "checkpoint_age_seconds": 5,
+                    "node_count": 3,
+                }),
+                "mesh-policy-object-distribution" => json!({
+                    "telemetry_state": "available",
+                    "peer_count": 2,
+                    "verified_owner_signatures": true,
+                    "node_count": 3,
+                }),
+                unknown => panic!("unexpected cutover gate id {unknown}"),
+            };
+        }
+
+        json!({
+            "schema_version": "fcp-host-cutover-gates/v1",
+            "catalog_connector_count": 3,
+            "node_count": 3,
+            "gates": gates,
+        })
+    }
+
     #[test]
     fn cutover_gate_telemetry_records_have_required_fields() {
         let gates =
@@ -27670,7 +27818,11 @@ mod tests {
             "POST /rpc/discover".to_owned(),
             mock_discovery_response_json(),
         );
-        let (host, server) = spawn_mock_host(routes, 1);
+        routes.insert(
+            "GET /rpc/mesh/cutover-gates".to_owned(),
+            json!({"status": "planned"}),
+        );
+        let (host, server) = spawn_mock_host(routes, 2);
 
         let (exit_code, payload) =
             execute_json(&["fwc", "--json", "--host", &host, "mesh", "cutover-gates"]);
@@ -27682,7 +27834,7 @@ mod tests {
         assert_eq!(payload["live_telemetry"]["state"], "reachable");
         assert_eq!(
             payload["live_telemetry"]["reason_code"],
-            "direct-cutover-telemetry-unavailable"
+            "direct-cutover-telemetry-invalid"
         );
         assert_eq!(payload["live_telemetry"]["catalog_connector_count"], 1);
         assert!(
@@ -27692,6 +27844,46 @@ mod tests {
                 .iter()
                 .all(|gate| gate["measured_value"]["live_telemetry"]["state"] == "reachable")
         );
+    }
+
+    #[test]
+    fn mesh_cutover_gates_direct_live_telemetry_can_turn_green() {
+        let mut routes = StdBTreeMap::new();
+        routes.insert(
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(),
+        );
+        routes.insert(
+            "GET /rpc/mesh/cutover-gates".to_owned(),
+            mock_direct_green_cutover_gate_snapshot(),
+        );
+        let (host, server) = spawn_mock_host(routes, 2);
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "mesh", "cutover-gates"]);
+
+        server.join().expect("mock host should complete");
+        assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
+        assert_eq!(payload["schema_version"], "1.2.0");
+        assert_eq!(payload["overall_status"], "green");
+        assert_eq!(
+            payload["live_telemetry"]["reason_code"],
+            "direct-cutover-telemetry-available"
+        );
+        assert_eq!(
+            payload["live_telemetry"]["direct_gate_telemetry_available"],
+            true
+        );
+        assert_eq!(
+            payload["gates"]
+                .as_array()
+                .expect("gates must be an array")
+                .iter()
+                .filter(|gate| gate["status"] == "green")
+                .count(),
+            4
+        );
+        assert_eq!(payload["red_gate_ids"].as_array().map(Vec::len), Some(0));
     }
 
     #[test]

@@ -258,19 +258,17 @@ impl CompiledPolicy {
 
     /// Return the normalized Windows `AppContainer` capabilities implied by this policy.
     pub fn windows_appcontainer_capabilities(&self) -> Result<Vec<String>, SandboxError> {
-        let mut requested = self
-            .platform_flags
-            .windows_appcontainer_capabilities
-            .clone();
+        let mut capabilities = normalize_windows_appcontainer_capabilities(
+            &self.platform_flags.windows_appcontainer_capabilities,
+        )?;
         if !self.block_direct_network
-            && !requested
+            && !capabilities
                 .iter()
-                .any(|capability| is_windows_network_appcontainer_capability(capability.trim()))
+                .any(|capability| is_windows_network_appcontainer_capability(capability))
         {
-            requested.push(WINDOWS_APPCONTAINER_INTERNET_CLIENT.to_owned());
+            capabilities.push(WINDOWS_APPCONTAINER_INTERNET_CLIENT.to_owned());
+            capabilities.sort();
         }
-
-        let capabilities = normalize_windows_appcontainer_capabilities(&requested)?;
         if self.block_direct_network {
             for capability in &capabilities {
                 if is_windows_network_appcontainer_capability(capability) {
@@ -732,10 +730,45 @@ fn normalize_windows_appcontainer_capabilities(
     for capability in requested {
         let capability = capability.trim();
         validate_windows_appcontainer_capability_name(capability)?;
-        capabilities.insert(capability.to_owned());
+        if let Some(mapped) = fcp_sandbox_capability_to_windows_appcontainer(capability) {
+            capabilities.insert(mapped.to_owned());
+        } else if !fcp_sandbox_capability_has_no_windows_appcontainer_sid(capability) {
+            capabilities.insert(capability.to_owned());
+        }
     }
 
     Ok(capabilities.into_iter().collect())
+}
+
+fn fcp_sandbox_capability_to_windows_appcontainer(capability: &str) -> Option<&'static str> {
+    match capability {
+        "network.egress" | "network.outbound" => Some(WINDOWS_APPCONTAINER_INTERNET_CLIENT),
+        "network.outbound_lan" | "network.outbound_tailnet" => {
+            Some(WINDOWS_APPCONTAINER_PRIVATE_NETWORK_CLIENT_SERVER)
+        }
+        "network.listen" => Some(WINDOWS_APPCONTAINER_INTERNET_CLIENT_SERVER),
+        "fs.read.user_profile" => Some("documentsLibrary"),
+        _ => None,
+    }
+}
+
+fn fcp_sandbox_capability_has_no_windows_appcontainer_sid(capability: &str) -> bool {
+    matches!(
+        capability,
+        "network.dns"
+            | "network.outbound_dns"
+            | "network.tls.sni"
+            | "network.tls.mtls"
+            | "system.exec"
+            | "system.privileged"
+            | "filesystem.read"
+            | "filesystem.write"
+            | "fs.write.user_profile"
+            | "fs.read.tmp"
+            | "storage.state"
+            | "media.download"
+            | "media.upload"
+    )
 }
 
 fn validate_windows_appcontainer_capability_name(name: &str) -> Result<(), SandboxError> {
@@ -1477,6 +1510,81 @@ mod tests {
                 "custom.capability",
                 WINDOWS_APPCONTAINER_PRIVATE_NETWORK_CLIENT_SERVER
             ]
+        );
+    }
+
+    #[test]
+    fn test_windows_appcontainer_maps_manifest_network_capabilities() {
+        let mut section = test_sandbox_section();
+        section.profile = SandboxProfile::Permissive;
+        let flags = PlatformFlags {
+            windows_appcontainer_capabilities: vec![
+                "network.egress".into(),
+                "network.dns".into(),
+                "network.tls.sni".into(),
+                "network.tls.mtls".into(),
+            ],
+            ..Default::default()
+        };
+        let policy = CompiledPolicy::from_manifest(&section, None)
+            .unwrap()
+            .with_platform_flags(flags);
+
+        assert_eq!(
+            policy.windows_appcontainer_capabilities().unwrap(),
+            vec![WINDOWS_APPCONTAINER_INTERNET_CLIENT]
+        );
+    }
+
+    #[test]
+    fn test_windows_appcontainer_maps_private_and_listen_capabilities() {
+        let mut section = test_sandbox_section();
+        section.profile = SandboxProfile::Permissive;
+        let flags = PlatformFlags {
+            windows_appcontainer_capabilities: vec![
+                "network.outbound_lan".into(),
+                "network.outbound_tailnet".into(),
+                "network.listen".into(),
+            ],
+            ..Default::default()
+        };
+        let policy = CompiledPolicy::from_manifest(&section, None)
+            .unwrap()
+            .with_platform_flags(flags);
+
+        assert_eq!(
+            policy.windows_appcontainer_capabilities().unwrap(),
+            vec![
+                WINDOWS_APPCONTAINER_INTERNET_CLIENT_SERVER,
+                WINDOWS_APPCONTAINER_PRIVATE_NETWORK_CLIENT_SERVER
+            ]
+        );
+    }
+
+    #[test]
+    fn test_windows_appcontainer_maps_non_sid_manifest_capabilities_to_no_grant() {
+        let mut section = test_sandbox_section();
+        section.profile = SandboxProfile::Permissive;
+        let flags = PlatformFlags {
+            windows_appcontainer_capabilities: vec![
+                "system.exec".into(),
+                "system.privileged".into(),
+                "filesystem.read".into(),
+                "filesystem.write".into(),
+                "storage.state".into(),
+                "media.download".into(),
+                "media.upload".into(),
+            ],
+            ..Default::default()
+        };
+        let policy = CompiledPolicy::from_manifest(&section, None)
+            .unwrap()
+            .with_platform_flags(flags);
+
+        assert_eq!(
+            policy.windows_appcontainer_capabilities().unwrap(),
+            vec![WINDOWS_APPCONTAINER_INTERNET_CLIENT],
+            "permissive policies retain the existing default outbound grant when no Windows network capability remains"
         );
     }
 

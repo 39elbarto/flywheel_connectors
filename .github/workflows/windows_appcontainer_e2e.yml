@@ -1,0 +1,135 @@
+name: Windows AppContainer E2E
+
+on:
+  pull_request:
+    paths:
+      - "crates/fcp-sandbox/**"
+      - "docs/architecture/windows_appcontainer_capability_map.md"
+      - "docs/development/windows_cross_compile.md"
+      - "docs/runbooks/windows_appcontainer.md"
+      - ".github/workflows/windows_appcontainer_e2e.yml"
+  workflow_dispatch:
+    inputs:
+      live_e2e:
+        description: "Run the live AppContainer launch test instead of recording a structured skip"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-appcontainer-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: 10
+  CARGO_INCREMENTAL: 0
+  WINDOWS_APPCONTAINER_ARTIFACT_DIR: artifacts/e2e/windows_appcontainer/${{ github.run_id }}
+
+jobs:
+  windows-appcontainer:
+    name: fcp-sandbox Windows AppContainer
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: windows-appcontainer-${{ hashFiles('Cargo.lock') }}
+
+      - name: Prepare artifact directory
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:WINDOWS_APPCONTAINER_ARTIFACT_DIR" | Out-Null
+          @{
+            schema_version = "1.0.0"
+            event_type = "fcp.host.windows.appcontainer.workflow_started"
+            bead_id = "flywheel_connectors-r4qcg.1.2"
+            actor = "github-actions"
+            redaction_scope = "public"
+            correlation_id = "windows-appcontainer-${{ github.run_id }}"
+            timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+            git_revision = "${{ github.sha }}"
+            target = "x86_64-pc-windows-msvc"
+          } | ConvertTo-Json -Compress | Add-Content "$env:WINDOWS_APPCONTAINER_ARTIFACT_DIR/windows_appcontainer_evidence.jsonl"
+
+      - name: Format check
+        run: cargo fmt --package fcp-sandbox -- --check
+
+      - name: Windows target check
+        run: cargo check -p fcp-sandbox --target x86_64-pc-windows-msvc --features windows-appcontainer --all-targets
+
+      - name: Clippy
+        run: cargo clippy -p fcp-sandbox --target x86_64-pc-windows-msvc --features windows-appcontainer --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test -p fcp-sandbox --target x86_64-pc-windows-msvc --features windows-appcontainer windows_appcontainer --lib -- --nocapture
+
+      - name: No-mock artifact tests
+        run: cargo test -p fcp-sandbox --target x86_64-pc-windows-msvc --features windows-appcontainer --test no_mock_integration windows_appcontainer -- --nocapture
+
+      - name: Live AppContainer launch test
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.live_e2e == 'true' }}
+        shell: pwsh
+        env:
+          FCP_SANDBOX_WINDOWS_APPCONTAINER: "1"
+          FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E: "1"
+        run: |
+          cargo test -p fcp-sandbox --target x86_64-pc-windows-msvc --features windows-appcontainer windows_appcontainer_real_process_launch_e2e --lib -- --nocapture
+          @{
+            schema_version = "1.0.0"
+            event_type = "fcp.host.windows.appcontainer.live_e2e_requested"
+            bead_id = "flywheel_connectors-r4qcg.1.2"
+            actor = "github-actions"
+            redaction_scope = "public"
+            correlation_id = "windows-appcontainer-${{ github.run_id }}"
+            timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+            result = "cargo_test_completed"
+            artifact_path = "$env:WINDOWS_APPCONTAINER_ARTIFACT_DIR/windows_appcontainer_evidence.jsonl"
+          } | ConvertTo-Json -Compress | Add-Content "$env:WINDOWS_APPCONTAINER_ARTIFACT_DIR/windows_appcontainer_evidence.jsonl"
+
+      - name: Record live E2E skip
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.live_e2e != 'true' }}
+        shell: pwsh
+        run: |
+          @{
+            schema_version = "1.0.0"
+            event_type = "fcp.host.windows.appcontainer.skip"
+            bead_id = "flywheel_connectors-r4qcg.1.2"
+            actor = "github-actions"
+            redaction_scope = "public"
+            correlation_id = "windows-appcontainer-${{ github.run_id }}"
+            timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+            skip_reason = "live_e2e_not_requested"
+            final_filter_strength = "process_limit"
+            artifact_path = "$env:WINDOWS_APPCONTAINER_ARTIFACT_DIR/windows_appcontainer_evidence.jsonl"
+          } | ConvertTo-Json -Compress | Add-Content "$env:WINDOWS_APPCONTAINER_ARTIFACT_DIR/windows_appcontainer_evidence.jsonl"
+
+      - name: Upload Windows AppContainer artifacts
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: windows-appcontainer-${{ github.run_id }}
+          path: artifacts/e2e/windows_appcontainer/
+          retention-days: 7
+
+      - name: Upload failed Windows AppContainer artifacts
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: windows-appcontainer-failed-${{ github.run_id }}
+          path: artifacts/e2e/windows_appcontainer/
+          retention-days: 30

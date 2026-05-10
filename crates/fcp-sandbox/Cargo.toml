@@ -17,6 +17,10 @@ all = "warn"
 pedantic = "warn"
 nursery = "warn"
 
+[features]
+default = []
+windows-appcontainer = []
+
 [dependencies]
 anyhow.workspace = true
 fcp-async-core.workspace = true

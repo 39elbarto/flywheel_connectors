@@ -619,6 +619,16 @@ impl CutoverGateStatus {
             Self::Skip => "skip",
         }
     }
+
+    /// Prometheus-shaped status value for `fcp_cutover_gate_status`.
+    #[must_use]
+    pub const fn metric_value(self) -> u8 {
+        match self {
+            Self::Red => 0,
+            Self::Skip => 1,
+            Self::Green => 2,
+        }
+    }
 }
 
 /// Arguments controlling cutover gate targets.
@@ -2014,6 +2024,13 @@ mod tests {
         assert_eq!(CutoverGateStatus::Green.tag(), "green");
         assert_eq!(CutoverGateStatus::Red.tag(), "red");
         assert_eq!(CutoverGateStatus::Skip.tag(), "skip");
+    }
+
+    #[test]
+    fn cutover_gate_status_metric_values_are_stable() {
+        assert_eq!(CutoverGateStatus::Red.metric_value(), 0);
+        assert_eq!(CutoverGateStatus::Skip.metric_value(), 1);
+        assert_eq!(CutoverGateStatus::Green.metric_value(), 2);
     }
 
     #[test]

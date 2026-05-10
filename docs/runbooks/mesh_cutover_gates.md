@@ -47,8 +47,8 @@ default until every gate is green from live telemetry.
 ## Redacted Log Examples
 
 ```json
-{"event_type":"fcp.cutover_gate.evaluated","bead_id":"flywheel_connectors-hr0rr.2.1","actor":"host","redaction_scope":"public","correlation_id":"cutover-20260510T000000Z","timestamp":"2026-05-10T00:00:00.000Z","gate_id":"mesh-inventory-placement","status":"skip","measured_value":{"telemetry_state":"unavailable"},"target":{"connectors_meeting_predicate":3,"placement.replica_count":2},"evaluated_in_ms":3}
-{"event_type":"fcp.cutover_gate.evaluated","bead_id":"flywheel_connectors-hr0rr.2.1","actor":"host","redaction_scope":"public","correlation_id":"cutover-20260510T000001Z","timestamp":"2026-05-10T00:00:01.000Z","gate_id":"mesh-audit-chain-quorum","status":"red","measured_value":{"quorum_signed_checkpoints":0,"quorum_signers":1},"target":{"quorum_signed_checkpoints":1,"quorum_signers":2},"evaluated_in_ms":4}
+{"event_type":"fcp.cutover_gate.evaluated","bead_id":"flywheel_connectors-hr0rr.2.1","actor":"fwc","redaction_scope":"public","correlation_id":"cutover-20260510T000000Z","timestamp":"2026-05-10T00:00:00.000Z","gate_id":"mesh-inventory-placement","status":"skip","measured_value":{"telemetry_state":"unavailable"},"target":{"connectors_meeting_predicate":3,"placement.replica_count":2},"evaluated_in_ms":3,"metric_name":"fcp_cutover_gate_status","metric_type":"gauge","metric_label_gate_id":"mesh-inventory-placement","metric_value":1}
+{"event_type":"fcp.cutover_gate.evaluated","bead_id":"flywheel_connectors-hr0rr.2.1","actor":"fwc","redaction_scope":"public","correlation_id":"cutover-20260510T000001Z","timestamp":"2026-05-10T00:00:01.000Z","gate_id":"mesh-audit-chain-quorum","status":"red","measured_value":{"quorum_signed_checkpoints":0,"quorum_signers":1},"target":{"quorum_signed_checkpoints":1,"quorum_signers":2},"evaluated_in_ms":4,"metric_name":"fcp_cutover_gate_status","metric_type":"gauge","metric_label_gate_id":"mesh-audit-chain-quorum","metric_value":0}
 ```
 
 The log payload must not contain node private keys, connector credentials,

@@ -7818,9 +7818,92 @@ fn mesh_dispatch(args: &MeshArgs, explicit_host: Option<&str>) -> Result<Dispatc
     }
 }
 
+const CUTOVER_GATE_TELEMETRY_EVENT_TYPE: &str = "fcp.cutover_gate.evaluated";
+const CUTOVER_GATE_TELEMETRY_BEAD_ID: &str = "flywheel_connectors-hr0rr.2.1";
+const CUTOVER_GATE_TELEMETRY_ACTOR: &str = "fwc";
+const CUTOVER_GATE_TELEMETRY_REDACTION_SCOPE: &str = "public";
+const CUTOVER_GATE_STATUS_METRIC_NAME: &str = "fcp_cutover_gate_status";
+
+#[derive(Clone, Debug, PartialEq)]
+struct CutoverGateTelemetryRecord {
+    event_type: &'static str,
+    bead_id: &'static str,
+    actor: &'static str,
+    redaction_scope: &'static str,
+    correlation_id: String,
+    timestamp: String,
+    gate_id: String,
+    status: &'static str,
+    measured_value: Value,
+    target: Value,
+    evaluated_in_ms: u64,
+    metric_name: &'static str,
+    metric_label_gate_id: String,
+    metric_value: u8,
+}
+
+fn cutover_gate_telemetry_records(
+    gates: &[mesh_cmd::MeshCutoverGate],
+    evaluated_in_ms: u64,
+    correlation_id: &str,
+    timestamp: &str,
+) -> Vec<CutoverGateTelemetryRecord> {
+    gates
+        .iter()
+        .map(|gate| CutoverGateTelemetryRecord {
+            event_type: CUTOVER_GATE_TELEMETRY_EVENT_TYPE,
+            bead_id: CUTOVER_GATE_TELEMETRY_BEAD_ID,
+            actor: CUTOVER_GATE_TELEMETRY_ACTOR,
+            redaction_scope: CUTOVER_GATE_TELEMETRY_REDACTION_SCOPE,
+            correlation_id: correlation_id.to_owned(),
+            timestamp: timestamp.to_owned(),
+            gate_id: gate.gate_id.clone(),
+            status: gate.status.tag(),
+            measured_value: gate.measured_value.clone(),
+            target: gate.target.clone(),
+            evaluated_in_ms,
+            metric_name: CUTOVER_GATE_STATUS_METRIC_NAME,
+            metric_label_gate_id: gate.gate_id.clone(),
+            metric_value: gate.status.metric_value(),
+        })
+        .collect()
+}
+
+fn emit_cutover_gate_telemetry(gates: &[mesh_cmd::MeshCutoverGate], evaluated_in_ms: u64) {
+    let correlation_id = uuid::Uuid::new_v4().to_string();
+    let timestamp = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+    for record in
+        cutover_gate_telemetry_records(gates, evaluated_in_ms, &correlation_id, &timestamp)
+    {
+        tracing::info!(
+            target: "fcp.cutover_gate",
+            event_type = record.event_type,
+            bead_id = record.bead_id,
+            actor = record.actor,
+            redaction_scope = record.redaction_scope,
+            correlation_id = %record.correlation_id,
+            timestamp = %record.timestamp,
+            gate_id = %record.gate_id,
+            status = record.status,
+            measured_value = %record.measured_value,
+            target = %record.target,
+            evaluated_in_ms = record.evaluated_in_ms,
+            metric_name = record.metric_name,
+            metric_type = "gauge",
+            metric_label_gate_id = %record.metric_label_gate_id,
+            metric_value = record.metric_value,
+            "fcp.cutover_gate.evaluated"
+        );
+    }
+}
+
 fn mesh_cutover_gates_dispatch(args: &MeshCutoverGatesArgs) -> Result<DispatchOutcome> {
     let gate_args = mesh_cmd::MeshCutoverGateArgs::from(args);
+    let started_at = std::time::Instant::now();
     let gates = mesh_cmd::mesh_cutover_gates(&gate_args);
+    let evaluated_in_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+    emit_cutover_gate_telemetry(&gates, evaluated_in_ms);
     let overall_status = mesh_cmd::cutover_gate_overall_status(&gates);
     let red_gate_ids = gates
         .iter()
@@ -27137,6 +27220,35 @@ mod tests {
         let owned_args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
         let outcome = execute(&owned_args).expect("execution should not fail internally");
         (outcome.exit_code, outcome.text)
+    }
+
+    #[test]
+    fn cutover_gate_telemetry_records_have_required_fields() {
+        let gates =
+            super::mesh_cmd::mesh_cutover_gates(&super::mesh_cmd::MeshCutoverGateArgs::default());
+        let records = super::cutover_gate_telemetry_records(
+            &gates,
+            7,
+            "cutover-test-correlation",
+            "2026-05-10T00:00:00.000Z",
+        );
+
+        assert_eq!(records.len(), gates.len());
+        let record = &records[0];
+        assert_eq!(record.event_type, super::CUTOVER_GATE_TELEMETRY_EVENT_TYPE);
+        assert_eq!(record.bead_id, super::CUTOVER_GATE_TELEMETRY_BEAD_ID);
+        assert_eq!(record.actor, "fwc");
+        assert_eq!(record.redaction_scope, "public");
+        assert_eq!(record.correlation_id, "cutover-test-correlation");
+        assert_eq!(record.timestamp, "2026-05-10T00:00:00.000Z");
+        assert_eq!(record.gate_id, "mesh-inventory-placement");
+        assert_eq!(record.status, "skip");
+        assert_eq!(record.measured_value["telemetry_state"], "unavailable");
+        assert_eq!(record.target["placement.replica_count"], 2);
+        assert_eq!(record.evaluated_in_ms, 7);
+        assert_eq!(record.metric_name, super::CUTOVER_GATE_STATUS_METRIC_NAME);
+        assert_eq!(record.metric_label_gate_id, record.gate_id);
+        assert_eq!(record.metric_value, 1);
     }
 
     fn temp_auth_store() -> (TempDir, super::CredentialStore) {

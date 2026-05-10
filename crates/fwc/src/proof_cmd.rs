@@ -2521,6 +2521,13 @@ related = []
                 "browser-control.example.test",
             ),
             (
+                "fcp.telemetry",
+                "Telemetry Connector",
+                "telemetry.export_span",
+                "telemetry.export",
+                "otlp.telemetry.example.test",
+            ),
+            (
                 "fcp.aws-bedrock",
                 "AWS Bedrock Connector",
                 "aws_bedrock.converse",
@@ -2667,6 +2674,7 @@ related = []
                 "fcp.slack",
                 "fcp.gmail",
                 "fcp.browser",
+                "fcp.telemetry",
                 "fcp.aws-bedrock"
             ])
         );
@@ -2678,5 +2686,6 @@ related = []
         assert!(!passport_json.contains("ya29."));
         assert!(passport_json.contains("fcp.aws-bedrock"));
         assert!(passport_json.contains("fcp.browser"));
+        assert!(passport_json.contains("fcp.telemetry"));
     }
 }

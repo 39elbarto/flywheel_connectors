@@ -33,6 +33,8 @@ use fcp_github::connector::GitHubConnector;
 // Helpers
 // ============================================================================
 
+const TEST_CREDENTIAL_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
 fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
     let cap = match op {
         "github.create_issue" | "github.create_pull_request" => "github.write",
@@ -62,6 +64,39 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
     fcp_core::CapabilityToken::from_raw(cose)
 }
 
+fn generate_valid_bound_token(
+    signing_key: &Ed25519SigningKey,
+    connector: &GitHubConnector,
+    op: &str,
+) -> fcp_core::CapabilityToken {
+    let cap = match op {
+        "github.create_issue" | "github.create_pull_request" => "github.write",
+        "github.merge_pull_request" | "github.trigger_workflow" => "github.admin",
+        "github.process_webhook" => "github.process_webhook",
+        _ => "github.read",
+    };
+    let now = Utc::now();
+    let constraints = CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+    let cose = CapabilityTokenBuilder::new()
+        .capability_id(cap)
+        .zone_id("z:work")
+        .principal("user:test")
+        .operations(&[op])
+        .issuer("node:test")
+        .validity(now, now + Duration::hours(1))
+        .target_instance(connector.instance_id().as_str())
+        .try_constraints_cbor(&cbor)
+        .expect("test constraints CBOR should be valid")
+        .sign(signing_key)
+        .unwrap();
+    fcp_core::CapabilityToken::from_raw(cose)
+}
+
 async fn setup_handshake(connector: &mut GitHubConnector, caps: &[&str]) -> Ed25519SigningKey {
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
@@ -83,7 +118,7 @@ async fn setup_handshake(connector: &mut GitHubConnector, caps: &[&str]) -> Ed25
 async fn setup_configure(connector: &mut GitHubConnector, base_url: &str) {
     connector
         .handle_configure(json!({
-            "token": "ghp_test_token_xyz",
+            "credential_id": TEST_CREDENTIAL_ID,
             "base_url": base_url
         }))
         .await
@@ -408,7 +443,7 @@ async fn get_repo_happy_path() {
     let mut connector = GitHubConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["github.get_repo"]).await;
-    let token = generate_valid_token(&signing_key, "github.get_repo");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.get_repo");
 
     let result = connector
         .handle_invoke(json!({
@@ -992,7 +1027,7 @@ async fn capability_no_configure_fails() {
 
     let mut connector = GitHubConnector::new();
     let signing_key = setup_handshake(&mut connector, &["github.get_repo"]).await;
-    let token = generate_valid_token(&signing_key, "github.get_repo");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.get_repo");
 
     let err = connector
         .handle_invoke(json!({
@@ -1520,7 +1555,7 @@ async fn error_non_json_response_body() {
 // Configuration Tests
 // ============================================================================
 
-/// Providing both token and credential_id fails.
+/// Providing a raw token field fails even when credential_id is also present.
 #[fcp_async_core::test]
 async fn config_both_token_and_credential_id_fails() {
     let _ctx = AsyncTestContext::for_scenario("github.config.both_auth");
@@ -1535,13 +1570,10 @@ async fn config_both_token_and_credential_id_fails() {
         .expect_err("should fail when both token and credential_id provided");
 
     match &err {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(
-                message.contains("not both"),
-                "error should mention mutual exclusion: {message}"
-            );
+        fcp_core::FcpError::ConfigurationLeakedSecret { detector, .. } => {
+            assert_eq!(detector, "raw_secret_config_field");
         }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
+        other => panic!("expected ConfigurationLeakedSecret, got: {other:?}"),
     }
 }
 
@@ -1617,7 +1649,7 @@ async fn config_custom_base_url() {
 
     Mock::given(method("GET"))
         .and(path("/repos/octocat/hello-world"))
-        .and(header("Authorization", "Bearer custom_token"))
+        .and(header("X-FCP-Credential-ID", TEST_CREDENTIAL_ID))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": 1_296_269,
             "name": "hello-world",
@@ -1641,14 +1673,14 @@ async fn config_custom_base_url() {
     let mut connector = GitHubConnector::new();
     connector
         .handle_configure(json!({
-            "token": "custom_token",
+            "credential_id": TEST_CREDENTIAL_ID,
             "base_url": mock_server.uri()
         }))
         .await
         .expect("configure with custom base_url should succeed");
 
     let signing_key = setup_handshake(&mut connector, &["github.get_repo"]).await;
-    let token = generate_valid_token(&signing_key, "github.get_repo");
+    let token = generate_valid_bound_token(&signing_key, &connector, "github.get_repo");
 
     let result = connector
         .handle_invoke(json!({
@@ -1686,7 +1718,7 @@ async fn doctor_before_configure() {
     assert_eq!(config_check["status"], "fail");
 }
 
-/// Doctor after configure with token auth reports healthy.
+/// Doctor after secretless configure reports degraded until an egress injector is present.
 #[fcp_async_core::test]
 async fn doctor_after_configure() {
     let _ctx = AsyncTestContext::for_scenario("github.doctor.after_configure");
@@ -1700,7 +1732,7 @@ async fn doctor_after_configure() {
         .await
         .expect("doctor should succeed");
 
-    assert_eq!(result["status"], "healthy");
+    assert_eq!(result["status"], "degraded");
     let checks = result["checks"].as_array().unwrap();
     let config_check = checks
         .iter()
@@ -1712,6 +1744,11 @@ async fn doctor_after_configure() {
         .find(|c| c["name"] == "client_initialized")
         .unwrap();
     assert_eq!(client_check["status"], "pass");
+    let cred_check = checks
+        .iter()
+        .find(|c| c["name"] == "credential_injection")
+        .unwrap();
+    assert_eq!(cred_check["status"], "warn");
 }
 
 /// Doctor with credential_id mode reports degraded (warn on credential_injection).
@@ -1781,7 +1818,7 @@ async fn self_check_credential_id_mode() {
     assert_eq!(result["status"], "degraded");
 }
 
-/// SelfCheck with successful health check reports ok.
+/// SelfCheck in secretless mode reports degraded without an egress injector.
 #[fcp_async_core::test]
 async fn self_check_connectivity_ok() {
     let _ctx = AsyncTestContext::for_scenario("github.self_check.ok");
@@ -1804,10 +1841,11 @@ async fn self_check_connectivity_ok() {
         .await
         .expect("self_check should return a report");
 
-    assert_eq!(result["status"], "ok");
+    assert_eq!(result["status"], "degraded");
+    assert_eq!(result["reason_code"], "credential_injection_required");
 }
 
-/// SelfCheck with failed health check reports failed.
+/// SelfCheck does not expose raw connectivity status before credential injection.
 #[fcp_async_core::test]
 async fn self_check_connectivity_failed() {
     let _ctx = AsyncTestContext::for_scenario("github.self_check.failed");
@@ -1829,7 +1867,8 @@ async fn self_check_connectivity_failed() {
         .await
         .expect("self_check should return a report");
 
-    assert_eq!(result["status"], "failed");
+    assert_eq!(result["status"], "degraded");
+    assert_eq!(result["reason_code"], "credential_injection_required");
 }
 
 // ============================================================================
@@ -1909,7 +1948,7 @@ async fn health_auth_mode_field() {
         .await
         .expect("health should succeed");
 
-    assert_eq!(result["auth_mode"], "token");
+    assert_eq!(result["auth_mode"], "credential_id");
 
     // Also check credential_id mode
     let mut connector2 = GitHubConnector::new();

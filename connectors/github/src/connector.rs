@@ -14,8 +14,8 @@ use fcp_oauth::{
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
-    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+    IdempotencyClass, InstanceId, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse, reject_secret_config_material,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -38,29 +38,23 @@ struct GitHubConfig {
 
 impl GitHubConfig {
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
-        let token = params.get("token").and_then(|v| v.as_str());
+        reject_secret_config_material(params)?;
+
         let credential_id = params.get("credential_id").and_then(|v| v.as_str());
         let base_url = params.get("base_url").and_then(|v| v.as_str());
 
-        let auth = match (token, credential_id) {
-            (Some(_), Some(_)) => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Provide either token or credential_id, not both".into(),
-                });
-            }
-            (Some(t), None) => GitHubAuth::Token(t.to_string()),
-            (None, Some(raw)) => {
+        let auth = match credential_id {
+            Some(raw) => {
                 let cid = CredentialId::parse(raw).map_err(|e| FcpError::InvalidRequest {
                     code: 1003,
                     message: format!("Invalid credential_id: {e}"),
                 })?;
                 GitHubAuth::CredentialId(cid)
             }
-            (None, None) => {
+            None => {
                 return Err(FcpError::InvalidRequest {
                     code: 1003,
-                    message: "Missing token or credential_id in configuration".into(),
+                    message: "Missing credential_id in configuration".into(),
                 });
             }
         };
@@ -206,6 +200,12 @@ impl GitHubConnector {
             webhook_delivery_order: Mutex::new(VecDeque::new()),
             shutdown: AtomicBool::new(false),
         }
+    }
+
+    /// Return the connector instance identifier used for bound capability tokens.
+    #[must_use]
+    pub fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
     }
 
     fn claim_webhook_delivery(&self, delivery_id: &str) -> FcpResult<()> {
@@ -439,7 +439,7 @@ impl GitHubConnector {
             message: if is_secretless {
                 "Using credential_id — requires egress proxy for injection".into()
             } else {
-                "Direct Bearer auth — no proxy required".into()
+                "Direct Bearer auth unavailable through connector configure".into()
             },
         });
 
@@ -1939,7 +1939,7 @@ mod tests {
         let mut connector = GitHubConnector::new();
         connector
             .handle_configure(json!({
-                "token": "fake_key"
+                "credential_id": uuid::Uuid::new_v4().to_string()
             }))
             .await
             .unwrap();
@@ -2029,7 +2029,7 @@ mod tests {
         let mut connector = GitHubConnector::new();
         connector
             .handle_configure(json!({
-                "token": "fake_key"
+                "credential_id": uuid::Uuid::new_v4().to_string()
             }))
             .await
             .unwrap();
@@ -2549,17 +2549,20 @@ mod tests {
     // ── Provisioning automation tests ──────────────────────────────────
 
     #[fcp_async_core::runtime::test]
-    async fn test_configure_with_token_auth() {
+    async fn test_configure_rejects_token_auth() {
         let mut connector = GitHubConnector::new();
-        let result = connector
+        let error = connector
             .handle_configure(json!({
                 "token": "ghp_test_token"
             }))
             .await
-            .unwrap();
-        assert_eq!(result["status"], "configured");
-        assert!(connector.client.is_some());
-        assert!(connector.config.is_some());
+            .expect_err("raw token config must be rejected");
+        assert!(
+            matches!(error, FcpError::ConfigurationLeakedSecret { .. }),
+            "expected ConfigurationLeakedSecret, got: {error:?}"
+        );
+        assert!(connector.client.is_none());
+        assert!(connector.config.is_none());
     }
 
     #[fcp_async_core::runtime::test]
@@ -2586,7 +2589,42 @@ mod tests {
                 "credential_id": cid
             }))
             .await;
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(FcpError::ConfigurationLeakedSecret { .. })),
+            "token field must be treated as leaked secret material"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_secret_shaped_values() {
+        let cases = [
+            ("Bearer abcdefgh123", "raw_secret_config_value_bearer"),
+            (
+                "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxMjMifQ.abcdefgh",
+                "raw_secret_config_value_jwt",
+            ),
+            ("sk-live-test", "raw_secret_config_value_openai"),
+            ("xoxb-1234567890abcdef", "raw_secret_config_value_slack"),
+            ("ghp_ABCdef123456", "raw_secret_config_value_github"),
+            ("AKIAIOSFODNN7EXAMPLE", "raw_secret_config_value_aws"),
+        ];
+
+        for (sample, expected_detector) in cases {
+            let mut connector = GitHubConnector::new();
+            let result = connector
+                .handle_configure(json!({
+                    "credential_id": uuid::Uuid::new_v4().to_string(),
+                    "metadata": sample
+                }))
+                .await;
+
+            match result {
+                Err(FcpError::ConfigurationLeakedSecret { detector, .. }) => {
+                    assert_eq!(detector, expected_detector);
+                }
+                other => panic!("Expected ConfigurationLeakedSecret, got {other:?}"),
+            }
+        }
     }
 
     #[fcp_async_core::runtime::test]
@@ -2601,19 +2639,19 @@ mod tests {
         let mut connector = GitHubConnector::new();
         let result = connector
             .handle_configure(json!({
-                "token": "ghp_test",
+                "credential_id": uuid::Uuid::new_v4().to_string(),
                 "base_url": "https://github.example.com/api/v3"
             }))
             .await;
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_configure_with_token_allows_localhost_base_url_for_tests() {
+    async fn test_configure_with_credential_id_allows_localhost_base_url_for_tests() {
         let mut connector = GitHubConnector::new();
         let result = connector
             .handle_configure(json!({
-                "token": "ghp_test",
+                "credential_id": uuid::Uuid::new_v4().to_string(),
                 "base_url": "http://localhost:9999"
             }))
             .await;
@@ -2625,15 +2663,15 @@ mod tests {
         let cid = uuid::Uuid::new_v4().to_string();
         let cases = [
             json!({
-                "token": "ghp_test",
+                "credential_id": cid,
                 "base_url": "https://user:secret@api.github.com"
             }),
             json!({
-                "token": "ghp_test",
+                "credential_id": uuid::Uuid::new_v4().to_string(),
                 "base_url": "https://api.github.com?trace=1"
             }),
             json!({
-                "credential_id": cid,
+                "credential_id": uuid::Uuid::new_v4().to_string(),
                 "base_url": "https://github.example.com/api/v3#fragment"
             }),
         ];
@@ -2669,13 +2707,13 @@ mod tests {
     async fn test_health_includes_auth_mode() {
         let mut connector = GitHubConnector::new();
         connector
-            .handle_configure(json!({ "token": "ghp_test" }))
+            .handle_configure(json!({ "credential_id": uuid::Uuid::new_v4().to_string() }))
             .await
             .unwrap();
 
         let result = connector.handle_health().await.unwrap();
         assert_eq!(result["status"], "healthy");
-        assert_eq!(result["auth_mode"], "token");
+        assert_eq!(result["auth_mode"], "credential_id");
         assert_eq!(result["api_url"], DEFAULT_BASE_URL);
     }
 
@@ -2683,15 +2721,15 @@ mod tests {
     async fn test_doctor_configured() {
         let mut connector = GitHubConnector::new();
         connector
-            .handle_configure(json!({ "token": "ghp_test" }))
+            .handle_configure(json!({ "credential_id": uuid::Uuid::new_v4().to_string() }))
             .await
             .unwrap();
 
         let result = connector.handle_doctor().await.unwrap();
-        assert_eq!(result["status"], "healthy");
+        assert_eq!(result["status"], "degraded");
         let checks = result["checks"].as_array().unwrap();
         assert_eq!(checks.len(), 6);
-        assert!(checks.iter().all(|c| c["status"] == "pass"));
+        assert!(checks.iter().any(|c| c["status"] == "warn"));
     }
 
     #[fcp_async_core::runtime::test]

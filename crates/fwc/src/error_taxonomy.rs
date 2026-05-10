@@ -632,6 +632,7 @@ pub fn classify_fcp_error(err: &FcpError) -> FcpErrorCode {
         FcpError::NotHandshaken => FcpErrorCode::FcpErrConnectorNotConfigured,
         FcpError::HealthCheckFailed { .. } => FcpErrorCode::FcpErrHealthCheckFailed,
         FcpError::StreamingNotSupported => FcpErrorCode::FcpErrStreamingNotSupported,
+        FcpError::ConfigurationLeakedSecret { .. } => FcpErrorCode::FcpErrInvalidInput,
         FcpError::ResourceNotFound { .. } => FcpErrorCode::FcpErrResourceNotFound,
         FcpError::ResourceExhausted { .. } => FcpErrorCode::FcpErrResourceExhausted,
         FcpError::BudgetExceeded { .. } => FcpErrorCode::FcpErrBudgetExceeded,
@@ -718,6 +719,15 @@ pub fn structured_from_fcp_error(err: &FcpError) -> StructuredError {
                 "kind": kind,
                 "claim_type": claim_type,
                 "detail": detail,
+            }));
+        }
+        FcpError::ConfigurationLeakedSecret {
+            field_name_hash,
+            detector,
+        } => {
+            se.details = Some(serde_json::json!({
+                "field_name_hash": field_name_hash,
+                "detector": detector,
             }));
         }
         _ => {}

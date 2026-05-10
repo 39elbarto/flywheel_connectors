@@ -2083,7 +2083,13 @@ mod tests {
         }
     }
 
-    fn github_manifest(extra_operation_sections: &str) -> String {
+    fn representative_manifest(
+        connector_id: &str,
+        name: &str,
+        operation_id: &str,
+        capability: &str,
+        extra_operation_sections: &str,
+    ) -> String {
         let interface_hash = format!("blake3-256:fcp.interface.v2:{}", "0".repeat(64));
         format!(
             r#"[manifest]
@@ -2096,10 +2102,10 @@ max_datagram_bytes = 65000
 interface_hash = "{interface_hash}"
 
 [connector]
-id = "fcp.github"
-name = "GitHub Connector"
+id = "{connector_id}"
+name = "{name}"
 version = "0.1.0"
-description = "FCP connector for GitHub"
+description = "FCP connector for {name}"
 archetypes = ["operational"]
 format = "wasi"
 
@@ -2111,7 +2117,7 @@ forbidden = ["z:public"]
 
 [capabilities]
 required = ["network.dns"]
-optional = ["github.read"]
+optional = ["{capability}"]
 forbidden = ["system.exec"]
 
 [sandbox]
@@ -2123,22 +2129,51 @@ fs_readonly_paths = ["/usr", "/lib"]
 deny_exec = true
 deny_ptrace = true
 
-[provides.operations."github.get_issue"]
+[provides.operations."{operation_id}"]
 description = "Get a single issue"
-capability = "github.read"
+capability = "{capability}"
 risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 revocation_freshness = "safe"
 
-[provides.operations."github.get_issue".input_schema]
+[provides.operations."{operation_id}".input_schema]
 type = "object"
 
-[provides.operations."github.get_issue".output_schema]
+[provides.operations."{operation_id}".output_schema]
 type = "object"
 
 {extra_operation_sections}
+"#
+        )
+    }
+
+    fn github_manifest(extra_operation_sections: &str) -> String {
+        representative_manifest(
+            "fcp.github",
+            "GitHub Connector",
+            "github.get_issue",
+            "github.read",
+            extra_operation_sections,
+        )
+    }
+
+    fn network_and_ai_hints(operation_id: &str, host: &str, usage: &str) -> String {
+        format!(
+            r#"[provides.operations."{operation_id}".network_constraints]
+host_allow = ["{host}"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+
+[provides.operations."{operation_id}".ai_hints]
+when_to_use = "{usage}"
+common_mistakes = ["Treating stale proof as current proof"]
+examples = ['{{"example":true}}']
+related = []
 "#
         )
     }
@@ -2251,22 +2286,11 @@ type = "object"
     #[test]
     fn passport_outputs_manifest_backed_connector_proof_state() {
         let corpus = write_corpus(&github_passport_corpus());
-        let manifest = write_manifest(&github_manifest(
-            r#"[provides.operations."github.get_issue".network_constraints]
-host_allow = ["api.github.com"]
-port_allow = [443]
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-
-[provides.operations."github.get_issue".ai_hints]
-when_to_use = "Read a GitHub issue by owner, repo, and issue number."
-common_mistakes = ["Using the database id instead of issue_number"]
-examples = ['{"owner":"octocat","repo":"hello-world","issue_number":42}']
-related = ["github.search_issues"]
-"#,
-        ));
+        let manifest = write_manifest(&github_manifest(&network_and_ai_hints(
+            "github.get_issue",
+            "api.github.com",
+            "Read a GitHub issue by owner, repo, and issue number.",
+        )));
 
         let result = run(&ProofArgs {
             command: ProofCommand::Passport(ProofPassportArgs {
@@ -2365,20 +2389,11 @@ related = ["github.search_issues"]
     #[test]
     fn passport_reports_incubating_connector_and_weak_sandbox_posture() {
         let corpus = write_corpus(&github_passport_corpus());
-        let manifest_body = github_manifest(
-            r#"[provides.operations."github.get_issue".network_constraints]
-host_allow = ["api.github.com"]
-port_allow = [443]
-deny_localhost = true
-deny_private_ranges = true
-deny_tailnet_ranges = true
-require_sni = true
-
-[provides.operations."github.get_issue".ai_hints]
-when_to_use = "Read a GitHub issue by owner, repo, and issue number."
-examples = ['{"owner":"octocat","repo":"hello-world","issue_number":42}']
-"#,
-        )
+        let manifest_body = github_manifest(&network_and_ai_hints(
+            "github.get_issue",
+            "api.github.com",
+            "Read a GitHub issue by owner, repo, and issue number.",
+        ))
         .replace(
             "format = \"wasi\"",
             "format = \"wasi\"\nstatus = \"incubating\"",
@@ -2410,5 +2425,258 @@ examples = ['{"owner":"octocat","repo":"hello-world","issue_number":42}']
 
         assert!(categories.contains("connector-status"));
         assert!(categories.contains("sandbox-posture"));
+    }
+
+    #[test]
+    fn passport_records_stale_claims_and_denied_network_posture() {
+        let mut corpus = github_passport_corpus();
+        corpus.bead_issues.push(issue(
+            "github-stale-proof",
+            "flywheel_connectors-b88ec.4.stale",
+            NOW - (30 * DAY_MS),
+        ));
+        let corpus = write_corpus(&corpus);
+        let manifest = write_manifest(&github_manifest(&network_and_ai_hints(
+            "github.get_issue",
+            "api.github.com",
+            "Read a GitHub issue by owner, repo, and issue number.",
+        )));
+
+        let result = run(&ProofArgs {
+            command: ProofCommand::Passport(ProofPassportArgs {
+                corpus: corpus_args(corpus.path()),
+                manifests: vec![manifest.path().to_path_buf()],
+                connector: Some("github".to_owned()),
+            }),
+        })
+        .expect("run proof passport");
+
+        assert!(result.success);
+        let passport = &result.payload["passports"][0];
+        let stale_claim_ids = passport["proof_state"]["stale_claim_ids"]
+            .as_array()
+            .expect("stale claim ids")
+            .iter()
+            .map(|value| value.as_str().expect("stale claim id"))
+            .collect::<BTreeSet<_>>();
+        assert!(stale_claim_ids.contains("claim:github-stale-proof"));
+
+        let proof_gap_statuses = passport["gaps"]
+            .as_array()
+            .expect("gaps array")
+            .iter()
+            .filter(|gap| gap["category"] == "proof")
+            .map(|gap| gap["status"].as_str().expect("proof gap status"))
+            .collect::<BTreeSet<_>>();
+        assert!(proof_gap_statuses.contains("stale"));
+
+        let network = &passport["operations"][0]["network_posture"];
+        assert_eq!(network["state"], "declared");
+        assert_eq!(network["host_allow_count"], 1);
+        assert_eq!(network["port_allow"][0], 443);
+        assert!(network["deny_localhost"].as_bool().expect("deny localhost"));
+        assert!(
+            network["deny_private_ranges"]
+                .as_bool()
+                .expect("deny private ranges")
+        );
+        assert!(
+            network["deny_tailnet_ranges"]
+                .as_bool()
+                .expect("deny tailnet ranges")
+        );
+        assert!(network["require_sni"].as_bool().expect("require sni"));
+        assert_eq!(passport["risk_summary"]["network_posture_gap_count"], 0);
+    }
+
+    #[test]
+    fn passport_outputs_stable_representative_connector_fixture_matrix() {
+        let connectors = [
+            (
+                "fcp.github",
+                "GitHub Connector",
+                "github.get_issue",
+                "github.read",
+                "api.github.com",
+            ),
+            (
+                "fcp.slack",
+                "Slack Connector",
+                "slack.post_message",
+                "slack.write",
+                "slack.com",
+            ),
+            (
+                "fcp.gmail",
+                "Gmail Connector",
+                "gmail.get_message",
+                "gmail.read",
+                "gmail.googleapis.com",
+            ),
+            (
+                "fcp.browser",
+                "Browser Connector",
+                "browser.navigate",
+                "browser.control",
+                "browser-control.example.test",
+            ),
+            (
+                "fcp.aws-bedrock",
+                "AWS Bedrock Connector",
+                "aws_bedrock.converse",
+                "aws.bedrock.invoke",
+                "bedrock.us-east-1.amazonaws.com",
+            ),
+        ];
+        let corpus = write_corpus(&ProofGraphCorpus {
+            schema: PROOF_GRAPH_INDEXER_CORPUS_SCHEMA.to_owned(),
+            readme_rows: connectors
+                .iter()
+                .enumerate()
+                .map(|(index, (id, name, ..))| {
+                    let claim_key = connector_slug(id);
+                    readme_row(
+                        &claim_key,
+                        name,
+                        "PROVEN",
+                        100 + u32::try_from(index).expect("fixture index fits in u32"),
+                    )
+                })
+                .collect(),
+            bead_issues: connectors
+                .iter()
+                .map(|(id, ..)| {
+                    let claim_key = connector_slug(id);
+                    issue(
+                        &claim_key,
+                        &format!("flywheel_connectors-b88ec.4.{claim_key}"),
+                        NOW - DAY_MS,
+                    )
+                })
+                .collect(),
+            verification_scripts: connectors
+                .iter()
+                .enumerate()
+                .map(|(index, (id, name, ..))| {
+                    let claim_key = connector_slug(id);
+                    VerificationScriptRecord {
+                        claim_key,
+                        script_path: format!(
+                            "connectors/{}/tests/passport_fixture.rs",
+                            connector_slug(id)
+                        ),
+                        purpose: format!("Run {name} passport fixture proof"),
+                        rerun_argv: vec![
+                            "cargo".to_owned(),
+                            "test".to_owned(),
+                            "-p".to_owned(),
+                            format!("fcp-{}", connector_slug(id)),
+                            "passport".to_owned(),
+                        ],
+                        required_env_keys: BTreeSet::new(),
+                        source: source(
+                            "crates/fwc/tests/representative_passport.rs",
+                            150 + u32::try_from(index).expect("fixture index fits in u32"),
+                        ),
+                    }
+                })
+                .collect(),
+            readiness_rows: connectors
+                .iter()
+                .enumerate()
+                .flat_map(|(index, (id, name, ..))| {
+                    let slug = connector_slug(id);
+                    [
+                        ReadinessMatrixRow {
+                            claim_key: format!("{slug}-introspection"),
+                            subject: format!("{name} manifest introspection"),
+                            state: "pass".to_owned(),
+                            truth_source: TruthSource::HostBacked,
+                            rerun_argv: Some(vec![
+                                "fwc".to_owned(),
+                                "proof".to_owned(),
+                                "passport".to_owned(),
+                                "--connector".to_owned(),
+                                slug.clone(),
+                            ]),
+                            source: source(
+                                "crates/fwc/tests/representative_passport.rs",
+                                200 + u32::try_from(index).expect("fixture index fits in u32"),
+                            ),
+                        },
+                        ReadinessMatrixRow {
+                            claim_key: format!("{slug}-secretless"),
+                            subject: format!("{name} secretless readiness"),
+                            state: "pass".to_owned(),
+                            truth_source: TruthSource::HostBacked,
+                            rerun_argv: Some(vec![
+                                "fwc".to_owned(),
+                                "proof".to_owned(),
+                                "passport".to_owned(),
+                                "--connector".to_owned(),
+                                slug,
+                            ]),
+                            source: source(
+                                "crates/fwc/tests/representative_passport.rs",
+                                300 + u32::try_from(index).expect("fixture index fits in u32"),
+                            ),
+                        },
+                    ]
+                })
+                .collect(),
+            evidence_bundles: Vec::new(),
+        });
+        let manifests = connectors
+            .iter()
+            .map(|(id, name, operation_id, capability, host)| {
+                write_manifest(&representative_manifest(
+                    id,
+                    name,
+                    operation_id,
+                    capability,
+                    &network_and_ai_hints(
+                        operation_id,
+                        host,
+                        &format!("Use {name} through the connector passport fixture."),
+                    ),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let manifest_paths = manifests
+            .iter()
+            .map(|manifest| manifest.path().to_path_buf())
+            .collect::<Vec<_>>();
+
+        let result = run(&ProofArgs {
+            command: ProofCommand::Passport(ProofPassportArgs {
+                corpus: corpus_args(corpus.path()),
+                manifests: manifest_paths,
+                connector: None,
+            }),
+        })
+        .expect("run proof passport");
+
+        assert!(result.success);
+        assert_eq!(result.payload["summary"]["passports"], connectors.len());
+        assert_eq!(result.payload["summary"]["operations"], connectors.len());
+        assert_eq!(result.payload["summary"]["gaps"], 0);
+        assert_eq!(
+            result.payload["summary"]["connectors"],
+            json!([
+                "fcp.github",
+                "fcp.slack",
+                "fcp.gmail",
+                "fcp.browser",
+                "fcp.aws-bedrock"
+            ])
+        );
+
+        let passport_json =
+            serde_json::to_string(&result.payload["passports"]).expect("stable passports json");
+        assert!(!passport_json.contains("xoxb"));
+        assert!(!passport_json.contains("ghp_"));
+        assert!(!passport_json.contains("ya29."));
+        assert!(passport_json.contains("fcp.aws-bedrock"));
+        assert!(passport_json.contains("fcp.browser"));
     }
 }

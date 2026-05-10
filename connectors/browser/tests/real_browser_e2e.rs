@@ -2,8 +2,9 @@
 //!
 //! This test intentionally does not mock browser behavior. In ordinary local or
 //! CI runs it emits a structured skip artifact when a Chrome/Chromium binary or
-//! FCP browser-control worker URL is absent. When prerequisites are present, it
-//! drives the existing Browser connector operations against that control worker.
+//! browser-control endpoint is absent. When a compatible local browser is
+//! available, it launches Chrome/Chromium, extracts a real direct-CDP page
+//! WebSocket, and drives the Browser connector through that endpoint.
 
 #![allow(clippy::too_many_lines)]
 
@@ -13,6 +14,7 @@ use std::{
     io::{Read, Write},
     net::{Shutdown, TcpListener, TcpStream},
     path::{Component, Path, PathBuf},
+    process::{Child, Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -38,6 +40,7 @@ const ZONE_ID: &str = "z:work";
 const BROWSER_BINARY_ENV: &str = "FCP_BROWSER_BINARY";
 const CONTROL_URL_ENV: &str = "FCP_BROWSER_CONTROL_URL";
 const ARTIFACT_DIR_ENV: &str = "FCP_BROWSER_E2E_ARTIFACT_DIR";
+const DIRECT_CDP_MANAGER_EVENTS_ARTIFACT: &str = "direct-cdp-manager-events.jsonl";
 
 const LIVE_OPERATIONS: &[&str] = &[
     "browser.navigate",
@@ -48,11 +51,25 @@ const LIVE_OPERATIONS: &[&str] = &[
     "browser.render_pdf",
     "browser.extract_text",
     "browser.extract_links",
+    "browser.evaluate_js",
     "browser.set_cookies",
     "browser.get_cookies",
     "browser.session.save",
     "browser.session.restore",
     "browser.session.describe",
+    "browser.set_proxy",
+    "browser.clear_proxy",
+];
+const BROWSER_BINARY_ALLOWLIST: &[&str] = &[
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/opt/google/chrome/chrome",
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
 ];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -257,6 +274,7 @@ struct EndpointPolicyDecision {
 struct BrowserE2ePrerequisites {
     browser_binary: Option<String>,
     control_worker_url: Option<String>,
+    control_endpoint_kind: String,
     artifact_dir: String,
     endpoint_policy_decision: EndpointPolicyDecision,
     missing: Vec<MissingPrerequisite>,
@@ -281,6 +299,7 @@ struct BrowserE2eReport {
     artifact_paths: BTreeMap<String, String>,
     redacted_fields: Vec<String>,
     logs: Vec<E2eLogEntry>,
+    direct_cdp_manager_events_jsonl: Option<String>,
     summary: Value,
 }
 
@@ -306,8 +325,12 @@ impl BrowserE2eReport {
             artifact_paths: standard_artifact_paths(),
             redacted_fields: Vec::new(),
             logs,
+            direct_cdp_manager_events_jsonl: None,
             summary: json!({
                 "outcome": "skipped",
+                "run_id": correlation_id,
+                "command_line": harness_command_line(),
+                "git_revision": current_git_revision(),
                 "missing_prerequisites": missing_codes,
                 "failure_to_skip_distinction": "missing_prerequisite_only",
             }),
@@ -331,8 +354,12 @@ impl BrowserE2eReport {
             artifact_paths: standard_artifact_paths(),
             redacted_fields: vec!["control_worker_url.query".to_string()],
             logs,
+            direct_cdp_manager_events_jsonl: None,
             summary: json!({
                 "outcome": "failed",
+                "run_id": correlation_id,
+                "command_line": harness_command_line(),
+                "git_revision": current_git_revision(),
                 "error": error,
                 "failure_to_skip_distinction": "live_prerequisites_were_satisfied",
             }),
@@ -343,6 +370,7 @@ impl BrowserE2eReport {
         correlation_id: &str,
         prerequisites: BrowserE2ePrerequisites,
         logs: Vec<E2eLogEntry>,
+        direct_cdp_manager_events_jsonl: Option<String>,
         summary: Value,
     ) -> Self {
         Self {
@@ -359,6 +387,7 @@ impl BrowserE2eReport {
                 "control_worker_url.fragment".to_string(),
             ],
             logs,
+            direct_cdp_manager_events_jsonl,
             summary,
         }
     }
@@ -398,20 +427,43 @@ async fn browser_real_browser_e2e_artifact_lane() {
     }
 }
 
+#[allow(clippy::large_stack_frames)]
 async fn run_live_browser_suite(
     correlation_id: &str,
     prerequisites: BrowserE2ePrerequisites,
 ) -> Result<BrowserE2eReport, (Vec<E2eLogEntry>, String)> {
     let mut logger = E2eLogger::new();
-    let mut connector = BrowserConnector::new();
+    let mut connector = Box::new(BrowserConnector::new());
     let signing_key = setup_handshake(&mut connector, LIVE_OPERATIONS).await;
 
-    let Some(control_url) = prerequisites.control_worker_url.as_deref() else {
-        return Err((logger.drain(), "control worker URL missing".to_string()));
+    let mut launched_browser = None;
+    let control_url = if let Some(control_url) = prerequisites.control_worker_url.clone() {
+        control_url
+    } else {
+        let Some(browser_binary) = prerequisites.browser_binary.as_deref() else {
+            return Err((
+                logger.drain(),
+                "browser binary missing for direct-CDP launch".to_string(),
+            ));
+        };
+        match LaunchedBrowser::start(browser_binary, &prerequisites.artifact_dir).await {
+            Ok(browser) => {
+                let control_url = browser.page_websocket_url.clone();
+                launched_browser = Some(browser);
+                control_url
+            }
+            Err(error) => return Err((logger.drain(), error)),
+        }
+    };
+    let endpoint_kind = classify_control_endpoint(Some(control_url.as_str())).reason;
+    let evidence = OperationEvidenceContext::new(control_url.as_str(), endpoint_kind);
+    let browser_version = match launched_browser.as_ref() {
+        Some(browser) => devtools_browser_version(&browser.devtools_http_base).await,
+        None => None,
     };
 
     if let Err(error) = connector
-        .handle_configure(json!({ "browser_url": control_url }))
+        .handle_configure(json!({ "browser_url": control_url.as_str() }))
         .await
     {
         logger.push(operation_log_entry(
@@ -421,10 +473,14 @@ async fn run_live_browser_suite(
             0,
             json!({
                 "operation": "browser.configure",
-                "target_id": "control-worker",
+                "target_id": evidence.target_id_hash.as_str(),
+                "target_id_hash": evidence.target_id_hash.as_str(),
                 "worker_operation_id": "configure",
-                "url_redaction_decision": redact_url_for_artifact(control_url),
-                "endpoint_policy_decision": prerequisites.endpoint_policy_decision,
+                "endpoint_kind": evidence.endpoint_kind.as_str(),
+                "command_line": evidence.command_line.as_str(),
+                "git_revision": evidence.git_revision.as_str(),
+                "url_redaction_decision": redact_url_for_artifact(control_url.as_str()),
+                "endpoint_policy_decision": &prerequisites.endpoint_policy_decision,
                 "navigation_policy_decision": "not_applicable",
                 "error": error.to_string(),
                 "retry_backoff": { "attempt": 1, "next_delay_ms": null },
@@ -447,6 +503,7 @@ async fn run_live_browser_suite(
         &signing_key,
         correlation_id,
         &mut logger,
+        &evidence,
         "browser.navigate",
         json!({ "url": page_url, "wait_until": "networkidle", "timeout_ms": 10_000 }),
     )
@@ -456,6 +513,7 @@ async fn run_live_browser_suite(
         &signing_key,
         correlation_id,
         &mut logger,
+        &evidence,
         "browser.wait_for_selector",
         json!({ "selector": "#ready", "state": "visible", "timeout_ms": 5_000 }),
     )
@@ -465,6 +523,17 @@ async fn run_live_browser_suite(
         &signing_key,
         correlation_id,
         &mut logger,
+        &evidence,
+        "browser.evaluate_js",
+        json!({ "expression": "document.title" }),
+    )
+    .await?;
+    invoke_and_log(
+        &connector,
+        &signing_key,
+        correlation_id,
+        &mut logger,
+        &evidence,
         "browser.click",
         json!({ "selector": "#click-target", "timeout_ms": 5_000 }),
     )
@@ -474,6 +543,7 @@ async fn run_live_browser_suite(
         &signing_key,
         correlation_id,
         &mut logger,
+        &evidence,
         "browser.fill_form",
         json!({
             "fields": {
@@ -490,12 +560,14 @@ async fn run_live_browser_suite(
         &signing_key,
         correlation_id,
         &mut logger,
+        &evidence,
         "browser.screenshot",
         json!({ "full_page": true, "format": "png" }),
     )
     .await?;
-    persist_base64_artifact(
-        Path::new(&prerequisites.artifact_dir).join("screenshot.png"),
+    let screenshot_path = Path::new(&prerequisites.artifact_dir).join("screenshot.png");
+    let screenshot_artifact = persist_base64_artifact(
+        &screenshot_path,
         screenshot.get("image_data").and_then(Value::as_str),
     );
 
@@ -504,20 +576,21 @@ async fn run_live_browser_suite(
         &signing_key,
         correlation_id,
         &mut logger,
+        &evidence,
         "browser.render_pdf",
         json!({ "format": "a4", "print_background": true, "max_pages": 100 }),
     )
     .await?;
-    persist_base64_artifact(
-        Path::new(&prerequisites.artifact_dir).join("page.pdf"),
-        pdf.get("pdf_data").and_then(Value::as_str),
-    );
+    let pdf_path = Path::new(&prerequisites.artifact_dir).join("page.pdf");
+    let pdf_artifact =
+        persist_base64_artifact(&pdf_path, pdf.get("pdf_data").and_then(Value::as_str));
 
     invoke_and_log(
         &connector,
         &signing_key,
         correlation_id,
         &mut logger,
+        &evidence,
         "browser.extract_text",
         json!({
             "selector": "body",
@@ -532,6 +605,7 @@ async fn run_live_browser_suite(
         &signing_key,
         correlation_id,
         &mut logger,
+        &evidence,
         "browser.extract_links",
         json!({ "selector": "body" }),
     )
@@ -541,6 +615,7 @@ async fn run_live_browser_suite(
         &signing_key,
         correlation_id,
         &mut logger,
+        &evidence,
         "browser.set_cookies",
         json!({
             "cookies": [{
@@ -557,6 +632,7 @@ async fn run_live_browser_suite(
         &signing_key,
         correlation_id,
         &mut logger,
+        &evidence,
         "browser.get_cookies",
         json!({ "domain": "127.0.0.1" }),
     )
@@ -566,6 +642,7 @@ async fn run_live_browser_suite(
         &signing_key,
         correlation_id,
         &mut logger,
+        &evidence,
         "browser.session.save",
         json!({
             "domain": "127.0.0.1",
@@ -589,6 +666,7 @@ async fn run_live_browser_suite(
         &signing_key,
         correlation_id,
         &mut logger,
+        &evidence,
         "browser.session.restore",
         json!({
             "state_object_id": state_object_id,
@@ -602,8 +680,48 @@ async fn run_live_browser_suite(
         &signing_key,
         correlation_id,
         &mut logger,
+        &evidence,
         "browser.session.describe",
         json!({}),
+    )
+    .await?;
+    invoke_expected_error_and_log(
+        &connector,
+        &signing_key,
+        correlation_id,
+        &mut logger,
+        &evidence,
+        ExpectedErrorOperation {
+            operation: "browser.wait_for_selector",
+            input: json!({ "selector": "#never-appears", "state": "visible", "timeout_ms": 1 }),
+            expected_reason: "timeout_or_selector_missing_expected",
+        },
+    )
+    .await?;
+    invoke_expected_error_and_log(
+        &connector,
+        &signing_key,
+        correlation_id,
+        &mut logger,
+        &evidence,
+        ExpectedErrorOperation {
+            operation: "browser.set_proxy",
+            input: json!({ "server": "http://198.51.100.10:8080" }),
+            expected_reason: "direct_cdp_proxy_fail_closed_expected",
+        },
+    )
+    .await?;
+    invoke_expected_error_and_log(
+        &connector,
+        &signing_key,
+        correlation_id,
+        &mut logger,
+        &evidence,
+        ExpectedErrorOperation {
+            operation: "browser.clear_proxy",
+            input: json!({}),
+            expected_reason: "direct_cdp_proxy_fail_closed_expected",
+        },
     )
     .await?;
 
@@ -639,25 +757,55 @@ async fn run_live_browser_suite(
             "operation": "browser.shutdown",
             "target_id": "connector",
             "worker_operation_id": "shutdown",
+            "endpoint_kind": evidence.endpoint_kind.as_str(),
+            "target_id_hash": evidence.target_id_hash.as_str(),
+            "command_line": evidence.command_line.as_str(),
+            "git_revision": evidence.git_revision.as_str(),
             "navigation_policy_decision": "not_applicable",
             "endpoint_policy_decision": "not_applicable",
             "output": shutdown,
             "no_orphan_task_shutdown_evidence": {
                 "connector_shutdown_status": "shutdown",
-                "harness_manages_browser_process": false,
-                "long_lived_state_owner": "external_control_worker",
+                "harness_manages_browser_process": launched_browser.is_some(),
+                "long_lived_state_owner": "direct_cdp_target_session_manager",
                 "process_local_loopback_site_joined_on_drop": true
             },
         }),
     ));
 
+    let direct_cdp_manager_events_jsonl = direct_cdp_manager_events_jsonl(&connector);
+    let manager_event_count = direct_cdp_manager_events_jsonl
+        .as_deref()
+        .map_or(0, |jsonl| jsonl.lines().count());
+    let launched_browser_endpoint = launched_browser.as_ref().map(|browser| {
+        json!({
+            "devtools_http_base_hash": stable_hash(browser.devtools_http_base.as_str()),
+            "page_websocket_url": redact_url_for_artifact(browser.page_websocket_url.as_str()),
+            "target_id_hash": evidence.target_id_hash.as_str(),
+            "profile_dir_hash": stable_hash(browser.profile_dir.to_string_lossy().as_ref())
+        })
+    });
     let summary = json!({
         "outcome": "passed",
+        "run_id": correlation_id,
+        "command_line": evidence.command_line.as_str(),
+        "git_revision": evidence.git_revision.as_str(),
+        "browser_binary": prerequisites.browser_binary.as_deref(),
+        "browser_version": browser_version,
+        "target_id_hash": evidence.target_id_hash.as_str(),
         "operations_exercised": LIVE_OPERATIONS,
         "blocked_navigation_exercised": true,
+        "timeout_cancellation_exercised": true,
+        "proxy_fail_closed_exercised": true,
+        "endpoint_kind": evidence.endpoint_kind.as_str(),
+        "manager_event_count": manager_event_count,
+        "direct_cdp_manager_events_jsonl": DIRECT_CDP_MANAGER_EVENTS_ARTIFACT,
+        "launched_browser": launched_browser_endpoint,
         "loopback_site": redact_url_for_artifact(site.url("/").as_str()),
-        "screenshot_artifact": "screenshot.png",
-        "pdf_artifact": "page.pdf",
+        "artifact_hashes": {
+            "screenshot_png": screenshot_artifact,
+            "pdf": pdf_artifact,
+        },
         "readable_content_guardrail_evidence": "extract_text logs readability, guardrails, and external_content when live prerequisites are present",
         "document_extraction_decision_evidence": "render_pdf logs document_extraction deferral metadata",
     });
@@ -665,8 +813,306 @@ async fn run_live_browser_suite(
         correlation_id,
         prerequisites,
         logger.drain(),
+        direct_cdp_manager_events_jsonl,
         summary,
     ))
+}
+
+struct LaunchedBrowser {
+    child: Child,
+    profile_dir: PathBuf,
+    devtools_http_base: String,
+    page_websocket_url: String,
+}
+
+impl LaunchedBrowser {
+    async fn start(browser_binary: &str, artifact_dir: &str) -> Result<Self, String> {
+        let profile_dir = Path::new(artifact_dir).join("chrome-profile");
+        fs::create_dir_all(&profile_dir)
+            .map_err(|error| format!("create browser profile dir: {error}"))?;
+        let launcher = BrowserLaunchProgram::new(browser_binary)?;
+
+        let mut command = launcher.command()?;
+        let mut child = command
+            .arg("--headless=new")
+            .arg("--remote-debugging-address=127.0.0.1")
+            .arg("--remote-debugging-port=0")
+            .arg(format!("--user-data-dir={}", profile_dir.display()))
+            .arg("--no-first-run")
+            .arg("--no-default-browser-check")
+            .arg("--disable-background-networking")
+            .arg("--disable-component-update")
+            .arg("--disable-extensions")
+            .arg("--disable-sync")
+            .arg("--disable-features=MediaRouter,OptimizationHints,Translate")
+            .arg("about:blank")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("launch Chrome/Chromium for direct-CDP proof: {error}"))?;
+
+        let port = wait_for_devtools_port(&mut child, &profile_dir).await?;
+        let devtools_http_base = format!("http://127.0.0.1:{port}");
+        let page_websocket_url = discover_page_websocket_url(&devtools_http_base).await?;
+
+        Ok(Self {
+            child,
+            profile_dir,
+            devtools_http_base,
+            page_websocket_url,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BrowserLaunchProgram {
+    program: String,
+}
+
+impl BrowserLaunchProgram {
+    fn new(raw_path: &str) -> Result<Self, String> {
+        if !is_allowlisted_browser_binary(raw_path) {
+            return Err(format!(
+                "{BROWSER_BINARY_ENV} must match an allowlisted Chrome/Chromium executable path"
+            ));
+        }
+        let metadata = fs::metadata(raw_path)
+            .map_err(|error| format!("inspect Chrome/Chromium executable: {error}"))?;
+        if !metadata.is_file() {
+            return Err(format!(
+                "{BROWSER_BINARY_ENV} must point to a file, got '{raw_path}'"
+            ));
+        }
+        Ok(Self {
+            program: raw_path.to_string(),
+        })
+    }
+
+    fn command(&self) -> Result<Command, String> {
+        let command = match self.program.as_str() {
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" => {
+                Command::new("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+            }
+            "/Applications/Chromium.app/Contents/MacOS/Chromium" => {
+                Command::new("/Applications/Chromium.app/Contents/MacOS/Chromium")
+            }
+            "/usr/bin/google-chrome" => Command::new("/usr/bin/google-chrome"),
+            "/usr/bin/google-chrome-stable" => Command::new("/usr/bin/google-chrome-stable"),
+            "/usr/bin/chromium" => Command::new("/usr/bin/chromium"),
+            "/usr/bin/chromium-browser" => Command::new("/usr/bin/chromium-browser"),
+            "/opt/google/chrome/chrome" => Command::new("/opt/google/chrome/chrome"),
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe" => {
+                Command::new(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+            }
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe" => {
+                Command::new(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe")
+            }
+            _ => {
+                return Err(format!(
+                    "{BROWSER_BINARY_ENV} must match an allowlisted Chrome/Chromium executable path"
+                ));
+            }
+        };
+        Ok(command)
+    }
+}
+
+impl Drop for LaunchedBrowser {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+async fn wait_for_devtools_port(child: &mut Child, profile_dir: &Path) -> Result<u16, String> {
+    let active_port_path = profile_dir.join("DevToolsActivePort");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match fs::read_to_string(&active_port_path) {
+            Ok(contents) => {
+                let mut lines = contents.lines();
+                let Some(port_line) = lines.next() else {
+                    fcp_async_core::time::sleep(Duration::from_millis(25)).await;
+                    continue;
+                };
+                if port_line.trim().is_empty() {
+                    fcp_async_core::time::sleep(Duration::from_millis(25)).await;
+                    continue;
+                }
+                return port_line.parse::<u16>().map_err(|error| {
+                    format!("DevToolsActivePort contained invalid port '{port_line}': {error}")
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("read DevToolsActivePort: {error}")),
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "Chrome/Chromium exited before DevToolsActivePort was ready: {status}"
+                ));
+            }
+            Ok(None) => {}
+            Err(error) => return Err(format!("poll Chrome/Chromium readiness: {error}")),
+        }
+
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Chrome/Chromium did not write DevToolsActivePort within 10s at {}",
+                active_port_path.display()
+            ));
+        }
+        fcp_async_core::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn discover_page_websocket_url(devtools_http_base: &str) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let list_url = format!("{devtools_http_base}/json/list");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let maybe_target = match client.get(&list_url).send().await {
+            Ok(response) => response.json::<Value>().await.map_or(None, |targets| {
+                page_websocket_url_from_devtools_targets(&targets)
+            }),
+            Err(_) => None,
+        };
+        if let Some(websocket_url) = maybe_target {
+            return Ok(websocket_url);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "Chrome/Chromium did not expose a page WebSocket at {list_url} within 10s"
+            ));
+        }
+        fcp_async_core::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn devtools_browser_version(devtools_http_base: &str) -> Option<String> {
+    let client = reqwest::Client::new();
+    let version_url = format!("{devtools_http_base}/json/version");
+    client
+        .get(version_url)
+        .send()
+        .await
+        .ok()?
+        .json::<Value>()
+        .await
+        .ok()?
+        .get("Browser")?
+        .as_str()
+        .filter(|version| !version.is_empty())
+        .map(ToString::to_string)
+}
+
+fn page_websocket_url_from_devtools_targets(targets: &Value) -> Option<String> {
+    targets.as_array()?.iter().find_map(|target| {
+        let target_type = target.get("type").and_then(Value::as_str)?;
+        let websocket_url = target.get("webSocketDebuggerUrl").and_then(Value::as_str)?;
+        (target_type == "page"
+            && websocket_url.starts_with("ws://")
+            && websocket_url.contains("/devtools/page/"))
+        .then(|| websocket_url.to_string())
+    })
+}
+
+#[cfg(feature = "test-support")]
+fn direct_cdp_manager_events_jsonl(connector: &BrowserConnector) -> Option<String> {
+    connector
+        .direct_cdp_manager_events_jsonl_for_test()
+        .ok()
+        .filter(|events| !events.is_empty())
+}
+
+#[cfg(not(feature = "test-support"))]
+fn direct_cdp_manager_events_jsonl(_connector: &BrowserConnector) -> Option<String> {
+    None
+}
+
+fn stable_hash(value: &str) -> String {
+    format!("blake3:{}", blake3::hash(value.as_bytes()).to_hex())
+}
+
+fn stable_hash_bytes(value: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(value).to_hex())
+}
+
+#[derive(Debug, Clone)]
+struct OperationEvidenceContext {
+    endpoint_kind: String,
+    target_id_hash: String,
+    command_line: String,
+    git_revision: String,
+}
+
+impl OperationEvidenceContext {
+    fn new(control_url: &str, endpoint_kind: String) -> Self {
+        Self {
+            target_id_hash: endpoint_target_id_hash(control_url, endpoint_kind.as_str()),
+            endpoint_kind,
+            command_line: harness_command_line(),
+            git_revision: current_git_revision(),
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test(endpoint_kind: &str) -> Self {
+        Self {
+            endpoint_kind: endpoint_kind.to_string(),
+            target_id_hash: "blake3:test-target".to_string(),
+            command_line: "fcp-browser real-browser e2e harness test".to_string(),
+            git_revision: "test-git-revision".to_string(),
+        }
+    }
+}
+
+fn endpoint_target_id_hash(control_url: &str, endpoint_kind: &str) -> String {
+    if endpoint_kind == "direct_cdp_websocket"
+        && let Ok(parsed) = Url::parse(control_url)
+        && let Some(target_id) = parsed
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+        && !target_id.is_empty()
+    {
+        return format!("blake3:{}", short_redaction_hash(target_id));
+    }
+    stable_hash(&redact_url_for_artifact(control_url).redacted_url)
+}
+
+fn short_redaction_hash(value: &str) -> String {
+    blake3::hash(value.as_bytes())
+        .to_hex()
+        .as_str()
+        .chars()
+        .take(16)
+        .collect()
+}
+
+fn harness_command_line() -> String {
+    env::args().collect::<Vec<_>>().join(" ")
+}
+
+fn current_git_revision() -> String {
+    if let Some(revision) = option_env!("GIT_COMMIT")
+        .or(option_env!("VERGEN_GIT_SHA"))
+        .or(option_env!("SOURCE_DATE_EPOCH"))
+    {
+        return revision.to_string();
+    }
+    Command::new("git")
+        .arg("rev-parse")
+        .arg("--short=12")
+        .arg("HEAD")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|revision| revision.trim().to_string())
+        .filter(|revision| !revision.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 async fn invoke_and_log(
@@ -674,6 +1120,7 @@ async fn invoke_and_log(
     signing_key: &Ed25519SigningKey,
     correlation_id: &str,
     logger: &mut E2eLogger,
+    evidence: &OperationEvidenceContext,
     operation: &str,
     input: Value,
 ) -> Result<Value, (Vec<E2eLogEntry>, String)> {
@@ -695,7 +1142,7 @@ async fn invoke_and_log(
                 operation,
                 HarnessStatus::Passed,
                 elapsed_ms(start),
-                operation_details(operation, HarnessStatus::Passed, &output, None),
+                operation_details(operation, evidence, HarnessStatus::Passed, &output, None),
             ));
             Ok(output)
         }
@@ -707,6 +1154,7 @@ async fn invoke_and_log(
                 elapsed_ms(start),
                 operation_details(
                     operation,
+                    evidence,
                     HarnessStatus::Failed,
                     &json!({}),
                     Some(error.to_string()),
@@ -717,8 +1165,78 @@ async fn invoke_and_log(
     }
 }
 
+struct ExpectedErrorOperation {
+    operation: &'static str,
+    input: Value,
+    expected_reason: &'static str,
+}
+
+async fn invoke_expected_error_and_log(
+    connector: &BrowserConnector,
+    signing_key: &Ed25519SigningKey,
+    correlation_id: &str,
+    logger: &mut E2eLogger,
+    evidence: &OperationEvidenceContext,
+    expected: ExpectedErrorOperation,
+) -> Result<(), (Vec<E2eLogEntry>, String)> {
+    let start = Instant::now();
+    let operation = expected.operation;
+    let capability_grant = generate_valid_grant(signing_key, connector, operation);
+    let mut request = json!({
+        "operation": operation,
+        "input": expected.input,
+        "capability_token": capability_grant
+    });
+    if requires_execution_approval(operation) {
+        request["approval_token"] = json!(generate_execution_approval(operation));
+    }
+
+    match connector.handle_invoke(request).await {
+        Ok(output) => {
+            let error = format!(
+                "{operation} unexpectedly succeeded during {}",
+                expected.expected_reason
+            );
+            logger.push(operation_log_entry(
+                correlation_id,
+                operation,
+                HarnessStatus::Failed,
+                elapsed_ms(start),
+                operation_details(
+                    operation,
+                    evidence,
+                    HarnessStatus::Failed,
+                    &output,
+                    Some(error.clone()),
+                ),
+            ));
+            Err((logger.drain(), error))
+        }
+        Err(error) => {
+            logger.push(operation_log_entry(
+                correlation_id,
+                operation,
+                HarnessStatus::Passed,
+                elapsed_ms(start),
+                operation_details(
+                    operation,
+                    evidence,
+                    HarnessStatus::Passed,
+                    &json!({
+                        "expected_error": error.to_string(),
+                        "expected_reason": expected.expected_reason
+                    }),
+                    None,
+                ),
+            ));
+            Ok(())
+        }
+    }
+}
+
 fn operation_details(
     operation: &str,
+    evidence: &OperationEvidenceContext,
     status: HarnessStatus,
     output: &Value,
     error: Option<String>,
@@ -726,17 +1244,26 @@ fn operation_details(
     let mut details = json!({
         "operation": operation,
         "target_id": operation_target_id(operation),
-        "cdp_command_id": null,
-        "worker_operation_id": operation,
+        "target_id_hash": evidence.target_id_hash.as_str(),
+        "endpoint_kind": evidence.endpoint_kind.as_str(),
+        "command_line": evidence.command_line.as_str(),
+        "git_revision": evidence.git_revision.as_str(),
+        "cdp_command_ids": [],
+        "cdp_command_ids_source": DIRECT_CDP_MANAGER_EVENTS_ARTIFACT,
+        "worker_operation_id": if evidence.endpoint_kind == "fcp_browser_control" { operation } else { "" },
         "cdp_command_id_or_worker_operation_id": operation,
+        "capability_decision": "capability_token_issued_for_operation",
+        "approval_decision": if requires_execution_approval(operation) { "execution_approval_token_issued" } else { "not_required" },
         "url_redaction_decision": json!(redact_url_for_artifact(
             output.get("url").and_then(Value::as_str).unwrap_or("about:blank")
         )),
-        "endpoint_policy_decision": "fcp_browser_control_url_validated_before_run",
+        "endpoint_policy_decision": evidence.endpoint_kind.as_str(),
         "navigation_policy_decision": navigation_policy_decision_for_output(operation, output),
         "latency": { "measured_by": "harness", "unit": "ms" },
         "retry_backoff": { "attempt": 1, "next_delay_ms": null },
         "output": output_metrics(output),
+        "expected_error": output.get("expected_error").cloned().unwrap_or(Value::Null),
+        "expected_reason": output.get("expected_reason").cloned().unwrap_or(Value::Null),
         "external_content": output.get("external_content").cloned().unwrap_or(Value::Null),
         "readability": output.get("readability").cloned().unwrap_or(Value::Null),
         "guardrails": output.get("guardrails").cloned().unwrap_or(Value::Null),
@@ -744,7 +1271,7 @@ fn operation_details(
         "cancellation_checkpoints": cancellation_checkpoints(operation),
         "timeout_budget_ms": timeout_budget_ms(operation),
         "no_orphan_task_shutdown_evidence": {
-            "long_lived_browser_state_owner": "external_control_worker",
+            "long_lived_browser_state_owner": if evidence.endpoint_kind == "direct_cdp_websocket" { "direct_cdp_target_session_manager" } else { "external_control_worker" },
             "harness_owned_processes": ["loopback_http_site"],
             "status": status,
         },
@@ -865,11 +1392,21 @@ where
         .get(CONTROL_URL_ENV)
         .filter(|value| !value.is_empty())
         .cloned();
-    let endpoint_policy_decision = classify_control_endpoint(control_worker_url.as_deref());
-    if control_worker_url.is_none() {
+    let endpoint_policy_decision = match control_worker_url.as_deref() {
+        Some(control_url) => classify_control_endpoint(Some(control_url)),
+        None if browser_binary.is_some() => EndpointPolicyDecision {
+            allowed: true,
+            reason: "auto_launch_direct_cdp_websocket".to_string(),
+            redacted_url: None,
+        },
+        None => classify_control_endpoint(None),
+    };
+    if control_worker_url.is_none() && browser_binary.is_none() {
         missing.push(MissingPrerequisite::new(
-            "control_worker_url_missing",
-            format!("{CONTROL_URL_ENV} must point at an FCP browser-control HTTP endpoint"),
+            "control_endpoint_missing",
+            format!(
+                "{CONTROL_URL_ENV} must point at an FCP browser-control HTTP endpoint or {BROWSER_BINARY_ENV} must match an allowlisted Chrome/Chromium executable path for direct-CDP auto-launch"
+            ),
         ));
     } else if !endpoint_policy_decision.allowed {
         missing.push(MissingPrerequisite::new(
@@ -881,6 +1418,7 @@ where
     BrowserE2ePrerequisites {
         browser_binary,
         control_worker_url,
+        control_endpoint_kind: endpoint_policy_decision.reason.clone(),
         artifact_dir: artifact_dir.to_string_lossy().to_string(),
         endpoint_policy_decision,
         missing,
@@ -900,6 +1438,13 @@ where
         .filter(|value| !value.is_empty())
     {
         let path = Path::new(configured);
+        if !is_allowlisted_browser_binary(configured) {
+            missing.push(MissingPrerequisite::new(
+                "browser_binary_env_path_not_allowlisted",
+                format!("{BROWSER_BINARY_ENV} must match a known Chrome/Chromium executable path"),
+            ));
+            return None;
+        }
         if exists(path) {
             return Some(configured.clone());
         }
@@ -922,41 +1467,21 @@ where
 
     missing.push(MissingPrerequisite::new(
         "browser_binary_missing",
-        format!("Set {BROWSER_BINARY_ENV} or put google-chrome/chromium/chrome on PATH"),
+        format!("Set {BROWSER_BINARY_ENV} to an allowlisted Chrome/Chromium executable path"),
     ));
     None
 }
 
 fn browser_binary_candidates(env: &BTreeMap<String, String>) -> Vec<String> {
-    let mut candidates = vec![
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".to_string(),
-        "/Applications/Chromium.app/Contents/MacOS/Chromium".to_string(),
-        "/usr/bin/google-chrome".to_string(),
-        "/usr/bin/google-chrome-stable".to_string(),
-        "/usr/bin/chromium".to_string(),
-        "/usr/bin/chromium-browser".to_string(),
-        "/opt/google/chrome/chrome".to_string(),
-    ];
+    let _ = env;
+    BROWSER_BINARY_ALLOWLIST
+        .iter()
+        .map(|path| (*path).to_string())
+        .collect()
+}
 
-    let executable_names = if cfg!(windows) {
-        vec!["chrome.exe", "chromium.exe"]
-    } else {
-        vec![
-            "google-chrome",
-            "google-chrome-stable",
-            "chromium",
-            "chromium-browser",
-            "chrome",
-        ]
-    };
-    if let Some(path) = env.get("PATH") {
-        for dir in env::split_paths(path) {
-            for executable in &executable_names {
-                candidates.push(dir.join(executable).to_string_lossy().to_string());
-            }
-        }
-    }
-    candidates
+fn is_allowlisted_browser_binary(path: &str) -> bool {
+    BROWSER_BINARY_ALLOWLIST.contains(&path)
 }
 
 fn classify_control_endpoint(raw_url: Option<&str>) -> EndpointPolicyDecision {
@@ -986,6 +1511,13 @@ fn classify_control_endpoint(raw_url: Option<&str>) -> EndpointPolicyDecision {
     };
 
     let scheme_allowed = matches!(parsed.scheme(), "http" | "https");
+    let direct_cdp_ws = parsed.scheme() == "ws"
+        && is_loopback_host(host)
+        && is_direct_cdp_page_websocket_path(parsed.path())
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none();
     let loopback = matches!(host, "localhost" | "127.0.0.1" | "::1");
     let internal = host.ends_with(".browser.mesh.internal")
         || host.ends_with(".browser.flywheel.internal")
@@ -1001,16 +1533,36 @@ fn classify_control_endpoint(raw_url: Option<&str>) -> EndpointPolicyDecision {
         && (loopback || internal)
         && https_or_loopback
         && path_is_control_base
-        && no_userinfo_query_fragment;
+        && no_userinfo_query_fragment
+        || direct_cdp_ws;
     EndpointPolicyDecision {
         allowed,
-        reason: if allowed {
+        reason: if direct_cdp_ws {
+            "direct_cdp_websocket".to_string()
+        } else if allowed {
             "control_worker_endpoint_allowed".to_string()
         } else {
             "control_worker_endpoint_rejected_by_browser_connector_policy".to_string()
         },
         redacted_url: Some(redaction.redacted_url),
     }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+fn is_direct_cdp_page_websocket_path(path: &str) -> bool {
+    let mut segments = path.trim_start_matches('/').split('/');
+    matches!(
+        (
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next()
+        ),
+        (Some("devtools"), Some("page"), Some(target), None) if !target.is_empty()
+    )
 }
 
 fn redact_url_for_artifact(raw_url: &str) -> UrlRedactionDecision {
@@ -1072,6 +1624,10 @@ fn standard_artifact_paths() -> BTreeMap<String, String> {
             "driver-result.json".to_string(),
         ),
         ("logs_jsonl".to_string(), "logs.jsonl".to_string()),
+        (
+            "direct_cdp_manager_events_jsonl".to_string(),
+            DIRECT_CDP_MANAGER_EVENTS_ARTIFACT.to_string(),
+        ),
         ("screenshot_png".to_string(), "screenshot.png".to_string()),
         ("pdf".to_string(), "page.pdf".to_string()),
     ])
@@ -1088,22 +1644,32 @@ fn write_report_artifacts(artifact_dir: &Path, report: &BrowserE2eReport) -> std
     for entry in &report.logs {
         logger.push(entry.clone());
     }
-    logger.write_json_lines(log_path)
+    logger.write_json_lines(log_path)?;
+    if let Some(events) = report.direct_cdp_manager_events_jsonl.as_deref() {
+        fs::write(
+            artifact_dir.join(DIRECT_CDP_MANAGER_EVENTS_ARTIFACT),
+            events,
+        )?;
+    }
+    Ok(())
 }
 
-fn persist_base64_artifact(path: PathBuf, encoded: Option<&str>) {
-    let Some(encoded) = encoded else {
-        return;
-    };
-    let Some(parent) = path.parent() else {
-        return;
-    };
+fn persist_base64_artifact(path: &Path, encoded: Option<&str>) -> Option<Value> {
+    let encoded = encoded?;
+    let parent = path.parent()?;
     if fs::create_dir_all(parent).is_err() {
-        return;
+        return None;
     }
-    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) {
-        let _ = fs::write(path, bytes);
+    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded)
+        && fs::write(path, &bytes).is_ok()
+    {
+        return Some(json!({
+            "path": path.file_name().and_then(|name| name.to_str()).unwrap_or_default(),
+            "byte_count": bytes.len(),
+            "blake3": stable_hash_bytes(&bytes),
+        }));
     }
+    None
 }
 
 fn capture_relevant_env() -> BTreeMap<String, String> {
@@ -1386,7 +1952,7 @@ fn prerequisite_detection_reports_exact_missing_inputs() {
         .map(|missing| missing.code.as_str())
         .collect::<BTreeSet<_>>();
     assert!(codes.contains("browser_binary_missing"));
-    assert!(codes.contains("control_worker_url_missing"));
+    assert!(codes.contains("control_endpoint_missing"));
 }
 
 #[test]
@@ -1394,7 +1960,7 @@ fn prerequisite_detection_accepts_env_binary_and_loopback_control_worker() {
     let mut env = BTreeMap::new();
     env.insert(
         BROWSER_BINARY_ENV.to_string(),
-        "/tmp/fake-chrome".to_string(),
+        "/usr/bin/google-chrome".to_string(),
     );
     env.insert(
         CONTROL_URL_ENV.to_string(),
@@ -1402,15 +1968,118 @@ fn prerequisite_detection_accepts_env_binary_and_loopback_control_worker() {
     );
     let artifact_dir = PathBuf::from("browser-e2e");
     let prerequisites = evaluate_prerequisites(&env, artifact_dir.as_path(), |path| {
-        path == Path::new("/tmp/fake-chrome")
+        path == Path::new("/usr/bin/google-chrome")
     });
 
     assert!(prerequisites.is_qualified());
     assert_eq!(
         prerequisites.browser_binary.as_deref(),
-        Some("/tmp/fake-chrome")
+        Some("/usr/bin/google-chrome")
     );
     assert!(prerequisites.endpoint_policy_decision.allowed);
+    assert_eq!(
+        prerequisites.control_endpoint_kind,
+        "control_worker_endpoint_allowed"
+    );
+}
+
+#[test]
+fn prerequisite_detection_accepts_env_binary_for_direct_cdp_auto_launch() {
+    let mut env = BTreeMap::new();
+    env.insert(
+        BROWSER_BINARY_ENV.to_string(),
+        "/usr/bin/google-chrome".to_string(),
+    );
+    let artifact_dir = PathBuf::from("browser-e2e");
+    let prerequisites = evaluate_prerequisites(&env, artifact_dir.as_path(), |path| {
+        path == Path::new("/usr/bin/google-chrome")
+    });
+
+    assert!(prerequisites.is_qualified());
+    assert!(prerequisites.endpoint_policy_decision.allowed);
+    assert_eq!(
+        prerequisites.control_endpoint_kind,
+        "auto_launch_direct_cdp_websocket"
+    );
+}
+
+#[test]
+fn prerequisite_detection_accepts_direct_cdp_page_websocket_endpoint() {
+    let mut env = BTreeMap::new();
+    env.insert(
+        BROWSER_BINARY_ENV.to_string(),
+        "/usr/bin/google-chrome".to_string(),
+    );
+    env.insert(
+        CONTROL_URL_ENV.to_string(),
+        "ws://127.0.0.1:9222/devtools/page/target-1".to_string(),
+    );
+    let artifact_dir = PathBuf::from("browser-e2e");
+    let prerequisites = evaluate_prerequisites(&env, artifact_dir.as_path(), |path| {
+        path == Path::new("/usr/bin/google-chrome")
+    });
+
+    assert!(prerequisites.is_qualified());
+    assert_eq!(prerequisites.control_endpoint_kind, "direct_cdp_websocket");
+}
+
+#[test]
+fn direct_cdp_target_hash_uses_redacted_page_target_id() {
+    let hash = endpoint_target_id_hash(
+        "ws://127.0.0.1:9222/devtools/page/target-1",
+        "direct_cdp_websocket",
+    );
+
+    assert_eq!(hash, format!("blake3:{}", short_redaction_hash("target-1")));
+}
+
+#[test]
+fn direct_cdp_page_websocket_extraction_selects_page_target() {
+    let targets = json!([
+        {
+            "type": "service_worker",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/service_worker/sw-1"
+        },
+        {
+            "type": "page",
+            "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/page-1"
+        }
+    ]);
+
+    assert_eq!(
+        page_websocket_url_from_devtools_targets(&targets).as_deref(),
+        Some("ws://127.0.0.1:9222/devtools/page/page-1")
+    );
+}
+
+#[test]
+fn loopback_site_serves_ready_page_and_joins_on_drop() {
+    let site = LoopbackSite::start().expect("loopback site starts");
+    let mut stream = TcpStream::connect(site.url_base.trim_start_matches("http://"))
+        .expect("connect loopback site");
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .expect("write loopback request");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("read loopback response");
+
+    assert!(response.contains("HTTP/1.1 200 OK"));
+    assert!(response.contains("id=\"ready\""));
+    drop(site);
+}
+
+#[test]
+fn artifact_paths_include_direct_cdp_manager_events_jsonl() {
+    let paths = standard_artifact_paths();
+
+    assert_eq!(
+        paths
+            .get("direct_cdp_manager_events_jsonl")
+            .map(String::as_str),
+        Some(DIRECT_CDP_MANAGER_EVENTS_ARTIFACT)
+    );
 }
 
 #[test]
@@ -1441,6 +2110,7 @@ fn skip_artifact_schema_distinguishes_missing_prereqs_from_live_failure() {
 
 #[test]
 fn log_schema_contains_required_browser_evidence_fields() {
+    let evidence = OperationEvidenceContext::for_test("fcp_browser_control");
     let log = operation_log_entry(
         "corr-log",
         "browser.screenshot",
@@ -1448,6 +2118,7 @@ fn log_schema_contains_required_browser_evidence_fields() {
         12,
         operation_details(
             "browser.screenshot",
+            &evidence,
             HarnessStatus::Passed,
             &json!({ "image_data": "aW1n", "width": 2, "height": 1 }),
             None,
@@ -1462,16 +2133,23 @@ fn log_schema_contains_required_browser_evidence_fields() {
         "browser.screenshot"
     );
     assert!(value["details"]["target_id"].is_string());
+    assert!(value["details"]["target_id_hash"].is_string());
+    assert!(value["details"]["command_line"].is_string());
+    assert!(value["details"]["git_revision"].is_string());
     assert!(value["details"]["endpoint_policy_decision"].is_string());
     assert!(value["details"]["navigation_policy_decision"].is_string());
+    assert!(value["details"]["capability_decision"].is_string());
+    assert!(value["details"]["approval_decision"].is_string());
     assert!(value["details"]["output"]["width"].is_u64());
     assert!(value["details"]["cancellation_checkpoints"].is_array());
 }
 
 #[test]
 fn log_schema_records_browser_extraction_guardrail_metadata() {
+    let evidence = OperationEvidenceContext::for_test("direct_cdp_websocket");
     let details = operation_details(
         "browser.extract_text",
+        &evidence,
         HarnessStatus::Passed,
         &json!({
             "text": "Readable page",
@@ -1492,6 +2170,7 @@ fn log_schema_records_browser_extraction_guardrail_metadata() {
 
     let pdf_details = operation_details(
         "browser.render_pdf",
+        &evidence,
         HarnessStatus::Passed,
         &json!({
             "pdf_data": "JVBERg==",
@@ -1531,8 +2210,10 @@ fn artifact_path_normalization_rejects_escape_paths() {
 
 #[test]
 fn timeout_and_cancellation_markers_are_explicit() {
+    let evidence = OperationEvidenceContext::for_test("direct_cdp_websocket");
     let details = operation_details(
         "browser.wait_for_selector",
+        &evidence,
         HarnessStatus::Passed,
         &json!({ "found": true }),
         None,
@@ -1542,6 +2223,32 @@ fn timeout_and_cancellation_markers_are_explicit() {
     assert_eq!(
         details["cancellation_checkpoints"],
         json!(["before_wait", "selector_poll", "after_response"])
+    );
+}
+
+#[test]
+fn expected_error_details_are_logged_explicitly() {
+    let evidence = OperationEvidenceContext::for_test("direct_cdp_websocket");
+    let details = operation_details(
+        "browser.clear_proxy",
+        &evidence,
+        HarnessStatus::Passed,
+        &json!({
+            "expected_error": "browser.clear_proxy proxy_unavailable control_mode=direct_cdp_websocket",
+            "expected_reason": "direct_cdp_proxy_fail_closed_expected"
+        }),
+        None,
+    );
+
+    assert_eq!(
+        details["expected_reason"],
+        "direct_cdp_proxy_fail_closed_expected"
+    );
+    assert!(
+        details["expected_error"]
+            .as_str()
+            .expect("expected_error string")
+            .contains("proxy_unavailable")
     );
 }
 

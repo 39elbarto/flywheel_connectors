@@ -7,7 +7,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,12 +15,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use fcp_evidence::{
-    ClaimId, ClaimNode, ClaimStatus, ProofGapStatus, ProofGraph, ProofGraphCorpus,
-    ProofGraphIndexer, RerunCommand, SupportRelationship,
+    ClaimId, ClaimNode, ClaimStatus, EvidenceKind, EvidenceNode, ProofGapStatus, ProofGraph,
+    ProofGraphCorpus, ProofGraphIndexer, RerunCommand, SupportEdge, SupportRelationship,
 };
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::readiness::{idempotency_label, risk_level_label, safety_tier_label};
+
+const CAPABILITY_PASSPORT_SCHEMA: &str = "fcp.capability-passport.v1";
 const DEFAULT_NEXT_LIMIT: usize = 10;
 const DEFAULT_OUTPUT_PREVIEW_BYTES: usize = 16 * 1024;
 
@@ -42,6 +46,8 @@ pub enum ProofCommand {
     Explain(ProofExplainArgs),
     /// Plan or explicitly execute one known redaction-safe rerun command.
     Run(ProofRunArgs),
+    /// Generate connector capability passports from manifests and proof state.
+    Passport(ProofPassportArgs),
 }
 
 /// Shared corpus loader arguments.
@@ -100,6 +106,21 @@ pub struct ProofRunArgs {
     /// Maximum stdout/stderr preview bytes retained in JSON output.
     #[arg(long, default_value_t = DEFAULT_OUTPUT_PREVIEW_BYTES)]
     pub max_output_bytes: usize,
+}
+
+/// Arguments for `fwc proof passport`.
+#[derive(Args, Debug, Clone, Serialize)]
+pub struct ProofPassportArgs {
+    #[command(flatten)]
+    pub corpus: ProofCorpusArgs,
+
+    /// Connector manifest files to summarize into passports.
+    #[arg(long = "manifest", value_name = "PATH", required = true)]
+    pub manifests: Vec<PathBuf>,
+
+    /// Optional connector selector. Matches manifest slug, connector id, or name.
+    #[arg(long, value_name = "CONNECTOR")]
+    pub connector: Option<String>,
 }
 
 /// Structured result returned to the main dispatcher.
@@ -175,6 +196,161 @@ struct ExecutedProofCommand {
     stderr_preview: String,
 }
 
+#[derive(Debug, Clone)]
+struct LoadedManifest {
+    path: PathBuf,
+    manifest: ConnectorManifest,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CapabilityPassport {
+    schema_version: &'static str,
+    connector: PassportConnector,
+    provenance: Vec<PassportProvenance>,
+    capabilities: PassportCapabilities,
+    zones: PassportZones,
+    sandbox: PassportSandbox,
+    operations: Vec<PassportOperation>,
+    proof_state: PassportProofState,
+    proof_signals: PassportProofSignals,
+    risk_summary: PassportRiskSummary,
+    gaps: Vec<PassportGap>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PassportConnector {
+    id: String,
+    slug: String,
+    name: String,
+    version: String,
+    status: String,
+    runtime_format: String,
+    archetypes: Vec<String>,
+    state_model: Value,
+    hidden_by_default: bool,
+    non_live_rationale: Option<&'static str>,
+    graduation_guidance: Option<&'static str>,
+    manifest_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PassportProvenance {
+    field: &'static str,
+    source: &'static str,
+    source_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PassportCapabilities {
+    required: Vec<String>,
+    optional: Vec<String>,
+    forbidden: Vec<String>,
+    operation_capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PassportZones {
+    home: String,
+    allowed_sources: Vec<String>,
+    allowed_targets: Vec<String>,
+    forbidden: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PassportSandbox {
+    profile: String,
+    memory_mb: u32,
+    cpu_percent: u8,
+    wall_clock_timeout_ms: u64,
+    readonly_path_count: usize,
+    writable_path_count: usize,
+    deny_exec: bool,
+    deny_ptrace: bool,
+    posture: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PassportOperation {
+    id: String,
+    capability: String,
+    risk_level: &'static str,
+    safety_tier: &'static str,
+    requires_approval: &'static str,
+    idempotency: &'static str,
+    input_schema_state: &'static str,
+    output_schema_state: &'static str,
+    network_posture: PassportNetworkPosture,
+    ai_hints_state: PassportAiHintsState,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PassportNetworkPosture {
+    state: &'static str,
+    host_allow_count: usize,
+    port_allow: Vec<u16>,
+    deny_localhost: Option<bool>,
+    deny_private_ranges: Option<bool>,
+    deny_tailnet_ranges: Option<bool>,
+    require_sni: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PassportAiHintsState {
+    state: &'static str,
+    has_when_to_use: bool,
+    common_mistake_count: usize,
+    example_count: usize,
+    related_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PassportProofState {
+    state: String,
+    matched_claim_ids: Vec<String>,
+    required_truth_sources: Vec<String>,
+    fresh_claim_ids: Vec<String>,
+    stale_claim_ids: Vec<String>,
+    evidence_by_kind: BTreeMap<String, usize>,
+    proof_gap_count: usize,
+    supporting_evidence_count: usize,
+    known_rerun_command_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PassportProofSignals {
+    readme_contract: PassportProofSignal,
+    secretless_readiness: PassportProofSignal,
+    host_or_introspection: PassportProofSignal,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PassportProofSignal {
+    state: &'static str,
+    matched_claim_ids: Vec<String>,
+    evidence_count: usize,
+    source_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PassportRiskSummary {
+    max_risk_level: &'static str,
+    max_safety_tier: &'static str,
+    operation_count: usize,
+    approval_required_count: usize,
+    network_posture_gap_count: usize,
+    ai_hints_gap_count: usize,
+    proof_gap_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PassportGap {
+    category: &'static str,
+    status: &'static str,
+    summary: String,
+    target_truth_source: String,
+    provenance: PassportProvenance,
+}
+
 /// Run a `fwc proof` subcommand.
 pub fn run(args: &ProofArgs) -> Result<ProofCommandResult> {
     match &args.command {
@@ -182,6 +358,7 @@ pub fn run(args: &ProofArgs) -> Result<ProofCommandResult> {
         ProofCommand::Next(args) => next(args),
         ProofCommand::Explain(args) => explain(args),
         ProofCommand::Run(args) => run_known_command(args),
+        ProofCommand::Passport(args) => passport(args),
     }
 }
 
@@ -340,6 +517,45 @@ fn run_known_command(args: &ProofRunArgs) -> Result<ProofCommandResult> {
     Ok(ProofCommandResult { payload, success })
 }
 
+fn passport(args: &ProofPassportArgs) -> Result<ProofCommandResult> {
+    let loaded = load_graph(&args.corpus)?;
+    let manifests = load_passport_manifests(&args.manifests)?;
+    let selected = select_passport_manifests(&manifests, args.connector.as_deref());
+    if selected.is_empty() {
+        return Ok(passport_selection_error(
+            args.connector.as_deref(),
+            &manifests,
+            &loaded.graph,
+        ));
+    }
+
+    let passports = selected
+        .into_iter()
+        .map(|manifest| build_capability_passport(manifest, &loaded.graph, loaded.now_unix_ms))
+        .collect::<Result<Vec<_>>>()?;
+    let summary = passport_summary(&passports);
+    let source = loaded.source.display().to_string();
+    let mut payload = json!({
+        "status": "ok",
+        "command": "proof",
+        "subcommand": "passport",
+        "schema_version": CAPABILITY_PASSPORT_SCHEMA,
+        "source": source,
+        "now_unix_ms": loaded.now_unix_ms,
+        "summary": summary,
+        "passports": passports,
+        "next_actions": [
+            "Use `fwc proof explain <claim> --corpus <path> --json` for detailed proof evidence.",
+            "Treat every passport gap as proof debt; do not infer missing schema, network, or runtime state."
+        ],
+    });
+    insert_toon(
+        &mut payload,
+        "Generated manifest-backed connector capability passports with ProofGraph gap routing.",
+    );
+    Ok(ok(payload))
+}
+
 fn load_graph(args: &ProofCorpusArgs) -> Result<LoadedProofGraph> {
     let file = File::open(&args.corpus)
         .with_context(|| format!("opening ProofGraph corpus `{}`", args.corpus.display()))?;
@@ -354,6 +570,74 @@ fn load_graph(args: &ProofCorpusArgs) -> Result<LoadedProofGraph> {
         now_unix_ms,
         graph,
     })
+}
+
+fn load_passport_manifests(paths: &[PathBuf]) -> Result<Vec<LoadedManifest>> {
+    paths
+        .iter()
+        .map(|path| {
+            let raw = fs::read_to_string(path)
+                .with_context(|| format!("reading connector manifest `{}`", path.display()))?;
+            let manifest = ConnectorManifest::parse_str_unchecked(&raw)
+                .with_context(|| format!("parsing connector manifest `{}`", path.display()))?;
+            Ok(LoadedManifest {
+                path: path.clone(),
+                manifest,
+            })
+        })
+        .collect()
+}
+
+fn select_passport_manifests<'a>(
+    manifests: &'a [LoadedManifest],
+    connector: Option<&str>,
+) -> Vec<&'a LoadedManifest> {
+    let Some(connector) = connector else {
+        return manifests.iter().collect();
+    };
+    let selector = normalize_passport_selector(connector);
+    manifests
+        .iter()
+        .filter(|manifest| passport_manifest_selectors(manifest).contains(&selector))
+        .collect()
+}
+
+fn passport_selection_error(
+    connector: Option<&str>,
+    manifests: &[LoadedManifest],
+    graph: &ProofGraph,
+) -> ProofCommandResult {
+    let mut payload = json!({
+        "status": "error",
+        "command": "proof",
+        "subcommand": "passport",
+        "schema_version": CAPABILITY_PASSPORT_SCHEMA,
+        "error": {
+            "type": "unknown-connector",
+            "message": connector.map_or_else(
+                || "No connector manifests were supplied.".to_owned(),
+                |value| format!("No supplied manifest matches connector selector `{value}`.")
+            ),
+            "recoverable": true,
+            "known_connectors": manifests
+                .iter()
+                .map(|manifest| manifest.manifest.connector.id.as_str().to_owned())
+                .collect::<Vec<_>>(),
+            "known_claim_ids": graph.claims.keys().map(ToString::to_string).collect::<Vec<_>>(),
+            "next_actions": [
+                "Pass one or more `--manifest <path>` values.",
+                "Use a connector id, slug, or connector name already present in the supplied manifests."
+            ],
+        },
+    });
+    insert_toon(
+        &mut payload,
+        "Proof passport refused an unknown connector selector.",
+    );
+    ProofCommandResult {
+        payload,
+        success: false,
+    }
 }
 
 fn current_unix_ms() -> u64 {
@@ -376,6 +660,813 @@ fn graph_summary(graph: &ProofGraph) -> Value {
         "suggested_next_actions": graph.suggested_next_actions.len(),
         "claim_statuses": statuses,
     })
+}
+
+fn build_capability_passport(
+    loaded: &LoadedManifest,
+    graph: &ProofGraph,
+    now_unix_ms: u64,
+) -> Result<CapabilityPassport> {
+    let manifest = &loaded.manifest;
+    let manifest_path = loaded.path.display().to_string();
+    let slug = connector_slug(manifest.connector.id.as_str());
+    let operations = manifest
+        .provides
+        .operations
+        .iter()
+        .map(|(operation_id, operation)| passport_operation(operation_id, operation))
+        .collect::<Result<Vec<_>>>()?;
+    let selectors = passport_manifest_selectors(loaded);
+    let proof_state = passport_proof_state(graph, &selectors, now_unix_ms);
+    let proof_signals = passport_proof_signals(graph, &selectors);
+    let capabilities = PassportCapabilities {
+        required: capability_strings(&manifest.capabilities.required),
+        optional: capability_strings(&manifest.capabilities.optional),
+        forbidden: capability_strings(&manifest.capabilities.forbidden),
+        operation_capabilities: operation_capabilities(&operations),
+    };
+    let zones = PassportZones {
+        home: manifest.zones.home.as_str().to_owned(),
+        allowed_sources: manifest
+            .zones
+            .allowed_sources
+            .iter()
+            .map(|zone| zone.as_str().to_owned())
+            .collect(),
+        allowed_targets: manifest
+            .zones
+            .allowed_targets
+            .iter()
+            .map(|zone| zone.as_str().to_owned())
+            .collect(),
+        forbidden: manifest
+            .zones
+            .forbidden
+            .iter()
+            .map(|zone| zone.as_str().to_owned())
+            .collect(),
+    };
+    let sandbox = PassportSandbox {
+        profile: manifest_enum_label(&manifest.sandbox.profile)?,
+        memory_mb: manifest.sandbox.memory_mb,
+        cpu_percent: manifest.sandbox.cpu_percent,
+        wall_clock_timeout_ms: manifest.sandbox.wall_clock_timeout_ms,
+        readonly_path_count: manifest.sandbox.fs_readonly_paths.len(),
+        writable_path_count: manifest.sandbox.fs_writable_paths.len(),
+        deny_exec: manifest.sandbox.deny_exec,
+        deny_ptrace: manifest.sandbox.deny_ptrace,
+        posture: sandbox_posture(manifest),
+    };
+    let mut provenance = vec![
+        PassportProvenance {
+            field: "connector",
+            source: "manifest",
+            source_ref: manifest_path.clone(),
+        },
+        PassportProvenance {
+            field: "capabilities",
+            source: "manifest",
+            source_ref: manifest_path.clone(),
+        },
+        PassportProvenance {
+            field: "proof_state",
+            source: "proof_graph",
+            source_ref: graph.schema.clone(),
+        },
+    ];
+    provenance.sort_by_key(|item| (item.field, item.source, item.source_ref.clone()));
+
+    let gaps = passport_gaps(loaded, graph, &operations, &proof_state);
+    let risk_summary = passport_risk_summary(&operations, proof_state.proof_gap_count);
+    let state_model = manifest
+        .connector
+        .state
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()?
+        .unwrap_or_else(|| json!({"status": "not_declared"}));
+
+    Ok(CapabilityPassport {
+        schema_version: CAPABILITY_PASSPORT_SCHEMA,
+        connector: PassportConnector {
+            id: manifest.connector.id.as_str().to_owned(),
+            slug,
+            name: manifest.connector.name.clone(),
+            version: manifest.connector.version.to_string(),
+            status: manifest.connector.status.to_string(),
+            runtime_format: runtime_format_label(&manifest.connector.format)?,
+            archetypes: manifest
+                .connector
+                .archetypes
+                .iter()
+                .map(|archetype| archetype.as_str().to_owned())
+                .collect(),
+            state_model,
+            hidden_by_default: manifest.connector.status.is_hidden_by_default(),
+            non_live_rationale: manifest.connector.status.non_live_rationale(),
+            graduation_guidance: manifest.connector.status.graduation_guidance(),
+            manifest_path,
+        },
+        provenance,
+        capabilities,
+        zones,
+        sandbox,
+        operations,
+        proof_state,
+        proof_signals,
+        risk_summary,
+        gaps,
+    })
+}
+
+fn passport_operation(
+    operation_id: &str,
+    operation: &OperationSection,
+) -> Result<PassportOperation> {
+    Ok(PassportOperation {
+        id: operation_id.to_owned(),
+        capability: operation.capability.as_str().to_owned(),
+        risk_level: risk_level_label(operation.risk_level),
+        safety_tier: safety_tier_label(operation.safety_tier),
+        requires_approval: approval_mode_label(operation.requires_approval),
+        idempotency: idempotency_label(operation.idempotency),
+        input_schema_state: schema_state(&operation.input_schema),
+        output_schema_state: schema_state(&operation.output_schema),
+        network_posture: network_posture(operation),
+        ai_hints_state: ai_hints_state(operation),
+    })
+}
+
+fn passport_proof_state(
+    graph: &ProofGraph,
+    selectors: &BTreeSet<String>,
+    now_unix_ms: u64,
+) -> PassportProofState {
+    let matched_claims = graph
+        .claims
+        .values()
+        .filter(|claim| claim_matches_connector(claim, selectors))
+        .collect::<Vec<_>>();
+    let commands = known_commands_by_claim(graph);
+    let mut claim_ids = Vec::new();
+    let mut truth_sources = BTreeSet::new();
+    let mut known_rerun_command_ids = BTreeSet::new();
+    let mut fresh_claim_ids = Vec::new();
+    let mut stale_claim_ids = Vec::new();
+    let mut proof_gap_count = 0;
+    let mut supporting_count = 0;
+    let mut evidence_by_kind = BTreeMap::new();
+    let state = matched_claims
+        .iter()
+        .max_by_key(|claim| status_weight(&claim.status))
+        .map_or_else(
+            || "unmatched".to_owned(),
+            |claim| status_label(&claim.status).to_owned(),
+        );
+
+    for claim in matched_claims {
+        claim_ids.push(claim.id.to_string());
+        truth_sources.insert(claim.required_truth_source.as_str().to_owned());
+        if claim.freshness.is_fresh_at(now_unix_ms) {
+            fresh_claim_ids.push(claim.id.to_string());
+        } else {
+            stale_claim_ids.push(claim.id.to_string());
+        }
+        proof_gap_count += claim.proof_gaps.len();
+        supporting_count += supporting_evidence_count(graph, &claim.id);
+        for edge in graph
+            .support_edges
+            .iter()
+            .filter(|edge| edge.claim_id == claim.id)
+        {
+            if let Some(evidence) = graph.evidence.get(&edge.evidence_id) {
+                *evidence_by_kind
+                    .entry(evidence_kind_label(evidence.kind).to_owned())
+                    .or_insert(0) += 1;
+            }
+        }
+        if let Some(per_claim) = commands.get(&claim.id) {
+            for command in per_claim {
+                known_rerun_command_ids.insert(command.command.id.to_string());
+            }
+        }
+    }
+
+    claim_ids.sort();
+    fresh_claim_ids.sort();
+    stale_claim_ids.sort();
+    PassportProofState {
+        state,
+        matched_claim_ids: claim_ids,
+        required_truth_sources: truth_sources.into_iter().collect(),
+        fresh_claim_ids,
+        stale_claim_ids,
+        evidence_by_kind,
+        proof_gap_count,
+        supporting_evidence_count: supporting_count,
+        known_rerun_command_ids: known_rerun_command_ids.into_iter().collect(),
+    }
+}
+
+fn passport_proof_signals(
+    graph: &ProofGraph,
+    selectors: &BTreeSet<String>,
+) -> PassportProofSignals {
+    PassportProofSignals {
+        readme_contract: proof_signal(
+            graph,
+            selectors,
+            |claim| {
+                claim.tags.contains("readme")
+                    || claim.tags.contains("feature-status")
+                    || normalized_claim_text(claim).contains("readme")
+            },
+            |evidence| evidence.kind == EvidenceKind::Documentation,
+        ),
+        secretless_readiness: proof_signal(
+            graph,
+            selectors,
+            |claim| normalized_claim_text(claim).contains("secretless"),
+            |evidence| normalized_evidence_text(evidence).contains("secretless"),
+        ),
+        host_or_introspection: proof_signal(
+            graph,
+            selectors,
+            |claim| {
+                normalized_claim_text(claim).contains("introspection")
+                    || normalized_claim_text(claim).contains("readiness")
+                    || claim.required_truth_source.as_str() == "host_backed"
+            },
+            |evidence| {
+                evidence.kind == EvidenceKind::HostIntegration
+                    || normalized_evidence_text(evidence).contains("introspection")
+            },
+        ),
+    }
+}
+
+fn proof_signal<C, E>(
+    graph: &ProofGraph,
+    selectors: &BTreeSet<String>,
+    claim_filter: C,
+    evidence_filter: E,
+) -> PassportProofSignal
+where
+    C: Fn(&ClaimNode) -> bool,
+    E: Fn(&EvidenceNode) -> bool,
+{
+    let mut matched_claim_ids = BTreeSet::new();
+    let mut source_refs = BTreeSet::new();
+    let mut evidence_count = 0;
+    let mut strongest_relationship = None;
+
+    for claim in graph
+        .claims
+        .values()
+        .filter(|claim| claim_matches_connector(claim, selectors) && claim_filter(claim))
+    {
+        matched_claim_ids.insert(claim.id.to_string());
+        for edge in graph
+            .support_edges
+            .iter()
+            .filter(|edge| edge.claim_id == claim.id)
+        {
+            record_signal_evidence(
+                graph,
+                edge,
+                &evidence_filter,
+                &mut evidence_count,
+                &mut source_refs,
+                &mut strongest_relationship,
+            );
+        }
+    }
+
+    if matched_claim_ids.is_empty() {
+        for edge in graph.support_edges.iter().filter(|edge| {
+            graph
+                .claims
+                .get(&edge.claim_id)
+                .is_some_and(|claim| claim_matches_connector(claim, selectors))
+        }) {
+            if let Some(evidence) = graph.evidence.get(&edge.evidence_id) {
+                if evidence_filter(evidence) {
+                    matched_claim_ids.insert(edge.claim_id.to_string());
+                    record_signal_evidence(
+                        graph,
+                        edge,
+                        &evidence_filter,
+                        &mut evidence_count,
+                        &mut source_refs,
+                        &mut strongest_relationship,
+                    );
+                }
+            }
+        }
+    }
+
+    PassportProofSignal {
+        state: signal_state(strongest_relationship, evidence_count),
+        matched_claim_ids: matched_claim_ids.into_iter().collect(),
+        evidence_count,
+        source_refs: source_refs.into_iter().collect(),
+    }
+}
+
+fn record_signal_evidence<E>(
+    graph: &ProofGraph,
+    edge: &SupportEdge,
+    evidence_filter: &E,
+    evidence_count: &mut usize,
+    source_refs: &mut BTreeSet<String>,
+    strongest_relationship: &mut Option<SupportRelationship>,
+) where
+    E: Fn(&EvidenceNode) -> bool,
+{
+    let Some(evidence) = graph.evidence.get(&edge.evidence_id) else {
+        return;
+    };
+    if !evidence_filter(evidence) {
+        return;
+    }
+    *evidence_count += 1;
+    source_refs.insert(evidence.source_ref.clone());
+    if strongest_relationship.map_or(true, |current| {
+        relationship_rank(edge.relationship) > relationship_rank(current)
+    }) {
+        *strongest_relationship = Some(edge.relationship);
+    }
+}
+
+fn signal_state(relationship: Option<SupportRelationship>, evidence_count: usize) -> &'static str {
+    match relationship {
+        Some(SupportRelationship::Supports) => "supported",
+        Some(SupportRelationship::PartiallySupports) => "partial",
+        Some(SupportRelationship::Contradicts) => "contradicted",
+        Some(SupportRelationship::DoesNotSupport) => "unsupported",
+        None if evidence_count > 0 => "observed",
+        None => "missing",
+    }
+}
+
+fn relationship_rank(relationship: SupportRelationship) -> u8 {
+    match relationship {
+        SupportRelationship::Contradicts => 4,
+        SupportRelationship::Supports => 3,
+        SupportRelationship::PartiallySupports => 2,
+        SupportRelationship::DoesNotSupport => 1,
+    }
+}
+
+fn passport_gaps(
+    loaded: &LoadedManifest,
+    graph: &ProofGraph,
+    operations: &[PassportOperation],
+    proof_state: &PassportProofState,
+) -> Vec<PassportGap> {
+    let manifest_path = loaded.path.display().to_string();
+    let mut gaps = Vec::new();
+    if proof_state.matched_claim_ids.is_empty() {
+        gaps.push(PassportGap {
+            category: "proof-state",
+            status: "missing",
+            summary: format!(
+                "No ProofGraph claim matched connector `{}`.",
+                loaded.manifest.connector.id.as_str()
+            ),
+            target_truth_source: "operator_record".to_owned(),
+            provenance: PassportProvenance {
+                field: "proof_state",
+                source: "proof_graph",
+                source_ref: graph.schema.clone(),
+            },
+        });
+    }
+
+    for claim_id in &proof_state.matched_claim_ids {
+        let Some(claim) = graph
+            .claims
+            .values()
+            .find(|candidate| candidate.id.as_str() == claim_id)
+        else {
+            continue;
+        };
+        for gap in &claim.proof_gaps {
+            gaps.push(PassportGap {
+                category: "proof",
+                status: gap_status_label(gap.status),
+                summary: format!("{}: {}", gap.id, gap.summary),
+                target_truth_source: gap.target_truth_source.as_str().to_owned(),
+                provenance: PassportProvenance {
+                    field: "proof_state",
+                    source: "proof_graph",
+                    source_ref: claim.id.to_string(),
+                },
+            });
+        }
+    }
+
+    if let Some(rationale) = loaded.manifest.connector.status.non_live_rationale() {
+        gaps.push(PassportGap {
+            category: "connector-status",
+            status: "blocked",
+            summary: format!(
+                "Manifest status `{}` is hidden or non-live: {rationale}.",
+                loaded.manifest.connector.status
+            ),
+            target_truth_source: "manifest".to_owned(),
+            provenance: PassportProvenance {
+                field: "connector.status",
+                source: "manifest",
+                source_ref: manifest_path.clone(),
+            },
+        });
+    }
+
+    if loaded.manifest.sandbox.deny_exec {
+        if !loaded.manifest.sandbox.deny_ptrace {
+            gaps.push(sandbox_gap(
+                "ptrace is not denied",
+                "sandbox.deny_ptrace",
+                &manifest_path,
+            ));
+        }
+    } else {
+        gaps.push(sandbox_gap(
+            "process execution is not denied",
+            "sandbox.deny_exec",
+            &manifest_path,
+        ));
+    }
+
+    let proof_signals = passport_proof_signals(graph, &passport_manifest_selectors(loaded));
+    if proof_signals.readme_contract.state == "missing" {
+        gaps.push(signal_gap(
+            "readme-contract",
+            "README contract status is not represented in the matched ProofGraph claims",
+            graph,
+        ));
+    }
+    if proof_signals.secretless_readiness.state == "missing" {
+        gaps.push(signal_gap(
+            "secretless-readiness",
+            "Secretless readiness is not represented in the matched ProofGraph claims",
+            graph,
+        ));
+    }
+    if proof_signals.host_or_introspection.state == "missing" {
+        gaps.push(signal_gap(
+            "host-introspection",
+            "Host-backed readiness or introspection evidence is not represented in the matched ProofGraph claims",
+            graph,
+        ));
+    }
+
+    for operation in operations {
+        if operation.input_schema_state != "declared" {
+            gaps.push(operation_gap(
+                "input-schema",
+                operation.input_schema_state,
+                operation,
+                "input schema is not fully declared",
+                &manifest_path,
+            ));
+        }
+        if operation.output_schema_state != "declared" {
+            gaps.push(operation_gap(
+                "output-schema",
+                operation.output_schema_state,
+                operation,
+                "output schema is not fully declared",
+                &manifest_path,
+            ));
+        }
+        if operation.network_posture.state != "declared" {
+            gaps.push(operation_gap(
+                "network-posture",
+                operation.network_posture.state,
+                operation,
+                "network posture is missing from the manifest",
+                &manifest_path,
+            ));
+        }
+        if operation.ai_hints_state.state != "declared" {
+            gaps.push(operation_gap(
+                "ai-hints",
+                operation.ai_hints_state.state,
+                operation,
+                "agent usage hints are incomplete",
+                &manifest_path,
+            ));
+        }
+    }
+
+    gaps.sort_by_key(|gap| (gap.category, gap.status, gap.summary.clone()));
+    gaps
+}
+
+fn signal_gap(category: &'static str, summary: &str, graph: &ProofGraph) -> PassportGap {
+    PassportGap {
+        category,
+        status: "missing",
+        summary: summary.to_owned(),
+        target_truth_source: "proof_graph".to_owned(),
+        provenance: PassportProvenance {
+            field: "proof_signals",
+            source: "proof_graph",
+            source_ref: graph.schema.clone(),
+        },
+    }
+}
+
+fn sandbox_gap(summary: &str, field: &'static str, manifest_path: &str) -> PassportGap {
+    PassportGap {
+        category: "sandbox-posture",
+        status: "weak",
+        summary: format!("Manifest sandbox posture is weak: {summary}."),
+        target_truth_source: "manifest".to_owned(),
+        provenance: PassportProvenance {
+            field,
+            source: "manifest",
+            source_ref: manifest_path.to_owned(),
+        },
+    }
+}
+
+fn operation_gap(
+    category: &'static str,
+    status: &'static str,
+    operation: &PassportOperation,
+    reason: &str,
+    manifest_path: &str,
+) -> PassportGap {
+    PassportGap {
+        category,
+        status,
+        summary: format!("Operation `{}` {reason}.", operation.id),
+        target_truth_source: "manifest".to_owned(),
+        provenance: PassportProvenance {
+            field: "operations",
+            source: "manifest",
+            source_ref: manifest_path.to_owned(),
+        },
+    }
+}
+
+fn passport_risk_summary(
+    operations: &[PassportOperation],
+    proof_gap_count: usize,
+) -> PassportRiskSummary {
+    PassportRiskSummary {
+        max_risk_level: operations
+            .iter()
+            .map(|operation| operation.risk_level)
+            .max_by_key(|risk| risk_label_rank(risk))
+            .unwrap_or("low"),
+        max_safety_tier: operations
+            .iter()
+            .map(|operation| operation.safety_tier)
+            .max_by_key(|tier| safety_tier_rank(tier))
+            .unwrap_or("safe"),
+        operation_count: operations.len(),
+        approval_required_count: operations
+            .iter()
+            .filter(|operation| operation.requires_approval != "none")
+            .count(),
+        network_posture_gap_count: operations
+            .iter()
+            .filter(|operation| operation.network_posture.state != "declared")
+            .count(),
+        ai_hints_gap_count: operations
+            .iter()
+            .filter(|operation| operation.ai_hints_state.state != "declared")
+            .count(),
+        proof_gap_count,
+    }
+}
+
+fn passport_summary(passports: &[CapabilityPassport]) -> Value {
+    json!({
+        "passports": passports.len(),
+        "connectors": passports
+            .iter()
+            .map(|passport| passport.connector.id.clone())
+            .collect::<Vec<_>>(),
+        "operations": passports
+            .iter()
+            .map(|passport| passport.operations.len())
+            .sum::<usize>(),
+        "gaps": passports
+            .iter()
+            .map(|passport| passport.gaps.len())
+            .sum::<usize>(),
+        "connectors_with_unmatched_proof_state": passports
+            .iter()
+            .filter(|passport| passport.proof_state.matched_claim_ids.is_empty())
+            .count(),
+    })
+}
+
+fn passport_manifest_selectors(manifest: &LoadedManifest) -> BTreeSet<String> {
+    let connector_id = manifest.manifest.connector.id.as_str();
+    let slug = connector_slug(connector_id);
+    [
+        connector_id,
+        connector_id.strip_prefix("fcp.").unwrap_or(connector_id),
+        slug.as_str(),
+        manifest.manifest.connector.name.as_str(),
+    ]
+    .into_iter()
+    .map(normalize_passport_selector)
+    .collect()
+}
+
+fn claim_matches_connector(claim: &ClaimNode, selectors: &BTreeSet<String>) -> bool {
+    let haystacks = std::iter::once(claim.id.as_str())
+        .chain(std::iter::once(claim.title.as_str()))
+        .chain(std::iter::once(claim.statement.as_str()))
+        .chain(claim.tags.iter().map(String::as_str))
+        .map(normalize_passport_selector)
+        .collect::<Vec<_>>();
+
+    selectors.iter().any(|selector| {
+        haystacks
+            .iter()
+            .any(|haystack| haystack == selector || haystack.contains(selector))
+    })
+}
+
+fn connector_slug(connector_id: &str) -> String {
+    connector_id
+        .strip_prefix("fcp.")
+        .unwrap_or(connector_id)
+        .to_owned()
+}
+
+fn normalize_passport_selector(value: &str) -> String {
+    let mut normalized = String::new();
+    let mut last_was_dash = false;
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch);
+            last_was_dash = false;
+        } else if !last_was_dash {
+            normalized.push('-');
+            last_was_dash = true;
+        }
+    }
+    normalized.trim_matches('-').to_owned()
+}
+
+fn capability_strings(caps: &[fcp_core::CapabilityId]) -> Vec<String> {
+    caps.iter()
+        .map(|capability| capability.as_str().to_owned())
+        .collect()
+}
+
+fn operation_capabilities(operations: &[PassportOperation]) -> Vec<String> {
+    operations
+        .iter()
+        .map(|operation| operation.capability.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn schema_state(value: &Value) -> &'static str {
+    if value.is_null() {
+        return "missing";
+    }
+    if value.as_object().is_some_and(serde_json::Map::is_empty) {
+        return "unknown";
+    }
+    "declared"
+}
+
+fn network_posture(operation: &OperationSection) -> PassportNetworkPosture {
+    if let Some(network) = &operation.network_constraints {
+        PassportNetworkPosture {
+            state: "declared",
+            host_allow_count: network.host_allow.len(),
+            port_allow: network.port_allow.clone(),
+            deny_localhost: Some(network.deny_localhost),
+            deny_private_ranges: Some(network.deny_private_ranges),
+            deny_tailnet_ranges: Some(network.deny_tailnet_ranges),
+            require_sni: Some(network.require_sni),
+        }
+    } else {
+        PassportNetworkPosture {
+            state: "missing",
+            host_allow_count: 0,
+            port_allow: Vec::new(),
+            deny_localhost: None,
+            deny_private_ranges: None,
+            deny_tailnet_ranges: None,
+            require_sni: None,
+        }
+    }
+}
+
+fn ai_hints_state(operation: &OperationSection) -> PassportAiHintsState {
+    let has_when_to_use = !operation.ai_hints.when_to_use.trim().is_empty();
+    let has_examples = !operation.ai_hints.examples.is_empty();
+    PassportAiHintsState {
+        state: if has_when_to_use && has_examples {
+            "declared"
+        } else {
+            "missing"
+        },
+        has_when_to_use,
+        common_mistake_count: operation.ai_hints.common_mistakes.len(),
+        example_count: operation.ai_hints.examples.len(),
+        related_count: operation.ai_hints.related.len(),
+    }
+}
+
+fn runtime_format_label(format: &fcp_manifest::ConnectorRuntimeFormat) -> Result<String> {
+    manifest_enum_label(format).context("serializing connector runtime format")
+}
+
+fn manifest_enum_label<T>(value: &T) -> Result<String>
+where
+    T: Serialize,
+{
+    serde_json::to_value(value)
+        .context("serializing manifest enum")?
+        .as_str()
+        .map(std::borrow::ToOwned::to_owned)
+        .context("manifest enum did not serialize as a string")
+}
+
+fn approval_mode_label(mode: ManifestApprovalMode) -> &'static str {
+    match mode {
+        ManifestApprovalMode::None => "none",
+        ManifestApprovalMode::Policy => "policy",
+        ManifestApprovalMode::Interactive => "interactive",
+        ManifestApprovalMode::ElevationToken => "elevation-token",
+    }
+}
+
+fn risk_label_rank(label: &str) -> u8 {
+    match label {
+        "critical" => 4,
+        "high" => 3,
+        "medium" => 2,
+        "low" => 1,
+        _ => 0,
+    }
+}
+
+fn safety_tier_rank(label: &str) -> u8 {
+    match label {
+        "forbidden" => 5,
+        "critical" => 4,
+        "dangerous" => 3,
+        "risky" => 2,
+        "safe" => 1,
+        _ => 0,
+    }
+}
+
+fn sandbox_posture(manifest: &ConnectorManifest) -> &'static str {
+    if manifest.sandbox.deny_exec
+        && manifest.sandbox.deny_ptrace
+        && matches!(
+            manifest.sandbox.profile,
+            fcp_manifest::SandboxProfile::Strict | fcp_manifest::SandboxProfile::StrictPlus
+        )
+    {
+        "strict"
+    } else if manifest.sandbox.deny_exec && manifest.sandbox.deny_ptrace {
+        "constrained"
+    } else {
+        "weak"
+    }
+}
+
+fn evidence_kind_label(kind: EvidenceKind) -> &'static str {
+    match kind {
+        EvidenceKind::MeshExecution => "mesh_execution",
+        EvidenceKind::HostIntegration => "host_integration",
+        EvidenceKind::NodeLocalRun => "node_local_run",
+        EvidenceKind::OfflineArtifact => "offline_artifact",
+        EvidenceKind::RepositoryObject => "repository_object",
+        EvidenceKind::OperatorRecord => "operator_record",
+        EvidenceKind::Documentation => "documentation",
+    }
+}
+
+fn normalized_claim_text(claim: &ClaimNode) -> String {
+    let mut text = format!("{} {} {}", claim.id, claim.title, claim.statement);
+    for tag in &claim.tags {
+        text.push(' ');
+        text.push_str(tag);
+    }
+    normalize_passport_selector(&text)
+}
+
+fn normalized_evidence_text(evidence: &EvidenceNode) -> String {
+    normalize_passport_selector(&format!("{} {}", evidence.summary, evidence.source_ref))
 }
 
 fn ranked_actions(graph: &ProofGraph, now_unix_ms: u64, limit: usize) -> Vec<RankedProofAction> {
@@ -945,6 +2036,113 @@ mod tests {
         file
     }
 
+    fn write_manifest(raw: &str) -> NamedTempFile {
+        let file = NamedTempFile::new().expect("create temp manifest");
+        std::fs::write(file.path(), raw).expect("write manifest");
+        file
+    }
+
+    fn github_passport_corpus() -> ProofGraphCorpus {
+        ProofGraphCorpus {
+            schema: PROOF_GRAPH_INDEXER_CORPUS_SCHEMA.to_owned(),
+            readme_rows: vec![readme_row("github", "GitHub Connector", "PROVEN", 20)],
+            bead_issues: vec![issue("github", "flywheel_connectors-b88ec.4", NOW - DAY_MS)],
+            verification_scripts: vec![VerificationScriptRecord {
+                claim_key: "github".to_owned(),
+                script_path: "connectors/github/tests/passport.rs".to_owned(),
+                purpose: "Run GitHub connector passport proof".to_owned(),
+                rerun_argv: vec![
+                    "cargo".to_owned(),
+                    "test".to_owned(),
+                    "-p".to_owned(),
+                    "fcp-github".to_owned(),
+                    "passport".to_owned(),
+                ],
+                required_env_keys: BTreeSet::new(),
+                source: source("connectors/github/tests/passport.rs", 1),
+            }],
+            readiness_rows: vec![
+                ReadinessMatrixRow {
+                    claim_key: "github-secretless".to_owned(),
+                    subject: "GitHub secretless readiness".to_owned(),
+                    state: "pass".to_owned(),
+                    truth_source: TruthSource::HostBacked,
+                    rerun_argv: None,
+                    source: source("crates/fwc/tests/github_secretless.rs", 4),
+                },
+                ReadinessMatrixRow {
+                    claim_key: "github-introspection".to_owned(),
+                    subject: "GitHub manifest introspection".to_owned(),
+                    state: "pass".to_owned(),
+                    truth_source: TruthSource::HostBacked,
+                    rerun_argv: None,
+                    source: source("crates/fwc/tests/github_introspection.rs", 5),
+                },
+            ],
+            evidence_bundles: Vec::new(),
+        }
+    }
+
+    fn github_manifest(extra_operation_sections: &str) -> String {
+        let interface_hash = format!("blake3-256:fcp.interface.v2:{}", "0".repeat(64));
+        format!(
+            r#"[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "{interface_hash}"
+
+[connector]
+id = "fcp.github"
+name = "GitHub Connector"
+version = "0.1.0"
+description = "FCP connector for GitHub"
+archetypes = ["operational"]
+format = "wasi"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns"]
+optional = ["github.read"]
+forbidden = ["system.exec"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+deny_exec = true
+deny_ptrace = true
+
+[provides.operations."github.get_issue"]
+description = "Get a single issue"
+capability = "github.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."github.get_issue".input_schema]
+type = "object"
+
+[provides.operations."github.get_issue".output_schema]
+type = "object"
+
+{extra_operation_sections}
+"#
+        )
+    }
+
     #[test]
     fn graph_outputs_machine_readable_claim_ids_and_evidence_counts() {
         let file = write_corpus(&fixture_corpus());
@@ -1048,5 +2246,169 @@ mod tests {
             argv.iter()
                 .any(|arg| arg.starts_with("CARGO_TARGET_DIR=/tmp/fwc-proof-"))
         );
+    }
+
+    #[test]
+    fn passport_outputs_manifest_backed_connector_proof_state() {
+        let corpus = write_corpus(&github_passport_corpus());
+        let manifest = write_manifest(&github_manifest(
+            r#"[provides.operations."github.get_issue".network_constraints]
+host_allow = ["api.github.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+
+[provides.operations."github.get_issue".ai_hints]
+when_to_use = "Read a GitHub issue by owner, repo, and issue number."
+common_mistakes = ["Using the database id instead of issue_number"]
+examples = ['{"owner":"octocat","repo":"hello-world","issue_number":42}']
+related = ["github.search_issues"]
+"#,
+        ));
+
+        let result = run(&ProofArgs {
+            command: ProofCommand::Passport(ProofPassportArgs {
+                corpus: corpus_args(corpus.path()),
+                manifests: vec![manifest.path().to_path_buf()],
+                connector: Some("github".to_owned()),
+            }),
+        })
+        .expect("run proof passport");
+
+        assert!(result.success);
+        assert_eq!(result.payload["schema_version"], CAPABILITY_PASSPORT_SCHEMA);
+        let passport = &result.payload["passports"][0];
+        assert_eq!(passport["connector"]["id"], "fcp.github");
+        assert_eq!(passport["operations"][0]["capability"], "github.read");
+        assert_eq!(passport["sandbox"]["posture"], "strict");
+        assert_eq!(
+            passport["operations"][0]["network_posture"]["state"],
+            "declared"
+        );
+        assert_eq!(
+            passport["operations"][0]["ai_hints_state"]["state"],
+            "declared"
+        );
+        assert!(
+            passport["proof_state"]["matched_claim_ids"]
+                .as_array()
+                .expect("matched claim ids")
+                .iter()
+                .any(|value| value == "claim:github")
+        );
+        assert_eq!(passport["proof_state"]["state"], "missing");
+        assert_eq!(
+            passport["proof_state"]["evidence_by_kind"]["host_integration"],
+            2
+        );
+        assert_eq!(
+            passport["proof_signals"]["readme_contract"]["state"],
+            "partial"
+        );
+        assert_eq!(
+            passport["proof_signals"]["secretless_readiness"]["state"],
+            "supported"
+        );
+        assert_eq!(
+            passport["proof_signals"]["host_or_introspection"]["state"],
+            "supported"
+        );
+        assert_eq!(passport["risk_summary"]["network_posture_gap_count"], 0);
+        assert_eq!(passport["risk_summary"]["ai_hints_gap_count"], 0);
+    }
+
+    #[test]
+    fn passport_reports_missing_network_hints_and_unmatched_proof_as_gaps() {
+        let corpus = write_corpus(&ProofGraphCorpus::default());
+        let manifest = write_manifest(&github_manifest(""));
+
+        let result = run(&ProofArgs {
+            command: ProofCommand::Passport(ProofPassportArgs {
+                corpus: corpus_args(corpus.path()),
+                manifests: vec![manifest.path().to_path_buf()],
+                connector: Some("github".to_owned()),
+            }),
+        })
+        .expect("run proof passport");
+
+        assert!(result.success);
+        let passport = &result.payload["passports"][0];
+        let categories = passport["gaps"]
+            .as_array()
+            .expect("gaps array")
+            .iter()
+            .map(|gap| gap["category"].as_str().expect("gap category"))
+            .collect::<BTreeSet<_>>();
+
+        assert!(categories.contains("proof-state"));
+        assert!(categories.contains("network-posture"));
+        assert!(categories.contains("ai-hints"));
+        assert!(categories.contains("readme-contract"));
+        assert!(categories.contains("secretless-readiness"));
+        assert!(categories.contains("host-introspection"));
+        assert_eq!(
+            passport["operations"][0]["network_posture"]["state"],
+            "missing"
+        );
+        assert_eq!(
+            passport["operations"][0]["ai_hints_state"]["state"],
+            "missing"
+        );
+        assert_eq!(
+            result.payload["summary"]["connectors_with_unmatched_proof_state"],
+            1
+        );
+    }
+
+    #[test]
+    fn passport_reports_incubating_connector_and_weak_sandbox_posture() {
+        let corpus = write_corpus(&github_passport_corpus());
+        let manifest_body = github_manifest(
+            r#"[provides.operations."github.get_issue".network_constraints]
+host_allow = ["api.github.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+
+[provides.operations."github.get_issue".ai_hints]
+when_to_use = "Read a GitHub issue by owner, repo, and issue number."
+examples = ['{"owner":"octocat","repo":"hello-world","issue_number":42}']
+"#,
+        )
+        .replace(
+            "format = \"wasi\"",
+            "format = \"wasi\"\nstatus = \"incubating\"",
+        )
+        .replace("deny_exec = true", "deny_exec = false");
+        let manifest = write_manifest(&manifest_body);
+
+        let result = run(&ProofArgs {
+            command: ProofCommand::Passport(ProofPassportArgs {
+                corpus: corpus_args(corpus.path()),
+                manifests: vec![manifest.path().to_path_buf()],
+                connector: Some("github".to_owned()),
+            }),
+        })
+        .expect("run proof passport");
+
+        assert!(result.success);
+        let passport = &result.payload["passports"][0];
+        assert_eq!(passport["connector"]["hidden_by_default"], true);
+        assert_eq!(passport["connector"]["status"], "incubating");
+        assert_eq!(passport["sandbox"]["posture"], "weak");
+
+        let categories = passport["gaps"]
+            .as_array()
+            .expect("gaps array")
+            .iter()
+            .map(|gap| gap["category"].as_str().expect("gap category"))
+            .collect::<BTreeSet<_>>();
+
+        assert!(categories.contains("connector-status"));
+        assert!(categories.contains("sandbox-posture"));
     }
 }

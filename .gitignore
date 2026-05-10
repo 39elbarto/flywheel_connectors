@@ -170,6 +170,13 @@ parse_test.rs
 .codex/
 .codex-tmp/
 
+# Agent CLI write-probe artifacts. Codex (and adjacent agent CLIs) drop a
+# zero-byte probe file at session start to test working-tree writeability;
+# `.ec` is a 2-byte session-status marker some agent helpers leave behind.
+# Both recur per session and must never land in git history.
+.codex-write-probe
+.ec
+
 # Remote compilation helper cache
 .rch/*
 !.rch/

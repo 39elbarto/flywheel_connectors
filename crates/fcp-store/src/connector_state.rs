@@ -52,6 +52,7 @@ pub const CONNECTOR_STATE_FALL_THROUGH_TOTAL_METRIC: &str =
 /// Histogram for connector-state operation latency in seconds.
 pub const CONNECTOR_STATE_LATENCY_SECONDS_METRIC: &str = "fcp_connector_state_latency_seconds";
 const CONNECTOR_STATE_CHANGE_BUFFER_CAPACITY: usize = 1_024;
+const DEFAULT_SNAPSHOT_EVERY_SECS: u64 = 24 * 60 * 60;
 
 /// Errors returned by [`FcpStoreConnectorStateStore`].
 #[derive(Debug, Error)]
@@ -134,6 +135,7 @@ pub struct FcpStoreConnectorStateStore {
     state_model: ConnectorStateModel,
     retention: RetentionClass,
     snapshot_every_entries: u64,
+    snapshot_every_secs: u64,
     change_tx: broadcast::Sender<ConnectorStateChange>,
 }
 
@@ -156,6 +158,7 @@ impl FcpStoreConnectorStateStore {
             state_model: ConnectorStateModel::SingletonWriter,
             retention: RetentionClass::Pinned,
             snapshot_every_entries: 1_000,
+            snapshot_every_secs: DEFAULT_SNAPSHOT_EVERY_SECS,
             change_tx,
         }
     }
@@ -181,10 +184,21 @@ impl FcpStoreConnectorStateStore {
         self
     }
 
-    /// Emit a snapshot every N committed state objects. Zero disables automatic snapshots.
+    /// Emit a snapshot every N committed state objects.
+    ///
+    /// Zero disables count-based snapshots but leaves the elapsed-time policy unchanged.
     #[must_use]
     pub const fn with_snapshot_every_entries(mut self, snapshot_every_entries: u64) -> Self {
         self.snapshot_every_entries = snapshot_every_entries;
+        self
+    }
+
+    /// Emit a snapshot when the latest snapshot is older than N seconds.
+    ///
+    /// Zero disables elapsed-time snapshots but leaves the count-based policy unchanged.
+    #[must_use]
+    pub const fn with_snapshot_every_secs(mut self, snapshot_every_secs: u64) -> Self {
+        self.snapshot_every_secs = snapshot_every_secs;
         self
     }
 
@@ -577,13 +591,27 @@ impl FcpStoreConnectorStateStore {
         object_id: ObjectId,
         state_obj: &ConnectorStateObject,
     ) -> Result<Option<ObjectId>> {
-        if self.snapshot_every_entries == 0 {
-            return Ok(None);
-        }
-        if (state_obj.seq + 1) % self.snapshot_every_entries != 0 {
+        let entries_due = self.snapshot_every_entries != 0
+            && state_obj
+                .seq
+                .checked_add(1)
+                .is_some_and(|entries| entries % self.snapshot_every_entries == 0);
+        if !entries_due && !self.elapsed_snapshot_due(state_obj).await? {
             return Ok(None);
         }
         self.emit_snapshot(object_id, state_obj).await.map(Some)
+    }
+
+    async fn elapsed_snapshot_due(&self, state_obj: &ConnectorStateObject) -> Result<bool> {
+        if self.snapshot_every_secs == 0 {
+            return Ok(false);
+        }
+        let Some((_snapshot_id, latest)) = self.latest_snapshot().await? else {
+            return Ok(false);
+        };
+        Ok(state_obj.seq > latest.covers_seq
+            && state_obj.updated_at.saturating_sub(latest.snapshotted_at)
+                >= self.snapshot_every_secs)
     }
 
     async fn emit_snapshot(
@@ -1597,6 +1625,42 @@ mod tests {
         assert!(second_snapshot.is_some());
         let latest = run_async(state_store.latest_snapshot()).unwrap().unwrap();
         assert_eq!(latest.1.covers_seq, 1);
+    }
+
+    #[test]
+    fn automatic_snapshot_emits_after_elapsed_interval() {
+        let state_store = test_store(store()).with_snapshot_every_entries(0);
+        let (head0, first_snapshot) = append_ok(&state_store, state(0, None, lease_id(1)));
+        assert!(first_snapshot.is_none());
+        let first_snapshot_id = run_async(state_store.snapshot_head()).unwrap().unwrap();
+        let first_snapshot = run_async(state_store.latest_snapshot()).unwrap().unwrap();
+        assert_eq!(first_snapshot.0, first_snapshot_id);
+        assert_eq!(first_snapshot.1.covers_seq, 0);
+
+        let mut stale_state = state(1, Some(head0), lease_id(2));
+        stale_state.updated_at = first_snapshot.1.snapshotted_at + DEFAULT_SNAPSHOT_EVERY_SECS;
+        let (_head1, second_snapshot) = append_ok(&state_store, stale_state);
+
+        assert!(second_snapshot.is_some());
+        let latest = run_async(state_store.latest_snapshot()).unwrap().unwrap();
+        assert_eq!(latest.1.covers_seq, 1);
+    }
+
+    #[test]
+    fn elapsed_snapshot_policy_can_be_disabled() {
+        let state_store = test_store(store())
+            .with_snapshot_every_entries(0)
+            .with_snapshot_every_secs(0);
+        let (head0, _) = append_ok(&state_store, state(0, None, lease_id(1)));
+        run_async(state_store.snapshot_head()).unwrap().unwrap();
+
+        let mut stale_state = state(1, Some(head0), lease_id(2));
+        stale_state.updated_at += DEFAULT_SNAPSHOT_EVERY_SECS * 2;
+        let (_head1, second_snapshot) = append_ok(&state_store, stale_state);
+
+        assert!(second_snapshot.is_none());
+        let latest = run_async(state_store.latest_snapshot()).unwrap().unwrap();
+        assert_eq!(latest.1.covers_seq, 0);
     }
 
     #[test]

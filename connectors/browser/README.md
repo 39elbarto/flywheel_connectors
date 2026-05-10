@@ -51,6 +51,7 @@ Important runtime truths the contract preserves:
 - Direct Chrome DevTools logs and descriptors use redacted endpoint URLs plus BLAKE3 target-id hashes rather than raw target IDs.
 - Direct Chrome DevTools operations acquire a single-owner Rust target/session manager lease before opening an operation-scoped CDP session.
 - The manager records current-tab ownership, stale-target recovery, command IDs, timeout/cancellation checkpoints, retry decisions, shutdown cleanup, and redacted session/cookie ownership metadata.
+- In direct-CDP mode, session save/restore acquire manager leases under `browser.session.save` and `browser.session.restore`, while session describe records the selected state object under `browser.session.describe` without reopening the network session.
 - Raw Chrome DevTools discovery endpoints such as `/json` and `/json/version` are rejected as `browser_url` values.
 - `wss://` direct DevTools WebSocket URLs are rejected until TLS WebSocket support is wired.
 - Direct Chrome DevTools WebSocket mode preserves page, cookie, and session operations, but `browser.set_proxy` and `browser.clear_proxy` fail closed with `proxy_unavailable_direct_cdp` unless the opt-in Rust-owned launcher supervisor is configured.
@@ -243,7 +244,7 @@ The verification surface captures:
 
 - runtime operation inventory and policy metadata
 - browser-control URL policy, control-plane headers, timeout budgets, and raw DevTools rejection
-- direct-CDP manager JSONL event coverage for manager start, target attach/detach, stale-target recovery, operation leases, command IDs, timeout/cancellation markers, dropped-lease cleanup, shutdown cleanup, and redacted session/cookie metadata
+- direct-CDP manager JSONL event coverage for manager start, target attach/detach, stale-target recovery, operation leases, command IDs, timeout/cancellation markers, dropped-lease cleanup, shutdown cleanup, and redacted session save/restore/describe metadata
 - host concurrency coverage proving a second direct-CDP invoke defers before CDP connection while the first invoke owns the manager lease for the same browser instance
 - capability-token and execution-approval enforcement for invoke
 - deterministic HTTP fixtures and real-browser e2e coverage

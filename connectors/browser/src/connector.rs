@@ -1644,7 +1644,7 @@ impl BrowserConnector {
         let lease_object_id = require_str(&input, "lease_object_id")?.to_string();
 
         let cookies = client
-            .get_cookies(domain.as_deref())
+            .session_save_cookies(domain.as_deref())
             .await
             .map_err(|e: BrowserError| e.to_fcp_error())?;
 
@@ -1777,7 +1777,7 @@ impl BrowserConnector {
         };
 
         let restored_count = client
-            .set_cookies(&record.payload.cookies)
+            .session_restore_cookies(&record.payload.cookies)
             .await
             .map_err(|e: BrowserError| e.to_fcp_error())?;
 
@@ -1841,6 +1841,17 @@ impl BrowserConnector {
                 drop(store);
                 (record, is_head)
             };
+
+        if let Some(client) = self.client.as_ref() {
+            client
+                .record_direct_cdp_session_object(
+                    "browser.session.describe",
+                    &record.state_object_id,
+                    record.lease_seq,
+                    record.payload.domain.as_deref(),
+                )
+                .map_err(|e: BrowserError| e.to_fcp_error())?;
+        }
 
         Ok(json!({
             "state_object_id": record.state_object_id,
@@ -2936,6 +2947,77 @@ mod tests {
         assert!(!after_shutdown.contains("private.example.test"));
         assert!(!after_shutdown.contains("post-shutdown-state-secret"));
         assert!(!after_shutdown.contains("after-shutdown.example.test"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_direct_cdp_session_describe_records_manager_state_without_network() {
+        let mut connector = BrowserConnector::new();
+        connector
+            .handle_configure(json!({
+                "browser_url": "ws://localhost:9222/devtools/page/session-describe-target-secret"
+            }))
+            .await
+            .unwrap();
+
+        let payload = BrowserSessionStatePayload {
+            schema_version: 1,
+            captured_at: current_unix_timestamp_secs(),
+            domain: Some("private.example.test".into()),
+            cookies: vec![Cookie {
+                name: "session".into(),
+                value: "secret-cookie-value".into(),
+                domain: Some("private.example.test".into()),
+                path: Some("/".into()),
+                expires: None,
+                http_only: Some(true),
+                secure: Some(true),
+                same_site: Some("Lax".into()),
+            }],
+        };
+        let payload_cbor = fcp_cbor::to_canonical_cbor(&payload).unwrap();
+        let state_object_id = "state-object-secret-describe".to_string();
+        {
+            let mut store = connector.session_store.lock().unwrap();
+            store.objects.insert(
+                state_object_id.clone(),
+                BrowserSessionStateObjectRecord {
+                    state_object_id: state_object_id.clone(),
+                    prev_state_object_id: None,
+                    seq: 0,
+                    lease_seq: 42,
+                    lease_object_id: "lease-object-secret-describe".into(),
+                    payload_cbor: payload_cbor.clone(),
+                    payload,
+                },
+            );
+            store.head_state_object_id = Some(state_object_id.clone());
+            store.last_seq = 0;
+            store.last_lease_seq = 42;
+        }
+
+        let described = connector
+            .invoke_session_describe(json!({ "state_object_id": state_object_id }))
+            .await
+            .unwrap();
+
+        assert_eq!(described["cookie_count"], 1);
+        assert_eq!(described["lease_seq"], 42);
+        assert_eq!(described["is_head"], true);
+        let jsonl = connector
+            .client
+            .as_ref()
+            .unwrap()
+            .direct_cdp_manager_events_jsonl()
+            .unwrap();
+        assert!(jsonl.contains("\"operation_id\":\"browser.session.describe\""));
+        assert!(jsonl.contains("\"event_kind\":\"session_object_recorded\""));
+        assert!(jsonl.contains("\"session_lease_seq\":42"));
+        assert!(jsonl.contains("\"session_object_id_hash\":\"blake3:"));
+        assert!(!jsonl.contains("session-describe-target-secret"));
+        assert!(!jsonl.contains("state-object-secret-describe"));
+        assert!(!jsonl.contains("lease-object-secret-describe"));
+        assert!(!jsonl.contains("private.example.test"));
+        assert!(!jsonl.contains("secret-cookie-value"));
     }
 
     #[fcp_async_core::runtime::test]

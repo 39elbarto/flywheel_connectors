@@ -4523,17 +4523,19 @@ impl BrowserClient {
         .await
     }
 
-    async fn direct_cdp_get_cookies(
+    async fn direct_cdp_get_cookies_with_operation(
         &self,
         endpoint: &DirectCdpEndpoint,
+        operation_id: &'static str,
+        context_operation: &'static str,
         domain: Option<&str>,
     ) -> BrowserResult<Vec<Cookie>> {
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
         let domain = domain.map(str::to_string);
         self.direct_cdp_session_operation(
             endpoint,
-            "browser.get_cookies",
-            "get_cookies",
+            operation_id,
+            context_operation,
             timeout,
             CONTROL_RESPONSE_BYTES_STANDARD,
             |cx, session| {
@@ -4548,17 +4550,33 @@ impl BrowserClient {
         .await
     }
 
-    async fn direct_cdp_set_cookies(
+    async fn direct_cdp_get_cookies(
         &self,
         endpoint: &DirectCdpEndpoint,
+        domain: Option<&str>,
+    ) -> BrowserResult<Vec<Cookie>> {
+        self.direct_cdp_get_cookies_with_operation(
+            endpoint,
+            "browser.get_cookies",
+            "get_cookies",
+            domain,
+        )
+        .await
+    }
+
+    async fn direct_cdp_set_cookies_with_operation(
+        &self,
+        endpoint: &DirectCdpEndpoint,
+        operation_id: &'static str,
+        context_operation: &'static str,
         cookies: &[Cookie],
     ) -> BrowserResult<u32> {
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
         let cookies = cookies.to_vec();
         self.direct_cdp_session_operation(
             endpoint,
-            "browser.set_cookies",
-            "set_cookies",
+            operation_id,
+            context_operation,
             timeout,
             CONTROL_RESPONSE_BYTES_STANDARD,
             |cx, session| {
@@ -4569,6 +4587,20 @@ impl BrowserClient {
                         .map(|response| response.set_count)
                 })
             },
+        )
+        .await
+    }
+
+    async fn direct_cdp_set_cookies(
+        &self,
+        endpoint: &DirectCdpEndpoint,
+        cookies: &[Cookie],
+    ) -> BrowserResult<u32> {
+        self.direct_cdp_set_cookies_with_operation(
+            endpoint,
+            "browser.set_cookies",
+            "set_cookies",
+            cookies,
         )
         .await
     }
@@ -4814,6 +4846,39 @@ impl BrowserClient {
         let data = self.post_json(WORKER_SET_COOKIES, &body).await?;
         let count = data.get("set_count").and_then(|v| v.as_u64()).unwrap_or(0);
         Ok(count as u32)
+    }
+
+    pub(crate) async fn session_save_cookies(
+        &self,
+        domain: Option<&str>,
+    ) -> BrowserResult<Vec<Cookie>> {
+        if let BrowserControlEndpoint::DirectCdp(endpoint) = self.control_endpoint()? {
+            return self
+                .direct_cdp_get_cookies_with_operation(
+                    &endpoint,
+                    "browser.session.save",
+                    "session_save",
+                    domain,
+                )
+                .await;
+        }
+
+        self.get_cookies(domain).await
+    }
+
+    pub(crate) async fn session_restore_cookies(&self, cookies: &[Cookie]) -> BrowserResult<u32> {
+        if let BrowserControlEndpoint::DirectCdp(endpoint) = self.control_endpoint()? {
+            return self
+                .direct_cdp_set_cookies_with_operation(
+                    &endpoint,
+                    "browser.session.restore",
+                    "session_restore",
+                    cookies,
+                )
+                .await;
+        }
+
+        self.set_cookies(cookies).await
     }
 
     // -- Proxy --
@@ -5558,7 +5623,7 @@ fn looks_like_chrome_cdp_version(body: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
+    use std::collections::{BTreeSet, VecDeque};
 
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -5904,6 +5969,147 @@ mod tests {
         Ok(())
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn test_direct_cdp_session_cookie_helpers_use_session_operation_ids() -> BrowserResult<()>
+    {
+        let client = BrowserClient::new(None)?
+            .with_browser_url("ws://127.0.0.1:9/devtools/page/session-operation-target-secret");
+
+        let save_error = client
+            .session_save_cookies(Some("private.example.test"))
+            .await
+            .unwrap_err();
+        assert!(!format!("{save_error}").contains("private.example.test"));
+
+        let restore_error = client
+            .session_restore_cookies(&[Cookie {
+                name: "session".into(),
+                value: "secret-cookie-value".into(),
+                domain: Some("private.example.test".into()),
+                path: Some("/".into()),
+                expires: None,
+                http_only: Some(true),
+                secure: Some(true),
+                same_site: Some("Lax".into()),
+            }])
+            .await
+            .unwrap_err();
+        assert!(!format!("{restore_error}").contains("secret-cookie-value"));
+
+        let jsonl = client.direct_cdp_manager_events_jsonl()?;
+        assert!(jsonl.contains("\"operation_id\":\"browser.session.save\""));
+        assert!(jsonl.contains("\"operation_id\":\"browser.session.restore\""));
+        assert!(jsonl.contains("\"event_kind\":\"operation_failed\""));
+        assert!(jsonl.contains("\"cleanup_result\":\"connect_failed_cleanup\""));
+        assert!(!jsonl.contains("\"operation_id\":\"browser.get_cookies\""));
+        assert!(!jsonl.contains("\"operation_id\":\"browser.set_cookies\""));
+        assert!(!jsonl.contains("session-operation-target-secret"));
+        assert!(!jsonl.contains("private.example.test"));
+        assert!(!jsonl.contains("secret-cookie-value"));
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_direct_cdp_all_client_operations_acquire_manager_lease_before_network()
+    -> BrowserResult<()> {
+        let client = BrowserClient::new(None)?
+            .with_browser_url("ws://127.0.0.1:9/devtools/page/all-operation-target-secret");
+        let cookies = [Cookie {
+            name: "session".into(),
+            value: "secret-cookie-value".into(),
+            domain: Some("private.example.test".into()),
+            path: Some("/".into()),
+            expires: None,
+            http_only: Some(true),
+            secure: Some(true),
+            same_site: Some("Lax".into()),
+        }];
+
+        assert!(client.health_check().await.is_err());
+        assert!(
+            client
+                .navigate("https://private.example.test/secret", None, Some(1), None)
+                .await
+                .is_err()
+        );
+        assert!(client.screenshot(None, None, None, None).await.is_err());
+        assert!(client.render_pdf(None, None, None).await.is_err());
+        assert!(client.extract_text(None, None).await.is_err());
+        assert!(client.extract_links(None).await.is_err());
+        assert!(
+            client
+                .wait_for_selector("#ready", Some("visible"), Some(1))
+                .await
+                .is_err()
+        );
+        assert!(client.click("#submit", Some(1)).await.is_err());
+        assert!(
+            client
+                .fill_form(
+                    &serde_json::json!({ "#email": "private@example.test" }),
+                    None
+                )
+                .await
+                .is_err()
+        );
+        assert!(client.evaluate_js("document.title").await.is_err());
+        assert!(
+            client
+                .get_cookies(Some("private.example.test"))
+                .await
+                .is_err()
+        );
+        assert!(client.set_cookies(&cookies).await.is_err());
+        assert!(
+            client
+                .session_save_cookies(Some("private.example.test"))
+                .await
+                .is_err()
+        );
+        assert!(client.session_restore_cookies(&cookies).await.is_err());
+
+        let jsonl = client.direct_cdp_manager_events_jsonl()?;
+        let operation_begins = jsonl
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|event| event["event_kind"] == "operation_begin")
+            .filter_map(|event| {
+                event["operation_id"]
+                    .as_str()
+                    .map(std::string::ToString::to_string)
+            })
+            .collect::<BTreeSet<_>>();
+
+        for operation in [
+            "browser.health_check",
+            "browser.navigate",
+            "browser.screenshot",
+            "browser.render_pdf",
+            "browser.extract_text",
+            "browser.extract_links",
+            "browser.wait_for_selector",
+            "browser.click",
+            "browser.fill_form",
+            "browser.evaluate_js",
+            "browser.get_cookies",
+            "browser.set_cookies",
+            "browser.session.save",
+            "browser.session.restore",
+        ] {
+            assert!(
+                operation_begins.contains(operation),
+                "missing manager operation_begin for {operation}: {operation_begins:?}"
+            );
+        }
+        assert!(!jsonl.contains("\"operation_id\":\"browser.set_proxy\""));
+        assert!(!jsonl.contains("\"operation_id\":\"browser.clear_proxy\""));
+        assert!(!jsonl.contains("all-operation-target-secret"));
+        assert!(!jsonl.contains("private.example.test"));
+        assert!(!jsonl.contains("private@example.test"));
+        assert!(!jsonl.contains("secret-cookie-value"));
+        Ok(())
+    }
+
     #[test]
     fn test_direct_cdp_manager_shutdown_releases_active_lease_without_orphan() -> BrowserResult<()>
     {
@@ -5999,6 +6205,13 @@ mod tests {
                 11,
                 Some("private.example.test"),
             )?;
+            guard.record_session_object(
+                &endpoint,
+                "browser.session.describe",
+                "session-object-secret-describe",
+                11,
+                Some("private.example.test"),
+            )?;
         }
 
         let mut screenshot = DirectCdpManagerLease::acquire(
@@ -6008,6 +6221,25 @@ mod tests {
             Duration::from_secs(60),
         )?;
         screenshot.finish(&[6, 7], "success", "session_closed_by_scope")?;
+
+        let operation_matrix: [(&str, &[u64]); 7] = [
+            ("browser.render_pdf", &[8, 9]),
+            ("browser.extract_text", &[10]),
+            ("browser.extract_links", &[11]),
+            ("browser.wait_for_selector", &[12, 13]),
+            ("browser.fill_form", &[14, 15, 16]),
+            ("browser.get_cookies", &[17]),
+            ("browser.set_cookies", &[18]),
+        ];
+        for (operation_id, cdp_command_ids) in operation_matrix {
+            let mut lease = DirectCdpManagerLease::acquire(
+                Arc::clone(&manager),
+                &replacement,
+                operation_id,
+                Duration::from_secs(30),
+            )?;
+            lease.finish(cdp_command_ids, "success", "session_closed_by_scope")?;
+        }
 
         let dropped = DirectCdpManagerLease::acquire(
             Arc::clone(&manager),
@@ -6056,12 +6288,21 @@ mod tests {
         }
         assert!(jsonl.contains("\"operation_id\":\"browser.navigate\""));
         assert!(jsonl.contains("\"operation_id\":\"browser.screenshot\""));
+        assert!(jsonl.contains("\"operation_id\":\"browser.render_pdf\""));
+        assert!(jsonl.contains("\"operation_id\":\"browser.extract_text\""));
+        assert!(jsonl.contains("\"operation_id\":\"browser.extract_links\""));
+        assert!(jsonl.contains("\"operation_id\":\"browser.wait_for_selector\""));
+        assert!(jsonl.contains("\"operation_id\":\"browser.fill_form\""));
         assert!(jsonl.contains("\"operation_id\":\"browser.click\""));
         assert!(jsonl.contains("\"operation_id\":\"browser.evaluate_js\""));
+        assert!(jsonl.contains("\"operation_id\":\"browser.get_cookies\""));
+        assert!(jsonl.contains("\"operation_id\":\"browser.set_cookies\""));
         assert!(jsonl.contains("\"operation_id\":\"browser.session.save\""));
         assert!(jsonl.contains("\"operation_id\":\"browser.session.restore\""));
+        assert!(jsonl.contains("\"operation_id\":\"browser.session.describe\""));
         assert!(jsonl.contains("\"cdp_command_ids\":[1,2,3,4,5]"));
         assert!(jsonl.contains("\"cdp_command_ids\":[6,7]"));
+        assert!(jsonl.contains("\"cdp_command_ids\":[14,15,16]"));
         assert!(jsonl.contains("\"cleanup_result\":\"lease_dropped_cleanup\""));
         assert!(jsonl.contains(
             "\"cleanup_result\":\"active_lease_released_targets_and_sessions_cleared_no_orphan\""
@@ -6083,10 +6324,18 @@ mod tests {
                 "operations_exercised": [
                     "browser.navigate",
                     "browser.screenshot",
+                    "browser.render_pdf",
+                    "browser.extract_text",
+                    "browser.extract_links",
+                    "browser.wait_for_selector",
                     "browser.click",
+                    "browser.fill_form",
                     "browser.evaluate_js",
+                    "browser.get_cookies",
+                    "browser.set_cookies",
                     "browser.session.save",
                     "browser.session.restore",
+                    "browser.session.describe",
                     "browser.shutdown"
                 ],
                 "redaction": {

@@ -4,7 +4,8 @@
 //! cache these objects, but this module is the content-addressed storage seam
 //! that host and SDK code can share as the mesh-native path lands.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ciborium::de::from_reader_with_recursion_limit;
@@ -149,7 +150,7 @@ pub struct FcpStoreConnectorStateStore {
     retention: RetentionClass,
     snapshot_every_entries: u64,
     snapshot_every_secs: u64,
-    change_tx: broadcast::Sender<ConnectorStateChange>,
+    change_bus: Arc<ConnectorStateChangeBus>,
 }
 
 impl FcpStoreConnectorStateStore {
@@ -161,7 +162,7 @@ impl FcpStoreConnectorStateStore {
         connector_id: ConnectorId,
         zone_id: ZoneId,
     ) -> Self {
-        let (change_tx, _change_rx) = broadcast::channel(CONNECTOR_STATE_CHANGE_BUFFER_CAPACITY);
+        let change_bus = shared_change_bus(&object_store, &connector_id, &zone_id);
         Self {
             object_store,
             object_id_key,
@@ -172,7 +173,7 @@ impl FcpStoreConnectorStateStore {
             retention: RetentionClass::Pinned,
             snapshot_every_entries: 1_000,
             snapshot_every_secs: DEFAULT_SNAPSHOT_EVERY_SECS,
-            change_tx,
+            change_bus,
         }
     }
 
@@ -1012,7 +1013,7 @@ impl FcpStoreConnectorStateStore {
             seq,
             observed_at: Self::now_unix_seconds(),
         };
-        let _ = self.change_tx.send(change);
+        let _ = self.change_bus.sender.send(change);
     }
 
     fn now_unix_seconds() -> u64 {
@@ -1138,7 +1139,7 @@ impl ConnectorStateStore for FcpStoreConnectorStateStore {
         connector_id: &ConnectorId,
     ) -> std::result::Result<ConnectorStateChangeStream, ConnectorStateError> {
         self.ensure_requested_connector(connector_id)?;
-        let receiver = self.change_tx.subscribe();
+        let receiver = self.change_bus.sender.subscribe();
         let connector_id = self.connector_id.clone();
         Ok(Box::pin(stream::unfold(receiver, move |mut receiver| {
             let connector_id = connector_id.clone();
@@ -1159,6 +1160,54 @@ impl ConnectorStateStore for FcpStoreConnectorStateStore {
             }
         })))
     }
+}
+
+#[derive(Debug)]
+struct ConnectorStateChangeBus {
+    sender: broadcast::Sender<ConnectorStateChange>,
+}
+
+impl ConnectorStateChangeBus {
+    fn new() -> Self {
+        let (sender, _receiver) = broadcast::channel(CONNECTOR_STATE_CHANGE_BUFFER_CAPACITY);
+        Self { sender }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ConnectorStateChangeBusKey {
+    object_store_addr: usize,
+    connector_id: String,
+    zone_id: String,
+}
+
+type ConnectorStateChangeBusRegistry =
+    parking_lot::Mutex<HashMap<ConnectorStateChangeBusKey, Weak<ConnectorStateChangeBus>>>;
+
+fn change_bus_registry() -> &'static ConnectorStateChangeBusRegistry {
+    static REGISTRY: OnceLock<ConnectorStateChangeBusRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+}
+
+fn shared_change_bus(
+    object_store: &Arc<dyn ObjectStore>,
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+) -> Arc<ConnectorStateChangeBus> {
+    let key = ConnectorStateChangeBusKey {
+        object_store_addr: Arc::as_ptr(object_store).cast::<()>() as usize,
+        connector_id: connector_id.to_string(),
+        zone_id: zone_id.as_str().to_owned(),
+    };
+    let mut registry = change_bus_registry().lock();
+    if let Some(existing) = registry.get(&key).and_then(Weak::upgrade) {
+        return existing;
+    }
+
+    let change_bus = Arc::new(ConnectorStateChangeBus::new());
+    registry.insert(key, Arc::downgrade(&change_bus));
+    registry.retain(|_, candidate| candidate.strong_count() > 0);
+    change_bus
 }
 
 fn headers_match(left: &ObjectHeader, right: &ObjectHeader) -> Result<bool> {
@@ -1707,6 +1756,44 @@ mod tests {
         assert_eq!(snapshot.kind, ConnectorStateChangeKind::SnapshotEmitted);
         assert_eq!(snapshot.object_id, Some(snapshot_object_id));
         assert_eq!(snapshot.seq, Some(0));
+    }
+
+    #[test]
+    fn subscribe_changes_reaches_independent_handles_for_same_store() {
+        let object_store = store();
+        let writer = test_store(object_store.clone())
+            .with_snapshot_every_entries(0)
+            .with_snapshot_every_secs(0);
+        let reader = test_store(object_store)
+            .with_snapshot_every_entries(0)
+            .with_snapshot_every_secs(0);
+        let mut changes = run_async(reader.subscribe_changes(&connector_id())).unwrap();
+
+        let outcome = run_async(writer.append_object(state(0, None, lease_id(1)))).unwrap();
+        let ConnectorStateAppendOutcome::Committed {
+            object_id,
+            root_object_id,
+            seq,
+            snapshot_object_id,
+        } = outcome
+        else {
+            panic!("unexpected conflict");
+        };
+        assert_eq!(seq, 0);
+        assert_eq!(snapshot_object_id, None);
+
+        let appended = run_async(changes.next()).unwrap().unwrap();
+        assert_eq!(appended.kind, ConnectorStateChangeKind::ObjectAppended);
+        assert_eq!(appended.object_id, Some(object_id));
+        assert_eq!(appended.seq, Some(0));
+
+        let root = run_async(changes.next()).unwrap().unwrap();
+        assert_eq!(root.kind, ConnectorStateChangeKind::RootUpdated);
+        assert_eq!(root.object_id, Some(root_object_id));
+        assert_eq!(root.seq, Some(0));
+
+        let reader_root = run_async(reader.read_root()).unwrap().expect("root");
+        assert_eq!(reader_root.1.head, Some(object_id));
     }
 
     #[test]

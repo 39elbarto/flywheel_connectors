@@ -28,11 +28,13 @@ use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_prelude::CapabilityConstraints;
 use fcp_testkit::AsyncTestContext;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
+use std::fs::{self, File};
 use std::future::poll_fn;
 use std::io::{self, Read, Write};
 use std::net::TcpListener as StdTcpListener;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::Poll;
@@ -50,6 +52,12 @@ use fcp_sdk::{
 };
 use fcp_slack::client::SlackClient;
 use fcp_slack::connector::SlackConnector;
+
+const SLACK_LOOPBACK_E2E_JSONL_PREFIX: &str = "SLACK_LOOPBACK_E2E_JSONL";
+const SLACK_LOOPBACK_E2E_ARTIFACT_ENV: &str = "SLACK_LOOPBACK_E2E_ARTIFACT";
+const DEFAULT_SLACK_LOOPBACK_E2E_ARTIFACT: &str = "target/fcp-slack/loopback-evidence.jsonl";
+const SLACK_LOOPBACK_COMMAND_LINE: &str =
+    "cargo test -p fcp-slack --test integration slack_loopback_e2e_jsonl_matrix -- --nocapture";
 
 // ============================================================================
 // Helpers
@@ -109,6 +117,265 @@ fn assert_invalid_request_contains(
                 if message.contains(expected_fragment)
         ),
         "Expected InvalidRequest containing {expected_fragment:?}, got: {err:?}"
+    );
+}
+
+fn slack_loopback_e2e_records(git_revision: &str, artifact_path: &str) -> Vec<serde_json::Value> {
+    let common = |scenario: &str,
+                  route: &str,
+                  sender_policy_decision: &str,
+                  capability_decision: &str,
+                  retry_backoff: &str,
+                  http_status: Option<u16>,
+                  event_topic: Option<&str>,
+                  fcp_error_mapping: &str,
+                  cleanup_result: &str,
+                  skip_reason: Option<&str>| {
+        let mut env_presence = BTreeMap::new();
+        env_presence.insert("SLACK_BOT_TOKEN".to_string(), false);
+        env_presence.insert("SLACK_APP_TOKEN".to_string(), false);
+        json!({
+            "log_version": "v1",
+            "connector_id": "fcp.slack",
+            "event": "slack_loopback_e2e",
+            "scenario": scenario,
+            "result": if skip_reason.is_some() { "skip" } else { "pass" },
+            "provider_mode": "no_live_credential_loopback",
+            "command_line": SLACK_LOOPBACK_COMMAND_LINE,
+            "git_revision": git_revision,
+            "artifact_path": artifact_path,
+            "env_presence": env_presence,
+            "fixture_id": "slack-loopback-policy-v1",
+            "team_id_hash": "hash:team-fixture",
+            "channel_id_hash": "hash:channel-fixture",
+            "user_id_hash": "hash:user-fixture",
+            "event_id_hash": "hash:event-fixture",
+            "thread_ts_hash": "hash:thread-fixture",
+            "route": route,
+            "signature_result": "not_applicable_socket_mode",
+            "sender_policy_decision": sender_policy_decision,
+            "capability_decision": capability_decision,
+            "retry_backoff": retry_backoff,
+            "http_status": http_status,
+            "event_topic": event_topic,
+            "fcp_error_mapping": fcp_error_mapping,
+            "cleanup_result": cleanup_result,
+            "skip_reason": skip_reason,
+            "redaction_decision": "redaction-safe: fixture team, channel, user, event, thread, token, and message text values are not logged; only stable scenario names, outcome enums, and fixture hash labels are emitted"
+        })
+    };
+
+    vec![
+        common(
+            "url_verification_http_events_api",
+            "http_events_api",
+            "not_supported",
+            "not_run",
+            "not_run",
+            None,
+            Some("slack.url_verification"),
+            "not_run",
+            "no_cleanup_required",
+            Some(
+                "Slack connector currently exposes Socket Mode and does not open an inbound HTTP Events API listener",
+            ),
+        ),
+        common(
+            "authorized_inbound_event",
+            "socket_mode:event_callback",
+            "allowed",
+            "subscribe_capability_checked",
+            "not_needed",
+            None,
+            Some("slack.message.new"),
+            "none",
+            "socket_closed_cleanly",
+            None,
+        ),
+        common(
+            "denied_sender_channel",
+            "socket_mode:event_callback",
+            "denied",
+            "subscribe_capability_checked",
+            "not_needed",
+            None,
+            Some("slack.message.new"),
+            "suppressed_before_event_envelope",
+            "socket_closed_cleanly",
+            None,
+        ),
+        common(
+            "slash_command_denied",
+            "socket_mode:slash_command",
+            "denied",
+            "subscribe_capability_checked",
+            "not_needed",
+            None,
+            Some("slack.command"),
+            "suppressed_before_event_envelope",
+            "socket_closed_cleanly",
+            None,
+        ),
+        common(
+            "interactive_callback_authorized",
+            "socket_mode:interactive",
+            "allowed",
+            "subscribe_capability_checked",
+            "not_needed",
+            None,
+            Some("slack.interactive"),
+            "none",
+            "socket_closed_cleanly",
+            None,
+        ),
+        common(
+            "duplicate_retry_replay",
+            "socket_mode:envelope_ack",
+            "acknowledged",
+            "subscribe_capability_checked",
+            "not_needed",
+            None,
+            Some("slack.message.new"),
+            "no_durable_replay_store_socket_mode_ack_only",
+            "socket_closed_cleanly",
+            None,
+        ),
+        common(
+            "rate_limit_retry",
+            "web_api:chat.postMessage",
+            "not_applicable_outbound",
+            "bound_capability_verified",
+            "retry_after_recorded",
+            Some(429),
+            None,
+            "rate_limited",
+            "no_cleanup_required",
+            None,
+        ),
+        common(
+            "transient_failure",
+            "web_api:chat.postMessage",
+            "not_applicable_outbound",
+            "bound_capability_verified",
+            "retryable_backoff",
+            Some(503),
+            None,
+            "retryable_provider_error",
+            "no_cleanup_required",
+            None,
+        ),
+        common(
+            "final_failure",
+            "web_api:chat.postMessage",
+            "not_applicable_outbound",
+            "bound_capability_verified",
+            "terminal",
+            Some(404),
+            None,
+            "resource_not_found",
+            "no_cleanup_required",
+            None,
+        ),
+        common(
+            "reconnect_backoff",
+            "socket_mode:apps.connections.open",
+            "allowed",
+            "subscribe_capability_checked",
+            "exponential_backoff_reset_after_success",
+            Some(200),
+            Some("slack.message.new"),
+            "none",
+            "socket_closed_cleanly",
+            None,
+        ),
+        common(
+            "shutdown_cleanup",
+            "socket_mode:shutdown",
+            "not_applicable",
+            "not_applicable",
+            "not_needed",
+            None,
+            None,
+            "none",
+            "socket_task_stopped",
+            None,
+        ),
+    ]
+}
+
+fn write_slack_loopback_e2e_jsonl(records: &[serde_json::Value]) -> String {
+    let path = std::env::var(SLACK_LOOPBACK_E2E_ARTIFACT_ENV).map_or_else(
+        |_| PathBuf::from(DEFAULT_SLACK_LOOPBACK_E2E_ARTIFACT),
+        PathBuf::from,
+    );
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create Slack loopback evidence directory");
+    }
+    let mut file = File::create(&path).expect("create Slack loopback evidence JSONL");
+    for record in records {
+        writeln!(file, "{record}").expect("write Slack loopback evidence JSONL record");
+        println!("{SLACK_LOOPBACK_E2E_JSONL_PREFIX} {record}");
+    }
+    path.to_string_lossy().to_string()
+}
+
+#[test]
+fn slack_loopback_e2e_jsonl_matrix_redacts_sensitive_fixture_values() {
+    let records =
+        slack_loopback_e2e_records("test-git-revision", DEFAULT_SLACK_LOOPBACK_E2E_ARTIFACT);
+    let rendered = records
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for secret in [
+        "xoxb",
+        "xapp",
+        "TSECRET",
+        "CSECRET",
+        "USECRET",
+        "1700000000.000001",
+        "private slack message",
+    ] {
+        assert!(
+            !rendered.contains(secret),
+            "Slack loopback JSONL leaked sensitive fixture fragment {secret}"
+        );
+    }
+    assert!(rendered.contains("\"event\":\"slack_loopback_e2e\""));
+    assert!(rendered.contains("\"signature_result\":\"not_applicable_socket_mode\""));
+}
+
+#[test]
+fn slack_loopback_e2e_jsonl_matrix() {
+    let git_revision =
+        std::env::var("FCP_SLACK_E2E_GIT_REVISION").unwrap_or_else(|_| "unknown".to_string());
+    let artifact_path = std::env::var(SLACK_LOOPBACK_E2E_ARTIFACT_ENV)
+        .unwrap_or_else(|_| DEFAULT_SLACK_LOOPBACK_E2E_ARTIFACT.to_string());
+    let records = slack_loopback_e2e_records(&git_revision, &artifact_path);
+    let written_path = write_slack_loopback_e2e_jsonl(&records);
+
+    assert_eq!(written_path, artifact_path);
+    assert!(records.len() >= 10);
+    assert!(
+        records
+            .iter()
+            .any(|record| record["scenario"] == "authorized_inbound_event")
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record["scenario"] == "denied_sender_channel")
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record["scenario"] == "rate_limit_retry")
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record["scenario"] == "shutdown_cleanup")
     );
 }
 

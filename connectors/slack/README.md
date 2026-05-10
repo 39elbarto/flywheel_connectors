@@ -3,7 +3,7 @@
 > **Status**: runtime contract documented; capability/approval drift documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/slack_connector_verification.sh`
 > **Slack chat.postMessage**: https://docs.slack.dev/reference/methods/chat.postMessage
 > **Slack Socket Mode**: https://docs.slack.dev/apis/events-api/using-socket-mode
 > **Slack Events API**: https://docs.slack.dev/apis/events-api/
@@ -82,9 +82,9 @@ This README documents runtime truth and keeps current drift visible:
 - Runtime `handle_subscribe()` starts Socket Mode only after client and verifier exist, but subscribe itself does not verify a subscribe capability token.
 - Manifest state model is singleton-writer. Runtime keeps token, Socket Mode state, progress drafts, monitor policy, subscriptions, and verifier/session state in process memory.
 - Manifest rate-limit pools are documented intent; runtime relies on Slack 429 handling and the client retry loop, not connector-local pool enforcement.
-- There is no dedicated tracked verification shell script for this connector.
+- The dedicated tracked verification script is `scripts/e2e/slack_connector_verification.sh`, which writes loopback and live-smoke JSONL evidence under `/tmp/fcp-slack-e2e/<run-id>/` by default.
 
-A follow-up parity bead should align runtime bound-token capability IDs with manifest capability IDs, add approval-token verification for policy-approved mutations, decide whether shutdown/reconfigure should clear verifier/session state, expand doctor/self-check scope readiness, document or replace legacy `files.upload`, and add a tracked verification bundle.
+A follow-up parity bead should align runtime bound-token capability IDs with manifest capability IDs, add approval-token verification for policy-approved mutations, decide whether shutdown/reconfigure should clear verifier/session state, expand doctor/self-check scope readiness, and document or replace legacy `files.upload`.
 
 ## First-Slice Scope
 
@@ -210,6 +210,7 @@ The deterministic integration evidence is anchored on connector-local tests cove
 Run these after changing this connector contract:
 
 ```bash
+scripts/e2e/slack_connector_verification.sh
 git diff --check -- connectors/slack/README.md
 ubs connectors/slack/README.md
 LC_ALL=C rg -n '[^ -~]' connectors/slack/README.md
@@ -229,6 +230,7 @@ rch exec -- cargo fmt --check
 
 - Use a bot token with only the Slack scopes required by the operations you plan to invoke.
 - Use a real app-level `xapp` token for Socket Mode; bot-token fallback is only a runtime fallback, not proof that Socket Mode will work.
+- `scripts/e2e/slack_connector_verification.sh` is the redaction-safe replay bundle for no-live-credential loopback evidence. It runs Cargo proof through `rch`, captures `SLACK_LOOPBACK_E2E_JSONL` and `SLACK_LIVE_E2E_JSONL` rows, and records structured skip rows for surfaces that require live Slack credentials or an HTTP Events API listener.
 - The optional live-smoke evidence lane for canary reply and mention-gating is intentionally side-effect gated. Without an operator credential lease and explicit write approval, `cargo test -p fcp-slack --test live_verification slack_live_smoke_structured_skip_jsonl -- --nocapture` emits redaction-safe `SLACK_LIVE_E2E_JSONL` skip rows and writes `target/fcp-slack/live-smoke-evidence.jsonl` unless `SLACK_LIVE_E2E_ARTIFACT` is set.
 - Treat message, file, and topic operations as high-review until approval verification is implemented.
 - Keep `monitor_policy.require_mention` enabled for public channels unless the channel is explicitly allowed for free response.

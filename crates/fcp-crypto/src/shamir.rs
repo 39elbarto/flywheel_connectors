@@ -27,7 +27,10 @@
 //! let subset: Vec<ShamirShare> = shares.into_iter().take(3).collect();
 //! let reconstructed = reconstruct_secret(&subset).unwrap();
 //!
-//! assert_eq!(&reconstructed[..], secret);
+//! // Compare via constant-time helper instead of indexing — `ZeroizingSecret`
+//! // intentionally does not implement `Deref` so callers cannot leak the
+//! // inner buffer past the borrow.
+//! assert!(reconstructed.ct_eq_bytes(secret));
 //! ```
 
 use rand::{CryptoRng, Rng, RngCore};
@@ -457,7 +460,7 @@ pub fn split_secret_with_rng<R: RngCore + CryptoRng>(
 /// let subset: Vec<_> = shares.into_iter().take(3).collect();
 /// let recovered = reconstruct_secret(&subset).unwrap();
 ///
-/// assert_eq!(&recovered[..], secret);
+/// assert!(recovered.ct_eq_bytes(secret));
 /// ```
 pub fn reconstruct_secret(shares: &[ShamirShare]) -> ShamirResult<ZeroizingSecret> {
     if shares.is_empty() {
@@ -554,10 +557,17 @@ impl ZeroizingSecret {
         Self(value)
     }
 
-    /// Access the secret bytes.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+    /// Borrow the secret bytes inside a closure.
+    ///
+    /// Closure-scoped access prevents callers from storing references to the
+    /// inner bytes beyond the borrow. The lifetime of the returned slice is
+    /// tied to the closure's stack frame, not the wrapper's lifetime, so any
+    /// attempt to escape the slice fails to compile.
+    pub fn with_bytes<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        f(&self.0)
     }
 
     /// Get the length of the secret.
@@ -581,6 +591,18 @@ impl ZeroizingSecret {
     pub fn constant_time_eq(&self, other: &Self) -> bool {
         self.0.len() == other.0.len()
             && subtle::ConstantTimeEq::ct_eq(self.0.as_slice(), other.0.as_slice()).into()
+    }
+
+    /// Compare a secret against a borrowed byte slice in constant time for
+    /// equal-length inputs. Returns `false` for unequal-length comparisons
+    /// without leaking position information beyond the length difference.
+    ///
+    /// Use this when comparing against test fixtures or precomputed expected
+    /// values without exposing the inner buffer.
+    #[must_use]
+    pub fn ct_eq_bytes(&self, other: &[u8]) -> bool {
+        self.0.len() == other.len()
+            && subtle::ConstantTimeEq::ct_eq(self.0.as_slice(), other).into()
     }
 }
 
@@ -607,14 +629,6 @@ impl std::str::FromStr for ZeroizingSecret {
 
     fn from_str(secret: &str) -> Result<Self, Self::Err> {
         Ok(Self(secret.as_bytes().to_vec()))
-    }
-}
-
-impl std::ops::Deref for ZeroizingSecret {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
     }
 }
 
@@ -874,7 +888,7 @@ mod tests {
         // Reconstruct with exactly k shares
         let subset: Vec<_> = shares[0..3].to_vec();
         let recovered = reconstruct_secret(&subset).unwrap();
-        assert_eq!(&recovered[..], secret);
+        assert!(recovered.ct_eq_bytes(secret));
     }
 
     #[test]
@@ -884,7 +898,7 @@ mod tests {
 
         // Using all shares should also work
         let recovered = reconstruct_secret(&shares).unwrap();
-        assert_eq!(&recovered[..], secret);
+        assert!(recovered.ct_eq_bytes(secret));
     }
 
     #[test]
@@ -910,7 +924,7 @@ mod tests {
         for indices in combinations {
             let subset: Vec<_> = indices.iter().map(|&i| shares[i].clone()).collect();
             let recovered = reconstruct_secret(&subset).unwrap();
-            assert_eq!(&recovered[..], secret, "failed for indices {indices:?}");
+            assert!(recovered.ct_eq_bytes(secret), "failed for indices {indices:?}");
         }
     }
 
@@ -921,7 +935,7 @@ mod tests {
         assert_eq!(shares.len(), 2);
 
         let recovered = reconstruct_secret(&shares).unwrap();
-        assert_eq!(&recovered[..], secret);
+        assert!(recovered.ct_eq_bytes(secret));
     }
 
     #[test]
@@ -933,7 +947,7 @@ mod tests {
         // Any single share should reconstruct
         for share in &shares {
             let recovered = reconstruct_secret(std::slice::from_ref(share)).unwrap();
-            assert_eq!(&recovered[..], secret);
+            assert!(recovered.ct_eq_bytes(secret));
         }
     }
 
@@ -943,7 +957,7 @@ mod tests {
         let shares = split_secret(secret, 5, 5).unwrap();
 
         let recovered = reconstruct_secret(&shares).unwrap();
-        assert_eq!(&recovered[..], secret);
+        assert!(recovered.ct_eq_bytes(secret));
     }
 
     #[test]
@@ -954,7 +968,7 @@ mod tests {
 
         let subset: Vec<_> = shares[3..8].to_vec();
         let recovered = reconstruct_secret(&subset).unwrap();
-        assert_eq!(&recovered[..], &secret[..]);
+        assert!(recovered.ct_eq_bytes(&secret));
     }
 
     #[test]
@@ -964,7 +978,7 @@ mod tests {
 
         let subset: Vec<_> = shares[1..4].to_vec();
         let recovered = reconstruct_secret(&subset).unwrap();
-        assert_eq!(&recovered[..], secret);
+        assert!(recovered.ct_eq_bytes(secret));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1088,20 +1102,20 @@ mod tests {
     #[test]
     fn zeroizing_secret_new_from_vec_preserves_bytes() {
         let secret = ZeroizingSecret::new(vec![1, 2, 3, 4]);
-        assert_eq!(secret.as_bytes(), &[1, 2, 3, 4]);
+        assert!(secret.ct_eq_bytes(&[1, 2, 3, 4]));
         assert_eq!(secret.len(), 4);
     }
 
     #[test]
     fn zeroizing_secret_from_str_copies_utf8_bytes() {
         let secret = ZeroizingSecret::from_str("secret-value");
-        assert_eq!(secret.as_bytes(), b"secret-value");
+        assert!(secret.ct_eq_bytes(b"secret-value"));
     }
 
     #[test]
     fn zeroizing_secret_with_zeroize_drop_accepts_owned_vec() {
         let secret = ZeroizingSecret::with_zeroize_drop(vec![9, 8, 7]);
-        assert_eq!(secret.as_bytes(), &[9, 8, 7]);
+        assert!(secret.ct_eq_bytes(&[9, 8, 7]));
     }
 
     #[test]
@@ -1114,35 +1128,37 @@ mod tests {
     #[test]
     fn zeroizing_secret_from_vec_trait_preserves_bytes() {
         let secret = ZeroizingSecret::from(vec![5, 6, 7]);
-        assert_eq!(secret.as_bytes(), &[5, 6, 7]);
+        assert!(secret.ct_eq_bytes(&[5, 6, 7]));
     }
 
     #[test]
     fn zeroizing_secret_from_slice_trait_copies_bytes() {
         let source = [10, 20, 30];
         let secret = ZeroizingSecret::from(source.as_slice());
-        assert_eq!(secret.as_bytes(), source);
+        assert!(secret.ct_eq_bytes(&source));
     }
 
     #[test]
     fn zeroizing_secret_from_str_trait_copies_bytes() {
         let secret = ZeroizingSecret::from("operator-token");
-        assert_eq!(secret.as_bytes(), b"operator-token");
+        assert!(secret.ct_eq_bytes(b"operator-token"));
     }
 
     #[test]
     fn zeroizing_secret_std_from_str_is_infallible() {
         let secret = <ZeroizingSecret as std::str::FromStr>::from_str("from-std")
             .expect("constructor is infallible");
-        assert_eq!(secret.as_bytes(), b"from-std");
+        assert!(secret.ct_eq_bytes(b"from-std"));
     }
 
     #[test]
     fn zeroizing_secret_clone_owns_independent_buffer() {
         let first = ZeroizingSecret::new(vec![1, 2, 3]);
         let second = first.clone();
-        assert_eq!(first.as_bytes(), second.as_bytes());
-        assert_ne!(first.as_bytes().as_ptr(), second.as_bytes().as_ptr());
+        assert!(first.constant_time_eq(&second));
+        let first_ptr = first.with_bytes(<[u8]>::as_ptr);
+        let second_ptr = second.with_bytes(<[u8]>::as_ptr);
+        assert_ne!(first_ptr, second_ptr);
     }
 
     #[test]
@@ -1181,7 +1197,7 @@ mod tests {
     #[test]
     fn zeroizing_secret_test_utils_constructs_static_fixture() {
         let secret = crate::test_utils::unsafe_construct_from_static_test_secret(b"public-fixture");
-        assert_eq!(secret.as_bytes(), b"public-fixture");
+        assert!(secret.ct_eq_bytes(b"public-fixture"));
     }
 
     #[test]
@@ -1197,7 +1213,7 @@ mod tests {
         let recovered = reconstruct_secret(&subset).unwrap();
 
         // Should NOT equal the original secret
-        assert_ne!(&recovered[..], secret);
+        assert!(!recovered.ct_eq_bytes(secret));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1296,7 +1312,7 @@ mod tests {
 
         // Reconstruct the secret
         let recovered = reconstruct_secret(&opened_shares).unwrap();
-        assert_eq!(&recovered[..], secret);
+        assert!(recovered.ct_eq_bytes(secret));
     }
 
     #[test]
@@ -1338,7 +1354,7 @@ mod tests {
             .collect();
 
         let recovered = reconstruct_secret(&opened).unwrap();
-        assert_eq!(&recovered[..], secret);
+        assert!(recovered.ct_eq_bytes(secret));
     }
 
     #[test]
@@ -1485,10 +1501,10 @@ mod tests {
     }
 
     #[test]
-    fn zeroizing_secret_deref() {
+    fn zeroizing_secret_with_bytes_borrows_inner_slice() {
         let s = ZeroizingSecret::new(vec![10, 20, 30]);
-        let slice: &[u8] = &s;
-        assert_eq!(slice, &[10, 20, 30]);
+        s.with_bytes(|slice| assert_eq!(slice, &[10, 20, 30]));
+        assert!(s.ct_eq_bytes(&[10, 20, 30]));
     }
 
     // ---- SealedShamirShare accessors ----
@@ -1645,14 +1661,14 @@ mod tests {
         assert!(matches!(result, Err(ShamirError::ReservedIndex)));
     }
 
-    // ---- ZeroizingSecret as_bytes ----
+    // ---- ZeroizingSecret accessors ----
 
     #[test]
-    fn zeroizing_secret_as_bytes_matches_deref() {
+    fn zeroizing_secret_with_bytes_and_ct_eq_bytes_agree() {
         let s = ZeroizingSecret(vec![1, 2, 3, 4]);
-        let from_as_bytes = s.as_bytes();
-        let from_deref: &[u8] = &s;
-        assert_eq!(from_as_bytes, from_deref);
+        let observed_via_with_bytes = s.with_bytes(<[u8]>::to_vec);
+        assert_eq!(observed_via_with_bytes, vec![1, 2, 3, 4]);
+        assert!(s.ct_eq_bytes(&observed_via_with_bytes));
     }
 
     // ---- ShamirError is std::error::Error ----
@@ -1686,6 +1702,6 @@ mod tests {
         // Verify reconstruction with first 3
         let subset: Vec<_> = shares[0..3].to_vec();
         let recovered = reconstruct_secret(&subset).unwrap();
-        assert_eq!(&recovered[..], secret);
+        assert!(recovered.ct_eq_bytes(secret));
     }
 }

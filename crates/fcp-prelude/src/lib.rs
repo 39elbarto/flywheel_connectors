@@ -139,7 +139,10 @@ pub use fcp_core::*;
 // External crate re-exports (mirror fcp-core's compatibility surface).
 pub use async_trait::async_trait;
 pub use chrono::{DateTime, Utc};
-pub use fcp_crypto::{CredentialIdHash, SecretFetchError, SecretFetchHook, ZeroizingSecret};
+pub use fcp_crypto::{
+    AsyncSecretFetchHook, AsyncToSyncSecretFetchHook, CredentialIdHash, SecretFetchError,
+    SecretFetchHook, ZeroizingSecret,
+};
 pub use uuid::Uuid;
 
 // ── Production-hardening helpers (ptb6n) ───────────────────────────
@@ -214,8 +217,14 @@ mod tests {
     #[test]
     fn crypto_re_exports_resolve_zeroizing_secret() {
         let secret = ZeroizingSecret::from("prelude-secret");
-        assert_eq!(secret.as_bytes(), b"prelude-secret");
+        assert!(secret.ct_eq_bytes(b"prelude-secret"));
         assert_eq!(secret.to_string(), "ZeroizingSecret(<redacted, len=14>)");
+    }
+
+    #[test]
+    fn crypto_re_exports_resolve_async_secret_fetch_contract() {
+        fn assert_async_secret_fetch_hook<T: AsyncSecretFetchHook + ?Sized>() {}
+        assert_async_secret_fetch_hook::<dyn AsyncSecretFetchHook>();
     }
 
     #[test]

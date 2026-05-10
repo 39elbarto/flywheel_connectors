@@ -396,7 +396,7 @@ fn shamir_split_reconstruct_roundtrip() {
     // Any 3 shares should reconstruct
     let subset = &shares[0..3];
     let recovered = reconstruct_secret(subset).unwrap();
-    assert_eq!(recovered.as_bytes(), secret);
+    assert!(recovered.ct_eq_bytes(secret));
 }
 
 #[test]
@@ -411,9 +411,9 @@ fn shamir_different_subsets_same_result() {
     let r3 =
         reconstruct_secret(&[shares[0].clone(), shares[2].clone(), shares[4].clone()]).unwrap();
 
-    assert_eq!(r1.as_bytes(), secret);
-    assert_eq!(r2.as_bytes(), secret);
-    assert_eq!(r3.as_bytes(), secret);
+    assert!(r1.ct_eq_bytes(secret));
+    assert!(r2.ct_eq_bytes(secret));
+    assert!(r3.ct_eq_bytes(secret));
 }
 
 #[test]
@@ -423,7 +423,7 @@ fn shamir_insufficient_shares_gives_wrong_result() {
 
     // Only 2 shares — reconstruction will produce garbage
     let wrong = reconstruct_secret(&shares[0..2]).unwrap();
-    assert_ne!(wrong.as_bytes(), secret);
+    assert!(!wrong.ct_eq_bytes(secret));
 }
 
 // ============================================================================

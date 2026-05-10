@@ -136,7 +136,10 @@ pub use owner_key::{
     OWNER_KEY_MIGRATION_ATTESTATION_SCHEMA, OWNER_KEY_MIGRATION_DOMAIN, OwnerKeyAlgorithm,
     OwnerKeyMigrationAttestation, OwnerKeyMigrationTranscript,
 };
-pub use secret_fetch::{CredentialIdHash, SecretFetchError, SecretFetchHook};
+pub use secret_fetch::{
+    AsyncSecretFetchHook, AsyncToSyncSecretFetchHook, CredentialIdHash, SecretFetchError,
+    SecretFetchHook,
+};
 pub use shamir::{
     SealedShamirShare, ShamirError, ShamirResult, ShamirShare, ZeroizingSecret, open_share,
     reconstruct_secret, seal_share, split_and_seal, split_secret, split_secret_with_rng,
@@ -151,7 +154,10 @@ pub use xwing::{
 
 /// Common crypto imports for connector and host code.
 pub mod prelude {
-    pub use crate::{CredentialIdHash, SecretFetchError, SecretFetchHook, ZeroizingSecret};
+    pub use crate::{
+        AsyncSecretFetchHook, AsyncToSyncSecretFetchHook, CredentialIdHash, SecretFetchError,
+        SecretFetchHook, ZeroizingSecret,
+    };
 }
 
 /// Test-only crypto helpers.

@@ -83,6 +83,16 @@ chrono.workspace = true
 # inputs instead of panicking.
 tracing.workspace = true
 
+# Async-trait support for AsyncSecretFetchHook companion trait (br-e99o6.1.1
+# round-2 follow-on). The canonical SecretFetchHook stays sync to keep the
+# WASI host integration sync; AsyncSecretFetchHook is for backends with
+# native async I/O (Vault, AWS Secrets Manager).
+async-trait.workspace = true
+# Minimal Tokio surface (`rt` only) so AsyncToSyncSecretFetchHook can hold a
+# runtime handle for `block_on`. We pull only the runtime feature; no I/O,
+# no time, no signal — fcp-crypto is otherwise runtime-agnostic.
+tokio = { version = "1", default-features = false, features = ["rt"] }
+
 [dev-dependencies]
 # Testing
 serde_json.workspace = true
@@ -91,6 +101,8 @@ rand_chacha = "0.3"
 proptest.workspace = true
 tracing-subscriber.workspace = true
 criterion.workspace = true
+# Async runtime for AsyncSecretFetchHook tests
+fcp-async-core.workspace = true
 # Self-audit metamorphic harness (6po63.1)
 semver.workspace = true
 # Integration tests compare FCP X-Wing bytes against the upstream component

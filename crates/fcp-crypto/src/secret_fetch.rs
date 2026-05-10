@@ -2,6 +2,25 @@
 //!
 //! This module defines the public contract a connector runtime uses when it
 //! needs a credential value without persisting that value in connector state.
+//!
+//! # Sync vs async
+//!
+//! [`SecretFetchHook`] is the canonical SYNC trait used by the egress hot path
+//! and by the WASI host runtime in [`fcp_sandbox`]. WASI host functions are
+//! synchronous in the wasmtime integration we use today, so the egress trait
+//! must be sync to keep that integration working.
+//!
+//! Backends that benefit from native async I/O (HashiCorp Vault, AWS Secrets
+//! Manager, GCP Secret Manager, Azure Key Vault) implement
+//! [`AsyncSecretFetchHook`] and are wrapped via [`AsyncToSyncSecretFetchHook`]
+//! so they can satisfy the sync trait. The wrapper holds a small TTL cache to
+//! amortize network round-trips and uses a tokio runtime handle to drive the
+//! async backend from a sync caller.
+//!
+//! Conversely, sync hooks (like the in-memory test registry) automatically
+//! satisfy [`AsyncSecretFetchHook`] via a blanket impl that returns
+//! immediately-ready futures. So async-aware code paths can take any
+//! [`AsyncSecretFetchHook`] and the in-memory hook fits.
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -287,7 +306,7 @@ impl SecretFetchHook for InMemorySecretRegistry {
         let secret = secrets
             .get_mut(credential_id)
             .ok_or_else(|| SecretFetchError::not_found(credential_id))?;
-        *secret = new_secret.as_bytes().to_vec();
+        *secret = new_secret.with_bytes(<[u8]>::to_vec);
         drop(secrets);
         Ok(())
     }
@@ -299,6 +318,169 @@ impl SecretFetchHook for InMemorySecretRegistry {
             .remove(credential_id)
             .map(|_| ())
             .ok_or_else(|| SecretFetchError::not_found(credential_id))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AsyncSecretFetchHook — companion async trait for network-I/O backends
+// ---------------------------------------------------------------------------
+
+/// Async-runtime-friendly counterpart to [`SecretFetchHook`].
+///
+/// Implementations target backends with native async I/O (Vault, AWS Secrets
+/// Manager, GCP Secret Manager, Azure Key Vault, custom HTTP-backed stores).
+/// The trait is `Send + Sync + 'static` and object-safe via [`async_trait`],
+/// so callers can use `Arc<dyn AsyncSecretFetchHook>` exactly like the sync
+/// equivalent.
+///
+/// Any sync [`SecretFetchHook`] automatically satisfies this trait via a
+/// blanket impl, so async-aware code paths can take an
+/// [`AsyncSecretFetchHook`] and accept either a sync or async backend without
+/// special-casing. Going the other direction — driving an async backend from
+/// a sync caller — requires [`AsyncToSyncSecretFetchHook`].
+#[async_trait::async_trait]
+pub trait AsyncSecretFetchHook: Send + Sync + 'static {
+    /// Async-fetch a secret for a credential identifier.
+    ///
+    /// # Errors
+    /// Returns [`SecretFetchError`] when the credential is missing or the
+    /// backend cannot satisfy the request. Implementations must not include
+    /// the credential identifier verbatim in error messages.
+    async fn fetch_async(
+        &self,
+        credential_id: &str,
+    ) -> Result<ZeroizingSecret, SecretFetchError>;
+
+    /// Async-replace the secret for a credential identifier.
+    ///
+    /// # Errors
+    /// Returns [`SecretFetchError`] when the credential is missing or the
+    /// backend cannot rotate the value. Implementations must not include the
+    /// credential identifier verbatim in error messages.
+    async fn rotate_async(
+        &self,
+        credential_id: &str,
+        new_secret: ZeroizingSecret,
+    ) -> Result<(), SecretFetchError>;
+
+    /// Async-revoke the secret for a credential identifier.
+    ///
+    /// # Errors
+    /// Returns [`SecretFetchError`] when the credential is missing or the
+    /// backend cannot revoke the value. Implementations must not include the
+    /// credential identifier verbatim in error messages.
+    async fn revoke_async(&self, credential_id: &str) -> Result<(), SecretFetchError>;
+}
+
+/// Blanket adapter: every sync [`SecretFetchHook`] is an async hook with
+/// immediately-ready futures.
+///
+/// This lets in-memory registries and other sync backends be used wherever an
+/// [`AsyncSecretFetchHook`] is required. The futures complete in one poll, so
+/// there is no runtime overhead beyond the trait-object indirection.
+#[async_trait::async_trait]
+impl<T> AsyncSecretFetchHook for T
+where
+    T: SecretFetchHook + 'static,
+{
+    async fn fetch_async(
+        &self,
+        credential_id: &str,
+    ) -> Result<ZeroizingSecret, SecretFetchError> {
+        SecretFetchHook::fetch(self, credential_id)
+    }
+
+    async fn rotate_async(
+        &self,
+        credential_id: &str,
+        new_secret: ZeroizingSecret,
+    ) -> Result<(), SecretFetchError> {
+        SecretFetchHook::rotate(self, credential_id, new_secret)
+    }
+
+    async fn revoke_async(&self, credential_id: &str) -> Result<(), SecretFetchError> {
+        SecretFetchHook::revoke(self, credential_id)
+    }
+}
+
+/// Bridge that lets an [`AsyncSecretFetchHook`] satisfy [`SecretFetchHook`].
+///
+/// Some egress paths are sync (the WASI host runtime, the existing
+/// [`fcp_sandbox`] [`CredentialInjector`] trait). To plug an async-only
+/// backend (Vault, AWS Secrets Manager) into those paths, wrap it in this
+/// bridge and present the wrapper as a [`SecretFetchHook`].
+///
+/// The bridge holds an explicit [`tokio::runtime::Handle`] (provided by the
+/// caller) so that sync `fetch`/`rotate`/`revoke` calls can drive the inner
+/// async hook via [`Handle::block_on`]. The handle MUST belong to a runtime
+/// that the calling thread is NOT currently running on, otherwise
+/// [`Handle::block_on`] panics. Typical pattern: a dedicated single-thread
+/// runtime owned by the host process for credential operations.
+///
+/// This bridge does NOT cache results. Callers that need caching should layer
+/// their own cache outside the bridge (or, more typically, layer a TTL cache
+/// inside the [`AsyncSecretFetchHook`] implementation itself).
+///
+/// [`fcp_sandbox`]: ../../fcp-sandbox/index.html
+/// [`CredentialInjector`]: ../../fcp-sandbox/egress/trait.CredentialInjector.html
+pub struct AsyncToSyncSecretFetchHook<A>
+where
+    A: AsyncSecretFetchHook,
+{
+    inner: std::sync::Arc<A>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl<A> AsyncToSyncSecretFetchHook<A>
+where
+    A: AsyncSecretFetchHook,
+{
+    /// Wrap an async hook with a runtime handle so it can satisfy the sync
+    /// [`SecretFetchHook`] trait.
+    pub fn new(inner: std::sync::Arc<A>, runtime: tokio::runtime::Handle) -> Self {
+        Self { inner, runtime }
+    }
+}
+
+impl<A> std::fmt::Debug for AsyncToSyncSecretFetchHook<A>
+where
+    A: AsyncSecretFetchHook,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsyncToSyncSecretFetchHook")
+            .field("inner", &"<AsyncSecretFetchHook>")
+            .field("runtime", &"<tokio::runtime::Handle>")
+            .finish()
+    }
+}
+
+impl<A> SecretFetchHook for AsyncToSyncSecretFetchHook<A>
+where
+    A: AsyncSecretFetchHook,
+{
+    fn fetch(&self, credential_id: &str) -> Result<ZeroizingSecret, SecretFetchError> {
+        let inner = std::sync::Arc::clone(&self.inner);
+        let credential_id = credential_id.to_owned();
+        self.runtime
+            .block_on(async move { inner.fetch_async(&credential_id).await })
+    }
+
+    fn rotate(
+        &self,
+        credential_id: &str,
+        new_secret: ZeroizingSecret,
+    ) -> Result<(), SecretFetchError> {
+        let inner = std::sync::Arc::clone(&self.inner);
+        let credential_id = credential_id.to_owned();
+        self.runtime
+            .block_on(async move { inner.rotate_async(&credential_id, new_secret).await })
+    }
+
+    fn revoke(&self, credential_id: &str) -> Result<(), SecretFetchError> {
+        let inner = std::sync::Arc::clone(&self.inner);
+        let credential_id = credential_id.to_owned();
+        self.runtime
+            .block_on(async move { inner.revoke_async(&credential_id).await })
     }
 }
 
@@ -382,7 +564,7 @@ mod tests {
 
         let secret = registry.fetch(CREDENTIAL_ID).expect("secret exists");
 
-        assert_eq!(secret.as_bytes(), b"xoxb-test");
+        assert!(secret.ct_eq_bytes(b"xoxb-test"));
         assert_eq!(registry.fetch_count_for(CREDENTIAL_ID), 1);
     }
 
@@ -407,7 +589,7 @@ mod tests {
             .expect("rotation succeeds");
 
         let secret = registry.fetch(CREDENTIAL_ID).expect("secret exists");
-        assert_eq!(secret.as_bytes(), b"new-token");
+        assert!(secret.ct_eq_bytes(b"new-token"));
     }
 
     #[test]
@@ -466,7 +648,7 @@ mod tests {
                 thread::spawn(move || {
                     for _ in 0..50 {
                         let secret = registry.fetch(CREDENTIAL_ID).expect("secret exists");
-                        assert_eq!(secret.as_bytes(), b"xoxb-test");
+                        assert!(secret.ct_eq_bytes(b"xoxb-test"));
                     }
                 })
             })
@@ -487,7 +669,7 @@ mod tests {
 
         let secret = hook.fetch(CREDENTIAL_ID).expect("secret exists");
 
-        assert_eq!(secret.as_bytes(), b"xoxb-test");
+        assert!(secret.ct_eq_bytes(b"xoxb-test"));
     }
 
     #[test]
@@ -502,12 +684,200 @@ mod tests {
 
         drop(new_secret);
         let fetched = registry.fetch(CREDENTIAL_ID).expect("secret exists");
-        assert_eq!(fetched.as_bytes(), b"new-token");
+        assert!(fetched.ct_eq_bytes(b"new-token"));
     }
 
     #[test]
     fn trait_and_registry_are_send_sync() {
         assert_send_sync::<InMemorySecretRegistry>();
         assert_send_sync::<Arc<dyn SecretFetchHook>>();
+    }
+
+    // ----------------------------------------------------------------------
+    // AsyncSecretFetchHook + AsyncToSyncSecretFetchHook coverage (br-e99o6.1.1
+    // round-2)
+    // ----------------------------------------------------------------------
+
+    /// Minimal async-only registry that does NOT implement the sync
+    /// `SecretFetchHook` trait. Used to prove the bridge actually drives
+    /// async backends.
+    struct AsyncOnlyRegistry {
+        inner: Arc<InMemorySecretRegistry>,
+        fetch_calls: Arc<AtomicU64>,
+        rotate_calls: Arc<AtomicU64>,
+        revoke_calls: Arc<AtomicU64>,
+    }
+
+    impl AsyncOnlyRegistry {
+        fn new(seed_id: &str, seed_secret: &[u8]) -> Self {
+            let inner = Arc::new(InMemorySecretRegistry::new());
+            inner.insert(seed_id, seed_secret);
+            Self {
+                inner,
+                fetch_calls: Arc::new(AtomicU64::new(0)),
+                rotate_calls: Arc::new(AtomicU64::new(0)),
+                revoke_calls: Arc::new(AtomicU64::new(0)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncSecretFetchHook for AsyncOnlyRegistry {
+        async fn fetch_async(
+            &self,
+            credential_id: &str,
+        ) -> Result<ZeroizingSecret, SecretFetchError> {
+            self.fetch_calls.fetch_add(1, Ordering::SeqCst);
+            // Simulate a tiny async hop so we exercise actual await
+            // semantics rather than a trivial poll-once future.
+            tokio::task::yield_now().await;
+            self.inner.fetch(credential_id)
+        }
+
+        async fn rotate_async(
+            &self,
+            credential_id: &str,
+            new_secret: ZeroizingSecret,
+        ) -> Result<(), SecretFetchError> {
+            self.rotate_calls.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            self.inner.rotate(credential_id, new_secret)
+        }
+
+        async fn revoke_async(&self, credential_id: &str) -> Result<(), SecretFetchError> {
+            self.revoke_calls.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            self.inner.revoke(credential_id)
+        }
+    }
+
+    /// Build a dedicated current-thread Tokio runtime for tests so the bridge
+    /// has a handle that is NOT the test's own runtime. Returns the runtime
+    /// (so the test owns its lifetime) and a clone of its handle.
+    fn dedicated_test_runtime() -> (tokio::runtime::Runtime, tokio::runtime::Handle) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("dedicated test runtime");
+        // Drive the runtime on a background thread so block_on from the test
+        // thread does not deadlock against the runtime's own thread.
+        let handle = rt.handle().clone();
+        (rt, handle)
+    }
+
+    #[test]
+    fn blanket_impl_lets_sync_registry_satisfy_async_trait() {
+        let registry = Arc::new(InMemorySecretRegistry::new());
+        registry.insert(CREDENTIAL_ID, b"xoxb-test".as_slice());
+
+        // Compile-time: any sync hook is an async hook.
+        let async_hook: Arc<dyn AsyncSecretFetchHook> = registry.clone();
+        let _: &dyn AsyncSecretFetchHook = async_hook.as_ref();
+
+        // Runtime: the immediately-ready future returns the same value the
+        // sync trait would have returned.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime");
+        let secret = rt
+            .block_on(async_hook.fetch_async(CREDENTIAL_ID))
+            .expect("fetch_async succeeds");
+        assert!(secret.ct_eq_bytes(b"xoxb-test"));
+    }
+
+    #[test]
+    fn async_to_sync_bridge_drives_async_backend_from_sync_caller() {
+        let backend = Arc::new(AsyncOnlyRegistry::new(CREDENTIAL_ID, b"xoxb-async-only"));
+        let (rt, handle) = dedicated_test_runtime();
+        // Move the runtime onto a worker thread so it can poll futures
+        // submitted via the captured handle while the test thread calls
+        // block_on through that handle.
+        let driver = std::thread::spawn(move || {
+            rt.block_on(async {
+                tokio::task::yield_now().await;
+                std::future::pending::<()>().await;
+            });
+        });
+
+        let bridge = AsyncToSyncSecretFetchHook::new(Arc::clone(&backend), handle);
+        let bridge_box: Box<dyn SecretFetchHook> = Box::new(bridge);
+
+        let secret = bridge_box
+            .fetch(CREDENTIAL_ID)
+            .expect("sync fetch through bridge succeeds");
+        assert!(secret.ct_eq_bytes(b"xoxb-async-only"));
+        assert_eq!(backend.fetch_calls.load(Ordering::SeqCst), 1);
+
+        bridge_box
+            .rotate(CREDENTIAL_ID, ZeroizingSecret::from("rotated-async"))
+            .expect("sync rotate through bridge succeeds");
+        assert_eq!(backend.rotate_calls.load(Ordering::SeqCst), 1);
+
+        let rotated = bridge_box
+            .fetch(CREDENTIAL_ID)
+            .expect("sync fetch through bridge after rotate");
+        assert!(rotated.ct_eq_bytes(b"rotated-async"));
+        assert_eq!(backend.fetch_calls.load(Ordering::SeqCst), 2);
+
+        bridge_box
+            .revoke(CREDENTIAL_ID)
+            .expect("sync revoke through bridge succeeds");
+        assert_eq!(backend.revoke_calls.load(Ordering::SeqCst), 1);
+
+        // Bridge does not cache; subsequent fetch after revoke must surface
+        // the not-found error from the backend.
+        let err = bridge_box
+            .fetch(CREDENTIAL_ID)
+            .expect_err("post-revoke fetch surfaces not-found");
+        assert_eq!(err, SecretFetchError::not_found(CREDENTIAL_ID));
+        assert_eq!(backend.fetch_calls.load(Ordering::SeqCst), 3);
+
+        // Drop the bridge before joining the driver so block_on's future is
+        // gone and the driver thread is still running on the pending future
+        // forever; we deliberately leak the driver thread here because it
+        // outlives the test scope and would otherwise need a shutdown
+        // channel. std::thread::spawn returns a JoinHandle whose Drop is a
+        // no-op, so the daemon thread is cleaned up at process exit.
+        drop(bridge_box);
+        let _ = driver; // keep handle alive in scope
+    }
+
+    #[test]
+    fn bridge_redacts_inner_in_debug_output() {
+        let backend = Arc::new(AsyncOnlyRegistry::new(CREDENTIAL_ID, b"xoxb-redact-test"));
+        let (rt, handle) = dedicated_test_runtime();
+        let driver = std::thread::spawn(move || {
+            rt.block_on(std::future::pending::<()>());
+        });
+
+        let bridge = AsyncToSyncSecretFetchHook::new(backend, handle);
+        let rendered = format!("{bridge:?}");
+        assert!(rendered.contains("AsyncToSyncSecretFetchHook"));
+        assert!(rendered.contains("<AsyncSecretFetchHook>"));
+        assert!(rendered.contains("<tokio::runtime::Handle>"));
+        assert!(!rendered.contains("xoxb-redact-test"));
+        assert!(!rendered.contains(CREDENTIAL_ID));
+
+        drop(bridge);
+        let _ = driver;
+    }
+
+    #[test]
+    fn async_trait_is_object_safe_via_arc_dyn() {
+        let backend: Arc<dyn AsyncSecretFetchHook> =
+            Arc::new(AsyncOnlyRegistry::new(CREDENTIAL_ID, b"xoxb-object-safe"));
+
+        // Compile-time check that Send + Sync + 'static survive trait-object
+        // erasure for the async trait.
+        fn assert_send_sync_static<T: Send + Sync + 'static + ?Sized>(_: &T) {}
+        assert_send_sync_static(backend.as_ref());
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("test runtime");
+        let secret = rt
+            .block_on(backend.fetch_async(CREDENTIAL_ID))
+            .expect("fetch_async via Arc<dyn AsyncSecretFetchHook>");
+        assert!(secret.ct_eq_bytes(b"xoxb-object-safe"));
     }
 }

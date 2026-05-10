@@ -272,7 +272,7 @@ impl ThresholdSecretEngine {
 
         let reconstructed =
             reconstruct_secret(opened).map_err(ThresholdSecretError::Reconstruct)?;
-        proof.verify(reconstructed.as_bytes())?;
+        reconstructed.with_bytes(|bytes| proof.verify(bytes))?;
         Ok(reconstructed)
     }
 }
@@ -316,7 +316,7 @@ fn threshold_secrets_e2e_reconstructs_database_credential_with_k_shares()
     );
 
     let recovered = engine.reconstruct_selected(&[0, 1, 2], &fixture.proof)?;
-    assert_eq!(recovered.as_bytes(), fixture.plaintext);
+    assert!(recovered.ct_eq_bytes(fixture.plaintext));
     assert_secret_debug_redacted(&recovered, fixture.plaintext);
     log_event(
         fixture.scenario_id,
@@ -335,8 +335,8 @@ fn threshold_secrets_e2e_reconstructs_api_key_from_disjoint_k_quorum()
 
     let engine = ThresholdSecretEngine::issue(fixture.secret_type, fixture.plaintext, K, N)?;
     let recovered = engine.reconstruct_selected(&[0, 2, 4], &fixture.proof)?;
-    assert_eq!(recovered.as_bytes(), fixture.plaintext);
-    fixture.proof.verify(recovered.as_bytes())?;
+    assert!(recovered.ct_eq_bytes(fixture.plaintext));
+    recovered.with_bytes(|bytes| fixture.proof.verify(bytes))?;
     log_event(
         fixture.scenario_id,
         "reconstruct_disjoint_quorum",

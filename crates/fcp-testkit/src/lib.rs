@@ -63,6 +63,7 @@ mod log_scan;
 mod mock_server;
 pub mod provider_contract;
 pub mod readiness_helpers;
+pub mod secretless_replay;
 pub mod session_script;
 pub mod streaming_fixture;
 pub mod supervisor_examples;
@@ -75,6 +76,7 @@ pub use harness::*;
 pub use http_fixture::*;
 pub use log_scan::*;
 pub use mock_server::*;
+pub use secretless_replay::*;
 pub use supervisor_examples::*;
 pub use tracing_config::*;
 

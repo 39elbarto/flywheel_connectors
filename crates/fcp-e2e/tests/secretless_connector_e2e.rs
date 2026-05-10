@@ -96,7 +96,8 @@ impl SecretlessGitHubClient {
             .map_err(|_| ClientError::CredentialNotFound)?;
         // Construct the bearer string in a tightly scoped block so it
         // lives no longer than the request itself.
-        let bearer = String::from_utf8(material.as_bytes().to_vec())
+        let bearer = material
+            .with_bytes(|bytes| std::str::from_utf8(bytes).map(str::to_owned))
             .map_err(|_| ClientError::InvalidSecretEncoding)?;
 
         let url = format!("{}/repos/{owner}/{repo}/issues", self.base_url);
@@ -429,14 +430,16 @@ async fn in_flight_request_completes_when_credential_rotated_after_fetch() {
 
     // Step 1: fetch the bearer (this is the snapshot).
     let snapshot = fetch_secret(&registry, &credential_id);
-    let bearer = String::from_utf8(snapshot.as_bytes().to_vec()).expect("utf8");
+    let bearer = snapshot
+        .with_bytes(|bytes| String::from_utf8(bytes.to_vec()))
+        .expect("utf8");
     drop(snapshot);
 
     // Step 2: rotate the registry mid-flight (between fetch and use).
     rotate_secret(&registry, credential_id, ROTATED_BEARER.as_bytes());
     // Sanity: registry now holds the NEW bearer.
     let post_rotation = fetch_secret(&registry, &credential_id);
-    assert_eq!(post_rotation.as_bytes(), ROTATED_BEARER.as_bytes());
+    assert!(post_rotation.ct_eq_bytes(ROTATED_BEARER.as_bytes()));
     drop(post_rotation);
 
     // Step 3: issue the egress request WITH the pre-rotation snapshot.
@@ -473,7 +476,11 @@ async fn many_pre_rotation_snapshots_remain_independent_of_post_rotation_state()
     let mut snapshots = Vec::new();
     for _ in 0..10 {
         let material = fetch_secret(&registry, &credential_id);
-        snapshots.push(String::from_utf8(material.as_bytes().to_vec()).expect("utf8"));
+        snapshots.push(
+            material
+                .with_bytes(|bytes| String::from_utf8(bytes.to_vec()))
+                .expect("utf8"),
+        );
     }
 
     // Rotate the registry. None of the snapshots above should change.
@@ -602,7 +609,7 @@ async fn registry_has_no_file_io_surface_by_construction() {
     let material = hook
         .fetch(&credential_key(&credential_id))
         .expect("credential fetch succeeds");
-    assert_eq!(material.as_bytes(), TEST_BEARER.as_bytes());
+    assert!(material.ct_eq_bytes(TEST_BEARER.as_bytes()));
 
     let debug = format!("{registry:?}");
     assert!(!debug.contains(TEST_BEARER));
@@ -678,7 +685,7 @@ async fn secret_bytes_dropped_after_fetch_returns_zeroizing_secret() {
     let material: ZeroizingSecret = fetch_secret(&registry, &id);
     // Touch the bytes so the compiler keeps the value live to its
     // declared scope, then drop explicitly to invoke ZeroizeOnDrop.
-    assert_eq!(material.as_bytes(), TEST_BEARER.as_bytes());
+    assert!(material.ct_eq_bytes(TEST_BEARER.as_bytes()));
     drop(material);
 }
 
@@ -703,7 +710,7 @@ fn production_zeroizing_secret_drop_zeroes_memory() {
 
     assert_zeroize_on_drop::<ZeroizingSecret>();
     let material = ZeroizingSecret::new(TEST_BEARER.as_bytes().to_vec());
-    assert_eq!(material.as_bytes(), TEST_BEARER.as_bytes());
+    assert!(material.ct_eq_bytes(TEST_BEARER.as_bytes()));
     drop(material);
 }
 

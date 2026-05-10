@@ -98,7 +98,7 @@ proptest! {
             "shares_used": k,
         }), timing_us);
 
-        prop_assert_eq!(recovered.as_bytes(), &secret[..]);
+        prop_assert!(recovered.ct_eq_bytes(&secret));
     }
 
     /// Reconstruction works with any subset of k shares (not just first k).
@@ -136,7 +136,7 @@ proptest! {
             "secret_len": secret.len(),
         }), timing_us);
 
-        prop_assert_eq!(recovered.as_bytes(), &secret[..]);
+        prop_assert!(recovered.ct_eq_bytes(&secret));
     }
 
     /// More than k shares also reconstructs correctly.
@@ -163,7 +163,7 @@ proptest! {
             "secret_len": secret.len(),
         }), timing_us);
 
-        prop_assert_eq!(recovered.as_bytes(), &secret[..]);
+        prop_assert!(recovered.ct_eq_bytes(&secret));
     }
 }
 
@@ -205,7 +205,7 @@ proptest! {
 
         // With overwhelming probability, the result should differ
         // (The probability of accidental collision is negligible: ~1/256^secret_len)
-        let matches = wrong_result.as_bytes() == &secret[..];
+        let matches = wrong_result.ct_eq_bytes(&secret);
 
         log_test_result("prop_insufficient_shares_wrong_result", "verify_security", serde_json::json!({
             "k": k,
@@ -442,7 +442,7 @@ proptest! {
             "secret_len": secret.len(),
         }), timing_us);
 
-        prop_assert_eq!(recovered.as_bytes(), &secret[..]);
+        prop_assert!(recovered.ct_eq_bytes(&secret));
     }
 }
 
@@ -466,7 +466,7 @@ proptest! {
         for share in &shares {
             let recovered = reconstruct_secret(std::slice::from_ref(share))
                 .expect("reconstruct should succeed");
-            prop_assert_eq!(recovered.as_bytes(), &secret[..]);
+            prop_assert!(recovered.ct_eq_bytes(&secret));
         }
 
         let timing_us = start.elapsed().as_micros() as u64;
@@ -488,14 +488,14 @@ proptest! {
 
         // All shares needed
         let recovered = reconstruct_secret(&shares).expect("reconstruct should succeed");
-        prop_assert_eq!(recovered.as_bytes(), &secret[..]);
+        prop_assert!(recovered.ct_eq_bytes(&secret));
 
         // n-1 shares should fail (give wrong result)
         if n > 1 {
             let insufficient: Vec<_> = shares.iter().take(usize::from(n) - 1).cloned().collect();
             let wrong = reconstruct_secret(&insufficient).expect("reconstruct succeeds");
             // With high probability, this should differ
-            let differs = wrong.as_bytes() != &secret[..];
+            let differs = !wrong.ct_eq_bytes(&secret);
 
             log_test_result("prop_k_equals_n_all_required", "verify_insufficient", serde_json::json!({
                 "k": n,
@@ -528,13 +528,15 @@ fn test_zeroizing_secret_traits() {
     let recovered = reconstruct_secret(&shares[..2]).expect("reconstruct should succeed");
 
     // Verify the secret is accessible
-    assert_eq!(recovered.as_bytes(), secret);
+    assert!(recovered.ct_eq_bytes(secret));
     assert_eq!(recovered.len(), secret.len());
     assert!(!recovered.is_empty());
 
-    // Verify debug output is redacted
+    // Verify debug output is redacted (ZeroizingSecret's Debug impl emits
+    // "<redacted, len=N>", not "[redacted]" — the bracketed form is for the
+    // ShamirShare debug shape).
     let debug = format!("{recovered:?}");
-    assert!(debug.contains("[redacted]"));
+    assert!(debug.contains("<redacted"));
     assert!(!debug.contains("test secret"));
 
     // Drop triggers zeroization (can't easily verify memory, but type compiles)

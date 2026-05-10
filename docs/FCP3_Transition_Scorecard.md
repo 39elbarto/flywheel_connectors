@@ -21,6 +21,33 @@
 
 ---
 
+## Mesh-Native Cutover Gates
+
+The Mesh-Native Architecture README row must stay `STEADY-STATE TARGET (NOT
+YET OPERATIONAL)` until these gates are green from direct telemetry. The
+initial `fwc mesh cutover-gates --json` surface is intentionally fail-closed:
+missing live telemetry is RED, not SKIP or GREEN.
+
+| Gate ID | Predicate | Current Measurement | Target | How Measured |
+|---------|-----------|---------------------|--------|--------------|
+| `mesh-inventory-placement` | At least N connectors have `placement.has_mesh_replica = true` and `placement.replica_count >= 2`. | RED: current `fwc mesh explain-availability` exposes host artifact provenance and optional placement policy, but not live `has_mesh_replica` or `replica_count` attainment. | Default N = 3 connectors; default replica count = 2. | `fwc mesh cutover-gates --json`; `fwc mesh explain-availability <connector> --host <endpoint> --json`; `bv --robot-triage` for candidate connector prioritization. |
+| `mesh-lifecycle-state-replication` | `ConnectorStateRoot` for at least N connectors is mesh-replicated with `replica_count >= 2` and `last_replicated_seq` advancing within bounded staleness. | RED: no stable `ConnectorStateRoot` replication telemetry route is exposed to `fwc` yet. | Default N = 3 connectors; default replica count = 2; default staleness <= 60s. | `fwc mesh cutover-gates --json`; future `fwc mesh state status --json`. |
+| `mesh-audit-chain-quorum` | Audit chain status reports `quorum_signed_checkpoints >= 1` and `quorum_signers >= 2` for the active zone within bounded staleness. | RED: no stable `fwc audit chain status --json` quorum summary is wired into the cutover gate evaluator yet. | At least one quorum-signed checkpoint; at least two signers; default checkpoint age <= 60s. | `fwc mesh cutover-gates --json`; future/expanded `fwc audit chain status --json`. |
+| `mesh-policy-object-distribution` | Policy bundles for the active zone are present on `peer_count >= 2` mesh peers with verified owner signatures. | RED: policy bundle peer distribution and owner-signature telemetry are not exposed through `fwc policy distribution --json` yet. | At least two peers; owner signatures verified. | `fwc mesh cutover-gates --json`; future/expanded `fwc policy distribution --json`. |
+
+Gate status contract:
+
+- `green` means the predicate is satisfied by direct current telemetry.
+- `red` means the predicate is not satisfied or required telemetry is missing.
+- `skip` is reserved for deliberately unsupported environments and must never
+  be used as the default when production cutover evidence is absent.
+
+Proxy signals that do not satisfy the gates by themselves: README wording,
+presence of mesh crates, unit tests for mesh building blocks, host-first
+connector status, or sync/transfer logs without the required predicate fields.
+
+---
+
 ## 1. Legacy Broad Buckets (to be carved)
 
 | Bucket | Current Location | Target | Status | Tracking Bead |

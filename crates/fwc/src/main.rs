@@ -863,6 +863,10 @@ enum MeshCommand {
 
     /// Show repair guidance for missing, degraded, or untracked connector state.
     RepairHints(MeshAvailabilityArgs),
+
+    /// Evaluate mesh-native cutover gates and report fail-closed status.
+    #[command(name = "cutover-gates")]
+    CutoverGates(MeshCutoverGatesArgs),
 }
 
 #[derive(Args, Debug, Default, Serialize)]
@@ -906,6 +910,41 @@ struct MeshAvailabilityArgs {
     /// Optional zone to compare against offline manifest declarations.
     #[arg(long)]
     zone: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct MeshCutoverGatesArgs {
+    /// Minimum connectors that must satisfy connector-level gates.
+    #[arg(long, default_value_t = mesh_cmd::DEFAULT_CUTOVER_GATE_CONNECTOR_COUNT)]
+    min_connectors: usize,
+
+    /// Minimum mesh replicas required per connector/state object.
+    #[arg(long, default_value_t = mesh_cmd::DEFAULT_CUTOVER_GATE_REPLICA_COUNT)]
+    replica_count: usize,
+
+    /// Maximum state-replication staleness in seconds.
+    #[arg(long, default_value_t = mesh_cmd::DEFAULT_CUTOVER_GATE_STALENESS_SECONDS)]
+    state_staleness_seconds: u64,
+
+    /// Maximum audit checkpoint staleness in seconds.
+    #[arg(long, default_value_t = mesh_cmd::DEFAULT_CUTOVER_GATE_STALENESS_SECONDS)]
+    audit_staleness_seconds: u64,
+
+    /// Minimum peers that must hold verified policy bundles.
+    #[arg(long, default_value_t = mesh_cmd::DEFAULT_CUTOVER_GATE_POLICY_PEER_COUNT)]
+    policy_peer_count: usize,
+}
+
+impl From<&MeshCutoverGatesArgs> for mesh_cmd::MeshCutoverGateArgs {
+    fn from(args: &MeshCutoverGatesArgs) -> Self {
+        Self {
+            min_connectors: args.min_connectors,
+            replica_count: args.replica_count,
+            state_staleness_seconds: args.state_staleness_seconds,
+            audit_staleness_seconds: args.audit_staleness_seconds,
+            policy_peer_count: args.policy_peer_count,
+        }
+    }
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -7755,7 +7794,56 @@ fn mesh_dispatch(args: &MeshArgs, explicit_host: Option<&str>) -> Result<Dispatc
         MeshCommand::RepairHints(args) => {
             mesh_availability_dispatch(args, explicit_host, false, true)
         }
+        MeshCommand::CutoverGates(args) => mesh_cutover_gates_dispatch(args),
     }
+}
+
+fn mesh_cutover_gates_dispatch(args: &MeshCutoverGatesArgs) -> Result<DispatchOutcome> {
+    let gate_args = mesh_cmd::MeshCutoverGateArgs::from(args);
+    let gates = mesh_cmd::mesh_cutover_gates(&gate_args);
+    let overall_status = mesh_cmd::cutover_gate_overall_status(&gates);
+    let red_gate_ids = gates
+        .iter()
+        .filter(|gate| matches!(gate.status, mesh_cmd::CutoverGateStatus::Red))
+        .map(|gate| gate.gate_id.clone())
+        .collect::<Vec<_>>();
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "mesh");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "mesh",
+        "subcommand": "cutover-gates",
+        "overall_status": overall_status.tag(),
+        "gate_count": gates.len(),
+        "red_gate_ids": red_gate_ids,
+        "targets": {
+            "min_connectors": gate_args.min_connectors,
+            "replica_count": gate_args.replica_count,
+            "state_staleness_seconds": gate_args.state_staleness_seconds,
+            "audit_staleness_seconds": gate_args.audit_staleness_seconds,
+            "policy_peer_count": gate_args.policy_peer_count,
+        },
+        "measurement_contract": {
+            "truth_model": "fail-closed",
+            "green_requires": "direct live mesh telemetry for every predicate",
+            "proxy_signals_rejected": [
+                "README wording",
+                "presence of mesh crates",
+                "passing unit tests without live gate telemetry",
+                "host-first connector status without mesh placement/state evidence"
+            ],
+        },
+        "gates": gates,
+        "next_actions": [
+            "Run `fwc mesh explain-availability <connector> --host <endpoint> --json` to inspect available connector placement provenance.",
+            "Keep the README Mesh-Native Architecture row at `STEADY-STATE TARGET (NOT YET OPERATIONAL)` while any gate is red.",
+            "Add live telemetry routes for the missing gate fields before attempting a mesh-native default flip."
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
 }
 
 fn mesh_availability_subcommand(explain: bool, hints_only: bool) -> &'static str {

@@ -4379,6 +4379,41 @@ fn e2e_mesh_availability_keeps_live_offline_and_repair_states_explicit() {
     );
 }
 
+#[test]
+fn e2e_mesh_cutover_gates_reports_fail_closed_schema() {
+    let payload = run_json_ok(&["--json", "mesh", "cutover-gates"]);
+    assert_eq!(payload["command"], "mesh");
+    assert_eq!(payload["subcommand"], "cutover-gates");
+    assert_eq!(payload["overall_status"], "red");
+    assert_eq!(payload["gate_count"], 4);
+    assert_eq!(
+        payload["measurement_contract"]["truth_model"],
+        "fail-closed"
+    );
+    let gates = payload["gates"]
+        .as_array()
+        .expect("cutover gates payload must include gates array");
+    assert_eq!(gates.len(), 4);
+    assert!(
+        gates
+            .iter()
+            .all(|gate| gate["status"].as_str() == Some("red"))
+    );
+    let gate_ids = gates
+        .iter()
+        .filter_map(|gate| gate["gate_id"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        gate_ids,
+        vec![
+            "mesh-inventory-placement",
+            "mesh-lifecycle-state-replication",
+            "mesh-audit-chain-quorum",
+            "mesh-policy-object-distribution",
+        ]
+    );
+}
+
 // ── P6.5: Offline and node-local trust path acceptance tests ───────────
 
 /// Verify that offline `show` exposes manifest safety metadata without

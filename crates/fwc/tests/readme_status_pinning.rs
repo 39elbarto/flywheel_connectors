@@ -25,6 +25,7 @@
 //! is to update both together.
 
 const README: &str = include_str!("../../../README.md");
+const FCP3_TRANSITION_SCORECARD: &str = include_str!("../../../docs/FCP3_Transition_Scorecard.md");
 const FWC_MAIN: &str = include_str!("../src/main.rs");
 
 fn feature_table_row_for(feature_name: &str) -> Option<&'static str> {
@@ -100,6 +101,31 @@ fn readme_audit_status_paragraph_still_present() {
         README.contains("br-lvz4t"),
         "br-lvz4t: audit-status paragraph should reference br-lvz4t so the rationale for \
          the Mesh-Native downgrade is discoverable"
+    );
+}
+
+#[test]
+fn readme_mesh_native_status_is_backed_by_cutover_gate_contract() {
+    let row = feature_table_row_for("Mesh-Native Architecture")
+        .expect("feature table row for Mesh-Native Architecture must exist");
+    assert!(
+        row.contains("STEADY-STATE TARGET") && row.contains("NOT YET OPERATIONAL"),
+        "Mesh-Native Architecture must remain a target while any cutover gate is red. Row: {row}"
+    );
+    for gate_id in [
+        "mesh-inventory-placement",
+        "mesh-lifecycle-state-replication",
+        "mesh-audit-chain-quorum",
+        "mesh-policy-object-distribution",
+    ] {
+        assert!(
+            FCP3_TRANSITION_SCORECARD.contains(gate_id),
+            "FCP3 transition scorecard must document cutover gate `{gate_id}` before the README mesh-native status can change"
+        );
+    }
+    assert!(
+        FWC_MAIN.contains("CutoverGates(MeshCutoverGatesArgs)"),
+        "`fwc mesh cutover-gates --json` must stay wired while the README references cutover gating"
     );
 }
 

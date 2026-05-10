@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 // ── Node state ──────────────────────────────────────────────────────
 
@@ -576,6 +577,236 @@ impl MeshAvailabilityResult {
     pub fn total_zones(&self) -> usize {
         self.zones_available.len() + self.zones_unavailable.len()
     }
+}
+
+// ── Cutover gates ──────────────────────────────────────────────────
+
+/// Default number of connectors that must satisfy inventory/state gates.
+pub const DEFAULT_CUTOVER_GATE_CONNECTOR_COUNT: usize = 3;
+
+/// Default minimum mesh replicas required for connector/state gates.
+pub const DEFAULT_CUTOVER_GATE_REPLICA_COUNT: usize = 2;
+
+/// Default staleness budget for state/audit/policy cutover telemetry.
+pub const DEFAULT_CUTOVER_GATE_STALENESS_SECONDS: u64 = 60;
+
+/// Default minimum policy peers that must hold verified policy bundles.
+pub const DEFAULT_CUTOVER_GATE_POLICY_PEER_COUNT: usize = 2;
+
+/// Stable machine status for a mesh-native cutover gate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CutoverGateStatus {
+    /// Predicate is satisfied by direct current evidence.
+    Green,
+    /// Predicate is not satisfied or telemetry is missing.
+    Red,
+    /// Predicate is intentionally out of scope for this environment.
+    Skip,
+}
+
+impl CutoverGateStatus {
+    /// Machine-readable tag for this status.
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::Green => "green",
+            Self::Red => "red",
+            Self::Skip => "skip",
+        }
+    }
+}
+
+/// Arguments controlling cutover gate targets.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshCutoverGateArgs {
+    /// Minimum connectors that must satisfy connector-level gates.
+    pub min_connectors: usize,
+    /// Minimum mesh replica count per connector/state object.
+    pub replica_count: usize,
+    /// Maximum staleness in seconds for state replication.
+    pub state_staleness_seconds: u64,
+    /// Maximum staleness in seconds for audit quorum checkpoints.
+    pub audit_staleness_seconds: u64,
+    /// Minimum peers that must hold verified policy bundles.
+    pub policy_peer_count: usize,
+}
+
+impl Default for MeshCutoverGateArgs {
+    fn default() -> Self {
+        Self {
+            min_connectors: DEFAULT_CUTOVER_GATE_CONNECTOR_COUNT,
+            replica_count: DEFAULT_CUTOVER_GATE_REPLICA_COUNT,
+            state_staleness_seconds: DEFAULT_CUTOVER_GATE_STALENESS_SECONDS,
+            audit_staleness_seconds: DEFAULT_CUTOVER_GATE_STALENESS_SECONDS,
+            policy_peer_count: DEFAULT_CUTOVER_GATE_POLICY_PEER_COUNT,
+        }
+    }
+}
+
+/// A single measurable mesh-native cutover gate.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MeshCutoverGate {
+    /// Stable gate identifier.
+    pub gate_id: String,
+    /// Human-readable gate name.
+    pub name: String,
+    /// Exact predicate the gate evaluates.
+    pub predicate_text: String,
+    /// Current evaluated status.
+    pub status: CutoverGateStatus,
+    /// Current measurement, or explicit missing-telemetry detail.
+    pub measured_value: Value,
+    /// Required target value.
+    pub target: Value,
+    /// Commands or artifacts used to measure the predicate.
+    pub how_measured: Vec<String>,
+    /// Operator guidance for moving a red gate forward.
+    pub remediation: String,
+}
+
+impl MeshCutoverGate {
+    fn red(
+        gate_id: &str,
+        name: &str,
+        predicate_text: String,
+        measured_value: Value,
+        target: Value,
+        how_measured: Vec<String>,
+        remediation: &str,
+    ) -> Self {
+        Self {
+            gate_id: gate_id.to_owned(),
+            name: name.to_owned(),
+            predicate_text,
+            status: CutoverGateStatus::Red,
+            measured_value,
+            target,
+            how_measured,
+            remediation: remediation.to_owned(),
+        }
+    }
+}
+
+/// Overall status for a group of cutover gates.
+#[must_use]
+pub fn cutover_gate_overall_status(gates: &[MeshCutoverGate]) -> CutoverGateStatus {
+    if gates
+        .iter()
+        .any(|gate| matches!(gate.status, CutoverGateStatus::Red))
+    {
+        CutoverGateStatus::Red
+    } else if gates
+        .iter()
+        .all(|gate| matches!(gate.status, CutoverGateStatus::Green))
+    {
+        CutoverGateStatus::Green
+    } else {
+        CutoverGateStatus::Skip
+    }
+}
+
+/// Build the mesh-native cutover gate contract.
+///
+/// The current implementation is fail-closed: it exposes the stable schema and
+/// reports RED until `fwc` and the host expose direct live telemetry for every
+/// predicate. This prevents a green-by-default cutover when no mesh evidence is
+/// available.
+#[must_use]
+pub fn mesh_cutover_gates(args: &MeshCutoverGateArgs) -> Vec<MeshCutoverGate> {
+    vec![
+        MeshCutoverGate::red(
+            "mesh-inventory-placement",
+            "Mesh-backed connector inventory with placement evidence",
+            format!(
+                "At least {} connectors have placement.has_mesh_replica=true and placement.replica_count >= {}.",
+                args.min_connectors, args.replica_count
+            ),
+            json!({
+                "telemetry_state": "missing",
+                "connectors_meeting_predicate": 0,
+                "available_route": "fwc mesh explain-availability",
+                "missing_fields": ["placement.has_mesh_replica", "placement.replica_count"],
+            }),
+            json!({
+                "connectors_meeting_predicate": args.min_connectors,
+                "placement.has_mesh_replica": true,
+                "placement.replica_count": args.replica_count,
+            }),
+            vec![
+                "fwc mesh explain-availability <connector> --host <endpoint> --json".to_owned(),
+                "bv --robot-triage".to_owned(),
+            ],
+            "Expose live placement replica telemetry on the host/mesh availability route, then count connectors that meet the target.",
+        ),
+        MeshCutoverGate::red(
+            "mesh-lifecycle-state-replication",
+            "Mesh-backed lifecycle state replication",
+            format!(
+                "ConnectorStateRoot for at least {} connectors is mesh-replicated with replica_count >= {} and last_replicated_seq advancing within {}s.",
+                args.min_connectors, args.replica_count, args.state_staleness_seconds
+            ),
+            json!({
+                "telemetry_state": "missing",
+                "connectors_meeting_predicate": 0,
+                "missing_fields": [
+                    "connector_state_root.replica_count",
+                    "connector_state_root.last_replicated_seq",
+                    "connector_state_root.last_replicated_age_seconds"
+                ],
+            }),
+            json!({
+                "connectors_meeting_predicate": args.min_connectors,
+                "replica_count": args.replica_count,
+                "last_replicated_age_seconds_lte": args.state_staleness_seconds,
+            }),
+            vec![
+                "fwc mesh cutover-gates --json".to_owned(),
+                "future: fwc mesh state status --json".to_owned(),
+            ],
+            "Publish ConnectorStateRoot replication telemetry before treating lifecycle state as mesh-backed.",
+        ),
+        MeshCutoverGate::red(
+            "mesh-audit-chain-quorum",
+            "Mesh-backed audit chain quorum across at least two nodes",
+            format!(
+                "Audit chain status reports quorum_signed_checkpoints >= 1 and quorum_signers >= 2 within {}s.",
+                args.audit_staleness_seconds
+            ),
+            json!({
+                "telemetry_state": "missing",
+                "quorum_signed_checkpoints": 0,
+                "quorum_signers": 0,
+                "missing_route": "fwc audit chain status --json",
+            }),
+            json!({
+                "quorum_signed_checkpoints": 1,
+                "quorum_signers": 2,
+                "checkpoint_age_seconds_lte": args.audit_staleness_seconds,
+            }),
+            vec!["fwc audit chain status --json".to_owned()],
+            "Expose quorum checkpoint status through the audit command before allowing this gate to turn green.",
+        ),
+        MeshCutoverGate::red(
+            "mesh-policy-object-distribution",
+            "Mesh-backed policy-object distribution",
+            format!(
+                "Policy bundles for the active zone are present on at least {} mesh peers with verified owner signatures.",
+                args.policy_peer_count
+            ),
+            json!({
+                "telemetry_state": "missing",
+                "peer_count": 0,
+                "verified_owner_signatures": false,
+                "missing_route": "fwc policy distribution --json",
+            }),
+            json!({
+                "peer_count": args.policy_peer_count,
+                "verified_owner_signatures": true,
+            }),
+            vec!["fwc policy distribution --json".to_owned()],
+            "Expose policy bundle distribution and signature verification telemetry before allowing this gate to turn green.",
+        ),
+    ]
 }
 
 // ── Command argument types ──────────────────────────────────────────
@@ -1747,6 +1978,50 @@ mod tests {
         assert_eq!(back.connector, "github");
         assert_eq!(back.operation, Some("list_repos".to_owned()));
         assert_eq!(back.zones_available, vec!["us-east"]);
+    }
+
+    // ── mesh_cutover_gates() tests ──────────────────────────────────
+
+    #[test]
+    fn cutover_gate_status_tags_are_stable() {
+        assert_eq!(CutoverGateStatus::Green.tag(), "green");
+        assert_eq!(CutoverGateStatus::Red.tag(), "red");
+        assert_eq!(CutoverGateStatus::Skip.tag(), "skip");
+    }
+
+    #[test]
+    fn cutover_gates_fail_closed_until_live_telemetry_exists() {
+        let args = MeshCutoverGateArgs::default();
+        let gates = mesh_cutover_gates(&args);
+        assert_eq!(gates.len(), 4);
+        assert_eq!(cutover_gate_overall_status(&gates), CutoverGateStatus::Red);
+        assert!(
+            gates
+                .iter()
+                .all(|gate| gate.status == CutoverGateStatus::Red)
+        );
+        assert_eq!(gates[0].gate_id, "mesh-inventory-placement");
+        assert_eq!(
+            gates[0].measured_value["telemetry_state"],
+            serde_json::Value::String("missing".to_owned())
+        );
+    }
+
+    #[test]
+    fn cutover_gate_targets_follow_args() {
+        let args = MeshCutoverGateArgs {
+            min_connectors: 5,
+            replica_count: 3,
+            state_staleness_seconds: 45,
+            audit_staleness_seconds: 90,
+            policy_peer_count: 4,
+        };
+        let gates = mesh_cutover_gates(&args);
+        assert_eq!(gates[0].target["connectors_meeting_predicate"], 5);
+        assert_eq!(gates[0].target["placement.replica_count"], 3);
+        assert_eq!(gates[1].target["last_replicated_age_seconds_lte"], 45);
+        assert_eq!(gates[2].target["checkpoint_age_seconds_lte"], 90);
+        assert_eq!(gates[3].target["peer_count"], 4);
     }
 
     // ── mesh_status() tests ─────────────────────────────────────────

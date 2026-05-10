@@ -3201,10 +3201,84 @@ fn render_dispatch(
         &effective_render_options,
     );
 
+    let text = if let Some(rendered) =
+        render_human_dispatch(&dispatch.payload, format, &effective_render_options)
+    {
+        rendered
+    } else {
+        render_with_options(dispatch.payload, format, &effective_render_options)?
+    };
+
     Ok(ExecutionOutcome {
-        text: render_with_options(dispatch.payload, format, &effective_render_options)?,
+        text,
         exit_code: dispatch.exit_code.into(),
     })
+}
+
+fn render_human_dispatch(
+    payload: &Value,
+    format: OutputFormat,
+    render_options: &RenderOptions,
+) -> Option<String> {
+    if format != OutputFormat::Toon || render_options.has_transform() {
+        return None;
+    }
+
+    match (
+        payload.get("command").and_then(Value::as_str),
+        payload.get("subcommand").and_then(Value::as_str),
+    ) {
+        (Some("mesh"), Some("cutover-gates")) => Some(render_mesh_cutover_gates_ladder(payload)),
+        _ => None,
+    }
+}
+
+fn render_mesh_cutover_gates_ladder(payload: &Value) -> String {
+    use std::fmt::Write as _;
+
+    let overall_status = payload
+        .get("overall_status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let gate_count = payload
+        .get("gate_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let mut output = String::new();
+    let _ = writeln!(
+        output,
+        "mesh cutover gates: {overall_status} ({gate_count} gates)"
+    );
+
+    if let Some(gates) = payload.get("gates").and_then(Value::as_array) {
+        for gate in gates {
+            let status = gate
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let gate_id = gate
+                .get("gate_id")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown-gate");
+            let name = gate.get("name").and_then(Value::as_str).unwrap_or(gate_id);
+            let measured_value = compact_json_field(gate.get("measured_value"));
+            let target = compact_json_field(gate.get("target"));
+            let _ = writeln!(
+                output,
+                "{status:<5} {gate_id} - {name} (measured={measured_value}; target={target})"
+            );
+        }
+    }
+
+    let _ = writeln!(output, "README graduation: requires all gates green");
+    output
+}
+
+fn compact_json_field(value: Option<&Value>) -> String {
+    value.map_or_else(
+        || "null".to_owned(),
+        |value| serde_json::to_string(value).unwrap_or_else(|_| "null".to_owned()),
+    )
 }
 
 fn annotate_output_contract(
@@ -27249,6 +27323,26 @@ mod tests {
         assert_eq!(record.metric_name, super::CUTOVER_GATE_STATUS_METRIC_NAME);
         assert_eq!(record.metric_label_gate_id, record.gate_id);
         assert_eq!(record.metric_value, 1);
+    }
+
+    #[test]
+    fn mesh_cutover_gates_default_output_is_human_ladder() {
+        let (exit_code, output) = execute_text(&["fwc", "mesh", "cutover-gates"]);
+
+        assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
+        assert!(output.starts_with("mesh cutover gates: skip (4 gates)"));
+        assert!(
+            output
+                .lines()
+                .any(|line| line.starts_with("skip  mesh-inventory-placement - "))
+        );
+        assert!(
+            output
+                .lines()
+                .any(|line| line.starts_with("skip  mesh-audit-chain-quorum - "))
+        );
+        assert!(output.contains("README graduation: requires all gates green"));
+        assert!(!output.trim_start().starts_with('{'));
     }
 
     fn temp_auth_store() -> (TempDir, super::CredentialStore) {

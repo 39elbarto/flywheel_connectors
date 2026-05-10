@@ -1258,8 +1258,7 @@ mod tests {
             field_pick in 0u8..10,
         ) {
             let key = signing_key();
-            let receipt_orig = ConstraintEnforcementReceipt::seal(allow_body(), &key).unwrap();
-            let mut receipt = receipt_orig.clone();
+            let mut receipt = ConstraintEnforcementReceipt::seal(allow_body(), &key).unwrap();
 
             match field_pick {
                 0 => {

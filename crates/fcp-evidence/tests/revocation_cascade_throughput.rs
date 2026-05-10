@@ -1,13 +1,13 @@
 //! m8j0q.A.9 throughput acceptance test.
 //!
-//! Bead acceptance: "Cascade is O(walk_depth), not O(num_tokens)".
+//! Bead acceptance: "Cascade is `O(walk_depth)`, not `O(num_tokens)`".
 //!
 //! This integration test mints 1000 distinct token ids that all share
 //! the same revoked issuer key, then verifies:
 //!
 //! 1. Every one of the 1000 tokens is rejected by the cascade walker
 //!    with the same `IssuerKeyRevoked` reason.
-//! 2. Per-token cost is O(walk_depth) — independent of `num_tokens`
+//! 2. Per-token cost is `O(walk_depth)` — independent of `num_tokens`
 //!    and independent of `registry_size`. We assert this by counting
 //!    lookup-closure invocations: each token triggers AT MOST
 //!    `max_hops` calls regardless of how many tokens or how many
@@ -25,11 +25,11 @@ use fcp_evidence::{
 use fcp_core::ObjectId;
 use fcp_crypto::kid::KeyId;
 
-fn kid(byte: u8) -> KeyId {
+const fn kid(byte: u8) -> KeyId {
     KeyId::from_bytes([byte; 8])
 }
 
-fn kid_u64(value: u64) -> KeyId {
+const fn kid_u64(value: u64) -> KeyId {
     KeyId::from_bytes(value.to_le_bytes())
 }
 

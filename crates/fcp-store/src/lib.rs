@@ -52,8 +52,7 @@ pub use compatibility_ledger::{
     MemoryCompatibilityLedgerStore,
 };
 pub use connector_state::{
-    CONNECTOR_STATE_CACHE_MARKER, ConnectorStateAppendOutcome, ConnectorStateStoreError,
-    FcpStoreConnectorStateStore,
+    CONNECTOR_STATE_CACHE_MARKER, ConnectorStateStoreError, FcpStoreConnectorStateStore,
 };
 pub use coverage::{CoverageEvaluation, CoverageHealth, SymbolDistribution};
 pub use durable::{
@@ -88,6 +87,8 @@ pub use symbol_store::{
     MemorySymbolStore, MemorySymbolStoreConfig, ObjectSymbolMeta, ObjectTransmissionInfo,
     StoredSymbol, SymbolMeta, SymbolStore, validate_source_symbols,
 };
+
+pub use fcp_prelude::ConnectorStateAppendOutcome;
 
 pub use offline::{
     AccessPatternTracker, OfflineAccess, OfflineCapability, OfflineStatus, OfflineSummary,

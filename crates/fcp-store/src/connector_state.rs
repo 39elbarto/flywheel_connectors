@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use fcp_cbor::{CanonicalSerializer, SchemaId, SerializationError};
 use fcp_prelude::{
-    ConnectorId, ConnectorStateModel, ConnectorStateObject, ConnectorStateRoot,
-    ConnectorStateSnapshot, InstanceId, ObjectHeader, ObjectId, ObjectIdKey, RetentionClass,
+    ConnectorId, ConnectorStateAppendOutcome, ConnectorStateChangeStream, ConnectorStateError,
+    ConnectorStateModel, ConnectorStateObject, ConnectorStateRoot, ConnectorStateSnapshot,
+    ConnectorStateStore, InstanceId, ObjectHeader, ObjectId, ObjectIdKey, RetentionClass,
     StorageMeta, StoredObject, ZoneId,
 };
 use semver::Version;
@@ -25,29 +26,6 @@ use crate::{ObjectStore, ObjectStoreError};
 /// name here gives host adapters one canonical spelling when they expose the
 /// cache-vs-canonical distinction to operators.
 pub const CONNECTOR_STATE_CACHE_MARKER: &str = ".fcp-cache-only";
-
-/// Result of appending a connector-state object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConnectorStateAppendOutcome {
-    /// The object became the canonical chain head.
-    Committed {
-        /// Stored state-object id.
-        object_id: ObjectId,
-        /// Stored root-object id pointing at `object_id`.
-        root_object_id: ObjectId,
-        /// Committed sequence number.
-        seq: u64,
-        /// Snapshot emitted by this append, when interval policy requested one.
-        snapshot_object_id: Option<ObjectId>,
-    },
-    /// The append did not match the canonical head and was not stored.
-    Conflict {
-        /// Current canonical head, if any.
-        canonical_head: Option<ObjectId>,
-        /// Current canonical sequence number, if the head object resolves.
-        canonical_seq: Option<u64>,
-    },
-}
 
 /// Errors returned by [`FcpStoreConnectorStateStore`].
 #[derive(Debug, Error)]
@@ -736,6 +714,144 @@ impl FcpStoreConnectorStateStore {
                 .as_ref()
                 .map_or_else(|| "<none>".to_string(), ToString::to_string),
             got: got.map_or_else(|| "<none>".to_string(), ToString::to_string),
+        })
+    }
+
+    fn ensure_requested_connector(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> std::result::Result<(), ConnectorStateError> {
+        if connector_id == &self.connector_id {
+            return Ok(());
+        }
+        Err(ConnectorStateError::MalformedState {
+            connector_id: connector_id.clone(),
+            reason: format!(
+                "requested connector_id does not match store connector_id {}",
+                self.connector_id
+            ),
+        })
+    }
+
+    fn to_connector_state_error(&self, err: ConnectorStateStoreError) -> ConnectorStateError {
+        match err {
+            ConnectorStateStoreError::ObjectStore(err) => ConnectorStateError::StorageUnavailable {
+                connector_id: self.connector_id.clone(),
+                reason: err.to_string(),
+            },
+            ConnectorStateStoreError::MissingHead(head) => {
+                ConnectorStateError::SnapshotUnavailable {
+                    connector_id: self.connector_id.clone(),
+                    reason: format!("root references missing state object {head}"),
+                }
+            }
+            ConnectorStateStoreError::UnexpectedSchema { .. }
+            | ConnectorStateStoreError::IdentityMismatch { .. }
+            | ConnectorStateStoreError::HeaderBodyMismatch
+            | ConnectorStateStoreError::ContentIdMismatch { .. }
+            | ConnectorStateStoreError::MissingLeaseReference(_)
+            | ConnectorStateStoreError::SequenceMismatch { .. }
+            | ConnectorStateStoreError::SequenceOverflow(_)
+            | ConnectorStateStoreError::Serialization(_) => ConnectorStateError::MalformedState {
+                connector_id: self.connector_id.clone(),
+                reason: err.to_string(),
+            },
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ConnectorStateStore for FcpStoreConnectorStateStore {
+    async fn read_root(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> std::result::Result<Option<ConnectorStateRoot>, ConnectorStateError> {
+        self.ensure_requested_connector(connector_id)?;
+        Self::read_root(self)
+            .await
+            .map(|root| root.map(|(_object_id, root)| root))
+            .map_err(|err| self.to_connector_state_error(err))
+    }
+
+    async fn append_object(
+        &self,
+        connector_id: &ConnectorId,
+        object: ConnectorStateObject,
+    ) -> std::result::Result<ConnectorStateAppendOutcome, ConnectorStateError> {
+        self.ensure_requested_connector(connector_id)?;
+        Self::append_object(self, object)
+            .await
+            .map_err(|err| self.to_connector_state_error(err))
+    }
+
+    async fn read_chain(
+        &self,
+        connector_id: &ConnectorId,
+        after_seq: Option<u64>,
+        limit: usize,
+    ) -> std::result::Result<Vec<ConnectorStateObject>, ConnectorStateError> {
+        self.ensure_requested_connector(connector_id)?;
+        Self::read_chain(self, after_seq, limit)
+            .await
+            .map(|states| {
+                states
+                    .into_iter()
+                    .map(|(_object_id, state)| state)
+                    .collect()
+            })
+            .map_err(|err| self.to_connector_state_error(err))
+    }
+
+    async fn snapshot(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> std::result::Result<ConnectorStateSnapshot, ConnectorStateError> {
+        self.ensure_requested_connector(connector_id)?;
+        let snapshot_id = Self::snapshot_head(self)
+            .await
+            .map_err(|err| self.to_connector_state_error(err))?
+            .ok_or_else(|| ConnectorStateError::SnapshotUnavailable {
+                connector_id: connector_id.clone(),
+                reason: "no connector state head exists".to_string(),
+            })?;
+        let Some((latest_id, snapshot)) = Self::latest_snapshot(self)
+            .await
+            .map_err(|err| self.to_connector_state_error(err))?
+        else {
+            return Err(ConnectorStateError::SnapshotUnavailable {
+                connector_id: connector_id.clone(),
+                reason: "snapshot was emitted but could not be reloaded".to_string(),
+            });
+        };
+        if latest_id != snapshot_id {
+            return Err(ConnectorStateError::SnapshotUnavailable {
+                connector_id: connector_id.clone(),
+                reason: format!("latest snapshot {latest_id} did not match emitted {snapshot_id}"),
+            });
+        }
+        Ok(snapshot)
+    }
+
+    async fn compact(
+        &self,
+        connector_id: &ConnectorId,
+        before_seq: u64,
+    ) -> std::result::Result<usize, ConnectorStateError> {
+        self.ensure_requested_connector(connector_id)?;
+        Self::compact(self, before_seq)
+            .await
+            .map_err(|err| self.to_connector_state_error(err))
+    }
+
+    async fn subscribe_changes(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> std::result::Result<ConnectorStateChangeStream, ConnectorStateError> {
+        self.ensure_requested_connector(connector_id)?;
+        Err(ConnectorStateError::SubscribeUnavailable {
+            connector_id: connector_id.clone(),
+            reason: "mesh gossip connector-state change stream is not wired in fcp-store"
+                .to_string(),
         })
     }
 }

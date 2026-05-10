@@ -22,8 +22,9 @@
 //! - Snapshots enable compaction of older state objects
 
 use fcp_cbor::{SerializationError, to_canonical_cbor};
+use futures_util::Stream;
 use serde::{Deserialize, Serialize};
-use std::fmt;
+use std::{fmt, pin::Pin};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -502,6 +503,199 @@ pub struct ConnectorStateSnapshot {
 
     /// Ed25519 signature over the canonical snapshot.
     pub signature: Signature,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Connector State Store (NORMATIVE)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Result of appending a connector state object to canonical storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum ConnectorStateAppendOutcome {
+    /// The object became the canonical chain head.
+    Committed {
+        /// Stored state-object id.
+        object_id: ObjectId,
+        /// Stored root-object id pointing at `object_id`.
+        root_object_id: ObjectId,
+        /// Committed sequence number.
+        seq: u64,
+        /// Snapshot emitted by this append, when interval policy requested one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        snapshot_object_id: Option<ObjectId>,
+    },
+    /// The append did not match the canonical head and was not stored.
+    Conflict {
+        /// Current canonical head, if any.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        canonical_head: Option<ObjectId>,
+        /// Current canonical sequence number, if the head object resolves.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        canonical_seq: Option<u64>,
+    },
+}
+
+/// Connector-state change kind emitted by canonical storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorStateChangeKind {
+    /// A root was created or advanced.
+    RootUpdated,
+    /// A chain object was appended.
+    ObjectAppended,
+    /// A snapshot was emitted.
+    SnapshotEmitted,
+    /// Older objects were compacted or marked eligible for collection.
+    Compacted,
+}
+
+/// Connector-state change notification for cache invalidation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorStateChange {
+    /// Connector whose state changed.
+    pub connector_id: ConnectorId,
+    /// Optional connector instance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<InstanceId>,
+    /// Zone containing the changed state.
+    pub zone_id: ZoneId,
+    /// Change kind.
+    pub kind: ConnectorStateChangeKind,
+    /// Object associated with the change, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_id: Option<ObjectId>,
+    /// Sequence associated with the change, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    /// Observation timestamp in UNIX seconds.
+    pub observed_at: u64,
+}
+
+/// Stream of connector-state change notifications.
+pub type ConnectorStateChangeStream =
+    Pin<Box<dyn Stream<Item = Result<ConnectorStateChange, ConnectorStateError>> + Send + 'static>>;
+
+/// Errors surfaced by canonical connector-state storage.
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+#[serde(tag = "error", rename_all = "snake_case")]
+pub enum ConnectorStateError {
+    /// Canonical state could not be read or written.
+    #[error("connector state storage unavailable for {connector_id}: {reason}")]
+    StorageUnavailable {
+        /// Connector whose state operation failed.
+        connector_id: ConnectorId,
+        /// Redaction-safe failure detail.
+        reason: String,
+    },
+    /// The append lost a prev-pointer race against the canonical head.
+    #[error("connector state conflict; canonical head is {canonical_head:?}")]
+    Conflict {
+        /// Canonical head at the time of conflict.
+        canonical_head: Option<ObjectId>,
+    },
+    /// The state payload or object envelope was malformed.
+    #[error("malformed connector state for {connector_id}: {reason}")]
+    MalformedState {
+        /// Connector whose state failed validation.
+        connector_id: ConnectorId,
+        /// Redaction-safe validation detail.
+        reason: String,
+    },
+    /// A caller lacked authority to mutate or read connector state.
+    #[error("connector state authorization denied for {connector_id}: {reason}")]
+    AuthorizationDenied {
+        /// Connector whose state operation was denied.
+        connector_id: ConnectorId,
+        /// Redaction-safe denial detail.
+        reason: String,
+    },
+    /// No snapshot can be emitted or read for the requested connector.
+    #[error("connector state snapshot unavailable for {connector_id}: {reason}")]
+    SnapshotUnavailable {
+        /// Connector whose snapshot was requested.
+        connector_id: ConnectorId,
+        /// Redaction-safe failure detail.
+        reason: String,
+    },
+    /// Change subscription is unavailable.
+    #[error("connector state subscription unavailable for {connector_id}: {reason}")]
+    SubscribeUnavailable {
+        /// Connector whose change stream was requested.
+        connector_id: ConnectorId,
+        /// Redaction-safe failure detail.
+        reason: String,
+    },
+    /// A chain-read limit was invalid.
+    #[error("invalid connector state read limit {limit}")]
+    InvalidLimit {
+        /// Supplied limit.
+        limit: usize,
+    },
+}
+
+/// Canonical connector-state storage contract.
+#[async_trait::async_trait]
+pub trait ConnectorStateStore: Send + Sync + 'static {
+    /// Read the current root for a connector.
+    ///
+    /// # Errors
+    /// Returns [`ConnectorStateError`] if canonical storage cannot be queried.
+    async fn read_root(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> Result<Option<ConnectorStateRoot>, ConnectorStateError>;
+
+    /// Append a state-chain object.
+    ///
+    /// # Errors
+    /// Returns [`ConnectorStateError`] if the object is malformed, unauthorized,
+    /// or canonical storage cannot persist it.
+    async fn append_object(
+        &self,
+        connector_id: &ConnectorId,
+        object: ConnectorStateObject,
+    ) -> Result<ConnectorStateAppendOutcome, ConnectorStateError>;
+
+    /// Read chain objects after `after_seq`, up to `limit`.
+    ///
+    /// # Errors
+    /// Returns [`ConnectorStateError`] if canonical storage cannot read the chain.
+    async fn read_chain(
+        &self,
+        connector_id: &ConnectorId,
+        after_seq: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<ConnectorStateObject>, ConnectorStateError>;
+
+    /// Emit and return a snapshot for the connector's current head.
+    ///
+    /// # Errors
+    /// Returns [`ConnectorStateError`] if the connector has no snapshot-able
+    /// state or canonical storage cannot persist the snapshot.
+    async fn snapshot(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> Result<ConnectorStateSnapshot, ConnectorStateError>;
+
+    /// Compact chain objects before `before_seq`.
+    ///
+    /// # Errors
+    /// Returns [`ConnectorStateError`] if canonical storage cannot compact state.
+    async fn compact(
+        &self,
+        connector_id: &ConnectorId,
+        before_seq: u64,
+    ) -> Result<usize, ConnectorStateError>;
+
+    /// Subscribe to canonical-state changes for cross-host cache invalidation.
+    ///
+    /// # Errors
+    /// Returns [`ConnectorStateError`] if the mesh-gossip backed stream is unavailable.
+    async fn subscribe_changes(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> Result<ConnectorStateChangeStream, ConnectorStateError>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2728,6 +2922,121 @@ mod tests {
             let deserialized: ConnectorStateModel = serde_json::from_str(&json).unwrap();
             assert_eq!(model, deserialized);
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ConnectorStateStore Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[derive(Default)]
+    struct EmptyConnectorStateStore;
+
+    #[async_trait::async_trait]
+    impl ConnectorStateStore for EmptyConnectorStateStore {
+        async fn read_root(
+            &self,
+            _connector_id: &ConnectorId,
+        ) -> Result<Option<ConnectorStateRoot>, ConnectorStateError> {
+            Ok(None)
+        }
+
+        async fn append_object(
+            &self,
+            _connector_id: &ConnectorId,
+            object: ConnectorStateObject,
+        ) -> Result<ConnectorStateAppendOutcome, ConnectorStateError> {
+            Ok(ConnectorStateAppendOutcome::Committed {
+                object_id: test_object_id("state"),
+                root_object_id: test_object_id("root"),
+                seq: object.seq,
+                snapshot_object_id: None,
+            })
+        }
+
+        async fn read_chain(
+            &self,
+            _connector_id: &ConnectorId,
+            _after_seq: Option<u64>,
+            limit: usize,
+        ) -> Result<Vec<ConnectorStateObject>, ConnectorStateError> {
+            if limit == 0 {
+                return Err(ConnectorStateError::InvalidLimit { limit });
+            }
+            Ok(Vec::new())
+        }
+
+        async fn snapshot(
+            &self,
+            connector_id: &ConnectorId,
+        ) -> Result<ConnectorStateSnapshot, ConnectorStateError> {
+            Err(ConnectorStateError::SnapshotUnavailable {
+                connector_id: connector_id.clone(),
+                reason: "empty test store".to_string(),
+            })
+        }
+
+        async fn compact(
+            &self,
+            _connector_id: &ConnectorId,
+            _before_seq: u64,
+        ) -> Result<usize, ConnectorStateError> {
+            Ok(0)
+        }
+
+        async fn subscribe_changes(
+            &self,
+            _connector_id: &ConnectorId,
+        ) -> Result<ConnectorStateChangeStream, ConnectorStateError> {
+            Ok(Box::pin(futures_util::stream::empty()))
+        }
+    }
+
+    #[test]
+    fn connector_state_append_outcome_conflict_serde_roundtrip() -> Result<(), serde_json::Error> {
+        let outcome = ConnectorStateAppendOutcome::Conflict {
+            canonical_head: Some(test_object_id("head")),
+            canonical_seq: Some(7),
+        };
+        let json = serde_json::to_string(&outcome)?;
+        let back: ConnectorStateAppendOutcome = serde_json::from_str(&json)?;
+        assert_eq!(back, outcome);
+        Ok(())
+    }
+
+    #[test]
+    fn connector_state_change_serde_roundtrip() -> Result<(), serde_json::Error> {
+        let change = ConnectorStateChange {
+            connector_id: test_connector_id(),
+            instance_id: Some(InstanceId::new()),
+            zone_id: ZoneId::work(),
+            kind: ConnectorStateChangeKind::ObjectAppended,
+            object_id: Some(test_object_id("state")),
+            seq: Some(9),
+            observed_at: 1_700_000_000,
+        };
+
+        let json = serde_json::to_string(&change)?;
+        let back: ConnectorStateChange = serde_json::from_str(&json)?;
+        assert_eq!(back, change);
+        Ok(())
+    }
+
+    #[test]
+    fn connector_state_error_display_is_redaction_safe() {
+        let err = ConnectorStateError::StorageUnavailable {
+            connector_id: test_connector_id(),
+            reason: "object store timeout".to_string(),
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains("object store timeout"));
+        assert!(rendered.contains(test_connector_id().as_str()));
+    }
+
+    #[test]
+    fn connector_state_store_trait_is_object_safe() {
+        let store: Box<dyn ConnectorStateStore> = Box::new(EmptyConnectorStateStore);
+        let result = fcp_async_core::runtime::block_on_sync(store.read_root(&test_connector_id()));
+        assert!(matches!(result, Ok(Ok(None))));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

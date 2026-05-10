@@ -168,6 +168,19 @@ pub use mesh_failover_recorder::{
     MeshFailoverRecordError, MeshStateRootRef,
 };
 
+// ── High-Core Swarm Evidence Adapter (b88ec.7) ───────────────────
+
+pub mod high_core_swarm_evidence;
+
+pub use high_core_swarm_evidence::{
+    HIGH_CORE_SWARM_EVIDENCE_SCHEMA, HighCoreSwarmAnalysis, HighCoreSwarmClassification,
+    HighCoreSwarmEvidenceError, HighCoreSwarmEvidenceRecord, HighCoreSwarmJsonlEvent,
+    MemoryHeadroom, QueueLatencyPercentiles, SwarmControlDecision, SwarmControlDecisionKind,
+    SwarmEvidenceRequirements, SwarmHardwareClass, SwarmHardwareProfile, SwarmOutcomeCounters,
+    SwarmProofDebtItem, SwarmProofDebtKind, SwarmProofValue, SwarmScenarioKind, SwarmScenarioShape,
+    rank_swarm_proof_debt,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

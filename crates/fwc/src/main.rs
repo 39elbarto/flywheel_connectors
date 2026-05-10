@@ -489,6 +489,9 @@ enum Commands {
     /// Inspect and persist explicit mesh execution targets.
     Mesh(MeshArgs),
 
+    /// Inspect connector-local operator state surfaces.
+    Connector(ConnectorArgs),
+
     /// Create and resume durable workflow capsules for connector jobs.
     #[command(visible_alias = "tasks")]
     Task(TaskArgs),
@@ -945,6 +948,47 @@ struct MeshCutoverGatesArgs {
     /// Minimum peers that must hold verified policy bundles.
     #[arg(long)]
     policy_peer_count: Option<usize>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct ConnectorArgs {
+    #[command(subcommand)]
+    command: ConnectorCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum ConnectorCommand {
+    /// Inspect connector state storage and local cache evidence.
+    State(ConnectorStateArgs),
+}
+
+#[derive(Args, Debug, Serialize)]
+struct ConnectorStateArgs {
+    #[command(subcommand)]
+    command: ConnectorStateCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum ConnectorStateCommand {
+    /// Explain where canonical connector state lives and what local cache exists.
+    Explain(ConnectorStateExplainArgs),
+}
+
+#[derive(Args, Debug, Serialize)]
+struct ConnectorStateExplainArgs {
+    /// Connector id, alias, or family name.
+    #[arg(long)]
+    connector: String,
+
+    /// Optional zone whose state cache path should be explained.
+    #[arg(long)]
+    zone: Option<String>,
+
+    /// Override the connector state root used for local cache inspection.
+    #[arg(long, value_name = "PATH")]
+    state_root: Option<PathBuf>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -3610,6 +3654,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         }
         Commands::Context(args) => context_dispatch(args)?,
         Commands::Mesh(args) => mesh_dispatch(args, cli.host.as_deref())?,
+        Commands::Connector(args) => connector_dispatch(args, cli.host.as_deref())?,
         Commands::Task(args) => task_dispatch(args)?,
         Commands::Session(args) => session_dispatch(args)?,
         Commands::Agent(args) => agent_dispatch(args)?,
@@ -7890,6 +7935,322 @@ fn mesh_dispatch(args: &MeshArgs, explicit_host: Option<&str>) -> Result<Dispatc
         }
         MeshCommand::CutoverGates(args) => mesh_cutover_gates_dispatch(args, explicit_host),
     }
+}
+
+const CONNECTOR_STATE_EXPLAIN_SCHEMA_VERSION: &str = "1.0.0";
+const CONNECTOR_STATE_CACHE_MARKER: &str = ".fcp-cache-only";
+
+fn connector_dispatch(
+    args: &ConnectorArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    match &args.command {
+        ConnectorCommand::State(args) => connector_state_dispatch(args, explicit_host),
+    }
+}
+
+fn connector_state_dispatch(
+    args: &ConnectorStateArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    match &args.command {
+        ConnectorStateCommand::Explain(args) => {
+            connector_state_explain_dispatch(args, explicit_host)
+        }
+    }
+}
+
+fn connector_state_explain_dispatch(
+    args: &ConnectorStateExplainArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    let catalog = DiscoveryCatalog::load_for_connector_filter(Some(args.connector.as_str()))?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => return Ok(connector_state_resolution_dispatch(&args.connector, &error)),
+    };
+    let (state_root, state_root_source) =
+        connector_state_root_for_explain(args.state_root.as_deref());
+    let connector_cache_dir =
+        connector_state_cache_dir(&state_root, connector.detail.summary.id.as_str());
+    let zone_cache_dir = args.zone.as_deref().map(|zone| {
+        connector_zone_state_cache_dir(&state_root, connector.detail.summary.id.as_str(), zone)
+    });
+    let mut warnings = Vec::new();
+    let connector_marker_present =
+        connector_state_cache_marker_present(&connector_cache_dir, &mut warnings);
+    let zone_marker_present = zone_cache_dir
+        .as_deref()
+        .is_some_and(|path| connector_state_cache_marker_present(path, &mut warnings));
+    let local_cache_present = connector_cache_dir.is_dir()
+        || zone_cache_dir.as_deref().is_some_and(Path::is_dir)
+        || connector_marker_present
+        || zone_marker_present;
+    let canonical_storage = if connector_marker_present || zone_marker_present {
+        "mesh"
+    } else {
+        "local"
+    };
+    let zone_supported = args.zone.as_ref().map(|zone| {
+        connector
+            .supported_zones
+            .iter()
+            .any(|candidate| candidate == zone)
+    });
+
+    if !connector_marker_present && !zone_marker_present {
+        warnings.push(
+            "No connector state cache marker was found, so this offline explanation treats the local state path as canonical until a host writes cache-only markers."
+                .to_owned(),
+        );
+    }
+    if matches!(zone_supported, Some(false)) {
+        if let Some(zone) = args.zone.as_deref() {
+            warnings.push(format!(
+                "Workspace manifests do not declare zone `{zone}` for this connector."
+            ));
+        }
+    }
+
+    warnings.push(
+        "Last canonical sequence and mesh replica count are not proven by local cache markers; they remain null until a host or mesh state route exposes them."
+            .to_owned(),
+    );
+    if explicit_host
+        .map(str::trim)
+        .is_some_and(|host| !host.is_empty())
+    {
+        warnings.push(
+            "`--host` was supplied, but this command currently reports local cache-marker evidence only because fcp-host does not expose a connector-state explain route yet."
+                .to_owned(),
+        );
+    }
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "connector");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "connector",
+        "subcommand": "state explain",
+        "schema_version": CONNECTOR_STATE_EXPLAIN_SCHEMA_VERSION,
+        "source": "local-cache-markers",
+        "message": format!(
+            "Explained connector state storage for `{}` from local cache markers and workspace manifests.",
+            connector.slug
+        ),
+        "connector": {
+            "requested_selector": &args.connector,
+            "slug": &connector.slug,
+            "canonical_id": &connector.detail.summary.id,
+            "name": &connector.detail.summary.name,
+            "version": &connector.detail.summary.version,
+            "manifest_path": &connector.manifest_path,
+        },
+        "state_root": {
+            "path": state_root.display().to_string(),
+            "source": state_root_source,
+        },
+        "canonical_storage": canonical_storage,
+        "last_canonical_seq": Value::Null,
+        "mesh_replica_count": Value::Null,
+        "local_cache_path": connector_cache_dir.display().to_string(),
+        "local_cache_present": local_cache_present,
+        "local_cache_marker_present": connector_marker_present,
+        "cache_marker": {
+            "filename": CONNECTOR_STATE_CACHE_MARKER,
+            "path": connector_cache_dir
+                .join(CONNECTOR_STATE_CACHE_MARKER)
+                .display()
+                .to_string(),
+            "present": connector_marker_present,
+        },
+        "zone": {
+            "requested": args.zone.as_deref(),
+            "supported_by_manifest": zone_supported,
+            "supported_zones": &connector.supported_zones,
+            "local_cache_path": zone_cache_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            "local_cache_marker_present": zone_marker_present,
+        },
+        "live_host": connector_state_explain_host_status(explicit_host),
+        "evidence_handles": connector_state_explain_evidence_handles(
+            connector,
+            &connector_cache_dir,
+            zone_cache_dir.as_deref(),
+            connector_marker_present,
+            zone_marker_present,
+        ),
+        "warnings": warnings,
+        "next_actions": [
+            format!("fwc connector state explain --connector {} --zone <zone> --json", connector.slug),
+            format!("fwc mesh explain-availability {} --host <endpoint>", connector.slug),
+            "Run a host-backed connector-state externalization E2E before treating mesh sequence or replica fields as proven.".to_owned(),
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn connector_state_resolution_dispatch(selector: &str, error: &SelectorError) -> DispatchOutcome {
+    let error_type = match error.kind {
+        SelectorErrorKind::NotFound => "connector-not-found",
+        SelectorErrorKind::Ambiguous => "ambiguous-connector",
+    };
+    let message = match error.kind {
+        SelectorErrorKind::NotFound => {
+            format!("`{selector}` did not match any connector in the workspace catalog.")
+        }
+        SelectorErrorKind::Ambiguous => {
+            format!("`{selector}` matches multiple connectors; choose one explicit slug.")
+        }
+    };
+    let examples = if error.suggestions.is_empty() {
+        vec!["fwc list".to_owned()]
+    } else {
+        error
+            .suggestions
+            .iter()
+            .map(|suggestion| {
+                format!("fwc connector state explain --connector {suggestion} --json")
+            })
+            .collect()
+    };
+
+    discovery_error(
+        "connector",
+        error_type,
+        message,
+        selector,
+        &error.suggestions,
+        &examples,
+    )
+}
+
+fn connector_state_root_for_explain(override_root: Option<&Path>) -> (PathBuf, &'static str) {
+    if let Some(path) = override_root {
+        return (path.to_path_buf(), "argument");
+    }
+    if let Some(path) = non_empty_os_env("FCP_CONNECTOR_STATE") {
+        return (PathBuf::from(path), "env:FCP_CONNECTOR_STATE");
+    }
+    if let Some(path) = non_empty_os_env("FCP_CONFIG_DIR") {
+        return (PathBuf::from(path).join("state"), "env:FCP_CONFIG_DIR");
+    }
+    if let Some(path) = non_empty_os_env("HOME") {
+        return (PathBuf::from(path).join(".fcp").join("state"), "env:HOME");
+    }
+    (PathBuf::from(".fcp").join("state"), "relative-default")
+}
+
+fn non_empty_os_env(key: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(key).filter(|value| !value.is_empty())
+}
+
+fn connector_state_cache_dir(root: &Path, connector_id: &str) -> PathBuf {
+    root.join(sanitize_connector_state_path_segment(connector_id))
+        .join("cache")
+}
+
+fn connector_zone_state_cache_dir(root: &Path, connector_id: &str, zone: &str) -> PathBuf {
+    connector_state_cache_dir(root, connector_id).join(sanitize_connector_state_path_segment(zone))
+}
+
+fn sanitize_connector_state_path_segment(value: &str) -> String {
+    let segment = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if segment.is_empty() || segment == "." || segment == ".." {
+        "_".to_owned()
+    } else {
+        segment
+    }
+}
+
+fn connector_state_cache_marker_present(dir: &Path, warnings: &mut Vec<String>) -> bool {
+    let marker_path = dir.join(CONNECTOR_STATE_CACHE_MARKER);
+    match std::fs::metadata(&marker_path) {
+        Ok(metadata) if metadata.is_file() => true,
+        Ok(_) => {
+            warnings.push(format!(
+                "Connector state cache marker `{}` exists but is not a file.",
+                marker_path.display()
+            ));
+            false
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            warnings.push(format!(
+                "Failed to inspect connector state cache marker `{}`: {error}",
+                marker_path.display()
+            ));
+            false
+        }
+    }
+}
+
+fn connector_state_explain_host_status(explicit_host: Option<&str>) -> Value {
+    explicit_host
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map_or_else(
+            || {
+                json!({
+                    "requested": false,
+                    "state": "not-requested",
+                    "route_available": false,
+                })
+            },
+            |host| {
+                json!({
+                    "requested": true,
+                    "endpoint_hash": sha256_prefixed(host.as_bytes()),
+                    "state": "not-queried",
+                    "route_available": false,
+                    "reason": "fcp-host does not expose a connector-state explain route yet",
+                })
+            },
+        )
+}
+
+fn connector_state_explain_evidence_handles(
+    connector: &DiscoveredConnector,
+    connector_cache_dir: &Path,
+    zone_cache_dir: Option<&Path>,
+    connector_marker_present: bool,
+    zone_marker_present: bool,
+) -> Vec<Value> {
+    let mut handles = vec![
+        json!({
+            "kind": "workspace-manifest",
+            "connector_id": &connector.detail.summary.id,
+            "manifest_path": &connector.manifest_path,
+        }),
+        json!({
+            "kind": "connector-state-cache-marker",
+            "scope": "connector",
+            "path": connector_cache_dir.join(CONNECTOR_STATE_CACHE_MARKER).display().to_string(),
+            "present": connector_marker_present,
+        }),
+    ];
+    if let Some(path) = zone_cache_dir {
+        handles.push(json!({
+            "kind": "connector-state-cache-marker",
+            "scope": "zone",
+            "path": path.join(CONNECTOR_STATE_CACHE_MARKER).display().to_string(),
+            "present": zone_marker_present,
+        }));
+    }
+    handles
 }
 
 const CUTOVER_GATE_TELEMETRY_EVENT_TYPE: &str = "fcp.cutover_gate.evaluated";
@@ -26552,6 +26913,13 @@ fn normalize_args(
     if args
         .get(command_index)
         .is_some_and(|segment| recovery::is_redundant_prefix(segment))
+        && !matches!(
+            (
+                args.get(command_index).map(String::as_str),
+                args.get(command_index + 1).map(String::as_str),
+            ),
+            (Some("connector"), Some("state"))
+        )
     {
         if let Some(next) = args.get(command_index + 1) {
             corrections.push(InputCorrection {
@@ -33928,6 +34296,117 @@ deny_ptrace = true
             },
             command => panic!("expected mesh command, got {command:?}"),
         }
+    }
+
+    #[test]
+    fn prepare_cli_parses_connector_state_explain_command() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "connector".to_owned(),
+            "state".to_owned(),
+            "explain".to_owned(),
+            "--connector".to_owned(),
+            "github".to_owned(),
+            "--zone".to_owned(),
+            "z:work".to_owned(),
+        ])
+        .expect("connector state explain command should parse");
+
+        match prepared.cli.command {
+            Commands::Connector(args) => match args.command {
+                super::ConnectorCommand::State(args) => match args.command {
+                    super::ConnectorStateCommand::Explain(args) => {
+                        assert_eq!(args.connector, "github");
+                        assert_eq!(args.zone.as_deref(), Some("z:work"));
+                        assert!(args.state_root.is_none());
+                    }
+                },
+            },
+            command => panic!("expected connector command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_connector_state_explain_reports_local_storage_without_marker() {
+        let state_root = TempDir::new().expect("state root tempdir should exist");
+        let state_root_arg = state_root.path().display().to_string();
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "connector",
+            "state",
+            "explain",
+            "--connector",
+            "github",
+            "--zone",
+            "z:work",
+            "--state-root",
+            state_root_arg.as_str(),
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "connector");
+        assert_eq!(payload["subcommand"], "state explain");
+        assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["connector"]["slug"], "github");
+        assert_eq!(payload["connector"]["canonical_id"], "fcp.github");
+        assert_eq!(payload["canonical_storage"], "local");
+        assert!(payload["last_canonical_seq"].is_null());
+        assert!(payload["mesh_replica_count"].is_null());
+        assert_eq!(payload["local_cache_present"], false);
+        assert_eq!(payload["local_cache_marker_present"], false);
+        assert!(
+            payload["local_cache_path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("fcp.github/cache"))
+        );
+        assert_eq!(payload["zone"]["requested"], "z:work");
+        assert_eq!(payload["zone"]["supported_by_manifest"], true);
+        assert_eq!(payload["zone"]["local_cache_marker_present"], false);
+    }
+
+    #[test]
+    fn execute_connector_state_explain_reports_mesh_storage_from_cache_marker() {
+        let state_root = TempDir::new().expect("state root tempdir should exist");
+        let cache_dir = state_root.path().join("fcp.github").join("cache");
+        std::fs::create_dir_all(&cache_dir).expect("cache dir should be created");
+        std::fs::write(
+            cache_dir.join(".fcp-cache-only"),
+            "cache-only: canonical connector state is stored through fcp-store\n",
+        )
+        .expect("cache marker should be written");
+        let state_root_arg = state_root.path().display().to_string();
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "connector",
+            "state",
+            "explain",
+            "--connector",
+            "github",
+            "--zone",
+            "z:work",
+            "--state-root",
+            state_root_arg.as_str(),
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["canonical_storage"], "mesh");
+        assert_eq!(payload["local_cache_present"], true);
+        assert_eq!(payload["local_cache_marker_present"], true);
+        assert_eq!(payload["zone"]["local_cache_marker_present"], false);
+        assert!(
+            payload["zone"]["local_cache_path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("fcp.github/cache/z_work"))
+        );
+        assert_eq!(payload["live_host"]["requested"], false);
+        assert!(
+            payload["evidence_handles"]
+                .as_array()
+                .is_some_and(|handles| handles.len() == 3)
+        );
     }
 
     #[test]

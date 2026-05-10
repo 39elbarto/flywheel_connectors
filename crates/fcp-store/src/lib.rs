@@ -33,6 +33,7 @@
 #![allow(clippy::option_if_let_else)]
 
 mod compatibility_ledger;
+mod connector_state;
 mod coverage;
 mod durable;
 mod error;
@@ -49,6 +50,10 @@ mod symbol_store;
 pub use compatibility_ledger::{
     CompatibilityLedgerStore, CompatibilityLedgerStoreError, DurableCompatibilityLedgerStore,
     MemoryCompatibilityLedgerStore,
+};
+pub use connector_state::{
+    CONNECTOR_STATE_CACHE_MARKER, ConnectorStateAppendOutcome, ConnectorStateStoreError,
+    FcpStoreConnectorStateStore,
 };
 pub use coverage::{CoverageEvaluation, CoverageHealth, SymbolDistribution};
 pub use durable::{

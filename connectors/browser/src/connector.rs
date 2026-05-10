@@ -1841,6 +1841,14 @@ impl BrowserConnector {
         }
         Ok(json!({ "status": "shutdown" }))
     }
+
+    #[cfg(feature = "test-support")]
+    pub fn direct_cdp_manager_events_jsonl_for_test(&self) -> FcpResult<String> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        client
+            .direct_cdp_manager_events_jsonl()
+            .map_err(|err| err.to_fcp_error())
+    }
 }
 
 impl Default for BrowserConnector {

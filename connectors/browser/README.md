@@ -230,13 +230,14 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
-The tracked direct-CDP target/session manager bundle is `scripts/e2e/browser_target_session_manager_verification.sh`. It runs the deterministic manager proof through `rch`, extracts `BROWSER_TARGET_SESSION_MANAGER_JSONL` records from test stdout, validates the JSONL shape, and writes an ignored operator bundle under `artifacts/e2e/browser_target_session_manager/<run-id>/`.
+The tracked direct-CDP target/session manager bundle is `scripts/e2e/browser_target_session_manager_verification.sh`. It runs the deterministic manager proof and host supervised concurrency proof through `rch`, extracts `BROWSER_TARGET_SESSION_MANAGER_JSONL` and `BROWSER_SUPERVISED_SESSION_HOST_E2E` records from test stdout, validates the JSONL shape, and writes an ignored operator bundle under `artifacts/e2e/browser_target_session_manager/<run-id>/`.
 
 The verification surface captures:
 
 - runtime operation inventory and policy metadata
 - browser-control URL policy, control-plane headers, timeout budgets, and raw DevTools rejection
 - direct-CDP manager JSONL event coverage for manager start, target attach/detach, stale-target recovery, operation leases, command IDs, timeout/cancellation markers, dropped-lease cleanup, shutdown cleanup, and redacted session/cookie metadata
+- host concurrency coverage proving a second direct-CDP invoke defers before CDP connection while the first invoke owns the manager lease for the same browser instance
 - capability-token and execution-approval enforcement for invoke
 - deterministic HTTP fixtures and real-browser e2e coverage
 - formatting, check, test, and clippy proof through `rch`

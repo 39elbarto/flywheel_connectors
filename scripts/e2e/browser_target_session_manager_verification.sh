@@ -60,7 +60,9 @@ require_cmd rch
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
 TEST_LOG="${OUT_ROOT}/logs/target_session_manager_test.log"
+HOST_TEST_LOG="${OUT_ROOT}/logs/host_supervised_session_test.log"
 EVENTS_JSONL="${OUT_ROOT}/evidence/manager-events.jsonl"
+HOST_EVENTS_JSONL="${OUT_ROOT}/evidence/host-concurrency.jsonl"
 SUMMARY_JSON="${OUT_ROOT}/evidence/manager-summary.json"
 ENVIRONMENT_JSON="${OUT_ROOT}/environment.json"
 REPLAY_SH="${OUT_ROOT}/replay.sh"
@@ -68,7 +70,9 @@ RUN_SUMMARY_JSON="${OUT_ROOT}/summary.json"
 
 git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 test_status="passed"
+host_test_status="passed"
 events_status="passed"
+host_events_status="passed"
 summary_status="passed"
 
 echo "[browser-target-session-manager] running deterministic manager proof"
@@ -78,9 +82,29 @@ if ! (
     RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}" \
     CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-browser-target-session-manager}" \
     CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" \
+    CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
+    CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}" \
+    CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}" \
+    RUSTFLAGS="${RUSTFLAGS:--Cdebuginfo=0}" \
     cargo test -p fcp-browser test_direct_cdp_manager_artifact_contains_closeout_evidence --lib -- --nocapture
 ) >"${TEST_LOG}" 2>&1; then
   test_status="failed"
+fi
+
+echo "[browser-target-session-manager] running host supervised concurrency proof"
+if ! (
+  cd "${REPO_ROOT}"
+  env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
+    RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}" \
+    CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-browser-target-session-manager}" \
+    CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" \
+    CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
+    CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}" \
+    CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}" \
+    RUSTFLAGS="${RUSTFLAGS:--Cdebuginfo=0}" \
+    cargo test -p fcp-host --test browser_supervised_session_e2e -- --nocapture
+) >"${HOST_TEST_LOG}" 2>&1; then
+  host_test_status="failed"
 fi
 
 if ! grep -a '^BROWSER_TARGET_SESSION_MANAGER_JSONL ' "${TEST_LOG}" \
@@ -91,6 +115,16 @@ fi
 
 if [[ ! -s "${EVENTS_JSONL}" ]] || ! jq -c . "${EVENTS_JSONL}" >/dev/null; then
   events_status="failed"
+fi
+
+if ! grep -a '^BROWSER_SUPERVISED_SESSION_HOST_E2E ' "${HOST_TEST_LOG}" \
+  | sed 's/^BROWSER_SUPERVISED_SESSION_HOST_E2E //' >"${HOST_EVENTS_JSONL}"
+then
+  host_events_status="failed"
+fi
+
+if [[ ! -s "${HOST_EVENTS_JSONL}" ]] || ! jq -c . "${HOST_EVENTS_JSONL}" >/dev/null; then
+  host_events_status="failed"
 fi
 
 if ! grep -a '^BROWSER_TARGET_SESSION_MANAGER_SUMMARY ' "${TEST_LOG}" \
@@ -107,7 +141,7 @@ fi
 event_count="$(wc -l <"${EVENTS_JSONL}" | tr -d ' ')"
 overall_status="passed"
 exit_code=0
-if [[ "${test_status}" != "passed" || "${events_status}" != "passed" || "${summary_status}" != "passed" ]]; then
+if [[ "${test_status}" != "passed" || "${host_test_status}" != "passed" || "${events_status}" != "passed" || "${host_events_status}" != "passed" || "${summary_status}" != "passed" ]]; then
   overall_status="failed"
   exit_code=1
 fi
@@ -139,7 +173,21 @@ env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
   RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}" \
   CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-browser-target-session-manager}" \
   CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" \
+  CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
+  CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}" \
+  CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}" \
+  RUSTFLAGS="${RUSTFLAGS:--Cdebuginfo=0}" \
   cargo test -p fcp-browser test_direct_cdp_manager_artifact_contains_closeout_evidence --lib -- --nocapture
+
+env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
+  RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}" \
+  CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-browser-target-session-manager}" \
+  CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" \
+  CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
+  CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}" \
+  CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}" \
+  RUSTFLAGS="${RUSTFLAGS:--Cdebuginfo=0}" \
+  cargo test -p fcp-host --test browser_supervised_session_e2e -- --nocapture
 EOF
 chmod +x "${REPLAY_SH}"
 
@@ -147,12 +195,16 @@ jq -n \
   --arg run_id "${RUN_ID}" \
   --arg overall_status "${overall_status}" \
   --arg test_status "${test_status}" \
+  --arg host_test_status "${host_test_status}" \
   --arg events_status "${events_status}" \
+  --arg host_events_status "${host_events_status}" \
   --arg summary_status "${summary_status}" \
   --arg event_count "${event_count}" \
   --arg events_jsonl "${EVENTS_JSONL}" \
+  --arg host_events_jsonl "${HOST_EVENTS_JSONL}" \
   --arg manager_summary "${SUMMARY_JSON}" \
   --arg test_log "${TEST_LOG}" \
+  --arg host_test_log "${HOST_TEST_LOG}" \
   --arg environment "${ENVIRONMENT_JSON}" \
   --arg replay "${REPLAY_SH}" \
   '{
@@ -162,14 +214,18 @@ jq -n \
     overall_status: $overall_status,
     steps: {
       cargo_test: $test_status,
+      host_concurrency_test: $host_test_status,
       manager_events_jsonl: $events_status,
+      host_concurrency_jsonl: $host_events_status,
       manager_summary: $summary_status
     },
     manager_event_count: ($event_count | tonumber),
     artifacts: {
       manager_events_jsonl: $events_jsonl,
+      host_concurrency_jsonl: $host_events_jsonl,
       manager_summary: $manager_summary,
       test_log: $test_log,
+      host_test_log: $host_test_log,
       environment: $environment,
       replay: $replay
     }

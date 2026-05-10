@@ -569,7 +569,7 @@ impl DirectCdpTargetSessionManager {
         self.events.push(event);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn events_jsonl(&self) -> String {
         self.events
             .iter()
@@ -3141,7 +3141,7 @@ impl BrowserClient {
             .map(Some)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn direct_cdp_manager_events_jsonl(&self) -> BrowserResult<String> {
         let manager = lock_direct_cdp_manager(&self.direct_cdp_manager)?;
         Ok(manager.events_jsonl())

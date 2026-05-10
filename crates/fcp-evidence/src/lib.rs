@@ -158,6 +158,16 @@ pub use proof_runner::{
     ProofRunnerKind, RedactedEnvValue, TargetDirPolicy, WorkerAffinityHint,
 };
 
+// ── Mesh Failover Flight Recorder (b88ec.6) ───────────────────────
+
+pub mod mesh_failover_recorder;
+
+pub use mesh_failover_recorder::{
+    MESH_FAILOVER_RECORDER_EVENT_SCHEMA, MeshFailoverAnalysis, MeshFailoverClassification,
+    MeshFailoverEvent, MeshFailoverEventKind, MeshFailoverFlightRecord, MeshFailoverJsonlEvent,
+    MeshFailoverRecordError, MeshStateRootRef,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

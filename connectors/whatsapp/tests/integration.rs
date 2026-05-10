@@ -8,6 +8,8 @@
 
 #![allow(clippy::too_many_lines)]
 
+use std::sync::Arc;
+
 use chrono::{Duration, Utc};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
@@ -16,6 +18,7 @@ use fcp_prelude::{
     HealthState, InstanceId, InvokeRequest, OperationId, RequestId, SelfCheckStatus,
     ShutdownRequest, ZoneId,
 };
+use fcp_sdk::{ChatCoordinationBackend, InMemoryThreadOwnershipChecker, ThreadOwnershipChecker};
 use fcp_testkit::AsyncTestContext;
 use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
@@ -260,11 +263,16 @@ fn assert_input_schema_examples(manifest: &toml::Value) {
 }
 
 fn assert_output_schema_examples(manifest: &toml::Value) {
-    let send_output = json!({ "message_id": "wamid.1", "wa_id": "15559876543" });
+    let send_output =
+        json!({ "message_id": "wamid.1", "wa_id": "15559876543", "coordination": [] });
 
     let send_text = operation_schema(manifest, "send_text", "output_schema");
     assert_schema_accepts(&send_text, &send_output);
     assert_schema_rejects(&send_text, &json!({ "message_id": "wamid.1" }));
+    assert_schema_rejects(
+        &send_text,
+        &json!({ "message_id": "wamid.1", "wa_id": "15559876543" }),
+    );
 
     let send_template = operation_schema(manifest, "send_template", "output_schema");
     assert_schema_accepts(&send_template, &send_output);
@@ -777,6 +785,90 @@ async fn send_text_happy_path() {
 
     assert_eq!(result["message_id"], "wamid.MSG1");
     assert_eq!(result["wa_id"], "15551234567");
+    assert_eq!(result["coordination"][0]["event"], "claim_attempt");
+    assert_eq!(result["coordination"][1]["outcome"], "granted");
+    assert_eq!(result["coordination"][2]["event"], "send_executed");
+    let coordination_text =
+        serde_json::to_string(&result["coordination"]).expect("serialize coordination");
+    assert!(
+        !coordination_text.contains("15551234567"),
+        "coordination audit must not leak raw WhatsApp recipients"
+    );
+    assert!(
+        !coordination_text.contains("Hello from FCP!"),
+        "coordination audit must not leak WhatsApp message bodies"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_text_claims_conversation_and_denies_duplicate_before_http() {
+    let _ctx = AsyncTestContext::for_scenario("whatsapp.send_text.chat_coordination");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/{PHONE_NUMBER_ID}/messages")))
+        .and(header("authorization", format!("Bearer {ACCESS_TOKEN}")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(send_message_response("wamid.CLAIM1", "15551234567")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let checker: Arc<dyn ThreadOwnershipChecker> = Arc::new(InMemoryThreadOwnershipChecker::new());
+    let mut first = WhatsAppConnector::new()
+        .with_thread_ownership_checker(Arc::clone(&checker), ChatCoordinationBackend::InMemory);
+    let mut second = WhatsAppConnector::new()
+        .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+    configure_connector(&mut first, &server.uri(), false).await;
+    configure_connector(&mut second, &server.uri(), false).await;
+    let first_key = setup_handshake(&mut first, &[CAP_SEND]).await;
+    let second_key = setup_handshake(&mut second, &[CAP_SEND]).await;
+    let first_id = first.instance_id().clone();
+    let second_id = second.instance_id().clone();
+
+    let first_result = invoke(
+        &first,
+        OP_SEND_TEXT,
+        json!({
+            "to": "15551234567",
+            "text": "secret WhatsApp body",
+        }),
+        generate_valid_token(&first_key, CAP_SEND, &[OP_SEND_TEXT], &first_id),
+    )
+    .await
+    .expect("first send should claim and reach provider");
+    assert_eq!(first_result["message_id"], "wamid.CLAIM1");
+    assert_eq!(first_result["coordination"][0]["event"], "claim_attempt");
+    assert_eq!(first_result["coordination"][1]["outcome"], "granted");
+    assert_eq!(first_result["coordination"][2]["event"], "send_executed");
+    let coordination_text =
+        serde_json::to_string(&first_result["coordination"]).expect("serialize coordination");
+    assert!(
+        !coordination_text.contains("15551234567"),
+        "coordination audit must not leak raw WhatsApp recipients"
+    );
+    assert!(
+        !coordination_text.contains("secret WhatsApp body"),
+        "coordination audit must not leak WhatsApp message bodies"
+    );
+
+    let duplicate = invoke(
+        &second,
+        OP_SEND_TEXT,
+        json!({
+            "to": "15551234567",
+            "text": "secret WhatsApp body",
+        }),
+        generate_valid_token(&second_key, CAP_SEND, &[OP_SEND_TEXT], &second_id),
+    )
+    .await
+    .expect_err("duplicate active owner should be denied before provider HTTP");
+    assert!(matches!(
+        duplicate,
+        FcpError::Unauthorized { code: 4090, ref message }
+            if message.starts_with("thread_owned_by_peer:") && message.contains(first_id.as_str())
+    ));
 }
 
 #[fcp_async_core::runtime::test]
@@ -928,6 +1020,9 @@ async fn send_template_happy_path() {
     .expect("send_template should succeed");
 
     assert_eq!(result["message_id"], "wamid.TEMPLATE1");
+    assert_eq!(result["coordination"][0]["event"], "claim_attempt");
+    assert_eq!(result["coordination"][1]["outcome"], "granted");
+    assert_eq!(result["coordination"][2]["event"], "send_executed");
 }
 
 #[fcp_async_core::runtime::test]

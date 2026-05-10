@@ -28,7 +28,7 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
 input_schema = { type = "object", required = ["to", "text"], additionalProperties = false, properties = { to = { type = "string", description = "Recipient phone number (E.164 format)" }, text = { type = "string", description = "Message text (max 4096 chars)" }, preview_url = { type = "boolean", default = false } } }
-output_schema = { type = "object", required = ["message_id", "wa_id"], additionalProperties = false, properties = { message_id = { type = "string" }, wa_id = { type = "string" } } }
+output_schema = { type = "object", required = ["message_id", "wa_id", "coordination"], additionalProperties = false, properties = { message_id = { type = "string" }, wa_id = { type = "string" }, coordination = { type = "array", description = "Redaction-safe chat coordination audit records for the send attempt", items = { type = "object" } } } }
 
 [provides.operations.send_text.network_constraints]
 host_allow = ["graph.facebook.com"]
@@ -59,7 +59,7 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
 input_schema = { type = "object", required = ["to", "template_name"], additionalProperties = false, properties = { to = { type = "string", description = "Recipient phone number (E.164)" }, template_name = { type = "string", description = "Approved template name" }, language_code = { type = "string", description = "e.g., en_US (defaults to en_US)", default = "en_US" }, components = { type = "array", description = "Template parameter components" } } }
-output_schema = { type = "object", required = ["message_id", "wa_id"], additionalProperties = false, properties = { message_id = { type = "string" }, wa_id = { type = "string" } } }
+output_schema = { type = "object", required = ["message_id", "wa_id", "coordination"], additionalProperties = false, properties = { message_id = { type = "string" }, wa_id = { type = "string" }, coordination = { type = "array", description = "Redaction-safe chat coordination audit records for the send attempt", items = { type = "object" } } } }
 
 [provides.operations.send_template.network_constraints]
 host_allow = ["graph.facebook.com"]

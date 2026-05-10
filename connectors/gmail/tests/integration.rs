@@ -14,12 +14,13 @@
 use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_google_discovery::{
-    DiscoveryEndpointKind, DiscoveryServiceId, generator::generate_google_service_artifacts,
-    normalize_snapshot_bytes, policy::GooglePolicyCatalog,
+    DiscoveryEndpointKind, DiscoveryServiceId, auth::FCP_CREDENTIAL_ID_HEADER,
+    generator::generate_google_service_artifacts, normalize_snapshot_bytes,
+    policy::GooglePolicyCatalog,
 };
 use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
 use fcp_prelude::ApprovalMode;
-use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
+use fcp_prelude::{CapabilityConstraints, CapabilityToken, CredentialId, FcpError};
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -27,6 +28,8 @@ use wiremock::{
 };
 
 use fcp_gmail::{client::GmailClient, connector::GmailConnector, error::GmailError};
+
+const TEST_CREDENTIAL_ID: &str = "00000000-0000-0000-0000-000000000001";
 
 // ============================================================================
 // Helpers
@@ -43,7 +46,11 @@ fn capability_for_operation(op: &str) -> &str {
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    connector: &GmailConnector,
+    op: &str,
+) -> CapabilityToken {
     let cap = capability_for_operation(op);
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
@@ -59,6 +66,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         .principal("user:test")
         .operations(&[op])
         .issuer("node:test")
+        .target_instance(connector.instance_id().as_str())
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .unwrap()
@@ -89,7 +97,7 @@ async fn setup_handshake(connector: &mut GmailConnector, caps: &[&str]) -> Ed255
 async fn setup_configure(connector: &mut GmailConnector, base_url: &str) {
     connector
         .handle_configure(json!({
-            "token": "test-oauth-token-xyz",
+            "credential_id": TEST_CREDENTIAL_ID,
             "base_url": base_url
         }))
         .await
@@ -636,6 +644,7 @@ async fn invoke_list_labels_through_connector() {
 
     Mock::given(method("GET"))
         .and(path("/users/me/labels"))
+        .and(header(FCP_CREDENTIAL_ID_HEADER, TEST_CREDENTIAL_ID))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "labels": [
                 {"id": "INBOX", "name": "INBOX", "type": "system"}
@@ -647,7 +656,7 @@ async fn invoke_list_labels_through_connector() {
     let mut connector = GmailConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["gmail.read"]).await;
-    let token = generate_valid_token(&signing_key, "gmail.list_labels");
+    let token = generate_valid_token(&signing_key, &connector, "gmail.list_labels");
 
     let result = connector
         .handle_invoke(json!({
@@ -679,7 +688,7 @@ async fn invoke_get_message_through_connector() {
     let mut connector = GmailConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["gmail.read"]).await;
-    let token = generate_valid_token(&signing_key, "gmail.get_message");
+    let token = generate_valid_token(&signing_key, &connector, "gmail.get_message");
 
     let result = connector
         .handle_invoke(json!({
@@ -711,7 +720,7 @@ async fn invoke_send_message_accepts_structured_fields() {
     let mut connector = GmailConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["gmail.send"]).await;
-    let token = generate_valid_token(&signing_key, "gmail.send_message");
+    let token = generate_valid_token(&signing_key, &connector, "gmail.send_message");
 
     let result = connector
         .handle_invoke(json!({
@@ -747,7 +756,7 @@ async fn invoke_create_draft_accepts_structured_fields() {
     let mut connector = GmailConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["gmail.write"]).await;
-    let token = generate_valid_token(&signing_key, "gmail.create_draft");
+    let token = generate_valid_token(&signing_key, &connector, "gmail.create_draft");
 
     let result = connector
         .handle_invoke(json!({
@@ -784,7 +793,7 @@ async fn invoke_trash_message_through_connector() {
     let mut connector = GmailConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["gmail.delete"]).await;
-    let token = generate_valid_token(&signing_key, "gmail.trash_message");
+    let token = generate_valid_token(&signing_key, &connector, "gmail.trash_message");
 
     let result = connector
         .handle_invoke(json!({
@@ -806,7 +815,7 @@ async fn wrong_capability_rejected() {
     let mut connector = GmailConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["gmail.send"]).await;
-    let token = generate_valid_token(&signing_key, "gmail.send_message");
+    let token = generate_valid_token(&signing_key, &connector, "gmail.send_message");
 
     let result = connector
         .handle_invoke(json!({
@@ -827,7 +836,7 @@ async fn missing_required_field_returns_invalid_request() {
     let mut connector = GmailConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["gmail.read"]).await;
-    let token = generate_valid_token(&signing_key, "gmail.get_message");
+    let token = generate_valid_token(&signing_key, &connector, "gmail.get_message");
 
     let result = connector
         .handle_invoke(json!({
@@ -852,7 +861,7 @@ async fn invoke_modify_message_rejects_malformed_label_arrays() {
     let mut connector = GmailConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["gmail.modify_message"]).await;
-    let token = generate_valid_token(&signing_key, "gmail.modify_message");
+    let token = generate_valid_token(&signing_key, &connector, "gmail.modify_message");
 
     let result = connector
         .handle_invoke(json!({
@@ -891,52 +900,27 @@ async fn doctor_reports_pending_materialization_for_credential_mode() {
     assert_eq!(self_check["reason_code"], "credential_injection_required");
 }
 
-/// OAuth refresh mode exchanges a token and passes self-check with mocked Gmail.
+/// OAuth refresh mode is not allowed to carry raw secret material in connector config.
 #[fcp_async_core::runtime::test]
-async fn oauth_refresh_mode_self_check_ok_with_mocked_endpoints() {
-    let mock_server = MockServer::start().await;
-
-    // Use the broadest Gmail scope so the doctor's operation_scope_coverage check
-    // sees all operations as covered, yielding a fully "healthy" result.
-    Mock::given(method("POST"))
-        .and(path("/oauth/token"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "access_token": "ya29.integration-oauth-token",
-            "token_type": "Bearer",
-            "expires_in": 3600,
-            "scope": "https://mail.google.com/"
-        })))
-        .mount(&mock_server)
-        .await;
-
-    Mock::given(method("GET"))
-        .and(path("/users/me/labels"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "labels": []
-        })))
-        .mount(&mock_server)
-        .await;
-
+async fn oauth_refresh_mode_rejects_raw_secret_material() {
     let mut connector = GmailConnector::new();
-    connector
+    let result = connector
         .handle_configure(json!({
-            "base_url": mock_server.uri(),
+            "base_url": "http://localhost:9999",
             "required_scopes": ["https://mail.google.com/"],
             "oauth_refresh": {
                 "client_id": "integration-client",
                 "client_secret": "integration-secret",
                 "refresh_token": "integration-refresh",
-                "token_url": format!("{}/oauth/token", mock_server.uri())
+                "token_url": "http://localhost:9999/oauth/token"
             }
         }))
-        .await
-        .unwrap();
+        .await;
 
-    let doctor = connector.handle_doctor().await.unwrap();
-    assert_eq!(doctor["status"], "healthy");
-
-    let self_check = connector.handle_self_check().await.unwrap();
-    assert_eq!(self_check["status"], "ok");
+    assert!(matches!(
+        result,
+        Err(FcpError::ConfigurationLeakedSecret { .. })
+    ));
 }
 
 /// history sync operation persists cursor and resumes via invoke dispatch.
@@ -971,14 +955,14 @@ async fn invoke_sync_history_persists_and_resumes_cursor() {
     let mut connector = GmailConnector::new();
     connector
         .handle_configure(json!({
-            "token": "test-oauth-token-xyz",
+            "credential_id": CredentialId::new().to_string(),
             "base_url": mock_server.uri(),
             "history_cursor_path": state_path.to_string_lossy().to_string()
         }))
         .await
         .unwrap();
     let signing_key = setup_handshake(&mut connector, &["gmail.history.read"]).await;
-    let token = generate_valid_token(&signing_key, "gmail.sync_history");
+    let token = generate_valid_token(&signing_key, &connector, "gmail.sync_history");
 
     let first = connector
         .handle_invoke(json!({
@@ -1000,14 +984,14 @@ async fn invoke_sync_history_persists_and_resumes_cursor() {
     let mut restarted = GmailConnector::new();
     restarted
         .handle_configure(json!({
-            "token": "test-oauth-token-xyz",
+            "credential_id": CredentialId::new().to_string(),
             "base_url": mock_server.uri(),
             "history_cursor_path": state_path.to_string_lossy().to_string()
         }))
         .await
         .unwrap();
     let signing_key2 = setup_handshake(&mut restarted, &["gmail.history.read"]).await;
-    let token2 = generate_valid_token(&signing_key2, "gmail.sync_history");
+    let token2 = generate_valid_token(&signing_key2, &restarted, "gmail.sync_history");
 
     let resumed = restarted
         .handle_invoke(json!({

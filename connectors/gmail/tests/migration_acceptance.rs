@@ -270,20 +270,17 @@ fn gmail_manifest_operations_have_capabilities() {
 // ── Configure with shared auth validates substrate integration ───────
 
 #[fcp_async_core::runtime::test]
-async fn gmail_configure_with_access_token_succeeds() {
+async fn gmail_configure_with_access_token_rejects_raw_secret() {
     let mut connector = GmailConnector::new();
     let result = connector
         .handle_configure(json!({
             "access_token": "ya29.test-integration-token",
         }))
         .await;
-    assert!(
-        result.is_ok(),
-        "Configure with shared auth access_token should succeed: {:?}",
-        result.err()
-    );
-    let value = result.unwrap();
-    assert_eq!(value["status"], "configured");
+    assert!(matches!(
+        result,
+        Err(FcpError::ConfigurationLeakedSecret { .. })
+    ));
 }
 
 #[fcp_async_core::runtime::test]

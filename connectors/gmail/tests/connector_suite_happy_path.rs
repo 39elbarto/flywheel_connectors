@@ -2,6 +2,7 @@ use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_gmail::connector::GmailConnector;
+use fcp_google_discovery::auth::FCP_CREDENTIAL_ID_HEADER;
 use fcp_prelude::{
     AgentHint, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics,
     FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
@@ -18,6 +19,7 @@ use wiremock::{
 const CONNECTOR_ID: &str = "gmail";
 const OP_LIST_MESSAGES: &str = "gmail.list_messages";
 const CAP_READ: &str = "gmail.read";
+const TEST_CREDENTIAL_ID: &str = "00000000-0000-0000-0000-000000000001";
 
 struct GmailAdapter {
     connector: GmailConnector,
@@ -146,7 +148,7 @@ impl FcpConnector for GmailAdapter {
     }
 }
 
-fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
+fn handshake_request(host_public_key: [u8; 32], instance_id: &InstanceId) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0".to_string(),
         zone: ZoneId::work(),
@@ -156,11 +158,11 @@ fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
         capabilities_requested: vec![CapabilityId::from_static(CAP_READ)],
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        requested_instance_id: Some(instance_id.clone()),
     }
 }
 
-fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+fn build_token(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec!["gmail:messages".to_string()],
@@ -176,6 +178,7 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         .operations(&[OP_LIST_MESSAGES])
         .issuer("node:test")
         .token_id(b"gmail-connector-suite")
+        .target_instance(instance_id.as_str())
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("valid constraints cbor")
@@ -187,10 +190,12 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
 #[fcp_async_core::runtime::test]
 async fn connector_suite_happy_path_lists_messages() {
     let server = MockServer::start().await;
+    let mut connector = GmailAdapter::new();
+    let instance_id = connector.connector.instance_id().clone();
 
     Mock::given(method("GET"))
         .and(path("/users/me/messages"))
-        .and(header("authorization", "Bearer ya29_test_gmail"))
+        .and(header(FCP_CREDENTIAL_ID_HEADER, TEST_CREDENTIAL_ID))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "messages": [
                 { "id": "msg_001", "threadId": "thread_001" },
@@ -214,7 +219,7 @@ async fn connector_suite_happy_path_lists_messages() {
             "query": "is:unread",
             "max_results": 2
         }),
-        capability_token: build_token(&signing_key),
+        capability_token: build_token(&signing_key, &instance_id),
         holder_proof: None,
         context: None,
         idempotency_key: None,
@@ -228,15 +233,14 @@ async fn connector_suite_happy_path_lists_messages() {
     let suite = ConnectorSuite {
         test_name: "gmail_list_messages_happy_path".to_string(),
         config: json!({
-            "token": "ya29_test_gmail",
+            "credential_id": TEST_CREDENTIAL_ID,
             "base_url": server.uri(),
         }),
-        handshake: handshake_request(signing_key.verifying_key().to_bytes()),
+        handshake: handshake_request(signing_key.verifying_key().to_bytes(), &instance_id),
         invoke: Some(invoke),
         invoke_expectations: InvokeExpectations::default(),
     };
 
-    let mut connector = GmailAdapter::new();
     let mut runner = E2eRunner::new("fcp-gmail");
     let report = runner
         .run_connector_suite(&mut connector, suite)

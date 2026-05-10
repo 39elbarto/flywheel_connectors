@@ -1,15 +1,15 @@
 //! Live verification tests for the Gmail connector against the real Gmail API.
 //!
-//! These tests require a `GMAIL_ACCESS_TOKEN` environment variable with a valid
-//! `OAuth2` access token. When the token is absent, tests skip gracefully with a
-//! descriptive message.
+//! Live connector invocation requires a secretless egress surface that accepts
+//! `x-fcp-credential-id`; raw OAuth access tokens are intentionally rejected at
+//! connector configure time.
 //!
 //! All operations are READ-ONLY (`gmail.list_labels`) and do not create, modify,
 //! or delete any data.
 
 use fcp_crypto::Ed25519SigningKey;
 use fcp_crypto::cose::CapabilityTokenBuilder;
-use fcp_prelude::{CapabilityConstraints, CapabilityToken};
+use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
 
 use chrono::{Duration, Utc};
 use serde_json::json;
@@ -18,18 +18,25 @@ use serde_json::json;
 // Skip guard
 // ============================================================================
 
-fn gmail_access_token() -> Option<String> {
-    std::env::var("GMAIL_ACCESS_TOKEN")
+fn gmail_credential_id() -> Option<String> {
+    std::env::var("GMAIL_CREDENTIAL_ID")
         .ok()
         .filter(|t| !t.is_empty())
 }
 
-macro_rules! skip_without_token {
+fn gmail_secretless_base_url() -> Option<String> {
+    std::env::var("GMAIL_SECRETLESS_BASE_URL")
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
+macro_rules! skip_without_secretless_config {
     ($var:ident) => {
-        let Some($var) = gmail_access_token() else {
+        let Some($var) = gmail_credential_id() else {
             eprintln!(
-                "SKIP: GMAIL_ACCESS_TOKEN not set — skipping live Gmail connector verification. \
-                 Set GMAIL_ACCESS_TOKEN=ya29.... to enable."
+                "SKIP: GMAIL_CREDENTIAL_ID not set — skipping live Gmail connector verification. \
+                 Configure an FCP secretless credential and set GMAIL_SECRETLESS_BASE_URL when \
+                 live egress proxying is required."
             );
             return;
         };
@@ -40,7 +47,11 @@ macro_rules! skip_without_token {
 // Helpers
 // ============================================================================
 
-fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+fn generate_read_token(
+    signing_key: &Ed25519SigningKey,
+    connector: &fcp_gmail::connector::GmailConnector,
+    op: &str,
+) -> CapabilityToken {
     let cap = match op {
         "gmail.send_message" | "gmail.send_draft" => "gmail.send",
         "gmail.sync_history" => "gmail.history.read",
@@ -62,6 +73,7 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .principal("user:live-test")
         .operations(&[op])
         .issuer("node:live-test")
+        .target_instance(connector.instance_id().as_str())
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .unwrap()
@@ -72,15 +84,17 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
 
 async fn setup_live_connector(
     connector: &mut fcp_gmail::connector::GmailConnector,
-    access_token: &str,
+    credential_id: &str,
 ) -> Ed25519SigningKey {
-    // Configure with real Gmail API using a bearer token
+    let mut config = json!({ "credential_id": credential_id });
+    if let Some(base_url) = gmail_secretless_base_url() {
+        config["base_url"] = json!(base_url);
+    }
+
     connector
-        .handle_configure(json!({
-            "token": access_token
-        }))
+        .handle_configure(config)
         .await
-        .expect("configure with real access token should succeed");
+        .expect("configure with credential_id should succeed");
 
     // Handshake
     let signing_key = Ed25519SigningKey::generate();
@@ -106,11 +120,18 @@ async fn setup_live_connector(
 
 #[fcp_async_core::test]
 async fn live_labels_list() {
-    skip_without_token!(token);
+    skip_without_secretless_config!(credential_id);
+    if gmail_secretless_base_url().is_none() {
+        eprintln!(
+            "SKIP: GMAIL_SECRETLESS_BASE_URL not set — live Gmail invocation requires a \
+             secretless egress proxy that materializes GMAIL_CREDENTIAL_ID."
+        );
+        return;
+    }
 
     let mut connector = fcp_gmail::connector::GmailConnector::new();
-    let signing_key = setup_live_connector(&mut connector, &token).await;
-    let cap_token = generate_read_token(&signing_key, "gmail.list_labels");
+    let signing_key = setup_live_connector(&mut connector, &credential_id).await;
+    let cap_token = generate_read_token(&signing_key, &connector, "gmail.list_labels");
 
     let result = connector
         .handle_invoke(json!({
@@ -134,69 +155,27 @@ async fn live_labels_list() {
 }
 
 #[fcp_async_core::test]
-async fn live_error_mapping_invalid_token() {
-    // Test with a deliberately invalid token to verify ConnectorErrorMapping
-    // works correctly: should get a structured FCP auth error, not a raw HTTP 401.
+async fn live_raw_token_config_rejected() {
     let mut connector = fcp_gmail::connector::GmailConnector::new();
 
-    // Configure with an obviously invalid token
-    connector
+    let result = connector
         .handle_configure(json!({
             "token": "ya29.this_is_not_a_valid_access_token_000000000"
         }))
-        .await
-        .expect("configure should succeed even with bad token");
-
-    let signing_key = Ed25519SigningKey::generate();
-    let verifying_key = signing_key.verifying_key();
-
-    connector
-        .handle_handshake(json!({
-            "protocol_version": "1.0.0",
-            "zone": "z:work",
-            "host_public_key": verifying_key.to_bytes(),
-            "nonce": vec![0u8; 32],
-            "capabilities_requested": ["gmail.read"]
-        }))
-        .await
-        .expect("handshake should succeed");
-
-    let cap_token = generate_read_token(&signing_key, "gmail.list_labels");
-
-    let err = connector
-        .handle_invoke(json!({
-            "operation": "gmail.list_labels",
-            "input": {},
-            "capability_token": cap_token
-        }))
         .await;
 
-    // The error should be a structured FCP error, not a raw HTTP status
-    assert!(
-        err.is_err(),
-        "invoke with invalid token should return an error"
-    );
-    let fcp_err = err.unwrap_err();
-    let err_str = format!("{fcp_err}");
-    // Should contain structured error info, not just "401"
-    assert!(
-        err_str.contains("401")
-            || err_str.to_lowercase().contains("unauthorized")
-            || err_str.to_lowercase().contains("auth")
-            || err_str.to_lowercase().contains("invalid")
-            || err_str.to_lowercase().contains("credential"),
-        "error should indicate auth failure: got '{err_str}'"
-    );
-
-    eprintln!("PASS: live_error_mapping_invalid_token — got structured error: {err_str}");
+    assert!(matches!(
+        result,
+        Err(FcpError::ConfigurationLeakedSecret { .. })
+    ));
 }
 
 #[fcp_async_core::test]
 async fn live_health_check() {
-    skip_without_token!(token);
+    skip_without_secretless_config!(credential_id);
 
     let mut connector = fcp_gmail::connector::GmailConnector::new();
-    let _signing_key = setup_live_connector(&mut connector, &token).await;
+    let _signing_key = setup_live_connector(&mut connector, &credential_id).await;
 
     let health = connector
         .handle_health()
@@ -213,10 +192,10 @@ async fn live_health_check() {
 
 #[fcp_async_core::test]
 async fn live_introspect() {
-    skip_without_token!(token);
+    skip_without_secretless_config!(credential_id);
 
     let mut connector = fcp_gmail::connector::GmailConnector::new();
-    let _signing_key = setup_live_connector(&mut connector, &token).await;
+    let _signing_key = setup_live_connector(&mut connector, &credential_id).await;
 
     let introspection = connector
         .handle_introspect()

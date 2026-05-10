@@ -15,8 +15,9 @@ use fcp_google_discovery::{
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
     CapabilityVerifier, ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
-    SafetyTier, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+    HandshakeResponse, IdempotencyClass, InstanceId, Introspection, OperationId, OperationInfo,
+    RiskLevel, SafetyTier, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+    reject_secret_config_material,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -105,10 +106,18 @@ impl GmailConnector {
         }
     }
 
+    /// Return the connector instance identifier used for bound capability tokens.
+    #[must_use]
+    pub fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
+    }
+
     /// Handle configure method.
     ///
-    /// Uses the shared `GoogleAuthSelection` from `fcp-google-discovery` for
-    /// unified credential handling (bearer tokens, credential refs, OAuth refresh).
+    /// Uses the shared `GoogleAuthSelection` from `fcp-google-discovery`, but
+    /// the connector configure boundary only accepts secretless credential
+    /// references. Direct bearer material stays limited to low-level client
+    /// tests and internal auth substrate coverage.
     ///
     /// # Errors
     /// Returns [`FcpError`] if the configuration is invalid or client creation fails.
@@ -117,6 +126,7 @@ impl GmailConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
+        reject_secret_config_material(&params)?;
         let base_url = parse_base_url(&params)?;
         let required_scopes = resolve_gmail_required_scopes(&params)?;
         let history_cursor_path = parse_history_cursor_path(&params)?;
@@ -1708,13 +1718,18 @@ fn parse_optional_string_array_field(
             code: 1003,
             message: format!("{field} must be an array of strings"),
         })?;
-    if values.iter().any(|value| value.trim().is_empty()) {
-        return Err(FcpError::InvalidRequest {
-            code: 1003,
-            message: format!("{field} entries must not be empty"),
-        });
+    let mut normalized = Vec::with_capacity(values.len());
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("{field} entries must not be empty"),
+            });
+        }
+        normalized.push(trimmed.to_string());
     }
-    Ok(values)
+    Ok(normalized)
 }
 
 fn granted_scopes_are_authoritative(config: &GmailConfig) -> bool {
@@ -2039,7 +2054,7 @@ mod tests {
         let mut connector = GmailConnector::new();
         connector
             .handle_configure(json!({
-                "token": "ya29.test-token",
+                "credential_id": CredentialId::new().to_string(),
                 "base_url": "http://localhost:9999"
             }))
             .await
@@ -3098,7 +3113,7 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn configure_with_token_sets_healthy() {
+    async fn configure_with_token_rejects_raw_secret() {
         let mock_server = MockServer::start().await;
         let mut connector = GmailConnector::new();
         let result = connector
@@ -3106,13 +3121,44 @@ mod tests {
                 "token": "ya29.test-token",
                 "base_url": mock_server.uri()
             }))
-            .await
-            .unwrap();
+            .await;
 
-        assert_eq!(result["status"], "configured");
-        let health = connector.handle_health().await.unwrap();
-        assert_eq!(health["status"], "healthy");
-        assert_eq!(health["auth_mode"], "access_token");
+        assert!(matches!(
+            result,
+            Err(FcpError::ConfigurationLeakedSecret { .. })
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_secret_shaped_values() {
+        let cases = [
+            ("Bearer abcdefgh123", "raw_secret_config_value_bearer"),
+            (
+                "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxMjMifQ.abcdefgh",
+                "raw_secret_config_value_jwt",
+            ),
+            ("sk-live-test", "raw_secret_config_value_openai"),
+            ("xoxb-1234567890abcdef", "raw_secret_config_value_slack"),
+            ("ghp_ABCdef123456", "raw_secret_config_value_github"),
+            ("AKIAIOSFODNN7EXAMPLE", "raw_secret_config_value_aws"),
+        ];
+
+        for (sample, expected_detector) in cases {
+            let mut connector = GmailConnector::new();
+            let result = connector
+                .handle_configure(json!({
+                    "credential_id": CredentialId::new().to_string(),
+                    "metadata": sample
+                }))
+                .await;
+
+            match result {
+                Err(FcpError::ConfigurationLeakedSecret { detector, .. }) => {
+                    assert_eq!(detector, expected_detector);
+                }
+                other => panic!("Expected ConfigurationLeakedSecret, got {other:?}"),
+            }
+        }
     }
 
     // ── Handshake details ──────────────────────────────────────────
@@ -3180,7 +3226,7 @@ mod tests {
         let mut connector = GmailConnector::new();
         connector
             .handle_configure(json!({
-                "token": "ya29.test-token",
+                "credential_id": CredentialId::new().to_string(),
                 "base_url": mock_server.uri(),
                 "required_scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
             }))
@@ -3308,49 +3354,33 @@ mod tests {
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("exactly one auth source"));
+            FcpError::ConfigurationLeakedSecret { detector, .. } => {
+                assert_eq!(detector, "raw_secret_config_field");
             }
-            other => panic!("Expected InvalidRequest, got: {other:?}"),
+            other => panic!("Expected ConfigurationLeakedSecret, got: {other:?}"),
         }
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_configure_oauth_refresh_materializes_access_token() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "access_token": "ya29.oauth-access-token",
-                "token_type": "Bearer",
-                "expires_in": 3600,
-                "scope": "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.labels"
-            })))
-            .mount(&mock_server)
-            .await;
-
+    async fn test_configure_oauth_refresh_rejects_raw_secret_material() {
         let mut connector = GmailConnector::new();
         let result = connector
             .handle_configure(json!({
-                "base_url": mock_server.uri(),
+                "base_url": "http://localhost:9999",
                 "required_scopes": ["https://www.googleapis.com/auth/gmail.readonly"],
                 "oauth_refresh": {
                     "client_id": "client-id",
                     "client_secret": "client-secret",
                     "refresh_token": "refresh-token",
-                    "token_url": format!("{}/token", mock_server.uri())
+                    "token_url": "http://localhost:9999/token"
                 }
             }))
-            .await
-            .unwrap();
+            .await;
 
-        assert_eq!(result["status"], "configured");
-        let health = connector.handle_health().await.unwrap();
-        assert_eq!(health["status"], "degraded_scope_limited");
-        assert_eq!(health["auth_mode"], "oauth_refresh");
-        let limited = health["scope_limited_operations"].as_array().unwrap();
-        assert!(limited.iter().any(|op| op == "gmail.send_message"));
+        assert!(matches!(
+            result,
+            Err(FcpError::ConfigurationLeakedSecret { .. })
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -3480,7 +3510,7 @@ mod tests {
         let mut connector = GmailConnector::new();
         connector
             .handle_configure(json!({
-                "token": "ya29.history-token",
+                "credential_id": CredentialId::new().to_string(),
                 "base_url": mock_server.uri(),
                 "history_cursor_path": state_path.to_string_lossy().to_string()
             }))
@@ -3504,7 +3534,7 @@ mod tests {
         let mut restarted = GmailConnector::new();
         restarted
             .handle_configure(json!({
-                "token": "ya29.history-token",
+                "credential_id": CredentialId::new().to_string(),
                 "base_url": mock_server.uri(),
                 "history_cursor_path": state_path.to_string_lossy().to_string()
             }))
@@ -3544,7 +3574,7 @@ mod tests {
         let mut connector = GmailConnector::new();
         connector
             .handle_configure(json!({
-                "token": "ya29.history-token",
+                "credential_id": CredentialId::new().to_string(),
                 "base_url": mock_server.uri(),
                 "history_cursor_path": state_path.to_string_lossy().to_string()
             }))

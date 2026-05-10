@@ -27,6 +27,12 @@
 const README: &str = include_str!("../../../README.md");
 const FCP3_TRANSITION_SCORECARD: &str = include_str!("../../../docs/FCP3_Transition_Scorecard.md");
 const FWC_MAIN: &str = include_str!("../src/main.rs");
+const SECRET_FETCH: &str = include_str!("../../fcp-crypto/src/secret_fetch.rs");
+const SECRETLESS_CONNECTOR_E2E: &str =
+    include_str!("../../fcp-e2e/tests/secretless_connector_e2e.rs");
+const SECRETLESS_GITHUB_E2E: &str = include_str!("../../fcp-e2e/tests/secretless_github_e2e.rs");
+const SECRETLESS_SLACK_E2E: &str = include_str!("../../fcp-e2e/tests/secretless_slack_e2e.rs");
+const SECRETLESS_GMAIL_E2E: &str = include_str!("../../fcp-e2e/tests/secretless_gmail_e2e.rs");
 
 fn feature_table_row_for(feature_name: &str) -> Option<&'static str> {
     // Locate the line in the feature table whose first non-pipe cell
@@ -102,6 +108,56 @@ fn readme_audit_status_paragraph_still_present() {
         "br-lvz4t: audit-status paragraph should reference br-lvz4t so the rationale for \
          the Mesh-Native downgrade is discoverable"
     );
+}
+
+#[test]
+fn readme_secretless_connectors_row_is_pinned_to_proven() {
+    let row = feature_table_row_for("Secretless Connectors")
+        .expect("feature table row for Secretless Connectors must exist");
+    assert!(
+        row.contains("| `PROVEN` |"),
+        "flywheel_connectors-e99o6.1.6: Secretless Connectors row must stay `PROVEN` \
+         while the evidence files remain present. Row: {row}"
+    );
+    for required_text in [
+        "SecretFetchHook",
+        "credential_id",
+        "GitHub",
+        "Slack",
+        "Gmail",
+        "does not claim every connector has migrated",
+    ] {
+        assert!(
+            row.contains(required_text),
+            "flywheel_connectors-e99o6.1.6: Secretless row must keep precision phrase \
+             `{required_text}` so PROVEN covers the pattern, not every connector. Row: {row}"
+        );
+    }
+}
+
+#[test]
+fn readme_secretless_proven_status_has_evidence_files() {
+    assert!(
+        SECRET_FETCH.contains("pub trait SecretFetchHook"),
+        "Secretless PROVEN requires the production SecretFetchHook trait"
+    );
+    assert!(
+        SECRETLESS_CONNECTOR_E2E.contains("SecretFetchHook"),
+        "Secretless PROVEN requires the production trait migration/redaction E2E"
+    );
+    for (name, contents) in [
+        ("github", SECRETLESS_GITHUB_E2E),
+        ("slack", SECRETLESS_SLACK_E2E),
+        ("gmail", SECRETLESS_GMAIL_E2E),
+    ] {
+        assert!(
+            contents.contains("RedactedReplayBundle")
+                && contents.contains("cross_connector_bleed")
+                && contents.contains("wire_and_rotation")
+                && contents.contains("tracing_and_audit"),
+            "Secretless PROVEN requires {name} connector-family redaction gauntlet evidence"
+        );
+    }
 }
 
 #[test]

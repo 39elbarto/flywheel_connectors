@@ -3,12 +3,15 @@
 `SecretFetchHook` is the public runtime boundary for secretless connector
 credentials. A connector receives a credential identifier from its manifest or
 host configuration, then asks the hook for a `ZeroizingSecret` at the moment it
-needs to call an external service.
+needs to call an external service. Backends that own provider refresh flows also
+implement `RefreshableSecretFetchHook` so a host can rotate material after a
+recoverable provider rejection such as an OAuth-backed `401`.
 
 The trait lives in `fcp-crypto` because it is coupled to `ZeroizingSecret`, not
 to first-run provisioning. Bootstrap code may install or configure a production
 backend later, but connector runtimes only need the small fetch, rotate, and
-revoke contract.
+revoke contract. Refresh-capable hosts use the subtrait instead of teaching
+connector code about provider-specific token rotation.
 
 ## API Shape
 
@@ -26,12 +29,18 @@ pub trait SecretFetchHook: Send + Sync {
 
     fn revoke(&self, credential_id: &str) -> Result<(), SecretFetchError>;
 }
+
+pub trait RefreshableSecretFetchHook: SecretFetchHook {
+    fn refresh(&self, credential_id: &str) -> Result<ZeroizingSecret, SecretFetchError>;
+}
 ```
 
 Implementations must be `Send + Sync` because hosts share one hook across
 worker tasks. The trait is synchronous by design: a production backend may
 internally cache, block, or bridge to an async secret manager, but connector
 call sites should not need a runtime-specific dependency to request a secret.
+`refresh` returns the newly materialized secret and updates the backend-owned
+credential state atomically from the caller's perspective.
 
 ## Redaction Requirements
 
@@ -69,7 +78,7 @@ Enable the `test-utils` feature, or use crate unit tests, to access
 implementation for tests:
 
 ```rust
-use fcp_crypto::{SecretFetchHook, ZeroizingSecret};
+use fcp_crypto::{RefreshableSecretFetchHook, SecretFetchHook, ZeroizingSecret};
 use fcp_crypto::test_utils::InMemorySecretRegistry;
 
 let registry = InMemorySecretRegistry::new();
@@ -79,6 +88,10 @@ let secret = registry.fetch("local/test-token").unwrap();
 assert_eq!(secret.as_bytes(), b"secret");
 
 registry.rotate("local/test-token", ZeroizingSecret::from("rotated")).unwrap();
+registry.queue_refresh("local/test-token", b"refreshed".as_slice());
+let refreshed = registry.refresh("local/test-token").unwrap();
+assert_eq!(refreshed.as_bytes(), b"refreshed");
+
 registry.revoke("local/test-token").unwrap();
 ```
 

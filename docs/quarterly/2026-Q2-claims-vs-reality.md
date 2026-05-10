@@ -5,6 +5,7 @@
 > Prior baseline: SunnyMoose MOR/C2.4 audit, 2026-04-10
 > Current snapshot date: 2026-05-03 (pre-docs commit `7f0bd5e7b`)
 > Capability-token follow-up: 2026-05-05 (`flywheel_connectors-01yaq`)
+> Secretless follow-up: 2026-05-10 (`flywheel_connectors-e99o6.1.6`)
 > Quarter note: The date is still Q2, so this report was revised in-place
 > rather than split into a Q3 report.
 
@@ -25,6 +26,10 @@ one connector-inventory underclaim, and one stale evidence path.
 - **2026-05-05 follow-up:** `flywheel_connectors-01yaq` is repaired in code and
   tests: `BoundVerified` now requires an explicit `INSTANCE_ID` claim, so the
   README Capability Tokens row has been restored to `PROVEN`.
+- **2026-05-10 follow-up:** `flywheel_connectors-e99o6.1.6` graduates
+  `Secretless Connectors` to `PROVEN` after B.1-B.5 landed production
+  `SecretFetchHook` evidence and representative GitHub, Slack, and Gmail
+  connector-family E2Es.
 - **Underclaims fixed:** rows with direct E2E/conformance/golden proof moved
   from `IMPLEMENTED` to `PROVEN`.
 - **Still intentionally limited:** `Zone Isolation` remains `LIMITED` because
@@ -38,7 +43,7 @@ live multi-node production deployment.
 
 ## Feature Status Delta Table
 
-| Feature | README before 2026-05-03 pass | README after pass | Verdict | Evidence checked | Notes |
+| Feature | README before 2026-05-03 pass | README after current follow-ups | Verdict | Evidence checked | Notes |
 |---------|--------------------------------|-------------------|---------|------------------|-------|
 | Host-First Control Plane | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fcp-conformance/tests/host_invoke_loop_conformance.rs`, `crates/fcp-e2e/tests/capability_enforcement_concurrent_e2e.rs`, `crates/fcp-host/src/{supervisor,enforcement,health}.rs` | Current operator path has direct conformance and concurrent E2E proof. |
 | Truthful Runtime Resolution | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fwc/src/{truth,catalog}.rs`, `crates/fwc/tests/{cual_integration,readme_status_pinning}.rs` | Truth-source taxonomy and README drift pinning are tested. |
@@ -47,7 +52,7 @@ live multi-node production deployment.
 | Tamper-Evident Audit | `PROVEN` | `PROVEN` | Accurate | `crates/fcp-audit/`, `crates/fcp-core/src/audit.rs`, audit golden/vector tests | Hash-linked chain and checkpoints remain directly proven. |
 | Revocation | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fcp-e2e/tests/revocation_cascade_e2e.rs`, `crates/fcp-e2e/tests/capability_enforcement_concurrent_e2e.rs`, `crates/fcp-conformance/tests/host_invoke_loop_conformance.rs` | Revocation freshness and rejection are now in E2E/conformance paths. |
 | Egress Proxy | `IMPLEMENTED` | `PROVEN` | Underclaim + stale path fixed | `crates/fcp-sandbox/src/egress.rs`, `crates/fcp-e2e/tests/egress_proxy_e2e.rs` | README previously pointed at removed `fcp-host/src/egress.rs`. |
-| Secretless Connectors | `IMPLEMENTED` | `IMPLEMENTED` | Accurate | `crates/fcp-sandbox/src/egress.rs`, credential authorization/injection tests | Integrated path exists; broad connector-family proof is still not enough for `PROVEN`. |
+| Secretless Connectors | `IMPLEMENTED` | `PROVEN` | 2026-05-10 graduation | `crates/fcp-crypto/src/secret_fetch.rs`, `crates/fcp-e2e/tests/secretless_connector_e2e.rs`, `crates/fcp-e2e/tests/secretless_{github,slack,gmail}_e2e.rs`, `crates/fcp-testkit/src/secretless_replay.rs` | `PROVEN` covers the secretless pattern across representative GitHub, Slack, and Gmail connector shapes; it does not claim every connector has migrated. |
 | Threshold Owner Key | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fcp-bootstrap/src/ceremony.rs`, `crates/fcp-e2e/tests/threshold_owner_key_e2e.rs` | FROST DKG/signing/survivor-quorum E2E exists; universal default remains a separate rollout choice. |
 | Threshold Secrets | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fcp-core/src/secret.rs`, `crates/fcp-e2e/tests/threshold_secrets_e2e.rs` | Shamir + HPKE sealing + k-of-n reconstruction and fail-closed cases are directly proven. |
 | Supply Chain Attestations | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fcp-registry/src/lib.rs`, `crates/fcp-e2e/tests/supply_chain_attestation_e2e.rs`, registry tests | Real cosign/TUF E2E and registry hardening exist; external release distribution remains outside repo proof. |
@@ -95,12 +100,40 @@ live multi-node production deployment.
 11. **Computation Migration:** reference connector migrate/resume E2E justifies `PROVEN`.
 12. **Connector inventory:** `OperationInfo` coverage is 147 connectors, not 137.
 
+## Graduations
+
+### Secretless Connectors: `IMPLEMENTED` -> `PROVEN`
+
+Closed `flywheel_connectors-e99o6.1.6` on 2026-05-10 after the B.1-B.5
+sequence moved the pattern from implemented mechanism to representative
+connector-family proof.
+
+Evidence:
+
+- Production trait surface: `crates/fcp-crypto/src/secret_fetch.rs`
+  (`SecretFetchHook`, `RefreshableSecretFetchHook`, `CredentialIdHash`,
+  redacted `SecretFetchError`, and the in-memory registry used by tests).
+- Production trait migration and redaction proof:
+  `crates/fcp-e2e/tests/secretless_connector_e2e.rs`.
+- Connector-family gauntlet proof:
+  `crates/fcp-e2e/tests/secretless_github_e2e.rs`,
+  `crates/fcp-e2e/tests/secretless_slack_e2e.rs`, and
+  `crates/fcp-e2e/tests/secretless_gmail_e2e.rs`.
+- Redaction-safe replay helper:
+  `crates/fcp-testkit/src/secretless_replay.rs`.
+- README claim pin:
+  `crates/fwc/tests/readme_status_pinning.rs`.
+
+The E2E gauntlet covers host-boundary credential materialization, connector
+blindness to raw bearer material, tracing/audit/debug/error redaction,
+redacted replay persistence, disk scans, rotation, and cross-connector
+fetch-denial/no-bleed checks. Gmail also includes access-token and
+refresh-token redaction controls.
+
 ## Still-Honest Limits
 
 - `Zone Isolation` stays `LIMITED`; the host-backed path still has an opt-in
   `allowed_zones` branch.
-- `Secretless Connectors` stays `IMPLEMENTED`; credential injection and
-  authorization exist, but broad connector-family proof is still incomplete.
 - `Mesh-Native Architecture` stays `STEADY-STATE TARGET (NOT YET OPERATIONAL)`;
   mesh components are real, but production operator invoke remains host-first.
 
@@ -133,8 +166,8 @@ live multi-node production deployment.
 - Resolved 2026-05-05: `flywheel_connectors-01yaq` repaired instance-binding
   semantics for `BoundVerified`; Capability Tokens were re-evaluated to
   `PROVEN`.
-- Decide what proof would let Secretless Connectors graduate from
-  `IMPLEMENTED` to `PROVEN`.
+- Resolved 2026-05-10: `flywheel_connectors-e99o6.1.6` graduated Secretless
+  Connectors to `PROVEN` with representative connector-family E2E proof.
 - Keep Mesh-Native non-operational wording pinned until ordinary `fwc invoke`
   uses a real mesh-backed path with E2E evidence.
 - Re-run connector inventory measurements rather than carrying forward counts.

@@ -126,6 +126,17 @@ pub use hybrid_owner_objects::{
     verify_hybrid_owner_object,
 };
 
+// ── Proof Graph Schema (b88ec.1) ──────────────────────────────────
+
+pub mod proof_graph;
+
+pub use proof_graph::{
+    BeadOwner, ClaimId, ClaimNode, ClaimStatus, EvidenceId, EvidenceKind, EvidenceNode,
+    FreshnessWindow, PROOF_GRAPH_SCHEMA, ProofGap, ProofGapId, ProofGapStatus, ProofGraph,
+    ProofGraphError, RedactionClass, RerunCommand, RerunCommandId, SuggestedActionId,
+    SuggestedNextAction, SupportEdge, SupportRelationship, TruthSource,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

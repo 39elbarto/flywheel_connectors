@@ -147,6 +147,17 @@ pub use proof_graph_indexer::{
     ReadmeFeatureRow, SourceLocation, VerificationScriptRecord,
 };
 
+// ── Proof Runner Contract (b88ec.5) ───────────────────────────────
+
+pub mod proof_runner;
+
+pub use proof_runner::{
+    CargoProofInvocation, PROOF_RUNNER_EVENT_SCHEMA, PROOF_RUNNER_SUMMARY_SCHEMA,
+    ProofCommandFingerprint, ProofCommandSpec, ProofRun, ProofRunClassification, ProofRunError,
+    ProofRunEvent, ProofRunEventKind, ProofRunJsonlEvent, ProofRunPolicy, ProofRunStage,
+    ProofRunnerKind, RedactedEnvValue, TargetDirPolicy, WorkerAffinityHint,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

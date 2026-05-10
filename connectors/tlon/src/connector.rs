@@ -12,9 +12,10 @@ use fcp_prelude::{
     BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, OperationId, SessionId,
 };
+use fcp_sdk::prelude::*;
 use reqwest::{Client, Response, StatusCode, header};
 use serde_json::{Value, json};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use url::Url;
 
 use crate::{TlonError, TlonResult};
@@ -39,6 +40,128 @@ const DEFAULT_CHANNEL_MARK: &str = "tlon-channel-action";
 const DEFAULT_TIMEOUT_MS: u64 = 15_000;
 const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_TARGET_BYTES: usize = 512;
+
+fn default_tlon_chat_coordination_config() -> ChatCoordinationConfig {
+    ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
+}
+
+fn parse_tlon_chat_coordination_config(
+    value: Option<&Value>,
+    base: ChatCoordinationConfig,
+) -> FcpResult<ChatCoordinationConfig> {
+    let Some(value) = value else {
+        return Ok(base);
+    };
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "chat_coordination must be an object".into(),
+    })?;
+
+    let mut config = base;
+    if let Some(enabled) = object.get("enabled") {
+        config = config.with_enabled(json_bool(enabled, "chat_coordination.enabled")?);
+    }
+    if let Some(ttl_seconds) = object.get("ttl_seconds") {
+        let seconds = ttl_seconds
+            .as_u64()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be an integer".into(),
+            })?;
+        if seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be greater than zero".into(),
+            });
+        }
+        config = config.with_ttl(Duration::from_secs(seconds));
+    }
+    if let Some(fail_open) = object.get("fail_open") {
+        config = config.with_fail_open(json_bool(fail_open, "chat_coordination.fail_open")?);
+    }
+    if let Some(allowlist) = object.get("allowlist_channels") {
+        let channels = allowlist
+            .as_array()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels must be an array".into(),
+            })?;
+        let mut normalized = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let raw = channel.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels entries must be strings".into(),
+            })?;
+            let channel_id = raw.trim();
+            if channel_id.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_coordination.allowlist_channels entries must not be empty"
+                        .into(),
+                });
+            }
+            normalized.push(ChannelId::new(channel_id.to_owned()));
+        }
+        config = config.with_allowlist_channels(normalized);
+    }
+    if let Some(backend) = object.get("backend") {
+        config = config.with_backend(parse_chat_coordination_backend(backend)?);
+    }
+    if let Some(dm_mode) = object.get("dm_mode") {
+        config = config.with_dm_mode(parse_chat_coordination_dm_mode(dm_mode)?);
+    }
+    Ok(config)
+}
+
+fn json_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a boolean"),
+    })
+}
+
+fn parse_chat_coordination_backend(value: &Value) -> FcpResult<ChatCoordinationBackend> {
+    match value.as_str() {
+        Some("agent_mail") => Ok(ChatCoordinationBackend::AgentMail),
+        Some("mesh_gossip") => Ok(ChatCoordinationBackend::MeshGossip),
+        Some("in_memory") => Ok(ChatCoordinationBackend::InMemory),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.backend: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.backend must be a string".into(),
+        }),
+    }
+}
+
+fn parse_chat_coordination_dm_mode(value: &Value) -> FcpResult<DmMode> {
+    match value.as_str() {
+        Some("skip") => Ok(DmMode::Skip),
+        Some("treat_as_thread") => Ok(DmMode::TreatAsThread),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.dm_mode: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.dm_mode must be a string".into(),
+        }),
+    }
+}
+
+fn tlon_coordination_audit_records(
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> Vec<ChatCoordinationAuditRecord> {
+    let mut records = decision.audit_records().to_vec();
+    if let Some(record) = decision.send_executed_audit_record(backend, claimant_agent_id) {
+        records.push(record);
+    }
+    records
+}
 
 fn dm_send_input_schema() -> Value {
     json!({
@@ -98,6 +221,10 @@ fn ok_output_schema() -> Value {
         "properties": {
             "ok": {
                 "type": "boolean"
+            },
+            "coordination": {
+                "type": "array",
+                "description": "Redacted chat coordination audit records"
             }
         }
     })
@@ -365,6 +492,8 @@ pub struct TlonConnector {
     session_id: Option<SessionId>,
     request_count: AtomicU64,
     error_count: AtomicU64,
+    chat_coordination_config: ChatCoordinationConfig,
+    thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
 }
 
 #[allow(clippy::missing_errors_doc, clippy::unused_async)]
@@ -379,10 +508,32 @@ impl TlonConnector {
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
+            chat_coordination_config: default_tlon_chat_coordination_config(),
+            thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
         }
     }
 
+    #[must_use]
+    pub fn instance_id(&self) -> &fcp_prelude::InstanceId {
+        &self.base.instance_id
+    }
+
+    #[must_use]
+    pub fn with_thread_ownership_checker(
+        mut self,
+        checker: Arc<dyn ThreadOwnershipChecker>,
+        backend: ChatCoordinationBackend,
+    ) -> Self {
+        self.thread_ownership_checker = checker;
+        self.chat_coordination_config = self.chat_coordination_config.with_backend(backend);
+        self
+    }
+
     pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
+        let chat_coordination_config = parse_tlon_chat_coordination_config(
+            params.get("chat_coordination"),
+            self.chat_coordination_config.clone(),
+        )?;
         let config = TlonConfig::from_params(&params)?;
         let client = Arc::new(TlonClient::new(&config).map_err(|error| error.to_fcp_error())?);
         info!(
@@ -392,6 +543,7 @@ impl TlonConnector {
         );
         self.client = Some(client);
         self.config = Some(config);
+        self.chat_coordination_config = chat_coordination_config;
         self.verifier = None;
         self.session_id = None;
         self.base.set_configured(true);
@@ -712,6 +864,23 @@ impl TlonConnector {
         let config = self.config()?;
         let ship = require_ship(input, "ship")?;
         let message = require_message(input)?;
+        let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+        let coordination = self
+            .claim_before_tlon_send(
+                zone_id,
+                ChannelId::new(format!("dm:{}", ship.display)),
+                None,
+                claimant_agent_id.clone(),
+            )
+            .await;
+        if let Some(error) = coordination.denial_error() {
+            warn!(
+                error = %error,
+                operation = DM_SEND_OPERATION,
+                "Tlon send denied by chat coordination"
+            );
+            return Err(error.clone());
+        }
         let payload = json!({
             "kind": "dm.send",
             "ship": ship.display,
@@ -724,16 +893,41 @@ impl TlonConnector {
             &config.dm_mark,
             &payload,
         );
-        self.client()?
+        let mut output = self
+            .client()?
             .send_action(action)
             .await
-            .map_err(|error| error.to_fcp_error())
+            .map_err(|error| error.to_fcp_error())?;
+        tlon_insert_coordination(
+            &mut output,
+            &coordination,
+            self.chat_coordination_config.backend(),
+            &claimant_agent_id,
+        )?;
+        Ok(output)
     }
 
     async fn invoke_channel_send(&self, input: &Value, action_id: u64) -> FcpResult<Value> {
         let config = self.config()?;
         let channel = require_channel(input, "channel")?;
         let message = require_message(input)?;
+        let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+        let coordination = self
+            .claim_before_tlon_send(
+                zone_id,
+                ChannelId::new(format!("channel:{}", channel.display)),
+                None,
+                claimant_agent_id.clone(),
+            )
+            .await;
+        if let Some(error) = coordination.denial_error() {
+            warn!(
+                error = %error,
+                operation = CHANNEL_SEND_OPERATION,
+                "Tlon send denied by chat coordination"
+            );
+            return Err(error.clone());
+        }
         let ship = channel
             .target_ship
             .as_ref()
@@ -752,10 +946,18 @@ impl TlonConnector {
             &config.channel_mark,
             &payload,
         );
-        self.client()?
+        let mut output = self
+            .client()?
             .send_action(action)
             .await
-            .map_err(|error| error.to_fcp_error())
+            .map_err(|error| error.to_fcp_error())?;
+        tlon_insert_coordination(
+            &mut output,
+            &coordination,
+            self.chat_coordination_config.backend(),
+            &claimant_agent_id,
+        )?;
+        Ok(output)
     }
 
     fn invoke_target_resolve(input: &Value) -> FcpResult<Value> {
@@ -766,6 +968,38 @@ impl TlonConnector {
             let _ = normalize_channel(target)?;
         }
         Ok(json!({ "resolved": true }))
+    }
+
+    fn chat_coordination_context(&self) -> (ZoneId, AgentId) {
+        let zone_id = self
+            .verifier
+            .as_ref()
+            .map_or_else(ZoneId::community, |verifier| verifier.zone_id.clone());
+        let claimant_agent_id = AgentId::new(self.base.instance_id.as_str().to_owned());
+        (zone_id, claimant_agent_id)
+    }
+
+    async fn claim_before_tlon_send(
+        &self,
+        zone_id: ZoneId,
+        channel_id: ChannelId,
+        thread_id: Option<ThreadId>,
+        claimant_agent_id: AgentId,
+    ) -> ChatCoordinationSendDecision {
+        let cx = fcp_async_core::compatibility_cx();
+        self.chat_coordination_config
+            .claim_before_send(
+                &cx,
+                self.thread_ownership_checker.as_ref(),
+                ChatCoordinationSendRequest::new(
+                    zone_id,
+                    self.base.id.clone(),
+                    channel_id,
+                    thread_id,
+                    claimant_agent_id,
+                ),
+            )
+            .await
     }
 }
 
@@ -796,6 +1030,26 @@ fn build_poke_action(id: u64, ship: &str, app: &str, mark: &str, payload: &Value
         "mark": mark,
         "json": payload
     })
+}
+
+fn tlon_insert_coordination(
+    output: &mut Value,
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> FcpResult<()> {
+    let output = output.as_object_mut().ok_or_else(|| FcpError::Internal {
+        message: "Tlon send output was not an object".into(),
+    })?;
+    output.insert(
+        "coordination".into(),
+        json!(tlon_coordination_audit_records(
+            decision,
+            backend,
+            claimant_agent_id,
+        )),
+    );
+    Ok(())
 }
 
 fn optional_trimmed<'a>(params: &'a Value, field: &str) -> Option<&'a str> {

@@ -35,6 +35,7 @@ Important runtime truths:
 - `self_check` reports `ok` for session-cookie auth and `degraded` with `credential_injection_required` for credential-id mode.
 - `introspect` advertises all three operations with `implemented = true`.
 - `simulate` returns `allowed = true` for known operations once configured and handshaken.
+- Outbound DM and channel sends claim SDK chat ownership before the Eyre HTTP call and append redacted `coordination` audit records on successful dispatch.
 - `shutdown` clears configured and handshaken state.
 
 ## Auth And Scope Boundary
@@ -59,16 +60,36 @@ Important runtime truths:
   - `tlon.dm.send` uses mark `tlon-dm-action`.
   - `tlon.channel.send` uses mark `tlon-channel-action`.
 - `tlon.target.resolve` is local validation only and opens no provider socket.
+- Chat coordination claim targets are namespaced as `dm:<ship>` for direct messages and `channel:<channel_path>` for channel sends. The current Tlon surface has no native thread identifier, so the default `dm_mode = "treat_as_thread"` treats each conversation/channel target as its own thread.
 - Manifest sandbox profile is `strict`, with `96 MB` memory, `25%` CPU, `60_000 ms` wall-clock timeout, no exec, and no ptrace.
 - Invalid JSON produces a JSON-RPC error with code `FCP-1001`.
 - Unknown JSON-RPC methods produce an invalid-request response.
+
+## Chat Coordination Configuration
+
+Outbound sends support the shared FCP chat thread-ownership guard through optional `chat_coordination` configuration:
+
+```json
+{
+  "chat_coordination": {
+    "enabled": true,
+    "ttl_seconds": 900,
+    "fail_open": true,
+    "backend": "in_memory",
+    "dm_mode": "treat_as_thread",
+    "allowlist_channels": ["dm:~zod", "channel:/ship/~zod/general"]
+  }
+}
+```
+
+The connector coordinates before Eyre dispatch. Successful outputs include only redacted audit hashes and claim outcomes, not raw ship names, channel paths, message bodies, cookies, credential IDs, endpoint URLs, or raw agent instance IDs. A duplicate active claim is denied before the provider socket is opened.
 
 ## Operation Inventory
 
 | Operation | Runtime status | Capability | SafetyTier | RiskLevel | Idempotency | Rationale |
 |-----------|----------------|------------|------------|-----------|-------------|-----------|
-| `tlon.dm.send` | implemented | `tlon.dm` | `Safe` | `Medium` | `BestEffort` | Sends a direct message payload to a target ship through Eyre. |
-| `tlon.channel.send` | implemented | `tlon.channel` | `Safe` | `Medium` | `BestEffort` | Sends a message payload into a Tlon or Urbit channel path. |
+| `tlon.dm.send` | implemented | `tlon.dm` | `Safe` | `Medium` | `BestEffort` | Sends a direct message payload to a target ship through Eyre after a chat-coordination claim. |
+| `tlon.channel.send` | implemented | `tlon.channel` | `Safe` | `Medium` | `BestEffort` | Sends a message payload into a Tlon or Urbit channel path after a chat-coordination claim. |
 | `tlon.target.resolve` | implemented | `tlon.channel` | `Safe` | `Low` | `Strict` | Normalizes and validates a DM ship or channel target before sending. |
 
 ## Explicit Non-Goals

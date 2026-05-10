@@ -10,6 +10,7 @@ use std::{
     io::Write,
     net::TcpListener,
     process::{Command, Stdio},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -17,9 +18,10 @@ use chrono::{Duration as ChronoDuration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_prelude::FcpError;
 use fcp_prelude::{CapabilityConstraints, CapabilityToken};
+use fcp_sdk::{ChatCoordinationBackend, InMemoryThreadOwnershipChecker};
 use fcp_tlon::TlonConnector;
 use serde_json::{Value, json};
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const CONNECTOR_ID: &str = "fcp.tlon";
@@ -432,6 +434,97 @@ async fn loopback_dm_and_channel_send_emit_redacted_jsonl() {
         cleanup_result: "mock_server_dropped",
         skip_reason: None,
     });
+}
+
+#[fcp_async_core::runtime::test]
+async fn dm_send_claims_conversation_and_denies_duplicate_before_http() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path(EYRE_CHANNEL_PATH))
+        .and(header("cookie", SESSION_COOKIE))
+        .and(body_partial_json(json!([{
+            "json": {
+                "kind": "dm.send",
+                "ship": SHIP_FIXTURE,
+                "message": "agent A reply"
+            }
+        }])))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let config = json!({
+        "base_url": server.uri(),
+        "session_cookie": SESSION_COOKIE,
+        "allow_private_network": true,
+        "ship": SHIP_FIXTURE,
+        "chat_coordination": { "backend": "in_memory" }
+    });
+    let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+    let mut first = TlonConnector::new()
+        .with_thread_ownership_checker(checker.clone(), ChatCoordinationBackend::InMemory);
+    let mut second = TlonConnector::new()
+        .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+    first
+        .handle_configure(config.clone())
+        .await
+        .expect("first configure should succeed");
+    second
+        .handle_configure(config)
+        .await
+        .expect("second configure should succeed");
+    first
+        .handle_handshake(json!({"protocol_version": "2.0", "zone": "z:community"}))
+        .await
+        .expect("first handshake should succeed");
+    second
+        .handle_handshake(json!({"protocol_version": "2.0", "zone": "z:community"}))
+        .await
+        .expect("second handshake should succeed");
+    let first_instance = first.instance_id().as_str().to_owned();
+
+    let first_result = first
+        .handle_invoke(json!({
+            "operation_id": DM_OPERATION,
+            "input": {"ship": SHIP_FIXTURE, "message": "agent A reply"}
+        }))
+        .await
+        .expect("first send should succeed");
+    assert_eq!(first_result["ok"], true);
+    let coordination = first_result["coordination"]
+        .as_array()
+        .expect("coordination audit records should be present");
+    assert_eq!(coordination[0]["event"], "claim_attempt");
+    assert_eq!(coordination[1]["outcome"], "granted");
+    assert_eq!(coordination[2]["event"], "send_executed");
+    let coordination_text = Value::Array(coordination.clone()).to_string();
+    assert!(!coordination_text.contains(SHIP_FIXTURE));
+    assert!(!coordination_text.contains("agent A reply"));
+    assert!(!coordination_text.contains(&first_instance));
+
+    let second_error = second
+        .handle_invoke(json!({
+            "operation_id": DM_OPERATION,
+            "input": {"ship": SHIP_FIXTURE, "message": "agent B reply"}
+        }))
+        .await
+        .expect_err("second send should be denied by duplicate claim");
+    match second_error {
+        FcpError::Unauthorized { code, message } => {
+            assert_eq!(code, 4090);
+            assert!(message.starts_with("thread_owned_by_peer:"));
+            assert!(message.contains(&first_instance));
+        }
+        other => panic!("expected duplicate claim denial, got {other:?}"),
+    }
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(
+        requests.len(),
+        1,
+        "duplicate Tlon claim must not reach the Eyre channel"
+    );
 }
 
 #[fcp_async_core::runtime::test]

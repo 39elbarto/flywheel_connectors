@@ -86,6 +86,10 @@ additionalProperties = false
 [provides.operations."tlon.dm.send".output_schema.properties.ok]
 type = "boolean"
 
+[provides.operations."tlon.dm.send".output_schema.properties.coordination]
+description = "Redacted chat coordination audit records"
+type = "array"
+
 [provides.operations."tlon.dm.send".ai_hints]
 when_to_use = "When you need to send a direct message to a ship on the Tlon/Urbit network."
 common_mistakes = ["Omitting the ~ prefix on ship names."]
@@ -138,6 +142,10 @@ additionalProperties = false
 
 [provides.operations."tlon.channel.send".output_schema.properties.ok]
 type = "boolean"
+
+[provides.operations."tlon.channel.send".output_schema.properties.coordination]
+description = "Redacted chat coordination audit records"
+type = "array"
 
 [provides.operations."tlon.channel.send".ai_hints]
 when_to_use = "When you need to send a message into a Tlon/Urbit channel."

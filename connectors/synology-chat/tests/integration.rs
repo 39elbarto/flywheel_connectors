@@ -16,6 +16,7 @@ use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, FcpConnector, FcpError, HandshakeRequest,
     InstanceId, InvokeRequest, OperationId, RequestId, SelfCheckStatus, ZoneId,
 };
+use fcp_sdk::{ChatCoordinationBackend, InMemoryThreadOwnershipChecker};
 use fcp_synology_chat::SynologyChatConnector;
 use serde_json::{Value, json};
 use wiremock::{
@@ -514,12 +515,12 @@ fn assert_schema_accepts(schema: &Value, payload: &Value) {
 
 fn assert_schema_rejects(schema: &Value, payload: &Value) {
     let validator = jsonschema::validator_for(schema).expect("schema should compile");
-    let errors = validator
+    let first_error = validator
         .iter_errors(payload)
-        .map(|error| error.to_string())
-        .collect::<Vec<_>>();
+        .next()
+        .map(|error| error.to_string());
     assert!(
-        !errors.is_empty(),
+        first_error.is_some(),
         "schema should reject payload {payload:#}"
     );
 }
@@ -968,6 +969,104 @@ async fn send_message_posts_expected_payload_and_normalizes_empty_success() {
     assert_eq!(result["status"], "ok");
     assert_eq!(result["http_status"], 200);
     assert_eq!(result["response_kind"], "empty");
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_message_denies_duplicate_claim_before_webhook_dispatch() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/webhook"))
+        .and(body_json(json!({
+            "text": "agent A reply",
+            "user_ids": ["u-123"]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+    let mut first = SynologyChatConnector::new()
+        .with_thread_ownership_checker(checker.clone(), ChatCoordinationBackend::InMemory);
+    let mut second = SynologyChatConnector::new()
+        .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+    first
+        .configure(json!({
+            "incoming_url": format!("{}/webhook", server.uri())
+        }))
+        .await
+        .expect("first configure should succeed");
+    second
+        .configure(json!({
+            "incoming_url": format!("{}/webhook", server.uri())
+        }))
+        .await
+        .expect("second configure should succeed");
+    let first_key = Ed25519SigningKey::generate();
+    let second_key = Ed25519SigningKey::generate();
+    first
+        .handshake(handshake_request(
+            first_key.verifying_key().to_bytes(),
+            &[CAP_WRITE],
+        ))
+        .await
+        .expect("first handshake should succeed");
+    second
+        .handshake(handshake_request(
+            second_key.verifying_key().to_bytes(),
+            &[CAP_WRITE],
+        ))
+        .await
+        .expect("second handshake should succeed");
+
+    let first_result = invoke_ok(
+        &first,
+        OP_SEND_MESSAGE,
+        json!({
+            "text": "agent A reply",
+            "user_id": "u-123"
+        }),
+        CAP_WRITE,
+        &first_key,
+    )
+    .await;
+    let coordination = first_result["coordination"]
+        .as_array()
+        .expect("coordination records should be present");
+    assert_eq!(coordination[0]["event"], "claim_attempt");
+    assert_eq!(coordination[1]["outcome"], "granted");
+    assert_eq!(coordination[2]["event"], "send_executed");
+    let coordination_text = Value::Array(coordination.clone()).to_string();
+    assert!(!coordination_text.contains("u-123"));
+    assert!(!coordination_text.contains("agent A reply"));
+    assert!(!coordination_text.contains(first.instance_id().as_str()));
+
+    let second_error = invoke_err(
+        &second,
+        OP_SEND_MESSAGE,
+        json!({
+            "text": "agent B reply",
+            "user_id": "u-123"
+        }),
+        CAP_WRITE,
+        &second_key,
+    )
+    .await;
+    match second_error {
+        FcpError::Unauthorized { code, message } => {
+            assert_eq!(code, 4090);
+            assert!(message.starts_with("thread_owned_by_peer:"));
+            assert!(message.contains(first.instance_id().as_str()));
+        }
+        other => panic!("expected duplicate claim denial, got {other:?}"),
+    }
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(
+        requests.len(),
+        1,
+        "duplicate Synology Chat claim must not reach the webhook"
+    );
 }
 
 #[fcp_async_core::runtime::test]

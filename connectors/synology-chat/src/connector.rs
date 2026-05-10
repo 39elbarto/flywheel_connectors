@@ -2,7 +2,7 @@
 
 use std::{
     collections::BTreeMap,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -19,6 +19,7 @@ use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_sdk::prelude::*;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use tracing::warn;
 
 use crate::client::{
     SynologyChatClient, SynologyChatFileUrlRequest, SynologyChatMessageRequest,
@@ -39,6 +40,128 @@ const OP_SEND_PAYLOAD: &str = "synology_chat.send_payload";
 const OP_INGEST_OUTGOING_WEBHOOK: &str = "synology_chat.ingest_outgoing_webhook";
 const OP_WEBHOOK_NORMALIZE: &str = "synology_chat.webhook.normalize";
 const OP_HEALTH: &str = "synology_chat.health";
+
+fn default_synology_chat_coordination_config() -> ChatCoordinationConfig {
+    ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
+}
+
+fn parse_synology_chat_coordination_config(
+    value: Option<&Value>,
+    base: ChatCoordinationConfig,
+) -> FcpResult<ChatCoordinationConfig> {
+    let Some(value) = value else {
+        return Ok(base);
+    };
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "chat_coordination must be an object".into(),
+    })?;
+
+    let mut config = base;
+    if let Some(enabled) = object.get("enabled") {
+        config = config.with_enabled(json_bool(enabled, "chat_coordination.enabled")?);
+    }
+    if let Some(ttl_seconds) = object.get("ttl_seconds") {
+        let seconds = ttl_seconds
+            .as_u64()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be an integer".into(),
+            })?;
+        if seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be greater than zero".into(),
+            });
+        }
+        config = config.with_ttl(Duration::from_secs(seconds));
+    }
+    if let Some(fail_open) = object.get("fail_open") {
+        config = config.with_fail_open(json_bool(fail_open, "chat_coordination.fail_open")?);
+    }
+    if let Some(allowlist) = object.get("allowlist_channels") {
+        let channels = allowlist
+            .as_array()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels must be an array".into(),
+            })?;
+        let mut normalized = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let raw = channel.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels entries must be strings".into(),
+            })?;
+            let channel_id = raw.trim();
+            if channel_id.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_coordination.allowlist_channels entries must not be empty"
+                        .into(),
+                });
+            }
+            normalized.push(ChannelId::new(channel_id.to_owned()));
+        }
+        config = config.with_allowlist_channels(normalized);
+    }
+    if let Some(backend) = object.get("backend") {
+        config = config.with_backend(parse_chat_coordination_backend(backend)?);
+    }
+    if let Some(dm_mode) = object.get("dm_mode") {
+        config = config.with_dm_mode(parse_chat_coordination_dm_mode(dm_mode)?);
+    }
+    Ok(config)
+}
+
+fn json_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a boolean"),
+    })
+}
+
+fn parse_chat_coordination_backend(value: &Value) -> FcpResult<ChatCoordinationBackend> {
+    match value.as_str() {
+        Some("agent_mail") => Ok(ChatCoordinationBackend::AgentMail),
+        Some("mesh_gossip") => Ok(ChatCoordinationBackend::MeshGossip),
+        Some("in_memory") => Ok(ChatCoordinationBackend::InMemory),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.backend: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.backend must be a string".into(),
+        }),
+    }
+}
+
+fn parse_chat_coordination_dm_mode(value: &Value) -> FcpResult<DmMode> {
+    match value.as_str() {
+        Some("skip") => Ok(DmMode::Skip),
+        Some("treat_as_thread") => Ok(DmMode::TreatAsThread),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.dm_mode: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.dm_mode must be a string".into(),
+        }),
+    }
+}
+
+fn synology_chat_coordination_audit_records(
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> Vec<ChatCoordinationAuditRecord> {
+    let mut records = decision.audit_records().to_vec();
+    if let Some(record) = decision.send_executed_audit_record(backend, claimant_agent_id) {
+        records.push(record);
+    }
+    records
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorCheck {
@@ -101,12 +224,25 @@ impl SynologyChatIngressRateState {
     }
 }
 
-#[derive(Debug)]
 pub struct SynologyChatConnector {
     base: BaseConnector,
     state: Option<SynologyChatState>,
     started_at: Instant,
     verifier: Option<CapabilityVerifier>,
+    chat_coordination_config: ChatCoordinationConfig,
+    thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
+}
+
+impl std::fmt::Debug for SynologyChatConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SynologyChatConnector")
+            .field("base", &self.base)
+            .field("state_configured", &self.state.is_some())
+            .field("started_at", &self.started_at)
+            .field("verifier_configured", &self.verifier.is_some())
+            .field("chat_coordination_config", &self.chat_coordination_config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SynologyChatConnector {
@@ -117,6 +253,8 @@ impl SynologyChatConnector {
             state: None,
             started_at: Instant::now(),
             verifier: None,
+            chat_coordination_config: default_synology_chat_coordination_config(),
+            thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
         }
     }
 
@@ -182,6 +320,18 @@ impl SynologyChatConnector {
     #[must_use]
     pub const fn instance_id(&self) -> &InstanceId {
         &self.base.instance_id
+    }
+
+    /// Replace the thread ownership checker used by outbound chat coordination.
+    #[must_use]
+    pub fn with_thread_ownership_checker(
+        mut self,
+        checker: Arc<dyn ThreadOwnershipChecker>,
+        backend: ChatCoordinationBackend,
+    ) -> Self {
+        self.thread_ownership_checker = checker;
+        self.chat_coordination_config = self.chat_coordination_config.with_backend(backend);
+        self
     }
 
     fn nonblank_string_schema() -> Value {
@@ -365,7 +515,11 @@ impl SynologyChatConnector {
                     "enum": ["empty", "json", "text"]
                 },
                 "body": {},
-                "raw_body": { "type": "string" }
+                "raw_body": { "type": "string" },
+                "coordination": {
+                    "type": "array",
+                    "description": "Redacted chat coordination audit records"
+                }
             }
         })
     }
@@ -416,6 +570,10 @@ impl SynologyChatConnector {
                 },
                 "body": {},
                 "raw_body": { "type": "string" },
+                "coordination": {
+                    "type": "array",
+                    "description": "Redacted chat coordination audit records"
+                },
                 "file_url_policy": Self::file_url_policy_output_schema()
             }
         })
@@ -832,12 +990,35 @@ impl SynologyChatConnector {
                 let bot_name = req.input.get("bot_name").and_then(|value| value.as_str());
                 let request = SynologyChatMessageRequest::new(text, &user_ids, bot_name)
                     .map_err(|error| error.to_fcp_error())?;
-                state
+                let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+                let coordination = self
+                    .claim_before_synology_chat_send(
+                        zone_id,
+                        synology_chat_channel_id_for_user_ids(&user_ids),
+                        None,
+                        claimant_agent_id.clone(),
+                    )
+                    .await;
+                if let Some(error) = coordination.denial_error() {
+                    warn!(
+                        error = %error,
+                        "Synology Chat send_message denied by chat coordination"
+                    );
+                    return Err(error.clone());
+                }
+                let mut output = state
                     .client
                     .send_message(&request)
                     .await
                     .map_err(|error| error.to_fcp_error())?
-                    .into_json()
+                    .into_json();
+                synology_chat_insert_coordination(
+                    &mut output,
+                    &coordination,
+                    self.chat_coordination_config.backend(),
+                    &claimant_agent_id,
+                )?;
+                output
             }
             OP_SEND_PAYLOAD => {
                 let payload = req
@@ -847,14 +1028,38 @@ impl SynologyChatConnector {
                         code: 1005,
                         message: "Missing payload".into(),
                     })?;
+                let (channel_id, thread_id) = synology_chat_payload_claim_target(payload);
                 let payload = SynologyChatPayload::from_value(payload)
                     .map_err(|error| error.to_fcp_error())?;
-                state
+                let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+                let coordination = self
+                    .claim_before_synology_chat_send(
+                        zone_id,
+                        channel_id,
+                        thread_id,
+                        claimant_agent_id.clone(),
+                    )
+                    .await;
+                if let Some(error) = coordination.denial_error() {
+                    warn!(
+                        error = %error,
+                        "Synology Chat send_payload denied by chat coordination"
+                    );
+                    return Err(error.clone());
+                }
+                let mut output = state
                     .client
                     .send_payload(&payload)
                     .await
                     .map_err(|error| error.to_fcp_error())?
-                    .into_json()
+                    .into_json();
+                synology_chat_insert_coordination(
+                    &mut output,
+                    &coordination,
+                    self.chat_coordination_config.backend(),
+                    &claimant_agent_id,
+                )?;
+                output
             }
             OP_SEND_FILE_URL => {
                 let file_url = req
@@ -869,6 +1074,22 @@ impl SynologyChatConnector {
                 let bot_name = req.input.get("bot_name").and_then(|value| value.as_str());
                 let request = SynologyChatFileUrlRequest::new(file_url, &user_ids, bot_name)
                     .map_err(|error| error.to_fcp_error())?;
+                let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+                let coordination = self
+                    .claim_before_synology_chat_send(
+                        zone_id,
+                        synology_chat_channel_id_for_user_ids(&user_ids),
+                        None,
+                        claimant_agent_id.clone(),
+                    )
+                    .await;
+                if let Some(error) = coordination.denial_error() {
+                    warn!(
+                        error = %error,
+                        "Synology Chat send_file_url denied by chat coordination"
+                    );
+                    return Err(error.clone());
+                }
                 let (dispatch, audit) = state
                     .client
                     .send_file_url(&request)
@@ -881,6 +1102,12 @@ impl SynologyChatConnector {
                 if let Some(object) = output.as_object_mut() {
                     object.insert("file_url_policy".into(), audit);
                 }
+                synology_chat_insert_coordination(
+                    &mut output,
+                    &coordination,
+                    self.chat_coordination_config.backend(),
+                    &claimant_agent_id,
+                )?;
                 output
             }
             OP_INGEST_OUTGOING_WEBHOOK => normalize_outgoing_webhook(&req.input, state)?,
@@ -906,6 +1133,38 @@ impl SynologyChatConnector {
             }
         };
         Ok(InvokeResponse::ok(req.id, output))
+    }
+
+    fn chat_coordination_context(&self) -> (ZoneId, AgentId) {
+        let zone_id = self
+            .verifier
+            .as_ref()
+            .map_or_else(ZoneId::work, |verifier| verifier.zone_id.clone());
+        let claimant_agent_id = AgentId::new(self.base.instance_id.as_str().to_owned());
+        (zone_id, claimant_agent_id)
+    }
+
+    async fn claim_before_synology_chat_send(
+        &self,
+        zone_id: ZoneId,
+        channel_id: ChannelId,
+        thread_id: Option<ThreadId>,
+        claimant_agent_id: AgentId,
+    ) -> ChatCoordinationSendDecision {
+        let cx = fcp_async_core::compatibility_cx();
+        self.chat_coordination_config
+            .claim_before_send(
+                &cx,
+                self.thread_ownership_checker.as_ref(),
+                ChatCoordinationSendRequest::new(
+                    zone_id,
+                    self.base.id.clone(),
+                    channel_id,
+                    thread_id,
+                    claimant_agent_id,
+                ),
+            )
+            .await
     }
 }
 
@@ -950,6 +1209,61 @@ fn optional_user_ids(input: &serde_json::Value) -> FcpResult<Vec<String>> {
         .filter(|value| !value.is_empty())
         .map(|value| vec![value.to_string()])
         .unwrap_or_default())
+}
+
+fn synology_chat_insert_coordination(
+    output: &mut Value,
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> FcpResult<()> {
+    let output = output.as_object_mut().ok_or_else(|| FcpError::Internal {
+        message: "Synology Chat dispatch output was not an object".into(),
+    })?;
+    output.insert(
+        "coordination".into(),
+        json!(synology_chat_coordination_audit_records(
+            decision,
+            backend,
+            claimant_agent_id,
+        )),
+    );
+    Ok(())
+}
+
+fn synology_chat_channel_id_for_user_ids(user_ids: &[String]) -> ChannelId {
+    if user_ids.is_empty() {
+        return ChannelId::new("incoming_webhook");
+    }
+    let mut normalized = user_ids
+        .iter()
+        .map(|user_id| user_id.trim())
+        .filter(|user_id| !user_id.is_empty())
+        .collect::<Vec<_>>();
+    normalized.sort_unstable();
+    ChannelId::new(format!("users:{}", normalized.join(",")))
+}
+
+fn synology_chat_payload_claim_target(payload: &Value) -> (ChannelId, Option<ThreadId>) {
+    let Some(object) = payload.as_object() else {
+        return (ChannelId::new("incoming_webhook"), None);
+    };
+    let channel_id = first_payload_scalar(
+        object,
+        &[
+            "channel_id",
+            "channel",
+            "room_id",
+            "conversation_id",
+            "user_id",
+        ],
+    )
+    .filter(|value| value != "0")
+    .map_or_else(|| ChannelId::new("incoming_webhook"), ChannelId::new);
+    let thread_id = first_payload_scalar(object, &["thread_id", "root_id", "post_id"])
+        .filter(|value| !matches!(value.as_str(), "" | "0"))
+        .map(ThreadId::new);
+    (channel_id, thread_id)
 }
 
 fn normalize_outgoing_webhook(input: &Value, state: &SynologyChatState) -> FcpResult<Value> {
@@ -1632,6 +1946,10 @@ impl FcpConnector for SynologyChatConnector {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
+        let chat_coordination_config = parse_synology_chat_coordination_config(
+            config.get("chat_coordination"),
+            self.chat_coordination_config.clone(),
+        )?;
         let config = SynologyChatConfig::from_value(config)?;
         let model = config.state_model();
         let webhook_auth_value = config.outgoing_token().map(ToString::to_string);
@@ -1648,6 +1966,7 @@ impl FcpConnector for SynologyChatConnector {
             outgoing_token: webhook_auth_value,
             ingress_rate: Mutex::new(SynologyChatIngressRateState::default()),
         });
+        self.chat_coordination_config = chat_coordination_config;
         self.base.set_configured(true);
         self.base.set_handshaken(false);
         self.verifier = None;

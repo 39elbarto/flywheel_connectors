@@ -108,6 +108,10 @@ enum = ["empty", "json", "text"]
 [provides.operations.send_message.output_schema.properties.raw_body]
 type = "string"
 
+[provides.operations.send_message.output_schema.properties.coordination]
+type = "array"
+description = "Redacted chat coordination audit records"
+
 [provides.operations.send_file_url]
 description = "Send a SSRF-checked Synology Chat media or file URL"
 capability = "synology_chat.write"
@@ -182,6 +186,10 @@ enum = ["empty", "json", "text"]
 
 [provides.operations.send_file_url.output_schema.properties.raw_body]
 type = "string"
+
+[provides.operations.send_file_url.output_schema.properties.coordination]
+type = "array"
+description = "Redacted chat coordination audit records"
 
 [provides.operations.send_file_url.output_schema.properties.file_url_policy]
 type = "object"
@@ -270,6 +278,10 @@ enum = ["empty", "json", "text"]
 
 [provides.operations.send_payload.output_schema.properties.raw_body]
 type = "string"
+
+[provides.operations.send_payload.output_schema.properties.coordination]
+type = "array"
+description = "Redacted chat coordination audit records"
 
 [provides.operations.ingest_outgoing_webhook]
 description = "Policy-check, verify, and normalize a host-forwarded Synology Chat outgoing-webhook payload"

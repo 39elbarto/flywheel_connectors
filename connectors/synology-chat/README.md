@@ -38,6 +38,8 @@ Important implementation truths from `connector.rs`, `client.rs`, `types.rs`, an
 - `send_message` requires `text` and optionally accepts `user_id`, `user_ids`, and `bot_name`.
 - `user_id` is normalized into a single-entry `user_ids` array; `user_ids` must be an array of non-empty strings.
 - `bot_name` is currently translated to the outbound payload field `username`.
+- Outbound `send_message`, `send_file_url`, and `send_payload` run SDK chat coordination before webhook dispatch. Successful responses include redacted `coordination` audit records, and duplicate ownership claims are denied before the provider HTTP call.
+- `chat_coordination` config can set `enabled`, `ttl_seconds`, `fail_open`, `allowlist_channels`, `backend`, and `dm_mode`; the connector defaults to the in-memory backend for local webhook delivery and tests.
 - `send_file_url` requires an HTTP or HTTPS `file_url`, rejects credentials, fragments, oversized URLs, localhost/private/link-local/internal destinations, unresolved hosts, and DNS pin mismatches, then posts `{ "file_url": ... }` with the same optional `user_id`, `user_ids`, and `bot_name` fields.
 - `allowed_file_url_hosts` is an exact-host override for private NAS or lab media hosts; it permits that exact host even when it resolves to private or loopback space.
 - `send_payload` requires a JSON object and forwards it directly to the webhook endpoint for advanced card or attachment shapes.
@@ -109,9 +111,9 @@ This slice is intentionally closer to "outbound incoming-webhook sender" than to
 
 | Operation | Protocol shape | Capability | SafetyTier | RiskLevel | Idempotency | Notes |
 |-----------|----------------|------------|------------|-----------|-------------|-------|
-| `synology_chat.send_message` | HTTP `POST` JSON webhook body with `text`, optional `user_ids`, optional `username` | `synology_chat.write` | `Risky` | `Medium` | `None` | Outbound plain-text message delivery only. The connector does not model inbound reply semantics. |
-| `synology_chat.send_file_url` | HTTP `POST` JSON webhook body with checked `file_url`, optional `user_ids`, optional `username` | `synology_chat.write` | `Risky` | `Medium` | `None` | Validates media URLs before dispatch; exact-host overrides are explicit runtime configuration for private deployments. |
-| `synology_chat.send_payload` | HTTP `POST` arbitrary JSON object | `synology_chat.write` | `Risky` | `Medium` | `None` | Passes a raw webhook payload through directly for richer provider-specific payloads and intentionally does not inspect nested `file_url` values. |
+| `synology_chat.send_message` | HTTP `POST` JSON webhook body with `text`, optional `user_ids`, optional `username` | `synology_chat.write` | `Risky` | `Medium` | `None` | Runs chat coordination before webhook dispatch. The connector does not model inbound reply semantics. |
+| `synology_chat.send_file_url` | HTTP `POST` JSON webhook body with checked `file_url`, optional `user_ids`, optional `username` | `synology_chat.write` | `Risky` | `Medium` | `None` | Runs chat coordination before provider dispatch; exact-host overrides are explicit runtime configuration for private deployments. |
+| `synology_chat.send_payload` | HTTP `POST` arbitrary JSON object | `synology_chat.write` | `Risky` | `Medium` | `None` | Runs chat coordination before raw passthrough and intentionally does not inspect nested `file_url` values. |
 | `synology_chat.ingest_outgoing_webhook` | local policy and payload normalization for one host-forwarded outgoing webhook request | `synology_chat.webhook` | `Safe` | `Low` | `Strict` | Verifies the configured `outgoing_token` from supported aliases, applies body/sender/DM/rate policy, normalizes channel/thread/sender/reply metadata, and exposes attachment and policy hints without hosting a listener. |
 | `synology_chat.health` | local configuration report | `synology_chat.read` | `Safe` | `Low` | `Strict` | Returns configured URL and settings, but does not perform a live webhook probe. |
 

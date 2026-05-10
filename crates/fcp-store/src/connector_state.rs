@@ -104,6 +104,10 @@ pub enum ConnectorStateStoreError {
     #[error("connector state object missing lease reference {0}")]
     MissingLeaseReference(ObjectId),
 
+    /// A state object carries no canonical state bytes.
+    #[error("connector state object has empty state_cbor")]
+    EmptyStateCbor,
+
     /// A state object used a sequence number that does not follow the head.
     #[error("connector state sequence mismatch: expected {expected}, got {got}")]
     SequenceMismatch {
@@ -758,6 +762,9 @@ impl FcpStoreConnectorStateStore {
         self.expect_zone("state.zone_id", &state.zone_id)?;
         self.expect_zone("state.header.zone_id", &state.header.zone_id)?;
         self.expect_instance(state.instance_id.as_ref())?;
+        if state.state_cbor.is_empty() {
+            return Err(ConnectorStateStoreError::EmptyStateCbor);
+        }
         if !state.header.refs.contains(&state.lease_object_id) {
             return Err(ConnectorStateStoreError::MissingLeaseReference(
                 state.lease_object_id,
@@ -975,6 +982,7 @@ impl FcpStoreConnectorStateStore {
             | ConnectorStateStoreError::HeaderBodyMismatch
             | ConnectorStateStoreError::ContentIdMismatch { .. }
             | ConnectorStateStoreError::MissingLeaseReference(_)
+            | ConnectorStateStoreError::EmptyStateCbor
             | ConnectorStateStoreError::SequenceMismatch { .. }
             | ConnectorStateStoreError::SequenceOverflow(_)
             | ConnectorStateStoreError::Serialization(_) => ConnectorStateError::MalformedState {
@@ -1429,6 +1437,43 @@ mod tests {
             err,
             ConnectorStateStoreError::MissingLeaseReference(_)
         ));
+    }
+
+    #[test]
+    fn append_rejects_empty_state_cbor() {
+        let state_store = test_store(store());
+        let mut incoming = state(0, None, lease_id(1));
+        incoming.state_cbor.clear();
+        let err = run_async(state_store.append_object(incoming)).unwrap_err();
+        assert!(matches!(err, ConnectorStateStoreError::EmptyStateCbor));
+    }
+
+    #[test]
+    fn trait_append_maps_quota_failure_to_storage_unavailable() {
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig {
+            max_bytes: 1,
+        }));
+        let state_store = test_store(object_store);
+
+        let err = run_async(
+            <FcpStoreConnectorStateStore as ConnectorStateStore>::append_object(
+                &state_store,
+                &connector_id(),
+                state(0, None, lease_id(1)),
+            ),
+        )
+        .unwrap_err();
+
+        match err {
+            ConnectorStateError::StorageUnavailable {
+                connector_id: got,
+                reason,
+            } => {
+                assert_eq!(got, connector_id());
+                assert!(reason.contains("quota"));
+            }
+            other => panic!("expected StorageUnavailable, got {other:?}"),
+        }
     }
 
     #[test]

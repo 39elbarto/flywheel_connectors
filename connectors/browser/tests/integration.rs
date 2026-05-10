@@ -1,7 +1,8 @@
 //! Browser connector integration tests.
 //!
 //! Deterministic integration tests using wiremock to mock the browser API.
-//! No real browser connections. Covers:
+//! Browser API calls remain mocked; the Rust-owned launcher proof may start a
+//! local headless browser binary when a documented platform path exists. Covers:
 //! - Happy-path operations (navigate, screenshot, extract, interact, cookies, proxy)
 //! - Error taxonomy (429/500/400)
 //! - FCP2 default-deny + capability verification
@@ -23,7 +24,7 @@ use wiremock::{
     matchers::{method, path},
 };
 
-use fcp_browser::client::BrowserClient;
+use fcp_browser::client::{BrowserClient, BrowserLauncherConfig};
 use fcp_browser::connector::BrowserConnector;
 use fcp_browser::types::ProxyConfig;
 
@@ -230,6 +231,97 @@ fn rust_owned_launcher_fixture_session_hash(generation: u64) -> String {
     )
 }
 
+fn rust_owned_launcher_native_session_hash(port: u16, path: &str) -> String {
+    let run_id = blake3::hash("fcp.browser.rust-owned-launcher.v1".as_bytes());
+    let run_id = run_id.to_hex().chars().take(16).collect::<String>();
+    let session = blake3::hash(format!("{run_id}:{port}:{path}").as_bytes());
+    format!(
+        "blake3:{}",
+        session.to_hex().chars().take(16).collect::<String>()
+    )
+}
+
+fn rust_owned_launcher_control_endpoint_hash(port: u16, path: &str) -> String {
+    let endpoint = blake3::hash(format!("127.0.0.1:{port}{path}").as_bytes());
+    format!(
+        "blake3:{}",
+        endpoint.to_hex().chars().take(16).collect::<String>()
+    )
+}
+
+#[cfg(unix)]
+fn create_fake_browser_binary(label: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture_dir = std::env::temp_dir().join(format!(
+        "fcp-browser-integration-native-{}-{}",
+        std::process::id(),
+        blake3::hash(label.as_bytes())
+            .to_hex()
+            .chars()
+            .take(16)
+            .collect::<String>()
+    ));
+    std::fs::create_dir_all(&fixture_dir).expect("create fake browser fixture dir");
+    let fake_browser = fixture_dir.join("fake-chrome");
+    std::fs::write(
+        &fake_browser,
+        r#"#!/bin/sh
+set -eu
+profile_dir=""
+for arg in "$@"; do
+  case "$arg" in
+    --user-data-dir=*) profile_dir="${arg#--user-data-dir=}" ;;
+  esac
+done
+if [ -z "$profile_dir" ]; then
+  exit 42
+fi
+mkdir -p "$profile_dir"
+printf '9444\n/devtools/browser/native-fixture\n' > "$profile_dir/DevToolsActivePort"
+trap 'exit 0' TERM INT
+while :; do sleep 1; done
+"#,
+    )
+    .expect("write fake browser binary");
+    let mut permissions = std::fs::metadata(&fake_browser)
+        .expect("fake browser metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_browser, permissions).expect("set fake browser executable bit");
+    fake_browser.display().to_string()
+}
+
+fn rust_owned_real_browser_candidate() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    let candidates: &[&str] = &[
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    ];
+    #[cfg(target_os = "linux")]
+    let candidates: &[&str] = &[
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/microsoft-edge",
+    ];
+    #[cfg(target_os = "windows")]
+    let candidates: &[&str] = &[
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ];
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let candidates: &[&str] = &[];
+
+    candidates
+        .iter()
+        .copied()
+        .find(|path| std::path::Path::new(path).is_file())
+        .map(str::to_string)
+}
+
 fn proxy_proof_git_revision() -> &'static str {
     option_env!("GIT_COMMIT")
         .or(option_env!("VERGEN_GIT_SHA"))
@@ -301,6 +393,9 @@ fn emit_rust_owned_launcher_evidence(
             "proxy_descriptor_hash_only": true
         }),
     );
+    object
+        .entry("control_endpoint_hash".to_string())
+        .or_insert_with(|| json!("blake3:not_applicable"));
     println!("BROWSER_RUST_LAUNCHER_JSONL {evidence}");
 }
 
@@ -1411,6 +1506,156 @@ async fn test_browser_rust_owned_launcher_supervisor_e2e_jsonl() {
             "skip_reason": null
         }),
     );
+
+    #[cfg(unix)]
+    {
+        let mut native_connector = BrowserConnector::new();
+        let native_key = setup_handshake(
+            &mut native_connector,
+            &["browser.set_proxy", "browser.clear_proxy"],
+        )
+        .await;
+        native_connector
+            .handle_configure(json!({
+                "browser_url": "ws://127.0.0.1:9222/devtools/page/native-launch-target",
+                "rust_owned_launcher": {
+                    "mode": "native",
+                    "browser_binary_path": create_fake_browser_binary(&run_id),
+                    "readiness_timeout_ms": 1_000
+                }
+            }))
+            .await
+            .expect("native rust-owned launcher configure should succeed");
+        let native_health = native_connector.handle_health().await.unwrap();
+        assert_eq!(
+            native_health["rust_owned_launcher"]["proxy_support"],
+            "native_spawn_available"
+        );
+        let native_set = native_connector
+            .handle_invoke(json!({
+                "operation": "browser.set_proxy",
+                "input": proxy_input.clone(),
+                "capability_token": generate_valid_token(&native_key, &native_connector, "browser.set_proxy"),
+                "approval_token": generate_execution_approval("browser.set_proxy", &proxy_input)
+            }))
+            .await
+            .expect("native rust-owned launcher should spawn fake browser and accept set_proxy");
+        assert_eq!(native_set["enabled"], true);
+        native_connector.handle_shutdown(json!({})).await.unwrap();
+        let native_devtools_path = "/devtools/browser/native-fixture";
+        emit_rust_owned_launcher_evidence(
+            &run_id,
+            "native_launch_success",
+            json!({
+                "platform": std::env::consts::OS,
+                "browser_binary_descriptor_hash": native_health["rust_owned_launcher"]["browser_binary_descriptor_hash"].clone(),
+                "launch_mode": "native",
+                "control_endpoint_kind": "rust_owned_launcher",
+                "operation_id": "browser.set_proxy",
+                "capability_decision": "granted",
+                "approval_decision": "granted",
+                "proxy_descriptor_hash": proxy_descriptor_hash(&proxy_input),
+                "control_endpoint_hash": rust_owned_launcher_control_endpoint_hash(9444, native_devtools_path),
+                "target_session_id_hash": rust_owned_launcher_native_session_hash(9444, native_devtools_path),
+                "readiness_checkpoint": "native_ready",
+                "timeout_cancellation_checkpoint": "not_cancelled",
+                "cleanup_result": "native_child_killed_and_reaped",
+                "artifact_paths": [],
+                "skip_reason": null
+            }),
+        );
+    }
+
+    #[cfg(not(unix))]
+    emit_rust_owned_launcher_evidence(
+        &run_id,
+        "native_launch_success",
+        json!({
+            "platform": std::env::consts::OS,
+            "browser_binary_descriptor_hash": "blake3:not_applicable",
+            "launch_mode": "native",
+            "control_endpoint_kind": "rust_owned_launcher",
+            "operation_id": "browser.set_proxy",
+            "capability_decision": "not_evaluated",
+            "approval_decision": "not_evaluated",
+            "proxy_descriptor_hash": proxy_hash,
+            "target_session_id_hash": "blake3:not_applicable",
+            "readiness_checkpoint": "not_started",
+            "timeout_cancellation_checkpoint": "not_started",
+            "cleanup_result": "launcher_not_called",
+            "artifact_paths": [],
+            "skip_reason": "native fake-browser fixture is unix-only"
+        }),
+    );
+
+    if let Some(real_browser_binary) = rust_owned_real_browser_candidate() {
+        let real_proxy = ProxyConfig {
+            server: "http://proxy.example.com:8080".into(),
+            bypass_list: Some(vec!["localhost".into()]),
+            username: Some("proxy-user".into()),
+            password: Some("proxy-password".into()),
+        };
+        let real_client = BrowserClient::new(None)
+            .unwrap()
+            .with_rust_owned_launcher(
+                BrowserLauncherConfig::native(Some(real_browser_binary.clone()), 10_000).unwrap(),
+            )
+            .unwrap();
+
+        let real_set = real_client.set_proxy(&real_proxy).await.unwrap();
+        assert!(real_set.enabled);
+        real_client.shutdown();
+        let real_jsonl = real_client.rust_owned_launcher_events_jsonl().unwrap();
+        assert!(!real_jsonl.contains(&real_browser_binary));
+        assert!(!real_jsonl.contains("proxy.example.com:8080"));
+        assert!(!real_jsonl.contains("proxy-user"));
+        assert!(!real_jsonl.contains("proxy-password"));
+
+        let launch_event = real_jsonl
+            .lines()
+            .find(|line| line.contains("\"operation_id\":\"browser.set_proxy\""))
+            .expect("real browser launcher should emit set_proxy evidence");
+        let launch_evidence: serde_json::Value =
+            serde_json::from_str(launch_event).expect("launch evidence should be JSON");
+        emit_rust_owned_launcher_evidence(
+            &run_id,
+            "native_real_browser_launch_success",
+            launch_evidence,
+        );
+
+        let shutdown_event = real_jsonl
+            .lines()
+            .find(|line| line.contains("\"operation_id\":\"browser.shutdown\""))
+            .expect("real browser launcher should emit shutdown evidence");
+        let shutdown_evidence: serde_json::Value =
+            serde_json::from_str(shutdown_event).expect("shutdown evidence should be JSON");
+        emit_rust_owned_launcher_evidence(
+            &run_id,
+            "native_real_browser_cleanup",
+            shutdown_evidence,
+        );
+    } else {
+        emit_rust_owned_launcher_evidence(
+            &run_id,
+            "native_real_browser_launch_success",
+            json!({
+                "platform": std::env::consts::OS,
+                "browser_binary_descriptor_hash": "blake3:not_applicable",
+                "launch_mode": "native",
+                "control_endpoint_kind": "rust_owned_launcher",
+                "operation_id": "browser.set_proxy",
+                "capability_decision": "not_evaluated",
+                "approval_decision": "not_evaluated",
+                "proxy_descriptor_hash": proxy_hash,
+                "target_session_id_hash": "blake3:not_applicable",
+                "readiness_checkpoint": "not_started",
+                "timeout_cancellation_checkpoint": "not_started",
+                "cleanup_result": "launcher_not_called",
+                "artifact_paths": [],
+                "skip_reason": "no documented browser binary path exists on this host"
+            }),
+        );
+    }
 
     let mut timeout_connector = BrowserConnector::new();
     let timeout_key = setup_handshake(&mut timeout_connector, &["browser.set_proxy"]).await;

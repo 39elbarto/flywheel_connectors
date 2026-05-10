@@ -55,7 +55,7 @@ Important runtime truths the contract preserves:
 - `wss://` direct DevTools WebSocket URLs are rejected until TLS WebSocket support is wired.
 - Direct Chrome DevTools WebSocket mode preserves page, cookie, and session operations, but `browser.set_proxy` and `browser.clear_proxy` fail closed with `proxy_unavailable_direct_cdp` unless the opt-in Rust-owned launcher supervisor is configured.
 - `fcp-browser-control` workers that do not advertise proxy operations remain valid for non-proxy operations. Proxy dispatch is allowed only after `/health` advertises exact `browser.set_proxy` and `browser.clear_proxy` worker-policy descriptors, timeout budgets, response budgets, target policy, and the proxy redaction contract.
-- The Rust-owned launcher supervisor currently has a deterministic fixture mode for launcher/proxy policy proof and a native mode that validates binary/path policy but fails closed with `launcher_native_spawn_not_wired` until real browser process spawn and readiness detection are wired.
+- The Rust-owned launcher supervisor currently has a deterministic fixture mode for launcher/proxy policy proof and a native mode that spawns a configured/discovered browser binary, waits for the `DevToolsActivePort` readiness file, kills/reaps the owned process on timeout or shutdown, and keeps all binary paths, profile paths, raw endpoints, proxy credentials, and target/session identifiers redacted in JSONL evidence.
 - Proxy descriptors reject invalid schemes, embedded URL credentials, private/internal proxy targets, malformed bypass entries, oversized descriptors, and newline/control-character injection before any proxy worker dispatch.
 - Runtime request timeout is 30 seconds.
 - The browser client uses `fcp-browser/0.1.0` as its user agent.

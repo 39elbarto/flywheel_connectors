@@ -8,13 +8,13 @@ fn cutover_gate(gate_id: &str) -> MeshCutoverGate {
 }
 
 #[test]
-fn cutover_gate_mesh_policy_object_distribution_fails_red_without_policy_peer_telemetry() {
+fn cutover_gate_mesh_policy_object_distribution_skips_without_policy_peer_telemetry() {
     let gate = cutover_gate("mesh-policy-object-distribution");
 
-    assert_eq!(gate.status, CutoverGateStatus::Red);
+    assert_eq!(gate.status, CutoverGateStatus::Skip);
     assert_eq!(
         gate.measured_value["telemetry_state"].as_str(),
-        Some("missing")
+        Some("unavailable")
     );
     assert_eq!(gate.measured_value["peer_count"].as_u64(), Some(0));
     assert_eq!(

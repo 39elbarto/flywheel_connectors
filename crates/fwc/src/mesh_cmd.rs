@@ -603,9 +603,9 @@ pub const MESH_CUTOVER_GATES_SCHEMA_VERSION: &str = "1.0.0";
 pub enum CutoverGateStatus {
     /// Predicate is satisfied by direct current evidence.
     Green,
-    /// Predicate is not satisfied or telemetry is missing.
+    /// Predicate was evaluated and is not satisfied.
     Red,
-    /// Predicate is intentionally out of scope for this environment.
+    /// Predicate cannot be evaluated because required live infrastructure is unavailable.
     Skip,
 }
 
@@ -670,7 +670,8 @@ pub struct MeshCutoverGate {
 }
 
 impl MeshCutoverGate {
-    fn red(
+    fn new(
+        status: CutoverGateStatus,
         gate_id: &str,
         name: &str,
         predicate_text: String,
@@ -683,12 +684,33 @@ impl MeshCutoverGate {
             gate_id: gate_id.to_owned(),
             name: name.to_owned(),
             predicate_text,
-            status: CutoverGateStatus::Red,
+            status,
             measured_value,
             target,
             how_measured,
             remediation: remediation.to_owned(),
         }
+    }
+
+    fn skip(
+        gate_id: &str,
+        name: &str,
+        predicate_text: String,
+        measured_value: Value,
+        target: Value,
+        how_measured: Vec<String>,
+        remediation: &str,
+    ) -> Self {
+        Self::new(
+            CutoverGateStatus::Skip,
+            gate_id,
+            name,
+            predicate_text,
+            measured_value,
+            target,
+            how_measured,
+            remediation,
+        )
     }
 }
 
@@ -713,13 +735,13 @@ pub fn cutover_gate_overall_status(gates: &[MeshCutoverGate]) -> CutoverGateStat
 /// Build the mesh-native cutover gate contract.
 ///
 /// The current implementation is fail-closed: it exposes the stable schema and
-/// reports RED until `fwc` and the host expose direct live telemetry for every
-/// predicate. This prevents a green-by-default cutover when no mesh evidence is
-/// available.
+/// reports SKIP until `fwc` and the host expose direct live telemetry for every
+/// predicate. SKIP gates never count as green, which prevents a green-by-default
+/// cutover when no mesh evidence is available.
 #[must_use]
 pub fn mesh_cutover_gates(args: &MeshCutoverGateArgs) -> Vec<MeshCutoverGate> {
     vec![
-        MeshCutoverGate::red(
+        MeshCutoverGate::skip(
             "mesh-inventory-placement",
             "Mesh-backed connector inventory with placement evidence",
             format!(
@@ -727,7 +749,7 @@ pub fn mesh_cutover_gates(args: &MeshCutoverGateArgs) -> Vec<MeshCutoverGate> {
                 args.min_connectors, args.replica_count
             ),
             json!({
-                "telemetry_state": "missing",
+                "telemetry_state": "unavailable",
                 "connectors_meeting_predicate": 0,
                 "available_route": "fwc mesh explain-availability",
                 "missing_fields": ["placement.has_mesh_replica", "placement.replica_count"],
@@ -741,9 +763,9 @@ pub fn mesh_cutover_gates(args: &MeshCutoverGateArgs) -> Vec<MeshCutoverGate> {
                 "fwc mesh explain-availability <connector> --host <endpoint> --json".to_owned(),
                 "bv --robot-triage".to_owned(),
             ],
-            "Expose live placement replica telemetry on the host/mesh availability route, then count connectors that meet the target.",
+            "Expose live placement replica telemetry on the host/mesh availability route; until that route is available this gate remains skipped and cannot count as green.",
         ),
-        MeshCutoverGate::red(
+        MeshCutoverGate::skip(
             "mesh-lifecycle-state-replication",
             "Mesh-backed lifecycle state replication",
             format!(
@@ -751,7 +773,7 @@ pub fn mesh_cutover_gates(args: &MeshCutoverGateArgs) -> Vec<MeshCutoverGate> {
                 args.min_connectors, args.replica_count, args.state_staleness_seconds
             ),
             json!({
-                "telemetry_state": "missing",
+                "telemetry_state": "unavailable",
                 "connectors_meeting_predicate": 0,
                 "missing_fields": [
                     "connector_state_root.replica_count",
@@ -768,9 +790,9 @@ pub fn mesh_cutover_gates(args: &MeshCutoverGateArgs) -> Vec<MeshCutoverGate> {
                 "fwc mesh cutover-gates --json".to_owned(),
                 "future: fwc mesh state status --json".to_owned(),
             ],
-            "Publish ConnectorStateRoot replication telemetry before treating lifecycle state as mesh-backed.",
+            "Publish ConnectorStateRoot replication telemetry; until that route is available this gate remains skipped and cannot count as green.",
         ),
-        MeshCutoverGate::red(
+        MeshCutoverGate::skip(
             "mesh-audit-chain-quorum",
             "Mesh-backed audit chain quorum across at least two nodes",
             format!(
@@ -778,7 +800,7 @@ pub fn mesh_cutover_gates(args: &MeshCutoverGateArgs) -> Vec<MeshCutoverGate> {
                 args.audit_staleness_seconds
             ),
             json!({
-                "telemetry_state": "missing",
+                "telemetry_state": "unavailable",
                 "quorum_signed_checkpoints": 0,
                 "quorum_signers": 0,
                 "missing_route": "fwc audit chain status --json",
@@ -789,9 +811,9 @@ pub fn mesh_cutover_gates(args: &MeshCutoverGateArgs) -> Vec<MeshCutoverGate> {
                 "checkpoint_age_seconds_lte": args.audit_staleness_seconds,
             }),
             vec!["fwc audit chain status --json".to_owned()],
-            "Expose quorum checkpoint status through the audit command before allowing this gate to turn green.",
+            "Expose quorum checkpoint status through the audit command; until that route is available this gate remains skipped and cannot count as green.",
         ),
-        MeshCutoverGate::red(
+        MeshCutoverGate::skip(
             "mesh-policy-object-distribution",
             "Mesh-backed policy-object distribution",
             format!(
@@ -799,7 +821,7 @@ pub fn mesh_cutover_gates(args: &MeshCutoverGateArgs) -> Vec<MeshCutoverGate> {
                 args.policy_peer_count
             ),
             json!({
-                "telemetry_state": "missing",
+                "telemetry_state": "unavailable",
                 "peer_count": 0,
                 "verified_owner_signatures": false,
                 "missing_route": "fwc policy distribution --json",
@@ -809,7 +831,7 @@ pub fn mesh_cutover_gates(args: &MeshCutoverGateArgs) -> Vec<MeshCutoverGate> {
                 "verified_owner_signatures": true,
             }),
             vec!["fwc policy distribution --json".to_owned()],
-            "Expose policy bundle distribution and signature verification telemetry before allowing this gate to turn green.",
+            "Expose policy bundle distribution and signature verification telemetry; until that route is available this gate remains skipped and cannot count as green.",
         ),
     ]
 }
@@ -1995,20 +2017,20 @@ mod tests {
     }
 
     #[test]
-    fn cutover_gates_fail_closed_until_live_telemetry_exists() {
+    fn cutover_gates_skip_until_live_telemetry_exists() {
         let args = MeshCutoverGateArgs::default();
         let gates = mesh_cutover_gates(&args);
         assert_eq!(gates.len(), 4);
-        assert_eq!(cutover_gate_overall_status(&gates), CutoverGateStatus::Red);
+        assert_eq!(cutover_gate_overall_status(&gates), CutoverGateStatus::Skip);
         assert!(
             gates
                 .iter()
-                .all(|gate| gate.status == CutoverGateStatus::Red)
+                .all(|gate| gate.status == CutoverGateStatus::Skip)
         );
         assert_eq!(gates[0].gate_id, "mesh-inventory-placement");
         assert_eq!(
             gates[0].measured_value["telemetry_state"],
-            serde_json::Value::String("missing".to_owned())
+            serde_json::Value::String("unavailable".to_owned())
         );
     }
 

@@ -110,7 +110,7 @@ fn readme_mesh_native_status_is_backed_by_cutover_gate_contract() {
         .expect("feature table row for Mesh-Native Architecture must exist");
     assert!(
         row.contains("STEADY-STATE TARGET") && row.contains("NOT YET OPERATIONAL"),
-        "Mesh-Native Architecture must remain a target while any cutover gate is red. Row: {row}"
+        "Mesh-Native Architecture must remain a target while any cutover gate is not green. Row: {row}"
     );
     for gate_id in [
         "mesh-inventory-placement",

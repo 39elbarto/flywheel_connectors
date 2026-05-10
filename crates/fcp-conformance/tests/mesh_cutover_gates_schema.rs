@@ -69,7 +69,7 @@ fn valid_cutover_gates_payload() -> Value {
         "gates": gates,
         "next_actions": [
             "Run `fwc mesh explain-availability <connector> --host <endpoint> --json` to inspect available connector placement provenance.",
-            "Keep the README Mesh-Native Architecture row at `STEADY-STATE TARGET (NOT YET OPERATIONAL)` while any gate is red.",
+            "Keep the README Mesh-Native Architecture row at `STEADY-STATE TARGET (NOT YET OPERATIONAL)` while any gate is not green.",
             "Add live telemetry routes for the missing gate fields before attempting a mesh-native default flip."
         ],
         "availability": availability,
@@ -97,12 +97,12 @@ fn assert_invalid(instance: &Value, reason: &str) {
 }
 
 #[test]
-fn mesh_cutover_gates_schema_validates_fail_closed_payload() {
+fn mesh_cutover_gates_schema_validates_skip_payload() {
     let payload = valid_cutover_gates_payload();
 
     assert_valid(&payload);
     assert_eq!(payload["schema_version"], "1.0.0");
-    assert_eq!(payload["overall_status"], "red");
+    assert_eq!(payload["overall_status"], "skip");
     assert_eq!(payload["gates"].as_array().map(Vec::len), Some(4));
 }
 

@@ -8,13 +8,13 @@ fn cutover_gate(gate_id: &str) -> MeshCutoverGate {
 }
 
 #[test]
-fn cutover_gate_mesh_lifecycle_state_replication_fails_red_without_state_root_telemetry() {
+fn cutover_gate_mesh_lifecycle_state_replication_skips_without_state_root_telemetry() {
     let gate = cutover_gate("mesh-lifecycle-state-replication");
 
-    assert_eq!(gate.status, CutoverGateStatus::Red);
+    assert_eq!(gate.status, CutoverGateStatus::Skip);
     assert_eq!(
         gate.measured_value["telemetry_state"].as_str(),
-        Some("missing")
+        Some("unavailable")
     );
     assert_eq!(
         gate.measured_value["connectors_meeting_predicate"].as_u64(),

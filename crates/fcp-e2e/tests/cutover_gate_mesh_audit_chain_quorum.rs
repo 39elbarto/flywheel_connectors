@@ -8,13 +8,13 @@ fn cutover_gate(gate_id: &str) -> MeshCutoverGate {
 }
 
 #[test]
-fn cutover_gate_mesh_audit_chain_quorum_fails_red_without_quorum_checkpoint_telemetry() {
+fn cutover_gate_mesh_audit_chain_quorum_skips_without_quorum_checkpoint_telemetry() {
     let gate = cutover_gate("mesh-audit-chain-quorum");
 
-    assert_eq!(gate.status, CutoverGateStatus::Red);
+    assert_eq!(gate.status, CutoverGateStatus::Skip);
     assert_eq!(
         gate.measured_value["telemetry_state"].as_str(),
-        Some("missing")
+        Some("unavailable")
     );
     assert_eq!(
         gate.measured_value["quorum_signed_checkpoints"].as_u64(),

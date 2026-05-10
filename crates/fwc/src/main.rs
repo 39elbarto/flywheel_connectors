@@ -7856,7 +7856,7 @@ fn mesh_cutover_gates_dispatch(args: &MeshCutoverGatesArgs) -> Result<DispatchOu
         "gates": gates,
         "next_actions": [
             "Run `fwc mesh explain-availability <connector> --host <endpoint> --json` to inspect available connector placement provenance.",
-            "Keep the README Mesh-Native Architecture row at `STEADY-STATE TARGET (NOT YET OPERATIONAL)` while any gate is red.",
+            "Keep the README Mesh-Native Architecture row at `STEADY-STATE TARGET (NOT YET OPERATIONAL)` while any gate is not green.",
             "Add live telemetry routes for the missing gate fields before attempting a mesh-native default flip."
         ],
     });

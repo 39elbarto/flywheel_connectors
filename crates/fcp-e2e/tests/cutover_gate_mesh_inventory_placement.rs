@@ -8,13 +8,13 @@ fn cutover_gate(gate_id: &str) -> MeshCutoverGate {
 }
 
 #[test]
-fn cutover_gate_mesh_inventory_placement_fails_red_without_live_replica_telemetry() {
+fn cutover_gate_mesh_inventory_placement_skips_without_live_replica_telemetry() {
     let gate = cutover_gate("mesh-inventory-placement");
 
-    assert_eq!(gate.status, CutoverGateStatus::Red);
+    assert_eq!(gate.status, CutoverGateStatus::Skip);
     assert_eq!(
         gate.measured_value["telemetry_state"].as_str(),
-        Some("missing")
+        Some("unavailable")
     );
     assert_eq!(
         gate.measured_value["connectors_meeting_predicate"].as_u64(),

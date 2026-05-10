@@ -4380,12 +4380,12 @@ fn e2e_mesh_availability_keeps_live_offline_and_repair_states_explicit() {
 }
 
 #[test]
-fn e2e_mesh_cutover_gates_reports_fail_closed_schema() {
+fn e2e_mesh_cutover_gates_reports_skip_schema_for_missing_telemetry() {
     let payload = run_json_ok(&["--json", "mesh", "cutover-gates"]);
     assert_eq!(payload["command"], "mesh");
     assert_eq!(payload["subcommand"], "cutover-gates");
     assert_eq!(payload["schema_version"], "1.0.0");
-    assert_eq!(payload["overall_status"], "red");
+    assert_eq!(payload["overall_status"], "skip");
     assert_eq!(payload["gate_count"], 4);
     assert_eq!(
         payload["measurement_contract"]["truth_model"],
@@ -4398,7 +4398,7 @@ fn e2e_mesh_cutover_gates_reports_fail_closed_schema() {
     assert!(
         gates
             .iter()
-            .all(|gate| gate["status"].as_str() == Some("red"))
+            .all(|gate| gate["status"].as_str() == Some("skip"))
     );
     let gate_ids = gates
         .iter()

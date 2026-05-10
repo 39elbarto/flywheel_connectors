@@ -28,7 +28,7 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
 input_schema = { type = "object", required = ["to", "content"], additionalProperties = false, properties = { to = { type = "string", minLength = 1, pattern = "\\S" }, content = { type = "string", minLength = 1, pattern = "\\S" } } }
-output_schema = { type = "object", additionalProperties = true, properties = { processQueryKey = { type = "string" }, messageId = { type = "string" }, errcode = { type = "integer" }, errmsg = { type = "string" } } }
+output_schema = { type = "object", additionalProperties = true, properties = { processQueryKey = { type = "string" }, messageId = { type = "string" }, errcode = { type = "integer" }, errmsg = { type = "string" }, coordination = { type = "array", description = "Redaction-safe chat thread ownership audit records", items = { type = "object", additionalProperties = true } } } }
 network_constraints = { host_allow = ["api.dingtalk.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.messages_send_text.ai_hints]
@@ -43,7 +43,7 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
 input_schema = { type = "object", required = ["to", "title", "text", "message_url"], additionalProperties = false, properties = { to = { type = "string", minLength = 1, pattern = "\\S" }, title = { type = "string", minLength = 1, pattern = "\\S" }, text = { type = "string", minLength = 1, pattern = "\\S" }, message_url = { type = "string", minLength = 1, format = "uri" }, pic_url = { type = "string", minLength = 1, format = "uri" } } }
-output_schema = { type = "object", additionalProperties = true, properties = { processQueryKey = { type = "string" }, messageId = { type = "string" }, errcode = { type = "integer" }, errmsg = { type = "string" } } }
+output_schema = { type = "object", additionalProperties = true, properties = { processQueryKey = { type = "string" }, messageId = { type = "string" }, errcode = { type = "integer" }, errmsg = { type = "string" }, coordination = { type = "array", description = "Redaction-safe chat thread ownership audit records", items = { type = "object", additionalProperties = true } } } }
 network_constraints = { host_allow = ["api.dingtalk.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.messages_send_link.ai_hints]
@@ -58,7 +58,7 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
 input_schema = { type = "object", required = ["to", "media_id", "file_name", "file_type"], additionalProperties = false, properties = { to = { type = "string", minLength = 1, pattern = "\\S" }, media_id = { type = "string", minLength = 1, pattern = "\\S" }, file_name = { type = "string", minLength = 1, pattern = "\\S" }, file_type = { type = "string", minLength = 1, pattern = "\\S" } } }
-output_schema = { type = "object", additionalProperties = true, properties = { processQueryKey = { type = "string" }, messageId = { type = "string" }, errcode = { type = "integer" }, errmsg = { type = "string" } } }
+output_schema = { type = "object", additionalProperties = true, properties = { processQueryKey = { type = "string" }, messageId = { type = "string" }, errcode = { type = "integer" }, errmsg = { type = "string" }, coordination = { type = "array", description = "Redaction-safe chat thread ownership audit records", items = { type = "object", additionalProperties = true } } } }
 network_constraints = { host_allow = ["api.dingtalk.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.messages_send_file.ai_hints]
@@ -118,7 +118,7 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
 input_schema = { type = "object", required = ["chat_id", "content"], additionalProperties = false, properties = { chat_id = { type = "string", minLength = 1, pattern = "\\S" }, content = { type = "string", minLength = 1, pattern = "\\S" }, session_webhook = { type = "string", minLength = 1, format = "uri" }, reply_to = { type = "string", minLength = 1 } } }
-output_schema = { type = "object", required = ["status", "chat_id_hash", "session_webhook_hash", "session_webhook_source", "reply_to_hash", "response", "redaction_status"], additionalProperties = false, properties = { status = { type = "string", enum = ["sent"] }, chat_id_hash = { type = "string", pattern = "^sha256:[0-9a-f]{16}$" }, session_webhook_hash = { type = "string", pattern = "^sha256:[0-9a-f]{16}$" }, session_webhook_source = { type = "string", enum = ["request", "cache"] }, reply_to_hash = { type = ["string", "null"], pattern = "^sha256:[0-9a-f]{16}$" }, response = { type = "object", additionalProperties = true }, redaction_status = { type = "string" } } }
+output_schema = { type = "object", required = ["status", "chat_id_hash", "session_webhook_hash", "session_webhook_source", "reply_to_hash", "response", "redaction_status"], additionalProperties = false, properties = { status = { type = "string", enum = ["sent"] }, chat_id_hash = { type = "string", pattern = "^sha256:[0-9a-f]{16}$" }, session_webhook_hash = { type = "string", pattern = "^sha256:[0-9a-f]{16}$" }, session_webhook_source = { type = "string", enum = ["request", "cache"] }, reply_to_hash = { type = ["string", "null"], pattern = "^sha256:[0-9a-f]{16}$" }, response = { type = "object", additionalProperties = true }, redaction_status = { type = "string" }, coordination = { type = "array", description = "Redaction-safe chat thread ownership audit records", items = { type = "object", additionalProperties = true } } } }
 network_constraints = { host_allow = ["api.dingtalk.com", "oapi.dingtalk.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations.stream_reply.ai_hints]

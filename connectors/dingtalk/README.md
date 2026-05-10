@@ -36,11 +36,12 @@ The current crate exposes these operations:
 
 Important implementation truths from `connector.rs`, `main.rs`, and `manifest.toml`:
 
-- Configuration is `base_url`, `media_base_url`, `client_id`, `client_secret`, bounded `request_timeout_ms`, and explicit Stream Mode policy fields: `stream_mode_enabled`, DM/group gates, mention-required behavior, allowed users, free-response chats, mention patterns, replay cache size, session-webhook cache size, session-webhook expiry safety margin, and reply timeout.
+- Configuration is `base_url`, `media_base_url`, `client_id`, `client_secret`, bounded `request_timeout_ms`, optional `chat_coordination`, and explicit Stream Mode policy fields: `stream_mode_enabled`, DM/group gates, mention-required behavior, allowed users, free-response chats, mention patterns, replay cache size, session-webhook cache size, session-webhook expiry safety margin, and reply timeout.
 - One connector instance is bound to one DingTalk app credential pair and therefore one robot identity as modeled by the current runtime.
 - Authentication is app-level token bootstrap against `POST /v1.0/oauth2/accessToken`; the access token is cached in memory only.
 - Group sends go through `/v1.0/robot/groupMessages/send` using `openConversationId`.
 - Direct sends go through `/v1.0/robot/oToMessages/batchSend` using one supplied user ID at a time.
+- `dingtalk.messages.send_text`, `dingtalk.messages.send_link`, `dingtalk.messages.send_file`, and `dingtalk.stream.reply` claim chat ownership before provider HTTP. Duplicate active ownership returns `Unauthorized` with code `4090`.
 - Media upload uses the separate `oapi.dingtalk.com` host and the legacy `/media/upload` flow with `access_token` and `type` in query parameters.
 - `health` and `self_check()` are both grounded in token issuance, not in a separate provider health endpoint.
 - `main.rs` accepts `subscribe` and `unsubscribe` RPC methods because of the shared connector interface, but the connector advertises `streaming = false`: it supervises host-forwarded Stream Mode frames rather than owning a long-lived DingTalk WebSocket transport.
@@ -86,6 +87,7 @@ This slice is intentionally closer to "outbound robot automation" than to "full 
   - direct user IDs, passed either as bare strings or as `user:<userid>`
   - group conversation IDs, passed as `chat:<openConversationId>`
   - `media_id` values returned by upload flows
+- Outbound send responses include redaction-safe `coordination` audit records. Raw DingTalk user IDs, group IDs, stream chat IDs, and webhook URLs are not emitted in coordination records.
 - The current runtime treats `client_id` as the `robotCode` for send operations.
 - The connector does not create or install the robot into chats. Provisioning the app, granting it the required DingTalk permissions, and making it visible in the intended group or direct-message contexts happen out of band.
 - The connector does not model cross-tenant brokering, user-granted OAuth, token rotation workflows, or secretless credential injection in this first slice.
@@ -104,6 +106,7 @@ This slice is intentionally closer to "outbound robot automation" than to "full 
 - The runtime does not open inbound listeners and does not own DingTalk's WebSocket Stream Mode transport
 - Host-forwarded stream frames use bounded in-memory replay/session-webhook state owned by the connector instance
 - Session webhook URLs are validated against DingTalk reply hosts, reject userinfo, and use HTTPS outside explicit localhost test seams
+- Chat coordination defaults to the in-memory backend in this connector crate. The optional `chat_coordination` object accepts `enabled`, `ttl_seconds`, `fail_open`, `allowlist_channels`, `backend`, and `dm_mode`; recognized backends are `agent_mail`, `mesh_gossip`, and `in_memory`, and recognized DM modes are `skip` and `treat_as_thread`.
 
 ## Capability Families
 
@@ -118,13 +121,13 @@ This slice is intentionally closer to "outbound robot automation" than to "full 
 
 | Operation | Endpoint shape | Capability | SafetyTier | RiskLevel | Idempotency | Notes |
 |-----------|----------------|------------|------------|-----------|-------------|-------|
-| `dingtalk.messages.send_text` | `POST /v1.0/robot/groupMessages/send` or `POST /v1.0/robot/oToMessages/batchSend` | `dingtalk.messages.write` | `Risky` | `Medium` | `None` | Sends one markdown-style message to one group target or one direct user target. |
-| `dingtalk.messages.send_link` | `POST /v1.0/robot/groupMessages/send` or `POST /v1.0/robot/oToMessages/batchSend` | `dingtalk.messages.write` | `Risky` | `Medium` | `None` | Sends one link-style card to one known target. |
-| `dingtalk.messages.send_file` | `POST /v1.0/robot/groupMessages/send` or `POST /v1.0/robot/oToMessages/batchSend` | `dingtalk.messages.write` | `Risky` | `Medium` | `None` | Sends a file-backed message using a previously returned `media_id`. |
+| `dingtalk.messages.send_text` | `POST /v1.0/robot/groupMessages/send` or `POST /v1.0/robot/oToMessages/batchSend` | `dingtalk.messages.write` | `Risky` | `Medium` | `None` | Claims chat ownership before sending one markdown-style message to one group target or one direct user target. |
+| `dingtalk.messages.send_link` | `POST /v1.0/robot/groupMessages/send` or `POST /v1.0/robot/oToMessages/batchSend` | `dingtalk.messages.write` | `Risky` | `Medium` | `None` | Claims chat ownership before sending one link-style card to one known target. |
+| `dingtalk.messages.send_file` | `POST /v1.0/robot/groupMessages/send` or `POST /v1.0/robot/oToMessages/batchSend` | `dingtalk.messages.write` | `Risky` | `Medium` | `None` | Claims chat ownership before sending a file-backed message using a previously returned `media_id`. |
 | `dingtalk.media.upload` | `POST /media/upload?access_token=...&type=...` | `dingtalk.media.write` | `Risky` | `Medium` | `BestEffort` | Uploads bytes and returns provider media metadata; exact-once semantics are not guaranteed. |
 | `dingtalk.events.normalize` | Local normalization | `dingtalk.messages.read` | `Safe` | `Low` | `Strict` | Converts a DingTalk robot callback/stream frame into normalized message metadata. |
 | `dingtalk.stream.ingest_message` | Host-forwarded Stream Mode frame | `dingtalk.messages.read` | `Safe` | `Low` | `Strict` | Applies enablement, sender, DM/group, mention, duplicate, media-bound, and session-webhook policy before emitting EventEnvelope JSON. |
-| `dingtalk.stream.reply` | `POST <sessionWebhook>` | `dingtalk.messages.write` | `Risky` | `Medium` | `None` | Sends a markdown reply through a validated cached or explicitly supplied Stream Mode session webhook. |
+| `dingtalk.stream.reply` | `POST <sessionWebhook>` | `dingtalk.messages.write` | `Risky` | `Medium` | `None` | Claims stream chat ownership before sending a markdown reply through a validated cached or explicitly supplied Stream Mode session webhook. |
 | `dingtalk.health` | `POST /v1.0/oauth2/accessToken` | `dingtalk.health.read` | `Safe` | `Low` | `Strict` | Safe credential and reachability probe backed by token issuance. |
 
 ## Explicit Non-Goals

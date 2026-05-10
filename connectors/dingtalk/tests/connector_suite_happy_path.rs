@@ -1,11 +1,14 @@
+use std::sync::Arc;
+
 use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_dingtalk::DingTalkConnector;
 use fcp_e2e::{ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_prelude::{
-    CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, HandshakeRequest,
-    InstanceId, InvokeRequest, OperationId, RequestId, ZoneId,
+    CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector, FcpError,
+    HandshakeRequest, InstanceId, InvokeRequest, InvokeStatus, OperationId, RequestId, ZoneId,
 };
+use fcp_sdk::{ChatCoordinationBackend, InMemoryThreadOwnershipChecker};
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -59,6 +62,15 @@ fn send_text_invoke(
     instance_id: &InstanceId,
     id: &'static str,
 ) -> InvokeRequest {
+    send_text_invoke_for(signing_key, instance_id, id, "user:user-1")
+}
+
+fn send_text_invoke_for(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
+    id: &'static str,
+    to: &str,
+) -> InvokeRequest {
     InvokeRequest {
         r#type: "invoke".into(),
         id: RequestId::new(id),
@@ -66,7 +78,7 @@ fn send_text_invoke(
         operation: OperationId::from_static(OP_SEND_TEXT),
         zone_id: ZoneId::work(),
         input: json!({
-            "to": "user:user-1",
+            "to": to,
             "content": "hello from connector suite"
         }),
         capability_token: build_token(signing_key, instance_id),
@@ -79,6 +91,34 @@ fn send_text_invoke(
         provenance: None,
         approval_tokens: Vec::new(),
     }
+}
+
+async fn setup_connector_with_checker(
+    base_url: &str,
+    checker: Arc<InMemoryThreadOwnershipChecker>,
+) -> (DingTalkConnector, Ed25519SigningKey, InstanceId) {
+    let mut connector = DingTalkConnector::new()
+        .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+    let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
+    connector
+        .configure(json!({
+            "base_url": base_url,
+            "media_base_url": base_url,
+            "client_id": "ding-app",
+            "client_secret": "test-secret",
+            "request_timeout_ms": 5_000
+        }))
+        .await
+        .expect("configure connector");
+    connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            instance_id.clone(),
+        ))
+        .await
+        .expect("handshake connector");
+    (connector, signing_key, instance_id)
 }
 
 #[test]
@@ -143,6 +183,92 @@ fn dingtalk_manifest_ai_hints_cover_all_operations() {
                 .unwrap_or_else(|error| panic!("{operation_id} example is not JSON: {error}"));
         }
     }
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_text_claims_target_and_denies_duplicate_before_http() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1.0/oauth2/accessToken"))
+        .and(body_partial_json(json!({
+            "appKey": "ding-app",
+            "appSecret": "test-secret"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "accessToken": "token-123",
+            "expireIn": 7200
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1.0/robot/oToMessages/batchSend"))
+        .and(header("x-acs-dingtalk-access-token", "token-123"))
+        .and(body_partial_json(json!({
+            "robotCode": "ding-app",
+            "userIds": ["coord-user"],
+            "msgKey": "sampleMarkdown"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "processQueryKey": "msg-1"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+    let (connector_a, signing_key_a, instance_id_a) =
+        setup_connector_with_checker(&server.uri(), checker.clone()).await;
+    let (connector_b, signing_key_b, instance_id_b) =
+        setup_connector_with_checker(&server.uri(), checker).await;
+
+    let first = connector_a
+        .invoke(send_text_invoke_for(
+            &signing_key_a,
+            &instance_id_a,
+            "dingtalk-claim-first",
+            "user:coord-user",
+        ))
+        .await
+        .expect("first coordinated send");
+    assert_eq!(first.status, InvokeStatus::Ok);
+    let result = first.result.expect("send result");
+    assert_eq!(result["coordination"][0]["event"], "claim_attempt");
+    assert_eq!(result["coordination"][1]["outcome"], "granted");
+    assert_eq!(result["coordination"][2]["event"], "send_executed");
+    assert!(
+        !serde_json::to_string(&result["coordination"])
+            .expect("serialize coordination")
+            .contains("coord-user"),
+        "coordination audit must not leak the raw DingTalk user ID"
+    );
+
+    let err = connector_b
+        .invoke(send_text_invoke_for(
+            &signing_key_b,
+            &instance_id_b,
+            "dingtalk-claim-duplicate",
+            "user:coord-user",
+        ))
+        .await
+        .expect_err("duplicate coordinated send should be denied");
+    match err {
+        FcpError::Unauthorized { code, message } => {
+            assert_eq!(code, 4090);
+            assert!(message.starts_with("thread_owned_by_peer:"));
+            assert!(message.contains(instance_id_a.as_str()));
+        }
+        other => panic!("expected duplicate claim unauthorized error, got {other:?}"),
+    }
+
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(
+        requests.len(),
+        2,
+        "duplicate claim must be denied before token or send HTTP"
+    );
 }
 
 #[fcp_async_core::runtime::test]

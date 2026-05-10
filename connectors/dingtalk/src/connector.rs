@@ -1,8 +1,8 @@
 //! `DingTalk` enterprise robot connector.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use fcp_prelude::{
@@ -16,6 +16,7 @@ use fcp_prelude::{
 use fcp_sdk::prelude::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tracing::warn;
 
 use crate::client::{
     DingTalkClient, default_mime_type, normalize_callback_event, validate_session_webhook_url,
@@ -40,6 +41,148 @@ const CAP_HEALTH_READ: &str = "dingtalk.health.read";
 const DINGTALK_STREAM_POLICY_MODEL: &str = "host_forwarded_stream_frame_supervision";
 const MAX_STREAM_MEDIA_FIELD_LEN: usize = 2_048;
 const MAX_REPLY_CONTENT_LEN: usize = 20_000;
+
+fn default_dingtalk_chat_coordination_config() -> ChatCoordinationConfig {
+    ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
+}
+
+fn parse_dingtalk_chat_coordination_config(
+    value: Option<&Value>,
+    base: ChatCoordinationConfig,
+) -> FcpResult<ChatCoordinationConfig> {
+    let Some(value) = value else {
+        return Ok(base);
+    };
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "chat_coordination must be an object".into(),
+    })?;
+
+    let mut config = base;
+    if let Some(enabled) = object.get("enabled") {
+        config = config.with_enabled(json_bool(enabled, "chat_coordination.enabled")?);
+    }
+    if let Some(ttl_seconds) = object.get("ttl_seconds") {
+        let seconds = ttl_seconds
+            .as_u64()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be an integer".into(),
+            })?;
+        if seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be greater than zero".into(),
+            });
+        }
+        config = config.with_ttl(Duration::from_secs(seconds));
+    }
+    if let Some(fail_open) = object.get("fail_open") {
+        config = config.with_fail_open(json_bool(fail_open, "chat_coordination.fail_open")?);
+    }
+    if let Some(allowlist) = object.get("allowlist_channels") {
+        let channels = allowlist
+            .as_array()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels must be an array".into(),
+            })?;
+        let mut normalized = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let raw = channel.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels entries must be strings".into(),
+            })?;
+            let channel_id = raw.trim();
+            if channel_id.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_coordination.allowlist_channels entries must not be empty"
+                        .into(),
+                });
+            }
+            normalized.push(ChannelId::new(channel_id.to_owned()));
+        }
+        config = config.with_allowlist_channels(normalized);
+    }
+    if let Some(backend) = object.get("backend") {
+        config = config.with_backend(parse_chat_coordination_backend(backend)?);
+    }
+    if let Some(dm_mode) = object.get("dm_mode") {
+        config = config.with_dm_mode(parse_chat_coordination_dm_mode(dm_mode)?);
+    }
+    Ok(config)
+}
+
+fn json_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a boolean"),
+    })
+}
+
+fn parse_chat_coordination_backend(value: &Value) -> FcpResult<ChatCoordinationBackend> {
+    match value.as_str() {
+        Some("agent_mail") => Ok(ChatCoordinationBackend::AgentMail),
+        Some("mesh_gossip") => Ok(ChatCoordinationBackend::MeshGossip),
+        Some("in_memory") => Ok(ChatCoordinationBackend::InMemory),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.backend: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.backend must be a string".into(),
+        }),
+    }
+}
+
+fn parse_chat_coordination_dm_mode(value: &Value) -> FcpResult<DmMode> {
+    match value.as_str() {
+        Some("skip") => Ok(DmMode::Skip),
+        Some("treat_as_thread") => Ok(DmMode::TreatAsThread),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.dm_mode: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.dm_mode must be a string".into(),
+        }),
+    }
+}
+
+fn dingtalk_coordination_audit_records(
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> Vec<ChatCoordinationAuditRecord> {
+    let mut records = decision.audit_records().to_vec();
+    if let Some(record) = decision.send_executed_audit_record(backend, claimant_agent_id) {
+        records.push(record);
+    }
+    records
+}
+
+fn dingtalk_insert_coordination(
+    output: &mut Value,
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> FcpResult<()> {
+    let object = output.as_object_mut().ok_or_else(|| FcpError::Internal {
+        message: "Serialized DingTalk send response was not an object".into(),
+    })?;
+    object.insert(
+        "coordination".into(),
+        json!(dingtalk_coordination_audit_records(
+            decision,
+            backend,
+            claimant_agent_id,
+        )),
+    );
+    Ok(())
+}
 
 fn send_text_input_schema() -> Value {
     json!({
@@ -161,7 +304,12 @@ fn dingtalk_send_output_schema() -> Value {
             "processQueryKey": { "type": "string" },
             "messageId": { "type": "string" },
             "errcode": { "type": "integer" },
-            "errmsg": { "type": "string" }
+            "errmsg": { "type": "string" },
+            "coordination": {
+                "type": "array",
+                "description": "Redaction-safe chat thread ownership audit records",
+                "items": { "type": "object", "additionalProperties": true }
+            }
         }
     })
 }
@@ -277,7 +425,12 @@ fn stream_reply_output_schema() -> Value {
             "session_webhook_source": { "type": "string", "enum": ["request", "cache"] },
             "reply_to_hash": { "type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{16}$" },
             "response": { "type": "object", "additionalProperties": true },
-            "redaction_status": { "type": "string" }
+            "redaction_status": { "type": "string" },
+            "coordination": {
+                "type": "array",
+                "description": "Redaction-safe chat thread ownership audit records",
+                "items": { "type": "object", "additionalProperties": true }
+            }
         }
     })
 }
@@ -345,7 +498,6 @@ impl DoctorResult {
     }
 }
 
-#[derive(Debug)]
 pub struct DingTalkConnector {
     base: BaseConnector,
     client: Option<DingTalkClient>,
@@ -353,6 +505,23 @@ pub struct DingTalkConnector {
     zone: Option<ZoneId>,
     stream_state: Mutex<DingTalkStreamState>,
     started_at: Instant,
+    chat_coordination_config: ChatCoordinationConfig,
+    thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
+}
+
+impl std::fmt::Debug for DingTalkConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DingTalkConnector")
+            .field("base", &self.base)
+            .field("client", &self.client)
+            .field("verifier", &self.verifier)
+            .field("zone", &self.zone)
+            .field("stream_state", &self.stream_state)
+            .field("started_at", &self.started_at)
+            .field("chat_coordination_config", &self.chat_coordination_config)
+            .field("thread_ownership_checker", &"ThreadOwnershipChecker")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -422,7 +591,20 @@ impl DingTalkConnector {
             zone: None,
             stream_state: Mutex::new(DingTalkStreamState::default()),
             started_at: Instant::now(),
+            chat_coordination_config: default_dingtalk_chat_coordination_config(),
+            thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
         }
+    }
+
+    #[must_use]
+    pub fn with_thread_ownership_checker(
+        mut self,
+        checker: Arc<dyn ThreadOwnershipChecker>,
+        backend: ChatCoordinationBackend,
+    ) -> Self {
+        self.thread_ownership_checker = checker;
+        self.chat_coordination_config = self.chat_coordination_config.with_backend(backend);
+        self
     }
 
     fn manifest_hash() -> String {
@@ -575,6 +757,23 @@ impl DingTalkConnector {
                 let to = required_string(&req.input, "to")?;
                 let content = required_string(&req.input, "content")?;
                 let target = ParsedTarget::parse(to);
+                let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+                let coordination = self
+                    .claim_before_dingtalk_send(
+                        zone_id,
+                        dingtalk_target_channel_id(&target),
+                        None,
+                        claimant_agent_id.clone(),
+                    )
+                    .await;
+                if let Some(error) = coordination.denial_error() {
+                    warn!(
+                        error = %error,
+                        operation = OP_SEND_TEXT,
+                        "DingTalk send_text denied by chat coordination"
+                    );
+                    return Err(error.clone());
+                }
                 let (path, body) = if target.is_group {
                     (
                         "/v1.0/robot/groupMessages/send",
@@ -602,10 +801,17 @@ impl DingTalkConnector {
                         }),
                     )
                 };
-                client
+                let mut output = client
                     .post_json(path, body)
                     .await
-                    .map_err(|e| e.to_fcp_error())?
+                    .map_err(|e| e.to_fcp_error())?;
+                dingtalk_insert_coordination(
+                    &mut output,
+                    &coordination,
+                    self.chat_coordination_config.backend(),
+                    &claimant_agent_id,
+                )?;
+                output
             }
             OP_SEND_LINK => {
                 let to = required_string(&req.input, "to")?;
@@ -614,6 +820,23 @@ impl DingTalkConnector {
                 let message_url = required_string(&req.input, "message_url")?;
                 let pic_url = optional_string(&req.input, "pic_url")?;
                 let target = ParsedTarget::parse(to);
+                let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+                let coordination = self
+                    .claim_before_dingtalk_send(
+                        zone_id,
+                        dingtalk_target_channel_id(&target),
+                        None,
+                        claimant_agent_id.clone(),
+                    )
+                    .await;
+                if let Some(error) = coordination.denial_error() {
+                    warn!(
+                        error = %error,
+                        operation = OP_SEND_LINK,
+                        "DingTalk send_link denied by chat coordination"
+                    );
+                    return Err(error.clone());
+                }
                 let (path, body) = if target.is_group {
                     (
                         "/v1.0/robot/groupMessages/send",
@@ -635,10 +858,17 @@ impl DingTalkConnector {
                         }),
                     )
                 };
-                client
+                let mut output = client
                     .post_json(path, body)
                     .await
-                    .map_err(|e| e.to_fcp_error())?
+                    .map_err(|e| e.to_fcp_error())?;
+                dingtalk_insert_coordination(
+                    &mut output,
+                    &coordination,
+                    self.chat_coordination_config.backend(),
+                    &claimant_agent_id,
+                )?;
+                output
             }
             OP_SEND_FILE => {
                 let to = required_string(&req.input, "to")?;
@@ -646,6 +876,23 @@ impl DingTalkConnector {
                 let file_name = required_string(&req.input, "file_name")?;
                 let file_type = required_string(&req.input, "file_type")?;
                 let target = ParsedTarget::parse(to);
+                let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+                let coordination = self
+                    .claim_before_dingtalk_send(
+                        zone_id,
+                        dingtalk_target_channel_id(&target),
+                        None,
+                        claimant_agent_id.clone(),
+                    )
+                    .await;
+                if let Some(error) = coordination.denial_error() {
+                    warn!(
+                        error = %error,
+                        operation = OP_SEND_FILE,
+                        "DingTalk send_file denied by chat coordination"
+                    );
+                    return Err(error.clone());
+                }
                 let (path, body) = if target.is_group {
                     (
                         "/v1.0/robot/groupMessages/send",
@@ -675,10 +922,17 @@ impl DingTalkConnector {
                         }),
                     )
                 };
-                client
+                let mut output = client
                     .post_json(path, body)
                     .await
-                    .map_err(|e| e.to_fcp_error())?
+                    .map_err(|e| e.to_fcp_error())?;
+                dingtalk_insert_coordination(
+                    &mut output,
+                    &coordination,
+                    self.chat_coordination_config.backend(),
+                    &claimant_agent_id,
+                )?;
+                output
             }
             OP_UPLOAD_MEDIA => {
                 let media_type = required_string(&req.input, "media_type")?;
@@ -772,11 +1026,28 @@ impl DingTalkConnector {
                 let target =
                     resolve_session_reply_target(self, client.config(), chat_id, &req.input)?;
                 let content = truncate_reply_content(content);
+                let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+                let coordination = self
+                    .claim_before_dingtalk_send(
+                        zone_id,
+                        dingtalk_stream_channel_id(chat_id),
+                        None,
+                        claimant_agent_id.clone(),
+                    )
+                    .await;
+                if let Some(error) = coordination.denial_error() {
+                    warn!(
+                        error = %error,
+                        operation = OP_STREAM_REPLY,
+                        "DingTalk stream_reply denied by chat coordination"
+                    );
+                    return Err(error.clone());
+                }
                 let response = client
                     .post_session_webhook(&target.session_webhook, &content)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                json!({
+                let mut output = json!({
                     "status": "sent",
                     "chat_id_hash": redacted_hash(&target.chat_id),
                     "session_webhook_hash": redacted_hash(&target.session_webhook),
@@ -784,7 +1055,14 @@ impl DingTalkConnector {
                     "reply_to_hash": optional_string(&req.input, "reply_to")?.map(redacted_hash),
                     "response": response,
                     "redaction_status": "chat_and_webhook_metadata_hashed",
-                })
+                });
+                dingtalk_insert_coordination(
+                    &mut output,
+                    &coordination,
+                    self.chat_coordination_config.backend(),
+                    &claimant_agent_id,
+                )?;
+                output
             }
             OP_HEALTH => {
                 let _auth_material = client.access_token().await.map_err(|e| e.to_fcp_error())?;
@@ -809,6 +1087,38 @@ impl DingTalkConnector {
 
         Ok(InvokeResponse::ok(req.id, output))
     }
+
+    fn chat_coordination_context(&self) -> (ZoneId, AgentId) {
+        let zone_id = self
+            .verifier
+            .as_ref()
+            .map_or_else(ZoneId::work, |verifier| verifier.zone_id.clone());
+        let claimant_agent_id = AgentId::new(self.base.instance_id.as_str().to_owned());
+        (zone_id, claimant_agent_id)
+    }
+
+    async fn claim_before_dingtalk_send(
+        &self,
+        zone_id: ZoneId,
+        channel_id: ChannelId,
+        thread_id: Option<ThreadId>,
+        claimant_agent_id: AgentId,
+    ) -> ChatCoordinationSendDecision {
+        let cx = fcp_async_core::compatibility_cx();
+        self.chat_coordination_config
+            .claim_before_send(
+                &cx,
+                self.thread_ownership_checker.as_ref(),
+                ChatCoordinationSendRequest::new(
+                    zone_id,
+                    self.base.id.clone(),
+                    channel_id,
+                    thread_id,
+                    claimant_agent_id,
+                ),
+            )
+            .await
+    }
 }
 
 impl Default for DingTalkConnector {
@@ -826,6 +1136,10 @@ impl FcpConnector for DingTalkConnector {
     }
 
     async fn configure(&mut self, config: Value) -> FcpResult<()> {
+        let chat_coordination_config = parse_dingtalk_chat_coordination_config(
+            config.get("chat_coordination"),
+            self.chat_coordination_config.clone(),
+        )?;
         let config: DingTalkConfig =
             serde_json::from_value(config).map_err(|error| FcpError::InvalidRequest {
                 code: 1003,
@@ -842,6 +1156,7 @@ impl FcpConnector for DingTalkConnector {
         self.base.set_handshaken(false);
         self.verifier = None;
         self.zone = None;
+        self.chat_coordination_config = chat_coordination_config;
         Ok(())
     }
 
@@ -1003,6 +1318,15 @@ impl FcpConnector for DingTalkConnector {
 
 fn title_for(content: &str) -> String {
     content.chars().take(10).collect()
+}
+
+fn dingtalk_target_channel_id(target: &ParsedTarget<'_>) -> ChannelId {
+    let prefix = if target.is_group { "chat" } else { "user" };
+    ChannelId::new(format!("{prefix}:{}", target.id.trim()))
+}
+
+fn dingtalk_stream_channel_id(chat_id: &str) -> ChannelId {
+    ChannelId::new(format!("stream_chat:{}", chat_id.trim()))
 }
 
 fn optional_string<'a>(value: &'a Value, field: &str) -> FcpResult<Option<&'a str>> {
@@ -1790,6 +2114,83 @@ mod tests {
             .collect()
     }
 
+    fn assert_common_network_guards(
+        constraints: &toml::map::Map<String, toml::Value>,
+        dns_max_ips: i64,
+        connect_timeout_ms: i64,
+    ) {
+        assert_eq!(constraints["deny_localhost"].as_bool(), Some(true));
+        assert_eq!(constraints["deny_private_ranges"].as_bool(), Some(true));
+        assert_eq!(constraints["deny_tailnet_ranges"].as_bool(), Some(true));
+        assert_eq!(constraints["deny_ip_literals"].as_bool(), Some(true));
+        assert_eq!(
+            constraints["require_host_canonicalization"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(constraints["dns_max_ips"].as_integer(), Some(dns_max_ips));
+        assert_eq!(constraints["max_redirects"].as_integer(), Some(0));
+        assert_eq!(
+            constraints["connect_timeout_ms"].as_integer(),
+            Some(connect_timeout_ms)
+        );
+        assert_eq!(constraints["total_timeout_ms"].as_integer(), Some(30_000));
+        assert_eq!(
+            constraints["max_response_bytes"].as_integer(),
+            Some(1_048_576)
+        );
+    }
+
+    fn assert_api_only_network_constraint(
+        manifest: &toml::Value,
+        operation_key: &str,
+    ) -> Result<(), String> {
+        let constraints = operation_network_constraints(manifest, operation_key)?;
+        assert_eq!(
+            string_array(constraints, "host_allow")?,
+            vec!["api.dingtalk.com".to_owned()],
+            "{operation_key} should only allow the DingTalk API host"
+        );
+        assert_eq!(integer_array(constraints, "port_allow")?, vec![443]);
+        assert_eq!(constraints["require_sni"].as_bool(), Some(true));
+        assert_common_network_guards(constraints, 16, 10_000);
+        Ok(())
+    }
+
+    fn assert_api_and_media_network_constraint(
+        manifest: &toml::Value,
+        operation_key: &str,
+    ) -> Result<(), String> {
+        let constraints = operation_network_constraints(manifest, operation_key)?;
+        assert_eq!(
+            string_array(constraints, "host_allow")?,
+            vec![
+                "api.dingtalk.com".to_owned(),
+                "oapi.dingtalk.com".to_owned()
+            ],
+            "{operation_key} should only allow DingTalk API and media/reply hosts"
+        );
+        assert_eq!(integer_array(constraints, "port_allow")?, vec![443]);
+        assert_eq!(constraints["require_sni"].as_bool(), Some(true));
+        assert_common_network_guards(constraints, 16, 10_000);
+        Ok(())
+    }
+
+    fn assert_local_only_network_constraint(
+        manifest: &toml::Value,
+        operation_key: &str,
+    ) -> Result<(), String> {
+        let constraints = operation_network_constraints(manifest, operation_key)?;
+        assert_eq!(
+            string_array(constraints, "host_allow")?,
+            vec!["none.invalid".to_owned()],
+            "{operation_key} should use the no-egress sentinel"
+        );
+        assert_eq!(integer_array(constraints, "port_allow")?, vec![0]);
+        assert_eq!(constraints["require_sni"].as_bool(), Some(false));
+        assert_common_network_guards(constraints, 0, 1_000);
+        Ok(())
+    }
+
     fn validator_for(schema: &Value) -> Result<jsonschema::Validator, String> {
         jsonschema::Validator::new(schema)
             .map_err(|err| format!("manifest operation schema should compile: {err}"))
@@ -2198,97 +2599,21 @@ mod tests {
     fn manifest_declares_strict_per_operation_network_constraints() -> Result<(), String> {
         let manifest = dingtalk_manifest()?;
         let operations = manifest_operations(&manifest)?;
-        let api_only_operations = [
+        for operation_key in [
             "messages_send_text",
             "messages_send_link",
             "messages_send_file",
             "health",
-        ];
-        let api_and_media_operations = ["media_upload", "stream_reply"];
-        let local_only_operations = ["events_normalize", "stream_ingest_message"];
-
-        for operation_key in api_only_operations {
-            let constraints = operation_network_constraints(&manifest, operation_key)?;
-            assert_eq!(
-                string_array(constraints, "host_allow")?,
-                vec!["api.dingtalk.com".to_owned()],
-                "{operation_key} should only allow the DingTalk API host"
-            );
-            assert_eq!(integer_array(constraints, "port_allow")?, vec![443]);
-            assert_eq!(constraints["require_sni"].as_bool(), Some(true));
-            assert_eq!(constraints["deny_localhost"].as_bool(), Some(true));
-            assert_eq!(constraints["deny_private_ranges"].as_bool(), Some(true));
-            assert_eq!(constraints["deny_tailnet_ranges"].as_bool(), Some(true));
-            assert_eq!(constraints["deny_ip_literals"].as_bool(), Some(true));
-            assert_eq!(
-                constraints["require_host_canonicalization"].as_bool(),
-                Some(true)
-            );
-            assert_eq!(constraints["dns_max_ips"].as_integer(), Some(16));
-            assert_eq!(constraints["max_redirects"].as_integer(), Some(0));
-            assert_eq!(constraints["connect_timeout_ms"].as_integer(), Some(10_000));
-            assert_eq!(constraints["total_timeout_ms"].as_integer(), Some(30_000));
-            assert_eq!(
-                constraints["max_response_bytes"].as_integer(),
-                Some(1_048_576)
-            );
+        ] {
+            assert_api_only_network_constraint(&manifest, operation_key)?;
         }
 
-        for operation_key in api_and_media_operations {
-            let constraints = operation_network_constraints(&manifest, operation_key)?;
-            assert_eq!(
-                string_array(constraints, "host_allow")?,
-                vec![
-                    "api.dingtalk.com".to_owned(),
-                    "oapi.dingtalk.com".to_owned()
-                ],
-                "{operation_key} should only allow DingTalk API and media/reply hosts"
-            );
-            assert_eq!(integer_array(constraints, "port_allow")?, vec![443]);
-            assert_eq!(constraints["require_sni"].as_bool(), Some(true));
-            assert_eq!(constraints["deny_localhost"].as_bool(), Some(true));
-            assert_eq!(constraints["deny_private_ranges"].as_bool(), Some(true));
-            assert_eq!(constraints["deny_tailnet_ranges"].as_bool(), Some(true));
-            assert_eq!(constraints["deny_ip_literals"].as_bool(), Some(true));
-            assert_eq!(
-                constraints["require_host_canonicalization"].as_bool(),
-                Some(true)
-            );
-            assert_eq!(constraints["dns_max_ips"].as_integer(), Some(16));
-            assert_eq!(constraints["max_redirects"].as_integer(), Some(0));
-            assert_eq!(constraints["connect_timeout_ms"].as_integer(), Some(10_000));
-            assert_eq!(constraints["total_timeout_ms"].as_integer(), Some(30_000));
-            assert_eq!(
-                constraints["max_response_bytes"].as_integer(),
-                Some(1_048_576)
-            );
+        for operation_key in ["media_upload", "stream_reply"] {
+            assert_api_and_media_network_constraint(&manifest, operation_key)?;
         }
 
-        for operation_key in local_only_operations {
-            let constraints = operation_network_constraints(&manifest, operation_key)?;
-            assert_eq!(
-                string_array(constraints, "host_allow")?,
-                vec!["none.invalid".to_owned()],
-                "{operation_key} should use the no-egress sentinel"
-            );
-            assert_eq!(integer_array(constraints, "port_allow")?, vec![0]);
-            assert_eq!(constraints["require_sni"].as_bool(), Some(false));
-            assert_eq!(constraints["deny_localhost"].as_bool(), Some(true));
-            assert_eq!(constraints["deny_private_ranges"].as_bool(), Some(true));
-            assert_eq!(constraints["deny_tailnet_ranges"].as_bool(), Some(true));
-            assert_eq!(constraints["deny_ip_literals"].as_bool(), Some(true));
-            assert_eq!(
-                constraints["require_host_canonicalization"].as_bool(),
-                Some(true)
-            );
-            assert_eq!(constraints["dns_max_ips"].as_integer(), Some(0));
-            assert_eq!(constraints["max_redirects"].as_integer(), Some(0));
-            assert_eq!(constraints["connect_timeout_ms"].as_integer(), Some(1_000));
-            assert_eq!(constraints["total_timeout_ms"].as_integer(), Some(30_000));
-            assert_eq!(
-                constraints["max_response_bytes"].as_integer(),
-                Some(1_048_576)
-            );
+        for operation_key in ["events_normalize", "stream_ingest_message"] {
+            assert_local_only_network_constraint(&manifest, operation_key)?;
         }
 
         for (operation_key, operation) in operations {

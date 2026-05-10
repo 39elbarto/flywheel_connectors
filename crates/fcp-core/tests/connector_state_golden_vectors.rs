@@ -9,6 +9,8 @@
 //! - Snapshot tests (compaction, coverage)
 //! - Adversarial tests (Byzantine writers, replay attacks)
 
+use std::{fs, path::PathBuf};
+
 use fcp_cbor::SchemaId;
 use fcp_core::{
     ConnectorId, ConnectorStateDelta, ConnectorStateModel, ConnectorStateObject,
@@ -117,6 +119,14 @@ fn create_test_snapshot(covers_head: ObjectId, covers_seq: u64) -> ConnectorStat
     }
 }
 
+fn connector_state_snapshot_golden_path(connector_id: &ConnectorId, seq: u64) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("golden")
+        .join("connector_state_snapshot")
+        .join(connector_id.as_str())
+        .join(format!("{seq}.cbor"))
+}
+
 fn create_test_delta() -> ConnectorStateDelta {
     ConnectorStateDelta {
         header: create_test_header("delta"),
@@ -184,6 +194,38 @@ mod cbor_golden_vectors {
         let restored: ConnectorStateSnapshot =
             ciborium::from_reader(&cbor[..]).expect("deserialization should succeed");
 
+        assert_eq!(snapshot.covers_head, restored.covers_head);
+        assert_eq!(snapshot.covers_seq, restored.covers_seq);
+        assert_eq!(snapshot.state_cbor, restored.state_cbor);
+        assert_eq!(snapshot.snapshotted_at, restored.snapshotted_at);
+    }
+
+    #[test]
+    fn state_snapshot_file_golden_vector() {
+        let snapshot = create_test_snapshot(test_object_id("head-state"), 100);
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&snapshot, &mut cbor).expect("serialization should succeed");
+
+        let path =
+            connector_state_snapshot_golden_path(&snapshot.connector_id, snapshot.covers_seq);
+        fs::create_dir_all(path.parent().expect("golden vector should have parent"))
+            .expect("golden vector directory should be created");
+        if !path.exists() {
+            fs::write(&path, &cbor).expect("golden vector should be written");
+        }
+
+        let stored = fs::read(&path).expect("golden vector should be readable");
+        assert_eq!(
+            stored,
+            cbor,
+            "connector-state snapshot golden vector drifted: {}",
+            path.display()
+        );
+
+        let restored: ConnectorStateSnapshot =
+            ciborium::from_reader(&stored[..]).expect("golden vector should deserialize");
+        assert_eq!(snapshot.connector_id, restored.connector_id);
+        assert_eq!(snapshot.zone_id, restored.zone_id);
         assert_eq!(snapshot.covers_head, restored.covers_head);
         assert_eq!(snapshot.covers_seq, restored.covers_seq);
         assert_eq!(snapshot.state_cbor, restored.state_cbor);

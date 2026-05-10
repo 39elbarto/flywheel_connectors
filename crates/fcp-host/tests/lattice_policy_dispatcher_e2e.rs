@@ -301,7 +301,7 @@ fn minted_fixture(params: pq::LatticeParams, fixture_label: &'static [u8]) -> Mi
         &certificate.public_key.hash,
         &verifier.trust_set_id(),
     );
-    let sub_token = LatticeSubToken {
+    let delegated_capability = LatticeSubToken {
         cert_id: certificate.cert_id,
         op_id: operation.clone(),
         principal_id: principal.clone(),
@@ -315,7 +315,7 @@ fn minted_fixture(params: pq::LatticeParams, fixture_label: &'static [u8]) -> Mi
         fixture_id_hash: digest_hex(b"fcp-host/e2e/lattice-fixture-v1|", fixture_label),
         verifier,
         certificate,
-        sub_token,
+        sub_token: delegated_capability,
         zone,
         operation,
         principal,
@@ -474,7 +474,7 @@ fn run_scenario(
     verifier: LatticeDelegationVerifierImpl,
     ctx: fcp_host::EnforcementContext,
 ) -> EvidenceRecord {
-    let sub_token = ctx
+    let delegated_capability = ctx
         .lattice_sub_token
         .as_ref()
         .expect("scenario context must carry lattice sub-token");
@@ -483,7 +483,7 @@ fn run_scenario(
     let request_principal = PrincipalId::new(ctx.principal.clone()).unwrap();
     let start = Instant::now();
     let verifier_outcome = verifier.verify_sub_token(
-        sub_token,
+        delegated_capability,
         &request_zone,
         &request_operation,
         &request_principal,

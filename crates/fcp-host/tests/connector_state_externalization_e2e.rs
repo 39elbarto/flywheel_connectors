@@ -1,0 +1,264 @@
+use std::future::Future;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use fcp_core::{
+    ConnectorId, ConnectorStateAppendOutcome, ConnectorStateError, ConnectorStateObject,
+    ConnectorStateRoot, ConnectorStateStore, ObjectHeader, ObjectId, ObjectIdKey, Provenance,
+    Signature, ZoneId,
+};
+use fcp_store::{
+    CONNECTOR_STATE_CACHE_MARKER, FcpStoreConnectorStateStore, MemoryObjectStore,
+    MemoryObjectStoreConfig, ObjectStore,
+};
+
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+fn block_on<F>(future: F) -> F::Output
+where
+    F: Future,
+{
+    fcp_async_core::runtime::block_on_sync(future).expect("test runtime should start")
+}
+
+fn memory_object_store() -> Arc<dyn ObjectStore> {
+    Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()))
+}
+
+fn memory_object_store_with_quota(max_bytes: u64) -> Arc<dyn ObjectStore> {
+    Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig {
+        max_bytes,
+    }))
+}
+
+fn object_id_key() -> ObjectIdKey {
+    ObjectIdKey::from_bytes([0xA2; 32])
+}
+
+fn connector_id() -> ConnectorId {
+    ConnectorId::from_static("slack:chat:v1")
+}
+
+fn zone_id() -> ZoneId {
+    ZoneId::work()
+}
+
+fn lease_id(seed: u8) -> ObjectId {
+    ObjectId::from_bytes([seed; 32])
+}
+
+fn host_state_store(object_store: Arc<dyn ObjectStore>) -> FcpStoreConnectorStateStore {
+    FcpStoreConnectorStateStore::new(object_store, object_id_key(), connector_id(), zone_id())
+        .with_snapshot_every_entries(0)
+        .with_snapshot_every_secs(0)
+}
+
+fn state_cbor(seq: u64) -> Vec<u8> {
+    let seq_byte = u8::try_from(seq).expect("test sequence should fit in one CBOR byte");
+    Vec::from([0xa1, 0x61, b'n', seq_byte])
+}
+
+fn state_header(seq: u64, lease: ObjectId) -> ObjectHeader {
+    ObjectHeader {
+        schema: FcpStoreConnectorStateStore::state_object_schema_id(),
+        zone_id: zone_id(),
+        created_at: 1_800_000_000 + seq,
+        provenance: Provenance::new(zone_id()),
+        refs: vec![lease],
+        foreign_refs: Vec::new(),
+        ttl_secs: None,
+        placement: None,
+    }
+}
+
+fn state(seq: u64, prev: Option<ObjectId>, lease: ObjectId) -> ConnectorStateObject {
+    ConnectorStateObject {
+        header: state_header(seq, lease),
+        connector_id: connector_id(),
+        instance_id: None,
+        zone_id: zone_id(),
+        prev,
+        seq,
+        state_cbor: state_cbor(seq),
+        updated_at: 1_800_000_000 + seq,
+        lease_seq: seq + 10,
+        lease_object_id: lease,
+        signature: Signature::zero(),
+    }
+}
+
+fn append_committed(
+    store: &FcpStoreConnectorStateStore,
+    state_obj: ConnectorStateObject,
+) -> Result<(ObjectId, ObjectId, u64), ConnectorStateError> {
+    let connector_id = connector_id();
+    match block_on(ConnectorStateStore::append_object(
+        store,
+        &connector_id,
+        state_obj,
+    ))? {
+        ConnectorStateAppendOutcome::Committed {
+            object_id,
+            root_object_id,
+            seq,
+            snapshot_object_id,
+        } => {
+            assert_eq!(snapshot_object_id, None);
+            Ok((object_id, root_object_id, seq))
+        }
+        ConnectorStateAppendOutcome::Conflict {
+            canonical_head,
+            canonical_seq,
+        } => panic!(
+            "expected committed state object, got conflict at {canonical_head:?} seq {canonical_seq:?}"
+        ),
+    }
+}
+
+fn read_root(
+    store: &FcpStoreConnectorStateStore,
+) -> Result<ConnectorStateRoot, ConnectorStateError> {
+    let connector_id = connector_id();
+    block_on(ConnectorStateStore::read_root(store, &connector_id))?.ok_or_else(|| {
+        ConnectorStateError::SnapshotUnavailable {
+            connector_id,
+            reason: "connector state root missing in test".to_string(),
+        }
+    })
+}
+
+fn read_chain(
+    store: &FcpStoreConnectorStateStore,
+    after_seq: Option<u64>,
+    limit: usize,
+) -> Result<Vec<ConnectorStateObject>, ConnectorStateError> {
+    let connector_id = connector_id();
+    block_on(ConnectorStateStore::read_chain(
+        store,
+        &connector_id,
+        after_seq,
+        limit,
+    ))
+}
+
+#[test]
+fn connector_state_externalization_restores_from_store_after_restart() -> TestResult {
+    let object_store = memory_object_store();
+    let host_a = host_state_store(Arc::clone(&object_store));
+    let cache_root = tempfile::tempdir()?;
+    let cache_dir = cache_root.path().join("slack_chat_v1").join("z_work");
+    std::fs::create_dir_all(&cache_dir)?;
+    let cache_marker_path = cache_dir.join(CONNECTOR_STATE_CACHE_MARKER);
+    std::fs::write(
+        &cache_marker_path,
+        "cache-only: canonical connector state is stored through fcp-store\n",
+    )?;
+    assert!(cache_marker_path.is_file());
+
+    let (head_0, _root_0, seq_0) = append_committed(&host_a, state(0, None, lease_id(1)))?;
+    assert_eq!(seq_0, 0);
+
+    let host_after_restart = host_state_store(Arc::clone(&object_store));
+    let restored_root = read_root(&host_after_restart)?;
+    assert_eq!(restored_root.head, Some(head_0));
+
+    let restored_chain = read_chain(&host_after_restart, None, 10)?;
+    assert_eq!(restored_chain.len(), 1);
+    assert_eq!(restored_chain[0].seq, 0);
+    assert_eq!(restored_chain[0].state_cbor, state_cbor(0));
+
+    let (head_1, _root_1, seq_1) =
+        append_committed(&host_after_restart, state(1, Some(head_0), lease_id(2)))?;
+    assert_eq!(seq_1, 1);
+
+    let host_after_second_restart = host_state_store(Arc::clone(&object_store));
+    let restored_root = read_root(&host_after_second_restart)?;
+    assert_eq!(restored_root.head, Some(head_1));
+
+    let restored_chain = read_chain(&host_after_second_restart, None, 10)?;
+    let restored_seqs = restored_chain
+        .iter()
+        .map(|state| state.seq)
+        .collect::<Vec<_>>();
+    assert_eq!(restored_seqs, [0, 1]);
+
+    let connector_id = connector_id();
+    let snapshot = block_on(ConnectorStateStore::snapshot(
+        &host_after_second_restart,
+        &connector_id,
+    ))?;
+    assert_eq!(snapshot.covers_head, head_1);
+    assert_eq!(snapshot.covers_seq, 1);
+    assert_eq!(snapshot.state_cbor, state_cbor(1));
+
+    Ok(())
+}
+
+#[test]
+fn connector_state_externalization_conflicts_on_stale_prev_pointer() -> TestResult {
+    let object_store = memory_object_store();
+    let host_a = host_state_store(Arc::clone(&object_store));
+    let host_b = host_state_store(Arc::clone(&object_store));
+
+    let (head_0, _root_0, _seq_0) = append_committed(&host_a, state(0, None, lease_id(1)))?;
+    let (head_1, _root_1, _seq_1) = append_committed(&host_a, state(1, Some(head_0), lease_id(2)))?;
+
+    let connector_id = connector_id();
+    let stale_outcome = block_on(ConnectorStateStore::append_object(
+        &host_b,
+        &connector_id,
+        state(1, Some(head_0), lease_id(3)),
+    ))?;
+    match stale_outcome {
+        ConnectorStateAppendOutcome::Conflict {
+            canonical_head,
+            canonical_seq,
+        } => {
+            assert_eq!(canonical_head, Some(head_1));
+            assert_eq!(canonical_seq, Some(1));
+        }
+        ConnectorStateAppendOutcome::Committed { .. } => {
+            panic!("stale prev-pointer append unexpectedly committed")
+        }
+    }
+
+    let chain_after_conflict = read_chain(&host_b, None, 10)?;
+    assert_eq!(chain_after_conflict.len(), 2);
+    assert!(
+        chain_after_conflict
+            .iter()
+            .all(|state| state.lease_object_id != lease_id(3))
+    );
+
+    Ok(())
+}
+
+#[test]
+fn connector_state_externalization_fails_closed_when_store_is_unavailable() {
+    let object_store = memory_object_store_with_quota(1);
+    let host = host_state_store(object_store);
+    let connector_id = connector_id();
+
+    let started = Instant::now();
+    let append_result = block_on(ConnectorStateStore::append_object(
+        &host,
+        &connector_id,
+        state(0, None, lease_id(1)),
+    ));
+    let elapsed = started.elapsed();
+
+    match append_result {
+        Err(ConnectorStateError::StorageUnavailable {
+            connector_id: failed_connector_id,
+            reason,
+        }) => {
+            assert_eq!(failed_connector_id, connector_id);
+            assert!(!reason.is_empty());
+        }
+        other => panic!("expected typed storage-unavailable failure, got {other:?}"),
+    }
+    assert!(
+        elapsed < Duration::from_millis(50),
+        "fail-closed path took {elapsed:?}"
+    );
+}

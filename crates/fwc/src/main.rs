@@ -7812,6 +7812,7 @@ fn mesh_cutover_gates_dispatch(args: &MeshCutoverGatesArgs) -> Result<DispatchOu
         "status": "ok",
         "command": "mesh",
         "subcommand": "cutover-gates",
+        "schema_version": mesh_cmd::MESH_CUTOVER_GATES_SCHEMA_VERSION,
         "overall_status": overall_status.tag(),
         "gate_count": gates.len(),
         "red_gate_ids": red_gate_ids,

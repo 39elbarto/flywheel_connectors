@@ -594,6 +594,9 @@ pub const DEFAULT_CUTOVER_GATE_STALENESS_SECONDS: u64 = 60;
 /// Default minimum policy peers that must hold verified policy bundles.
 pub const DEFAULT_CUTOVER_GATE_POLICY_PEER_COUNT: usize = 2;
 
+/// Stable schema version for `fwc mesh cutover-gates --json`.
+pub const MESH_CUTOVER_GATES_SCHEMA_VERSION: &str = "1.0.0";
+
 /// Stable machine status for a mesh-native cutover gate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

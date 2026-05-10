@@ -72,6 +72,7 @@ fcp-streaming = { path = "../fcp-streaming" }
 fcp-audit = { path = "../fcp-audit" }
 fcp-policy = { path = "../fcp-policy" }
 fcp-kernel = { path = "../fcp-kernel" }
+fwc = { workspace = true }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 futures-util = { workspace = true }

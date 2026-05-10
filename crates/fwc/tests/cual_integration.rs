@@ -4384,6 +4384,7 @@ fn e2e_mesh_cutover_gates_reports_fail_closed_schema() {
     let payload = run_json_ok(&["--json", "mesh", "cutover-gates"]);
     assert_eq!(payload["command"], "mesh");
     assert_eq!(payload["subcommand"], "cutover-gates");
+    assert_eq!(payload["schema_version"], "1.0.0");
     assert_eq!(payload["overall_status"], "red");
     assert_eq!(payload["gate_count"], 4);
     assert_eq!(

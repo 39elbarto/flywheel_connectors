@@ -23,6 +23,7 @@ async-trait.workspace = true
 blake3.workspace = true
 semver.workspace = true
 tokio.workspace = true
+futures-util.workspace = true
 
 # Internal crates
 fcp-async-core = { path = "../fcp-async-core" }

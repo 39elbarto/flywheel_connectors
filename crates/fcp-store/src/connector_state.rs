@@ -5,15 +5,17 @@
 //! that host and SDK code can share as the mesh-native path lands.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use fcp_async_core::channel::broadcast;
 use fcp_cbor::{CanonicalSerializer, SchemaId, SerializationError};
 use fcp_prelude::{
-    ConnectorId, ConnectorStateAppendOutcome, ConnectorStateChangeStream, ConnectorStateError,
-    ConnectorStateModel, ConnectorStateObject, ConnectorStateRoot, ConnectorStateSnapshot,
-    ConnectorStateStore, InstanceId, ObjectHeader, ObjectId, ObjectIdKey, RetentionClass,
-    StorageMeta, StoredObject, ZoneId,
+    ConnectorId, ConnectorStateAppendOutcome, ConnectorStateChange, ConnectorStateChangeKind,
+    ConnectorStateChangeStream, ConnectorStateError, ConnectorStateModel, ConnectorStateObject,
+    ConnectorStateRoot, ConnectorStateSnapshot, ConnectorStateStore, InstanceId, ObjectHeader,
+    ObjectId, ObjectIdKey, RetentionClass, StorageMeta, StoredObject, ZoneId,
 };
+use futures_util::stream;
 use semver::Version;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -49,6 +51,7 @@ pub const CONNECTOR_STATE_FALL_THROUGH_TOTAL_METRIC: &str =
     "fcp_connector_state_fall_through_total";
 /// Histogram for connector-state operation latency in seconds.
 pub const CONNECTOR_STATE_LATENCY_SECONDS_METRIC: &str = "fcp_connector_state_latency_seconds";
+const CONNECTOR_STATE_CHANGE_BUFFER_CAPACITY: usize = 1_024;
 
 /// Errors returned by [`FcpStoreConnectorStateStore`].
 #[derive(Debug, Error)]
@@ -131,6 +134,7 @@ pub struct FcpStoreConnectorStateStore {
     state_model: ConnectorStateModel,
     retention: RetentionClass,
     snapshot_every_entries: u64,
+    change_tx: broadcast::Sender<ConnectorStateChange>,
 }
 
 impl FcpStoreConnectorStateStore {
@@ -142,6 +146,7 @@ impl FcpStoreConnectorStateStore {
         connector_id: ConnectorId,
         zone_id: ZoneId,
     ) -> Self {
+        let (change_tx, _change_rx) = broadcast::channel(CONNECTOR_STATE_CHANGE_BUFFER_CAPACITY);
         Self {
             object_store,
             object_id_key,
@@ -151,6 +156,7 @@ impl FcpStoreConnectorStateStore {
             state_model: ConnectorStateModel::SingletonWriter,
             retention: RetentionClass::Pinned,
             snapshot_every_entries: 1_000,
+            change_tx,
         }
     }
 
@@ -331,6 +337,24 @@ impl FcpStoreConnectorStateStore {
         let root_object_id = self.store_root(root).await?;
         let snapshot_object_id = self.maybe_emit_snapshot(object_id, &state_obj).await?;
 
+        self.publish_change(
+            ConnectorStateChangeKind::ObjectAppended,
+            Some(object_id),
+            Some(state_obj.seq),
+        );
+        self.publish_change(
+            ConnectorStateChangeKind::RootUpdated,
+            Some(root_object_id),
+            Some(state_obj.seq),
+        );
+        if let Some(snapshot_object_id) = snapshot_object_id {
+            self.publish_change(
+                ConnectorStateChangeKind::SnapshotEmitted,
+                Some(snapshot_object_id),
+                Some(state_obj.seq),
+            );
+        }
+
         Ok(ConnectorStateAppendOutcome::Committed {
             object_id,
             root_object_id,
@@ -408,7 +432,13 @@ impl FcpStoreConnectorStateStore {
         let Some((head_id, head)) = self.current_head().await? else {
             return Ok(None);
         };
-        self.emit_snapshot(head_id, &head).await.map(Some)
+        let snapshot_id = self.emit_snapshot(head_id, &head).await?;
+        self.publish_change(
+            ConnectorStateChangeKind::SnapshotEmitted,
+            Some(snapshot_id),
+            Some(head.seq),
+        );
+        Ok(Some(snapshot_id))
     }
 
     /// Return the latest snapshot for this connector, if any.
@@ -468,6 +498,9 @@ impl FcpStoreConnectorStateStore {
             telemetry_result,
             started,
         );
+        if matches!(result, Ok(updated) if updated > 0) {
+            self.publish_change(ConnectorStateChangeKind::Compacted, None, Some(before_seq));
+        }
         result
     }
 
@@ -873,6 +906,30 @@ impl FcpStoreConnectorStateStore {
         );
     }
 
+    fn publish_change(
+        &self,
+        kind: ConnectorStateChangeKind,
+        object_id: Option<ObjectId>,
+        seq: Option<u64>,
+    ) {
+        let change = ConnectorStateChange {
+            connector_id: self.connector_id.clone(),
+            instance_id: self.instance_id.clone(),
+            zone_id: self.zone_id.clone(),
+            kind,
+            object_id,
+            seq,
+            observed_at: Self::now_unix_seconds(),
+        };
+        let _ = self.change_tx.send(change);
+    }
+
+    fn now_unix_seconds() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs())
+    }
+
     fn to_connector_state_error(&self, err: ConnectorStateStoreError) -> ConnectorStateError {
         match err {
             ConnectorStateStoreError::ObjectStore(err) => ConnectorStateError::StorageUnavailable {
@@ -988,11 +1045,26 @@ impl ConnectorStateStore for FcpStoreConnectorStateStore {
         connector_id: &ConnectorId,
     ) -> std::result::Result<ConnectorStateChangeStream, ConnectorStateError> {
         self.ensure_requested_connector(connector_id)?;
-        Err(ConnectorStateError::SubscribeUnavailable {
-            connector_id: connector_id.clone(),
-            reason: "mesh gossip connector-state change stream is not wired in fcp-store"
-                .to_string(),
-        })
+        let receiver = self.change_tx.subscribe();
+        let connector_id = self.connector_id.clone();
+        Ok(Box::pin(stream::unfold(receiver, move |mut receiver| {
+            let connector_id = connector_id.clone();
+            async move {
+                match receiver.recv().await {
+                    Ok(change) => Some((Ok(change), receiver)),
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => Some((
+                        Err(ConnectorStateError::SubscribeUnavailable {
+                            connector_id,
+                            reason: format!(
+                                "connector-state change stream lagged by {skipped} messages"
+                            ),
+                        }),
+                        receiver,
+                    )),
+                    Err(broadcast::error::RecvError::Closed) => None,
+                }
+            }
+        })))
     }
 }
 
@@ -1005,6 +1077,7 @@ mod tests {
     use std::panic::{self, AssertUnwindSafe};
 
     use fcp_prelude::{Provenance, Signature};
+    use futures_util::StreamExt;
 
     use super::*;
     use crate::{MemoryObjectStore, MemoryObjectStoreConfig};
@@ -1426,6 +1499,81 @@ mod tests {
         assert_eq!(count, 0);
         let meta = run_async(object_store.get_storage_meta(&head0)).unwrap();
         assert_eq!(meta.retention, RetentionClass::Pinned);
+    }
+
+    #[test]
+    fn subscribe_changes_reports_append_root_and_snapshot() {
+        let state_store = test_store(store()).with_snapshot_every_entries(1);
+        let mut changes = run_async(state_store.subscribe_changes(&connector_id())).unwrap();
+        let outcome = run_async(state_store.append_object(state(0, None, lease_id(1)))).unwrap();
+        let ConnectorStateAppendOutcome::Committed {
+            object_id,
+            root_object_id,
+            seq,
+            snapshot_object_id,
+        } = outcome
+        else {
+            panic!("unexpected conflict");
+        };
+        let snapshot_object_id = snapshot_object_id.expect("snapshot emitted");
+        assert_eq!(seq, 0);
+
+        let appended = run_async(changes.next()).unwrap().unwrap();
+        assert_eq!(appended.kind, ConnectorStateChangeKind::ObjectAppended);
+        assert_eq!(appended.connector_id, connector_id());
+        assert_eq!(appended.zone_id, zone_id());
+        assert_eq!(appended.object_id, Some(object_id));
+        assert_eq!(appended.seq, Some(0));
+        assert_ne!(appended.observed_at, 0);
+
+        let root = run_async(changes.next()).unwrap().unwrap();
+        assert_eq!(root.kind, ConnectorStateChangeKind::RootUpdated);
+        assert_eq!(root.object_id, Some(root_object_id));
+        assert_eq!(root.seq, Some(0));
+
+        let snapshot = run_async(changes.next()).unwrap().unwrap();
+        assert_eq!(snapshot.kind, ConnectorStateChangeKind::SnapshotEmitted);
+        assert_eq!(snapshot.object_id, Some(snapshot_object_id));
+        assert_eq!(snapshot.seq, Some(0));
+    }
+
+    #[test]
+    fn subscribe_changes_reports_manual_snapshot() {
+        let state_store = test_store(store()).with_snapshot_every_entries(0);
+        append_ok(&state_store, state(0, None, lease_id(1)));
+        let mut changes = run_async(state_store.subscribe_changes(&connector_id())).unwrap();
+        let snapshot_id = run_async(state_store.snapshot_head()).unwrap().unwrap();
+
+        let snapshot = run_async(changes.next()).unwrap().unwrap();
+        assert_eq!(snapshot.kind, ConnectorStateChangeKind::SnapshotEmitted);
+        assert_eq!(snapshot.object_id, Some(snapshot_id));
+        assert_eq!(snapshot.seq, Some(0));
+    }
+
+    #[test]
+    fn subscribe_changes_reports_compaction() {
+        let object_store = store();
+        let state_store = test_store(object_store);
+        let (head0, _) = append_ok(&state_store, state(0, None, lease_id(1)));
+        append_ok(&state_store, state(1, Some(head0), lease_id(2)));
+        let mut changes = run_async(state_store.subscribe_changes(&connector_id())).unwrap();
+
+        let count = run_async(state_store.compact(1)).unwrap();
+        assert_eq!(count, 1);
+        let compacted = run_async(changes.next()).unwrap().unwrap();
+        assert_eq!(compacted.kind, ConnectorStateChangeKind::Compacted);
+        assert_eq!(compacted.object_id, None);
+        assert_eq!(compacted.seq, Some(1));
+    }
+
+    #[test]
+    fn subscribe_changes_rejects_wrong_connector() {
+        let state_store = test_store(store());
+        let result = run_async(state_store.subscribe_changes(&other_connector_id()));
+        assert!(matches!(
+            result,
+            Err(ConnectorStateError::MalformedState { .. })
+        ));
     }
 
     #[test]

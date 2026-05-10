@@ -11,6 +11,7 @@ mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
 OVERALL_STATUS="ok"
 EXIT_CODE=0
+LAST_STEP_STATUS="not_run"
 
 promote_status() {
   local status="$1"
@@ -53,12 +54,12 @@ run_step() {
   local name="$1"
   shift
   if run_logged "${name}" "$@"; then
-    echo "passed"
+    LAST_STEP_STATUS="passed"
   else
     local status
     status="$(classify_failure "${OUT_ROOT}/logs/${name}.log")"
     promote_status "${status}"
-    echo "${status}"
+    LAST_STEP_STATUS="${status}"
   fi
 }
 
@@ -73,20 +74,26 @@ run_rch_cargo_step() {
 
 git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
-format_check_status="$(run_rch_cargo_step format_check cargo fmt -p fcp-slack -- --check)"
-loopback_jsonl_status="$(run_rch_cargo_step loopback_jsonl \
+run_rch_cargo_step format_check cargo fmt -p fcp-slack -- --check
+format_check_status="${LAST_STEP_STATUS}"
+run_rch_cargo_step loopback_jsonl \
   FCP_SLACK_E2E_GIT_REVISION="${git_revision}" \
   SLACK_LOOPBACK_E2E_ARTIFACT="${OUT_ROOT}/evidence/loopback_policy_matrix.jsonl" \
-  cargo test -p fcp-slack --test integration slack_loopback_e2e_jsonl_matrix -- --nocapture)"
-socket_policy_status="$(run_rch_cargo_step socket_policy \
-  cargo test -p fcp-slack --test integration socket_mode_ -- --nocapture)"
-live_skip_status="$(run_rch_cargo_step live_smoke_skip_jsonl \
+  cargo test -p fcp-slack --test integration slack_loopback_e2e_jsonl_matrix -- --nocapture
+loopback_jsonl_status="${LAST_STEP_STATUS}"
+run_rch_cargo_step socket_policy \
+  cargo test -p fcp-slack --test integration socket_mode_ -- --nocapture
+socket_policy_status="${LAST_STEP_STATUS}"
+run_rch_cargo_step live_smoke_skip_jsonl \
   FCP_SLACK_E2E_GIT_REVISION="${git_revision}" \
   SLACK_LIVE_E2E_ARTIFACT="${OUT_ROOT}/evidence/live_smoke_skip.jsonl" \
-  cargo test -p fcp-slack --test live_verification slack_live_smoke_structured_skip_jsonl -- --nocapture)"
-clippy_status="$(run_rch_cargo_step clippy \
-  cargo clippy -p fcp-slack --test integration --test live_verification -- -D warnings)"
-diff_check_status="$(run_step diff_check git diff --check -- connectors/slack/tests/integration.rs connectors/slack/tests/live_verification.rs connectors/slack/README.md scripts/e2e/slack_connector_verification.sh)"
+  cargo test -p fcp-slack --test live_verification slack_live_smoke_structured_skip_jsonl -- --nocapture
+live_skip_status="${LAST_STEP_STATUS}"
+run_rch_cargo_step clippy \
+  cargo clippy -p fcp-slack --test integration --test live_verification -- -D warnings
+clippy_status="${LAST_STEP_STATUS}"
+run_step diff_check git diff --check -- connectors/slack/tests/integration.rs connectors/slack/tests/live_verification.rs connectors/slack/README.md scripts/e2e/slack_connector_verification.sh
+diff_check_status="${LAST_STEP_STATUS}"
 
 if grep -a "^${SLACK_LOOPBACK_E2E_JSONL_PREFIX:-SLACK_LOOPBACK_E2E_JSONL} " "${OUT_ROOT}/logs/loopback_jsonl.log" \
   | sed "s/^${SLACK_LOOPBACK_E2E_JSONL_PREFIX:-SLACK_LOOPBACK_E2E_JSONL} //" >"${OUT_ROOT}/evidence/loopback_stdout.jsonl"; then

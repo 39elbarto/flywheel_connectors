@@ -4635,6 +4635,18 @@ impl HostAdminClient {
         self.get_json(&format!("/rpc/connectors/{connector_id}/status"))
     }
 
+    fn connector_state_explain(&self, connector_id: &str, zone: Option<&str>) -> Result<Value> {
+        let mut path = format!("/rpc/admin/connectors/{connector_id}/state/explain");
+        if let Some(zone) = zone.map(str::trim).filter(|zone| !zone.is_empty()) {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("zone", zone)
+                .finish();
+            path.push('?');
+            path.push_str(&query);
+        }
+        self.get_json(&path)
+    }
+
     fn config_snapshot(&self, connector_id: &str) -> Result<ConnectorConfigSnapshot> {
         self.get_json(&format!("/rpc/connectors/{connector_id}/config"))
     }
@@ -7962,6 +7974,72 @@ fn connector_state_explain_dispatch(
     args: &ConnectorStateExplainArgs,
     explicit_host: Option<&str>,
 ) -> Result<DispatchOutcome> {
+    if let Some(host) = explicit_host.map(str::trim).filter(|host| !host.is_empty()) {
+        let client = HostAdminClient::new(host)?;
+        let (catalog, discovery) = client.catalog(None)?;
+        let connector = match catalog.resolve_connector(&args.connector) {
+            Ok(connector) => connector,
+            Err(error) => {
+                return Ok(connector_resolution_dispatch(
+                    "connector state explain",
+                    &args.connector,
+                    &error,
+                ));
+            }
+        };
+        let mut payload =
+            client.connector_state_explain(connector.summary.id.as_str(), args.zone.as_deref())?;
+        let host_payload_source = payload
+            .get("source")
+            .cloned()
+            .unwrap_or_else(|| Value::String("host-admin-api".to_owned()));
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("command".to_owned(), Value::String("connector".to_owned()));
+            object.insert(
+                "subcommand".to_owned(),
+                Value::String("state explain".to_owned()),
+            );
+            object.insert(
+                "source".to_owned(),
+                Value::String("host-admin-api".to_owned()),
+            );
+            object.insert("host_payload_source".to_owned(), host_payload_source);
+            object.insert(
+                "message".to_owned(),
+                Value::String(format!(
+                    "Explained connector state storage for `{}` from live fcp-host cache-marker evidence.",
+                    connector.slug
+                )),
+            );
+            object.insert(
+                "connector".to_owned(),
+                json!({
+                    "requested_selector": &args.connector,
+                    "slug": &connector.slug,
+                    "canonical_id": connector.summary.id.as_str(),
+                    "name": &connector.summary.name,
+                    "version": connector.summary.version.to_string(),
+                }),
+            );
+            object.insert(
+                "host_registry_version".to_owned(),
+                json!(discovery.registry_version),
+            );
+            if let Some(live_host) = object.get_mut("live_host").and_then(Value::as_object_mut) {
+                live_host.insert(
+                    "endpoint_hash".to_owned(),
+                    Value::String(sha256_prefixed(host.as_bytes())),
+                );
+            }
+        }
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "connector");
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
+            exit_code: CliExitCode::Success,
+        });
+    }
+
     let catalog = DiscoveryCatalog::load_for_connector_filter(Some(args.connector.as_str()))?;
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
@@ -34169,6 +34247,81 @@ deny_ptrace = true
                 .as_array()
                 .is_some_and(|handles| handles.len() == 3)
         );
+    }
+
+    #[test]
+    fn execute_connector_state_explain_with_host_queries_admin_route() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/admin/connectors/fcp.github:enterprise:v1/state/explain?zone=z%3Awork"
+                        .to_owned(),
+                    json!({
+                        "status": "ok",
+                        "command": "fcp-host",
+                        "subcommand": "connector state explain",
+                        "schema_version": "1.0.0",
+                        "source": "host-cache-markers",
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "canonical_storage": "mesh",
+                        "last_canonical_seq": Value::Null,
+                        "mesh_replica_count": Value::Null,
+                        "local_cache_present": true,
+                        "local_cache_marker_present": true,
+                        "live_host": {
+                            "requested": true,
+                            "state": "queried",
+                            "route_available": true,
+                            "route": "/rpc/admin/connectors/{connector_id}/state/explain",
+                        },
+                        "zone": {
+                            "requested": "z:work",
+                            "local_cache_marker_present": true,
+                            "cache_marker_status": "present",
+                        },
+                        "warnings": [],
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "connector",
+            "state",
+            "explain",
+            "--connector",
+            "github",
+            "--zone",
+            "z:work",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "connector");
+        assert_eq!(payload["subcommand"], "state explain");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["host_payload_source"], "host-cache-markers");
+        assert_eq!(
+            payload["connector"]["canonical_id"],
+            "fcp.github:enterprise:v1"
+        );
+        assert_eq!(payload["canonical_storage"], "mesh");
+        assert_eq!(payload["live_host"]["route_available"], true);
+        assert!(
+            payload["live_host"]["endpoint_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+        assert_eq!(payload["zone"]["requested"], "z:work");
     }
 
     #[test]

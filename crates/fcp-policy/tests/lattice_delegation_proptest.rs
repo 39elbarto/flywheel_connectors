@@ -83,6 +83,13 @@ fn principal() -> PrincipalId {
 }
 
 fn git_revision() -> String {
+    if let Ok(revision) = std::env::var("FCP_LATTICE_GIT_REVISION") {
+        let revision = revision.trim();
+        if !revision.is_empty() {
+            return revision.to_string();
+        }
+    }
+
     Command::new("git")
         .args(["rev-parse", "HEAD"])
         .output()

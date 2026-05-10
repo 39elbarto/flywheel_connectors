@@ -168,6 +168,7 @@ run_rch_cargo() {
       CARGO_PROFILE_DEV_DEBUG=0 \
       CARGO_PROFILE_TEST_DEBUG=0 \
       CARGO_INCREMENTAL=0 \
+      FCP_LATTICE_GIT_REVISION="$(git_revision)" \
       RUSTFLAGS=-Cdebuginfo=0 \
       "$@"
 }

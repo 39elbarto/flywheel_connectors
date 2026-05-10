@@ -121,6 +121,13 @@ fn artifact_path() -> PathBuf {
 }
 
 fn git_revision() -> String {
+    if let Ok(revision) = std::env::var("FCP_LATTICE_GIT_REVISION") {
+        let revision = revision.trim();
+        if !revision.is_empty() {
+            return revision.to_owned();
+        }
+    }
+
     std::process::Command::new("git")
         .args(["rev-parse", "--short=12", "HEAD"])
         .output()

@@ -49,6 +49,9 @@ Proxy signals that do not satisfy the gates by themselves: README wording,
 presence of mesh crates, unit tests for mesh building blocks, host-first
 connector status, or sync/transfer logs without the required predicate fields.
 
+Configuration details: [Mesh Cutover Gates Configuration](configuration/cutover_gates.md).
+Operator recovery steps: [Mesh Cutover Gates Runbook](runbooks/mesh_cutover_gates.md).
+
 ---
 
 ## 1. Legacy Broad Buckets (to be carved)

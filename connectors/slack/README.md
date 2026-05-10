@@ -229,6 +229,7 @@ rch exec -- cargo fmt --check
 
 - Use a bot token with only the Slack scopes required by the operations you plan to invoke.
 - Use a real app-level `xapp` token for Socket Mode; bot-token fallback is only a runtime fallback, not proof that Socket Mode will work.
+- The optional live-smoke evidence lane for canary reply and mention-gating is intentionally side-effect gated. Without an operator credential lease and explicit write approval, `cargo test -p fcp-slack --test live_verification slack_live_smoke_structured_skip_jsonl -- --nocapture` emits redaction-safe `SLACK_LIVE_E2E_JSONL` skip rows and writes `target/fcp-slack/live-smoke-evidence.jsonl` unless `SLACK_LIVE_E2E_ARTIFACT` is set.
 - Treat message, file, and topic operations as high-review until approval verification is implemented.
 - Keep `monitor_policy.require_mention` enabled for public channels unless the channel is explicitly allowed for free response.
 - Do not rely on shutdown to erase token or verifier state; it only stops active runtime work.

@@ -14,6 +14,25 @@ use fcp_slack::connector::SlackConnector;
 
 use chrono::{Duration, Utc};
 use serde_json::json;
+use std::collections::BTreeMap;
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::PathBuf;
+
+const SLACK_LIVE_E2E_JSONL_PREFIX: &str = "SLACK_LIVE_E2E_JSONL";
+const SLACK_LIVE_E2E_ARTIFACT_ENV: &str = "SLACK_LIVE_E2E_ARTIFACT";
+const DEFAULT_SLACK_LIVE_E2E_ARTIFACT: &str = "target/fcp-slack/live-smoke-evidence.jsonl";
+const LIVE_SMOKE_COMMAND_LINE: &str = "cargo test -p fcp-slack --test live_verification slack_live_smoke_structured_skip_jsonl -- --nocapture";
+const LIVE_SMOKE_ENV_KEYS: &[&str] = &[
+    "SLACK_BOT_TOKEN",
+    "SLACK_APP_TOKEN",
+    "SLACK_E2E_CHANNEL_ID",
+    "SLACK_E2E_THREAD_TS",
+    "SLACK_E2E_BOT_USER_ID",
+    "SLACK_E2E_AGENT_USER_ID",
+    "SLACK_LIVE_WRITE_APPROVAL",
+];
+const LIVE_SMOKE_SCENARIOS: &[&str] = &["canary_reply", "mention_gating"];
 
 // ============================================================================
 // Skip guard
@@ -35,6 +54,85 @@ macro_rules! skip_without_token {
             return;
         };
     };
+}
+
+fn slack_live_smoke_env_snapshot() -> BTreeMap<String, String> {
+    LIVE_SMOKE_ENV_KEYS
+        .iter()
+        .filter_map(|key| {
+            std::env::var(key)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .map(|value| ((*key).to_string(), value))
+        })
+        .collect()
+}
+
+fn slack_live_smoke_structured_records(
+    env: &BTreeMap<String, String>,
+    git_revision: &str,
+    artifact_path: &str,
+) -> Vec<serde_json::Value> {
+    let env_presence = LIVE_SMOKE_ENV_KEYS
+        .iter()
+        .map(|key| ((*key).to_string(), env.contains_key(*key)))
+        .collect::<BTreeMap<_, _>>();
+
+    LIVE_SMOKE_SCENARIOS
+        .iter()
+        .map(|scenario| {
+            let event_topic = if *scenario == "mention_gating" {
+                Some("slack.message.new")
+            } else {
+                None
+            };
+            json!({
+                "log_version": "v1",
+                "connector_id": "fcp.slack",
+                "event": "slack_live_smoke_structured_skip",
+                "scenario": scenario,
+                "result": "skip",
+                "provider_mode": "live_slack",
+                "command_line": LIVE_SMOKE_COMMAND_LINE,
+                "git_revision": git_revision,
+                "artifact_path": artifact_path,
+                "env_presence": &env_presence,
+                "team_id_hash": null,
+                "channel_id_hash": null,
+                "user_id_hash": null,
+                "event_id_hash": null,
+                "thread_ts_hash": null,
+                "route": null,
+                "signature_result": "not_run",
+                "sender_policy_decision": "not_run",
+                "capability_decision": "not_run",
+                "retry_backoff": "not_run",
+                "http_status": null,
+                "event_topic": event_topic,
+                "fcp_error_mapping": "not_run",
+                "cleanup_result": "not_started_no_cleanup_required",
+                "skip_reason": "live Slack canary reply and mention-gating smoke requires an operator-provided credential lease plus explicit live-write approval; this automated lane records the redaction-safe skip instead of performing Slack side effects",
+                "redaction_decision": "redaction-safe: token, channel, user, thread, team, event, and message text values are never logged; only environment presence booleans and scenario identifiers are emitted"
+            })
+        })
+        .collect()
+}
+
+fn write_live_smoke_jsonl_artifact(records: &[serde_json::Value]) -> String {
+    let path = std::env::var(SLACK_LIVE_E2E_ARTIFACT_ENV).map_or_else(
+        |_| PathBuf::from(DEFAULT_SLACK_LIVE_E2E_ARTIFACT),
+        PathBuf::from,
+    );
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create Slack live smoke artifact directory");
+    }
+    let mut file = File::create(&path).expect("create Slack live smoke JSONL artifact");
+    for record in records {
+        writeln!(file, "{record}").expect("write Slack live smoke JSONL record");
+        println!("{SLACK_LIVE_E2E_JSONL_PREFIX} {record}");
+    }
+    path.to_string_lossy().to_string()
 }
 
 // ============================================================================
@@ -99,6 +197,91 @@ async fn setup_live_connector(connector: &mut SlackConnector, token: &str) -> Ed
 // ============================================================================
 // Live verification tests
 // ============================================================================
+
+#[test]
+fn slack_live_smoke_structured_skip_jsonl_redacts_sensitive_inputs() {
+    let env = BTreeMap::from([
+        (
+            "SLACK_BOT_TOKEN".to_string(),
+            "xoxb-secret-token".to_string(),
+        ),
+        (
+            "SLACK_APP_TOKEN".to_string(),
+            "xapp-secret-token".to_string(),
+        ),
+        ("SLACK_E2E_CHANNEL_ID".to_string(), "CSECRET123".to_string()),
+        (
+            "SLACK_E2E_THREAD_TS".to_string(),
+            "1700000000.000001".to_string(),
+        ),
+        ("SLACK_E2E_BOT_USER_ID".to_string(), "USECRET".to_string()),
+        (
+            "SLACK_E2E_AGENT_USER_ID".to_string(),
+            "UAGENTSECRET".to_string(),
+        ),
+        (
+            "SLACK_LIVE_WRITE_APPROVAL".to_string(),
+            "approval-secret".to_string(),
+        ),
+    ]);
+
+    let records = slack_live_smoke_structured_records(
+        &env,
+        "test-git-revision",
+        DEFAULT_SLACK_LIVE_E2E_ARTIFACT,
+    );
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["scenario"], "canary_reply");
+    assert_eq!(records[1]["scenario"], "mention_gating");
+
+    let rendered = records
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    for secret in [
+        "xoxb-secret-token",
+        "xapp-secret-token",
+        "CSECRET123",
+        "1700000000.000001",
+        "USECRET",
+        "UAGENTSECRET",
+        "approval-secret",
+    ] {
+        assert!(
+            !rendered.contains(secret),
+            "structured Slack live-smoke JSONL leaked {secret}"
+        );
+    }
+    assert!(rendered.contains("\"SLACK_BOT_TOKEN\":true"));
+    assert!(rendered.contains("\"SLACK_APP_TOKEN\":true"));
+    assert!(rendered.contains("\"result\":\"skip\""));
+}
+
+#[test]
+fn slack_live_smoke_structured_skip_jsonl() {
+    let env = slack_live_smoke_env_snapshot();
+    let git_revision =
+        std::env::var("FCP_SLACK_E2E_GIT_REVISION").unwrap_or_else(|_| "unknown".to_string());
+    let artifact_path = std::env::var(SLACK_LIVE_E2E_ARTIFACT_ENV)
+        .unwrap_or_else(|_| DEFAULT_SLACK_LIVE_E2E_ARTIFACT.to_string());
+    let records = slack_live_smoke_structured_records(&env, &git_revision, &artifact_path);
+    let written_path = write_live_smoke_jsonl_artifact(&records);
+
+    assert_eq!(records.len(), 2);
+    assert_eq!(written_path, artifact_path);
+    assert!(records.iter().all(|record| record["result"] == "skip"));
+    assert!(
+        records
+            .iter()
+            .any(|record| record["scenario"] == "canary_reply")
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record["scenario"] == "mention_gating")
+    );
+}
 
 #[fcp_async_core::test]
 async fn live_conversations_list() {

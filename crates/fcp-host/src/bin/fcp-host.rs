@@ -497,7 +497,7 @@ impl SubprocessConnector {
             let request = HandshakeRequest {
                 protocol_version: "1.0.0".to_string(),
                 zone: zone.clone(),
-                zone_dir: Some(self.zone_dir_for(zone)),
+                zone_dir: Some(self.zone_dir_for(zone)?),
                 host_public_key,
                 nonce,
                 capabilities_requested: Vec::new(),
@@ -530,14 +530,13 @@ impl SubprocessConnector {
         self.rpc(method, params).await
     }
 
-    fn zone_dir_for(&self, zone: &ZoneId) -> String {
+    fn zone_dir_for(&self, zone: &ZoneId) -> HostResult<String> {
         let state_root = self
             .state_root
             .clone()
             .unwrap_or_else(connector_state_root_dir);
-        connector_zone_state_dir(&state_root, &self.summary.id, zone)
-            .to_string_lossy()
-            .into_owned()
+        prepare_connector_zone_state_dir(&state_root, &self.summary.id, zone)
+            .map(|path| path.to_string_lossy().into_owned())
     }
 
     async fn self_check(&self) -> HostResult<SelfCheckReport> {
@@ -669,11 +668,11 @@ impl WasiConnector {
             ..WasiConfig::default()
         };
         if let Some(state_root) = configured_connector_state_root(&self.config) {
-            base.state_dir = Some(connector_zone_state_dir(
+            base.state_dir = Some(prepare_connector_zone_state_dir(
                 &state_root,
                 &self.summary.id,
                 zone_id,
-            ));
+            )?);
         }
 
         wasi_config_for_operation_network_policy(
@@ -2093,9 +2092,68 @@ fn non_empty_os_env(key: &str) -> Option<OsString> {
     std::env::var_os(key).filter(|value| !value.is_empty())
 }
 
-fn connector_zone_state_dir(root: &StdPath, connector_id: &ConnectorId, zone: &ZoneId) -> PathBuf {
+fn connector_state_cache_dir(root: &StdPath, connector_id: &ConnectorId) -> PathBuf {
     root.join(sanitize_state_path_segment(connector_id.as_str()))
-        .join(sanitize_state_path_segment(zone.as_ref()))
+        .join("cache")
+}
+
+fn connector_zone_state_dir(root: &StdPath, connector_id: &ConnectorId, zone: &ZoneId) -> PathBuf {
+    connector_state_cache_dir(root, connector_id).join(sanitize_state_path_segment(zone.as_ref()))
+}
+
+fn prepare_connector_zone_state_dir(
+    root: &StdPath,
+    connector_id: &ConnectorId,
+    zone: &ZoneId,
+) -> HostResult<PathBuf> {
+    let cache_dir = connector_state_cache_dir(root, connector_id);
+    ensure_connector_state_cache_marker(&cache_dir)?;
+    let zone_dir = connector_zone_state_dir(root, connector_id, zone);
+    ensure_connector_state_cache_marker(&zone_dir)?;
+    Ok(zone_dir)
+}
+
+fn ensure_connector_state_cache_marker(dir: &StdPath) -> HostResult<()> {
+    std::fs::create_dir_all(dir).map_err(|error| {
+        HostError::RegistryError(format!(
+            "failed to create connector state cache directory `{}`: {error}",
+            dir.display()
+        ))
+    })?;
+
+    let marker_path = dir.join(fcp_store::CONNECTOR_STATE_CACHE_MARKER);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker_path)
+    {
+        Ok(mut marker) => {
+            use std::io::Write as _;
+
+            marker
+                .write_all(b"cache-only: canonical connector state is stored through fcp-store\n")
+                .map_err(|error| {
+                    HostError::RegistryError(format!(
+                        "failed to write connector state cache marker `{}`: {error}",
+                        marker_path.display()
+                    ))
+                })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if marker_path.is_file() {
+                Ok(())
+            } else {
+                Err(HostError::RegistryError(format!(
+                    "connector state cache marker `{}` exists but is not a file",
+                    marker_path.display()
+                )))
+            }
+        }
+        Err(error) => Err(HostError::RegistryError(format!(
+            "failed to create connector state cache marker `{}`: {error}",
+            marker_path.display()
+        ))),
+    }
 }
 
 fn sanitize_state_path_segment(value: &str) -> String {
@@ -12789,6 +12847,55 @@ deny_ptrace = true
         let blocker = dir.path().join("admin-state-blocker");
         std::fs::write(&blocker, "block persistence here").expect("write blocker file");
         blocker.join("state.json")
+    }
+
+    #[test]
+    fn connector_zone_state_dir_is_nested_under_cache_root() {
+        let root = std::path::Path::new("/tmp/fcp-state");
+        let connector_id = ConnectorId::from_static("fcp.test:state:1.0.0");
+        let zone_id: ZoneId = "z:project:alpha".parse().expect("zone should parse");
+
+        assert_eq!(
+            connector_state_cache_dir(root, &connector_id),
+            root.join("fcp.test_state_1.0.0").join("cache")
+        );
+        assert_eq!(
+            connector_zone_state_dir(root, &connector_id, &zone_id),
+            root.join("fcp.test_state_1.0.0")
+                .join("cache")
+                .join("z_project_alpha")
+        );
+    }
+
+    #[test]
+    fn prepare_connector_zone_state_dir_marks_cache_root_and_zone_cache() {
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let connector_id = ConnectorId::from_static("fcp.test:state:1.0.0");
+        let zone_id: ZoneId = "z:project:alpha".parse().expect("zone should parse");
+
+        let zone_dir = prepare_connector_zone_state_dir(tempdir.path(), &connector_id, &zone_id)
+            .expect("prepare connector state cache directory");
+        let cache_dir = connector_state_cache_dir(tempdir.path(), &connector_id);
+        assert_eq!(zone_dir, cache_dir.join("z_project_alpha"));
+
+        let cache_marker = cache_dir.join(fcp_store::CONNECTOR_STATE_CACHE_MARKER);
+        let zone_marker = zone_dir.join(fcp_store::CONNECTOR_STATE_CACHE_MARKER);
+        assert!(cache_marker.is_file());
+        assert!(zone_marker.is_file());
+        assert!(
+            std::fs::read_to_string(&cache_marker)
+                .expect("cache marker should be readable")
+                .contains("cache-only")
+        );
+        assert!(
+            std::fs::read_to_string(&zone_marker)
+                .expect("zone marker should be readable")
+                .contains("fcp-store")
+        );
+
+        let repeated = prepare_connector_zone_state_dir(tempdir.path(), &connector_id, &zone_id)
+            .expect("cache marker creation should be idempotent");
+        assert_eq!(repeated, zone_dir);
     }
 
     async fn test_app_state_with_connectors_file(

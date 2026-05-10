@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{
         HeaderMap, HeaderValue, Request, StatusCode, Uri,
         header::{CACHE_CONTROL, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, VARY},
@@ -2108,6 +2108,14 @@ enum ConnectorStateCacheMarkerStatus {
     Present,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConnectorStateCacheMarkerObservation {
+    Present,
+    Missing,
+    NotFile,
+    Unreadable,
+}
+
 impl ConnectorStateCacheMarkerStatus {
     const fn as_str(self) -> &'static str {
         match self {
@@ -2207,6 +2215,143 @@ fn record_connector_state_cache_marker(
         cache_path = %cache_dir.display(),
         canonical_storage = "fcp-store",
     );
+}
+
+impl ConnectorStateCacheMarkerObservation {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Present => "present",
+            Self::Missing => "missing",
+            Self::NotFile => "not_file",
+            Self::Unreadable => "unreadable",
+        }
+    }
+
+    const fn present(self) -> bool {
+        matches!(self, Self::Present)
+    }
+}
+
+fn inspect_connector_state_cache_marker(
+    dir: &StdPath,
+    warnings: &mut Vec<String>,
+) -> ConnectorStateCacheMarkerObservation {
+    let marker_path = dir.join(fcp_store::CONNECTOR_STATE_CACHE_MARKER);
+    match std::fs::metadata(&marker_path) {
+        Ok(metadata) if metadata.is_file() => ConnectorStateCacheMarkerObservation::Present,
+        Ok(_) => {
+            warnings.push(format!(
+                "Connector state cache marker `{}` exists but is not a file.",
+                marker_path.display()
+            ));
+            ConnectorStateCacheMarkerObservation::NotFile
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            ConnectorStateCacheMarkerObservation::Missing
+        }
+        Err(error) => {
+            warnings.push(format!(
+                "Failed to inspect connector state cache marker `{}`: {error}",
+                marker_path.display()
+            ));
+            ConnectorStateCacheMarkerObservation::Unreadable
+        }
+    }
+}
+
+#[must_use]
+fn host_connector_state_explain_payload(
+    connector_id: &ConnectorId,
+    zone: Option<&ZoneId>,
+    state_root: &StdPath,
+) -> Value {
+    let mut warnings = Vec::new();
+    let connector_cache_dir = connector_state_cache_dir(state_root, connector_id);
+    let zone_cache_dir = zone.map(|zone| connector_zone_state_dir(state_root, connector_id, zone));
+    let connector_marker =
+        inspect_connector_state_cache_marker(&connector_cache_dir, &mut warnings);
+    let zone_marker = zone_cache_dir
+        .as_deref()
+        .map(|dir| inspect_connector_state_cache_marker(dir, &mut warnings));
+    let local_cache_present = connector_cache_dir.is_dir()
+        || zone_cache_dir.as_deref().is_some_and(StdPath::is_dir)
+        || connector_marker.present()
+        || zone_marker.is_some_and(ConnectorStateCacheMarkerObservation::present);
+    let canonical_storage = if connector_marker.present()
+        || zone_marker.is_some_and(ConnectorStateCacheMarkerObservation::present)
+    {
+        "mesh"
+    } else {
+        "local"
+    };
+
+    if !connector_marker.present()
+        && !zone_marker.is_some_and(ConnectorStateCacheMarkerObservation::present)
+    {
+        warnings.push(
+            "No connector state cache marker was found, so host explain treats the local state path as canonical until cache-only markers exist."
+                .to_string(),
+        );
+    }
+    warnings.push(
+        "Last canonical sequence and mesh replica count are not proven by cache markers; they remain null until the canonical fcp-store route exposes them."
+            .to_string(),
+    );
+
+    json!({
+        "status": "ok",
+        "command": "fcp-host",
+        "subcommand": "connector state explain",
+        "schema_version": "1.0.0",
+        "source": "host-cache-markers",
+        "connector_id": connector_id.to_string(),
+        "state_root": {
+            "path": state_root.display().to_string(),
+            "source": "host",
+        },
+        "canonical_storage": canonical_storage,
+        "last_canonical_seq": Value::Null,
+        "mesh_replica_count": Value::Null,
+        "local_cache_path": connector_cache_dir.display().to_string(),
+        "local_cache_present": local_cache_present,
+        "local_cache_marker_present": connector_marker.present(),
+        "cache_marker": {
+            "filename": fcp_store::CONNECTOR_STATE_CACHE_MARKER,
+            "path": connector_cache_dir
+                .join(fcp_store::CONNECTOR_STATE_CACHE_MARKER)
+                .display()
+                .to_string(),
+            "present": connector_marker.present(),
+            "status": connector_marker.as_str(),
+        },
+        "zone": {
+            "requested": zone.map(ZoneId::as_str),
+            "local_cache_path": zone_cache_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            "local_cache_marker_present": zone_marker
+                .is_some_and(ConnectorStateCacheMarkerObservation::present),
+            "cache_marker_status": zone_marker
+                .map(ConnectorStateCacheMarkerObservation::as_str),
+        },
+        "live_host": {
+            "requested": true,
+            "state": "queried",
+            "route_available": true,
+            "route": "/rpc/admin/connectors/{connector_id}/state/explain",
+        },
+        "telemetry": {
+            "cache_hit_counter": fcp_store::CONNECTOR_STATE_CACHE_HITS_TOTAL_METRIC,
+            "fall_through_counter": fcp_store::CONNECTOR_STATE_FALL_THROUGH_TOTAL_METRIC,
+            "fall_through_event": fcp_store::CONNECTOR_STATE_FALL_THROUGH_EVENT,
+        },
+        "warnings": warnings,
+    })
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ConnectorStateExplainQuery {
+    zone: Option<String>,
 }
 
 fn sanitize_state_path_segment(value: &str) -> String {
@@ -5291,6 +5436,10 @@ async fn async_main() -> HostResult<()> {
             get(connector_config_revision_handler),
         )
         .route(
+            "/rpc/admin/connectors/{connector_id}/state/explain",
+            get(connector_state_explain_handler),
+        )
+        .route(
             "/rpc/connectors/{connector_id}/config/diff",
             post(connector_config_diff_handler),
         )
@@ -7248,6 +7397,49 @@ async fn connector_status_handler(
             Err(map_host_error(host_error))
         }
     }
+}
+
+async fn connector_state_explain_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+    Query(query): Query<ConnectorStateExplainQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    if state.registry.get(&connector_id).await.is_none() {
+        return Err(map_host_error(HostError::ConnectorNotFound(
+            connector_id.to_string(),
+        )));
+    }
+    let zone = match query
+        .zone
+        .as_deref()
+        .map(str::trim)
+        .filter(|zone| !zone.is_empty())
+    {
+        Some(zone) => Some(zone.parse::<ZoneId>().map_err(|error| {
+            map_host_error(HostError::InvalidFilter(format!(
+                "invalid connector state explain zone `{zone}`: {error}"
+            )))
+        })?),
+        None => None,
+    };
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_state_explain_request",
+        connector_id = %connector_id,
+        zone_id = zone.as_ref().map(ZoneId::as_str),
+        "processing connector state explain request"
+    );
+    let state_root = connector_state_root_dir();
+    let payload = host_connector_state_explain_payload(&connector_id, zone.as_ref(), &state_root);
+    tracing::debug!(
+        event = "connector_state_explain_response",
+        connector_id = %connector_id,
+        zone_id = zone.as_ref().map(ZoneId::as_str),
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "connector state explain request complete"
+    );
+    Ok(Json(payload))
 }
 
 async fn connector_artifact_metadata_handler(
@@ -13283,6 +13475,38 @@ deny_ptrace = true
         let repeated = prepare_connector_zone_state_dir(tempdir.path(), &connector_id, &zone_id)
             .expect("cache marker creation should be idempotent");
         assert_eq!(repeated, zone_dir);
+    }
+
+    #[test]
+    fn host_connector_state_explain_payload_reports_cache_marker_evidence() {
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let connector_id = ConnectorId::from_static("fcp.test:state:1.0.0");
+        let zone_id: ZoneId = "z:project:alpha".parse().expect("zone should parse");
+        let zone_dir = prepare_connector_zone_state_dir(tempdir.path(), &connector_id, &zone_id)
+            .expect("cache markers should be created");
+
+        let payload =
+            host_connector_state_explain_payload(&connector_id, Some(&zone_id), tempdir.path());
+
+        assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["source"], "host-cache-markers");
+        assert_eq!(payload["connector_id"], connector_id.to_string());
+        assert_eq!(payload["canonical_storage"], "mesh");
+        assert_eq!(payload["local_cache_present"], true);
+        assert_eq!(payload["local_cache_marker_present"], true);
+        assert_eq!(payload["cache_marker"]["status"], "present");
+        assert_eq!(payload["zone"]["requested"], zone_id.as_str());
+        assert_eq!(payload["zone"]["local_cache_marker_present"], true);
+        assert_eq!(payload["zone"]["cache_marker_status"], "present");
+        assert_eq!(
+            payload["zone"]["local_cache_path"],
+            zone_dir.display().to_string()
+        );
+        assert_eq!(
+            payload["telemetry"]["fall_through_event"],
+            fcp_store::CONNECTOR_STATE_FALL_THROUGH_EVENT
+        );
+        assert_eq!(payload["live_host"]["route_available"], true);
     }
 
     async fn test_app_state_with_connectors_file(
@@ -22517,6 +22741,21 @@ done"#;
             .with_state(Arc::clone(&state))
     }
 
+    fn connector_state_explain_test_app(state: Arc<AppState>) -> axum::Router {
+        let protected = axum::Router::new()
+            .route(
+                "/rpc/admin/connectors/{connector_id}/state/explain",
+                get(connector_state_explain_handler),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                admin_auth_middleware,
+            ));
+        axum::Router::new()
+            .merge(protected)
+            .with_state(Arc::clone(&state))
+    }
+
     fn credential_pool_admin_test_app(state: Arc<AppState>) -> axum::Router {
         let protected = axum::Router::new()
             .route(
@@ -22857,6 +23096,47 @@ done"#;
         .await;
 
         assert_eq!(status, axum::http::StatusCode::OK);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_state_explain_admin_route_rejects_unauthenticated_requests()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let state = cancel_route_test_state();
+        let app = connector_state_explain_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/connectors/fcp.test/state/explain",
+            serde_json::json!({}),
+            &[],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_state_explain_admin_route_reports_missing_connector()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let state = cancel_route_test_state();
+        let app = connector_state_explain_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/connectors/fcp.test/state/explain?zone=z%3Aowner",
+            serde_json::json!({}),
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        Ok(())
     }
 
     #[fcp_async_core::runtime::test]

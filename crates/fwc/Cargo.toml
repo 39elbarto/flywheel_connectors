@@ -11,6 +11,10 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+otlp = ["fcp-telemetry/otlp"]
+
 [lib]
 name = "fwc"
 path = "src/lib.rs"

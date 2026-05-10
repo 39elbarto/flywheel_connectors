@@ -333,7 +333,8 @@ use fcp_registry::{
 };
 use fcp_telemetry::{
     CapabilityRecommendation, CapabilitySuggestionKind, CapabilityUsageAggregate,
-    CapabilityUsageKey, RecommendationConfig, recommend_capabilities,
+    CapabilityUsageKey, RecommendationConfig, TelemetryConfig, TelemetryError, otlp_readiness,
+    parse_otlp_headers, parse_otlp_resource_attributes, recommend_capabilities,
 };
 
 use crate::credential::{AuthStatus, AuthTestResult, ExpiryInfo};
@@ -401,6 +402,7 @@ Examples:
   fwc schema github issues.create
   fwc doctor --zone z:work --host http://127.0.0.1:8787
   fwc budget --host http://127.0.0.1:8787
+  fwc telemetry otlp-readiness --endpoint http://127.0.0.1:4317 --json
   fwc capabilities report
   fwc config schema github
   fwc simulate github issues.create --file payload.json
@@ -577,6 +579,9 @@ enum Commands {
 
     /// Report live usage-budget state through `fcp-host`.
     Budget(BudgetArgs),
+
+    /// Inspect local host/runtime telemetry configuration.
+    Telemetry(TelemetryArgs),
 
     /// Report and recommend capability usage from real execution history.
     Capabilities(CapabilitiesArgs),
@@ -1477,6 +1482,47 @@ struct BudgetArgs {
     /// Optional zone filter. Omit for all configured zones.
     #[arg(long, short = 'z')]
     zone: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct TelemetryArgs {
+    #[command(subcommand)]
+    command: TelemetryCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum TelemetryCommand {
+    /// Report redaction-safe OTLP exporter readiness from env or CLI overrides.
+    #[command(name = "otlp-readiness", visible_alias = "otlp")]
+    OtlpReadiness(TelemetryOtlpReadinessArgs),
+}
+
+#[derive(Args, Debug, Serialize)]
+struct TelemetryOtlpReadinessArgs {
+    /// Override the OTLP collector endpoint for this readiness check.
+    #[arg(long, value_name = "URL")]
+    endpoint: Option<String>,
+
+    /// Override the OTEL service.name resource for this readiness check.
+    #[arg(long = "service-name", value_name = "NAME")]
+    service_name: Option<String>,
+
+    /// Override the trace sample rate for this readiness check.
+    #[arg(long = "sample-rate", value_name = "RATE")]
+    sample_rate: Option<f64>,
+
+    /// Override OTLP collector metadata as KEY=VALUE. Values may be percent-encoded.
+    #[arg(long = "header", value_name = "KEY=VALUE")]
+    headers: Vec<String>,
+
+    /// Override OTLP resource attributes as KEY=VALUE. Values may be percent-encoded.
+    #[arg(long = "resource", value_name = "KEY=VALUE")]
+    resource_attributes: Vec<String>,
+
+    /// Force OTLP disabled while preserving other config fields for diagnostics.
+    #[arg(long, default_value_t = false)]
+    disabled: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -3479,6 +3525,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Status(args) => status_dispatch(args, cli.host.as_deref())?,
         Commands::Health(args) => health_dispatch(args, cli.host.as_deref())?,
         Commands::Budget(args) => budget_dispatch(args, cli.host.as_deref())?,
+        Commands::Telemetry(args) => telemetry_dispatch(args),
         Commands::Capabilities(args) => capabilities_dispatch(args, cli.host.as_deref())?,
         Commands::Install(args) => install_dispatch(args, cli.host.as_deref())?,
         Commands::Update(args) => update_dispatch(args, cli.host.as_deref())?,
@@ -11465,6 +11512,139 @@ fn budget_dispatch(args: &BudgetArgs, explicit_host: Option<&str>) -> Result<Dis
     })
 }
 
+fn telemetry_dispatch(args: &TelemetryArgs) -> DispatchOutcome {
+    match &args.command {
+        TelemetryCommand::OtlpReadiness(args) => telemetry_otlp_readiness_dispatch(args),
+    }
+}
+
+fn telemetry_otlp_readiness_dispatch(args: &TelemetryOtlpReadinessArgs) -> DispatchOutcome {
+    let config = match telemetry_config_for_readiness(args) {
+        Ok(config) => config,
+        Err(error) => return telemetry_config_error_dispatch(error, args),
+    };
+    let readiness = otlp_readiness(&config);
+    let status = readiness.status;
+    let exit_code = if status == "fail" {
+        CliExitCode::Validation
+    } else {
+        CliExitCode::Success
+    };
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "telemetry");
+    let mut payload = json!({
+        "status": status,
+        "command": "telemetry",
+        "subcommand": "otlp-readiness",
+        "source": "local-telemetry-config",
+        "message": telemetry_readiness_message(status),
+        "readiness": readiness,
+        "config_source": telemetry_config_source(args),
+        "next_actions": telemetry_readiness_next_actions(status),
+    });
+    envelope.inject_into(&mut payload);
+    DispatchOutcome { payload, exit_code }
+}
+
+fn telemetry_config_for_readiness(
+    args: &TelemetryOtlpReadinessArgs,
+) -> std::result::Result<TelemetryConfig, TelemetryError> {
+    let mut config = TelemetryConfig::from_env()?;
+    if let Some(service_name) = &args.service_name {
+        config.service_name = service_name.clone();
+    }
+    if let Some(endpoint) = &args.endpoint {
+        config = config.with_otlp(endpoint.clone());
+    }
+    if let Some(sample_rate) = args.sample_rate {
+        config.trace_sample_rate = sample_rate;
+    }
+    if !args.headers.is_empty() {
+        config.otlp_headers = parse_otlp_headers(&args.headers.join(","))?;
+    }
+    if !args.resource_attributes.is_empty() {
+        config.otlp_resource_attributes =
+            parse_otlp_resource_attributes(&args.resource_attributes.join(","))?;
+    }
+    if args.disabled {
+        config.otlp_enabled = false;
+    }
+    Ok(config)
+}
+
+fn telemetry_config_error_dispatch(
+    error: TelemetryError,
+    args: &TelemetryOtlpReadinessArgs,
+) -> DispatchOutcome {
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "telemetry");
+    let mut payload = json!({
+        "status": "error",
+        "command": "telemetry",
+        "subcommand": "otlp-readiness",
+        "source": "local-telemetry-config",
+        "error": {
+            "type": "invalid-otlp-configuration",
+            "message": error.to_string(),
+            "recoverable": true,
+        },
+        "config_source": telemetry_config_source(args),
+        "next_actions": [
+            "Fix OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS, or OTEL_RESOURCE_ATTRIBUTES.",
+            "Use `fwc telemetry otlp-readiness --endpoint http://127.0.0.1:4317 --json` to preview a sanitized readiness payload.",
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Validation,
+    }
+}
+
+fn telemetry_config_source(args: &TelemetryOtlpReadinessArgs) -> Value {
+    json!({
+        "environment_loaded": true,
+        "endpoint_override": args.endpoint.is_some(),
+        "service_name_override": args.service_name.is_some(),
+        "sample_rate_override": args.sample_rate.is_some(),
+        "header_override_count": args.headers.len(),
+        "resource_override_count": args.resource_attributes.len(),
+        "disabled_override": args.disabled,
+    })
+}
+
+fn telemetry_readiness_message(status: &str) -> &'static str {
+    match status {
+        "ready" => "OTLP export is configured and this build includes exporter support.",
+        "unavailable" => {
+            "OTLP export is configured, but this build does not include the otlp feature."
+        }
+        "fail" => "OTLP export configuration is invalid.",
+        "disabled" => "OTLP export is disabled in local telemetry configuration.",
+        _ => "OTLP readiness produced an unknown status.",
+    }
+}
+
+fn telemetry_readiness_next_actions(status: &str) -> Vec<&'static str> {
+    match status {
+        "ready" => vec![
+            "Start fcp-host with the same OTEL_* environment to enable runtime export.",
+            "Run scripts/e2e/telemetry_otlp_exporter_verification.sh for loopback collector proof.",
+        ],
+        "unavailable" => vec![
+            "Build fwc or fcp-host with the fcp-telemetry otlp feature before enabling runtime export.",
+            "Keep using this command to validate redaction-safe config while the feature is disabled.",
+        ],
+        "fail" => vec![
+            "Fix malformed OTEL_* values or CLI overrides and rerun the readiness check.",
+            "Do not embed credentials in OTLP endpoint URLs; use collector metadata headers instead.",
+        ],
+        "disabled" => vec![
+            "Set OTEL_EXPORTER_OTLP_ENDPOINT or pass --endpoint to preview an enabled readiness state.",
+            "Keep OTLP disabled if this runtime should only emit local logs and Prometheus metrics.",
+        ],
+        _ => vec!["Inspect the JSON readiness payload before enabling OTLP export."],
+    }
+}
+
 fn pin_dispatch(args: &PinArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
     let Some(host) = resolve_host_config(explicit_host)? else {
         return Ok(missing_host_dispatch(
@@ -12275,10 +12455,10 @@ fn auth_login_validation_error(
 fn require_auth_login_field(
     args: &AuthLoginArgs,
     field_name: &'static str,
-    value: &Option<String>,
+    value: Option<&String>,
 ) -> Result<String, DispatchOutcome> {
     value
-        .clone()
+        .cloned()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| {
             auth_login_validation_error(
@@ -12333,9 +12513,9 @@ fn auth_login_request(args: &AuthLoginArgs) -> Result<(Value, &'static str), Dis
             "method": "oauth_device",
             "label": label,
             "priority": args.priority,
-            "client_id": require_auth_login_field(args, "client_id", &args.client_id)?,
-            "device_code_url": require_auth_login_field(args, "device_code_url", &args.device_code_url)?,
-            "token_url": require_auth_login_field(args, "token_url", &args.token_url)?,
+            "client_id": require_auth_login_field(args, "client_id", args.client_id.as_ref())?,
+            "device_code_url": require_auth_login_field(args, "device_code_url", args.device_code_url.as_ref())?,
+            "token_url": require_auth_login_field(args, "token_url", args.token_url.as_ref())?,
             "scope": args.scope,
         });
         return Ok((request, "oauth_device"));
@@ -12346,11 +12526,11 @@ fn auth_login_request(args: &AuthLoginArgs) -> Result<(Value, &'static str), Dis
         "method": "oauth_auth_code",
         "label": label,
         "priority": args.priority,
-        "client_id": require_auth_login_field(args, "client_id", &args.client_id)?,
+        "client_id": require_auth_login_field(args, "client_id", args.client_id.as_ref())?,
         "client_secret": args.client_secret,
-        "authorize_url": require_auth_login_field(args, "authorize_url", &args.authorize_url)?,
-        "token_url": require_auth_login_field(args, "token_url", &args.token_url)?,
-        "redirect_uri": require_auth_login_field(args, "redirect_uri", &args.redirect_uri)?,
+        "authorize_url": require_auth_login_field(args, "authorize_url", args.authorize_url.as_ref())?,
+        "token_url": require_auth_login_field(args, "token_url", args.token_url.as_ref())?,
+        "redirect_uri": require_auth_login_field(args, "redirect_uri", args.redirect_uri.as_ref())?,
         "scope": args.scope,
         "use_pkce": !args.no_pkce,
     });
@@ -30897,6 +31077,64 @@ deny_ptrace = true
         assert_eq!(outcome.exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "health");
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
+    }
+
+    #[test]
+    fn execute_telemetry_otlp_readiness_reports_build_support_without_leaking_metadata() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "telemetry",
+            "otlp-readiness",
+            "--endpoint",
+            "http://127.0.0.1:4317",
+            "--header",
+            "authorization=Bearer%20secret-test-token",
+            "--resource",
+            "deployment.environment=test",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "telemetry");
+        assert_eq!(payload["subcommand"], "otlp-readiness");
+        let expected_status = if cfg!(feature = "otlp") {
+            "ready"
+        } else {
+            "unavailable"
+        };
+        assert_eq!(payload["readiness"]["status"], expected_status);
+        assert_eq!(payload["readiness"]["endpoint_class"], "http_loopback");
+        assert_eq!(payload["readiness"]["collector_header_count"], 1);
+        assert_eq!(payload["readiness"]["resource_attribute_count"], 1);
+        let rendered = payload.to_string();
+        assert!(!rendered.contains("secret-test-token"));
+        assert!(!rendered.contains("deployment.environment=test"));
+        assert!(!rendered.contains("127.0.0.1:4317"));
+    }
+
+    #[test]
+    fn execute_telemetry_otlp_readiness_redacts_secret_bearing_invalid_endpoint() {
+        let (exit_code, text) = execute_text(&[
+            "fwc",
+            "--json",
+            "telemetry",
+            "otlp-readiness",
+            "--endpoint",
+            "https://api-token@collector.example.com:4317",
+        ]);
+        let payload: Value = serde_json::from_str(&text).expect("json output should parse cleanly");
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "telemetry");
+        assert_eq!(payload["status"], "fail");
+        assert_eq!(payload["readiness"]["status"], "fail");
+        assert!(
+            payload["readiness"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("OTLP endpoint"))
+        );
+        assert!(!text.contains("api-token"));
+        assert!(!text.contains("collector.example.com"));
     }
 
     #[test]

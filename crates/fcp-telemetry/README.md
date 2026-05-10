@@ -48,12 +48,21 @@ Use `otlp_readiness(&config)` before initializing exporters when surfacing opera
 
 - boundary: always identifies host/runtime OTLP export.
 - status: `disabled`, `unavailable`, `fail`, or `ready`.
-- endpoint class: `http`, `https`, `loopback-http`, `loopback-https`, or `invalid`.
+- endpoint class: `http_plaintext`, `http_loopback`, `https`, `https_loopback`, or `invalid`.
 - signal support: traces, metrics, and logs.
 - counts for collector headers and resource attributes.
 - trace sample-rate class.
 
 It must not expose collector hostnames, header values, API keys, tenant IDs, local paths, prompts, completions, or other sensitive payload data.
+
+Operators can inspect that same contract through `fwc` without contacting a collector:
+
+```bash
+fwc telemetry otlp-readiness --json
+fwc telemetry otlp-readiness --endpoint http://127.0.0.1:4317 --json
+```
+
+The command reads `TelemetryConfig::from_env()` and applies optional CLI overrides for the endpoint, service name, sample rate, collector headers, and resource attributes. Its JSON output carries the readiness status, endpoint class, signal support, header/resource counts, and next actions, but never the raw endpoint or metadata values.
 
 ## Failure Behavior
 
@@ -90,6 +99,13 @@ rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telemetry-otlp-unavailable \
 
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telemetry-otlp-clippy \
   cargo clippy -p fcp-telemetry --all-targets --features otlp -- -D warnings
+```
+
+fwc readiness surface:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-fwc-telemetry-readiness \
+  cargo test -p fwc execute_telemetry_otlp_readiness -- --nocapture
 ```
 
 ## Current Limits

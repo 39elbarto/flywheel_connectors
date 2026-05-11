@@ -873,7 +873,6 @@ fn expected_ai_hints_gap_connectors() -> Vec<String> {
         "google-people",
         "google-workspace-events",
         "mastodon",
-        "nostr",
         "telnyx",
     ])
 }

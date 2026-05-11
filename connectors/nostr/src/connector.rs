@@ -1365,6 +1365,9 @@ impl NostrConnector {
                     "`secret_key_hex` accepts either raw 64-character hex or NIP-19 `nsec`; secrets are redacted in Debug and error paths.",
                     "Publishing fans out to every configured relay; there is no per-request relay override.",
                 ],
+                &[
+                    r#"{"input":{"content":"Release notes are ready for review.","kind":1,"tags":[["t","release"]]},"output":{"accepted_relays":[{"relay":"wss://relay.example.com","ok":true}],"rejected_relays":[]}}"#,
+                ],
                 &[CAP_HEALTH_READ, CAP_RELAYS_READ, CAP_EVENTS_READ],
             ),
             operation(
@@ -1382,6 +1385,9 @@ impl NostrConnector {
                     "`plaintext` and `content` are accepted as input aliases, capped at 4096 bytes, and never returned in operation output.",
                     "Self-send is rejected unless `allow_self_send` is explicitly true.",
                     "The operation returns event id, kind, public sender/recipient metadata, and per-relay delivery diagnostics; it omits plaintext and encrypted content.",
+                ],
+                &[
+                    r#"{"input":{"recipient_pubkey":"1111111111111111111111111111111111111111111111111111111111111111","plaintext":"Can you review the incident summary?"},"output":{"event_kind":4,"accepted_relays":[{"relay":"wss://relay.example.com","ok":true}]}}"#,
                 ],
                 &[CAP_HEALTH_READ, CAP_RELAYS_READ],
             ),
@@ -1401,6 +1407,9 @@ impl NostrConnector {
                     "State is persisted only after at least one configured relay accepts the event.",
                     "`last_published_at` can provide host state, but connector-persisted state also enforces monotonic timestamps.",
                 ],
+                &[
+                    r#"{"input":{"profile":{"display_name":"FCP Operations","about":"Automation status and handoff notes","website":"https://example.com/fcp"}},"output":{"event_kind":0,"persisted":true,"accepted_relays":[{"relay":"wss://relay.example.com","ok":true}]}}"#,
+                ],
                 &[CAP_PROFILE_READ, CAP_RELAYS_READ, CAP_HEALTH_READ],
             ),
             operation(
@@ -1416,6 +1425,9 @@ impl NostrConnector {
                 &[
                     "This operation does not import profile data from relays; use `nostr.profile.import` for bounded relay reads.",
                     "No secret key material is persisted or returned.",
+                ],
+                &[
+                    r#"{"input":{},"output":{"persistence":"zone_dir","last_published_event_id":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","last_profile":{"display_name":"FCP Operations"}}}"#,
                 ],
                 &[CAP_PROFILE_WRITE, CAP_RELAYS_READ],
             ),
@@ -1433,6 +1445,9 @@ impl NostrConnector {
                     "Import uses the configured relay list; there is no per-request relay override.",
                     "Unsafe URL fields from imported content are omitted and reported rather than returned for display/fetch use.",
                     "If `pubkey` is omitted, the connector imports its own bound public key profile.",
+                ],
+                &[
+                    r#"{"input":{"pubkey":"2222222222222222222222222222222222222222222222222222222222222222","local_profile":{"display_name":"Local fallback"}},"output":{"ok":true,"pubkey_hex":"2222222222222222222222222222222222222222222222222222222222222222","relays_queried":["wss://relay.example.com"]}}"#,
                 ],
                 &[CAP_EVENTS_READ, CAP_RELAYS_READ, CAP_PROFILE_WRITE],
             ),
@@ -1452,6 +1467,9 @@ impl NostrConnector {
                     "`authors` accepts raw hex, NIP-19 `npub`, and `nostr:npub`; filters sent to relays use canonical hex.",
                     "Results are returned per relay and may contain duplicates across relays.",
                 ],
+                &[
+                    r#"{"input":{"authors":["3333333333333333333333333333333333333333333333333333333333333333"],"kinds":[1],"limit":20},"output":{"subscription_id":"sub-001","results":[{"relay":"wss://relay.example.com","events":[]}]}}"#,
+                ],
                 &[CAP_RELAYS_READ, CAP_HEALTH_READ],
             ),
             operation(
@@ -1467,6 +1485,9 @@ impl NostrConnector {
                 &[
                     "This does not discover relays from NIP metadata or mutate relay policy.",
                     "The relay list is static configuration for this request-response slice.",
+                ],
+                &[
+                    r#"{"input":{},"output":{"relays":["wss://relay.example.com"],"public_key_hex":"4444444444444444444444444444444444444444444444444444444444444444"}}"#,
                 ],
                 &[CAP_HEALTH_READ, CAP_EVENTS_READ],
             ),
@@ -1484,6 +1505,9 @@ impl NostrConnector {
                     "Health checks websocket reachability only; it does not prove encrypted DM support.",
                     "Health does not score, rank, or deduplicate relays.",
                 ],
+                &[
+                    r#"{"input":{},"output":{"public_key_hex":"5555555555555555555555555555555555555555555555555555555555555555","relay_health":[{"relay":"wss://relay.example.com","ok":true}]}}"#,
+                ],
                 &[CAP_RELAYS_READ, CAP_NOTES_WRITE],
             ),
             operation(
@@ -1500,6 +1524,9 @@ impl NostrConnector {
                     "This operation probes relay kind support by issuing bounded REQs; some relays may rate-limit probing.",
                     "NIP-44 support is inferred from kind=1059 (gift-wrapped) event indexing, not direct NIP-44 negotiation.",
                     "Latency measures WebSocket connection time only, not query round-trip time.",
+                ],
+                &[
+                    r#"{"input":{},"output":{"public_key_hex":"6666666666666666666666666666666666666666666666666666666666666666","relay_scores":[{"relay":"wss://relay.example.com","score":100}],"scored_count":1}}"#,
                 ],
                 &[CAP_RELAYS_READ, CAP_NOTES_WRITE, CAP_EVENTS_READ],
             ),
@@ -2188,6 +2215,7 @@ fn operation(
     input_schema: Value,
     when_to_use: &str,
     common_mistakes: &[&str],
+    examples: &[&str],
     related: &[&'static str],
 ) -> OperationInfo {
     OperationInfo {
@@ -2206,7 +2234,7 @@ fn operation(
                 .iter()
                 .map(|item| (*item).to_string())
                 .collect(),
-            examples: Vec::new(),
+            examples: examples.iter().map(|item| (*item).to_string()).collect(),
             related: related
                 .iter()
                 .map(|capability| CapabilityId::from_static(capability))
@@ -2392,6 +2420,38 @@ mod tests {
         }
         serde_json::to_value(schema)
             .map_err(|err| format!("{operation_key}.{field} should convert to JSON: {err}"))
+    }
+
+    fn operation_ai_hints<'a>(
+        manifest: &'a toml::Value,
+        operation_key: &str,
+    ) -> Result<&'a toml::map::Map<String, toml::Value>, String> {
+        manifest_operations(manifest)?
+            .get(operation_key)
+            .and_then(toml::Value::as_table)
+            .and_then(|operation| operation.get("ai_hints"))
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| format!("{operation_key} should declare ai_hints"))
+    }
+
+    fn hint_string_array(
+        hints: &toml::map::Map<String, toml::Value>,
+        field: &str,
+    ) -> Result<Vec<String>, String> {
+        let values = hints
+            .get(field)
+            .and_then(toml::Value::as_array)
+            .ok_or_else(|| format!("ai_hints.{field} should be an array"))?;
+        values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|text| !text.trim().is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("ai_hints.{field} entries should be non-empty strings"))
+            })
+            .collect()
     }
 
     const RELAY_NETWORK_CONSTRAINT_OPS: &[&str] = &[
@@ -2953,6 +3013,66 @@ mod tests {
     }
 
     #[test]
+    fn manifest_ai_hints_cover_all_operations_and_runtime_examples() -> Result<(), String> {
+        let manifest = nostr_manifest()?;
+        let operation_catalog = NostrConnector::operations();
+
+        for (operation_id, manifest_key) in EXPECTED_MANIFEST_SCHEMA_OPS {
+            let hints = operation_ai_hints(&manifest, manifest_key)?;
+            let when_to_use = hints
+                .get("when_to_use")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| format!("{manifest_key}.ai_hints.when_to_use missing"))?;
+            if when_to_use.trim().is_empty() {
+                return Err(format!("{manifest_key}.ai_hints.when_to_use is empty"));
+            }
+
+            let common_mistakes = hint_string_array(hints, "common_mistakes")?;
+            if common_mistakes.len() < 2 {
+                return Err(format!(
+                    "{manifest_key}.ai_hints.common_mistakes should have at least 2 entries"
+                ));
+            }
+
+            let examples = hint_string_array(hints, "examples")?;
+            for example in &examples {
+                serde_json::from_str::<Value>(example).map_err(|err| {
+                    format!("{manifest_key}.ai_hints example should parse as JSON: {err}")
+                })?;
+                let lower = example.to_ascii_lowercase();
+                for forbidden in ["secret", "token", "password", "private_key", "nsec"] {
+                    if lower.contains(forbidden) {
+                        return Err(format!(
+                            "{manifest_key}.ai_hints example contains forbidden sample text `{forbidden}`"
+                        ));
+                    }
+                }
+            }
+
+            let operation = operation_catalog
+                .iter()
+                .find(|operation| operation.id.as_str() == *operation_id)
+                .ok_or_else(|| format!("operation catalog should declare {operation_id}"))?;
+            if operation.ai_hints.when_to_use.trim().is_empty() {
+                return Err(format!("{operation_id} runtime when_to_use is empty"));
+            }
+            if operation.ai_hints.common_mistakes.is_empty() {
+                return Err(format!("{operation_id} runtime common_mistakes is empty"));
+            }
+            if operation.ai_hints.examples.is_empty() {
+                return Err(format!("{operation_id} runtime examples are empty"));
+            }
+            for example in &operation.ai_hints.examples {
+                serde_json::from_str::<Value>(example).map_err(|err| {
+                    format!("{operation_id} runtime example should parse as JSON: {err}")
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn manifest_declares_runtime_scoped_network_constraints() -> Result<(), String> {
         let manifest = nostr_manifest()?;
         let operations = manifest_operations(&manifest)?;
@@ -3289,7 +3409,7 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn invoke_dm_send_denies_duplicate_claim_before_relay_publish() {
+    async fn invoke_dm_send_denies_duplicate_claim_before_relay_publish() -> Result<(), String> {
         let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
         let checker_for_connector: Arc<dyn ThreadOwnershipChecker> = checker.clone();
         let mut connector = NostrConnector::new().with_thread_ownership_checker(
@@ -3354,8 +3474,14 @@ mod tests {
                     "coordination denial must not leak plaintext"
                 );
             }
-            other => panic!("expected Unauthorized duplicate-claim denial, got {other:?}"),
+            other => {
+                return Err(format!(
+                    "expected Unauthorized duplicate-claim denial, got {other:?}"
+                ));
+            }
         }
+
+        Ok(())
     }
 
     // ── Configure / handshake / shutdown lifecycle tests ─────────────

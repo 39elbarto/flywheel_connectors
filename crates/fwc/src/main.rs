@@ -8007,7 +8007,7 @@ fn connector_state_explain_dispatch(
             object.insert(
                 "message".to_owned(),
                 Value::String(format!(
-                    "Explained connector state storage for `{}` from live fcp-host cache-marker evidence.",
+                    "Explained connector state storage for `{}` from live fcp-host evidence.",
                     connector.slug
                 )),
             );
@@ -30148,7 +30148,7 @@ deny_ptrace = true
 
         assert_eq!(outcome.exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "unknown-command");
-        assert!(payload["error"]["recoverable"] == true);
+        assert_eq!(payload["error"]["recoverable"], true);
     }
 
     #[test]
@@ -33791,7 +33791,7 @@ deny_ptrace = true
 
         assert_eq!(outcome.exit_code, CliExitCode::AmbiguousCorrection.into());
         assert_eq!(payload["error"]["type"], "destructive-ambiguity");
-        assert!(payload["error"]["recoverable"] == true);
+        assert_eq!(payload["error"]["recoverable"], true);
     }
 
     #[test]
@@ -34265,11 +34265,22 @@ deny_ptrace = true
                         "command": "fcp-host",
                         "subcommand": "connector state explain",
                         "schema_version": "1.0.0",
-                        "source": "host-cache-markers",
+                        "source": "host-canonical-state",
                         "connector_id": "fcp.github:enterprise:v1",
                         "canonical_storage": "mesh",
-                        "last_canonical_seq": Value::Null,
-                        "mesh_replica_count": Value::Null,
+                        "last_canonical_seq": 17,
+                        "mesh_replica_count": 2,
+                        "canonical_state": {
+                            "root_present": true,
+                            "connector_id": "fcp.github:enterprise:v1",
+                            "zone_id": "z:work",
+                            "instance_id": Value::Null,
+                            "model": "singleton_writer",
+                            "root_object_id": "sha256:root",
+                            "head_object_id": "sha256:head",
+                            "state_schema_version": 1,
+                            "status_source": "fcp-store",
+                        },
                         "local_cache_present": true,
                         "local_cache_marker_present": true,
                         "live_host": {
@@ -34309,12 +34320,22 @@ deny_ptrace = true
         assert_eq!(payload["command"], "connector");
         assert_eq!(payload["subcommand"], "state explain");
         assert_eq!(payload["source"], "host-admin-api");
-        assert_eq!(payload["host_payload_source"], "host-cache-markers");
+        assert_eq!(payload["host_payload_source"], "host-canonical-state");
         assert_eq!(
             payload["connector"]["canonical_id"],
             "fcp.github:enterprise:v1"
         );
         assert_eq!(payload["canonical_storage"], "mesh");
+        assert_eq!(payload["last_canonical_seq"], 17);
+        assert_eq!(payload["mesh_replica_count"], 2);
+        assert_eq!(payload["canonical_state"]["root_present"], true);
+        assert_eq!(
+            payload["canonical_state"]["connector_id"],
+            "fcp.github:enterprise:v1"
+        );
+        assert_eq!(payload["canonical_state"]["zone_id"], "z:work");
+        assert_eq!(payload["canonical_state"]["model"], "singleton_writer");
+        assert_eq!(payload["canonical_state"]["status_source"], "fcp-store");
         assert_eq!(payload["live_host"]["route_available"], true);
         assert!(
             payload["live_host"]["endpoint_hash"]
@@ -39126,7 +39147,7 @@ depends_on = ["missing"]
         assert_eq!(payload["phase"], "execution");
         assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["response"]["result"]["number"], 77);
-        assert!(payload["connector"]["slug"] == "github");
+        assert_eq!(payload["connector"]["slug"], "github");
         assert!(
             payload["next_actions"]
                 .as_array()
@@ -39260,7 +39281,7 @@ depends_on = ["missing"]
         assert!(payload["operation"]["safety_tier"].is_string());
         assert!(payload["risk_analysis"]["risk_level"].is_string());
         assert!(payload["risk_analysis"]["safety_tier"].is_string());
-        assert!(payload["risk_analysis"]["source"] == "manifest");
+        assert_eq!(payload["risk_analysis"]["source"], "manifest");
         assert!(
             payload["risk_analysis"]["caveat"]
                 .as_str()
@@ -39463,8 +39484,8 @@ depends_on = ["missing"]
         assert_eq!(payload["phase"], "execution");
         assert_eq!(payload["command"], "invoke");
         assert_eq!(payload["source"], "host-admin-api");
-        assert!(payload["response"]["result"]["issue_id"] == 42);
-        assert!(payload["response"]["result"]["created"] == true);
+        assert_eq!(payload["response"]["result"]["issue_id"], 42);
+        assert_eq!(payload["response"]["result"]["created"], true);
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["operation"]["requested_selector"], "issues.create");
     }
@@ -43386,7 +43407,7 @@ require_attestation_types = ["in-toto"]"#,
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["command"], "invoke");
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
-        assert!(payload["captures"]["deadline_ms"].as_u64() == Some(5000));
+        assert_eq!(payload["captures"]["deadline_ms"].as_u64(), Some(5000));
     }
 
     #[test]
@@ -44077,7 +44098,7 @@ require_attestation_types = ["in-toto"]"#,
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "unknown-command");
-        assert!(payload["error"]["recoverable"] == true);
+        assert_eq!(payload["error"]["recoverable"], true);
         // The error message should mention the unrecognised token.
         assert!(
             payload["error"]["message"]
@@ -44092,7 +44113,7 @@ require_attestation_types = ["in-toto"]"#,
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "unknown-command");
-        assert!(payload["error"]["recoverable"] == true);
+        assert_eq!(payload["error"]["recoverable"], true);
         assert!(
             payload["error"]["message"]
                 .as_str()
@@ -44108,7 +44129,7 @@ require_attestation_types = ["in-toto"]"#,
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "unknown-command");
-        assert!(payload["error"]["recoverable"] == true);
+        assert_eq!(payload["error"]["recoverable"], true);
     }
 
     #[test]
@@ -44117,7 +44138,7 @@ require_attestation_types = ["in-toto"]"#,
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "unknown-command");
-        assert!(payload["error"]["recoverable"] == true);
+        assert_eq!(payload["error"]["recoverable"], true);
         assert!(
             payload["error"]["message"]
                 .as_str()
@@ -44131,7 +44152,7 @@ require_attestation_types = ["in-toto"]"#,
 
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["error"]["type"], "unknown-command");
-        assert!(payload["error"]["recoverable"] == true);
+        assert_eq!(payload["error"]["recoverable"], true);
         assert!(
             payload["error"]["message"]
                 .as_str()
@@ -44263,7 +44284,7 @@ require_attestation_types = ["in-toto"]"#,
             "error type should be connector-not-found, got: {}",
             payload["error"]["type"]
         );
-        assert!(payload["error"]["recoverable"] == true);
+        assert_eq!(payload["error"]["recoverable"], true);
     }
 
     #[test]

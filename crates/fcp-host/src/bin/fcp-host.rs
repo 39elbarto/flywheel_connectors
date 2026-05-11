@@ -109,7 +109,7 @@ use fcp_policy::{
 };
 use fcp_prelude::{
     ApprovalToken, CapabilityConstraints, CapabilityVerifier, ConnectorStateCanonicalStatus,
-    CorrelationId, CostEstimateConfidence, CredentialId, Decision,
+    CorrelationId, CostEstimateConfidence, CredentialId, Decision, InstanceId,
     LeasePurpose as CoreLeasePurpose, ObjectId, PolicySimulationInput, ResourceAvailability,
     RolloutPolicy, SafetyTier, TailscaleNodeId, TransportMode, UsageMetric, UsageMetricKind,
     ZoneId, ZonePolicyObject, simulate_policy_decision,
@@ -2353,6 +2353,17 @@ fn host_connector_state_explain_payload_with_canonical_status(
             .map_or(Value::Null, |count| json!(count)),
         "canonical_state": {
             "root_present": canonical_status.is_some_and(|status| status.root_present),
+            "connector_id": canonical_status
+                .map(|status| status.connector_id.to_string()),
+            "zone_id": canonical_status
+                .and_then(|status| status.zone_id.as_ref())
+                .map(ZoneId::as_str),
+            "instance_id": canonical_status
+                .and_then(|status| status.instance_id.as_ref())
+                .map(InstanceId::as_str),
+            "model": canonical_status
+                .and_then(|status| status.model.as_ref())
+                .map(ToString::to_string),
             "root_object_id": canonical_status
                 .and_then(|status| status.root_object_id)
                 .map(|object_id| object_id.to_string()),
@@ -2410,9 +2421,7 @@ fn usable_connector_state_canonical_status<'a>(
     zone: Option<&ZoneId>,
     warnings: &mut Vec<String>,
 ) -> Option<&'a ConnectorStateCanonicalStatus> {
-    let Some(status) = canonical_status else {
-        return None;
-    };
+    let status = canonical_status?;
     if &status.connector_id != connector_id {
         warnings.push(
             "Canonical fcp-store status was supplied for a different connector; ignoring it."
@@ -13625,6 +13634,13 @@ deny_ptrace = true
         assert_eq!(payload["last_canonical_seq"], 17);
         assert_eq!(payload["mesh_replica_count"], 2);
         assert_eq!(payload["canonical_state"]["root_present"], true);
+        assert_eq!(
+            payload["canonical_state"]["connector_id"],
+            connector_id.to_string()
+        );
+        assert_eq!(payload["canonical_state"]["zone_id"], zone_id.as_str());
+        assert_eq!(payload["canonical_state"]["instance_id"], Value::Null);
+        assert_eq!(payload["canonical_state"]["model"], "singleton_writer");
         assert_eq!(
             payload["canonical_state"]["root_object_id"],
             root_object_id.to_string()

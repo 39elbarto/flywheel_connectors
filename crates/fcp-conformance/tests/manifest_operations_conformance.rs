@@ -869,12 +869,7 @@ fn expected_sandbox_gap_connectors() -> Vec<String> {
 }
 
 fn expected_ai_hints_gap_connectors() -> Vec<String> {
-    connector_names(&[
-        "google-people",
-        "google-workspace-events",
-        "mastodon",
-        "telnyx",
-    ])
+    connector_names(&["google-workspace-events", "mastodon", "telnyx"])
 }
 
 fn connectors_with_gap<F>(records: &[ManifestFieldCoverageRecord], gap: F) -> Vec<String>

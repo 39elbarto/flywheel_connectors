@@ -50,6 +50,13 @@ risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "policy"
 idempotency = "strict"
+[provides.operations."people.list_connections".ai_hints]
+when_to_use = "Enumerate the authenticated user's contact corpus with an explicit field mask."
+common_mistakes = [
+  "Broad field masks widen privacy exposure; request only the fields you need.",
+  "Use page_size and page_token for paging; do not assume the first page is complete.",
+]
+examples = ['{"person_fields":["names","emailAddresses"],"page_size":50}']
 [provides.operations."people.list_connections".input_schema]
 type = "object"
 [provides.operations."people.list_connections".input_schema.properties.person_fields]
@@ -88,6 +95,13 @@ risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "policy"
 idempotency = "strict"
+[provides.operations."people.get_person".ai_hints]
+when_to_use = "Fetch one People resource when you already have its resource name."
+common_mistakes = [
+  "This connector intentionally does not expose people/me because self-profile reads can require broader personal-profile scopes.",
+  "Pass the exact People resource name returned by list or search operations.",
+]
+examples = ['{"resource_name":"people/c123","person_fields":["names","emailAddresses"]}']
 [provides.operations."people.get_person".input_schema]
 type = "object"
 required = ["resource_name"]
@@ -127,6 +141,13 @@ risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "policy"
 idempotency = "strict"
+[provides.operations."people.search_contacts".ai_hints]
+when_to_use = "Find matching contacts by name, email, or phone fragments."
+common_mistakes = [
+  "person_fields controls returned fields, not the search query.",
+  "This searches the authenticated user's contacts, not Workspace directory profiles.",
+]
+examples = ['{"query":"alice","person_fields":["names","emailAddresses"]}']
 [provides.operations."people.search_contacts".input_schema]
 type = "object"
 required = ["query"]
@@ -164,6 +185,13 @@ risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "policy"
 idempotency = "strict"
+[provides.operations."people.list_other_contacts".ai_hints]
+when_to_use = "Read the separate Google-suggested Other Contacts corpus after explicitly opting into that data surface."
+common_mistakes = [
+  "Other Contacts requires its own scope trigger above ordinary contacts.readonly.",
+  "Do not merge Other Contacts with normal contacts without preserving provenance.",
+]
+examples = ['{"person_fields":["names","emailAddresses"],"page_size":25}']
 [provides.operations."people.list_other_contacts".input_schema]
 type = "object"
 [provides.operations."people.list_other_contacts".input_schema.properties.person_fields]
@@ -200,6 +228,13 @@ risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "policy"
 idempotency = "strict"
+[provides.operations."people.search_directory_people".ai_hints]
+when_to_use = "Search org-wide directory profiles after explicitly opting into directory.readonly."
+common_mistakes = [
+  "Directory results are not the same as the user's personal contacts corpus.",
+  "Use directory source filters when the caller needs domain profile results only.",
+]
+examples = ['{"query":"alice","person_fields":["names","emailAddresses","organizations"]}']
 [provides.operations."people.search_directory_people".input_schema]
 type = "object"
 required = ["query"]
@@ -241,6 +276,13 @@ risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "policy"
 idempotency = "strict"
+[provides.operations."people.list_contact_groups".ai_hints]
+when_to_use = "Inspect contact-group metadata without mutating memberships."
+common_mistakes = [
+  "Group membership mutation is intentionally out of scope for this first slice.",
+  "Use group_fields when you need a narrower response.",
+]
+examples = ['{}']
 [provides.operations."people.list_contact_groups".input_schema]
 type = "object"
 [provides.operations."people.list_contact_groups".input_schema.properties.group_fields]
@@ -277,6 +319,13 @@ risk_level = "high"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+[provides.operations."people.create_contact".ai_hints]
+when_to_use = "Create a durable contact entry after explicitly opting into contacts write scope."
+common_mistakes = [
+  "Do not rely on hidden defaults; provide the actual People fields you intend to write.",
+  "Treat this as side-effecting even when the payload looks like simple profile data.",
+]
+examples = ['{"person":{"names":[{"givenName":"Alice","familyName":"Ng"}],"emailAddresses":[{"value":"alice@example.com"}]}}']
 [provides.operations."people.create_contact".input_schema]
 type = "object"
 required = ["person"]
@@ -308,6 +357,13 @@ risk_level = "high"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "best_effort"
+[provides.operations."people.update_contact".ai_hints]
+when_to_use = "Patch a contact while keeping the updated field mask explicit."
+common_mistakes = [
+  "People updateContact expects an etag; omitting it turns a safe concurrency check into a confusing API failure.",
+  "Do not update fields that the caller did not explicitly request.",
+]
+examples = ['{"resource_name":"people/c123","person":{"etag":"%EgUBAQMEBQY=","emailAddresses":[{"value":"alice@example.com"}]}}']
 [provides.operations."people.update_contact".input_schema]
 type = "object"
 required = ["resource_name", "person"]
@@ -345,6 +401,13 @@ risk_level = "critical"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "strict"
+[provides.operations."people.delete_contact".ai_hints]
+when_to_use = "Permanently delete a contact after explicit interactive approval."
+common_mistakes = [
+  "Deletion is irreversible; confirm you are targeting the correct People resource name before calling.",
+  "Use get_person first when the caller only provides a display name or email.",
+]
+examples = ['{"resource_name":"people/c123"}']
 [provides.operations."people.delete_contact".input_schema]
 type = "object"
 required = ["resource_name"]

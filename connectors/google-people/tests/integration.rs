@@ -5,6 +5,7 @@
 
 #![allow(clippy::too_many_lines)]
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use fcp_async_core::AsyncError;
@@ -22,6 +23,17 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TEST_TOKEN: &str = "ya29.google-people-test-token";
 const AUTH_HEADER_VALUE: &str = "Bearer ya29.google-people-test-token";
+const PEOPLE_OPERATIONS: &[&str] = &[
+    "people.list_connections",
+    "people.get_person",
+    "people.search_contacts",
+    "people.list_other_contacts",
+    "people.search_directory_people",
+    "people.list_contact_groups",
+    "people.create_contact",
+    "people.update_contact",
+    "people.delete_contact",
+];
 
 fn materialized_test_auth() -> GoogleMaterializedAuth {
     GoogleMaterializedAuth::BearerToken {
@@ -94,6 +106,95 @@ fn manifest_capability_section() -> &'static str {
         .split_once("[provides.operations.")
         .expect("Google People manifest should separate capabilities from operations");
     capability_section
+}
+
+#[test]
+fn manifest_ai_hints_cover_all_operations() {
+    let manifest: toml::Value = toml::from_str(include_str!("../manifest.toml"))
+        .expect("Google People manifest should parse");
+    let operations = manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("Google People manifest should declare operations");
+
+    let expected = PEOPLE_OPERATIONS.iter().copied().collect::<BTreeSet<_>>();
+    let actual = operations
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual, expected,
+        "manifest operation inventory changed; update ai_hints coverage expectations"
+    );
+
+    for &operation_id in PEOPLE_OPERATIONS {
+        let operation = operations
+            .get(operation_id)
+            .and_then(toml::Value::as_table)
+            .expect("operation should be a TOML table");
+        let ai_hints = operation
+            .get("ai_hints")
+            .and_then(toml::Value::as_table)
+            .expect("operation should declare ai_hints");
+
+        let when_to_use = ai_hints
+            .get("when_to_use")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        assert!(
+            !when_to_use.is_empty(),
+            "operation {operation_id} should explain when to use it"
+        );
+
+        let common_mistakes = ai_hints
+            .get("common_mistakes")
+            .and_then(toml::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        assert!(
+            common_mistakes.len() >= 2
+                && common_mistakes
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .all(|mistake| !mistake.trim().is_empty()),
+            "operation {operation_id} should document at least two common mistakes"
+        );
+
+        let examples = ai_hints
+            .get("examples")
+            .and_then(toml::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        assert!(
+            !examples.is_empty(),
+            "operation {operation_id} should include at least one JSON example"
+        );
+        for example in examples {
+            let example_text = example
+                .as_str()
+                .expect("operation example should be a string")
+                .trim();
+            assert!(
+                !example_text.is_empty(),
+                "operation {operation_id} should not contain empty examples"
+            );
+            let parsed_example = serde_json::from_str::<Value>(example_text);
+            assert!(
+                parsed_example.is_ok(),
+                "operation {operation_id} example must be JSON: {parsed_example:?}"
+            );
+
+            let lower = example_text.to_ascii_lowercase();
+            for forbidden in ["api_key", "bearer", "password", "secret", "token"] {
+                assert!(
+                    !lower.contains(forbidden),
+                    "operation {operation_id} example contains secret-shaped text: {forbidden}"
+                );
+            }
+        }
+    }
 }
 
 #[fcp_async_core::runtime::test]
@@ -456,17 +557,7 @@ async fn operation_catalog_manifest_and_redaction_preserve_security_posture() {
         .await
         .expect("introspection should serialize");
     let ids = operation_ids(&introspection);
-    for id in [
-        "people.list_connections",
-        "people.get_person",
-        "people.search_contacts",
-        "people.list_other_contacts",
-        "people.search_directory_people",
-        "people.list_contact_groups",
-        "people.create_contact",
-        "people.update_contact",
-        "people.delete_contact",
-    ] {
+    for &id in PEOPLE_OPERATIONS {
         assert!(ids.contains(&id), "introspection missing operation {id}");
     }
 

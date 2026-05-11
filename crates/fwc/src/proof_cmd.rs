@@ -2298,6 +2298,7 @@ output_schema = {{}}
                     None,
                 ),
             ],
+            agent_readiness_reports: Vec::new(),
         }
     }
 
@@ -2347,6 +2348,7 @@ output_schema = {{}}
                 validation_argv: None,
                 source: source("artifacts/e2e/latency-proof/manifest.json", 1),
             }],
+            agent_readiness_reports: Vec::new(),
         }
     }
 
@@ -2401,6 +2403,7 @@ output_schema = {{}}
                 },
             ],
             evidence_bundles: Vec::new(),
+            agent_readiness_reports: Vec::new(),
         }
     }
 
@@ -3359,6 +3362,7 @@ related = []
                 })
                 .collect(),
             evidence_bundles: Vec::new(),
+            agent_readiness_reports: Vec::new(),
         });
         let manifests = connectors
             .iter()

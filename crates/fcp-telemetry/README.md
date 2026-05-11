@@ -16,6 +16,7 @@ The public boundary is:
 - `shutdown_telemetry()`: best-effort shutdown and flush for OTLP metrics, traces, and logs.
 - `otlp_readiness(&config)`: redaction-safe readiness summary for host/admin surfaces.
 - `init_otlp_*_with_options_and_timeout(...)`: lower-level trace, metric, and log exporter initializers used by focused tests and host integrations.
+- `OtlpRetryPolicy` plus `init_otlp_*_with_options_timeout_and_retry(...)`: explicit bounded retry/backoff for transient collector failures. The default initializer path keeps one-attempt OpenTelemetry SDK behavior unless callers opt into this policy.
 
 ## Feature Flag
 
@@ -76,6 +77,11 @@ Exporter failures map by signal type:
 
 Unavailable collector tests use timeout-bounded initializers and force flushes so operators get bounded failure behavior instead of an unbounded wait.
 
+The OpenTelemetry SDK leaves retry behavior to exporters. `fcp-telemetry`
+therefore exposes an explicit `OtlpRetryPolicy` for transient collector errors
+such as gRPC `Unavailable`, `ResourceExhausted`, and `DeadlineExceeded`; this is
+opt-in so existing one-attempt exporter behavior remains stable.
+
 ## Proof Lanes
 
 The current no-live-credential OTLP proof entrypoint is:
@@ -85,8 +91,9 @@ scripts/e2e/telemetry_otlp_exporter_verification.sh
 ```
 
 It runs the loopback collector fixture, the unavailable-collector fixture, the
-trace/metric/log collector-backpressure fixture, and the slow-collector timeout
-fixture through `rch`.
+trace/metric/log transient-unavailable retry fixture, the trace/metric/log
+collector-backpressure fixture, and the slow-collector timeout fixture through
+`rch`.
 
 Set `FCP_TELEMETRY_OTLP_EVIDENCE=/path/to/evidence.jsonl` to append redaction-safe JSONL evidence. The fixture records command line, git revision, endpoint class, signal type, batch or signal counts, retry decision, dropped count, gRPC status, error mapping, timeout/cancellation checkpoint where applicable, cleanup result, and skip reason.
 
@@ -98,6 +105,9 @@ rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telemetry-otlp \
 
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telemetry-otlp-unavailable \
   cargo test -p fcp-telemetry --test otlp_unavailable_fixture --features otlp -- --nocapture
+
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telemetry-otlp-retry \
+  cargo test -p fcp-telemetry --test otlp_retry_fixture --features otlp -- --nocapture
 
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telemetry-otlp-backpressure \
   cargo test -p fcp-telemetry --test otlp_backpressure_fixture --features otlp -- --nocapture
@@ -121,7 +131,7 @@ rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-fwc-telemetry-readiness \
 This crate provides the OTLP exporter and proof fixtures. Host/fwc admin wiring is still tracked by the OTLP bead and should not be implied complete until an operator can query the host readiness surface and see the same redaction-safe readiness contract.
 
 The current fixtures cover successful trace, metric, and log export,
-unavailable collector mapping, trace/metric/log collector
-backpressure/drop-accounting, and timeout-bounded slow-collector cancellation
-behavior. Remaining closeout work includes broader retry policy and host/admin
-integration evidence.
+unavailable collector mapping, explicit trace/metric/log retry after transient
+collector unavailability, trace/metric/log collector backpressure/drop-accounting,
+and timeout-bounded slow-collector cancellation behavior. Remaining closeout work
+includes host/admin integration evidence.

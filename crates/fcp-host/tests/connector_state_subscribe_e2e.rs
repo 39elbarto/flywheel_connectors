@@ -2,11 +2,17 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::{Duration as ChronoDuration, Utc};
 use fcp_core::{
-    ConnectorId, ConnectorStateAppendOutcome, ConnectorStateChangeKind, ConnectorStateError,
-    ConnectorStateObject, ConnectorStateRoot, ConnectorStateStore, ObjectHeader, ObjectId,
-    ObjectIdKey, Provenance, Signature, ZoneId,
+    CONNECTOR_STATE_APPEND_OPERATION_ID, CONNECTOR_STATE_WRITE_CAPABILITY_ID,
+    CapabilityConstraints, CapabilityToken, CapabilityVerifier, ConnectorId,
+    ConnectorStateAppendOutcome, ConnectorStateChangeKind, ConnectorStateError,
+    ConnectorStateObject, ConnectorStateRoot, ConnectorStateStore,
+    ConnectorStateWriteAuthorization, InstanceId, ObjectHeader, ObjectId, ObjectIdKey, Provenance,
+    Signature, ZoneId, connector_state_resource_uri,
 };
+use fcp_crypto::cose::CapabilityTokenBuilder;
+use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_store::{
     FcpStoreConnectorStateStore, MemoryObjectStore, MemoryObjectStoreConfig, ObjectStore,
 };
@@ -35,6 +41,42 @@ fn connector_id() -> ConnectorId {
 
 fn zone_id() -> ZoneId {
     ZoneId::work()
+}
+
+fn connector_state_authorization() -> ConnectorStateWriteAuthorization {
+    let connector_id = connector_id();
+    let zone_id = zone_id();
+    let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
+    let constraints = CapabilityConstraints {
+        resource_allow: vec![connector_state_resource_uri(&connector_id)],
+        ..Default::default()
+    };
+    let mut constraints_cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut constraints_cbor).unwrap();
+    let now = Utc::now();
+    let token = CapabilityToken::from_raw(
+        CapabilityTokenBuilder::new()
+            .capability_id(CONNECTOR_STATE_WRITE_CAPABILITY_ID)
+            .zone_id(zone_id.as_str())
+            .target_instance(instance_id.as_str())
+            .principal("principal:test")
+            .operations(&[CONNECTOR_STATE_APPEND_OPERATION_ID])
+            .issuer("node:test")
+            .validity(now, now + ChronoDuration::hours(1))
+            .try_constraints_cbor(&constraints_cbor)
+            .unwrap()
+            .sign(&signing_key)
+            .unwrap(),
+    );
+    let verifier = CapabilityVerifier::new(
+        signing_key.verifying_key().to_bytes(),
+        zone_id.clone(),
+        instance_id,
+    );
+
+    ConnectorStateWriteAuthorization::verify_append_token(&verifier, token, &connector_id, &zone_id)
+        .expect("connector-state write token should authorize append")
 }
 
 fn lease_id(seed: u8) -> ObjectId {
@@ -86,9 +128,11 @@ fn append_committed(
     state_obj: ConnectorStateObject,
 ) -> Result<(ObjectId, ObjectId, u64), ConnectorStateError> {
     let connector_id = connector_id();
+    let authorization = connector_state_authorization();
     match block_on(ConnectorStateStore::append_object(
         store,
         &connector_id,
+        &authorization,
         state_obj,
     ))? {
         ConnectorStateAppendOutcome::Committed {

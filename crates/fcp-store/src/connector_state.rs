@@ -18,8 +18,9 @@ use fcp_cbor::{
 use fcp_prelude::{
     ConnectorId, ConnectorStateAppendOutcome, ConnectorStateChange, ConnectorStateChangeKind,
     ConnectorStateChangeStream, ConnectorStateError, ConnectorStateModel, ConnectorStateObject,
-    ConnectorStateRoot, ConnectorStateSnapshot, ConnectorStateStore, InstanceId, ObjectHeader,
-    ObjectId, ObjectIdKey, RetentionClass, StorageMeta, StoredObject, ZoneId,
+    ConnectorStateRoot, ConnectorStateSnapshot, ConnectorStateStore,
+    ConnectorStateWriteAuthorization, InstanceId, ObjectHeader, ObjectId, ObjectIdKey,
+    RetentionClass, StorageMeta, StoredObject, ZoneId,
 };
 use futures_util::stream;
 use semver::Version;
@@ -972,6 +973,35 @@ impl FcpStoreConnectorStateStore {
         })
     }
 
+    fn ensure_write_authorized(
+        &self,
+        connector_id: &ConnectorId,
+        authorization: &ConnectorStateWriteAuthorization,
+    ) -> std::result::Result<(), ConnectorStateError> {
+        self.ensure_requested_connector(connector_id)?;
+        if authorization.connector_id() != connector_id {
+            return Err(ConnectorStateError::AuthorizationDenied {
+                connector_id: connector_id.clone(),
+                reason: format!(
+                    "authorization connector {} does not match append connector {}",
+                    authorization.connector_id(),
+                    connector_id
+                ),
+            });
+        }
+        if authorization.zone_id() != &self.zone_id {
+            return Err(ConnectorStateError::AuthorizationDenied {
+                connector_id: connector_id.clone(),
+                reason: format!(
+                    "authorization zone {} does not match store zone {}",
+                    authorization.zone_id(),
+                    self.zone_id
+                ),
+            });
+        }
+        Ok(())
+    }
+
     fn record_operation_telemetry(
         &self,
         event_type: &'static str,
@@ -1067,9 +1097,10 @@ impl ConnectorStateStore for FcpStoreConnectorStateStore {
     async fn append_object(
         &self,
         connector_id: &ConnectorId,
+        authorization: &ConnectorStateWriteAuthorization,
         object: ConnectorStateObject,
     ) -> std::result::Result<ConnectorStateAppendOutcome, ConnectorStateError> {
-        self.ensure_requested_connector(connector_id)?;
+        self.ensure_write_authorized(connector_id, authorization)?;
         Self::append_object(self, object)
             .await
             .map_err(|err| self.to_connector_state_error(err))

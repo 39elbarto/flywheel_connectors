@@ -19,6 +19,11 @@ use fcp_core::{
     ZoneId, validate_singleton_writer_fencing,
 };
 use semver::Version;
+use sha2::{Digest, Sha256};
+
+const SNAPSHOT_GOLDEN_SEQ_100_SHA256: &str =
+    "dd6fb52043bc2d6bac665a90299c69c0aac69c7b975a45b1345500ade6368950";
+const SNAPSHOT_GOLDEN_SEQ_100_LEN: usize = 404;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Test Helpers
@@ -208,13 +213,18 @@ mod cbor_golden_vectors {
 
         let path =
             connector_state_snapshot_golden_path(&snapshot.connector_id, snapshot.covers_seq);
-        fs::create_dir_all(path.parent().expect("golden vector should have parent"))
-            .expect("golden vector directory should be created");
-        if !path.exists() {
-            fs::write(&path, &cbor).expect("golden vector should be written");
-        }
+        assert!(
+            path.is_file(),
+            "connector-state snapshot golden vector is missing: {}",
+            path.display()
+        );
 
         let stored = fs::read(&path).expect("golden vector should be readable");
+        assert_eq!(stored.len(), SNAPSHOT_GOLDEN_SEQ_100_LEN);
+        assert_eq!(
+            hex::encode(Sha256::digest(&stored)),
+            SNAPSHOT_GOLDEN_SEQ_100_SHA256
+        );
         assert_eq!(
             stored,
             cbor,

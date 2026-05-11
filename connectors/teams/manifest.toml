@@ -329,6 +329,20 @@ type = "object"
 [provides.operations."teams.send_channel_message".output_schema.properties.message_id]
 type = "string"
 
+[provides.operations."teams.send_channel_message".output_schema.properties.target]
+type = "string"
+
+[provides.operations."teams.send_channel_message".output_schema.properties.conversation_id]
+type = "string"
+
+[provides.operations."teams.send_channel_message".output_schema.properties.coordination]
+type = "array"
+description = "Redaction-safe chat thread ownership audit records"
+
+[provides.operations."teams.send_channel_message".output_schema.properties.coordination.items]
+type = "object"
+additionalProperties = true
+
 [provides.operations."teams.send_channel_message".ai_hints]
 when_to_use = "When you need to post a message in a Teams channel."
 common_mistakes = ["Requires ChannelMessage.Send permission.", "HTML content needs content_type set to html."]
@@ -394,6 +408,20 @@ type = "object"
 
 [provides.operations."teams.send_chat_message".output_schema.properties.message_id]
 type = "string"
+
+[provides.operations."teams.send_chat_message".output_schema.properties.target]
+type = "string"
+
+[provides.operations."teams.send_chat_message".output_schema.properties.conversation_id]
+type = "string"
+
+[provides.operations."teams.send_chat_message".output_schema.properties.coordination]
+type = "array"
+description = "Redaction-safe chat thread ownership audit records"
+
+[provides.operations."teams.send_chat_message".output_schema.properties.coordination.items]
+type = "object"
+additionalProperties = true
 
 [provides.operations."teams.send_chat_message".ai_hints]
 when_to_use = "When you need to send a direct or group chat message."
@@ -472,6 +500,17 @@ type = "string"
 
 [provides.operations."teams.send_card".output_schema.properties.target]
 type = "string"
+
+[provides.operations."teams.send_card".output_schema.properties.conversation_id]
+type = "string"
+
+[provides.operations."teams.send_card".output_schema.properties.coordination]
+type = "array"
+description = "Redaction-safe chat thread ownership audit records"
+
+[provides.operations."teams.send_card".output_schema.properties.coordination.items]
+type = "object"
+additionalProperties = true
 
 [provides.operations."teams.send_card".ai_hints]
 when_to_use = "When you need to deliver a rich adaptive card instead of plain text."
@@ -552,6 +591,14 @@ type = "integer"
 
 [provides.operations."teams.reply_message".output_schema.properties.fallback_diagnostic.properties.code]
 type = "string"
+
+[provides.operations."teams.reply_message".output_schema.properties.coordination]
+type = "array"
+description = "Redaction-safe chat thread ownership audit records"
+
+[provides.operations."teams.reply_message".output_schema.properties.coordination.items]
+type = "object"
+additionalProperties = true
 
 [provides.operations."teams.reply_message".ai_hints]
 when_to_use = "When you need to continue an existing Teams thread or quote a chat message."

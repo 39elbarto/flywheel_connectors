@@ -812,6 +812,84 @@ pub enum ConnectorStateError {
     },
 }
 
+/// Storage-backed summary of the current canonical connector-state chain.
+///
+/// This is the payload shape host/operator explain routes can expose when
+/// they are wired to canonical fcp-store state instead of cache markers alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorStateCanonicalStatus {
+    /// Connector represented by this status record.
+    pub connector_id: ConnectorId,
+    /// Optional connector instance represented by the root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<InstanceId>,
+    /// Zone that owns the canonical root, if one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zone_id: Option<ZoneId>,
+    /// State model declared by the canonical root, if one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<ConnectorStateModel>,
+    /// Whether a canonical root currently exists.
+    pub root_present: bool,
+    /// Content-addressed root object id when the store can expose it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_object_id: Option<ObjectId>,
+    /// Current canonical state-object head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_object_id: Option<ObjectId>,
+    /// Last committed canonical sequence number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_canonical_seq: Option<u64>,
+    /// Root schema version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_schema_version: Option<u32>,
+    /// Proven count of mesh replicas for the root object, when symbol
+    /// distribution metadata was supplied by the backing store.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mesh_replica_count: Option<usize>,
+}
+
+impl ConnectorStateCanonicalStatus {
+    /// Build a missing-root status for a connector.
+    #[must_use]
+    pub fn missing(connector_id: ConnectorId) -> Self {
+        Self {
+            connector_id,
+            instance_id: None,
+            zone_id: None,
+            model: None,
+            root_present: false,
+            root_object_id: None,
+            head_object_id: None,
+            last_canonical_seq: None,
+            state_schema_version: None,
+            mesh_replica_count: None,
+        }
+    }
+
+    /// Build a status from a canonical root and optional storage evidence.
+    #[must_use]
+    pub fn from_root(
+        root_object_id: Option<ObjectId>,
+        root: &ConnectorStateRoot,
+        last_canonical_seq: Option<u64>,
+        mesh_replica_count: Option<usize>,
+    ) -> Self {
+        Self {
+            connector_id: root.connector_id.clone(),
+            instance_id: root.instance_id.clone(),
+            zone_id: Some(root.zone_id.clone()),
+            model: Some(root.model.clone()),
+            root_present: true,
+            root_object_id,
+            head_object_id: root.head,
+            last_canonical_seq,
+            state_schema_version: Some(root.state_schema_version),
+            mesh_replica_count,
+        }
+    }
+}
+
 /// Canonical connector-state storage contract.
 #[async_trait::async_trait]
 pub trait ConnectorStateStore: Send + Sync + 'static {
@@ -846,6 +924,38 @@ pub trait ConnectorStateStore: Send + Sync + 'static {
         after_seq: Option<u64>,
         limit: usize,
     ) -> Result<Vec<ConnectorStateObject>, ConnectorStateError>;
+
+    /// Return a storage-backed summary of the current canonical chain.
+    ///
+    /// Store implementations that know root object ids or mesh replica counts
+    /// should override this default. The fallback is intentionally conservative:
+    /// it reports root/head/schema/seq only from the trait read APIs and leaves
+    /// storage-specific fields unset.
+    ///
+    /// # Errors
+    /// Returns [`ConnectorStateError`] if canonical storage cannot be queried.
+    async fn canonical_status(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> Result<ConnectorStateCanonicalStatus, ConnectorStateError> {
+        let Some(root) = self.read_root(connector_id).await? else {
+            return Ok(ConnectorStateCanonicalStatus::missing(connector_id.clone()));
+        };
+        let last_canonical_seq = if root.head.is_some() {
+            self.read_chain(connector_id, None, usize::MAX)
+                .await?
+                .last()
+                .map(|state| state.seq)
+        } else {
+            None
+        };
+        Ok(ConnectorStateCanonicalStatus::from_root(
+            None,
+            &root,
+            last_canonical_seq,
+            None,
+        ))
+    }
 
     /// Emit and return a snapshot for the connector's current head.
     ///
@@ -3355,6 +3465,21 @@ mod tests {
         let store: Box<dyn ConnectorStateStore> = Box::new(EmptyConnectorStateStore);
         let result = fcp_async_core::runtime::block_on_sync(store.read_root(&test_connector_id()));
         assert!(matches!(result, Ok(Ok(None))));
+    }
+
+    #[test]
+    fn connector_state_store_default_canonical_status_reports_missing_root() {
+        let store: Box<dyn ConnectorStateStore> = Box::new(EmptyConnectorStateStore);
+        let result =
+            fcp_async_core::runtime::block_on_sync(store.canonical_status(&test_connector_id()));
+        let status = result.expect("runtime").expect("canonical status");
+
+        assert_eq!(status.connector_id, test_connector_id());
+        assert!(!status.root_present);
+        assert!(status.root_object_id.is_none());
+        assert!(status.head_object_id.is_none());
+        assert!(status.last_canonical_seq.is_none());
+        assert!(status.mesh_replica_count.is_none());
     }
 
     // ─────────────────────────────────────────────────────────────────────────

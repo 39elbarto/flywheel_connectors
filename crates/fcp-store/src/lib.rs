@@ -93,7 +93,7 @@ pub use symbol_store::{
     StoredSymbol, SymbolMeta, SymbolStore, validate_source_symbols,
 };
 
-pub use fcp_prelude::ConnectorStateAppendOutcome;
+pub use fcp_prelude::{ConnectorStateAppendOutcome, ConnectorStateCanonicalStatus};
 
 pub use offline::{
     AccessPatternTracker, OfflineAccess, OfflineCapability, OfflineStatus, OfflineSummary,

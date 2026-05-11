@@ -16,9 +16,9 @@ use fcp_cbor::{
     MAX_DESERIALIZATION_RECURSION_LIMIT, SchemaId, SerializationError,
 };
 use fcp_prelude::{
-    ConnectorId, ConnectorStateAppendOutcome, ConnectorStateChange, ConnectorStateChangeKind,
-    ConnectorStateChangeStream, ConnectorStateError, ConnectorStateModel, ConnectorStateObject,
-    ConnectorStateRoot, ConnectorStateSnapshot, ConnectorStateStore,
+    ConnectorId, ConnectorStateAppendOutcome, ConnectorStateCanonicalStatus, ConnectorStateChange,
+    ConnectorStateChangeKind, ConnectorStateChangeStream, ConnectorStateError, ConnectorStateModel,
+    ConnectorStateObject, ConnectorStateRoot, ConnectorStateSnapshot, ConnectorStateStore,
     ConnectorStateWriteAuthorization, InstanceId, ObjectHeader, ObjectId, ObjectIdKey,
     RetentionClass, StorageMeta, StoredObject, ZoneId,
 };
@@ -28,7 +28,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use crate::{ObjectStore, ObjectStoreError};
+use crate::{ObjectStore, ObjectStoreError, SymbolStore};
 
 /// Marker file name written by host-local connector-state cache directories.
 ///
@@ -450,6 +450,45 @@ impl FcpStoreConnectorStateStore {
         states.retain(|(_object_id, state)| after_seq.is_none_or(|min_seq| state.seq > min_seq));
         states.truncate(limit);
         Ok(states)
+    }
+
+    /// Return canonical root/head/sequence status for operator explain routes.
+    ///
+    /// When a symbol store is supplied, `mesh_replica_count` is derived from
+    /// the root object's symbol distribution. Without that distribution, the
+    /// field remains `None` rather than inventing a replica count from a
+    /// placement policy target.
+    ///
+    /// # Errors
+    /// Returns an error if the canonical root or head cannot be decoded.
+    pub async fn canonical_status(
+        &self,
+        symbol_store: Option<&dyn SymbolStore>,
+    ) -> Result<ConnectorStateCanonicalStatus> {
+        let Some((root_id, root)) = self.read_root().await? else {
+            return Ok(ConnectorStateCanonicalStatus::missing(
+                self.connector_id.clone(),
+            ));
+        };
+
+        let last_canonical_seq = match root.head {
+            Some(head_id) => Some(self.load_state_object(&head_id).await?.1.seq),
+            None => None,
+        };
+        let mesh_replica_count = match symbol_store {
+            Some(symbol_store) => symbol_store
+                .get_distribution(&root_id)
+                .await
+                .map(|distribution| distribution.distinct_nodes()),
+            None => None,
+        };
+
+        Ok(ConnectorStateCanonicalStatus::from_root(
+            Some(root_id),
+            &root,
+            last_canonical_seq,
+            mesh_replica_count,
+        ))
     }
 
     /// Emit a snapshot for the current head, if any.
@@ -1124,6 +1163,16 @@ impl ConnectorStateStore for FcpStoreConnectorStateStore {
             .map_err(|err| self.to_connector_state_error(err))
     }
 
+    async fn canonical_status(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> std::result::Result<ConnectorStateCanonicalStatus, ConnectorStateError> {
+        self.ensure_requested_connector(connector_id)?;
+        FcpStoreConnectorStateStore::canonical_status(self, None)
+            .await
+            .map_err(|err| self.to_connector_state_error(err))
+    }
+
     async fn snapshot(
         &self,
         connector_id: &ConnectorId,
@@ -1249,11 +1298,21 @@ fn headers_match(left: &ObjectHeader, right: &ObjectHeader) -> Result<bool> {
 mod tests {
     use std::panic::{self, AssertUnwindSafe};
 
-    use fcp_prelude::{Provenance, Signature};
+    use bytes::Bytes;
+    use chrono::Duration;
+    use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+    use fcp_prelude::{
+        CONNECTOR_STATE_APPEND_OPERATION_ID, CONNECTOR_STATE_WRITE_CAPABILITY_ID,
+        CapabilityConstraints, CapabilityToken, CapabilityVerifier, Provenance, Signature,
+        connector_state_resource_uri,
+    };
     use futures_util::StreamExt;
 
     use super::*;
-    use crate::{MemoryObjectStore, MemoryObjectStoreConfig};
+    use crate::{
+        MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
+        ObjectSymbolMeta, ObjectTransmissionInfo, StoredSymbol, SymbolMeta,
+    };
 
     fn run_async<F, T>(future: F) -> T
     where
@@ -1264,6 +1323,10 @@ mod tests {
 
     fn store() -> Arc<MemoryObjectStore> {
         Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()))
+    }
+
+    fn symbol_store() -> MemorySymbolStore {
+        MemorySymbolStore::new(MemorySymbolStoreConfig::default())
     }
 
     fn object_id_key() -> ObjectIdKey {
@@ -1292,6 +1355,52 @@ mod tests {
 
     fn test_store(object_store: Arc<dyn ObjectStore>) -> FcpStoreConnectorStateStore {
         FcpStoreConnectorStateStore::new(object_store, object_id_key(), connector_id(), zone_id())
+    }
+
+    fn capability_constraints_cbor(resource_allow: Vec<String>) -> Vec<u8> {
+        let constraints = CapabilityConstraints {
+            resource_allow,
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).unwrap();
+        cbor
+    }
+
+    fn write_authorization() -> ConnectorStateWriteAuthorization {
+        let connector_id = connector_id();
+        let zone_id = zone_id();
+        let instance_id = InstanceId::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let now = fcp_prelude::Utc::now();
+        let token = CapabilityToken::from_raw(
+            CapabilityTokenBuilder::new()
+                .capability_id(CONNECTOR_STATE_WRITE_CAPABILITY_ID)
+                .zone_id(zone_id.as_str())
+                .target_instance(instance_id.as_str())
+                .principal("principal:test")
+                .operations(&[CONNECTOR_STATE_APPEND_OPERATION_ID])
+                .issuer("node:test")
+                .validity(now, now + Duration::hours(1))
+                .try_constraints_cbor(&capability_constraints_cbor(vec![
+                    connector_state_resource_uri(&connector_id),
+                ]))
+                .unwrap()
+                .sign(&signing_key)
+                .unwrap(),
+        );
+        let verifier = CapabilityVerifier::new(
+            signing_key.verifying_key().to_bytes(),
+            zone_id.clone(),
+            instance_id,
+        );
+        ConnectorStateWriteAuthorization::verify_append_token(
+            &verifier,
+            token,
+            &connector_id,
+            &zone_id,
+        )
+        .unwrap()
     }
 
     fn header(schema: SchemaId, created_at: u64, lease: Option<ObjectId>) -> ObjectHeader {
@@ -1365,6 +1474,38 @@ mod tests {
         }
     }
 
+    fn store_root_symbols(symbol_store: &MemorySymbolStore, root_id: ObjectId) {
+        let meta = ObjectSymbolMeta {
+            object_id: root_id,
+            zone_id: zone_id(),
+            oti: ObjectTransmissionInfo {
+                transfer_length: 8,
+                symbol_size: 4,
+                source_blocks: 1,
+                sub_blocks: 1,
+                alignment: 4,
+                payload_hash: None,
+            },
+            source_symbols: 2,
+            first_symbol_at: 1_700_000_000,
+        };
+        run_async(symbol_store.put_object_meta(meta)).unwrap();
+
+        for (esi, source_node) in [(0, 10), (1, 20)] {
+            run_async(symbol_store.put_symbol(StoredSymbol {
+                meta: SymbolMeta {
+                    object_id: root_id,
+                    esi,
+                    zone_id: zone_id(),
+                    source_node: Some(source_node),
+                    stored_at: 1_700_000_001 + u64::from(esi),
+                },
+                data: Bytes::from_static(b"root"),
+            }))
+            .unwrap();
+        }
+    }
+
     fn catches_unwind<F: FnOnce() + panic::UnwindSafe>(f: F) {
         let result = panic::catch_unwind(AssertUnwindSafe(f));
         assert!(result.is_err());
@@ -1430,6 +1571,19 @@ mod tests {
     fn read_root_empty_store_returns_none() {
         let state_store = test_store(store());
         assert!(run_async(state_store.read_root()).unwrap().is_none());
+    }
+
+    #[test]
+    fn canonical_status_empty_store_reports_missing_root() {
+        let state_store = test_store(store());
+        let status = run_async(state_store.canonical_status(None)).unwrap();
+
+        assert_eq!(status.connector_id, connector_id());
+        assert!(!status.root_present);
+        assert!(status.root_object_id.is_none());
+        assert!(status.head_object_id.is_none());
+        assert!(status.last_canonical_seq.is_none());
+        assert!(status.mesh_replica_count.is_none());
     }
 
     #[test]
@@ -1506,6 +1660,59 @@ mod tests {
         let (head1, _) = append_ok(&state_store, state(1, Some(head0), lease_id(2)));
         let root = run_async(state_store.read_root()).unwrap().unwrap().1;
         assert_eq!(root.head, Some(head1));
+    }
+
+    #[test]
+    fn canonical_status_reports_root_head_and_sequence() {
+        let state_store = test_store(store());
+        let (head0, _) = append_ok(&state_store, state(0, None, lease_id(1)));
+        let outcome =
+            run_async(state_store.append_object(state(1, Some(head0), lease_id(2)))).unwrap();
+        let (head1, root1, seq1) = match outcome {
+            ConnectorStateAppendOutcome::Committed {
+                object_id,
+                root_object_id,
+                seq,
+                ..
+            } => (object_id, root_object_id, seq),
+            ConnectorStateAppendOutcome::Conflict { .. } => panic!("unexpected conflict"),
+        };
+
+        let status = run_async(state_store.canonical_status(None)).unwrap();
+
+        assert!(status.root_present);
+        assert_eq!(status.connector_id, connector_id());
+        assert_eq!(status.zone_id, Some(zone_id()));
+        assert_eq!(status.model, Some(ConnectorStateModel::SingletonWriter));
+        assert_eq!(status.root_object_id, Some(root1));
+        assert_eq!(status.head_object_id, Some(head1));
+        assert_eq!(status.last_canonical_seq, Some(seq1));
+        assert_eq!(status.state_schema_version, Some(1));
+        assert_eq!(status.mesh_replica_count, None);
+    }
+
+    #[test]
+    fn canonical_status_reports_proven_root_replica_count_from_symbols() {
+        let state_store = test_store(store());
+        let symbol_store = symbol_store();
+        let outcome = run_async(state_store.append_object(state(0, None, lease_id(1)))).unwrap();
+        let (head, root, seq) = match outcome {
+            ConnectorStateAppendOutcome::Committed {
+                object_id,
+                root_object_id,
+                seq,
+                ..
+            } => (object_id, root_object_id, seq),
+            ConnectorStateAppendOutcome::Conflict { .. } => panic!("unexpected conflict"),
+        };
+        store_root_symbols(&symbol_store, root);
+
+        let status = run_async(state_store.canonical_status(Some(&symbol_store))).unwrap();
+
+        assert_eq!(status.root_object_id, Some(root));
+        assert_eq!(status.head_object_id, Some(head));
+        assert_eq!(status.last_canonical_seq, Some(seq));
+        assert_eq!(status.mesh_replica_count, Some(2));
     }
 
     #[test]
@@ -1644,6 +1851,7 @@ mod tests {
             <FcpStoreConnectorStateStore as ConnectorStateStore>::append_object(
                 &state_store,
                 &connector_id(),
+                &write_authorization(),
                 incoming,
             ),
         )
@@ -1663,6 +1871,7 @@ mod tests {
             <FcpStoreConnectorStateStore as ConnectorStateStore>::append_object(
                 &state_store,
                 &connector_id(),
+                &write_authorization(),
                 state(0, None, lease_id(1)),
             ),
         )

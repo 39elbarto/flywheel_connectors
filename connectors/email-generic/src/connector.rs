@@ -78,7 +78,7 @@ impl EmailGenericConnector {
         json!({
             "status": "deferred",
             "streaming": false,
-            "reason": "supervised inbound polling/event fan-out is tracked by flywheel_connectors-4kw5f.4.2",
+            "reason": "bounded IMAP RFC822 poll-once parsing is available; supervised event fan-out is still tracked by flywheel_connectors-4kw5f.4.2",
             "pre_emission_policy": {
                 "sender_allowlist": true,
                 "automated_sender_suppression": true,
@@ -292,7 +292,7 @@ impl EmailGenericConnector {
                 name: "inbound_monitor".into(),
                 passed: false,
                 message:
-                    "Supervised poller is deferred; pre-emission sender, UID, body, attachment, and thread guardrails are available"
+                    "Bounded IMAP RFC822 poll-once parsing is available; supervised event fan-out remains deferred"
                         .into(),
                 critical: false,
             });

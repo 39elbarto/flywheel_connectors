@@ -28,6 +28,7 @@ fcp-sdk = { path = "../../crates/fcp-sdk" }
 anyhow.workspace = true
 async-trait.workspace = true
 lettre = { version = "0.11.19", default-features = false, features = ["builder", "smtp-transport", "pool", "native-tls", "hostname"] }
+mailparse = "0.16.1"
 native-tls = "0.2.18"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

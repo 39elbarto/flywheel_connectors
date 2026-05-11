@@ -7,11 +7,16 @@ use std::time::Duration;
 use lettre::message::Mailbox;
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{Message, SmtpTransport, Transport};
+use mailparse::{DispositionType, MailHeaderMap, ParsedMail};
 use native_tls::{TlsConnector, TlsStream};
 use serde_json::{Value, json};
 
 use crate::error::{EmailGenericError, EmailGenericResult};
-use crate::types::EmailGenericConfig;
+use crate::types::{
+    EmailAttachmentCandidate, EmailGenericConfig, EmailInboundMessage, EmailSeenUidCache,
+};
+
+const MAX_IMAP_LITERAL_BYTES: usize = 1_048_576;
 
 enum ImapStream {
     Plain(TcpStream),
@@ -126,6 +131,61 @@ impl EmailGenericClient {
         Ok(lines)
     }
 
+    fn run_imap_fetch_literal(
+        reader: &mut BufReader<ImapStream>,
+        tag: &str,
+        command: &str,
+    ) -> EmailGenericResult<Vec<u8>> {
+        reader
+            .get_mut()
+            .write_all(format!("{tag} {command}\r\n").as_bytes())?;
+        reader.get_mut().flush()?;
+        let mut literal = None;
+        loop {
+            let line = Self::read_line(reader)?;
+            if line.is_empty() {
+                return Err(EmailGenericError::Imap(
+                    "Unexpected EOF from IMAP server".into(),
+                ));
+            }
+            let trimmed = line.trim_end();
+            if let Some(len) = Self::parse_imap_literal_len(trimmed)? {
+                if len > MAX_IMAP_LITERAL_BYTES {
+                    return Err(EmailGenericError::Imap(format!(
+                        "IMAP FETCH literal exceeds {MAX_IMAP_LITERAL_BYTES} byte limit"
+                    )));
+                }
+                let mut body = vec![0_u8; len];
+                reader.read_exact(&mut body)?;
+                literal = Some(body);
+                continue;
+            }
+            if trimmed.starts_with(&format!("{tag} ")) {
+                if !trimmed.contains(" OK") {
+                    return Err(EmailGenericError::Imap(trimmed.to_owned()));
+                }
+                return literal.ok_or_else(|| {
+                    EmailGenericError::Imap("IMAP FETCH did not include an RFC822 literal".into())
+                });
+            }
+        }
+    }
+
+    fn parse_imap_literal_len(line: &str) -> EmailGenericResult<Option<usize>> {
+        let Some(start) = line.rfind('{') else {
+            return Ok(None);
+        };
+        if !line.ends_with('}') {
+            return Ok(None);
+        }
+        line[start + 1..line.len() - 1]
+            .parse::<usize>()
+            .map(Some)
+            .map_err(|error| {
+                EmailGenericError::Imap(format!("Invalid IMAP literal length: {error}"))
+            })
+    }
+
     fn imap_login_and_read<F, T>(&self, f: F) -> EmailGenericResult<T>
     where
         F: FnOnce(&mut BufReader<ImapStream>) -> EmailGenericResult<T>,
@@ -220,6 +280,161 @@ impl EmailGenericClient {
                 "uids": Self::parse_search_uids(&lines),
             }))
         })
+    }
+
+    pub fn fetch_unseen_inbound_messages(
+        &self,
+        mailbox: &str,
+        seen_uids: &mut EmailSeenUidCache,
+    ) -> EmailGenericResult<Vec<EmailInboundMessage>> {
+        if mailbox.trim().is_empty() {
+            return Err(EmailGenericError::Config(
+                "mailbox must not be empty".into(),
+            ));
+        }
+        self.imap_login_and_read(|reader| {
+            let select = format!("SELECT {}", Self::quote_imap(mailbox));
+            let select_lines = Self::run_imap_command(reader, "a2", &select)?;
+            if !select_lines.last().is_some_and(|line| line.contains(" OK")) {
+                return Err(EmailGenericError::Imap(select_lines.join("\n")));
+            }
+            let search_lines = Self::run_imap_command(reader, "a3", "UID SEARCH UNSEEN")?;
+            if !search_lines.last().is_some_and(|line| line.contains(" OK")) {
+                return Err(EmailGenericError::Imap(search_lines.join("\n")));
+            }
+
+            let mut messages = Vec::new();
+            for uid in Self::parse_search_uids(&search_lines) {
+                let uid = uid.to_string();
+                if seen_uids.contains(&uid) {
+                    continue;
+                }
+                let fetch = format!("UID FETCH {uid} (RFC822)");
+                let raw = Self::run_imap_fetch_literal(reader, &format!("f{uid}"), &fetch)?;
+                let message = Self::parse_inbound_message(uid.clone(), &raw)?;
+                seen_uids.observe(uid);
+                messages.push(message);
+            }
+            Ok(messages)
+        })
+    }
+
+    pub fn parse_inbound_message(
+        uid: impl Into<String>,
+        raw: &[u8],
+    ) -> EmailGenericResult<EmailInboundMessage> {
+        let parsed = mailparse::parse_mail(raw).map_err(|error| Self::mail_parse_error(&error))?;
+        let sender = parsed
+            .headers
+            .get_first_value("From")
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| EmailGenericError::Imap("RFC822 message is missing From".into()))?;
+        let headers = parsed
+            .headers
+            .iter()
+            .map(|header| (header.get_key(), header.get_value()))
+            .collect::<Vec<_>>();
+        Ok(EmailInboundMessage {
+            uid: uid.into(),
+            sender,
+            headers,
+            subject: parsed
+                .headers
+                .get_first_value("Subject")
+                .unwrap_or_default(),
+            body: Self::extract_text_body(&parsed)?,
+            message_id: parsed.headers.get_first_value("Message-ID"),
+            in_reply_to: parsed.headers.get_first_value("In-Reply-To"),
+            references: parsed.headers.get_first_value("References"),
+            attachments: Self::extract_attachments(&parsed)?,
+        })
+    }
+
+    fn mail_parse_error(error: &mailparse::MailParseError) -> EmailGenericError {
+        EmailGenericError::Imap(format!("Failed to parse RFC822 message: {error}"))
+    }
+
+    fn extract_text_body(parsed: &ParsedMail<'_>) -> EmailGenericResult<String> {
+        if let Some(body) = Self::find_body_part(parsed, "text/plain")? {
+            return Ok(body);
+        }
+        if let Some(body) = Self::find_body_part(parsed, "text/html")? {
+            return Ok(Self::strip_html_tags(&body));
+        }
+        Ok(String::new())
+    }
+
+    fn find_body_part(
+        part: &ParsedMail<'_>,
+        media_type: &str,
+    ) -> EmailGenericResult<Option<String>> {
+        if part.subparts.is_empty()
+            && part.ctype.mimetype.eq_ignore_ascii_case(media_type)
+            && Self::part_filename(part).is_none()
+            && !matches!(
+                part.get_content_disposition().disposition,
+                DispositionType::Attachment
+            )
+        {
+            return part
+                .get_body()
+                .map(Some)
+                .map_err(|error| Self::mail_parse_error(&error));
+        }
+        for subpart in &part.subparts {
+            if let Some(body) = Self::find_body_part(subpart, media_type)? {
+                return Ok(Some(body));
+            }
+        }
+        Ok(None)
+    }
+
+    fn extract_attachments(
+        parsed: &ParsedMail<'_>,
+    ) -> EmailGenericResult<Vec<EmailAttachmentCandidate>> {
+        let mut attachments = Vec::new();
+        for part in parsed.parts() {
+            let Some(filename) = Self::part_filename(part) else {
+                continue;
+            };
+            let size_bytes = part
+                .get_body_raw()
+                .map_err(|error| Self::mail_parse_error(&error))?
+                .len();
+            attachments.push(EmailAttachmentCandidate {
+                filename,
+                media_type: part.ctype.mimetype.clone(),
+                size_bytes,
+            });
+        }
+        Ok(attachments)
+    }
+
+    fn part_filename(part: &ParsedMail<'_>) -> Option<String> {
+        let disposition = part.get_content_disposition();
+        disposition
+            .params
+            .get("filename")
+            .or_else(|| part.ctype.params.get("name"))
+            .filter(|value| !value.trim().is_empty())
+            .cloned()
+    }
+
+    fn strip_html_tags(html: &str) -> String {
+        let mut text = String::new();
+        let mut in_tag = false;
+        for ch in html.chars() {
+            match ch {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                _ if !in_tag => text.push(ch),
+                _ => {}
+            }
+        }
+        text.replace("&nbsp;", " ")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
     }
 
     pub fn send_message(
@@ -330,5 +545,72 @@ mod tests {
             EmailGenericClient::quote_imap("ab\\\"cd"),
             "\"ab\\\\\\\"cd\""
         );
+    }
+
+    #[test]
+    fn parse_imap_literal_len_accepts_fetch_literal_marker() {
+        assert_eq!(
+            EmailGenericClient::parse_imap_literal_len("* 1 FETCH (RFC822 {42}").unwrap(),
+            Some(42)
+        );
+        assert_eq!(
+            EmailGenericClient::parse_imap_literal_len("* SEARCH 2 5 8").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_inbound_message_extracts_headers_body_and_attachment_metadata() {
+        let raw = concat!(
+            "From: Human <human@example.com>\r\n",
+            "Subject: =?utf-8?Q?Deploy_ready?=\r\n",
+            "Message-ID: <msg-1@example.com>\r\n",
+            "In-Reply-To: <parent@example.com>\r\n",
+            "References: <root@example.com> <parent@example.com>\r\n",
+            "Content-Type: multipart/mixed; boundary=\"b\"\r\n",
+            "\r\n",
+            "--b\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "green\r\n",
+            "--b\r\n",
+            "Content-Type: application/pdf; name=\"plan.pdf\"\r\n",
+            "Content-Disposition: attachment; filename=\"plan.pdf\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "\r\n",
+            "cGxhbg==\r\n",
+            "--b--\r\n",
+        );
+        let message = EmailGenericClient::parse_inbound_message("99", raw.as_bytes()).unwrap();
+        assert_eq!(message.uid, "99");
+        assert_eq!(message.sender, "Human <human@example.com>");
+        assert_eq!(message.subject, "Deploy ready");
+        assert_eq!(message.body.trim(), "green");
+        assert_eq!(message.message_id.as_deref(), Some("<msg-1@example.com>"));
+        assert_eq!(message.attachments.len(), 1);
+        assert_eq!(message.attachments[0].filename, "plan.pdf");
+        assert_eq!(message.attachments[0].media_type, "application/pdf");
+        assert_eq!(message.attachments[0].size_bytes, 4);
+    }
+
+    #[test]
+    fn parse_inbound_message_prefers_plain_text_over_html() {
+        let raw = concat!(
+            "From: human@example.com\r\n",
+            "Subject: Body choice\r\n",
+            "Content-Type: multipart/alternative; boundary=\"alt\"\r\n",
+            "\r\n",
+            "--alt\r\n",
+            "Content-Type: text/html; charset=utf-8\r\n",
+            "\r\n",
+            "<p>html</p>\r\n",
+            "--alt\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "plain\r\n",
+            "--alt--\r\n",
+        );
+        let message = EmailGenericClient::parse_inbound_message("7", raw.as_bytes()).unwrap();
+        assert_eq!(message.body.trim(), "plain");
     }
 }

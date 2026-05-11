@@ -5,6 +5,7 @@
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: none tracked; use the commands below
 > **Primary upstream**: https://docs.anthropic.com/
+> **Claude Code auth docs cited**: https://code.claude.com/docs/en/authentication and https://code.claude.com/docs/en/settings
 
 ## Purpose
 
@@ -27,6 +28,9 @@ The current crate exposes these operations:
 Important runtime truths the contract preserves:
 
 - Configuration accepts exactly one auth method: `api_key`, `auth_token`, `bearer_token`, `claude_code_oauth_token`, `oauth_token`, `setup_token`, or `credential_id`.
+- This connector intentionally does not implement Claude Code's own credential-precedence chain. Connector configuration is stricter: choose one FCP auth source per configured instance.
+- Current Claude Code precedence puts cloud-provider env auth first, then `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `apiKeyHelper`, `CLAUDE_CODE_OAUTH_TOKEN`, and finally subscription OAuth from `/login`.
+- `claude setup-token` prints a one-year OAuth token for `CLAUDE_CODE_OAUTH_TOKEN`; the connector can reject unsafe direct API use and report its lifetime boundary, but it cannot mint, persist, or refresh that token.
 - `credential_id` must parse as a UUID and requires host-side egress credential injection for live traffic.
 - API-key mode sends `x-api-key`.
 - Bearer-token mode sends `Authorization: Bearer ...` for provider-mediated or gateway deployments.
@@ -113,7 +117,7 @@ The first Anthropic README slice documents the existing runtime surface:
 | `anthropic.message.stream` | `POST /v1/messages` with SSE | `anthropic.message.stream` | `Safe` | `Medium` | `None` | Stream output depends on event ordering, content-block deltas, and provider stop metadata. |
 | `anthropic.get_usage` | Local counters | `anthropic.get_usage` | `Safe` | `Low` | `Strict` | Read-only local accounting for this connector instance. |
 | `anthropic.auth.list_methods` | Local metadata | `anthropic.auth` | `Safe` | `Low` | `Strict` | Read-only auth capability discovery. |
-| `anthropic.auth.refresh_oauth` | Local metadata | `anthropic.auth` | `Safe` | `Low` | `Strict` | Reports whether the active auth mode is host-refreshable. |
+| `anthropic.auth.refresh_oauth` | Local metadata | `anthropic.auth` | `Safe` | `Low` | `Strict` | Reports that Claude Code OAuth/setup-token credentials are not connector-refreshable and must be rotated outside the connector. |
 | `anthropic.models.normalize` | Local normalization | `anthropic.models` | `Safe` | `Low` | `Strict` | Deterministic alias-to-model mapping. |
 
 ## Explicit Non-Goals
@@ -125,6 +129,7 @@ The current implementation does not include:
 - FCP subscription-based streaming
 - direct credential vaulting or OAuth refresh
 - direct use of Claude Code subscription/setup tokens against `https://api.anthropic.com`
+- connector-local minting, storage, or refresh of `claude setup-token` output
 - public-zone invocation
 - connector-local storage of prompts, thinking traces, streamed deltas, or tool inputs
 - automatic 1M-context beta header injection for retired beta paths
@@ -172,6 +177,7 @@ The deterministic integration evidence is anchored on WireMock and connector-loc
 - `connectors/anthropic/tests/v3_lifecycle.rs` checks lifecycle expectations.
 - `connectors/anthropic/tests/integration.rs` covers deterministic loopback and error behavior.
 - `connectors/anthropic/tests/live_verification.rs` emits live skip/pass results when `ANTHROPIC_API_KEY` is absent or present.
+- Claude Code authentication docs define the current CLI auth precedence and setup-token semantics; this connector keeps those credentials out of direct `api.anthropic.com` calls unless a host-managed or loopback boundary is explicitly configured.
 
 ## Verification Bundle
 
@@ -209,6 +215,7 @@ The verification surface captures:
 - If `health` reports `not_configured`, configure with exactly one auth method and then run handshake.
 - If `self_check` reports `credential_injection_required`, run behind the host egress injection layer or switch to a direct live-test key.
 - If `claude_code_oauth_token`, `oauth_token`, or `setup_token` is rejected against the default API origin, use `api_key` or `credential_id` for direct Anthropic API calls, or route the Claude Code credential through a host-managed Claude CLI/provider boundary.
+- If `anthropic.auth.refresh_oauth` reports `refreshable=false`, rerun `claude setup-token` or rotate the host-managed credential outside the connector, then reconfigure with the new token.
 - If base URL validation fails, use `https://api.anthropic.com` or a localhost origin for tests.
 - If a model is rejected, run `anthropic.models.normalize` or choose one of the supported canonical IDs.
 - If `enable_1m_context` fails, switch to `claude-opus-4-7`, `claude-opus-4-6`, or `claude-sonnet-4-6`.

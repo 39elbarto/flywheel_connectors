@@ -1711,7 +1711,7 @@ mod tests {
         let no_cache_cost = no_cache_usage.calculate_cost(Model::ClaudeSonnet4);
         // With cache reads, the overall cost should be lower than without (cache reads are 90% cheaper)
         // but cache writes are 25% more expensive, so the net depends on the ratio
-        assert!(cost != no_cache_cost);
+        assert_ne!(cost, no_cache_cost);
     }
 
     // --- MessagesRequest clone and debug ---

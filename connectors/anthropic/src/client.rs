@@ -53,9 +53,9 @@ pub enum AnthropicAuth {
     ApiKey(String),
     /// Bearer token supplied by an operator or gateway.
     BearerToken(String),
-    /// Claude Code OAuth/setup-token bearer token.
+    /// Long-lived Claude Code OAuth token, typically from `claude setup-token`.
     ClaudeCodeOAuth(String),
-    /// Short-lived setup token from `claude setup-token`.
+    /// Explicit FCP alias for the `claude setup-token` OAuth token output.
     SetupToken(String),
     /// Secretless credential reference (egress proxy injection).
     CredentialId(CredentialId),

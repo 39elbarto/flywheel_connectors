@@ -59,11 +59,14 @@ async fn anthropic_provider_contract_is_advertised() {
                     .with_config_key("bearer_token"),
             )
             .with_auth_method(
-                ProviderAuthMethodContract::new("claude_code_oauth", "Claude Code OAuth token")
-                    .with_config_key("claude_code_oauth_token"),
+                ProviderAuthMethodContract::new(
+                    "claude_code_oauth",
+                    "Claude Code OAuth/setup-token runtime credential",
+                )
+                .with_config_key("claude_code_oauth_token"),
             )
             .with_auth_method(
-                ProviderAuthMethodContract::new("setup_token", "Setup token")
+                ProviderAuthMethodContract::new("setup_token", "claude setup-token OAuth output")
                     .with_config_key("setup_token"),
             )
             .with_auth_method(

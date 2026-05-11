@@ -197,7 +197,7 @@ fn validate_auth_base_url_boundary(auth: &AnthropicAuth, base_url: &str) -> FcpR
         return Err(FcpError::InvalidRequest {
             code: 1003,
             message: concat!(
-                "Claude Code OAuth and setup-token credentials are Claude Code runtime credentials; ",
+                "Claude Code OAuth and setup-token credentials authenticate the Claude Code runtime; ",
                 "do not send them directly to https://api.anthropic.com. Use api_key or ",
                 "credential_id for direct Anthropic API calls, or route Claude Code credentials ",
                 "through a host-managed Claude CLI/provider boundary or localhost verification gateway."
@@ -925,14 +925,20 @@ impl AnthropicConnector {
 
         // Check 6: Credential injection status
         let secretless = config.auth.is_secretless();
+        let credential_message = match &config.auth {
+            AnthropicAuth::CredentialId(_) => "Credential injection required via egress proxy",
+            AnthropicAuth::ApiKey(_) => "Direct Anthropic API key configured",
+            AnthropicAuth::BearerToken(_) => {
+                "Bearer token configured for an approved gateway or provider boundary"
+            }
+            AnthropicAuth::ClaudeCodeOAuth(_) | AnthropicAuth::SetupToken(_) => {
+                "Claude Code OAuth/setup-token configured behind a host-managed or loopback boundary; connector cannot mint or refresh this token"
+            }
+        };
         checks.push(DoctorCheck {
             name: "credential_injection".into(),
             passed: !secretless,
-            message: Some(if secretless {
-                "Credential injection required via egress proxy".into()
-            } else {
-                "Direct API key configured".into()
-            }),
+            message: Some(credential_message.into()),
             critical: false,
         });
 
@@ -1906,7 +1912,8 @@ impl AnthropicConnector {
             ],
             "active_method": active,
             "configured": self.config.is_some(),
-            "oauth_refresh_available": self
+            "oauth_refresh_available": false,
+            "host_managed_claude_code_credential": self
                 .config
                 .as_ref()
                 .is_some_and(|config| config.auth.uses_claude_code_oauth())
@@ -1917,15 +1924,21 @@ impl AnthropicConnector {
         let Some(config) = &self.config else {
             return Err(FcpError::NotConfigured);
         };
-        let refreshable = config.auth.uses_claude_code_oauth();
+        let host_managed = config.auth.uses_claude_code_oauth();
         Ok(json!({
             "auth_method": config.auth.method_name(),
             "refreshed": false,
-            "refreshable": refreshable,
-            "message": if refreshable {
-                "OAuth token refresh is host-managed in this connector; provide a refreshed token via configure."
+            "refreshable": false,
+            "host_managed": host_managed,
+            "expires_after": if host_managed {
+                "one_year_from_generation"
             } else {
-                "Active auth method does not use Claude Code OAuth."
+                "not_applicable"
+            },
+            "message": if host_managed {
+                "Claude Code setup-token output is a long-lived OAuth token; this connector cannot mint, store, or refresh it. Generate or rotate the token outside the connector and reconfigure."
+            } else {
+                "Active auth method does not use Claude Code OAuth/setup-token credentials."
             }
         }))
     }
@@ -2154,7 +2167,7 @@ mod tests {
                 FcpError::InvalidRequest { message, .. } => message,
                 _ => String::new(),
             };
-            assert!(message.contains("Claude Code runtime credentials"));
+            assert!(message.contains("authenticate the Claude Code runtime"));
             assert!(message.contains("https://api.anthropic.com"));
         }
     }
@@ -2172,6 +2185,45 @@ mod tests {
 
         assert_eq!(result["status"], "configured");
         assert_eq!(result["auth_method"], "setup_token");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_refresh_oauth_reports_setup_token_is_not_connector_refreshable() {
+        let mut connector = AnthropicConnector::new();
+        connector
+            .handle_configure(json!({
+                "setup_token": "setup-token",
+                "base_url": "http://127.0.0.1:1"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector.invoke_auth_refresh_oauth().await.unwrap();
+
+        assert_eq!(result["auth_method"], "setup_token");
+        assert_eq!(result["refreshed"], false);
+        assert_eq!(result["refreshable"], false);
+        assert_eq!(result["host_managed"], true);
+        assert_eq!(result["expires_after"], "one_year_from_generation");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_doctor_describes_claude_code_boundary_not_direct_api_key() {
+        let mut connector = AnthropicConnector::new();
+        connector
+            .handle_configure(json!({
+                "claude_code_oauth_token": "oauth-token",
+                "base_url": "http://127.0.0.1:1"
+            }))
+            .await
+            .unwrap();
+
+        let doctor = connector.handle_doctor().await.unwrap();
+        let doctor_text = doctor.to_string();
+
+        assert!(doctor_text.contains("Claude Code OAuth/setup-token configured"));
+        assert!(doctor_text.contains("cannot mint or refresh"));
+        assert!(!doctor_text.contains("Direct API key configured"));
     }
 
     #[fcp_async_core::runtime::test]

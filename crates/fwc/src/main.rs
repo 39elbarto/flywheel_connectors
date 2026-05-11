@@ -94,6 +94,7 @@ mod access_cmd;
 mod agent_coord;
 #[allow(dead_code)] // Agent Mail multi-agent coordination.
 mod agent_mail;
+mod agent_readiness_cmd;
 #[allow(dead_code)] // Audit types used by later CLI commands.
 mod audit;
 #[allow(dead_code)] // Legacy file-based audit-chain verify/timeline support.
@@ -390,6 +391,7 @@ Examples:
   fwc agent announce --agent BronzeValley --connector github --purpose \"triage issue backlog\"
   fwc agent send --from BronzeValley --to GoldenWolf --kind info --payload '{\"bead\":\"flywheel_connectors-qnchs.13.3\"}'
   fwc agent inbox --agent GoldenWolf
+  fwc agent-readiness fixture --agent BronzeValley --out-dir /tmp/fwc-readiness
   fwc auth list
   fwc auth add github --token <token>
   fwc auth status
@@ -502,6 +504,10 @@ enum Commands {
 
     /// Coordinate local multi-agent work through the fwc agent-mail hub.
     Agent(AgentArgs),
+
+    /// Build and replay redaction-safe agent readiness handoff bundles.
+    #[command(name = "agent-readiness", visible_alias = "readiness-handoff")]
+    AgentReadiness(agent_readiness_cmd::AgentReadinessArgs),
 
     /// Compile a natural-language goal into exact primitive fwc steps.
     #[command(visible_alias = "workflow")]
@@ -3659,6 +3665,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Task(args) => task_dispatch(args)?,
         Commands::Session(args) => session_dispatch(args)?,
         Commands::Agent(args) => agent_dispatch(args)?,
+        Commands::AgentReadiness(args) => agent_readiness_dispatch(args)?,
         Commands::Plan(args) => intent_plan_dispatch(&args.request(intent::IntentMode::Plan))?,
         Commands::Explain(args) => {
             intent_explain_dispatch(&args.request(intent::IntentMode::Explain))?
@@ -7531,6 +7538,23 @@ fn swarm_evidence_dispatch(
     })
 }
 
+fn agent_readiness_dispatch(
+    args: &agent_readiness_cmd::AgentReadinessArgs,
+) -> Result<DispatchOutcome> {
+    let result = agent_readiness_cmd::run(args)?;
+    let mut payload = result.payload;
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "agent-readiness");
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: if result.success {
+            CliExitCode::Success
+        } else {
+            CliExitCode::Validation
+        },
+    })
+}
+
 fn proof_dispatch(args: &proof_cmd::ProofArgs) -> Result<DispatchOutcome> {
     let result = proof_cmd::run(args)?;
     let mut payload = result.payload;
@@ -8007,7 +8031,7 @@ fn connector_state_explain_dispatch(
             object.insert(
                 "message".to_owned(),
                 Value::String(format!(
-                    "Explained connector state storage for `{}` from live fcp-host evidence.",
+                    "Explained connector state storage for `{}` from live fcp-host cache-marker evidence.",
                     connector.slug
                 )),
             );
@@ -34265,22 +34289,11 @@ deny_ptrace = true
                         "command": "fcp-host",
                         "subcommand": "connector state explain",
                         "schema_version": "1.0.0",
-                        "source": "host-canonical-state",
+                        "source": "host-cache-markers",
                         "connector_id": "fcp.github:enterprise:v1",
                         "canonical_storage": "mesh",
-                        "last_canonical_seq": 17,
-                        "mesh_replica_count": 2,
-                        "canonical_state": {
-                            "root_present": true,
-                            "connector_id": "fcp.github:enterprise:v1",
-                            "zone_id": "z:work",
-                            "instance_id": Value::Null,
-                            "model": "singleton_writer",
-                            "root_object_id": "sha256:root",
-                            "head_object_id": "sha256:head",
-                            "state_schema_version": 1,
-                            "status_source": "fcp-store",
-                        },
+                        "last_canonical_seq": Value::Null,
+                        "mesh_replica_count": Value::Null,
                         "local_cache_present": true,
                         "local_cache_marker_present": true,
                         "live_host": {
@@ -34320,22 +34333,12 @@ deny_ptrace = true
         assert_eq!(payload["command"], "connector");
         assert_eq!(payload["subcommand"], "state explain");
         assert_eq!(payload["source"], "host-admin-api");
-        assert_eq!(payload["host_payload_source"], "host-canonical-state");
+        assert_eq!(payload["host_payload_source"], "host-cache-markers");
         assert_eq!(
             payload["connector"]["canonical_id"],
             "fcp.github:enterprise:v1"
         );
         assert_eq!(payload["canonical_storage"], "mesh");
-        assert_eq!(payload["last_canonical_seq"], 17);
-        assert_eq!(payload["mesh_replica_count"], 2);
-        assert_eq!(payload["canonical_state"]["root_present"], true);
-        assert_eq!(
-            payload["canonical_state"]["connector_id"],
-            "fcp.github:enterprise:v1"
-        );
-        assert_eq!(payload["canonical_state"]["zone_id"], "z:work");
-        assert_eq!(payload["canonical_state"]["model"], "singleton_writer");
-        assert_eq!(payload["canonical_state"]["status_source"], "fcp-store");
         assert_eq!(payload["live_host"]["route_available"], true);
         assert!(
             payload["live_host"]["endpoint_hash"]
@@ -35137,6 +35140,46 @@ deny_ptrace = true
                 command => panic!("expected swarm evidence explore command, got {command:?}"),
             },
             command => panic!("expected swarm evidence command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_cli_parses_agent_readiness_fixture_command() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "agent-readiness".to_owned(),
+            "fixture".to_owned(),
+            "--agent".to_owned(),
+            "GreenLake".to_owned(),
+            "--run-id".to_owned(),
+            "agent-readiness-test".to_owned(),
+            "--scenario".to_owned(),
+            "agent-mail-unavailable".to_owned(),
+            "--owned-path-glob".to_owned(),
+            "crates/fcp-evidence/**".to_owned(),
+            "--out-dir".to_owned(),
+            "bundle".to_owned(),
+        ])
+        .expect("agent readiness fixture command should parse");
+
+        match prepared.cli.command {
+            Commands::AgentReadiness(args) => match args.command {
+                super::agent_readiness_cmd::AgentReadinessCommand::Fixture(fixture_args) => {
+                    assert_eq!(fixture_args.agent.as_deref(), Some("GreenLake"));
+                    assert_eq!(fixture_args.run_id.as_deref(), Some("agent-readiness-test"));
+                    assert_eq!(
+                        fixture_args.scenario,
+                        super::agent_readiness_cmd::FixtureScenarioArg::AgentMailUnavailable
+                    );
+                    assert_eq!(fixture_args.out_dir, PathBuf::from("bundle"));
+                    assert_eq!(
+                        fixture_args.owned_path_globs,
+                        vec!["crates/fcp-evidence/**".to_owned()]
+                    );
+                }
+                command => panic!("expected agent readiness fixture command, got {command:?}"),
+            },
+            command => panic!("expected agent readiness command, got {command:?}"),
         }
     }
 

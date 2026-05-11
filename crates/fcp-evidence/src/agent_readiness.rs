@@ -1,0 +1,1599 @@
+//! Agent-session readiness evidence schema.
+//!
+//! This module records the state an agent observed before it claims work,
+//! edits files, runs proof lanes, or pushes changes. It is intentionally
+//! evidence-only: probe execution and operator command wiring live outside this
+//! crate, while this crate owns the redaction-safe schema and validation rules.
+
+#![allow(clippy::module_name_repetitions, clippy::struct_excessive_bools)]
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Stable schema for an agent readiness report.
+pub const AGENT_READINESS_REPORT_SCHEMA: &str = "fcp.agent-readiness-report.v1";
+
+/// Stable schema for JSONL events derived from a readiness report.
+pub const AGENT_READINESS_EVENT_SCHEMA: &str = "fcp.agent-readiness-event.v1";
+
+const MAX_KEY_FRAGMENT_LEN: usize = 160;
+
+/// Complete redaction-safe report for a single agent startup or handoff check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentReadinessReport {
+    /// Schema identifier; must be [`AGENT_READINESS_REPORT_SCHEMA`].
+    pub schema: String,
+    /// Stable run id for joining JSONL lines, Beads comments, and artifacts.
+    pub run_id: String,
+    /// Repository path after applying the selected path-redaction policy.
+    pub repo_path: RedactedPath,
+    /// Agent identity or fallback display name.
+    pub agent_name: String,
+    /// Start time as Unix milliseconds.
+    pub started_at_unix_ms: u64,
+    /// Finish time as Unix milliseconds.
+    pub finished_at_unix_ms: u64,
+    /// Policy source, for example `AGENTS.md`.
+    pub policy_source: String,
+    /// Redaction-safe argv that produced the report.
+    pub command_line: Vec<String>,
+    /// Git revision or tree observed at startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_revision_observed: Option<String>,
+    /// Remote `main` revision from `git ls-remote`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_main_sha: Option<String>,
+    /// Remote `master` mirror revision from `git ls-remote`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_master_sha: Option<String>,
+    /// Per-subsystem probe evidence.
+    pub probes: AgentReadinessProbes,
+    /// Final action decision derived from the probes.
+    pub decision: ReadinessDecision,
+    /// Redaction contract applied by the producer.
+    pub redaction: ReadinessRedactionContract,
+    /// Explicit mapping from repo policy to refused actions.
+    pub policy: AgentReadinessPolicyMapping,
+}
+
+impl AgentReadinessReport {
+    /// Validate the report schema, redaction contract, and safety decisions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentReadinessError`] when a field is unsafe, a required
+    /// AGENTS.md guardrail is missing, or a decision contradicts probe state.
+    pub fn validate(&self) -> Result<(), AgentReadinessError> {
+        if self.schema != AGENT_READINESS_REPORT_SCHEMA {
+            return Err(AgentReadinessError::InvalidSchema {
+                expected: AGENT_READINESS_REPORT_SCHEMA,
+                actual: self.schema.clone(),
+            });
+        }
+        validate_key_fragment("run_id", &self.run_id)?;
+        validate_key_fragment("agent_name", &self.agent_name)?;
+        self.repo_path.validate()?;
+        validate_safe_text("policy_source", &self.policy_source)?;
+        if self.command_line.is_empty() {
+            return Err(AgentReadinessError::EmptyCommandLine);
+        }
+        for arg in &self.command_line {
+            validate_safe_text("command_line", arg)?;
+        }
+        if let Some(revision) = &self.git_revision_observed {
+            validate_revision("git_revision_observed", revision)?;
+        }
+        if let Some(revision) = &self.remote_main_sha {
+            validate_revision("remote_main_sha", revision)?;
+        }
+        if let Some(revision) = &self.remote_master_sha {
+            validate_revision("remote_master_sha", revision)?;
+        }
+        if self.finished_at_unix_ms < self.started_at_unix_ms {
+            return Err(AgentReadinessError::InvalidTimeRange);
+        }
+        self.probes.validate()?;
+        self.redaction.validate()?;
+        self.policy.validate()?;
+        self.decision.validate()?;
+        self.validate_policy_decisions()
+    }
+
+    /// Build deterministic JSONL-ready events from the report.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentReadinessError`] when the report is invalid.
+    pub fn to_jsonl_events(&self) -> Result<Vec<AgentReadinessJsonlEvent>, AgentReadinessError> {
+        self.validate()?;
+        let mut events = Vec::new();
+        events.push(AgentReadinessJsonlEvent {
+            schema: AGENT_READINESS_EVENT_SCHEMA.to_owned(),
+            run_id: self.run_id.clone(),
+            event_sequence: 1,
+            event_kind: ReadinessEventKind::ReportSummary,
+            subsystem: ReadinessSubsystem::Decision,
+            status: self.decision.status,
+            reason_code: self.decision.primary_reason_code.clone(),
+            remediation: self.decision.primary_remediation.clone(),
+            evidence_digest: Some(self.record_digest()?),
+            decision_status: self.decision.status,
+        });
+
+        for (subsystem, probe) in self.probes.iter_probe_results() {
+            events.push(AgentReadinessJsonlEvent {
+                schema: AGENT_READINESS_EVENT_SCHEMA.to_owned(),
+                run_id: self.run_id.clone(),
+                event_sequence: u32::try_from(events.len() + 1)
+                    .map_err(|_| AgentReadinessError::TooManyEvents)?,
+                event_kind: ReadinessEventKind::ProbeResult,
+                subsystem,
+                status: probe.status,
+                reason_code: probe.reason_code.clone(),
+                remediation: probe.remediation.clone(),
+                evidence_digest: probe.evidence_digest.clone(),
+                decision_status: self.decision.status,
+            });
+        }
+
+        Ok(events)
+    }
+
+    /// Deterministic digest over the validated report.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentReadinessError`] when validation or serialization fails.
+    pub fn record_digest(&self) -> Result<String, AgentReadinessError> {
+        self.validate_without_digest()?;
+        let bytes = serde_json::to_vec(self)?;
+        Ok(format!(
+            "blake3:{}",
+            hex::encode(blake3::hash(&bytes).as_bytes())
+        ))
+    }
+
+    fn validate_without_digest(&self) -> Result<(), AgentReadinessError> {
+        if self.schema != AGENT_READINESS_REPORT_SCHEMA {
+            return Err(AgentReadinessError::InvalidSchema {
+                expected: AGENT_READINESS_REPORT_SCHEMA,
+                actual: self.schema.clone(),
+            });
+        }
+        validate_key_fragment("run_id", &self.run_id)?;
+        self.repo_path.validate()?;
+        self.probes.validate()?;
+        self.redaction.validate()?;
+        self.policy.validate()?;
+        self.decision.validate()
+    }
+
+    fn validate_policy_decisions(&self) -> Result<(), AgentReadinessError> {
+        if self.probes.agent_mail.repair_actions_attempted {
+            return Err(AgentReadinessError::ForbiddenActionAttempted {
+                action: ForbiddenAgentAction::AgentMailRepairOrRestart,
+            });
+        }
+
+        if !self.probes.rch.cargo_offload_allowed || self.probes.rch.workers_healthy == 0 {
+            self.decision
+                .requires_refusal(ReadinessAction::CargoProof, "rch unavailable")?;
+        }
+        if self.probes.rch.local_cargo_allowed {
+            return Err(AgentReadinessError::PolicyContradiction {
+                field: "rch.local_cargo_allowed",
+                reason: "AGENTS.md requires Cargo proof through rch",
+            });
+        }
+        if self.probes.git.branch_mirror_match == Some(false) {
+            self.decision
+                .requires_refusal(ReadinessAction::Push, "remote branch mirror mismatch")?;
+        }
+        Ok(())
+    }
+}
+
+impl Default for AgentReadinessReport {
+    fn default() -> Self {
+        Self {
+            schema: AGENT_READINESS_REPORT_SCHEMA.to_owned(),
+            run_id: String::new(),
+            repo_path: RedactedPath::default(),
+            agent_name: String::new(),
+            started_at_unix_ms: 0,
+            finished_at_unix_ms: 0,
+            policy_source: String::new(),
+            command_line: Vec::new(),
+            git_revision_observed: None,
+            remote_main_sha: None,
+            remote_master_sha: None,
+            probes: AgentReadinessProbes::default(),
+            decision: ReadinessDecision::default(),
+            redaction: ReadinessRedactionContract::default(),
+            policy: AgentReadinessPolicyMapping::default(),
+        }
+    }
+}
+
+/// A path value annotated with whether it is safe to export.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedactedPath {
+    /// Path value or stable artifact id.
+    pub value: String,
+    /// Export scope for the value.
+    pub scope: PathRedactionScope,
+}
+
+impl RedactedPath {
+    fn validate(&self) -> Result<(), AgentReadinessError> {
+        validate_safe_text("redacted_path.value", &self.value)?;
+        if self.scope == PathRedactionScope::ExportSafe && looks_like_local_user_path(&self.value) {
+            return Err(AgentReadinessError::UnsafeText {
+                field: "redacted_path.value",
+                reason: "export-safe paths must not include local user directories",
+            });
+        }
+        Ok(())
+    }
+}
+
+impl Default for RedactedPath {
+    fn default() -> Self {
+        Self {
+            value: "repo:fcp".to_owned(),
+            scope: PathRedactionScope::ExportSafe,
+        }
+    }
+}
+
+/// Export policy for a path-like value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathRedactionScope {
+    /// Safe for persisted/shared evidence.
+    ExportSafe,
+    /// May contain machine-local detail and must remain local.
+    LocalOnly,
+}
+
+/// Subsystem probe evidence grouped by integration boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentReadinessProbes {
+    /// Agent Mail coordination state.
+    pub agent_mail: AgentMailReadiness,
+    /// Beads database and JSONL state.
+    pub beads: BeadsReadiness,
+    /// Git local/remote state.
+    pub git: GitReadiness,
+    /// Remote proof runner state.
+    pub rch: RchReadiness,
+    /// Filesystem pressure state.
+    pub disk: DiskReadiness,
+    /// Dirty-tree ownership risk.
+    pub worktree: WorktreeReadiness,
+}
+
+impl AgentReadinessProbes {
+    fn validate(&self) -> Result<(), AgentReadinessError> {
+        self.agent_mail.validate()?;
+        self.beads.validate()?;
+        self.git.validate()?;
+        self.rch.validate()?;
+        self.disk.validate()?;
+        self.worktree.validate()
+    }
+
+    fn iter_probe_results(&self) -> Vec<(ReadinessSubsystem, &ProbeResult)> {
+        let mut probes = Vec::new();
+        self.agent_mail.collect_probe_results(&mut probes);
+        self.beads.collect_probe_results(&mut probes);
+        self.git.collect_probe_results(&mut probes);
+        self.rch.collect_probe_results(&mut probes);
+        self.disk.collect_probe_results(&mut probes);
+        self.worktree.collect_probe_results(&mut probes);
+        probes
+    }
+}
+
+/// Common shape for each command or API probe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbeResult {
+    /// Subsystem that produced this result.
+    pub subsystem: ReadinessSubsystem,
+    /// Probe status.
+    pub status: ReadinessStatus,
+    /// Redaction-safe argv or API label.
+    pub command_redacted: Vec<String>,
+    /// Process exit code, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// Duration in milliseconds.
+    pub duration_ms: u64,
+    /// Observation time as Unix milliseconds.
+    pub observed_at_unix_ms: u64,
+    /// Stable reason code for warn/blocked/skipped/error states.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    /// Redaction-safe remediation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+    /// Optional digest over the underlying local artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_digest: Option<String>,
+    /// Whether redaction was applied before persistence.
+    pub redaction_applied: bool,
+}
+
+impl ProbeResult {
+    fn validate(&self) -> Result<(), AgentReadinessError> {
+        if self.command_redacted.is_empty() {
+            return Err(AgentReadinessError::EmptyProbeCommand {
+                subsystem: self.subsystem,
+            });
+        }
+        for arg in &self.command_redacted {
+            validate_safe_text("probe.command_redacted", arg)?;
+        }
+        if let Some(reason_code) = &self.reason_code {
+            validate_key_fragment("probe.reason_code", reason_code)?;
+        }
+        if let Some(remediation) = &self.remediation {
+            validate_safe_text("probe.remediation", remediation)?;
+        }
+        if let Some(digest) = &self.evidence_digest {
+            validate_digest(digest)?;
+        }
+        if !self.redaction_applied {
+            return Err(AgentReadinessError::MissingRedaction {
+                field: "probe.redaction_applied",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Status labels used by readiness probes and final decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessStatus {
+    /// Probe or decision is healthy.
+    Ok,
+    /// Probe or decision is usable with caveats.
+    Warn,
+    /// Probe or decision blocks an action.
+    Blocked,
+    /// Probe was intentionally skipped.
+    Skipped,
+    /// Probe failed unexpectedly.
+    Error,
+}
+
+/// Readiness subsystem labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessSubsystem {
+    /// Agent Mail coordination.
+    AgentMail,
+    /// Beads task tracker.
+    Beads,
+    /// Git local/remote state.
+    Git,
+    /// Remote command runner.
+    Rch,
+    /// Filesystem capacity.
+    Disk,
+    /// Worktree ownership.
+    Worktree,
+    /// Final action decision.
+    Decision,
+}
+
+/// Agent Mail readiness fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentMailReadiness {
+    /// MCP health check result.
+    pub mcp_health: ProbeResult,
+    /// Registration result.
+    pub register_result: ProbeResult,
+    /// Agent listing result.
+    pub list_agents_result: ProbeResult,
+    /// Inbox fetch result.
+    pub inbox_result: ProbeResult,
+    /// Optional direct CLI status fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_cli_status_result: Option<ProbeResult>,
+    /// Optional direct CLI agent-list fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_cli_list_result: Option<ProbeResult>,
+    /// Redaction-safe mailbox lock state.
+    pub mailbox_lock_state: LockState,
+    /// Database open error class, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_open_error_kind: Option<String>,
+    /// Must remain false; agents may not repair or restart Agent Mail.
+    pub repair_actions_attempted: bool,
+}
+
+impl AgentMailReadiness {
+    fn validate(&self) -> Result<(), AgentReadinessError> {
+        for probe in [
+            &self.mcp_health,
+            &self.register_result,
+            &self.list_agents_result,
+            &self.inbox_result,
+        ] {
+            probe.validate()?;
+        }
+        if let Some(probe) = &self.direct_cli_status_result {
+            probe.validate()?;
+        }
+        if let Some(probe) = &self.direct_cli_list_result {
+            probe.validate()?;
+        }
+        if let Some(kind) = &self.db_open_error_kind {
+            validate_key_fragment("agent_mail.db_open_error_kind", kind)?;
+        }
+        Ok(())
+    }
+
+    fn collect_probe_results<'a>(
+        &'a self,
+        probes: &mut Vec<(ReadinessSubsystem, &'a ProbeResult)>,
+    ) {
+        probes.extend([
+            (ReadinessSubsystem::AgentMail, &self.mcp_health),
+            (ReadinessSubsystem::AgentMail, &self.register_result),
+            (ReadinessSubsystem::AgentMail, &self.list_agents_result),
+            (ReadinessSubsystem::AgentMail, &self.inbox_result),
+        ]);
+        if let Some(probe) = &self.direct_cli_status_result {
+            probes.push((ReadinessSubsystem::AgentMail, probe));
+        }
+        if let Some(probe) = &self.direct_cli_list_result {
+            probes.push((ReadinessSubsystem::AgentMail, probe));
+        }
+    }
+}
+
+impl Default for AgentMailReadiness {
+    fn default() -> Self {
+        Self {
+            mcp_health: default_probe(ReadinessSubsystem::AgentMail, "agent-mail.mcp-health"),
+            register_result: default_probe(ReadinessSubsystem::AgentMail, "agent-mail.register"),
+            list_agents_result: default_probe(ReadinessSubsystem::AgentMail, "agent-mail.list"),
+            inbox_result: default_probe(ReadinessSubsystem::AgentMail, "agent-mail.inbox"),
+            direct_cli_status_result: None,
+            direct_cli_list_result: None,
+            mailbox_lock_state: LockState::Unknown,
+            db_open_error_kind: None,
+            repair_actions_attempted: false,
+        }
+    }
+}
+
+/// Beads readiness fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BeadsReadiness {
+    /// Beads DB path class.
+    pub db_path_kind: PathKind,
+    /// Beads JSONL path class.
+    pub jsonl_path_kind: PathKind,
+    /// Import probe result.
+    pub import_status: ProbeResult,
+    /// Write-smoke probe result.
+    pub write_smoke_status: ProbeResult,
+    /// Flush probe result.
+    pub flush_status: ProbeResult,
+    /// SQLite/write lock timeout.
+    pub lock_timeout_ms: u64,
+    /// Current issue count at observation time.
+    pub current_issue_count: usize,
+    /// Infrastructure blocker beads active at observation time.
+    #[serde(default)]
+    pub blocked_infra_bead_ids: BTreeSet<String>,
+}
+
+impl BeadsReadiness {
+    fn validate(&self) -> Result<(), AgentReadinessError> {
+        self.import_status.validate()?;
+        self.write_smoke_status.validate()?;
+        self.flush_status.validate()?;
+        for bead_id in &self.blocked_infra_bead_ids {
+            validate_key_fragment("beads.blocked_infra_bead_ids", bead_id)?;
+        }
+        Ok(())
+    }
+
+    fn collect_probe_results<'a>(
+        &'a self,
+        probes: &mut Vec<(ReadinessSubsystem, &'a ProbeResult)>,
+    ) {
+        probes.extend([
+            (ReadinessSubsystem::Beads, &self.import_status),
+            (ReadinessSubsystem::Beads, &self.write_smoke_status),
+            (ReadinessSubsystem::Beads, &self.flush_status),
+        ]);
+    }
+}
+
+impl Default for BeadsReadiness {
+    fn default() -> Self {
+        Self {
+            db_path_kind: PathKind::RepoLocal,
+            jsonl_path_kind: PathKind::RepoLocal,
+            import_status: default_probe(ReadinessSubsystem::Beads, "br.import"),
+            write_smoke_status: default_probe(ReadinessSubsystem::Beads, "br.write-smoke"),
+            flush_status: default_probe(ReadinessSubsystem::Beads, "br.sync-flush-only"),
+            lock_timeout_ms: 0,
+            current_issue_count: 0,
+            blocked_infra_bead_ids: BTreeSet::new(),
+        }
+    }
+}
+
+/// Path class for local state stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathKind {
+    /// Path lives under the repository.
+    RepoLocal,
+    /// Path lives in external scratch storage.
+    ExternalScratch,
+    /// Path is unknown or unavailable.
+    Unknown,
+}
+
+/// Git readiness fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitReadiness {
+    /// `git ls-remote origin refs/heads/main` result.
+    pub ls_remote_main: ProbeResult,
+    /// `git ls-remote origin refs/heads/master` result.
+    pub ls_remote_master: ProbeResult,
+    /// Whether remote `main` and mirror `master` match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_mirror_match: Option<bool>,
+    /// Local ref write status.
+    pub local_ref_write_status: ProbeResult,
+    /// Object directory class used for writes.
+    pub object_directory_kind: PathKind,
+    /// Optional alternate object directory path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternate_object_directory: Option<RedactedPath>,
+    /// Push probe result.
+    pub push_status: ProbeResult,
+    /// Local tracking-ref error class, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_tracking_ref_error_kind: Option<String>,
+}
+
+impl GitReadiness {
+    fn validate(&self) -> Result<(), AgentReadinessError> {
+        self.ls_remote_main.validate()?;
+        self.ls_remote_master.validate()?;
+        self.local_ref_write_status.validate()?;
+        self.push_status.validate()?;
+        if let Some(path) = &self.alternate_object_directory {
+            path.validate()?;
+        }
+        if let Some(kind) = &self.local_tracking_ref_error_kind {
+            validate_key_fragment("git.local_tracking_ref_error_kind", kind)?;
+        }
+        Ok(())
+    }
+
+    fn collect_probe_results<'a>(
+        &'a self,
+        probes: &mut Vec<(ReadinessSubsystem, &'a ProbeResult)>,
+    ) {
+        probes.extend([
+            (ReadinessSubsystem::Git, &self.ls_remote_main),
+            (ReadinessSubsystem::Git, &self.ls_remote_master),
+            (ReadinessSubsystem::Git, &self.local_ref_write_status),
+            (ReadinessSubsystem::Git, &self.push_status),
+        ]);
+    }
+}
+
+impl Default for GitReadiness {
+    fn default() -> Self {
+        Self {
+            ls_remote_main: default_probe(ReadinessSubsystem::Git, "git.ls-remote-main"),
+            ls_remote_master: default_probe(ReadinessSubsystem::Git, "git.ls-remote-master"),
+            branch_mirror_match: None,
+            local_ref_write_status: default_probe(ReadinessSubsystem::Git, "git.local-ref-write"),
+            object_directory_kind: PathKind::RepoLocal,
+            alternate_object_directory: None,
+            push_status: default_probe(ReadinessSubsystem::Git, "git.push"),
+            local_tracking_ref_error_kind: None,
+        }
+    }
+}
+
+/// Remote command runner readiness fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RchReadiness {
+    /// `rch check --json` result.
+    pub check_result: ProbeResult,
+    /// Whether the daemon was observed running.
+    pub daemon_running: bool,
+    /// Whether the repository hook was installed.
+    pub hook_installed: bool,
+    /// Total configured workers.
+    pub workers_total: usize,
+    /// Healthy workers.
+    pub workers_healthy: usize,
+    /// Unreachable worker names or hashes.
+    #[serde(default)]
+    pub unreachable_workers: BTreeSet<String>,
+    /// Worker pressure telemetry status.
+    pub pressure_telemetry_state: TelemetryState,
+    /// Whether Cargo proof may be offloaded now.
+    pub cargo_offload_allowed: bool,
+    /// Whether local Cargo is allowed by repo policy.
+    pub local_cargo_allowed: bool,
+}
+
+impl RchReadiness {
+    fn validate(&self) -> Result<(), AgentReadinessError> {
+        self.check_result.validate()?;
+        if self.workers_healthy > self.workers_total {
+            return Err(AgentReadinessError::PolicyContradiction {
+                field: "rch.workers_healthy",
+                reason: "healthy workers cannot exceed total workers",
+            });
+        }
+        for worker in &self.unreachable_workers {
+            validate_key_fragment("rch.unreachable_workers", worker)?;
+        }
+        Ok(())
+    }
+
+    fn collect_probe_results<'a>(
+        &'a self,
+        probes: &mut Vec<(ReadinessSubsystem, &'a ProbeResult)>,
+    ) {
+        probes.push((ReadinessSubsystem::Rch, &self.check_result));
+    }
+}
+
+impl Default for RchReadiness {
+    fn default() -> Self {
+        Self {
+            check_result: default_probe(ReadinessSubsystem::Rch, "rch.check"),
+            daemon_running: false,
+            hook_installed: false,
+            workers_total: 0,
+            workers_healthy: 0,
+            unreachable_workers: BTreeSet::new(),
+            pressure_telemetry_state: TelemetryState::Unknown,
+            cargo_offload_allowed: false,
+            local_cargo_allowed: false,
+        }
+    }
+}
+
+/// Worker telemetry state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelemetryState {
+    /// Pressure telemetry is current.
+    Current,
+    /// Telemetry is stale.
+    Stale,
+    /// Telemetry was unavailable.
+    Unavailable,
+    /// State is unknown.
+    Unknown,
+}
+
+/// Filesystem readiness fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskReadiness {
+    /// Disk check probe.
+    pub check_result: ProbeResult,
+    /// Mount summaries.
+    #[serde(default)]
+    pub checked_mounts: Vec<DiskMountState>,
+    /// Whether external scratch storage was available.
+    pub external_scratch_available: bool,
+}
+
+impl DiskReadiness {
+    fn validate(&self) -> Result<(), AgentReadinessError> {
+        self.check_result.validate()?;
+        for mount in &self.checked_mounts {
+            mount.validate()?;
+        }
+        Ok(())
+    }
+
+    fn collect_probe_results<'a>(
+        &'a self,
+        probes: &mut Vec<(ReadinessSubsystem, &'a ProbeResult)>,
+    ) {
+        probes.push((ReadinessSubsystem::Disk, &self.check_result));
+    }
+}
+
+impl Default for DiskReadiness {
+    fn default() -> Self {
+        Self {
+            check_result: default_probe(ReadinessSubsystem::Disk, "df"),
+            checked_mounts: Vec::new(),
+            external_scratch_available: false,
+        }
+    }
+}
+
+/// Capacity state for one filesystem mount.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskMountState {
+    /// Redaction-safe mount label.
+    pub mount_label: String,
+    /// Free bytes.
+    pub free_bytes: u64,
+    /// Capacity percent from the probe.
+    pub capacity_percent: u8,
+    /// Optional inode pressure status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inode_state: Option<String>,
+    /// Threshold state.
+    pub threshold_status: ReadinessStatus,
+}
+
+impl DiskMountState {
+    fn validate(&self) -> Result<(), AgentReadinessError> {
+        validate_key_fragment("disk.mount_label", &self.mount_label)?;
+        if self.capacity_percent > 100 {
+            return Err(AgentReadinessError::PolicyContradiction {
+                field: "disk.capacity_percent",
+                reason: "capacity percent cannot exceed 100",
+            });
+        }
+        if let Some(inode_state) = &self.inode_state {
+            validate_key_fragment("disk.inode_state", inode_state)?;
+        }
+        Ok(())
+    }
+}
+
+/// Worktree readiness fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeReadiness {
+    /// Dirty-tree probe.
+    pub status_result: ProbeResult,
+    /// Dirty path count.
+    pub dirty_count: usize,
+    /// Hashes or redaction-safe ids for dirty paths.
+    #[serde(default)]
+    pub dirty_paths_hashed: BTreeSet<String>,
+    /// Owned path globs for this agent.
+    #[serde(default)]
+    pub owned_path_globs: BTreeSet<String>,
+    /// Whether unrelated dirty changes were present.
+    pub unrelated_dirty_present: bool,
+    /// Whether local refs may be stale relative to remote truth.
+    pub local_ref_staleness_risk: bool,
+}
+
+impl WorktreeReadiness {
+    fn validate(&self) -> Result<(), AgentReadinessError> {
+        self.status_result.validate()?;
+        for path_hash in &self.dirty_paths_hashed {
+            validate_digest(path_hash)?;
+        }
+        for glob in &self.owned_path_globs {
+            validate_relative_glob(glob)?;
+        }
+        Ok(())
+    }
+
+    fn collect_probe_results<'a>(
+        &'a self,
+        probes: &mut Vec<(ReadinessSubsystem, &'a ProbeResult)>,
+    ) {
+        probes.push((ReadinessSubsystem::Worktree, &self.status_result));
+    }
+}
+
+impl Default for WorktreeReadiness {
+    fn default() -> Self {
+        Self {
+            status_result: default_probe(ReadinessSubsystem::Worktree, "git.status"),
+            dirty_count: 0,
+            dirty_paths_hashed: BTreeSet::new(),
+            owned_path_globs: BTreeSet::new(),
+            unrelated_dirty_present: false,
+            local_ref_staleness_risk: false,
+        }
+    }
+}
+
+/// Advisory lock state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LockState {
+    /// No lock conflict observed.
+    Clear,
+    /// Lock was busy.
+    Busy,
+    /// Lock state was unknown.
+    Unknown,
+}
+
+/// Final readiness decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessDecision {
+    /// Overall decision status.
+    pub status: ReadinessStatus,
+    /// Stable primary reason code.
+    pub primary_reason_code: Option<String>,
+    /// Primary remediation.
+    pub primary_remediation: Option<String>,
+    /// Whether this agent can coordinate via Agent Mail.
+    pub can_coordinate: bool,
+    /// Whether this agent can claim Beads.
+    pub can_claim: bool,
+    /// Whether this agent can edit owned files.
+    pub can_edit: bool,
+    /// Whether this agent can run Cargo proof.
+    pub can_run_cargo_proof: bool,
+    /// Whether this agent can push to remote.
+    pub can_push: bool,
+    /// Explicitly allowed actions.
+    #[serde(default)]
+    pub allowed_actions: BTreeSet<ReadinessAction>,
+    /// Explicitly refused actions.
+    #[serde(default)]
+    pub refused_actions: BTreeSet<ReadinessAction>,
+    /// Bead ids for blockers behind the decision.
+    #[serde(default)]
+    pub blocker_bead_ids: BTreeSet<String>,
+}
+
+impl ReadinessDecision {
+    fn validate(&self) -> Result<(), AgentReadinessError> {
+        if let Some(reason_code) = &self.primary_reason_code {
+            validate_key_fragment("decision.primary_reason_code", reason_code)?;
+        }
+        if let Some(remediation) = &self.primary_remediation {
+            validate_safe_text("decision.primary_remediation", remediation)?;
+        }
+        for bead_id in &self.blocker_bead_ids {
+            validate_key_fragment("decision.blocker_bead_ids", bead_id)?;
+        }
+        Ok(())
+    }
+
+    fn requires_refusal(
+        &self,
+        action: ReadinessAction,
+        reason: &'static str,
+    ) -> Result<(), AgentReadinessError> {
+        if self.refused_actions.contains(&action) {
+            Ok(())
+        } else {
+            Err(AgentReadinessError::PolicyContradiction {
+                field: action.field_name(),
+                reason,
+            })
+        }
+    }
+}
+
+impl Default for ReadinessDecision {
+    fn default() -> Self {
+        Self {
+            status: ReadinessStatus::Skipped,
+            primary_reason_code: None,
+            primary_remediation: None,
+            can_coordinate: false,
+            can_claim: false,
+            can_edit: false,
+            can_run_cargo_proof: false,
+            can_push: false,
+            allowed_actions: BTreeSet::new(),
+            refused_actions: BTreeSet::new(),
+            blocker_bead_ids: BTreeSet::new(),
+        }
+    }
+}
+
+/// Actions governed by readiness decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessAction {
+    /// Use Agent Mail for coordination.
+    Coordinate,
+    /// Claim or update Beads.
+    ClaimBead,
+    /// Edit owned files.
+    EditFiles,
+    /// Run Cargo proof.
+    CargoProof,
+    /// Push commits to remote.
+    Push,
+}
+
+impl ReadinessAction {
+    const fn field_name(self) -> &'static str {
+        match self {
+            Self::Coordinate => "decision.can_coordinate",
+            Self::ClaimBead => "decision.can_claim",
+            Self::EditFiles => "decision.can_edit",
+            Self::CargoProof => "decision.can_run_cargo_proof",
+            Self::Push => "decision.can_push",
+        }
+    }
+}
+
+/// Redaction contract applied by the readiness producer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessRedactionContract {
+    /// Contract schema label.
+    pub schema: String,
+    /// Fields that must never be persisted raw.
+    #[serde(default)]
+    pub redacted_classes: BTreeSet<RedactionTarget>,
+    /// Whether bounded redacted stderr/stdout excerpts are allowed.
+    pub bounded_stderr_excerpt_allowed: bool,
+    /// Maximum retained excerpt bytes.
+    pub max_excerpt_bytes: usize,
+    /// Whether local user paths are redacted for export-safe reports.
+    pub local_user_paths_redacted: bool,
+}
+
+impl ReadinessRedactionContract {
+    fn validate(&self) -> Result<(), AgentReadinessError> {
+        validate_key_fragment("redaction.schema", &self.schema)?;
+        for required in REQUIRED_REDACTION_TARGETS {
+            if !self.redacted_classes.contains(&required) {
+                return Err(AgentReadinessError::MissingRedactionTarget { target: required });
+            }
+        }
+        if !self.local_user_paths_redacted {
+            return Err(AgentReadinessError::MissingRedaction {
+                field: "redaction.local_user_paths_redacted",
+            });
+        }
+        Ok(())
+    }
+}
+
+impl Default for ReadinessRedactionContract {
+    fn default() -> Self {
+        Self {
+            schema: "fcp.agent-readiness-redaction.v1".to_owned(),
+            redacted_classes: REQUIRED_REDACTION_TARGETS.into_iter().collect(),
+            bounded_stderr_excerpt_allowed: true,
+            max_excerpt_bytes: 4096,
+            local_user_paths_redacted: true,
+        }
+    }
+}
+
+const REQUIRED_REDACTION_TARGETS: [RedactionTarget; 9] = [
+    RedactionTarget::Token,
+    RedactionTarget::Cookie,
+    RedactionTarget::Authorization,
+    RedactionTarget::ProxyCredential,
+    RedactionTarget::RawEndpoint,
+    RedactionTarget::TargetUrl,
+    RedactionTarget::LocalUserPath,
+    RedactionTarget::MailboxDatabasePath,
+    RedactionTarget::DirtyFilePath,
+];
+
+/// Data classes covered by the readiness redaction policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedactionTarget {
+    /// Tokens and OAuth secrets.
+    Token,
+    /// Cookie values.
+    Cookie,
+    /// Authorization headers.
+    Authorization,
+    /// Proxy credentials.
+    ProxyCredential,
+    /// Raw endpoints.
+    RawEndpoint,
+    /// Target URLs.
+    TargetUrl,
+    /// Local user paths.
+    LocalUserPath,
+    /// Agent Mail mailbox database paths.
+    MailboxDatabasePath,
+    /// Dirty file paths.
+    DirtyFilePath,
+}
+
+/// Explicit repo-policy mapping for forbidden actions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentReadinessPolicyMapping {
+    /// Policy source path or id.
+    pub source: String,
+    /// Forbidden actions from the policy.
+    #[serde(default)]
+    pub forbidden_actions: BTreeSet<ForbiddenAgentAction>,
+    /// Stable refusal rules keyed by rule id.
+    #[serde(default)]
+    pub refusal_rules: BTreeMap<String, String>,
+}
+
+impl AgentReadinessPolicyMapping {
+    fn validate(&self) -> Result<(), AgentReadinessError> {
+        validate_safe_text("policy.source", &self.source)?;
+        for required in REQUIRED_FORBIDDEN_ACTIONS {
+            if !self.forbidden_actions.contains(&required) {
+                return Err(AgentReadinessError::MissingForbiddenAction { action: required });
+            }
+        }
+        for (rule_id, rule) in &self.refusal_rules {
+            validate_key_fragment("policy.refusal_rules.key", rule_id)?;
+            validate_safe_text("policy.refusal_rules.value", rule)?;
+        }
+        Ok(())
+    }
+}
+
+impl Default for AgentReadinessPolicyMapping {
+    fn default() -> Self {
+        let refusal_rules = BTreeMap::from([
+            (
+                "agent-mail-no-repair".to_owned(),
+                "Do not restart, repair, reconstruct, or kill Agent Mail.".to_owned(),
+            ),
+            (
+                "no-file-deletion".to_owned(),
+                "Do not delete files or folders without explicit written approval.".to_owned(),
+            ),
+            (
+                "cargo-through-rch".to_owned(),
+                "Run Cargo build, test, check, and clippy proof through rch.".to_owned(),
+            ),
+            (
+                "remote-ref-truth".to_owned(),
+                "Use git ls-remote for remote branch truth when local refs may be stale."
+                    .to_owned(),
+            ),
+        ]);
+        Self {
+            source: "AGENTS.md".to_owned(),
+            forbidden_actions: REQUIRED_FORBIDDEN_ACTIONS.into_iter().collect(),
+            refusal_rules,
+        }
+    }
+}
+
+const REQUIRED_FORBIDDEN_ACTIONS: [ForbiddenAgentAction; 6] = [
+    ForbiddenAgentAction::AgentMailRepairOrRestart,
+    ForbiddenAgentAction::FileDeletion,
+    ForbiddenAgentAction::DestructiveGitCleanup,
+    ForbiddenAgentAction::LocalCargoWhenRchRequired,
+    ForbiddenAgentAction::TrustStaleLocalRef,
+    ForbiddenAgentAction::FakeLiveProof,
+];
+
+/// Actions the readiness policy must refuse unless explicit operator approval exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForbiddenAgentAction {
+    /// Restart, repair, reconstruct, or kill Agent Mail.
+    AgentMailRepairOrRestart,
+    /// Delete files or directories without explicit approval.
+    FileDeletion,
+    /// Run destructive Git cleanup or reset.
+    DestructiveGitCleanup,
+    /// Run Cargo locally when repo policy requires rch.
+    LocalCargoWhenRchRequired,
+    /// Treat stale local refs as remote truth.
+    TrustStaleLocalRef,
+    /// Treat sync chatter or skipped proof as live proof.
+    FakeLiveProof,
+}
+
+/// JSONL-ready event derived from a readiness report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentReadinessJsonlEvent {
+    /// Schema identifier; must be [`AGENT_READINESS_EVENT_SCHEMA`].
+    pub schema: String,
+    /// Readiness run id.
+    pub run_id: String,
+    /// Stable event sequence.
+    pub event_sequence: u32,
+    /// Event kind.
+    pub event_kind: ReadinessEventKind,
+    /// Subsystem summarized by this event.
+    pub subsystem: ReadinessSubsystem,
+    /// Event status.
+    pub status: ReadinessStatus,
+    /// Stable reason code, if any.
+    pub reason_code: Option<String>,
+    /// Redaction-safe remediation, if any.
+    pub remediation: Option<String>,
+    /// Optional evidence digest.
+    pub evidence_digest: Option<String>,
+    /// Final decision status for easy JSONL filtering.
+    pub decision_status: ReadinessStatus,
+}
+
+/// JSONL event kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessEventKind {
+    /// Summary event for the full report.
+    ReportSummary,
+    /// Event for one probe result.
+    ProbeResult,
+}
+
+/// Error type for readiness schema validation.
+#[derive(Debug, Error)]
+pub enum AgentReadinessError {
+    /// Report schema was not the current schema.
+    #[error("invalid agent readiness schema: expected {expected}, got {actual}")]
+    InvalidSchema {
+        /// Expected schema id.
+        expected: &'static str,
+        /// Actual schema id.
+        actual: String,
+    },
+    /// Finished time preceded started time.
+    #[error("invalid readiness time range")]
+    InvalidTimeRange,
+    /// Top-level command line was empty.
+    #[error("readiness command line must not be empty")]
+    EmptyCommandLine,
+    /// Probe command label was empty.
+    #[error("probe command for {subsystem:?} must not be empty")]
+    EmptyProbeCommand {
+        /// Probe subsystem.
+        subsystem: ReadinessSubsystem,
+    },
+    /// Unsafe text was detected.
+    #[error("unsafe {field}: {reason}")]
+    UnsafeText {
+        /// Field name.
+        field: &'static str,
+        /// Reason text.
+        reason: &'static str,
+    },
+    /// Required redaction target was missing.
+    #[error("readiness redaction contract is missing {target:?}")]
+    MissingRedactionTarget {
+        /// Missing target.
+        target: RedactionTarget,
+    },
+    /// Required redaction state was missing.
+    #[error("missing readiness redaction marker for {field}")]
+    MissingRedaction {
+        /// Field name.
+        field: &'static str,
+    },
+    /// Required forbidden action mapping was missing.
+    #[error("readiness policy mapping is missing forbidden action {action:?}")]
+    MissingForbiddenAction {
+        /// Missing action.
+        action: ForbiddenAgentAction,
+    },
+    /// A forbidden action was attempted.
+    #[error("forbidden readiness action was attempted: {action:?}")]
+    ForbiddenActionAttempted {
+        /// Attempted forbidden action.
+        action: ForbiddenAgentAction,
+    },
+    /// Probe state and decision state were contradictory.
+    #[error("policy contradiction in {field}: {reason}")]
+    PolicyContradiction {
+        /// Contradictory field.
+        field: &'static str,
+        /// Reason text.
+        reason: &'static str,
+    },
+    /// Event count overflowed `u32`.
+    #[error("too many readiness events")]
+    TooManyEvents,
+    /// JSON serialization failed.
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+}
+
+fn default_probe(subsystem: ReadinessSubsystem, command: &str) -> ProbeResult {
+    ProbeResult {
+        subsystem,
+        status: ReadinessStatus::Skipped,
+        command_redacted: vec![command.to_owned()],
+        exit_code: None,
+        duration_ms: 0,
+        observed_at_unix_ms: 0,
+        reason_code: Some("not-run".to_owned()),
+        remediation: Some("probe was not run".to_owned()),
+        evidence_digest: None,
+        redaction_applied: true,
+    }
+}
+
+fn validate_key_fragment(field: &'static str, value: &str) -> Result<(), AgentReadinessError> {
+    validate_safe_text(field, value)?;
+    if value.len() > MAX_KEY_FRAGMENT_LEN {
+        return Err(AgentReadinessError::UnsafeText {
+            field,
+            reason: "identifier is too long",
+        });
+    }
+    if value.trim() != value || value.chars().any(char::is_whitespace) {
+        return Err(AgentReadinessError::UnsafeText {
+            field,
+            reason: "identifier must not contain whitespace",
+        });
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':' | '/'))
+    {
+        return Err(AgentReadinessError::UnsafeText {
+            field,
+            reason: "identifier contains unsupported characters",
+        });
+    }
+    Ok(())
+}
+
+fn validate_revision(field: &'static str, value: &str) -> Result<(), AgentReadinessError> {
+    validate_safe_text(field, value)?;
+    if value.len() < 7 || value.len() > 64 || !value.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(AgentReadinessError::UnsafeText {
+            field,
+            reason: "revision must be 7 to 64 hex characters",
+        });
+    }
+    Ok(())
+}
+
+fn validate_relative_glob(value: &str) -> Result<(), AgentReadinessError> {
+    validate_safe_text("worktree.owned_path_globs", value)?;
+    if value.starts_with('/') || value.contains("..") || looks_like_local_user_path(value) {
+        return Err(AgentReadinessError::UnsafeText {
+            field: "worktree.owned_path_globs",
+            reason: "owned path globs must be repository-relative",
+        });
+    }
+    Ok(())
+}
+
+fn validate_safe_text(field: &'static str, value: &str) -> Result<(), AgentReadinessError> {
+    if value.trim().is_empty() {
+        return Err(AgentReadinessError::UnsafeText {
+            field,
+            reason: "empty text",
+        });
+    }
+    if value.contains("://") {
+        return Err(AgentReadinessError::UnsafeText {
+            field,
+            reason: "raw endpoints must be replaced with artifact ids",
+        });
+    }
+    if looks_like_secret(value) {
+        return Err(AgentReadinessError::UnsafeText {
+            field,
+            reason: "raw secret-like text is not allowed",
+        });
+    }
+    Ok(())
+}
+
+fn validate_digest(value: &str) -> Result<(), AgentReadinessError> {
+    let Some((algorithm, digest)) = value.split_once(':') else {
+        return Err(AgentReadinessError::UnsafeText {
+            field: "digest",
+            reason: "digest must include an algorithm prefix",
+        });
+    };
+    validate_key_fragment("digest.algorithm", algorithm)?;
+    if digest.len() < 16 || !digest.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(AgentReadinessError::UnsafeText {
+            field: "digest",
+            reason: "digest body must be hex and at least 16 characters",
+        });
+    }
+    Ok(())
+}
+
+fn looks_like_secret(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("authorization:")
+        || lower.contains("bearer ")
+        || lower.contains("token=")
+        || lower.contains("password=")
+        || lower.contains("secret=")
+        || lower.contains("api_key=")
+        || lower.contains("apikey=")
+        || lower.contains("ghp_")
+        || lower.contains("oauth_")
+}
+
+fn looks_like_local_user_path(value: &str) -> bool {
+    value.contains("/Users/") || value.contains("/home/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: u64 = 1_800_000_000_000;
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn ok_probe(subsystem: ReadinessSubsystem, command: &str) -> ProbeResult {
+        ProbeResult {
+            subsystem,
+            status: ReadinessStatus::Ok,
+            command_redacted: command.split_whitespace().map(ToOwned::to_owned).collect(),
+            exit_code: Some(0),
+            duration_ms: 12,
+            observed_at_unix_ms: NOW,
+            reason_code: None,
+            remediation: None,
+            evidence_digest: Some(
+                "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_owned(),
+            ),
+            redaction_applied: true,
+        }
+    }
+
+    fn blocked_probe(
+        subsystem: ReadinessSubsystem,
+        command: &str,
+        reason_code: &str,
+    ) -> ProbeResult {
+        ProbeResult {
+            status: ReadinessStatus::Blocked,
+            reason_code: Some(reason_code.to_owned()),
+            remediation: Some("use degraded mode without unsafe repair".to_owned()),
+            ..ok_probe(subsystem, command)
+        }
+    }
+
+    fn healthy_report() -> AgentReadinessReport {
+        let allowed_actions = [
+            ReadinessAction::Coordinate,
+            ReadinessAction::ClaimBead,
+            ReadinessAction::EditFiles,
+            ReadinessAction::CargoProof,
+            ReadinessAction::Push,
+        ]
+        .into_iter()
+        .collect();
+
+        AgentReadinessReport {
+            schema: AGENT_READINESS_REPORT_SCHEMA.to_owned(),
+            run_id: "readiness-run-1".to_owned(),
+            repo_path: RedactedPath {
+                value: "repo:flywheel-connectors".to_owned(),
+                scope: PathRedactionScope::ExportSafe,
+            },
+            agent_name: "GreenLake".to_owned(),
+            started_at_unix_ms: NOW,
+            finished_at_unix_ms: NOW + 100,
+            policy_source: "AGENTS.md".to_owned(),
+            command_line: vec![
+                "fwc".to_owned(),
+                "agent-readiness".to_owned(),
+                "--jsonl".to_owned(),
+            ],
+            git_revision_observed: Some(SHA.to_owned()),
+            remote_main_sha: Some(SHA.to_owned()),
+            remote_master_sha: Some(SHA.to_owned()),
+            probes: AgentReadinessProbes {
+                agent_mail: AgentMailReadiness {
+                    mcp_health: ok_probe(ReadinessSubsystem::AgentMail, "agent-mail mcp-health"),
+                    register_result: ok_probe(ReadinessSubsystem::AgentMail, "agent-mail register"),
+                    list_agents_result: ok_probe(ReadinessSubsystem::AgentMail, "agent-mail list"),
+                    inbox_result: ok_probe(ReadinessSubsystem::AgentMail, "agent-mail inbox"),
+                    direct_cli_status_result: None,
+                    direct_cli_list_result: None,
+                    mailbox_lock_state: LockState::Clear,
+                    db_open_error_kind: None,
+                    repair_actions_attempted: false,
+                },
+                beads: BeadsReadiness {
+                    import_status: ok_probe(ReadinessSubsystem::Beads, "br import"),
+                    write_smoke_status: ok_probe(ReadinessSubsystem::Beads, "br write-smoke"),
+                    flush_status: ok_probe(ReadinessSubsystem::Beads, "br sync-flush-only"),
+                    lock_timeout_ms: 60_000,
+                    current_issue_count: 3545,
+                    ..BeadsReadiness::default()
+                },
+                git: GitReadiness {
+                    ls_remote_main: ok_probe(ReadinessSubsystem::Git, "git ls-remote main"),
+                    ls_remote_master: ok_probe(ReadinessSubsystem::Git, "git ls-remote master"),
+                    branch_mirror_match: Some(true),
+                    local_ref_write_status: ok_probe(ReadinessSubsystem::Git, "git ref-write"),
+                    push_status: ok_probe(ReadinessSubsystem::Git, "git push"),
+                    ..GitReadiness::default()
+                },
+                rch: RchReadiness {
+                    check_result: ok_probe(ReadinessSubsystem::Rch, "rch check --json"),
+                    daemon_running: true,
+                    hook_installed: true,
+                    workers_total: 8,
+                    workers_healthy: 8,
+                    unreachable_workers: BTreeSet::new(),
+                    pressure_telemetry_state: TelemetryState::Current,
+                    cargo_offload_allowed: true,
+                    local_cargo_allowed: false,
+                },
+                disk: DiskReadiness {
+                    check_result: ok_probe(ReadinessSubsystem::Disk, "df -h"),
+                    checked_mounts: vec![DiskMountState {
+                        mount_label: "system-data".to_owned(),
+                        free_bytes: 170_000_000_000,
+                        capacity_percent: 92,
+                        inode_state: Some("ok".to_owned()),
+                        threshold_status: ReadinessStatus::Ok,
+                    }],
+                    external_scratch_available: true,
+                },
+                worktree: WorktreeReadiness {
+                    status_result: ok_probe(ReadinessSubsystem::Worktree, "git status --short"),
+                    dirty_count: 0,
+                    dirty_paths_hashed: BTreeSet::new(),
+                    owned_path_globs: BTreeSet::from(["crates/fcp-evidence/src/*".to_owned()]),
+                    unrelated_dirty_present: false,
+                    local_ref_staleness_risk: false,
+                },
+            },
+            decision: ReadinessDecision {
+                status: ReadinessStatus::Ok,
+                primary_reason_code: None,
+                primary_remediation: None,
+                can_coordinate: true,
+                can_claim: true,
+                can_edit: true,
+                can_run_cargo_proof: true,
+                can_push: true,
+                allowed_actions,
+                refused_actions: BTreeSet::new(),
+                blocker_bead_ids: BTreeSet::new(),
+            },
+            redaction: ReadinessRedactionContract::default(),
+            policy: AgentReadinessPolicyMapping::default(),
+        }
+    }
+
+    #[test]
+    fn healthy_fixture_validates_and_emits_deterministic_jsonl() {
+        let report = healthy_report();
+        report.validate().expect("healthy report validates");
+
+        let events = report.to_jsonl_events().expect("jsonl events");
+        assert_eq!(events[0].schema, AGENT_READINESS_EVENT_SCHEMA);
+        assert_eq!(events[0].event_sequence, 1);
+        assert_eq!(events[0].event_kind, ReadinessEventKind::ReportSummary);
+        assert_eq!(events[0].status, ReadinessStatus::Ok);
+        assert_eq!(events.len(), 15);
+
+        let line = serde_json::to_string(&events[0]).expect("event serializes");
+        assert!(line.contains("\"schema\":\"fcp.agent-readiness-event.v1\""));
+        assert!(line.contains("\"run_id\":\"readiness-run-1\""));
+    }
+
+    #[test]
+    fn degraded_agent_mail_fixture_refuses_coordination_without_repair() {
+        let mut report = healthy_report();
+        report.probes.agent_mail.register_result = blocked_probe(
+            ReadinessSubsystem::AgentMail,
+            "agent-mail register",
+            "agent-mail-db-error",
+        );
+        report.probes.agent_mail.mailbox_lock_state = LockState::Busy;
+        report.probes.agent_mail.db_open_error_kind = Some("io-error".to_owned());
+        report.probes.agent_mail.repair_actions_attempted = false;
+        report.decision.status = ReadinessStatus::Warn;
+        report.decision.can_coordinate = false;
+        report
+            .decision
+            .allowed_actions
+            .remove(&ReadinessAction::Coordinate);
+        report
+            .decision
+            .refused_actions
+            .insert(ReadinessAction::Coordinate);
+        report.decision.primary_reason_code = Some("agent-mail-db-error".to_owned());
+        report.decision.primary_remediation =
+            Some("proceed with Beads-only fallback; do not repair Agent Mail".to_owned());
+
+        report.validate().expect("degraded report validates");
+    }
+
+    #[test]
+    fn blocked_rch_fixture_requires_cargo_refusal() {
+        let mut report = healthy_report();
+        report.probes.rch.check_result = blocked_probe(
+            ReadinessSubsystem::Rch,
+            "rch check --json",
+            "rch-workers-unreachable",
+        );
+        report.probes.rch.workers_healthy = 0;
+        report.probes.rch.unreachable_workers = BTreeSet::from(["vmi1149989".to_owned()]);
+        report.probes.rch.pressure_telemetry_state = TelemetryState::Unavailable;
+        report.probes.rch.cargo_offload_allowed = false;
+        report.decision.status = ReadinessStatus::Blocked;
+        report.decision.can_run_cargo_proof = false;
+        report
+            .decision
+            .allowed_actions
+            .remove(&ReadinessAction::CargoProof);
+        report
+            .decision
+            .refused_actions
+            .insert(ReadinessAction::CargoProof);
+        report
+            .decision
+            .blocker_bead_ids
+            .insert("flywheel_connectors-rfbrc".to_owned());
+
+        report.validate().expect("blocked rch report validates");
+    }
+
+    #[test]
+    fn blocked_rch_fixture_rejects_fake_cargo_permission() {
+        let mut report = healthy_report();
+        report.probes.rch.workers_healthy = 0;
+        report.probes.rch.cargo_offload_allowed = false;
+
+        let err = report.validate().expect_err("cargo proof must be refused");
+        assert!(matches!(
+            err,
+            AgentReadinessError::PolicyContradiction {
+                field: "decision.can_run_cargo_proof",
+                reason: "rch unavailable",
+            }
+        ));
+    }
+
+    #[test]
+    fn agent_mail_repair_attempt_is_rejected() {
+        let mut report = healthy_report();
+        report.probes.agent_mail.repair_actions_attempted = true;
+
+        let err = report
+            .validate()
+            .expect_err("repair attempts are forbidden");
+        assert!(matches!(
+            err,
+            AgentReadinessError::ForbiddenActionAttempted {
+                action: ForbiddenAgentAction::AgentMailRepairOrRestart,
+            }
+        ));
+    }
+
+    #[test]
+    fn redaction_contract_rejects_raw_secrets_and_exported_user_paths() {
+        let mut report = healthy_report();
+        report.command_line.push("token=super-secret".to_owned());
+        let err = report.validate().expect_err("raw token is rejected");
+        assert!(matches!(err, AgentReadinessError::UnsafeText { .. }));
+
+        let mut report = healthy_report();
+        report.repo_path = RedactedPath {
+            value: "/Users/jemanuel/projects/flywheel_connectors".to_owned(),
+            scope: PathRedactionScope::ExportSafe,
+        };
+        let err = report
+            .validate()
+            .expect_err("exported user path is rejected");
+        assert!(matches!(
+            err,
+            AgentReadinessError::UnsafeText {
+                field: "redacted_path.value",
+                reason: "export-safe paths must not include local user directories",
+            }
+        ));
+    }
+}

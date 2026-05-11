@@ -101,6 +101,13 @@ impl AgentReadinessReport {
         self.validate_policy_decisions()
     }
 
+    /// Return the decision that the built-in degraded-mode policy derives from
+    /// this report's probes.
+    #[must_use]
+    pub fn derived_decision(&self) -> ReadinessDecision {
+        ReadinessDecision::from_probes(&self.probes)
+    }
+
     /// Build deterministic JSONL-ready events from the report.
     ///
     /// # Errors
@@ -190,9 +197,23 @@ impl AgentReadinessReport {
             });
         }
 
-        if !self.probes.rch.cargo_offload_allowed || self.probes.rch.workers_healthy == 0 {
+        if agent_mail_unavailable(&self.probes.agent_mail) {
+            self.decision.requires_refusal(
+                ReadinessAction::Coordinate,
+                "Agent Mail unavailable or locked",
+            )?;
+        }
+        if beads_unavailable(&self.probes.beads) {
+            self.decision
+                .requires_refusal(ReadinessAction::ClaimBead, "Beads write path unavailable")?;
+            self.decision
+                .requires_refusal(ReadinessAction::EditFiles, "Beads write path unavailable")?;
+        }
+        if rch_unavailable(&self.probes.rch) || disk_blocks_proof(&self.probes.disk) {
             self.decision
                 .requires_refusal(ReadinessAction::CargoProof, "rch unavailable")?;
+            self.decision
+                .requires_refusal(ReadinessAction::Push, "proof is blocked")?;
         }
         if self.probes.rch.local_cargo_allowed {
             return Err(AgentReadinessError::PolicyContradiction {
@@ -200,9 +221,33 @@ impl AgentReadinessReport {
                 reason: "AGENTS.md requires Cargo proof through rch",
             });
         }
+        if remote_ref_untrusted(&self.probes.git)
+            || local_ref_stale(&self.probes.git, &self.probes.worktree)
+        {
+            self.decision.requires_refusal(
+                ReadinessAction::ClaimBead,
+                "remote ref truth is unavailable",
+            )?;
+            self.decision.requires_refusal(
+                ReadinessAction::EditFiles,
+                "remote ref truth is unavailable",
+            )?;
+            self.decision.requires_refusal(
+                ReadinessAction::CargoProof,
+                "remote ref truth is unavailable",
+            )?;
+            self.decision
+                .requires_refusal(ReadinessAction::Push, "remote ref truth is unavailable")?;
+        }
         if self.probes.git.branch_mirror_match == Some(false) {
             self.decision
                 .requires_refusal(ReadinessAction::Push, "remote branch mirror mismatch")?;
+        }
+        if self.probes.worktree.unrelated_dirty_present {
+            self.decision
+                .requires_refusal(ReadinessAction::EditFiles, "unrelated dirty tree present")?;
+            self.decision
+                .requires_refusal(ReadinessAction::Push, "unrelated dirty tree present")?;
         }
         Ok(())
     }
@@ -840,6 +885,8 @@ pub enum LockState {
 /// Final readiness decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadinessDecision {
+    /// Operational mode selected by the degraded-mode policy.
+    pub mode: ReadinessOperatingMode,
     /// Overall decision status.
     pub status: ReadinessStatus,
     /// Stable primary reason code.
@@ -868,6 +915,12 @@ pub struct ReadinessDecision {
 }
 
 impl ReadinessDecision {
+    /// Classify an observed probe set into the safest allowed operating mode.
+    #[must_use]
+    pub fn from_probes(probes: &AgentReadinessProbes) -> Self {
+        DecisionBuilder::from_probes(probes).finish()
+    }
+
     fn validate(&self) -> Result<(), AgentReadinessError> {
         if let Some(reason_code) = &self.primary_reason_code {
             validate_key_fragment("decision.primary_reason_code", reason_code)?;
@@ -877,6 +930,43 @@ impl ReadinessDecision {
         }
         for bead_id in &self.blocker_bead_ids {
             validate_key_fragment("decision.blocker_bead_ids", bead_id)?;
+        }
+        self.validate_action_state(ReadinessAction::Coordinate, self.can_coordinate)?;
+        self.validate_action_state(ReadinessAction::ClaimBead, self.can_claim)?;
+        self.validate_action_state(ReadinessAction::EditFiles, self.can_edit)?;
+        self.validate_action_state(ReadinessAction::CargoProof, self.can_run_cargo_proof)?;
+        self.validate_action_state(ReadinessAction::Push, self.can_push)?;
+        Ok(())
+    }
+
+    fn validate_action_state(
+        &self,
+        action: ReadinessAction,
+        allowed: bool,
+    ) -> Result<(), AgentReadinessError> {
+        if allowed && self.refused_actions.contains(&action) {
+            return Err(AgentReadinessError::PolicyContradiction {
+                field: action.field_name(),
+                reason: "action cannot be both allowed and refused",
+            });
+        }
+        if allowed && !self.allowed_actions.contains(&action) {
+            return Err(AgentReadinessError::PolicyContradiction {
+                field: action.field_name(),
+                reason: "action flag must agree with allowed actions",
+            });
+        }
+        if !allowed && self.allowed_actions.contains(&action) {
+            return Err(AgentReadinessError::PolicyContradiction {
+                field: action.field_name(),
+                reason: "action flag must agree with allowed actions",
+            });
+        }
+        if !allowed && !self.refused_actions.contains(&action) {
+            return Err(AgentReadinessError::PolicyContradiction {
+                field: action.field_name(),
+                reason: "refused actions must explain every disabled action",
+            });
         }
         Ok(())
     }
@@ -900,6 +990,7 @@ impl ReadinessDecision {
 impl Default for ReadinessDecision {
     fn default() -> Self {
         Self {
+            mode: ReadinessOperatingMode::ReadOnlyPlanning,
             status: ReadinessStatus::Skipped,
             primary_reason_code: None,
             primary_remediation: None,
@@ -913,6 +1004,24 @@ impl Default for ReadinessDecision {
             blocker_bead_ids: BTreeSet::new(),
         }
     }
+}
+
+/// Operating modes selected from startup readiness probes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessOperatingMode {
+    /// Agent Mail, Beads, rch proof, Git, disk, and worktree checks all allow
+    /// normal work.
+    FullMailBeadsRch,
+    /// Agent Mail is unavailable, but Beads and proof/push lanes are usable.
+    BeadsOnly,
+    /// The agent may inspect and plan but must not claim, edit, prove, or push.
+    ReadOnlyPlanning,
+    /// The agent may coordinate, claim, and edit owned files, but proof/push are
+    /// blocked until rch or disk pressure recovers.
+    ProofBlocked,
+    /// A human/operator action is required before productive work can proceed.
+    OperatorActionRequired,
 }
 
 /// Actions governed by readiness decisions.
@@ -941,6 +1050,240 @@ impl ReadinessAction {
             Self::Push => "decision.can_push",
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct DecisionBuilder {
+    mode: ReadinessOperatingMode,
+    status: ReadinessStatus,
+    reason_code: Option<&'static str>,
+    remediation: Option<&'static str>,
+    allowed_actions: BTreeSet<ReadinessAction>,
+    refused_actions: BTreeSet<ReadinessAction>,
+    blocker_bead_ids: BTreeSet<String>,
+}
+
+impl DecisionBuilder {
+    fn from_probes(probes: &AgentReadinessProbes) -> Self {
+        let mut builder = Self::full();
+        let mail_unavailable = agent_mail_unavailable(&probes.agent_mail);
+        let beads_unavailable = beads_unavailable(&probes.beads);
+        let rch_unavailable = rch_unavailable(&probes.rch);
+        let disk_blocked = disk_blocks_proof(&probes.disk);
+        let remote_ref_untrusted = remote_ref_untrusted(&probes.git);
+        let local_ref_stale = local_ref_stale(&probes.git, &probes.worktree);
+        let dirty_shared_tree = probes.worktree.unrelated_dirty_present;
+
+        if probes.agent_mail.repair_actions_attempted {
+            builder.operator_required(
+                "agent-mail-repair-attempted",
+                "stop and remove repair/restart actions before continuing",
+            );
+            builder
+                .blocker_bead_ids
+                .insert("flywheel_connectors-d5yeb".to_owned());
+        } else if remote_ref_untrusted {
+            builder.operator_required(
+                "remote-ref-truth-unavailable",
+                "refresh with git ls-remote before trusting local refs or pushing",
+            );
+        } else if probes.git.branch_mirror_match == Some(false) {
+            builder.operator_required(
+                "branch-mirror-mismatch",
+                "refuse push until remote main and mirror branch match",
+            );
+        } else if probes.rch.local_cargo_allowed {
+            builder.operator_required(
+                "local-cargo-policy-contradiction",
+                "disable local Cargo fallback; repo proof must use rch",
+            );
+            builder
+                .blocker_bead_ids
+                .insert("flywheel_connectors-rfbrc".to_owned());
+        } else if beads_unavailable {
+            builder.read_only(
+                "beads-write-unavailable",
+                "use read-only planning until Beads import/write/flush probes recover",
+            );
+        } else if local_ref_stale {
+            builder.read_only(
+                "local-ref-staleness-risk",
+                "use read-only planning until remote ref truth and local tracking state agree",
+            );
+        } else if dirty_shared_tree {
+            builder.read_only(
+                "unrelated-dirty-tree",
+                "use read-only planning until owned and unrelated dirty paths are separated",
+            );
+        } else if rch_unavailable || disk_blocked {
+            let (reason, remediation) = if rch_unavailable {
+                (
+                    "proof-blocked-rch-unavailable",
+                    "defer Cargo proof and push until rch has healthy workers",
+                )
+            } else {
+                (
+                    "proof-blocked-disk-pressure",
+                    "defer Cargo proof and push until disk pressure or scratch storage recovers",
+                )
+            };
+            builder.proof_blocked(reason, remediation);
+            builder
+                .blocker_bead_ids
+                .insert("flywheel_connectors-rfbrc".to_owned());
+        } else if mail_unavailable {
+            builder.beads_only(
+                "agent-mail-db-error",
+                "use Beads-only fallback; do not repair or restart Agent Mail",
+            );
+            builder
+                .blocker_bead_ids
+                .insert("flywheel_connectors-d5yeb".to_owned());
+        }
+
+        if mail_unavailable {
+            builder.refuse(ReadinessAction::Coordinate);
+        }
+        builder
+    }
+
+    fn full() -> Self {
+        Self {
+            mode: ReadinessOperatingMode::FullMailBeadsRch,
+            status: ReadinessStatus::Ok,
+            reason_code: None,
+            remediation: None,
+            allowed_actions: all_readiness_actions(),
+            refused_actions: BTreeSet::new(),
+            blocker_bead_ids: BTreeSet::new(),
+        }
+    }
+
+    fn beads_only(&mut self, reason_code: &'static str, remediation: &'static str) {
+        self.mode = ReadinessOperatingMode::BeadsOnly;
+        self.status = ReadinessStatus::Warn;
+        self.reason_code = Some(reason_code);
+        self.remediation = Some(remediation);
+        self.refuse(ReadinessAction::Coordinate);
+    }
+
+    fn read_only(&mut self, reason_code: &'static str, remediation: &'static str) {
+        self.mode = ReadinessOperatingMode::ReadOnlyPlanning;
+        self.status = ReadinessStatus::Warn;
+        self.reason_code = Some(reason_code);
+        self.remediation = Some(remediation);
+        for action in [
+            ReadinessAction::ClaimBead,
+            ReadinessAction::EditFiles,
+            ReadinessAction::CargoProof,
+            ReadinessAction::Push,
+        ] {
+            self.refuse(action);
+        }
+    }
+
+    fn proof_blocked(&mut self, reason_code: &'static str, remediation: &'static str) {
+        self.mode = ReadinessOperatingMode::ProofBlocked;
+        self.status = ReadinessStatus::Blocked;
+        self.reason_code = Some(reason_code);
+        self.remediation = Some(remediation);
+        self.refuse(ReadinessAction::CargoProof);
+        self.refuse(ReadinessAction::Push);
+    }
+
+    fn operator_required(&mut self, reason_code: &'static str, remediation: &'static str) {
+        self.mode = ReadinessOperatingMode::OperatorActionRequired;
+        self.status = ReadinessStatus::Blocked;
+        self.reason_code = Some(reason_code);
+        self.remediation = Some(remediation);
+        for action in [
+            ReadinessAction::ClaimBead,
+            ReadinessAction::EditFiles,
+            ReadinessAction::CargoProof,
+            ReadinessAction::Push,
+        ] {
+            self.refuse(action);
+        }
+    }
+
+    fn refuse(&mut self, action: ReadinessAction) {
+        self.allowed_actions.remove(&action);
+        self.refused_actions.insert(action);
+    }
+
+    fn finish(self) -> ReadinessDecision {
+        ReadinessDecision {
+            mode: self.mode,
+            status: self.status,
+            primary_reason_code: self.reason_code.map(str::to_owned),
+            primary_remediation: self.remediation.map(str::to_owned),
+            can_coordinate: self.allowed_actions.contains(&ReadinessAction::Coordinate),
+            can_claim: self.allowed_actions.contains(&ReadinessAction::ClaimBead),
+            can_edit: self.allowed_actions.contains(&ReadinessAction::EditFiles),
+            can_run_cargo_proof: self.allowed_actions.contains(&ReadinessAction::CargoProof),
+            can_push: self.allowed_actions.contains(&ReadinessAction::Push),
+            allowed_actions: self.allowed_actions,
+            refused_actions: self.refused_actions,
+            blocker_bead_ids: self.blocker_bead_ids,
+        }
+    }
+}
+
+fn all_readiness_actions() -> BTreeSet<ReadinessAction> {
+    BTreeSet::from([
+        ReadinessAction::Coordinate,
+        ReadinessAction::ClaimBead,
+        ReadinessAction::EditFiles,
+        ReadinessAction::CargoProof,
+        ReadinessAction::Push,
+    ])
+}
+
+const fn probe_blocks(probe: &ProbeResult) -> bool {
+    matches!(
+        probe.status,
+        ReadinessStatus::Blocked | ReadinessStatus::Error
+    )
+}
+
+fn agent_mail_unavailable(agent_mail: &AgentMailReadiness) -> bool {
+    agent_mail.repair_actions_attempted
+        || probe_blocks(&agent_mail.register_result)
+        || probe_blocks(&agent_mail.list_agents_result)
+        || probe_blocks(&agent_mail.inbox_result)
+        || agent_mail.db_open_error_kind.is_some()
+        || agent_mail.mailbox_lock_state == LockState::Busy
+}
+
+const fn beads_unavailable(beads: &BeadsReadiness) -> bool {
+    probe_blocks(&beads.import_status)
+        || probe_blocks(&beads.write_smoke_status)
+        || probe_blocks(&beads.flush_status)
+}
+
+const fn rch_unavailable(rch: &RchReadiness) -> bool {
+    probe_blocks(&rch.check_result) || !rch.cargo_offload_allowed || rch.workers_healthy == 0
+}
+
+fn disk_blocks_proof(disk: &DiskReadiness) -> bool {
+    probe_blocks(&disk.check_result)
+        || !disk.external_scratch_available
+        || disk
+            .checked_mounts
+            .iter()
+            .any(|mount| probe_status_blocks(mount.threshold_status))
+}
+
+const fn remote_ref_untrusted(git: &GitReadiness) -> bool {
+    probe_blocks(&git.ls_remote_main) || probe_blocks(&git.ls_remote_master)
+}
+
+const fn local_ref_stale(git: &GitReadiness, worktree: &WorktreeReadiness) -> bool {
+    git.local_tracking_ref_error_kind.is_some() || worktree.local_ref_staleness_risk
+}
+
+const fn probe_status_blocks(status: ReadinessStatus) -> bool {
+    matches!(status, ReadinessStatus::Blocked | ReadinessStatus::Error)
 }
 
 /// Redaction contract applied by the readiness producer.
@@ -1468,6 +1811,7 @@ mod tests {
                 },
             },
             decision: ReadinessDecision {
+                mode: ReadinessOperatingMode::FullMailBeadsRch,
                 status: ReadinessStatus::Ok,
                 primary_reason_code: None,
                 primary_remediation: None,
@@ -1513,6 +1857,7 @@ mod tests {
         report.probes.agent_mail.mailbox_lock_state = LockState::Busy;
         report.probes.agent_mail.db_open_error_kind = Some("io-error".to_owned());
         report.probes.agent_mail.repair_actions_attempted = false;
+        report.decision.mode = ReadinessOperatingMode::BeadsOnly;
         report.decision.status = ReadinessStatus::Warn;
         report.decision.can_coordinate = false;
         report
@@ -1542,8 +1887,10 @@ mod tests {
         report.probes.rch.unreachable_workers = BTreeSet::from(["vmi1149989".to_owned()]);
         report.probes.rch.pressure_telemetry_state = TelemetryState::Unavailable;
         report.probes.rch.cargo_offload_allowed = false;
+        report.decision.mode = ReadinessOperatingMode::ProofBlocked;
         report.decision.status = ReadinessStatus::Blocked;
         report.decision.can_run_cargo_proof = false;
+        report.decision.can_push = false;
         report
             .decision
             .allowed_actions
@@ -1552,6 +1899,14 @@ mod tests {
             .decision
             .refused_actions
             .insert(ReadinessAction::CargoProof);
+        report
+            .decision
+            .allowed_actions
+            .remove(&ReadinessAction::Push);
+        report
+            .decision
+            .refused_actions
+            .insert(ReadinessAction::Push);
         report
             .decision
             .blocker_bead_ids
@@ -1574,6 +1929,336 @@ mod tests {
                 reason: "rch unavailable",
             }
         ));
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum DegradedDecisionCase {
+        Healthy,
+        AgentMailUnavailable,
+        BeadsUnavailable,
+        LocalRefStale,
+        DirtySharedTree,
+        RchUnavailable,
+        DiskPressure,
+        BranchMirrorMismatch,
+        RemoteRefUnavailable,
+        LocalCargoAllowed,
+        AgentMailRepairAttempted,
+    }
+
+    struct ExpectedDecisionCase {
+        name: &'static str,
+        scenario: DegradedDecisionCase,
+        mode: ReadinessOperatingMode,
+        status: ReadinessStatus,
+        reason_code: Option<&'static str>,
+        refused_actions: &'static [ReadinessAction],
+        blocker_bead_ids: &'static [&'static str],
+    }
+
+    const WORK_REFUSALS: &[ReadinessAction] = &[
+        ReadinessAction::ClaimBead,
+        ReadinessAction::EditFiles,
+        ReadinessAction::CargoProof,
+        ReadinessAction::Push,
+    ];
+    const PROOF_REFUSALS: &[ReadinessAction] =
+        &[ReadinessAction::CargoProof, ReadinessAction::Push];
+    const ALL_REFUSALS: &[ReadinessAction] = &[
+        ReadinessAction::Coordinate,
+        ReadinessAction::ClaimBead,
+        ReadinessAction::EditFiles,
+        ReadinessAction::CargoProof,
+        ReadinessAction::Push,
+    ];
+
+    #[test]
+    fn derived_decision_classifies_degraded_modes_and_refusals() {
+        let cases = normal_degraded_decision_cases()
+            .into_iter()
+            .chain(blocked_degraded_decision_cases());
+
+        for case in cases {
+            let mut report = healthy_report();
+            apply_degraded_decision_case(case.scenario, &mut report);
+            report.decision = report.derived_decision();
+
+            assert_eq!(report.decision.mode, case.mode, "{}", case.name);
+            assert_eq!(report.decision.status, case.status, "{}", case.name);
+            assert_eq!(
+                report.decision.primary_reason_code.as_deref(),
+                case.reason_code,
+                "{}",
+                case.name
+            );
+            assert_refused_actions(&report.decision, case.refused_actions, case.name);
+            assert_blocker_beads(&report.decision, case.blocker_bead_ids, case.name);
+
+            match case.scenario {
+                DegradedDecisionCase::AgentMailRepairAttempted => {
+                    let err = report.validate().expect_err("repair attempt is forbidden");
+                    assert!(matches!(
+                        err,
+                        AgentReadinessError::ForbiddenActionAttempted {
+                            action: ForbiddenAgentAction::AgentMailRepairOrRestart,
+                        }
+                    ));
+                }
+                DegradedDecisionCase::LocalCargoAllowed => {
+                    let err = report
+                        .validate()
+                        .expect_err("local cargo permission is forbidden");
+                    assert!(matches!(
+                        err,
+                        AgentReadinessError::PolicyContradiction {
+                            field: "rch.local_cargo_allowed",
+                            reason: "AGENTS.md requires Cargo proof through rch",
+                        }
+                    ));
+                }
+                _ => report.validate().expect(case.name),
+            }
+        }
+    }
+
+    fn normal_degraded_decision_cases() -> [ExpectedDecisionCase; 5] {
+        use DegradedDecisionCase::{
+            AgentMailUnavailable, BeadsUnavailable, DirtySharedTree, Healthy, LocalRefStale,
+        };
+        use ReadinessOperatingMode::{BeadsOnly, FullMailBeadsRch, ReadOnlyPlanning};
+
+        [
+            expected_case(
+                "healthy",
+                Healthy,
+                FullMailBeadsRch,
+                ReadinessStatus::Ok,
+                None,
+                &[],
+                &[],
+            ),
+            expected_case(
+                "agent mail unavailable",
+                AgentMailUnavailable,
+                BeadsOnly,
+                ReadinessStatus::Warn,
+                Some("agent-mail-db-error"),
+                &[ReadinessAction::Coordinate],
+                &["flywheel_connectors-d5yeb"],
+            ),
+            expected_case(
+                "beads unavailable",
+                BeadsUnavailable,
+                ReadOnlyPlanning,
+                ReadinessStatus::Warn,
+                Some("beads-write-unavailable"),
+                WORK_REFUSALS,
+                &[],
+            ),
+            expected_case(
+                "local ref stale",
+                LocalRefStale,
+                ReadOnlyPlanning,
+                ReadinessStatus::Warn,
+                Some("local-ref-staleness-risk"),
+                WORK_REFUSALS,
+                &[],
+            ),
+            expected_case(
+                "dirty shared tree",
+                DirtySharedTree,
+                ReadOnlyPlanning,
+                ReadinessStatus::Warn,
+                Some("unrelated-dirty-tree"),
+                WORK_REFUSALS,
+                &[],
+            ),
+        ]
+    }
+
+    fn blocked_degraded_decision_cases() -> [ExpectedDecisionCase; 6] {
+        use DegradedDecisionCase::{
+            AgentMailRepairAttempted, BranchMirrorMismatch, DiskPressure, LocalCargoAllowed,
+            RchUnavailable, RemoteRefUnavailable,
+        };
+        use ReadinessOperatingMode::{OperatorActionRequired, ProofBlocked};
+
+        [
+            expected_case(
+                "rch unavailable",
+                RchUnavailable,
+                ProofBlocked,
+                ReadinessStatus::Blocked,
+                Some("proof-blocked-rch-unavailable"),
+                PROOF_REFUSALS,
+                &["flywheel_connectors-rfbrc"],
+            ),
+            expected_case(
+                "disk pressure",
+                DiskPressure,
+                ProofBlocked,
+                ReadinessStatus::Blocked,
+                Some("proof-blocked-disk-pressure"),
+                PROOF_REFUSALS,
+                &["flywheel_connectors-rfbrc"],
+            ),
+            expected_case(
+                "branch mirror mismatch",
+                BranchMirrorMismatch,
+                OperatorActionRequired,
+                ReadinessStatus::Blocked,
+                Some("branch-mirror-mismatch"),
+                WORK_REFUSALS,
+                &[],
+            ),
+            expected_case(
+                "remote ref unavailable",
+                RemoteRefUnavailable,
+                OperatorActionRequired,
+                ReadinessStatus::Blocked,
+                Some("remote-ref-truth-unavailable"),
+                WORK_REFUSALS,
+                &[],
+            ),
+            expected_case(
+                "local cargo allowed",
+                LocalCargoAllowed,
+                OperatorActionRequired,
+                ReadinessStatus::Blocked,
+                Some("local-cargo-policy-contradiction"),
+                WORK_REFUSALS,
+                &["flywheel_connectors-rfbrc"],
+            ),
+            expected_case(
+                "agent mail repair attempted",
+                AgentMailRepairAttempted,
+                OperatorActionRequired,
+                ReadinessStatus::Blocked,
+                Some("agent-mail-repair-attempted"),
+                ALL_REFUSALS,
+                &["flywheel_connectors-d5yeb"],
+            ),
+        ]
+    }
+
+    const fn expected_case(
+        name: &'static str,
+        scenario: DegradedDecisionCase,
+        mode: ReadinessOperatingMode,
+        status: ReadinessStatus,
+        reason_code: Option<&'static str>,
+        refused_actions: &'static [ReadinessAction],
+        blocker_bead_ids: &'static [&'static str],
+    ) -> ExpectedDecisionCase {
+        ExpectedDecisionCase {
+            name,
+            scenario,
+            mode,
+            status,
+            reason_code,
+            refused_actions,
+            blocker_bead_ids,
+        }
+    }
+
+    fn apply_degraded_decision_case(
+        scenario: DegradedDecisionCase,
+        report: &mut AgentReadinessReport,
+    ) {
+        match scenario {
+            DegradedDecisionCase::Healthy => {}
+            DegradedDecisionCase::AgentMailUnavailable => {
+                report.probes.agent_mail.register_result = blocked_probe(
+                    ReadinessSubsystem::AgentMail,
+                    "agent-mail register",
+                    "agent-mail-db-error",
+                );
+                report.probes.agent_mail.mailbox_lock_state = LockState::Busy;
+                report.probes.agent_mail.db_open_error_kind = Some("database-error".to_owned());
+            }
+            DegradedDecisionCase::BeadsUnavailable => {
+                report.probes.beads.write_smoke_status = blocked_probe(
+                    ReadinessSubsystem::Beads,
+                    "br write-smoke",
+                    "beads-write-unavailable",
+                );
+            }
+            DegradedDecisionCase::LocalRefStale => {
+                report.probes.git.local_tracking_ref_error_kind =
+                    Some("tracking-ref-stale".to_owned());
+                report.probes.worktree.local_ref_staleness_risk = true;
+            }
+            DegradedDecisionCase::DirtySharedTree => {
+                report.probes.worktree.status_result = ProbeResult {
+                    status: ReadinessStatus::Warn,
+                    reason_code: Some("unrelated-dirty-tree".to_owned()),
+                    remediation: Some("restrict edits and commits to owned paths".to_owned()),
+                    ..ok_probe(ReadinessSubsystem::Worktree, "git status --short")
+                };
+                report.probes.worktree.dirty_count = 2;
+                report.probes.worktree.unrelated_dirty_present = true;
+            }
+            DegradedDecisionCase::RchUnavailable => {
+                report.probes.rch.check_result = blocked_probe(
+                    ReadinessSubsystem::Rch,
+                    "rch status --json",
+                    "rch-workers-unavailable",
+                );
+                report.probes.rch.workers_healthy = 0;
+                report.probes.rch.cargo_offload_allowed = false;
+            }
+            DegradedDecisionCase::DiskPressure => {
+                report.probes.disk.check_result =
+                    blocked_probe(ReadinessSubsystem::Disk, "df -h", "disk-pressure");
+                report.probes.disk.external_scratch_available = false;
+                report.probes.disk.checked_mounts[0].threshold_status = ReadinessStatus::Blocked;
+            }
+            DegradedDecisionCase::BranchMirrorMismatch => {
+                report.probes.git.branch_mirror_match = Some(false);
+                report.probes.git.push_status = blocked_probe(
+                    ReadinessSubsystem::Git,
+                    "git push --dry-run",
+                    "branch-mirror-mismatch",
+                );
+            }
+            DegradedDecisionCase::RemoteRefUnavailable => {
+                report.probes.git.ls_remote_main = blocked_probe(
+                    ReadinessSubsystem::Git,
+                    "git ls-remote main",
+                    "remote-ref-truth-unavailable",
+                );
+            }
+            DegradedDecisionCase::LocalCargoAllowed => {
+                report.probes.rch.local_cargo_allowed = true;
+            }
+            DegradedDecisionCase::AgentMailRepairAttempted => {
+                report.probes.agent_mail.repair_actions_attempted = true;
+            }
+        }
+    }
+
+    fn assert_refused_actions(
+        decision: &ReadinessDecision,
+        expected: &[ReadinessAction],
+        name: &str,
+    ) {
+        let expected = expected.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(decision.refused_actions, expected, "{name}");
+        for action in all_readiness_actions() {
+            assert_eq!(
+                decision.allowed_actions.contains(&action),
+                !expected.contains(&action),
+                "{name}: {action:?}"
+            );
+        }
+    }
+
+    fn assert_blocker_beads(decision: &ReadinessDecision, expected: &[&str], name: &str) {
+        let expected = expected
+            .iter()
+            .map(|bead_id| (*bead_id).to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(decision.blocker_bead_ids, expected, "{name}");
     }
 
     #[test]

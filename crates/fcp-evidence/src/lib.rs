@@ -190,7 +190,7 @@ pub use agent_readiness::{
     AgentReadinessError, AgentReadinessJsonlEvent, AgentReadinessPolicyMapping,
     AgentReadinessProbes, AgentReadinessReport, BeadsReadiness, DiskMountState, DiskReadiness,
     ForbiddenAgentAction, GitReadiness, LockState, PathKind, PathRedactionScope, ProbeResult,
-    RchReadiness, ReadinessAction, ReadinessDecision, ReadinessEventKind,
+    RchReadiness, ReadinessAction, ReadinessDecision, ReadinessEventKind, ReadinessOperatingMode,
     ReadinessRedactionContract, ReadinessStatus, ReadinessSubsystem, RedactedPath, RedactionTarget,
     TelemetryState, WorktreeReadiness,
 };

@@ -15,9 +15,9 @@ use crate::agent_readiness::{
     AGENT_READINESS_REPORT_SCHEMA, AgentMailReadiness, AgentReadinessError,
     AgentReadinessPolicyMapping, AgentReadinessProbes, AgentReadinessReport, BeadsReadiness,
     DiskMountState, DiskReadiness, GitReadiness, LockState, PathKind, PathRedactionScope,
-    ProbeResult, RchReadiness, ReadinessAction, ReadinessDecision, ReadinessRedactionContract,
-    ReadinessStatus, ReadinessSubsystem, RedactedPath, TelemetryState, WorktreeReadiness,
-    validate_key_fragment, validate_safe_text,
+    ProbeResult, RchReadiness, ReadinessDecision, ReadinessRedactionContract, ReadinessStatus,
+    ReadinessSubsystem, RedactedPath, TelemetryState, WorktreeReadiness, validate_key_fragment,
+    validate_safe_text,
 };
 
 /// Stable schema for the startup probe plan.
@@ -529,7 +529,21 @@ impl NoNetworkProbeFixture {
     pub fn build_report(&self) -> Result<AgentReadinessReport, AgentReadinessError> {
         let plan = AgentStartupProbePlan::no_network_fixture()?;
         let scenario = FixtureScenarioState::from(self.scenario);
-        let decision = fixture_decision(scenario);
+        let blocked_infra_bead_ids = fixture_blocker_bead_ids(scenario);
+        let probes = AgentReadinessProbes {
+            agent_mail: fixture_agent_mail(&plan, scenario, self.observed_at_unix_ms)?,
+            beads: fixture_beads(&plan, &blocked_infra_bead_ids, self.observed_at_unix_ms)?,
+            git: fixture_git(&plan, scenario, self.observed_at_unix_ms)?,
+            rch: fixture_rch(&plan, scenario, self.observed_at_unix_ms)?,
+            disk: fixture_disk(&plan, self.observed_at_unix_ms)?,
+            worktree: fixture_worktree(
+                &plan,
+                scenario,
+                &self.owned_path_globs,
+                self.observed_at_unix_ms,
+            )?,
+        };
+        let decision = ReadinessDecision::from_probes(&probes);
 
         let report = AgentReadinessReport {
             schema: AGENT_READINESS_REPORT_SCHEMA.to_owned(),
@@ -549,20 +563,8 @@ impl NoNetworkProbeFixture {
             git_revision_observed: Some(FAKE_SHA.to_owned()),
             remote_main_sha: Some(FAKE_SHA.to_owned()),
             remote_master_sha: Some(remote_master_sha(scenario).to_owned()),
-            probes: AgentReadinessProbes {
-                agent_mail: fixture_agent_mail(&plan, scenario, self.observed_at_unix_ms)?,
-                beads: fixture_beads(&plan, &decision.blocker_bead_ids, self.observed_at_unix_ms)?,
-                git: fixture_git(&plan, scenario, self.observed_at_unix_ms)?,
-                rch: fixture_rch(&plan, scenario, self.observed_at_unix_ms)?,
-                disk: fixture_disk(&plan, self.observed_at_unix_ms)?,
-                worktree: fixture_worktree(
-                    &plan,
-                    scenario,
-                    &self.owned_path_globs,
-                    self.observed_at_unix_ms,
-                )?,
-            },
-            decision: decision.into_readiness_decision(scenario),
+            probes,
+            decision,
             redaction: plan.redaction,
             policy: AgentReadinessPolicyMapping::default(),
         };
@@ -590,87 +592,15 @@ impl From<NoNetworkProbeScenario> for FixtureScenarioState {
     }
 }
 
-#[derive(Debug, Clone)]
-struct FixtureDecisionParts {
-    status: ReadinessStatus,
-    reason_code: Option<&'static str>,
-    remediation: Option<&'static str>,
-    allowed_actions: BTreeSet<ReadinessAction>,
-    refused_actions: BTreeSet<ReadinessAction>,
-    blocker_bead_ids: BTreeSet<String>,
-}
-
-impl FixtureDecisionParts {
-    fn into_readiness_decision(self, scenario: FixtureScenarioState) -> ReadinessDecision {
-        ReadinessDecision {
-            status: self.status,
-            primary_reason_code: self.reason_code.map(str::to_owned),
-            primary_remediation: self.remediation.map(str::to_owned),
-            can_coordinate: !scenario.agent_mail_blocked,
-            can_claim: true,
-            can_edit: true,
-            can_run_cargo_proof: !scenario.rch_blocked,
-            can_push: !scenario.mirror_blocked,
-            allowed_actions: self.allowed_actions,
-            refused_actions: self.refused_actions,
-            blocker_bead_ids: self.blocker_bead_ids,
-        }
-    }
-}
-
-fn fixture_decision(scenario: FixtureScenarioState) -> FixtureDecisionParts {
-    let mut decision = FixtureDecisionParts {
-        status: ReadinessStatus::Ok,
-        reason_code: None,
-        remediation: None,
-        allowed_actions: BTreeSet::from([
-            ReadinessAction::Coordinate,
-            ReadinessAction::ClaimBead,
-            ReadinessAction::EditFiles,
-            ReadinessAction::CargoProof,
-            ReadinessAction::Push,
-        ]),
-        refused_actions: BTreeSet::new(),
-        blocker_bead_ids: BTreeSet::new(),
-    };
-    apply_scenario_decision(scenario, &mut decision);
-    decision
-}
-
-fn apply_scenario_decision(scenario: FixtureScenarioState, decision: &mut FixtureDecisionParts) {
+fn fixture_blocker_bead_ids(scenario: FixtureScenarioState) -> BTreeSet<String> {
+    let mut blocker_bead_ids = BTreeSet::new();
     if scenario.rch_blocked {
-        decision
-            .allowed_actions
-            .remove(&ReadinessAction::CargoProof);
-        decision.refused_actions.insert(ReadinessAction::CargoProof);
-        decision
-            .blocker_bead_ids
-            .insert("flywheel_connectors-rfbrc".to_owned());
-        decision.status = ReadinessStatus::Blocked;
-        decision.reason_code = Some("rch-workers-unavailable");
-        decision.remediation = Some("defer Cargo proof until rch has healthy workers");
-    } else if scenario.mirror_blocked {
-        decision.allowed_actions.remove(&ReadinessAction::Push);
-        decision.refused_actions.insert(ReadinessAction::Push);
-        decision.status = ReadinessStatus::Blocked;
-        decision.reason_code = Some("branch-mirror-mismatch");
-        decision.remediation = Some("refuse push until remote branch mirror is restored");
-    } else if scenario.agent_mail_blocked {
-        decision
-            .allowed_actions
-            .remove(&ReadinessAction::Coordinate);
-        decision.refused_actions.insert(ReadinessAction::Coordinate);
-        decision
-            .blocker_bead_ids
-            .insert("flywheel_connectors-d5yeb".to_owned());
-        decision.status = ReadinessStatus::Warn;
-        decision.reason_code = Some("agent-mail-db-error");
-        decision.remediation = Some("use Beads fallback; do not repair Agent Mail");
-    } else if scenario.dirty_tree {
-        decision.status = ReadinessStatus::Warn;
-        decision.reason_code = Some("unrelated-dirty-tree");
-        decision.remediation = Some("restrict edits and commits to owned paths");
+        blocker_bead_ids.insert("flywheel_connectors-rfbrc".to_owned());
     }
+    if scenario.agent_mail_blocked {
+        blocker_bead_ids.insert("flywheel_connectors-d5yeb".to_owned());
+    }
+    blocker_bead_ids
 }
 
 const fn remote_master_sha(scenario: FixtureScenarioState) -> &'static str {
@@ -999,6 +929,7 @@ fn forbidden_action_for_fragment(fragment: &str) -> crate::ForbiddenAgentAction 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_readiness::{ReadinessAction, ReadinessOperatingMode};
 
     #[test]
     fn no_network_plan_contains_only_injected_or_local_probes() {
@@ -1057,6 +988,12 @@ mod tests {
         assert!(!joined.contains("/Users/"));
         assert!(!joined.contains("token="));
         assert!(joined.contains("fcp.agent-readiness-event.v1"));
+
+        let report = fixture.build_report().expect("healthy fixture report");
+        assert_eq!(
+            report.decision.mode,
+            ReadinessOperatingMode::FullMailBeadsRch
+        );
     }
 
     #[test]
@@ -1068,6 +1005,7 @@ mod tests {
         let report = fixture.build_report().expect("fixture report validates");
 
         assert_eq!(report.decision.status, ReadinessStatus::Warn);
+        assert_eq!(report.decision.mode, ReadinessOperatingMode::BeadsOnly);
         assert!(!report.decision.can_coordinate);
         assert!(
             report
@@ -1087,6 +1025,7 @@ mod tests {
         let report = fixture.build_report().expect("fixture report validates");
 
         assert_eq!(report.decision.status, ReadinessStatus::Blocked);
+        assert_eq!(report.decision.mode, ReadinessOperatingMode::ProofBlocked);
         assert!(!report.decision.can_run_cargo_proof);
         assert!(
             report
@@ -1105,6 +1044,10 @@ mod tests {
         let report = fixture.build_report().expect("fixture report validates");
 
         assert_eq!(report.probes.git.branch_mirror_match, Some(false));
+        assert_eq!(
+            report.decision.mode,
+            ReadinessOperatingMode::OperatorActionRequired
+        );
         assert!(!report.decision.can_push);
         assert!(
             report

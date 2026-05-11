@@ -142,9 +142,9 @@ pub use proof_graph::{
 pub mod proof_graph_indexer;
 
 pub use proof_graph_indexer::{
-    BeadIssueRecord, BeadProofComment, EvidenceBundleRecord, PROOF_GRAPH_INDEXER_CORPUS_SCHEMA,
-    ProofGraphCorpus, ProofGraphIndexError, ProofGraphIndexer, ReadinessMatrixRow,
-    ReadmeFeatureRow, SourceLocation, VerificationScriptRecord,
+    AgentReadinessProofRecord, BeadIssueRecord, BeadProofComment, EvidenceBundleRecord,
+    PROOF_GRAPH_INDEXER_CORPUS_SCHEMA, ProofGraphCorpus, ProofGraphIndexError, ProofGraphIndexer,
+    ReadinessMatrixRow, ReadmeFeatureRow, SourceLocation, VerificationScriptRecord,
 };
 
 // ── Proof Runner Contract (b88ec.5) ───────────────────────────────

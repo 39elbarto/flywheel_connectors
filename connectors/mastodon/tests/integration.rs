@@ -5,6 +5,7 @@
 
 #![allow(clippy::missing_errors_doc, clippy::too_many_lines)]
 
+use std::collections::BTreeSet;
 use std::sync::Once;
 use std::time::Duration;
 
@@ -103,6 +104,29 @@ fn operation_network_constraints<'a>(
         .and_then(|operation| operation.get("network_constraints"))
         .and_then(toml::Value::as_table)
         .unwrap_or_else(|| panic!("{operation_key} should define network_constraints"))
+}
+
+fn operation_ai_hints<'a>(manifest: &'a toml::Value, operation_key: &str) -> &'a toml::Table {
+    manifest_operations(manifest)
+        .get(operation_key)
+        .and_then(|operation| operation.get("ai_hints"))
+        .and_then(toml::Value::as_table)
+        .expect("operation should define ai_hints")
+}
+
+fn assert_manifest_operation_inventory(operations: &toml::Table) {
+    let expected = EXPECTED_MANIFEST_SCHEMA_OPS
+        .iter()
+        .map(|(operation_key, _operation_id)| *operation_key)
+        .collect::<BTreeSet<_>>();
+    let actual = operations
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual, expected,
+        "manifest operation set should stay aligned with expected operation coverage"
+    );
 }
 
 fn network_string_list<'a>(constraints: &'a toml::Table, key: &str) -> Vec<&'a str> {
@@ -664,6 +688,72 @@ fn operation_catalog_preserves_risk_approval_and_event_metadata() {
 }
 
 #[test]
+fn manifest_ai_hints_cover_all_operations() {
+    init_logging();
+
+    let manifest = mastodon_manifest();
+    let operations = manifest_operations(&manifest);
+    assert_manifest_operation_inventory(operations);
+
+    for (operation_key, operation_id) in EXPECTED_MANIFEST_SCHEMA_OPS {
+        let ai_hints = operation_ai_hints(&manifest, operation_key);
+        let when_to_use = ai_hints
+            .get("when_to_use")
+            .and_then(toml::Value::as_str)
+            .expect("ai_hints.when_to_use should be a string");
+        assert!(
+            !when_to_use.trim().is_empty(),
+            "{operation_id} ai_hints.when_to_use should be non-empty"
+        );
+
+        let common_mistakes = ai_hints
+            .get("common_mistakes")
+            .and_then(toml::Value::as_array)
+            .expect("ai_hints.common_mistakes should be an array");
+        assert!(
+            common_mistakes.len() >= 2,
+            "{operation_id} should document at least two common mistakes"
+        );
+        for mistake in common_mistakes {
+            let mistake = mistake
+                .as_str()
+                .expect("ai_hints.common_mistakes entries should be strings");
+            assert!(
+                !mistake.trim().is_empty(),
+                "{operation_id} common mistakes should be non-empty"
+            );
+        }
+
+        let examples = ai_hints
+            .get("examples")
+            .and_then(toml::Value::as_array)
+            .expect("ai_hints.examples should be an array");
+        assert!(
+            !examples.is_empty(),
+            "{operation_id} should include at least one ai_hints example"
+        );
+        for example in examples {
+            let example = example
+                .as_str()
+                .expect("ai_hints.examples entries should be strings");
+            let lowered = example.to_ascii_lowercase();
+            for forbidden in ["api_key", "bearer", "password", "secret", "token"] {
+                assert!(
+                    !lowered.contains(forbidden),
+                    "{operation_id} example should not contain secret-shaped text: {forbidden}"
+                );
+            }
+            let parsed = serde_json::from_str::<Value>(example)
+                .expect("ai_hints examples should be valid JSON payloads");
+            assert!(
+                parsed.is_object(),
+                "{operation_id} ai_hints examples should be JSON objects"
+            );
+        }
+    }
+}
+
+#[test]
 fn manifest_operation_schemas_compile_and_validate_core_payloads() {
     init_logging();
 
@@ -803,11 +893,7 @@ fn manifest_declares_instance_scoped_network_constraints() {
 
     let manifest = mastodon_manifest();
     let operations = manifest_operations(&manifest);
-    assert_eq!(
-        operations.len(),
-        EXPECTED_MANIFEST_SCHEMA_OPS.len(),
-        "manifest operation set should stay aligned with expected operation coverage"
-    );
+    assert_manifest_operation_inventory(operations);
     for (operation_key, _operation_id) in EXPECTED_MANIFEST_SCHEMA_OPS {
         assert_instance_egress_constraints(operation_network_constraints(&manifest, operation_key));
     }

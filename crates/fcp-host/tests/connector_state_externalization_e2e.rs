@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_core::{
-    CONNECTOR_STATE_APPEND_OPERATION_ID, CONNECTOR_STATE_WRITE_CAPABILITY_ID,
+    BackoffPolicy, CONNECTOR_STATE_APPEND_OPERATION_ID, CONNECTOR_STATE_WRITE_CAPABILITY_ID,
     CapabilityConstraints, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorStateAppendOutcome, ConnectorStateError, ConnectorStateObject, ConnectorStateRoot,
     ConnectorStateStore, ConnectorStateWriteAuthorization, InstanceId, ObjectHeader, ObjectId,
@@ -505,6 +505,31 @@ fn connector_state_externalization_retries_cleanly_after_root_write_failure() ->
 
     let (head_0, _root_0, seq_0) = append_committed(&host, state(0, None, lease_id(1)))?;
     assert_eq!(seq_0, 0);
+    let root = read_root(&host)?;
+    assert_eq!(root.head, Some(head_0));
+    let chain = read_chain(&host, None, 10)?;
+    assert_eq!(chain.len(), 1);
+    assert_eq!(chain[0].seq, 0);
+    assert_eq!(chain[0].lease_object_id, lease_id(1));
+
+    Ok(())
+}
+
+#[test]
+fn connector_state_externalization_retries_transient_root_write_with_policy() -> TestResult {
+    let inner = memory_object_store();
+    let object_store: Arc<dyn ObjectStore> =
+        Arc::new(FailNthPutObjectStore::new(Arc::clone(&inner), 2));
+    let host = host_state_store(object_store).with_root_write_retry_policy(BackoffPolicy::new(
+        1,
+        Duration::ZERO,
+        Duration::ZERO,
+        1.0,
+    ));
+
+    let (head_0, _root_0, seq_0) = append_committed(&host, state(0, None, lease_id(1)))?;
+    assert_eq!(seq_0, 0);
+
     let root = read_root(&host)?;
     assert_eq!(root.head, Some(head_0));
     let chain = read_chain(&host, None, 10)?;

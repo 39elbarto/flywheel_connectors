@@ -636,7 +636,10 @@ required = [
 type = "object"
 
 [provides.operations."feishu.messages.reply".output_schema]
-required = ["message_id"]
+required = [
+    "message_id",
+    "coordination",
+]
 type = "object"
 
 [provides.operations."feishu.messages.reply".network_constraints]
@@ -692,7 +695,10 @@ required = [
 type = "object"
 
 [provides.operations."feishu.messages.send".output_schema]
-required = ["message_id"]
+required = [
+    "message_id",
+    "coordination",
+]
 type = "object"
 
 [provides.operations."feishu.messages.send".network_constraints]

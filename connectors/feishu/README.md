@@ -35,6 +35,7 @@ Important runtime truths from `connector.rs`, `client.rs`, and `manifest.toml`:
 - Configuration is `base_url`, `app_id`, `app_secret`, retry policy, bounded `request_timeout_ms`, and optional `webhook_state` settings for connector-owned dedupe persistence.
 - One connector instance is bound to one installed tenant app and one tenant access token flow.
 - Production roots are `https://open.feishu.cn` and `https://open.larksuite.com`; localhost and `127.0.0.1` overrides are allowed only for deterministic test harnesses.
+- `feishu.messages.send` and `feishu.messages.reply` claim chat ownership before tenant-token or provider message HTTP work. Successful responses include redaction-safe `coordination` audit records.
 - `health` and `self_check()` are grounded in the tenant-access-token internal auth endpoint and now emit operator guidance, verification-script references, provisioning details, and structured self-check evidence.
 - Docs, sheets, and calendar reads are known-resource operations. This connector does not search Drive, enumerate arbitrary docs, or mutate calendar state.
 - Webhook ingestion is host-forwarded request processing only. It validates signature/token, applies sender/chat/comment policy, and uses connector-owned dedupe state before event emission. Embedded listener lifecycle, websocket events, cross-tenant brokering, and user-delegated OAuth remain explicit non-goals in the current slice.
@@ -78,6 +79,8 @@ This slice is intentionally closer to "tenant app request-response automation" t
 - Stable first-slice identifiers include `message_id`, `chat_id`, `user_id`, `document_id`, `spreadsheet_token`, and `calendar_id`.
 - `receive_id_type` supports `open_id`, `user_id`, `union_id`, `email`, and `chat_id` for send paths.
 - `user_id_type` supports `open_id`, `user_id`, and `union_id` for directory reads.
+- Optional `chat_coordination` config supports `enabled`, `ttl_seconds`, `fail_open`, `allowlist_channels`, `backend`, and `dm_mode`. This connector defaults to the in-memory backend for local deterministic tests and connector-local fixtures.
+- Send-path coordination hashes `receive_id_type + receive_id`; reply-path coordination hashes the target `message_id`. Duplicate active owners return `FcpError::Unauthorized` code `4090` before Feishu token issuance or message HTTP.
 
 ## Network And Runtime Invariants
 
@@ -106,8 +109,8 @@ This slice is intentionally closer to "tenant app request-response automation" t
 
 | Operation | Endpoint shape | Capability | SafetyTier | RiskLevel | Idempotency | Notes |
 |-----------|----------------|------------|------------|-----------|-------------|-------|
-| `feishu.messages.send` | `POST /open-apis/im/v1/messages` | `feishu.messages.write` | `Risky` | `Medium` | `None` | Sends one bot-authored message through the installed tenant app. |
-| `feishu.messages.reply` | `POST /open-apis/im/v1/messages/{message_id}/reply` | `feishu.messages.write` | `Risky` | `Medium` | `None` | Replies to one existing visible message. |
+| `feishu.messages.send` | chat coordination claim, then `POST /open-apis/im/v1/messages` | `feishu.messages.write` | `Risky` | `Medium` | `None` | Sends one bot-authored message after duplicate-owner denial. |
+| `feishu.messages.reply` | chat coordination claim, then `POST /open-apis/im/v1/messages/{message_id}/reply` | `feishu.messages.write` | `Risky` | `Medium` | `None` | Replies to one existing visible message after duplicate-owner denial. |
 | `feishu.messages.get` | `GET /open-apis/im/v1/messages/{message_id}` | `feishu.messages.read` | `Safe` | `Low` | `Strict` | Reads one known message by ID. |
 | `feishu.chats.list` | `GET /open-apis/im/v1/chats` | `feishu.chats.read` | `Safe` | `Low` | `Strict` | Lists visible chats with pagination. |
 | `feishu.chats.get` | `GET /open-apis/im/v1/chats/{chat_id}` | `feishu.chats.read` | `Safe` | `Low` | `Strict` | Reads one visible chat by ID. |
@@ -167,6 +170,7 @@ Redaction rules:
 - Redact `app_secret`, tenant access tokens, Authorization headers, and copied auth payloads.
 - Treat `app_id`, message IDs, chat IDs, user IDs, document IDs, spreadsheet tokens, calendar IDs, email addresses, and raw content bodies as sensitive tenant metadata.
 - Sanitize live response payloads before exporting artifacts.
+- Outbound chat coordination audit records must contain only redaction-safe claim keys, channel identifiers, owner identifiers, outcomes, and reasons. They must not include raw Feishu receiver IDs, message IDs, or content bodies.
 
 Common remediation:
 

@@ -4,8 +4,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
     sync::atomic::Ordering,
+    sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -15,14 +15,20 @@ use fcp_prelude::{
     CapabilityVerifier, ConnectorId, EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId, Introspection, InvokeRequest,
     InvokeResponse, OperationId, OperationInfo, ResourceTypeInfo, RiskLevel, SafetyTier,
-    SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
+    SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, ZoneId,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_sdk::prelude::*;
+use fcp_sdk::{
+    AgentId, ChannelId, ChatCoordinationAuditRecord, ChatCoordinationBackend,
+    ChatCoordinationConfig, ChatCoordinationSendDecision, ChatCoordinationSendRequest, DmMode,
+    InMemoryThreadOwnershipChecker, ThreadId, ThreadOwnershipChecker,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use tracing::warn;
 
 use crate::client::FeishuClient;
 use crate::types::{ReplyMessageRequest, SendMessageRequest};
@@ -342,6 +348,116 @@ fn default_base_url() -> String {
 
 const fn default_request_timeout_ms() -> u64 {
     30_000
+}
+
+fn default_feishu_chat_coordination_config() -> ChatCoordinationConfig {
+    ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
+}
+
+fn parse_feishu_chat_coordination_config(
+    value: Option<&Value>,
+    base: ChatCoordinationConfig,
+) -> FcpResult<ChatCoordinationConfig> {
+    let Some(value) = value else {
+        return Ok(base);
+    };
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "chat_coordination must be an object".into(),
+    })?;
+
+    let mut config = base;
+    if let Some(enabled) = object.get("enabled") {
+        config = config.with_enabled(json_bool(enabled, "chat_coordination.enabled")?);
+    }
+    if let Some(ttl_seconds) = object.get("ttl_seconds") {
+        let seconds = ttl_seconds
+            .as_u64()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be an integer".into(),
+            })?;
+        if seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be greater than zero".into(),
+            });
+        }
+        config = config.with_ttl(Duration::from_secs(seconds));
+    }
+    if let Some(fail_open) = object.get("fail_open") {
+        config = config.with_fail_open(json_bool(fail_open, "chat_coordination.fail_open")?);
+    }
+    if let Some(allowlist) = object.get("allowlist_channels") {
+        let channels = allowlist
+            .as_array()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels must be an array".into(),
+            })?;
+        let mut normalized = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let raw = channel.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels entries must be strings".into(),
+            })?;
+            let channel_id = raw.trim();
+            if channel_id.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_coordination.allowlist_channels entries must not be empty"
+                        .into(),
+                });
+            }
+            normalized.push(ChannelId::new(channel_id.to_owned()));
+        }
+        config = config.with_allowlist_channels(normalized);
+    }
+    if let Some(backend) = object.get("backend") {
+        config = config.with_backend(parse_chat_coordination_backend(backend)?);
+    }
+    if let Some(dm_mode) = object.get("dm_mode") {
+        config = config.with_dm_mode(parse_chat_coordination_dm_mode(dm_mode)?);
+    }
+    Ok(config)
+}
+
+fn json_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a boolean"),
+    })
+}
+
+fn parse_chat_coordination_backend(value: &Value) -> FcpResult<ChatCoordinationBackend> {
+    match value.as_str() {
+        Some("agent_mail") => Ok(ChatCoordinationBackend::AgentMail),
+        Some("mesh_gossip") => Ok(ChatCoordinationBackend::MeshGossip),
+        Some("in_memory") => Ok(ChatCoordinationBackend::InMemory),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.backend: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.backend must be a string".into(),
+        }),
+    }
+}
+
+fn parse_chat_coordination_dm_mode(value: &Value) -> FcpResult<DmMode> {
+    match value.as_str() {
+        Some("skip") => Ok(DmMode::Skip),
+        Some("treat_as_thread") => Ok(DmMode::TreatAsThread),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.dm_mode: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.dm_mode must be a string".into(),
+        }),
+    }
 }
 
 fn default_webhook_ingress_transport() -> String {
@@ -917,6 +1033,62 @@ fn validate_receive_id_type(receive_id_type: &str) -> FcpResult<&str> {
             ),
         })
     }
+}
+
+fn feishu_coordination_channel_id(scope: &str, id_type: &str, raw_id: &str) -> ChannelId {
+    let mut hasher = Sha256::new();
+    for part in [scope.trim(), id_type.trim(), raw_id.trim()] {
+        hasher.update(part.len().to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    ChannelId::new(format!("feishu:{scope}:{}", hex::encode(hasher.finalize())))
+}
+
+fn feishu_coordination_audit_records(
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> Vec<ChatCoordinationAuditRecord> {
+    let mut records = decision.audit_records().to_vec();
+    if let Some(record) = decision.send_executed_audit_record(backend, claimant_agent_id) {
+        records.push(record);
+    }
+    records
+}
+
+fn feishu_insert_coordination(
+    output: &mut Value,
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> FcpResult<()> {
+    let object = output.as_object_mut().ok_or_else(|| FcpError::Internal {
+        message: "Serialized Feishu message response was not an object".into(),
+    })?;
+    object.insert(
+        "coordination".into(),
+        json!(feishu_coordination_audit_records(
+            decision,
+            backend,
+            claimant_agent_id,
+        )),
+    );
+    Ok(())
+}
+
+fn feishu_message_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["message_id", "coordination"],
+        "properties": {
+            "message_id": { "type": "string" },
+            "coordination": {
+                "type": "array",
+                "description": "Redaction-safe chat coordination audit records for the send attempt",
+                "items": { "type": "object" }
+            }
+        }
+    })
 }
 
 fn validate_user_id_type(user_id_type: &str) -> FcpResult<&str> {
@@ -2503,7 +2675,6 @@ fn contract_details(config: Option<&FeishuConfig>) -> serde_json::Value {
 }
 
 /// Feishu connector state.
-#[derive(Debug)]
 pub struct FeishuConnector {
     base: BaseConnector,
     config: Option<FeishuConfig>,
@@ -2511,6 +2682,8 @@ pub struct FeishuConnector {
     runtime: Option<ConnectorRuntime>,
     retry_config: HttpRetryConfig,
     webhook_state: FeishuWebhookStateStore,
+    chat_coordination_config: ChatCoordinationConfig,
+    thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
     started_at: Instant,
     verifier: Option<CapabilityVerifier>,
 }
@@ -2526,9 +2699,23 @@ impl FeishuConnector {
             runtime: None,
             retry_config: HttpRetryConfig::default(),
             webhook_state: FeishuWebhookStateStore::memory(),
+            chat_coordination_config: default_feishu_chat_coordination_config(),
+            thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
             started_at: Instant::now(),
             verifier: None,
         }
+    }
+
+    /// Replace the thread ownership checker used by outbound chat coordination.
+    #[must_use]
+    pub fn with_thread_ownership_checker(
+        mut self,
+        checker: Arc<dyn ThreadOwnershipChecker>,
+        backend: ChatCoordinationBackend,
+    ) -> Self {
+        self.thread_ownership_checker = checker;
+        self.chat_coordination_config = self.chat_coordination_config.with_backend(backend);
+        self
     }
 
     /// Return this connector instance ID for host-issued capability token binding.
@@ -2834,12 +3021,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "content": { "type": "string", "description": "JSON-encoded message content" }
                 }
             }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "message_id": { "type": "string" }
-                }
-            }),
+            output_schema: feishu_message_output_schema(),
             capability: CapabilityId::from_static(CAP_MSG_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
@@ -2873,12 +3055,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "content": { "type": "string", "description": "JSON-encoded message content" }
                 }
             }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "message_id": { "type": "string" }
-                }
-            }),
+            output_schema: feishu_message_output_schema(),
             capability: CapabilityId::from_static(CAP_MSG_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
@@ -3400,6 +3577,10 @@ impl FcpConnector for FeishuConnector {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
+        let chat_coordination_config = parse_feishu_chat_coordination_config(
+            config.get("chat_coordination"),
+            self.chat_coordination_config.clone(),
+        )?;
         let mut config: FeishuConfig =
             serde_json::from_value(config).map_err(|e| FcpError::InvalidRequest {
                 code: 1001,
@@ -3445,6 +3626,7 @@ impl FcpConnector for FeishuConnector {
         self.runtime = Some(runtime);
         self.client = Some(client);
         self.webhook_state = webhook_state;
+        self.chat_coordination_config = chat_coordination_config;
         self.config = Some(config);
         self.verifier = None;
         self.base.set_configured(true);
@@ -3686,6 +3868,33 @@ impl FcpConnector for FeishuConnector {
 }
 
 impl FeishuConnector {
+    fn chat_coordination_agent_id(&self) -> AgentId {
+        AgentId::new(self.base.instance_id.as_str().to_owned())
+    }
+
+    async fn claim_before_feishu_send(
+        &self,
+        zone_id: ZoneId,
+        channel_id: ChannelId,
+        thread_id: Option<ThreadId>,
+        claimant_agent_id: AgentId,
+    ) -> ChatCoordinationSendDecision {
+        let cx = fcp_async_core::compatibility_cx();
+        self.chat_coordination_config
+            .claim_before_send(
+                &cx,
+                self.thread_ownership_checker.as_ref(),
+                ChatCoordinationSendRequest::new(
+                    zone_id,
+                    self.base.id.clone(),
+                    channel_id,
+                    thread_id,
+                    claimant_agent_id,
+                ),
+            )
+            .await
+    }
+
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         self.base.check_ready()?;
         let operation = req.operation.as_str();
@@ -3735,13 +3944,37 @@ impl FeishuConnector {
                     msg_type: msg_type.into(),
                     content: content.into(),
                 };
+                let claimant_agent_id = self.chat_coordination_agent_id();
+                let coordination = self
+                    .claim_before_feishu_send(
+                        req.zone_id.clone(),
+                        feishu_coordination_channel_id("recipient", receive_id_type, receive_id),
+                        None,
+                        claimant_agent_id.clone(),
+                    )
+                    .await;
+                if let Some(error) = coordination.denial_error() {
+                    warn!(
+                        operation,
+                        "Feishu messages.send denied by chat coordination"
+                    );
+                    return Err(error.clone());
+                }
+
                 let resp = client
                     .send_message(runtime, receive_id_type, &send_req)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+                let mut output = serde_json::to_value(resp).map_err(|e| FcpError::Internal {
                     message: format!("Failed to serialize response: {e}"),
-                })?
+                })?;
+                feishu_insert_coordination(
+                    &mut output,
+                    &coordination,
+                    self.chat_coordination_config.backend(),
+                    &claimant_agent_id,
+                )?;
+                output
             }
             OP_MESSAGES_REPLY => {
                 let message_id = req.input.get("message_id").and_then(|v| v.as_str()).ok_or(
@@ -3767,13 +4000,37 @@ impl FeishuConnector {
                     msg_type: msg_type.into(),
                     content: content.into(),
                 };
+                let claimant_agent_id = self.chat_coordination_agent_id();
+                let coordination = self
+                    .claim_before_feishu_send(
+                        req.zone_id.clone(),
+                        feishu_coordination_channel_id("reply", "message_id", message_id),
+                        None,
+                        claimant_agent_id.clone(),
+                    )
+                    .await;
+                if let Some(error) = coordination.denial_error() {
+                    warn!(
+                        operation,
+                        "Feishu messages.reply denied by chat coordination"
+                    );
+                    return Err(error.clone());
+                }
+
                 let resp = client
                     .reply_message(runtime, message_id, &reply_req)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(resp).map_err(|e| FcpError::Internal {
+                let mut output = serde_json::to_value(resp).map_err(|e| FcpError::Internal {
                     message: format!("Failed to serialize response: {e}"),
-                })?
+                })?;
+                feishu_insert_coordination(
+                    &mut output,
+                    &coordination,
+                    self.chat_coordination_config.backend(),
+                    &claimant_agent_id,
+                )?;
+                output
             }
             OP_MESSAGES_GET => {
                 let message_id = req.input.get("message_id").and_then(|v| v.as_str()).ok_or(

@@ -2442,6 +2442,116 @@ fn usable_connector_state_canonical_status<'a>(
     Some(status)
 }
 
+const HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION: &str = "fcp-host-cutover-gates/v1";
+
+fn host_mesh_cutover_gates_payload(catalog_connector_count: usize) -> Value {
+    let node_count = 1_usize;
+    let gates = vec![
+        json!({
+            "gate_id": "mesh-inventory-placement",
+            "name": "Mesh-backed connector inventory with placement evidence",
+            "predicate_text": "At least 3 connectors have placement.has_mesh_replica=true and placement.replica_count >= 2.",
+            "status": "skip",
+            "measured_value": {
+                "telemetry_state": "unavailable",
+                "reason_code": "host-direct-telemetry-skip",
+                "catalog_connector_count": catalog_connector_count,
+                "connectors_meeting_predicate": 0,
+                "node_count": node_count,
+                "missing_fields": ["placement.has_mesh_replica", "placement.replica_count"]
+            },
+            "target": {
+                "connectors_meeting_predicate": 3,
+                "placement.has_mesh_replica": true,
+                "placement.replica_count": 2,
+                "node_count_gte": 3
+            },
+            "how_measured": ["GET /rpc/mesh/cutover-gates", "fwc mesh explain-availability <connector> --host <endpoint> --json"],
+            "remediation": "Expose live placement replica telemetry from a real mesh; this host route remains skipped until the direct telemetry is available."
+        }),
+        json!({
+            "gate_id": "mesh-lifecycle-state-replication",
+            "name": "Mesh-backed lifecycle state replication",
+            "predicate_text": "ConnectorStateRoot for at least 3 connectors is mesh-replicated with replica_count >= 2 and last_replicated_seq advancing within 60s.",
+            "status": "skip",
+            "measured_value": {
+                "telemetry_state": "unavailable",
+                "reason_code": "host-direct-telemetry-skip",
+                "catalog_connector_count": catalog_connector_count,
+                "connectors_meeting_predicate": 0,
+                "node_count": node_count,
+                "missing_fields": [
+                    "connector_state_root.replica_count",
+                    "connector_state_root.last_replicated_seq",
+                    "connector_state_root.last_replicated_age_seconds"
+                ]
+            },
+            "target": {
+                "connectors_meeting_predicate": 3,
+                "replica_count": 2,
+                "last_replicated_age_seconds_lte": 60,
+                "node_count_gte": 3
+            },
+            "how_measured": ["GET /rpc/mesh/cutover-gates", "future: fwc mesh state status --json"],
+            "remediation": "Publish ConnectorStateRoot replication telemetry from the mesh state store before this gate can turn green."
+        }),
+        json!({
+            "gate_id": "mesh-audit-chain-quorum",
+            "name": "Mesh-backed audit chain quorum across at least two nodes",
+            "predicate_text": "Audit chain status reports quorum_signed_checkpoints >= 1 and quorum_signers >= 2 within 60s.",
+            "status": "skip",
+            "measured_value": {
+                "telemetry_state": "unavailable",
+                "reason_code": "host-direct-telemetry-skip",
+                "quorum_signed_checkpoints": 0,
+                "quorum_signers": 0,
+                "node_count": node_count,
+                "missing_route": "fwc audit chain status --json"
+            },
+            "target": {
+                "quorum_signed_checkpoints": 1,
+                "quorum_signers": 2,
+                "checkpoint_age_seconds_lte": 60,
+                "node_count_gte": 3
+            },
+            "how_measured": ["GET /rpc/mesh/cutover-gates", "fwc audit chain status --json"],
+            "remediation": "Expose quorum checkpoint status before this gate can turn green."
+        }),
+        json!({
+            "gate_id": "mesh-policy-object-distribution",
+            "name": "Mesh-backed policy-object distribution",
+            "predicate_text": "Policy bundles for the active zone are present on at least 2 mesh peers with verified owner signatures.",
+            "status": "skip",
+            "measured_value": {
+                "telemetry_state": "unavailable",
+                "reason_code": "host-direct-telemetry-skip",
+                "peer_count": 0,
+                "verified_owner_signatures": false,
+                "node_count": node_count,
+                "missing_route": "fwc policy distribution --json"
+            },
+            "target": {
+                "peer_count": 2,
+                "verified_owner_signatures": true,
+                "node_count_gte": 3
+            },
+            "how_measured": ["GET /rpc/mesh/cutover-gates", "fwc policy distribution --json"],
+            "remediation": "Expose policy bundle distribution and owner-signature verification telemetry before this gate can turn green."
+        }),
+    ];
+
+    json!({
+        "status": "ok",
+        "schema_version": HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION,
+        "source": "fcp-host-direct-skip",
+        "overall_status": "skip",
+        "catalog_connector_count": catalog_connector_count,
+        "node_count": node_count,
+        "message": "fcp-host exposes the cutover-gates route, but no direct mesh cutover telemetry is available yet; all gates remain skipped and do not count as green.",
+        "gates": gates,
+    })
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct ConnectorStateExplainQuery {
     zone: Option<String>,
@@ -5717,6 +5827,7 @@ async fn async_main() -> HostResult<()> {
         .route("/rpc/batch-invoke", post(batch_invoke_handler))
         .route("/rpc/preflight", post(preflight_handler))
         .route("/rpc/simulate", post(simulate_handler))
+        .route("/rpc/mesh/cutover-gates", get(mesh_cutover_gates_handler))
         .route("/rpc/health", get(health_handler))
         .merge(protected_routes)
         .with_state(Arc::clone(&state));
@@ -7531,6 +7642,24 @@ async fn connector_state_explain_handler(
         zone_id = zone.as_ref().map(ZoneId::as_str),
         duration_ms = started_at.elapsed().as_millis() as u64,
         "connector state explain request complete"
+    );
+    Ok(Json(payload))
+}
+
+async fn mesh_cutover_gates_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let started_at = Instant::now();
+    let catalog_connector_count = state.registry.list().await.len();
+    let payload = host_mesh_cutover_gates_payload(catalog_connector_count);
+    tracing::debug!(
+        event = "mesh_cutover_gates_response",
+        schema_version = HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION,
+        catalog_connector_count,
+        node_count = 1_usize,
+        overall_status = "skip",
+        duration_ms = %started_at.elapsed().as_millis(),
+        "mesh cutover-gates request complete"
     );
     Ok(Json(payload))
 }
@@ -22910,6 +23039,12 @@ done"#;
             .with_state(Arc::clone(&state))
     }
 
+    fn mesh_cutover_gates_test_app(state: Arc<AppState>) -> axum::Router {
+        axum::Router::new()
+            .route("/rpc/mesh/cutover-gates", get(mesh_cutover_gates_handler))
+            .with_state(Arc::clone(&state))
+    }
+
     fn credential_pool_admin_test_app(state: Arc<AppState>) -> axum::Router {
         let protected = axum::Router::new()
             .route(
@@ -23290,6 +23425,58 @@ done"#;
         .await?;
 
         assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mesh_cutover_gates_route_reports_fail_closed_skip_snapshot()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let state = cancel_route_test_state();
+        let app = mesh_cutover_gates_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/mesh/cutover-gates",
+            serde_json::json!({}),
+            &[],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(
+            payload["schema_version"],
+            HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION
+        );
+        assert_eq!(payload["source"], "fcp-host-direct-skip");
+        assert_eq!(payload["overall_status"], "skip");
+        assert_eq!(payload["node_count"], 1);
+        assert_eq!(payload["catalog_connector_count"], 0);
+
+        let gates = payload["gates"].as_array().ok_or_else(|| {
+            std::io::Error::other("cutover-gates payload should include gate records")
+        })?;
+        assert_eq!(gates.len(), 4);
+        for expected_id in [
+            "mesh-inventory-placement",
+            "mesh-lifecycle-state-replication",
+            "mesh-audit-chain-quorum",
+            "mesh-policy-object-distribution",
+        ] {
+            let gate = gates
+                .iter()
+                .find(|gate| gate["gate_id"] == expected_id)
+                .ok_or_else(|| {
+                    std::io::Error::other(format!("missing cutover gate {expected_id}"))
+                })?;
+            assert_eq!(gate["status"], "skip");
+            assert_eq!(
+                gate["measured_value"]["reason_code"],
+                "host-direct-telemetry-skip"
+            );
+            assert_eq!(gate["target"]["node_count_gte"], 3);
+        }
         Ok(())
     }
 

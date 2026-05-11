@@ -195,6 +195,14 @@ pub use agent_readiness::{
     TelemetryState, WorktreeReadiness,
 };
 
+pub mod agent_readiness_probe;
+
+pub use agent_readiness_probe::{
+    AGENT_READINESS_PROBE_PLAN_SCHEMA, AgentStartupProbePlan, NoNetworkProbeFixture,
+    NoNetworkProbeScenario, ProbeCommandPlan, ProbeExecutionMode, ProbeMutationScope,
+    ProbeNetworkPolicy, ProbeRetryPolicy,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

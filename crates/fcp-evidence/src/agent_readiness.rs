@@ -141,6 +141,19 @@ impl AgentReadinessReport {
         Ok(events)
     }
 
+    /// Build deterministic JSONL lines from the report events.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentReadinessError`] when the report is invalid or an event
+    /// cannot be serialized.
+    pub fn to_jsonl_lines(&self) -> Result<Vec<String>, AgentReadinessError> {
+        self.to_jsonl_events()?
+            .into_iter()
+            .map(|event| serde_json::to_string(&event).map_err(AgentReadinessError::from))
+            .collect()
+    }
+
     /// Deterministic digest over the validated report.
     ///
     /// # Errors
@@ -947,7 +960,7 @@ pub struct ReadinessRedactionContract {
 }
 
 impl ReadinessRedactionContract {
-    fn validate(&self) -> Result<(), AgentReadinessError> {
+    pub(crate) fn validate(&self) -> Result<(), AgentReadinessError> {
         validate_key_fragment("redaction.schema", &self.schema)?;
         for required in REQUIRED_REDACTION_TARGETS {
             if !self.redacted_classes.contains(&required) {
@@ -1217,7 +1230,10 @@ fn default_probe(subsystem: ReadinessSubsystem, command: &str) -> ProbeResult {
     }
 }
 
-fn validate_key_fragment(field: &'static str, value: &str) -> Result<(), AgentReadinessError> {
+pub(crate) fn validate_key_fragment(
+    field: &'static str,
+    value: &str,
+) -> Result<(), AgentReadinessError> {
     validate_safe_text(field, value)?;
     if value.len() > MAX_KEY_FRAGMENT_LEN {
         return Err(AgentReadinessError::UnsafeText {
@@ -1265,7 +1281,10 @@ fn validate_relative_glob(value: &str) -> Result<(), AgentReadinessError> {
     Ok(())
 }
 
-fn validate_safe_text(field: &'static str, value: &str) -> Result<(), AgentReadinessError> {
+pub(crate) fn validate_safe_text(
+    field: &'static str,
+    value: &str,
+) -> Result<(), AgentReadinessError> {
     if value.trim().is_empty() {
         return Err(AgentReadinessError::UnsafeText {
             field,

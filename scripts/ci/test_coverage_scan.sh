@@ -266,7 +266,7 @@ classify_test_file() {
   file_has_host_e2e_signal "${file}" && host_marker=true
 
   case "${base}" in
-    *live*.rs|*sandbox*.rs|*nightly_live*.rs)
+    live*.rs|*_live.rs|*_live_*.rs|*nightly_live*.rs|*sandbox*.rs)
       live_named=true
       ;;
   esac

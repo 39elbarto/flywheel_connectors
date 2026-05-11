@@ -7,6 +7,7 @@ use serde_json::json;
 const OP_CHAT: &str = "moonshot.chat.completions";
 const CAP_CHAT: &str = "moonshot.chat";
 const MOONSHOT_KEY_ENV: &str = concat!("MOONSHOT", "_API", "_KEY");
+const LIVE_GATE_ENV: &str = "FCP_LIVE_READ";
 
 fn capability_grant(
     signing_key: &Ed25519SigningKey,
@@ -40,14 +41,41 @@ fn read_live_auth_material() -> Option<String> {
     })
 }
 
+fn live_gate_enabled() -> bool {
+    std::env::var(LIVE_GATE_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
 #[fcp_async_core::runtime::test]
 async fn moonshot_live_smoke_or_structured_skip_jsonl() {
+    if !live_gate_enabled() {
+        println!(
+            "MOONSHOT_E2E_JSONL {}",
+            json!({
+                "event": "moonshot_live_operation",
+                "fixture_mode": "live",
+                "suite_class": "live_read_only",
+                "gate_env_var": LIVE_GATE_ENV,
+                "operation": "live_smoke",
+                "status": "skipped",
+                "skip_reason": format!("{LIVE_GATE_ENV} is not set to 1"),
+                "cleanup_result": "not_started",
+                "connector_id": "fcp.moonshot",
+                "command_line": "cargo test -p fcp-moonshot --test live_verification moonshot_live_smoke_or_structured_skip_jsonl -- --nocapture",
+                "git_revision": option_env!("GIT_REVISION").unwrap_or("unknown")
+            })
+        );
+        return;
+    }
+
     let Some(live_auth_material) = read_live_auth_material() else {
         println!(
             "MOONSHOT_E2E_JSONL {}",
             json!({
                 "event": "moonshot_live_operation",
                 "fixture_mode": "live",
+                "suite_class": "live_read_only",
+                "gate_env_var": LIVE_GATE_ENV,
                 "operation": "live_smoke",
                 "status": "skipped",
                 "skip_reason": format!("{MOONSHOT_KEY_ENV} not set"),
@@ -100,6 +128,8 @@ async fn moonshot_live_smoke_or_structured_skip_jsonl() {
         json!({
             "event": "moonshot_live_operation",
             "fixture_mode": "live",
+            "suite_class": "live_read_only",
+            "gate_env_var": LIVE_GATE_ENV,
             "operation": "chat",
             "status": status,
             "endpoint_class": if base_url.contains(".cn") { "cn" } else { "international" },

@@ -24,6 +24,8 @@ const SLACK_LIVE_E2E_ARTIFACT_ENV: &str = "SLACK_LIVE_E2E_ARTIFACT";
 const DEFAULT_SLACK_LIVE_E2E_ARTIFACT: &str = "target/fcp-slack/live-smoke-evidence.jsonl";
 const LIVE_SMOKE_COMMAND_LINE: &str = "cargo test -p fcp-slack --test live_verification slack_live_smoke_structured_skip_jsonl -- --nocapture";
 const LIVE_SMOKE_ENV_KEYS: &[&str] = &[
+    "FCP_LIVE_READ",
+    "FCP_LIVE_WRITE",
     "SLACK_BOT_TOKEN",
     "SLACK_APP_TOKEN",
     "SLACK_E2E_CHANNEL_ID",
@@ -33,6 +35,8 @@ const LIVE_SMOKE_ENV_KEYS: &[&str] = &[
     "SLACK_LIVE_WRITE_APPROVAL",
 ];
 const LIVE_SMOKE_SCENARIOS: &[&str] = &["canary_reply", "mention_gating"];
+const LIVE_READ_GATE_ENV: &str = "FCP_LIVE_READ";
+const LIVE_WRITE_GATE_ENV: &str = "FCP_LIVE_WRITE";
 
 // ============================================================================
 // Skip guard
@@ -44,8 +48,27 @@ fn slack_token() -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
+fn live_read_gate_enabled() -> bool {
+    std::env::var(LIVE_READ_GATE_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn skip_without_live_read_gate() -> bool {
+    if live_read_gate_enabled() {
+        return false;
+    }
+
+    eprintln!(
+        "SKIP: {LIVE_READ_GATE_ENV} is not enabled; set {LIVE_READ_GATE_ENV}=1 before running live Slack read verification."
+    );
+    true
+}
+
 macro_rules! skip_without_token {
     ($var:ident) => {
+        if skip_without_live_read_gate() {
+            return;
+        }
         let Some($var) = slack_token() else {
             eprintln!(
                 "SKIP: SLACK_BOT_TOKEN not set — skipping live Slack connector verification. \
@@ -94,6 +117,8 @@ fn slack_live_smoke_structured_records(
                 "scenario": scenario,
                 "result": "skip",
                 "provider_mode": "live_slack",
+                "suite_class": "live_write_required",
+                "gate_env_var": LIVE_WRITE_GATE_ENV,
                 "command_line": LIVE_SMOKE_COMMAND_LINE,
                 "git_revision": git_revision,
                 "artifact_path": artifact_path,
@@ -201,6 +226,8 @@ async fn setup_live_connector(connector: &mut SlackConnector, token: &str) -> Ed
 #[test]
 fn slack_live_smoke_structured_skip_jsonl_redacts_sensitive_inputs() {
     let env = BTreeMap::from([
+        ("FCP_LIVE_READ".to_string(), "1".to_string()),
+        ("FCP_LIVE_WRITE".to_string(), "1".to_string()),
         (
             "SLACK_BOT_TOKEN".to_string(),
             "xoxb-secret-token".to_string(),
@@ -325,6 +352,10 @@ async fn live_conversations_list() {
 
 #[fcp_async_core::test]
 async fn live_error_mapping_invalid_token() {
+    if skip_without_live_read_gate() {
+        return;
+    }
+
     // Test with a deliberately invalid token to verify ConnectorErrorMapping
     // works correctly: should get a structured FCP auth error, not a raw HTTP 401.
     let mut connector = SlackConnector::new();

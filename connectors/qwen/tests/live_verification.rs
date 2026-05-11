@@ -15,11 +15,26 @@ const OP_MODELS: &str = "qwen.models.list";
 const CAP_CHAT: &str = "qwen.chat";
 const CAP_EMBEDDINGS: &str = "qwen.embeddings";
 const CAP_MODELS: &str = "qwen.models.read";
+const LIVE_GATE_ENV: &str = "FCP_LIVE_READ";
 
 #[fcp_async_core::runtime::test]
 async fn qwen_live_smoke_or_structured_skip_jsonl() {
     let git_revision =
         std::env::var("QWEN_E2E_GIT_REVISION").unwrap_or_else(|_| "unknown".to_string());
+    if !live_gate_enabled() {
+        emit_jsonl(
+            &git_revision,
+            "live_smoke",
+            "live",
+            "skipped",
+            json!({
+                "skip_reason": format!("{LIVE_GATE_ENV} is not set to 1"),
+                "cleanup_result": "not_started"
+            }),
+        );
+        return;
+    }
+
     let Ok(api_key) = std::env::var("DASHSCOPE_API_KEY") else {
         emit_jsonl(
             &git_revision,
@@ -205,6 +220,11 @@ async fn qwen_live_smoke_or_structured_skip_jsonl() {
     );
 }
 
+fn live_gate_enabled() -> bool {
+    std::env::var(LIVE_GATE_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
 fn valid_token(
     signing_key: &Ed25519SigningKey,
     instance_id: &InstanceId,
@@ -262,6 +282,8 @@ fn emit_jsonl(
     record.insert("connector_id".into(), json!(CONNECTOR_ID));
     record.insert("git_revision".into(), json!(git_revision));
     record.insert("fixture_mode".into(), json!(fixture_mode));
+    record.insert("suite_class".into(), json!("live_read_only"));
+    record.insert("gate_env_var".into(), json!(LIVE_GATE_ENV));
     record.insert("operation".into(), json!(operation));
     record.insert("status".into(), json!(status));
     record.insert(

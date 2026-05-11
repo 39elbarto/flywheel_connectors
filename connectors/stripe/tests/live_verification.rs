@@ -14,6 +14,8 @@ use fcp_prelude::{CapabilityConstraints, CapabilityToken};
 use chrono::{Duration, Utc};
 use serde_json::json;
 
+const LIVE_GATE_ENV: &str = "FCP_LIVE_SANDBOX";
+
 // ============================================================================
 // Skip guard
 // ============================================================================
@@ -24,8 +26,27 @@ fn stripe_secret_key() -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
+fn live_gate_enabled() -> bool {
+    std::env::var(LIVE_GATE_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn skip_without_live_gate() -> bool {
+    if live_gate_enabled() {
+        return false;
+    }
+
+    eprintln!(
+        "SKIP: {LIVE_GATE_ENV} is not enabled; set {LIVE_GATE_ENV}=1 before running live Stripe sandbox verification."
+    );
+    true
+}
+
 macro_rules! skip_without_token {
     ($var:ident) => {
+        if skip_without_live_gate() {
+            return;
+        }
         let Some($var) = stripe_secret_key() else {
             eprintln!(
                 "SKIP: STRIPE_SECRET_KEY not set — skipping live Stripe connector verification. \
@@ -150,6 +171,10 @@ async fn live_customers_list() {
 
 #[fcp_async_core::test]
 async fn live_error_mapping_invalid_key() {
+    if skip_without_live_gate() {
+        return;
+    }
+
     // Test with a deliberately invalid key to verify ConnectorErrorMapping
     // works correctly: should get a structured FCP auth error, not a raw HTTP 401.
     let mut connector = fcp_stripe::connector::StripeConnector::new();

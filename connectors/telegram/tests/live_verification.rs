@@ -15,6 +15,8 @@ use fcp_telegram::connector::TelegramConnector;
 use chrono::{Duration, Utc};
 use serde_json::json;
 
+const LIVE_GATE_ENV: &str = "FCP_LIVE_SANDBOX";
+
 // ============================================================================
 // Skip guard
 // ============================================================================
@@ -25,8 +27,27 @@ fn telegram_token() -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
+fn live_gate_enabled() -> bool {
+    std::env::var(LIVE_GATE_ENV)
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn skip_without_live_gate() -> bool {
+    if live_gate_enabled() {
+        return false;
+    }
+
+    eprintln!(
+        "SKIP: {LIVE_GATE_ENV} is not enabled; set {LIVE_GATE_ENV}=1 before running live Telegram bot verification."
+    );
+    true
+}
+
 macro_rules! skip_without_token {
     ($var:ident) => {
+        if skip_without_live_gate() {
+            return;
+        }
         let Some($var) = telegram_token() else {
             eprintln!(
                 "SKIP: TELEGRAM_BOT_TOKEN not set — skipping live Telegram connector verification. \
@@ -135,6 +156,10 @@ async fn live_get_me() {
 
 #[fcp_async_core::test]
 async fn live_error_mapping_invalid_token() {
+    if skip_without_live_gate() {
+        return;
+    }
+
     // Test with a deliberately invalid token to verify error handling.
     // Telegram's handle_configure calls getMe, so an invalid token produces
     // a structured FCP error at configure time (not at invoke time).

@@ -132,6 +132,7 @@ use fcp_sandbox::{
     EgressTcpConnectRequest, HttpHeader, NoOpCredentialInjector, TlsVerifier, WasiConfig,
     WasiConnectorRunner, host_matches_allow_list,
 };
+use fcp_telemetry::{OtlpReadiness, TelemetryConfig, TelemetryError};
 use futures_util::future::join_all;
 use hyper::body::Incoming;
 use hyper_util::{
@@ -141,7 +142,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
 use tower::ServiceExt;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 type ConnectorConfig = ManagedConnectorConfig;
 
@@ -5303,7 +5303,7 @@ fn main() -> HostResult<()> {
             return Ok(());
         }
     }
-    init_tracing();
+    init_tracing()?;
     match fcp_async_core::runtime::block_on_sync(async_main()) {
         Ok(result) => result,
         Err(err) => Err(HostError::Internal(format!(
@@ -5312,21 +5312,50 @@ fn main() -> HostResult<()> {
     }
 }
 
-fn init_tracing() {
-    tracing_subscriber::registry()
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,fcp_host=debug")),
-        )
-        .with(
-            tracing_subscriber::fmt::layer()
-                .json()
-                .flatten_event(true)
-                .with_ansi(false)
-                .with_current_span(false)
-                .with_writer(std::io::stderr),
-        )
-        .init();
+fn init_tracing() -> HostResult<()> {
+    let config = host_telemetry_config_from_env()?;
+    let readiness = fcp_telemetry::otlp_readiness(&config);
+    let init_config = if readiness.status == "unavailable" {
+        let mut local_logging_config = config.clone();
+        local_logging_config.otlp_enabled = false;
+        local_logging_config
+    } else {
+        config
+    };
+
+    fcp_telemetry::init_telemetry(init_config).map_err(host_telemetry_init_error)?;
+    tracing::info!(
+        event = "host_telemetry_initialized",
+        otlp_status = readiness.status,
+        otlp_enabled = readiness.enabled,
+        otlp_feature_compiled = readiness.feature_compiled,
+        otlp_endpoint_configured = readiness.endpoint_configured,
+        otlp_endpoint_class = readiness.endpoint_class,
+        collector_header_count = readiness.collector_header_count,
+        resource_attribute_count = readiness.resource_attribute_count,
+        "fcp-host telemetry initialized"
+    );
+    if readiness.status == "unavailable" {
+        tracing::warn!(
+            event = "host_otlp_unavailable",
+            "OTLP export was requested, but this fcp-host build does not include the otlp feature"
+        );
+    }
+    Ok(())
+}
+
+fn host_telemetry_config_from_env() -> HostResult<TelemetryConfig> {
+    let mut config = TelemetryConfig::from_env().map_err(host_telemetry_init_error)?;
+    if config.service_name == "fcp-connector" {
+        config.service_name = "fcp-host".to_string();
+    }
+    config.log_level = "info,fcp_host=debug".to_string();
+    config.json_logs = true;
+    Ok(config)
+}
+
+fn host_telemetry_init_error(error: TelemetryError) -> HostError {
+    HostError::Internal(format!("host telemetry initialization failed: {error}"))
 }
 
 async fn async_main() -> HostResult<()> {
@@ -5497,6 +5526,10 @@ async fn async_main() -> HostResult<()> {
             post(event_acknowledge_handler),
         )
         .route(
+            "/rpc/admin/telemetry/otlp/readiness",
+            get(telemetry_otlp_readiness_handler),
+        )
+        .route(
             "/rpc/admin/credentials/pools",
             get(credential_pool_list_handler),
         )
@@ -5660,6 +5693,7 @@ async fn async_main() -> HostResult<()> {
     }
 
     tracing::info!(event = "host_shutdown_complete", "fcp-host exiting cleanly");
+    fcp_telemetry::shutdown_telemetry();
     Ok(())
 }
 
@@ -11544,6 +11578,78 @@ async fn supply_chain_verify_handler(
             );
             Err(map_host_error(err))
         }
+    }
+}
+
+async fn telemetry_otlp_readiness_handler() -> (StatusCode, Json<Value>) {
+    match host_telemetry_config_from_env() {
+        Ok(config) => (
+            StatusCode::OK,
+            Json(host_telemetry_otlp_readiness_payload(&config)),
+        ),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(host_telemetry_otlp_config_error_payload(&error)),
+        ),
+    }
+}
+
+fn host_telemetry_otlp_readiness_payload(config: &TelemetryConfig) -> Value {
+    let readiness = fcp_telemetry::otlp_readiness(config);
+    let next_actions = host_telemetry_otlp_next_actions(&readiness);
+    json!({
+        "status": readiness.status,
+        "command": "fcp-host",
+        "subcommand": "telemetry otlp-readiness",
+        "source": "host-admin-api",
+        "schema_version": "1.0.0",
+        "readiness": readiness,
+        "config_source": {
+            "environment_loaded": true,
+            "service_name": &config.service_name,
+        },
+        "next_actions": next_actions,
+    })
+}
+
+fn host_telemetry_otlp_config_error_payload(error: &HostError) -> Value {
+    json!({
+        "status": "error",
+        "command": "fcp-host",
+        "subcommand": "telemetry otlp-readiness",
+        "source": "host-admin-api",
+        "schema_version": "1.0.0",
+        "error": {
+            "type": "invalid-otlp-configuration",
+            "message": error.to_string(),
+            "recoverable": true,
+        },
+        "next_actions": [
+            "Fix malformed OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS, or OTEL_RESOURCE_ATTRIBUTES.",
+            "Do not embed credentials in OTLP endpoint URLs; use OTEL_EXPORTER_OTLP_HEADERS instead.",
+        ],
+    })
+}
+
+fn host_telemetry_otlp_next_actions(readiness: &OtlpReadiness) -> Vec<&'static str> {
+    match readiness.status {
+        "ready" => vec![
+            "Keep fcp-host running with the same OTEL_* environment to export traces, metrics, and logs.",
+            "Run scripts/e2e/telemetry_otlp_exporter_verification.sh for loopback collector proof before changing collector routing.",
+        ],
+        "unavailable" => vec![
+            "Build fcp-host with --features otlp before relying on runtime OTLP export.",
+            "Keep local JSON logs enabled while OTLP export is unavailable.",
+        ],
+        "fail" => vec![
+            "Fix malformed OTEL_* values and retry the admin readiness request.",
+            "Keep secrets in collector headers, never in endpoint URLs.",
+        ],
+        "disabled" => vec![
+            "Set OTEL_EXPORTER_OTLP_ENDPOINT before expecting host runtime OTLP export.",
+            "Keep OTLP disabled if this node should only emit local logs and Prometheus metrics.",
+        ],
+        _ => vec!["Inspect the readiness payload before enabling OTLP export."],
     }
 }
 
@@ -22756,6 +22862,21 @@ done"#;
             .with_state(Arc::clone(&state))
     }
 
+    fn telemetry_otlp_readiness_test_app(state: Arc<AppState>) -> axum::Router {
+        let protected = axum::Router::new()
+            .route(
+                "/rpc/admin/telemetry/otlp/readiness",
+                get(telemetry_otlp_readiness_handler),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                admin_auth_middleware,
+            ));
+        axum::Router::new()
+            .merge(protected)
+            .with_state(Arc::clone(&state))
+    }
+
     fn credential_pool_admin_test_app(state: Arc<AppState>) -> axum::Router {
         let protected = axum::Router::new()
             .route(
@@ -22837,6 +22958,49 @@ done"#;
         axum::Router::new()
             .merge(protected)
             .with_state(Arc::clone(&state))
+    }
+
+    #[test]
+    fn host_telemetry_otlp_readiness_payload_redacts_operator_metadata() {
+        let config = TelemetryConfig::new("fcp-host")
+            .with_otlp("https://collector.example.com:4317/v1/traces")
+            .try_with_otlp_headers("authorization=Bearer%20secret-token,x-honeycomb-team=team_123")
+            .expect("test headers should parse")
+            .try_with_otlp_resource_attributes("cloud.account.id=123456789,fcp.zone=z:owner")
+            .expect("test resource attributes should parse");
+
+        let payload = host_telemetry_otlp_readiness_payload(&config);
+        let rendered = payload.to_string();
+
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["command"], "fcp-host");
+        assert_eq!(payload["subcommand"], "telemetry otlp-readiness");
+        assert_eq!(payload["readiness"]["boundary"], "fcp-telemetry-crate");
+        assert_eq!(payload["readiness"]["collector_header_count"], 2);
+        assert_eq!(payload["readiness"]["resource_attribute_count"], 2);
+        assert!(!rendered.contains("secret-token"));
+        assert!(!rendered.contains("team_123"));
+        assert!(!rendered.contains("collector.example.com"));
+        assert!(!rendered.contains("123456789"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn telemetry_otlp_readiness_route_rejects_unauthenticated_request()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let state = cancel_route_test_state();
+        let app = telemetry_otlp_readiness_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/telemetry/otlp/readiness",
+            json!({}),
+            &[],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        Ok(())
     }
 
     async fn send_cancel_request(

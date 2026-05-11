@@ -11,6 +11,10 @@ categories = ["network-programming", "asynchronous"]
 [lints.rust]
 unsafe_code = "deny"
 
+[features]
+default = []
+otlp = ["fcp-telemetry/otlp"]
+
 [dependencies]
 # Core FCP types
 fcp-audit = { path = "../fcp-audit" }
@@ -29,6 +33,7 @@ fcp-crypto = { path = "../fcp-crypto" }
 fcp-ratelimit = { path = "../fcp-ratelimit" }
 fcp-store = { path = "../fcp-store" }
 fcp-tailscale = { path = "../fcp-tailscale" }
+fcp-telemetry.workspace = true
 
 # Async runtime
 async-trait = "0.1"

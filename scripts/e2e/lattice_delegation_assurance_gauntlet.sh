@@ -6,9 +6,10 @@ RUN_ID="${RUN_ID:-lattice-assurance-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_DIR="${OUT_DIR:-target/fcp-crypto-pq}"
 ARTIFACT="${ARTIFACT:-${OUT_DIR}/lattice-delegation-assurance-gauntlet.${RUN_ID}.jsonl}"
 TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-lattice-assurance-${RUN_ID}}"
+ARTIFACT_STAGE_ROOT="${ARTIFACT_STAGE_ROOT:-rch-lattice-evidence/${RUN_ID}}"
 LOG_PREFIX="${OUT_DIR}/${RUN_ID}"
 
-mkdir -p "${OUT_DIR}"
+mkdir -p "${OUT_DIR}" "${ARTIFACT_STAGE_ROOT}"
 : > "${ARTIFACT}"
 
 git_revision() {
@@ -169,6 +170,7 @@ run_rch_cargo() {
       CARGO_PROFILE_TEST_DEBUG=0 \
       CARGO_INCREMENTAL=0 \
       FCP_LATTICE_GIT_REVISION="$(git_revision)" \
+      FCP_LATTICE_EVIDENCE_ROOT="${ARTIFACT_STAGE_ROOT}" \
       RUSTFLAGS=-Cdebuginfo=0 \
       "$@"
 }
@@ -190,6 +192,66 @@ append_artifact_hash() {
     --arg artifact "${path}" \
     --arg artifact_hash "sha256:$(sha256_file "${path}")" \
     '{artifact_path:$artifact,artifact_hash:$artifact_hash,cleanup_result:"not_applicable_generated_artifact"}')"
+}
+
+artifact_stage_path() {
+  local path="$1"
+  case "${path}" in
+    target/*)
+      printf '%s/%s' "${ARTIFACT_STAGE_ROOT}" "${path#target/}"
+      ;;
+    *)
+      printf '%s/%s' "${ARTIFACT_STAGE_ROOT}" "${path}"
+      ;;
+  esac
+}
+
+artifact_log_path() {
+  local path="$1"
+  case "${path}" in
+    target/fcp-crypto-pq/*)
+      printf '%s.crypto_representation_profile_tests.log' "${LOG_PREFIX}"
+      ;;
+    target/fcp-policy/*)
+      printf '%s.policy_lattice_delegation_tests.log' "${LOG_PREFIX}"
+      ;;
+    target/fcp-host/*)
+      printf '%s.host_lattice_dispatcher_e2e.log' "${LOG_PREFIX}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+materialize_logged_artifact() {
+  local path="$1"
+  local log
+  log="$(artifact_log_path "${path}")" || return 0
+  if [ ! -s "${path}" ] && [ -s "${log}" ]; then
+    mkdir -p "$(dirname "${path}")"
+    jq -R -c --arg artifact "${path}" \
+      'fromjson? | select(.artifact_path == $artifact)' \
+      "${log}" > "${path}"
+  fi
+}
+
+materialize_staged_artifact() {
+  local path="$1"
+  local staged
+  staged="$(artifact_stage_path "${path}")"
+  if [ -s "${staged}" ] && [ "${staged}" != "${path}" ]; then
+    mkdir -p "$(dirname "${path}")"
+    cp "${staged}" "${path}"
+  fi
+  materialize_logged_artifact "${path}"
+}
+
+append_materialized_artifact_hash() {
+  local step="$1"
+  local path="$2"
+  materialize_staged_artifact "${path}"
+  append_artifact_hash "${step}" "${path}"
 }
 
 scan_jsonl_artifact() {
@@ -332,13 +394,13 @@ run_and_capture "ubs_lattice_surfaces" \
     crates/fcp-host/tests/lattice_policy_dispatcher_e2e.rs \
     crates/fcp-crypto-pq/benches/lattice_vs_ed25519_vs_mldsa.rs
 
-append_artifact_hash "crypto_representation_artifact" "target/fcp-crypto-pq/representation-profile-evidence.jsonl"
-append_artifact_hash "crypto_route_artifact" "target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl"
-append_artifact_hash "crypto_public_matrix_artifact" "target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl"
-append_artifact_hash "crypto_sample_pre_artifact" "target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl"
-append_artifact_hash "crypto_formal_artifact" "target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl"
-append_artifact_hash "policy_formal_artifact" "target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl"
-append_artifact_hash "host_dispatcher_artifact" "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"
+append_materialized_artifact_hash "crypto_representation_artifact" "target/fcp-crypto-pq/representation-profile-evidence.jsonl"
+append_materialized_artifact_hash "crypto_route_artifact" "target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl"
+append_materialized_artifact_hash "crypto_public_matrix_artifact" "target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl"
+append_materialized_artifact_hash "crypto_sample_pre_artifact" "target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl"
+append_materialized_artifact_hash "crypto_formal_artifact" "target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl"
+append_materialized_artifact_hash "policy_formal_artifact" "target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl"
+append_materialized_artifact_hash "host_dispatcher_artifact" "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"
 
 append_redaction_scan \
   "${ARTIFACT}" \

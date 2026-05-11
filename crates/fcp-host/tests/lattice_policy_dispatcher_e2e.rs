@@ -115,6 +115,26 @@ struct DispatchResult {
 }
 
 fn artifact_path() -> PathBuf {
+    if let Ok(root) = std::env::var("FCP_LATTICE_EVIDENCE_ROOT") {
+        let root = root.trim();
+        if !root.is_empty() {
+            let root = PathBuf::from(root);
+            let root = if root.is_absolute() {
+                root
+            } else {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join(root)
+            };
+
+            return root.join(
+                RELATIVE_ARTIFACT_PATH
+                    .strip_prefix("target/")
+                    .unwrap_or(RELATIVE_ARTIFACT_PATH),
+            );
+        }
+    }
+
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(RELATIVE_ARTIFACT_PATH)
@@ -784,8 +804,12 @@ fn lattice_policy_dispatcher_e2e_writes_redaction_safe_jsonl() {
     let file = File::create(&path).expect("create JSONL artifact");
     let mut writer = BufWriter::new(file);
     for record in &records {
-        serde_json::to_writer(&mut writer, record).expect("serialize evidence record");
+        let line = serde_json::to_string(record).expect("serialize evidence record");
+        writer
+            .write_all(line.as_bytes())
+            .expect("write JSONL record");
         writer.write_all(b"\n").expect("write JSONL newline");
+        eprintln!("{line}");
     }
     writer.flush().expect("flush JSONL artifact");
 

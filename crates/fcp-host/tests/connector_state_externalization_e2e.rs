@@ -141,6 +141,25 @@ fn read_chain(
     ))
 }
 
+fn p50_latency(mut samples: Vec<Duration>) -> Duration {
+    assert!(!samples.is_empty(), "latency sample set must not be empty");
+    samples.sort_unstable();
+    samples[samples.len() / 2]
+}
+
+fn measure_p50_latency<E>(
+    iterations: usize,
+    mut operation: impl FnMut() -> Result<(), E>,
+) -> Result<Duration, E> {
+    let mut samples = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let started = Instant::now();
+        operation()?;
+        samples.push(started.elapsed());
+    }
+    Ok(p50_latency(samples))
+}
+
 #[test]
 fn connector_state_externalization_restores_from_store_after_restart() -> TestResult {
     let object_store = memory_object_store();
@@ -190,6 +209,68 @@ fn connector_state_externalization_restores_from_store_after_restart() -> TestRe
     assert_eq!(snapshot.covers_head, head_1);
     assert_eq!(snapshot.covers_seq, 1);
     assert_eq!(snapshot.state_cbor, state_cbor(1));
+
+    Ok(())
+}
+
+#[test]
+fn connector_state_externalization_latency_budget_matrix() -> TestResult {
+    const ITERATIONS: usize = 33;
+
+    let object_store = memory_object_store();
+    let host = host_state_store(Arc::clone(&object_store));
+    let (head_0, _root_0, _seq_0) = append_committed(&host, state(0, None, lease_id(1)))?;
+
+    let same_handle_read_p50 = measure_p50_latency(ITERATIONS, || {
+        let root = read_root(&host)?;
+        assert_eq!(root.head, Some(head_0));
+        Ok::<(), ConnectorStateError>(())
+    })?;
+
+    let fresh_handle_fall_through_p50 = measure_p50_latency(ITERATIONS, || {
+        let fresh_host = host_state_store(Arc::clone(&object_store));
+        let root = read_root(&fresh_host)?;
+        assert_eq!(root.head, Some(head_0));
+        Ok::<(), ConnectorStateError>(())
+    })?;
+
+    let fail_closed_p50 = measure_p50_latency(ITERATIONS, || {
+        let unavailable = host_state_store(memory_object_store_with_quota(1));
+        let connector_id = connector_id();
+        let result = block_on(ConnectorStateStore::append_object(
+            &unavailable,
+            &connector_id,
+            state(0, None, lease_id(9)),
+        ));
+        match result {
+            Err(ConnectorStateError::StorageUnavailable {
+                connector_id: failed_connector_id,
+                reason,
+            }) => {
+                assert_eq!(failed_connector_id, connector_id);
+                assert!(!reason.is_empty());
+            }
+            other => panic!("expected typed storage-unavailable failure, got {other:?}"),
+        }
+        Ok::<(), ConnectorStateError>(())
+    })?;
+
+    eprintln!(
+        "connector-state p50 matrix: same-handle={same_handle_read_p50:?}, fresh-handle-fall-through={fresh_handle_fall_through_p50:?}, fail-closed={fail_closed_p50:?}"
+    );
+
+    assert!(
+        same_handle_read_p50 < Duration::from_millis(2),
+        "same-handle canonical connector-state read p50 {same_handle_read_p50:?} exceeded 2ms"
+    );
+    assert!(
+        fresh_handle_fall_through_p50 < Duration::from_millis(20),
+        "fresh-handle fcp-store fall-through read p50 {fresh_handle_fall_through_p50:?} exceeded 20ms"
+    );
+    assert!(
+        fail_closed_p50 < Duration::from_millis(5),
+        "fail-closed storage-unavailable path p50 {fail_closed_p50:?} exceeded 5ms"
+    );
 
     Ok(())
 }

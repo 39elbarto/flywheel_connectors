@@ -1,15 +1,17 @@
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use fcp_core::{
     ConnectorId, ConnectorStateAppendOutcome, ConnectorStateError, ConnectorStateObject,
     ConnectorStateRoot, ConnectorStateStore, ObjectHeader, ObjectId, ObjectIdKey, Provenance,
-    Signature, ZoneId,
+    RetentionClass, Signature, StorageMeta, StoredObject, ZoneId,
 };
 use fcp_store::{
     CONNECTOR_STATE_CACHE_MARKER, FcpStoreConnectorStateStore, MemoryObjectStore,
-    MemoryObjectStoreConfig, ObjectStore,
+    MemoryObjectStoreConfig, ObjectStore, ObjectStoreError,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -29,6 +31,75 @@ fn memory_object_store_with_quota(max_bytes: u64) -> Arc<dyn ObjectStore> {
     Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig {
         max_bytes,
     }))
+}
+
+struct FailNthPutObjectStore {
+    inner: Arc<dyn ObjectStore>,
+    fail_on_put: usize,
+    puts: AtomicUsize,
+}
+
+impl FailNthPutObjectStore {
+    fn new(inner: Arc<dyn ObjectStore>, fail_on_put: usize) -> Self {
+        Self {
+            inner,
+            fail_on_put,
+            puts: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl ObjectStore for FailNthPutObjectStore {
+    async fn put(&self, object: StoredObject) -> Result<(), ObjectStoreError> {
+        let put_number = self.puts.fetch_add(1, Ordering::SeqCst) + 1;
+        if put_number == self.fail_on_put {
+            return Err(ObjectStoreError::Io(
+                "simulated connector state root write outage".to_string(),
+            ));
+        }
+        self.inner.put(object).await
+    }
+
+    async fn get(&self, id: &ObjectId) -> Result<StoredObject, ObjectStoreError> {
+        self.inner.get(id).await
+    }
+
+    async fn exists(&self, id: &ObjectId) -> bool {
+        self.inner.exists(id).await
+    }
+
+    async fn delete(&self, id: &ObjectId) -> Result<(), ObjectStoreError> {
+        self.inner.delete(id).await
+    }
+
+    async fn get_header(&self, id: &ObjectId) -> Result<ObjectHeader, ObjectStoreError> {
+        self.inner.get_header(id).await
+    }
+
+    async fn get_storage_meta(&self, id: &ObjectId) -> Result<StorageMeta, ObjectStoreError> {
+        self.inner.get_storage_meta(id).await
+    }
+
+    async fn set_retention(
+        &self,
+        id: &ObjectId,
+        retention: RetentionClass,
+    ) -> Result<(), ObjectStoreError> {
+        self.inner.set_retention(id, retention).await
+    }
+
+    async fn list_zone(&self, zone_id: &ZoneId) -> Vec<ObjectId> {
+        self.inner.list_zone(zone_id).await
+    }
+
+    async fn storage_used(&self) -> u64 {
+        self.inner.storage_used().await
+    }
+
+    async fn storage_quota(&self) -> u64 {
+        self.inner.storage_quota().await
+    }
 }
 
 fn object_id_key() -> ObjectIdKey {
@@ -310,6 +381,48 @@ fn connector_state_externalization_conflicts_on_stale_prev_pointer() -> TestResu
             .iter()
             .all(|state| state.lease_object_id != lease_id(3))
     );
+
+    Ok(())
+}
+
+#[test]
+fn connector_state_externalization_retries_cleanly_after_root_write_failure() -> TestResult {
+    let inner = memory_object_store();
+    let object_store: Arc<dyn ObjectStore> =
+        Arc::new(FailNthPutObjectStore::new(Arc::clone(&inner), 2));
+    let host = host_state_store(object_store);
+    let connector_id = connector_id();
+
+    let first_attempt = block_on(ConnectorStateStore::append_object(
+        &host,
+        &connector_id,
+        state(0, None, lease_id(1)),
+    ));
+    match first_attempt {
+        Err(ConnectorStateError::StorageUnavailable {
+            connector_id: failed_connector_id,
+            reason,
+        }) => {
+            assert_eq!(failed_connector_id, connector_id);
+            assert!(reason.contains("simulated connector state root write outage"));
+        }
+        other => panic!("expected simulated root-write outage, got {other:?}"),
+    }
+
+    assert!(block_on(ConnectorStateStore::read_root(&host, &connector_id))?.is_none());
+    assert!(
+        read_chain(&host, None, 10)?.is_empty(),
+        "unrooted state object from failed append must not be exposed as canonical chain"
+    );
+
+    let (head_0, _root_0, seq_0) = append_committed(&host, state(0, None, lease_id(1)))?;
+    assert_eq!(seq_0, 0);
+    let root = read_root(&host)?;
+    assert_eq!(root.head, Some(head_0));
+    let chain = read_chain(&host, None, 10)?;
+    assert_eq!(chain.len(), 1);
+    assert_eq!(chain[0].seq, 0);
+    assert_eq!(chain[0].lease_object_id, lease_id(1));
 
     Ok(())
 }

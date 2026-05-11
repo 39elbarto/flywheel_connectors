@@ -4,7 +4,7 @@
 //! cache these objects, but this module is the content-addressed storage seam
 //! that host and SDK code can share as the mesh-native path lands.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -134,6 +134,10 @@ pub enum ConnectorStateStoreError {
     /// Sequence increment overflowed.
     #[error("connector state sequence overflow at {0}")]
     SequenceOverflow(u64),
+
+    /// The canonical state chain loops back to an already visited object.
+    #[error("connector state chain contains a cycle at {0}")]
+    ChainCycle(ObjectId),
 }
 
 type Result<T> = std::result::Result<T, ConnectorStateStoreError>;
@@ -425,29 +429,24 @@ impl FcpStoreConnectorStateStore {
             return Ok(Vec::new());
         }
 
-        let mut states = Vec::new();
-        for object_id in self.object_store.list_zone(&self.zone_id).await {
-            let stored = self.object_store.get(&object_id).await?;
-            if stored.header.schema != Self::state_object_schema_id() {
-                continue;
-            }
+        let Some((_root_id, root)) = self.read_root().await? else {
+            return Ok(Vec::new());
+        };
 
-            let state = self.load_state_from_stored(object_id, &stored)?;
-            if !self.state_belongs_to_store(&state) {
-                continue;
+        let mut states = Vec::new();
+        let mut visited = HashSet::new();
+        let mut next = root.head;
+        while let Some(object_id) = next {
+            if !visited.insert(object_id) {
+                return Err(ConnectorStateStoreError::ChainCycle(object_id));
             }
-            if after_seq.is_some_and(|min_seq| state.seq <= min_seq) {
-                continue;
-            }
+            let (_loaded_id, state) = self.load_state_object(&object_id).await?;
+            next = state.prev;
             states.push((object_id, state));
         }
 
-        states.sort_by(|(left_id, left), (right_id, right)| {
-            left.seq
-                .cmp(&right.seq)
-                .then(left.lease_seq.cmp(&right.lease_seq))
-                .then(left_id.cmp(right_id))
-        });
+        states.reverse();
+        states.retain(|(_object_id, state)| after_seq.is_none_or(|min_seq| state.seq > min_seq));
         states.truncate(limit);
         Ok(states)
     }
@@ -1043,6 +1042,7 @@ impl FcpStoreConnectorStateStore {
             | ConnectorStateStoreError::InvalidStateCbor(_)
             | ConnectorStateStoreError::SequenceMismatch { .. }
             | ConnectorStateStoreError::SequenceOverflow(_)
+            | ConnectorStateStoreError::ChainCycle(_)
             | ConnectorStateStoreError::Serialization(_) => ConnectorStateError::MalformedState {
                 connector_id: self.connector_id.clone(),
                 reason: err.to_string(),
@@ -1441,6 +1441,31 @@ mod tests {
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].0, head);
         assert_eq!(chain[0].1.seq, 0);
+    }
+
+    #[test]
+    fn read_chain_follows_committed_root_and_hides_unrooted_state() {
+        let object_store = store();
+        let state_store = test_store(object_store.clone());
+        let orphan = state(7, None, lease_id(7));
+        let stored = state_store
+            .stored_object(&orphan.header, &orphan, RetentionClass::Pinned)
+            .unwrap();
+        run_async(object_store.put(stored)).unwrap();
+
+        assert!(run_async(state_store.read_root()).unwrap().is_none());
+        assert!(
+            run_async(state_store.read_chain(None, 10))
+                .unwrap()
+                .is_empty()
+        );
+
+        let (head, _) = append_ok(&state_store, state(0, None, lease_id(1)));
+        let chain = run_async(state_store.read_chain(None, 10)).unwrap();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].0, head);
+        assert_eq!(chain[0].1.seq, 0);
+        assert_ne!(chain[0].1.lease_object_id, lease_id(7));
     }
 
     #[test]

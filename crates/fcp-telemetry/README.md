@@ -85,8 +85,8 @@ scripts/e2e/telemetry_otlp_exporter_verification.sh
 ```
 
 It runs the loopback collector fixture, the unavailable-collector fixture, the
-collector-backpressure fixture, and the slow-collector timeout fixture through
-`rch`.
+trace/metric/log collector-backpressure fixture, and the slow-collector timeout
+fixture through `rch`.
 
 Set `FCP_TELEMETRY_OTLP_EVIDENCE=/path/to/evidence.jsonl` to append redaction-safe JSONL evidence. The fixture records command line, git revision, endpoint class, signal type, batch or signal counts, retry decision, dropped count, gRPC status, error mapping, timeout/cancellation checkpoint where applicable, cleanup result, and skip reason.
 
@@ -121,6 +121,7 @@ rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-fwc-telemetry-readiness \
 This crate provides the OTLP exporter and proof fixtures. Host/fwc admin wiring is still tracked by the OTLP bead and should not be implied complete until an operator can query the host readiness surface and see the same redaction-safe readiness contract.
 
 The current fixtures cover successful trace, metric, and log export,
-unavailable collector mapping, collector backpressure/drop-accounting, and
-timeout-bounded slow-collector cancellation behavior. Remaining closeout work
-includes broader retry policy and host/admin integration evidence.
+unavailable collector mapping, trace/metric/log collector
+backpressure/drop-accounting, and timeout-bounded slow-collector cancellation
+behavior. Remaining closeout work includes broader retry policy and host/admin
+integration evidence.

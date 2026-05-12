@@ -1736,7 +1736,7 @@ fn build_rerun_plan(target: &str, known: &KnownProofCommand) -> PlannedRerunComm
 fn remote_argv(original: &[String], target_slug: &str) -> Vec<String> {
     let mut argv = vec![
         "env".to_owned(),
-        "RCH_FORCE_REMOTE=true".to_owned(),
+        "RCH_REQUIRE_REMOTE=1".to_owned(),
         "RCH_VISIBILITY=summary".to_owned(),
         "rch".to_owned(),
         "exec".to_owned(),
@@ -2298,6 +2298,7 @@ output_schema = {{}}
                     None,
                 ),
             ],
+            agent_readiness_reports: Vec::new(),
         }
     }
 
@@ -2347,6 +2348,7 @@ output_schema = {{}}
                 validation_argv: None,
                 source: source("artifacts/e2e/latency-proof/manifest.json", 1),
             }],
+            agent_readiness_reports: Vec::new(),
         }
     }
 
@@ -2401,6 +2403,7 @@ output_schema = {{}}
                 },
             ],
             evidence_bundles: Vec::new(),
+            agent_readiness_reports: Vec::new(),
         }
     }
 
@@ -2596,6 +2599,8 @@ related = []
             .map(|value| value.as_str().expect("argv string"))
             .collect::<Vec<_>>();
         assert_eq!(argv[0], "env");
+        assert!(argv.contains(&"RCH_REQUIRE_REMOTE=1"));
+        assert!(!argv.contains(&"RCH_FORCE_REMOTE=true"));
         assert!(argv.contains(&"rch"));
         assert!(argv.contains(&"CARGO_INCREMENTAL=0"));
         assert!(
@@ -2760,7 +2765,8 @@ related = []
             .iter()
             .map(|value| value.as_str().expect("remote argv string"))
             .collect::<Vec<_>>();
-        assert!(remote_argv.contains(&"RCH_FORCE_REMOTE=true"));
+        assert!(remote_argv.contains(&"RCH_REQUIRE_REMOTE=1"));
+        assert!(!remote_argv.contains(&"RCH_FORCE_REMOTE=true"));
         assert!(remote_argv.contains(&"rch"));
         assert!(remote_argv.contains(&"cargo"));
 
@@ -3356,6 +3362,7 @@ related = []
                 })
                 .collect(),
             evidence_bundles: Vec::new(),
+            agent_readiness_reports: Vec::new(),
         });
         let manifests = connectors
             .iter()

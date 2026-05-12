@@ -25,6 +25,14 @@ const REPORT_FILENAME: &str = "report.json";
 const EVENTS_FILENAME: &str = "events.jsonl";
 const HANDOFF_FILENAME: &str = "handoff.json";
 const HANDOFF_MARKDOWN_FILENAME: &str = "handoff.md";
+const OPERATOR_APPROVAL_GATES: [&str; 6] = [
+    "agent_mail_repair: do not repair, reconstruct, restart, or kill Agent Mail without explicit user approval",
+    "disk_cleanup: do not delete files or prune artifacts to relieve disk pressure without explicit user approval",
+    "file_deletion: do not delete any file or folder without explicit user approval",
+    "worker_fleet_repair: do not repair, restart, or reconfigure rch workers without explicit user approval",
+    "destructive_git: do not run destructive Git cleanup, reset, or overwrite commands without explicit user approval",
+    "local_cargo_proof: do not treat local Cargo or transfer logs as proof when rch proof is required",
+];
 
 /// Arguments for `fwc agent-readiness`.
 #[derive(Args, Debug, Clone, Serialize)]
@@ -156,6 +164,7 @@ struct HandoffBundle {
     owned_path_globs: Vec<String>,
     exact_allowed_next_actions: Vec<String>,
     refused_next_actions: Vec<String>,
+    operator_approval_gates: Vec<&'static str>,
     artifact_files: HandoffArtifactFiles,
     redaction: Value,
     human_summary: String,
@@ -360,6 +369,7 @@ fn build_handoff_bundle(
         .map(refused_next_action)
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    let operator_approval_gates = OPERATOR_APPROVAL_GATES.to_vec();
     let owned_path_globs = report
         .probes
         .worktree
@@ -382,6 +392,7 @@ fn build_handoff_bundle(
         &active_blocker_beads,
         &exact_allowed_next_actions,
         &refused_next_actions,
+        &operator_approval_gates,
         &report_digest,
     );
 
@@ -397,6 +408,7 @@ fn build_handoff_bundle(
         owned_path_globs,
         exact_allowed_next_actions,
         refused_next_actions,
+        operator_approval_gates,
         artifact_files,
         redaction,
         human_summary,
@@ -555,6 +567,7 @@ fn format_handoff_summary(
     blockers: &[String],
     allowed: &[String],
     refused: &[String],
+    approval_gates: &[&str],
     digest: &str,
 ) -> String {
     let blocker_text = if blockers.is_empty() {
@@ -572,6 +585,7 @@ fn format_handoff_summary(
     } else {
         refused.join("\n- ")
     };
+    let approval_gate_text = approval_gates.join("\n- ");
     format!(
         "\
 agent readiness handoff: {run_id}
@@ -590,6 +604,8 @@ allowed_next_actions:
 - {allowed}
 refused_next_actions:
 - {refused}
+operator_approval_gates:
+- {approval_gates}
 ",
         run_id = report.run_id.as_str(),
         agent = report.agent_name.as_str(),
@@ -608,6 +624,7 @@ refused_next_actions:
         blockers = blocker_text,
         allowed = allowed_text,
         refused = refused_text,
+        approval_gates = approval_gate_text,
     )
 }
 
@@ -656,9 +673,16 @@ mod tests {
     use tempfile::TempDir;
 
     fn fixture_args(out_dir: PathBuf) -> AgentReadinessArgs {
+        fixture_args_for_scenario(out_dir, FixtureScenarioArg::AgentMailUnavailable)
+    }
+
+    fn fixture_args_for_scenario(
+        out_dir: PathBuf,
+        scenario: FixtureScenarioArg,
+    ) -> AgentReadinessArgs {
         AgentReadinessArgs {
             command: AgentReadinessCommand::Fixture(AgentReadinessFixtureArgs {
-                scenario: FixtureScenarioArg::AgentMailUnavailable,
+                scenario,
                 run_id: Some("agent-readiness-test".to_owned()),
                 agent: Some("GreenLake".to_owned()),
                 observed_at_unix_ms: Some(1_893_456_000_000),
@@ -694,6 +718,59 @@ mod tests {
         assert!(!handoff_text.contains(tmp.path().to_string_lossy().as_ref()));
         assert!(handoff_text.contains("agent-readiness-test"));
         assert!(handoff_text.contains("flywheel_connectors-d5yeb"));
+        assert!(handoff_text.contains("agent_mail_repair"));
+        assert!(handoff_text.contains("disk_cleanup"));
+        assert!(handoff_text.contains("worker_fleet_repair"));
+        assert!(handoff_text.contains("destructive_git"));
+
+        let markdown_text =
+            fs::read_to_string(tmp.path().join(HANDOFF_MARKDOWN_FILENAME)).expect("handoff md");
+        assert!(markdown_text.contains("operator_approval_gates"));
+        assert!(markdown_text.contains("do not repair, reconstruct, restart, or kill Agent Mail"));
+    }
+
+    #[test]
+    fn fixture_command_writes_rch_blocker_troubleshooting_packet() {
+        let tmp = TempDir::new().expect("tempdir");
+        let result = run(&fixture_args_for_scenario(
+            tmp.path().to_path_buf(),
+            FixtureScenarioArg::RchUnavailable,
+        ))
+        .expect("fixture run");
+
+        assert!(result.success);
+        assert_eq!(
+            result.payload["handoff"]["decision"]["mode"],
+            "proof_blocked"
+        );
+        assert_eq!(
+            result.payload["handoff"]["active_blocker_beads"][0],
+            "flywheel_connectors-rfbrc"
+        );
+        let refused_next_actions = result.payload["handoff"]["refused_next_actions"]
+            .as_array()
+            .expect("refused actions are an array");
+        assert!(refused_next_actions.iter().any(|action| {
+            action
+                .as_str()
+                .is_some_and(|action| action.starts_with("cargo_proof:"))
+        }));
+        assert!(refused_next_actions.iter().any(|action| {
+            action
+                .as_str()
+                .is_some_and(|action| action.starts_with("push:"))
+        }));
+        let approval_gates = result.payload["handoff"]["operator_approval_gates"]
+            .as_array()
+            .expect("approval gates are an array");
+        assert!(approval_gates.iter().any(|gate| {
+            gate.as_str()
+                .is_some_and(|gate| gate.starts_with("disk_cleanup:"))
+        }));
+        assert!(approval_gates.iter().any(|gate| {
+            gate.as_str()
+                .is_some_and(|gate| gate.starts_with("worker_fleet_repair:"))
+        }));
     }
 
     #[test]

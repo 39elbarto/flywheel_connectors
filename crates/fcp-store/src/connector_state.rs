@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock, Weak};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ciborium::de::from_reader_with_recursion_limit;
 use ciborium::value::Value as CborValue;
@@ -16,11 +16,11 @@ use fcp_cbor::{
     MAX_DESERIALIZATION_RECURSION_LIMIT, SchemaId, SerializationError,
 };
 use fcp_prelude::{
-    ConnectorId, ConnectorStateAppendOutcome, ConnectorStateCanonicalStatus, ConnectorStateChange,
-    ConnectorStateChangeKind, ConnectorStateChangeStream, ConnectorStateError, ConnectorStateModel,
-    ConnectorStateObject, ConnectorStateRoot, ConnectorStateSnapshot, ConnectorStateStore,
-    ConnectorStateWriteAuthorization, InstanceId, ObjectHeader, ObjectId, ObjectIdKey,
-    RetentionClass, StorageMeta, StoredObject, ZoneId,
+    BackoffPolicy, ConnectorId, ConnectorStateAppendOutcome, ConnectorStateCanonicalStatus,
+    ConnectorStateChange, ConnectorStateChangeKind, ConnectorStateChangeStream,
+    ConnectorStateError, ConnectorStateModel, ConnectorStateObject, ConnectorStateRoot,
+    ConnectorStateSnapshot, ConnectorStateStore, ConnectorStateWriteAuthorization, InstanceId,
+    ObjectHeader, ObjectId, ObjectIdKey, RetentionClass, StorageMeta, StoredObject, ZoneId,
 };
 use futures_util::stream;
 use semver::Version;
@@ -43,6 +43,8 @@ pub const CONNECTOR_STATE_TRACING_TARGET: &str = "fcp.connector_state";
 pub const CONNECTOR_STATE_READ_EVENT: &str = "fcp.connector_state.read";
 /// Structured event name emitted for connector-state writes.
 pub const CONNECTOR_STATE_WRITE_EVENT: &str = "fcp.connector_state.write";
+/// Structured event name emitted when connector-state root writes are retried.
+pub const CONNECTOR_STATE_WRITE_RETRY_EVENT: &str = "fcp.connector_state.write.retry";
 /// Structured event name emitted for connector-state snapshots.
 pub const CONNECTOR_STATE_SNAPSHOT_EVENT: &str = "fcp.connector_state.snapshot";
 /// Structured event name emitted for connector-state compaction.
@@ -155,6 +157,7 @@ pub struct FcpStoreConnectorStateStore {
     retention: RetentionClass,
     snapshot_every_entries: u64,
     snapshot_every_secs: u64,
+    root_write_retry_policy: BackoffPolicy,
     change_bus: Arc<ConnectorStateChangeBus>,
 }
 
@@ -178,6 +181,7 @@ impl FcpStoreConnectorStateStore {
             retention: RetentionClass::Pinned,
             snapshot_every_entries: 1_000,
             snapshot_every_secs: DEFAULT_SNAPSHOT_EVERY_SECS,
+            root_write_retry_policy: BackoffPolicy::new(0, Duration::ZERO, Duration::ZERO, 1.0),
             change_bus,
         }
     }
@@ -218,6 +222,18 @@ impl FcpStoreConnectorStateStore {
     #[must_use]
     pub const fn with_snapshot_every_secs(mut self, snapshot_every_secs: u64) -> Self {
         self.snapshot_every_secs = snapshot_every_secs;
+        self
+    }
+
+    /// Configure retries for transient canonical root writes.
+    ///
+    /// The default policy has zero retries so fail-closed storage errors stay
+    /// bounded for hot-path callers. Hosts that can tolerate a short bounded
+    /// retry window can opt in when the backing mesh/object store may recover
+    /// quickly after a transient I/O outage.
+    #[must_use]
+    pub const fn with_root_write_retry_policy(mut self, policy: BackoffPolicy) -> Self {
+        self.root_write_retry_policy = policy;
         self
     }
 
@@ -308,6 +324,28 @@ impl FcpStoreConnectorStateStore {
         Ok(object_id)
     }
 
+    async fn store_root_with_retry(&self, root: ConnectorStateRoot) -> Result<ObjectId> {
+        let mut delays = self.root_write_retry_policy.retry_delays();
+        let mut retry_index = 0_u32;
+
+        loop {
+            match self.store_root(root.clone()).await {
+                Ok(root_id) => return Ok(root_id),
+                Err(err) if Self::is_retryable_root_write_error(&err) => {
+                    let Some(delay) = delays.next() else {
+                        return Err(err);
+                    };
+                    self.record_root_write_retry(retry_index, delay, &err);
+                    retry_index = retry_index.saturating_add(1);
+                    if !delay.is_zero() {
+                        fcp_async_core::time::sleep(delay).await;
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
     /// Append a state object if its prev pointer matches the canonical head.
     ///
     /// # Errors
@@ -367,7 +405,7 @@ impl FcpStoreConnectorStateStore {
 
         let object_id = self.store_state_object(state_obj.clone()).await?;
         let root = self.root_for_head(&state_obj, object_id);
-        let root_object_id = self.store_root(root).await?;
+        let root_object_id = self.store_root_with_retry(root).await?;
         let snapshot_object_id = self.maybe_emit_snapshot(object_id, &state_obj).await?;
 
         self.publish_change(
@@ -1064,6 +1102,32 @@ impl FcpStoreConnectorStateStore {
             latency_seconds,
             metric_name = CONNECTOR_STATE_LATENCY_SECONDS_METRIC,
         );
+    }
+
+    fn record_root_write_retry(
+        &self,
+        retry_index: u32,
+        delay: Duration,
+        err: &ConnectorStateStoreError,
+    ) {
+        tracing::warn!(
+            target: CONNECTOR_STATE_TRACING_TARGET,
+            event_type = CONNECTOR_STATE_WRITE_RETRY_EVENT,
+            connector_id = %self.connector_id,
+            zone_id = %self.zone_id,
+            operation = "write_root",
+            result = "retry",
+            retry_index,
+            retry_delay_ms = delay.as_millis(),
+            reason = %err,
+        );
+    }
+
+    const fn is_retryable_root_write_error(err: &ConnectorStateStoreError) -> bool {
+        matches!(
+            err,
+            ConnectorStateStoreError::ObjectStore(ObjectStoreError::Io(_))
+        )
     }
 
     fn publish_change(

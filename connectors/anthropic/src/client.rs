@@ -46,20 +46,16 @@ fn resolve_api_version(config_override: Option<&str>) -> String {
     DEFAULT_API_VERSION.to_string()
 }
 
-/// Authentication mode for the Anthropic connector.
+/// Authentication mode for the Anthropic API.
 #[derive(Clone)]
 pub enum AnthropicAuth {
     /// Direct API key (legacy; avoided in secretless deployments).
     ApiKey(String),
     /// Bearer token supplied by an operator or gateway.
-    ///
-    /// Direct Anthropic API use is reserved for short-lived WIF access tokens.
-    /// Claude Code `ANTHROPIC_AUTH_TOKEN` values belong behind a gateway or
-    /// proxy boundary.
     BearerToken(String),
-    /// Claude Code subscription OAuth token, usually from `CLAUDE_CODE_OAUTH_TOKEN`.
+    /// Long-lived Claude Code OAuth token, typically from `claude setup-token`.
     ClaudeCodeOAuth(String),
-    /// Compatibility alias for the long-lived token produced by `claude setup-token`.
+    /// Explicit FCP alias for the `claude setup-token` OAuth token output.
     SetupToken(String),
     /// Secretless credential reference (egress proxy injection).
     CredentialId(CredentialId),
@@ -82,17 +78,6 @@ impl AnthropicAuth {
     #[must_use]
     pub const fn is_secretless(&self) -> bool {
         matches!(self, Self::CredentialId(_))
-    }
-
-    /// Operator-facing boundary label for diagnostics and readiness reports.
-    #[must_use]
-    pub const fn boundary_name(&self) -> &'static str {
-        match self {
-            Self::ApiKey(_) => "direct_anthropic_api_key",
-            Self::BearerToken(_) => "direct_wif_or_gateway_bearer",
-            Self::ClaudeCodeOAuth(_) | Self::SetupToken(_) => "claude_code_runtime_boundary",
-            Self::CredentialId(_) => "host_credential_injection",
-        }
     }
 
     /// Auth method name for diagnostics and request-policy decisions.

@@ -41,6 +41,14 @@ idempotency = "none"
 input_schema = { type = "object", required = ["to", "from", "connection_id"] }
 output_schema = { type = "object" }
 
+[provides.operations."telnyx.call.initiate".ai_hints]
+when_to_use = "Use when the agent has explicit approval to place a new outbound Telnyx Call Control call."
+common_mistakes = [
+  "Starting a call without confirming the requested caller and callee numbers; this operation creates external telephone traffic.",
+  "Omitting webhook_url or stream_url when the downstream workflow depends on signed callback or media-session binding.",
+]
+examples = ['{"to":"+15551230000","from":"+15559870000","connection_id":"conn-workflow","webhook_url":"https://voice.example.com/telnyx","timeout_secs":30}']
+
 [provides.operations."telnyx.call.initiate".network_constraints]
 host_allow = ["api.telnyx.com"]
 port_allow = [443]
@@ -68,6 +76,14 @@ requires_approval = "policy"
 idempotency = "best_effort"
 input_schema = { type = "object", required = ["call_control_id"] }
 output_schema = { type = "object" }
+
+[provides.operations."telnyx.call.continue".ai_hints]
+when_to_use = "Use when the agent needs to answer or continue a pending Telnyx call that already has a call_control_id."
+common_mistakes = [
+  "Calling this before a Telnyx webhook or status lookup has supplied the current call_control_id.",
+  "Treating answer as idempotent across provider retries; repeated continue requests can change the live call state.",
+]
+examples = ['{"call_control_id":"call-control-123"}']
 
 [provides.operations."telnyx.call.continue".network_constraints]
 host_allow = ["api.telnyx.com"]
@@ -97,6 +113,14 @@ idempotency = "none"
 input_schema = { type = "object", required = ["call_control_id", "payload"] }
 output_schema = { type = "object" }
 
+[provides.operations."telnyx.call.speak".ai_hints]
+when_to_use = "Use when the agent should speak short synthesized text into an active Telnyx call."
+common_mistakes = [
+  "Sending long transcripts or unreviewed generated text into a live call instead of a concise approved prompt.",
+  "Confusing speak with gather; use telnyx.call.gather when the next step requires DTMF input.",
+]
+examples = ['{"call_control_id":"call-control-123","payload":"Your build finished successfully.","voice":"female","language":"en-US"}']
+
 [provides.operations."telnyx.call.speak".network_constraints]
 host_allow = ["api.telnyx.com"]
 port_allow = [443]
@@ -124,6 +148,14 @@ requires_approval = "policy"
 idempotency = "best_effort"
 input_schema = { type = "object", required = ["call_control_id"] }
 output_schema = { type = "object" }
+
+[provides.operations."telnyx.call.end".ai_hints]
+when_to_use = "Use when the agent has approval to hang up an active Telnyx call."
+common_mistakes = [
+  "Ending the wrong call because stale call_control_id values were kept after a transfer or reconnect.",
+  "Using end as a cleanup shortcut before persisting the final call status or audit outcome.",
+]
+examples = ['{"call_control_id":"call-control-123"}']
 
 [provides.operations."telnyx.call.end".network_constraints]
 host_allow = ["api.telnyx.com"]
@@ -153,6 +185,14 @@ idempotency = "strict"
 input_schema = { type = "object", required = ["call_control_id"] }
 output_schema = { type = "object" }
 
+[provides.operations."telnyx.call.status".ai_hints]
+when_to_use = "Use when the agent needs the current Telnyx provider state for a known call_control_id without changing the call."
+common_mistakes = [
+  "Polling status as a substitute for signed webhooks in event-driven call flows.",
+  "Assuming a missing call is safe to ignore; provider 404 or 422 responses should be surfaced as call-state evidence.",
+]
+examples = ['{"call_control_id":"call-control-123"}']
+
 [provides.operations."telnyx.call.status".network_constraints]
 host_allow = ["api.telnyx.com"]
 port_allow = [443]
@@ -180,6 +220,14 @@ requires_approval = "policy"
 idempotency = "none"
 input_schema = { type = "object", required = ["call_control_id", "to"] }
 output_schema = { type = "object" }
+
+[provides.operations."telnyx.call.transfer".ai_hints]
+when_to_use = "Use when the agent has approval to move a live Telnyx call to another destination."
+common_mistakes = [
+  "Transferring to an unverified destination number or queue; this changes who can hear or control the call.",
+  "Forgetting to supply from when the transfer flow depends on preserving caller identity.",
+]
+examples = ['{"call_control_id":"call-control-123","to":"+15550000001","from":"+15559870000","timeout_secs":20}']
 
 [provides.operations."telnyx.call.transfer".network_constraints]
 host_allow = ["api.telnyx.com"]
@@ -209,6 +257,14 @@ idempotency = "none"
 input_schema = { type = "object", required = ["call_control_id", "payload"] }
 output_schema = { type = "object" }
 
+[provides.operations."telnyx.call.gather".ai_hints]
+when_to_use = "Use when the agent needs to ask an active caller for DTMF digits using Telnyx gather_using_speak."
+common_mistakes = [
+  "Using speak when the workflow needs keypad input; speak does not collect digits.",
+  "Leaving digit bounds or terminator unspecified when the prompt needs a predictable completion condition.",
+]
+examples = ['{"call_control_id":"call-control-123","payload":"Press 1 for deploy status or 2 for incident summary.","minimum_digits":1,"maximum_digits":1,"terminator":"#"}']
+
 [provides.operations."telnyx.call.gather".network_constraints]
 host_allow = ["api.telnyx.com"]
 port_allow = [443]
@@ -236,6 +292,14 @@ requires_approval = "none"
 idempotency = "best_effort"
 input_schema = { type = "object", required = ["headers", "body"] }
 output_schema = { type = "object" }
+
+[provides.operations."telnyx.webhook.validate_signature".ai_hints]
+when_to_use = "Use when the agent needs to verify Telnyx webhook Ed25519 headers and replay state before trusting the event body."
+common_mistakes = [
+  "Treating Telnyx signatures like Twilio HMAC signatures; Telnyx uses Ed25519 headers.",
+  "Validating the parsed JSON body instead of the exact raw body bytes that Telnyx signed.",
+]
+examples = ['{"headers":{"Telnyx-Timestamp":"1770000000","Telnyx-Signature-Ed25519":"base64-ed25519-signature"},"raw_body":"{\"data\":{\"event_type\":\"call.initiated\"}}","body":{"data":{"event_type":"call.initiated"}}}']
 
 [provides.operations."telnyx.webhook.validate_signature".network_constraints]
 host_allow = ["none.invalid"]
@@ -265,6 +329,14 @@ idempotency = "strict"
 input_schema = { type = "object", required = ["body", "inbound_policy"] }
 output_schema = { type = "object" }
 
+[provides.operations."telnyx.webhook.evaluate_inbound_policy".ai_hints]
+when_to_use = "Use when a verified Telnyx webhook must be accepted or denied based on the configured inbound caller policy."
+common_mistakes = [
+  "Evaluating allowlist policy before signature validation; unsigned caller data is untrusted.",
+  "Comparing display formatting instead of normalized E.164 caller numbers.",
+]
+examples = ['{"body":{"data":{"event_type":"call.initiated","payload":{"from":"+15551230000","to":"+15559870000"}}},"inbound_policy":"allowlist","allowed_from":["+15551230000"]}']
+
 [provides.operations."telnyx.webhook.evaluate_inbound_policy".network_constraints]
 host_allow = ["none.invalid"]
 port_allow = [0]
@@ -293,6 +365,14 @@ idempotency = "strict"
 input_schema = { type = "object", required = ["body"] }
 output_schema = { type = "object" }
 
+[provides.operations."telnyx.webhook.parse_event".ai_hints]
+when_to_use = "Use when the agent already has a trusted Telnyx webhook body and needs the normalized event envelope."
+common_mistakes = [
+  "Parsing unverified webhook bodies directly; validate the Ed25519 signature first for provider-originated callbacks.",
+  "Assuming every event has call_control_id at the top level instead of under the Telnyx data payload.",
+]
+examples = ['{"body":{"data":{"id":"evt-123","event_type":"call.initiated","payload":{"call_control_id":"call-control-123","from":"+15551230000"}}}}']
+
 [provides.operations."telnyx.webhook.parse_event".network_constraints]
 host_allow = ["none.invalid"]
 port_allow = [0]
@@ -320,6 +400,14 @@ requires_approval = "none"
 idempotency = "best_effort"
 input_schema = { type = "object", required = ["headers", "body"] }
 output_schema = { type = "object" }
+
+[provides.operations."telnyx.webhook.ingest_request".ai_hints]
+when_to_use = "Use for the normal inbound Telnyx webhook path when the connector should validate, replay-check, parse, policy-check, and ingest the request."
+common_mistakes = [
+  "Calling parse_event or evaluate_inbound_policy separately for production ingress and skipping replay protection.",
+  "Dropping request_region or service-layer context that operators need for redaction-safe webhook evidence.",
+]
+examples = ['{"method":"POST","headers":{"Telnyx-Timestamp":"1770000000","Telnyx-Signature-Ed25519":"base64-ed25519-signature"},"raw_body":"{\"data\":{\"event_type\":\"call.initiated\"}}","body":{"data":{"event_type":"call.initiated"}},"inbound_policy":"open","request_region":{"source":"gateway"}}']
 
 [provides.operations."telnyx.webhook.ingest_request".network_constraints]
 host_allow = ["none.invalid"]

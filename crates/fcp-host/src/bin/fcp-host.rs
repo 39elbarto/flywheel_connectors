@@ -109,7 +109,7 @@ use fcp_policy::{
 };
 use fcp_prelude::{
     ApprovalToken, CapabilityConstraints, CapabilityVerifier, ConnectorStateCanonicalStatus,
-    CorrelationId, CostEstimateConfidence, CredentialId, Decision,
+    CorrelationId, CostEstimateConfidence, CredentialId, Decision, InstanceId,
     LeasePurpose as CoreLeasePurpose, ObjectId, PolicySimulationInput, ResourceAvailability,
     RolloutPolicy, SafetyTier, TailscaleNodeId, TransportMode, UsageMetric, UsageMetricKind,
     ZoneId, ZonePolicyObject, simulate_policy_decision,
@@ -134,7 +134,6 @@ use fcp_sandbox::{
     EgressTcpConnectRequest, HttpHeader, NoOpCredentialInjector, TlsVerifier, WasiConfig,
     WasiConnectorRunner, host_matches_allow_list,
 };
-use fcp_telemetry::{OtlpReadiness, TelemetryConfig, TelemetryError};
 use futures_util::future::join_all;
 use hyper::body::Incoming;
 use hyper_util::{
@@ -144,6 +143,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
 use tower::ServiceExt;
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 type ConnectorConfig = ManagedConnectorConfig;
 
@@ -2353,6 +2353,17 @@ fn host_connector_state_explain_payload_with_canonical_status(
             .map_or(Value::Null, |count| json!(count)),
         "canonical_state": {
             "root_present": canonical_status.is_some_and(|status| status.root_present),
+            "connector_id": canonical_status
+                .map(|status| status.connector_id.to_string()),
+            "zone_id": canonical_status
+                .and_then(|status| status.zone_id.as_ref())
+                .map(ZoneId::as_str),
+            "instance_id": canonical_status
+                .and_then(|status| status.instance_id.as_ref())
+                .map(InstanceId::as_str),
+            "model": canonical_status
+                .and_then(|status| status.model.as_ref())
+                .map(ToString::to_string),
             "root_object_id": canonical_status
                 .and_then(|status| status.root_object_id)
                 .map(|object_id| object_id.to_string()),
@@ -2410,9 +2421,7 @@ fn usable_connector_state_canonical_status<'a>(
     zone: Option<&ZoneId>,
     warnings: &mut Vec<String>,
 ) -> Option<&'a ConnectorStateCanonicalStatus> {
-    let Some(status) = canonical_status else {
-        return None;
-    };
+    let status = canonical_status?;
     if &status.connector_id != connector_id {
         warnings.push(
             "Canonical fcp-store status was supplied for a different connector; ignoring it."
@@ -2431,6 +2440,116 @@ fn usable_connector_state_canonical_status<'a>(
         return None;
     }
     Some(status)
+}
+
+const HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION: &str = "fcp-host-cutover-gates/v1";
+
+fn host_mesh_cutover_gates_payload(catalog_connector_count: usize) -> Value {
+    let node_count = 1_usize;
+    let gates = vec![
+        json!({
+            "gate_id": "mesh-inventory-placement",
+            "name": "Mesh-backed connector inventory with placement evidence",
+            "predicate_text": "At least 3 connectors have placement.has_mesh_replica=true and placement.replica_count >= 2.",
+            "status": "skip",
+            "measured_value": {
+                "telemetry_state": "unavailable",
+                "reason_code": "host-direct-telemetry-skip",
+                "catalog_connector_count": catalog_connector_count,
+                "connectors_meeting_predicate": 0,
+                "node_count": node_count,
+                "missing_fields": ["placement.has_mesh_replica", "placement.replica_count"]
+            },
+            "target": {
+                "connectors_meeting_predicate": 3,
+                "placement.has_mesh_replica": true,
+                "placement.replica_count": 2,
+                "node_count_gte": 3
+            },
+            "how_measured": ["GET /rpc/mesh/cutover-gates", "fwc mesh explain-availability <connector> --host <endpoint> --json"],
+            "remediation": "Expose live placement replica telemetry from a real mesh; this host route remains skipped until the direct telemetry is available."
+        }),
+        json!({
+            "gate_id": "mesh-lifecycle-state-replication",
+            "name": "Mesh-backed lifecycle state replication",
+            "predicate_text": "ConnectorStateRoot for at least 3 connectors is mesh-replicated with replica_count >= 2 and last_replicated_seq advancing within 60s.",
+            "status": "skip",
+            "measured_value": {
+                "telemetry_state": "unavailable",
+                "reason_code": "host-direct-telemetry-skip",
+                "catalog_connector_count": catalog_connector_count,
+                "connectors_meeting_predicate": 0,
+                "node_count": node_count,
+                "missing_fields": [
+                    "connector_state_root.replica_count",
+                    "connector_state_root.last_replicated_seq",
+                    "connector_state_root.last_replicated_age_seconds"
+                ]
+            },
+            "target": {
+                "connectors_meeting_predicate": 3,
+                "replica_count": 2,
+                "last_replicated_age_seconds_lte": 60,
+                "node_count_gte": 3
+            },
+            "how_measured": ["GET /rpc/mesh/cutover-gates", "future: fwc mesh state status --json"],
+            "remediation": "Publish ConnectorStateRoot replication telemetry from the mesh state store before this gate can turn green."
+        }),
+        json!({
+            "gate_id": "mesh-audit-chain-quorum",
+            "name": "Mesh-backed audit chain quorum across at least two nodes",
+            "predicate_text": "Audit chain status reports quorum_signed_checkpoints >= 1 and quorum_signers >= 2 within 60s.",
+            "status": "skip",
+            "measured_value": {
+                "telemetry_state": "unavailable",
+                "reason_code": "host-direct-telemetry-skip",
+                "quorum_signed_checkpoints": 0,
+                "quorum_signers": 0,
+                "node_count": node_count,
+                "missing_route": "fwc audit chain status --json"
+            },
+            "target": {
+                "quorum_signed_checkpoints": 1,
+                "quorum_signers": 2,
+                "checkpoint_age_seconds_lte": 60,
+                "node_count_gte": 3
+            },
+            "how_measured": ["GET /rpc/mesh/cutover-gates", "fwc audit chain status --json"],
+            "remediation": "Expose quorum checkpoint status before this gate can turn green."
+        }),
+        json!({
+            "gate_id": "mesh-policy-object-distribution",
+            "name": "Mesh-backed policy-object distribution",
+            "predicate_text": "Policy bundles for the active zone are present on at least 2 mesh peers with verified owner signatures.",
+            "status": "skip",
+            "measured_value": {
+                "telemetry_state": "unavailable",
+                "reason_code": "host-direct-telemetry-skip",
+                "peer_count": 0,
+                "verified_owner_signatures": false,
+                "node_count": node_count,
+                "missing_route": "fwc policy distribution --json"
+            },
+            "target": {
+                "peer_count": 2,
+                "verified_owner_signatures": true,
+                "node_count_gte": 3
+            },
+            "how_measured": ["GET /rpc/mesh/cutover-gates", "fwc policy distribution --json"],
+            "remediation": "Expose policy bundle distribution and owner-signature verification telemetry before this gate can turn green."
+        }),
+    ];
+
+    json!({
+        "status": "ok",
+        "schema_version": HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION,
+        "source": "fcp-host-direct-skip",
+        "overall_status": "skip",
+        "catalog_connector_count": catalog_connector_count,
+        "node_count": node_count,
+        "message": "fcp-host exposes the cutover-gates route, but no direct mesh cutover telemetry is available yet; all gates remain skipped and do not count as green.",
+        "gates": gates,
+    })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -5387,7 +5506,7 @@ fn main() -> HostResult<()> {
             return Ok(());
         }
     }
-    init_tracing()?;
+    init_tracing();
     match fcp_async_core::runtime::block_on_sync(async_main()) {
         Ok(result) => result,
         Err(err) => Err(HostError::Internal(format!(
@@ -5396,50 +5515,21 @@ fn main() -> HostResult<()> {
     }
 }
 
-fn init_tracing() -> HostResult<()> {
-    let config = host_telemetry_config_from_env()?;
-    let readiness = fcp_telemetry::otlp_readiness(&config);
-    let init_config = if readiness.status == "unavailable" {
-        let mut local_logging_config = config.clone();
-        local_logging_config.otlp_enabled = false;
-        local_logging_config
-    } else {
-        config
-    };
-
-    fcp_telemetry::init_telemetry(init_config).map_err(host_telemetry_init_error)?;
-    tracing::info!(
-        event = "host_telemetry_initialized",
-        otlp_status = readiness.status,
-        otlp_enabled = readiness.enabled,
-        otlp_feature_compiled = readiness.feature_compiled,
-        otlp_endpoint_configured = readiness.endpoint_configured,
-        otlp_endpoint_class = readiness.endpoint_class,
-        collector_header_count = readiness.collector_header_count,
-        resource_attribute_count = readiness.resource_attribute_count,
-        "fcp-host telemetry initialized"
-    );
-    if readiness.status == "unavailable" {
-        tracing::warn!(
-            event = "host_otlp_unavailable",
-            "OTLP export was requested, but this fcp-host build does not include the otlp feature"
-        );
-    }
-    Ok(())
-}
-
-fn host_telemetry_config_from_env() -> HostResult<TelemetryConfig> {
-    let mut config = TelemetryConfig::from_env().map_err(host_telemetry_init_error)?;
-    if config.service_name == "fcp-connector" {
-        config.service_name = "fcp-host".to_string();
-    }
-    config.log_level = "info,fcp_host=debug".to_string();
-    config.json_logs = true;
-    Ok(config)
-}
-
-fn host_telemetry_init_error(error: TelemetryError) -> HostError {
-    HostError::Internal(format!("host telemetry initialization failed: {error}"))
+fn init_tracing() {
+    tracing_subscriber::registry()
+        .with(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info,fcp_host=debug")),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .json()
+                .flatten_event(true)
+                .with_ansi(false)
+                .with_current_span(false)
+                .with_writer(std::io::stderr),
+        )
+        .init();
 }
 
 async fn async_main() -> HostResult<()> {
@@ -5610,10 +5700,6 @@ async fn async_main() -> HostResult<()> {
             post(event_acknowledge_handler),
         )
         .route(
-            "/rpc/admin/telemetry/otlp/readiness",
-            get(telemetry_otlp_readiness_handler),
-        )
-        .route(
             "/rpc/admin/credentials/pools",
             get(credential_pool_list_handler),
         )
@@ -5741,6 +5827,7 @@ async fn async_main() -> HostResult<()> {
         .route("/rpc/batch-invoke", post(batch_invoke_handler))
         .route("/rpc/preflight", post(preflight_handler))
         .route("/rpc/simulate", post(simulate_handler))
+        .route("/rpc/mesh/cutover-gates", get(mesh_cutover_gates_handler))
         .route("/rpc/health", get(health_handler))
         .merge(protected_routes)
         .with_state(Arc::clone(&state));
@@ -5777,7 +5864,6 @@ async fn async_main() -> HostResult<()> {
     }
 
     tracing::info!(event = "host_shutdown_complete", "fcp-host exiting cleanly");
-    fcp_telemetry::shutdown_telemetry();
     Ok(())
 }
 
@@ -7556,6 +7642,24 @@ async fn connector_state_explain_handler(
         zone_id = zone.as_ref().map(ZoneId::as_str),
         duration_ms = started_at.elapsed().as_millis() as u64,
         "connector state explain request complete"
+    );
+    Ok(Json(payload))
+}
+
+async fn mesh_cutover_gates_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let started_at = Instant::now();
+    let catalog_connector_count = state.registry.list().await.len();
+    let payload = host_mesh_cutover_gates_payload(catalog_connector_count);
+    tracing::debug!(
+        event = "mesh_cutover_gates_response",
+        schema_version = HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION,
+        catalog_connector_count,
+        node_count = 1_usize,
+        overall_status = "skip",
+        duration_ms = %started_at.elapsed().as_millis(),
+        "mesh cutover-gates request complete"
     );
     Ok(Json(payload))
 }
@@ -11665,78 +11769,6 @@ async fn supply_chain_verify_handler(
     }
 }
 
-async fn telemetry_otlp_readiness_handler() -> (StatusCode, Json<Value>) {
-    match host_telemetry_config_from_env() {
-        Ok(config) => (
-            StatusCode::OK,
-            Json(host_telemetry_otlp_readiness_payload(&config)),
-        ),
-        Err(error) => (
-            StatusCode::BAD_REQUEST,
-            Json(host_telemetry_otlp_config_error_payload(&error)),
-        ),
-    }
-}
-
-fn host_telemetry_otlp_readiness_payload(config: &TelemetryConfig) -> Value {
-    let readiness = fcp_telemetry::otlp_readiness(config);
-    let next_actions = host_telemetry_otlp_next_actions(&readiness);
-    json!({
-        "status": readiness.status,
-        "command": "fcp-host",
-        "subcommand": "telemetry otlp-readiness",
-        "source": "host-admin-api",
-        "schema_version": "1.0.0",
-        "readiness": readiness,
-        "config_source": {
-            "environment_loaded": true,
-            "service_name": &config.service_name,
-        },
-        "next_actions": next_actions,
-    })
-}
-
-fn host_telemetry_otlp_config_error_payload(error: &HostError) -> Value {
-    json!({
-        "status": "error",
-        "command": "fcp-host",
-        "subcommand": "telemetry otlp-readiness",
-        "source": "host-admin-api",
-        "schema_version": "1.0.0",
-        "error": {
-            "type": "invalid-otlp-configuration",
-            "message": error.to_string(),
-            "recoverable": true,
-        },
-        "next_actions": [
-            "Fix malformed OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS, or OTEL_RESOURCE_ATTRIBUTES.",
-            "Do not embed credentials in OTLP endpoint URLs; use OTEL_EXPORTER_OTLP_HEADERS instead.",
-        ],
-    })
-}
-
-fn host_telemetry_otlp_next_actions(readiness: &OtlpReadiness) -> Vec<&'static str> {
-    match readiness.status {
-        "ready" => vec![
-            "Keep fcp-host running with the same OTEL_* environment to export traces, metrics, and logs.",
-            "Run scripts/e2e/telemetry_otlp_exporter_verification.sh for loopback collector proof before changing collector routing.",
-        ],
-        "unavailable" => vec![
-            "Build fcp-host with --features otlp before relying on runtime OTLP export.",
-            "Keep local JSON logs enabled while OTLP export is unavailable.",
-        ],
-        "fail" => vec![
-            "Fix malformed OTEL_* values and retry the admin readiness request.",
-            "Keep secrets in collector headers, never in endpoint URLs.",
-        ],
-        "disabled" => vec![
-            "Set OTEL_EXPORTER_OTLP_ENDPOINT before expecting host runtime OTLP export.",
-            "Keep OTLP disabled if this node should only emit local logs and Prometheus metrics.",
-        ],
-        _ => vec!["Inspect the readiness payload before enabling OTLP export."],
-    }
-}
-
 async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HostHealthResponse> {
     let started_at = Instant::now();
     let summaries = state.registry.list().await;
@@ -13731,6 +13763,13 @@ deny_ptrace = true
         assert_eq!(payload["last_canonical_seq"], 17);
         assert_eq!(payload["mesh_replica_count"], 2);
         assert_eq!(payload["canonical_state"]["root_present"], true);
+        assert_eq!(
+            payload["canonical_state"]["connector_id"],
+            connector_id.to_string()
+        );
+        assert_eq!(payload["canonical_state"]["zone_id"], zone_id.as_str());
+        assert_eq!(payload["canonical_state"]["instance_id"], Value::Null);
+        assert_eq!(payload["canonical_state"]["model"], "singleton_writer");
         assert_eq!(
             payload["canonical_state"]["root_object_id"],
             root_object_id.to_string()
@@ -23000,18 +23039,9 @@ done"#;
             .with_state(Arc::clone(&state))
     }
 
-    fn telemetry_otlp_readiness_test_app(state: Arc<AppState>) -> axum::Router {
-        let protected = axum::Router::new()
-            .route(
-                "/rpc/admin/telemetry/otlp/readiness",
-                get(telemetry_otlp_readiness_handler),
-            )
-            .route_layer(axum::middleware::from_fn_with_state(
-                Arc::clone(&state),
-                admin_auth_middleware,
-            ));
+    fn mesh_cutover_gates_test_app(state: Arc<AppState>) -> axum::Router {
         axum::Router::new()
-            .merge(protected)
+            .route("/rpc/mesh/cutover-gates", get(mesh_cutover_gates_handler))
             .with_state(Arc::clone(&state))
     }
 
@@ -23096,49 +23126,6 @@ done"#;
         axum::Router::new()
             .merge(protected)
             .with_state(Arc::clone(&state))
-    }
-
-    #[test]
-    fn host_telemetry_otlp_readiness_payload_redacts_operator_metadata() {
-        let config = TelemetryConfig::new("fcp-host")
-            .with_otlp("https://collector.example.com:4317/v1/traces")
-            .try_with_otlp_headers("authorization=Bearer%20secret-token,x-honeycomb-team=team_123")
-            .expect("test headers should parse")
-            .try_with_otlp_resource_attributes("cloud.account.id=123456789,fcp.zone=z:owner")
-            .expect("test resource attributes should parse");
-
-        let payload = host_telemetry_otlp_readiness_payload(&config);
-        let rendered = payload.to_string();
-
-        assert_eq!(payload["source"], "host-admin-api");
-        assert_eq!(payload["command"], "fcp-host");
-        assert_eq!(payload["subcommand"], "telemetry otlp-readiness");
-        assert_eq!(payload["readiness"]["boundary"], "fcp-telemetry-crate");
-        assert_eq!(payload["readiness"]["collector_header_count"], 2);
-        assert_eq!(payload["readiness"]["resource_attribute_count"], 2);
-        assert!(!rendered.contains("secret-token"));
-        assert!(!rendered.contains("team_123"));
-        assert!(!rendered.contains("collector.example.com"));
-        assert!(!rendered.contains("123456789"));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn telemetry_otlp_readiness_route_rejects_unauthenticated_request()
-    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let state = cancel_route_test_state();
-        let app = telemetry_otlp_readiness_test_app(state);
-
-        let response = send_json_request(
-            app,
-            axum::http::Method::GET,
-            "/rpc/admin/telemetry/otlp/readiness",
-            json!({}),
-            &[],
-        )
-        .await?;
-
-        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
-        Ok(())
     }
 
     async fn send_cancel_request(
@@ -23438,6 +23425,58 @@ done"#;
         .await?;
 
         assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn mesh_cutover_gates_route_reports_fail_closed_skip_snapshot()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let state = cancel_route_test_state();
+        let app = mesh_cutover_gates_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/mesh/cutover-gates",
+            serde_json::json!({}),
+            &[],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(
+            payload["schema_version"],
+            HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION
+        );
+        assert_eq!(payload["source"], "fcp-host-direct-skip");
+        assert_eq!(payload["overall_status"], "skip");
+        assert_eq!(payload["node_count"], 1);
+        assert_eq!(payload["catalog_connector_count"], 0);
+
+        let gates = payload["gates"].as_array().ok_or_else(|| {
+            std::io::Error::other("cutover-gates payload should include gate records")
+        })?;
+        assert_eq!(gates.len(), 4);
+        for expected_id in [
+            "mesh-inventory-placement",
+            "mesh-lifecycle-state-replication",
+            "mesh-audit-chain-quorum",
+            "mesh-policy-object-distribution",
+        ] {
+            let gate = gates
+                .iter()
+                .find(|gate| gate["gate_id"] == expected_id)
+                .ok_or_else(|| {
+                    std::io::Error::other(format!("missing cutover gate {expected_id}"))
+                })?;
+            assert_eq!(gate["status"], "skip");
+            assert_eq!(
+                gate["measured_value"]["reason_code"],
+                "host-direct-telemetry-skip"
+            );
+            assert_eq!(gate["target"]["node_count_gte"], 3);
+        }
         Ok(())
     }
 

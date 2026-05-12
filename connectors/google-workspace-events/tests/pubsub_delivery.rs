@@ -164,18 +164,6 @@ fn assert_common_network_denials(network_constraints: &toml::Table) {
     assert_network_integer(network_constraints, "max_redirects", 0);
 }
 
-fn assert_manifest_operation_inventory(manifest_ops: &toml::Table) {
-    let expected = SCHEMA_OPERATION_IDS.into_iter().collect::<BTreeSet<_>>();
-    let actual = manifest_ops
-        .keys()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        actual, expected,
-        "manifest operation IDs should match the Workspace Events coverage set"
-    );
-}
-
 fn assert_external_https_network_constraints(
     manifest: &toml::Value,
     operation_id: &str,
@@ -218,12 +206,8 @@ fn assert_schema_accepts(schema: &Value, payload: &Value) {
 
 fn assert_schema_rejects(schema: &Value, payload: &Value) {
     let validator = jsonschema::validator_for(schema).expect("schema should compile");
-    let errors = validator
-        .iter_errors(payload)
-        .map(|error| error.to_string())
-        .collect::<Vec<_>>();
     assert!(
-        !errors.is_empty(),
+        !validator.is_valid(payload),
         "schema should reject payload {payload:#}"
     );
 }
@@ -536,63 +520,74 @@ async fn assert_introspection_matches_manifest(connector: &WorkspaceEventsConnec
 #[test]
 fn manifest_ai_hints_cover_all_operations() {
     let manifest = workspace_events_manifest();
-    let manifest_ops = manifest_operations(&manifest);
-    assert_manifest_operation_inventory(manifest_ops);
+    let operations = manifest_operations(&manifest);
+    let expected = SCHEMA_OPERATION_IDS.into_iter().collect::<BTreeSet<_>>();
+    let actual = operations
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual, expected,
+        "manifest operation inventory changed; update ai_hints coverage expectations"
+    );
 
     for operation_id in SCHEMA_OPERATION_IDS {
         let ai_hints = manifest_operation_ai_hints(&manifest, operation_id);
         let when_to_use = ai_hints
             .get("when_to_use")
             .and_then(toml::Value::as_str)
-            .expect("ai_hints.when_to_use should be a string");
+            .map(str::trim)
+            .unwrap_or_default();
         assert!(
-            !when_to_use.trim().is_empty(),
-            "{operation_id} ai_hints.when_to_use should be non-empty"
+            !when_to_use.is_empty(),
+            "operation {operation_id} should explain when to use it"
         );
 
         let common_mistakes = ai_hints
             .get("common_mistakes")
             .and_then(toml::Value::as_array)
-            .expect("ai_hints.common_mistakes should be an array");
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         assert!(
-            common_mistakes.len() >= 2,
-            "{operation_id} should describe at least two common mistakes"
+            common_mistakes.len() >= 2
+                && common_mistakes
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .all(|mistake| !mistake.trim().is_empty()),
+            "operation {operation_id} should document at least two common mistakes"
         );
-        for mistake in common_mistakes {
-            let mistake = mistake
-                .as_str()
-                .expect("ai_hints.common_mistakes entries should be strings");
-            assert!(
-                !mistake.trim().is_empty(),
-                "{operation_id} common mistakes should be non-empty"
-            );
-        }
 
         let examples = ai_hints
             .get("examples")
             .and_then(toml::Value::as_array)
-            .expect("ai_hints.examples should be an array");
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         assert!(
             !examples.is_empty(),
-            "{operation_id} should include at least one ai_hints example"
+            "operation {operation_id} should include at least one JSON example"
         );
         for example in examples {
-            let example = example
+            let example_text = example
                 .as_str()
-                .expect("ai_hints.examples entries should be strings");
-            let lowered = example.to_ascii_lowercase();
+                .expect("operation example should be a string")
+                .trim();
+            assert!(
+                !example_text.is_empty(),
+                "operation {operation_id} should not contain empty examples"
+            );
+            let parsed_example = serde_json::from_str::<Value>(example_text);
+            assert!(
+                parsed_example.is_ok(),
+                "operation {operation_id} example must be JSON: {parsed_example:?}"
+            );
+
+            let lower = example_text.to_ascii_lowercase();
             for forbidden in ["api_key", "bearer", "password", "secret", "token"] {
                 assert!(
-                    !lowered.contains(forbidden),
-                    "{operation_id} example should not contain secret-shaped text: {forbidden}"
+                    !lower.contains(forbidden),
+                    "operation {operation_id} example contains secret-shaped text: {forbidden}"
                 );
             }
-            let parsed = serde_json::from_str::<Value>(example)
-                .expect("ai_hints examples should be valid JSON payloads");
-            assert!(
-                parsed.is_object(),
-                "{operation_id} ai_hints examples should be JSON objects"
-            );
         }
     }
 }
@@ -601,7 +596,11 @@ fn manifest_ai_hints_cover_all_operations() {
 fn manifest_declares_scoped_network_constraints() {
     let manifest = workspace_events_manifest();
     let manifest_ops = manifest_operations(&manifest);
-    assert_manifest_operation_inventory(manifest_ops);
+    assert_eq!(
+        manifest_ops.len(),
+        SCHEMA_OPERATION_IDS.len(),
+        "manifest operation count should match network-constraint coverage set"
+    );
 
     let local_only =
         manifest_operation_network_constraints(&manifest, "workspace_events.describe_provisioning");

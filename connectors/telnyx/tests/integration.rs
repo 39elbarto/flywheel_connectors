@@ -1,4 +1,6 @@
-use std::{fs::File, io::Write, path::PathBuf, process::Command, time::Instant};
+use std::{
+    collections::BTreeSet, fs::File, io::Write, path::PathBuf, process::Command, time::Instant,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
@@ -246,14 +248,22 @@ fn manifest_operation<'a>(manifest: &'a ConnectorManifest, id: &str) -> &'a Oper
         .provides
         .operations
         .get(id)
-        .unwrap_or_else(|| panic!("{id} should be declared in the manifest"))
+        .expect("operation should be declared in the manifest")
+}
+
+fn expected_operation_ids() -> BTreeSet<&'static str> {
+    TELNYX_API_EGRESS_OPERATIONS
+        .iter()
+        .chain(NO_CONNECTOR_EGRESS_OPERATIONS.iter())
+        .copied()
+        .collect()
 }
 
 fn assert_telnyx_api_network_constraints(id: &str, operation: &OperationSection) {
     let constraints = operation
         .network_constraints
         .as_ref()
-        .unwrap_or_else(|| panic!("{id} should declare network_constraints"));
+        .expect("operation should declare network_constraints");
     assert_eq!(
         constraints.host_allow,
         ["api.telnyx.com"],
@@ -289,7 +299,7 @@ fn assert_no_connector_egress_network_constraints(id: &str, operation: &Operatio
     let constraints = operation
         .network_constraints
         .as_ref()
-        .unwrap_or_else(|| panic!("{id} should declare network_constraints"));
+        .expect("operation should declare network_constraints");
     assert_eq!(
         constraints.host_allow,
         ["none.invalid"],
@@ -345,6 +355,55 @@ fn manifest_declares_strict_per_operation_network_constraints() {
             operation.network_constraints.is_some(),
             "{id} should declare per-operation network_constraints"
         );
+    }
+}
+
+#[test]
+fn manifest_ai_hints_cover_all_operations() {
+    let manifest = telnyx_manifest();
+    let actual = manifest
+        .provides
+        .operations
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        actual,
+        expected_operation_ids(),
+        "Telnyx manifest operation set should stay aligned with ai_hints coverage"
+    );
+
+    for (id, operation) in &manifest.provides.operations {
+        let hints = &operation.ai_hints;
+        assert!(
+            !hints.when_to_use.trim().is_empty(),
+            "{id} should explain when an agent should use it"
+        );
+        assert!(
+            hints.common_mistakes.len() >= 2,
+            "{id} should document at least two concrete common mistakes"
+        );
+        assert!(
+            !hints.examples.is_empty(),
+            "{id} should include at least one synthetic example"
+        );
+
+        for example in &hints.examples {
+            let parsed: Value =
+                serde_json::from_str(example).expect("ai_hints example should be valid JSON");
+            assert!(
+                parsed.is_object(),
+                "{id} example should be a JSON object payload"
+            );
+
+            let lowered = example.to_ascii_lowercase();
+            for forbidden in ["api_key", "bearer", "password", "secret", "token"] {
+                assert!(
+                    !lowered.contains(forbidden),
+                    "{id} example should not contain secret-shaped text: {forbidden}"
+                );
+            }
+        }
     }
 }
 

@@ -43,6 +43,45 @@ The bundle is redaction-safe and non-destructive. It contains:
 Replay validates that `events.jsonl` is exactly derivable from `report.json`.
 If the replay fails, do not claim, edit, prove, or push from that bundle.
 
+## Approval Gates
+
+The handoff bundle has three action lists:
+
+- `exact_allowed_next_actions`: steps the agent may take from the current
+  readiness state.
+- `refused_next_actions`: steps the agent must not take until the blocker
+  clears.
+- `operator_approval_gates`: steps that require explicit user approval even if
+  they look like obvious remediation.
+
+Safe actions without extra approval are read-only inspection, replaying the
+bundle, `br show`, robot-mode `bv`, `git status`, `git diff`,
+`git ls-remote`, `df`, and allowed `rch exec` proof with an isolated target
+directory.
+
+These actions are approval-gated and must not be executed by readiness handling:
+
+- Agent Mail repair, reconstruct, restart, stop, or process killing.
+- Disk cleanup that deletes files, prunes artifacts, empties caches, or removes
+  build output to recover space.
+- Any file or folder deletion.
+- Worker-fleet repair, restart, or reconfiguration for `rch`.
+- Destructive Git cleanup, reset, checkout-overwrite, or clean commands.
+- Treating local Cargo output or transfer logs as proof when `rch` proof is
+  required.
+
+`flywheel_connectors-d5yeb` is the Agent Mail readiness blocker. If the report
+shows an Agent Mail database error, mailbox lock, or unavailable registration,
+retry once after a short delay, then proceed without Agent Mail. Do not run
+`am doctor repair`, `am doctor reconstruct`, `am service restart`, or any
+process-kill workaround, even if a health check suggests it.
+
+`flywheel_connectors-rfbrc` is the rch/disk proof blocker. If the report shows
+no healthy `rch` workers, a blocked `rch` status probe, or disk pressure, do not
+clean disk, delete artifacts, repair workers, or use local Cargo as proof. Stop
+at the refused `cargo_proof` and `push` actions and hand the blocker to the
+operator with the report digest and active blocker bead.
+
 ## Dry-Run Script
 
 Use the e2e script for a deterministic no-network rehearsal:

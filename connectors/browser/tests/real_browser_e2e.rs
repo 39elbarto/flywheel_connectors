@@ -35,6 +35,7 @@ use uuid::Uuid;
 
 const TEST_NAME: &str = "browser_real_browser_no_mock_e2e";
 const SCENARIO_ID: &str = "browser-real-browser-no-mock";
+const ACCEPTANCE_SUITE_CLASS: &str = "host_e2e";
 const CONNECTOR_ID: &str = "fcp.browser";
 const ZONE_ID: &str = "z:work";
 const BROWSER_BINARY_ENV: &str = "FCP_BROWSER_BINARY";
@@ -329,6 +330,7 @@ impl BrowserE2eReport {
             summary: json!({
                 "outcome": "skipped",
                 "run_id": correlation_id,
+                "acceptance_suite_class": ACCEPTANCE_SUITE_CLASS,
                 "command_line": harness_command_line(),
                 "git_revision": current_git_revision(),
                 "missing_prerequisites": missing_codes,
@@ -358,6 +360,7 @@ impl BrowserE2eReport {
             summary: json!({
                 "outcome": "failed",
                 "run_id": correlation_id,
+                "acceptance_suite_class": ACCEPTANCE_SUITE_CLASS,
                 "command_line": harness_command_line(),
                 "git_revision": current_git_revision(),
                 "error": error,
@@ -1045,6 +1048,7 @@ async fn run_live_browser_suite(
     let summary = json!({
         "outcome": "passed",
         "run_id": correlation_id,
+        "acceptance_suite_class": ACCEPTANCE_SUITE_CLASS,
         "command_line": evidence.command_line.as_str(),
         "git_revision": evidence.git_revision.as_str(),
         "browser_binary": prerequisites.browser_binary.as_deref(),
@@ -1767,6 +1771,7 @@ fn operation_log_entry(
             "connector_id": CONNECTOR_ID,
             "zone_id": ZONE_ID,
             "operation": operation,
+            "acceptance_suite_class": ACCEPTANCE_SUITE_CLASS,
         }),
     )
     .with_scenario_id(SCENARIO_ID)
@@ -1790,6 +1795,7 @@ fn skip_log_entry(correlation_id: &str, prerequisites: &BrowserE2ePrerequisites)
             "connector_id": CONNECTOR_ID,
             "zone_id": ZONE_ID,
             "operation": "browser.real_e2e.prerequisites",
+            "acceptance_suite_class": ACCEPTANCE_SUITE_CLASS,
         }),
     )
     .with_scenario_id(SCENARIO_ID)

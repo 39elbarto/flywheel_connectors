@@ -1408,6 +1408,14 @@ impl Default for AgentReadinessPolicyMapping {
                 "Do not delete files or folders without explicit written approval.".to_owned(),
             ),
             (
+                "disk-cleanup-needs-approval".to_owned(),
+                "Do not clean disk pressure by deleting files or artifacts without explicit written approval.".to_owned(),
+            ),
+            (
+                "worker-fleet-repair-needs-approval".to_owned(),
+                "Do not repair, restart, or reconfigure rch workers from readiness handling.".to_owned(),
+            ),
+            (
                 "cargo-through-rch".to_owned(),
                 "Run Cargo build, test, check, and clippy proof through rch.".to_owned(),
             ),
@@ -1425,9 +1433,11 @@ impl Default for AgentReadinessPolicyMapping {
     }
 }
 
-const REQUIRED_FORBIDDEN_ACTIONS: [ForbiddenAgentAction; 6] = [
+const REQUIRED_FORBIDDEN_ACTIONS: [ForbiddenAgentAction; 8] = [
     ForbiddenAgentAction::AgentMailRepairOrRestart,
     ForbiddenAgentAction::FileDeletion,
+    ForbiddenAgentAction::DiskCleanup,
+    ForbiddenAgentAction::WorkerFleetRepair,
     ForbiddenAgentAction::DestructiveGitCleanup,
     ForbiddenAgentAction::LocalCargoWhenRchRequired,
     ForbiddenAgentAction::TrustStaleLocalRef,
@@ -1442,6 +1452,10 @@ pub enum ForbiddenAgentAction {
     AgentMailRepairOrRestart,
     /// Delete files or directories without explicit approval.
     FileDeletion,
+    /// Clean disk pressure by deleting files or pruning artifacts.
+    DiskCleanup,
+    /// Repair, restart, or reconfigure rch worker fleets.
+    WorkerFleetRepair,
     /// Run destructive Git cleanup or reset.
     DestructiveGitCleanup,
     /// Run Cargo locally when repo policy requires rch.
@@ -2275,6 +2289,32 @@ mod tests {
                 action: ForbiddenAgentAction::AgentMailRepairOrRestart,
             }
         ));
+    }
+
+    #[test]
+    fn default_policy_lists_explicit_operator_approval_gates() {
+        let policy = AgentReadinessPolicyMapping::default();
+
+        for action in [
+            ForbiddenAgentAction::AgentMailRepairOrRestart,
+            ForbiddenAgentAction::FileDeletion,
+            ForbiddenAgentAction::DiskCleanup,
+            ForbiddenAgentAction::WorkerFleetRepair,
+            ForbiddenAgentAction::DestructiveGitCleanup,
+        ] {
+            assert!(policy.forbidden_actions.contains(&action), "{action:?}");
+        }
+        assert!(
+            policy
+                .refusal_rules
+                .contains_key("disk-cleanup-needs-approval")
+        );
+        assert!(
+            policy
+                .refusal_rules
+                .contains_key("worker-fleet-repair-needs-approval")
+        );
+        policy.validate().expect("default policy validates");
     }
 
     #[test]

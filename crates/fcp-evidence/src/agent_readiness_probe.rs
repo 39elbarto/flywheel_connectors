@@ -45,18 +45,29 @@ const REQUIRED_PROBE_LABELS: [&str; 15] = [
     "decision.summary",
 ];
 
-const FORBIDDEN_COMMAND_FRAGMENTS: [&str; 11] = [
+const FORBIDDEN_COMMAND_FRAGMENTS: [&str; 22] = [
     "am service restart",
     "am service stop",
     "am doctor fix",
     "am doctor repair",
     "am doctor reconstruct",
     "mcp-agent-mail kill",
+    "killall am",
+    "killall mcp-agent-mail",
+    "pkill am",
+    "pkill mcp-agent-mail",
+    "rch repair",
+    "rch doctor fix",
+    "rch service restart",
+    "rch worker repair",
     "git reset --hard",
     "git clean -fd",
     "rm -rf",
+    "find -delete",
+    "gfind -delete",
     "cargo check",
     "cargo test",
+    "cargo clippy",
 ];
 
 /// Execution mode for a readiness probe plan.
@@ -193,6 +204,11 @@ impl ProbeCommandPlan {
                     action: forbidden_action_for_fragment(forbidden),
                 });
             }
+        }
+        if invokes_find_delete(&joined) {
+            return Err(AgentReadinessError::ForbiddenActionAttempted {
+                action: crate::ForbiddenAgentAction::DiskCleanup,
+            });
         }
         if self.label.starts_with("agent-mail.")
             && self.retry_policy.max_attempts > AGENT_MAIL_MAX_ATTEMPTS
@@ -915,15 +931,30 @@ fn digest_for(input: &str) -> String {
 }
 
 fn forbidden_action_for_fragment(fragment: &str) -> crate::ForbiddenAgentAction {
-    if fragment.starts_with("am ") || fragment.contains("mcp-agent-mail") {
+    if fragment.starts_with("am ")
+        || fragment.contains("mcp-agent-mail")
+        || fragment.starts_with("killall am")
+        || fragment.starts_with("pkill am")
+    {
         crate::ForbiddenAgentAction::AgentMailRepairOrRestart
+    } else if fragment.starts_with("rch ") {
+        crate::ForbiddenAgentAction::WorkerFleetRepair
     } else if fragment.starts_with("git ") {
         crate::ForbiddenAgentAction::DestructiveGitCleanup
+    } else if fragment.ends_with("find -delete") {
+        crate::ForbiddenAgentAction::DiskCleanup
     } else if fragment.starts_with("cargo ") {
         crate::ForbiddenAgentAction::LocalCargoWhenRchRequired
     } else {
         crate::ForbiddenAgentAction::FileDeletion
     }
+}
+
+fn invokes_find_delete(joined_command: &str) -> bool {
+    (joined_command.starts_with("find ") || joined_command.starts_with("gfind "))
+        && joined_command
+            .split_whitespace()
+            .any(|part| part == "-delete")
 }
 
 #[cfg(test)]
@@ -965,6 +996,38 @@ mod tests {
                 action: crate::ForbiddenAgentAction::AgentMailRepairOrRestart,
             }
         ));
+    }
+
+    #[test]
+    fn plan_rejects_disk_cleanup_and_worker_repair_commands() {
+        for (argv, expected_action) in [
+            (
+                vec!["gfind", "redacted-scratch", "-delete"],
+                crate::ForbiddenAgentAction::DiskCleanup,
+            ),
+            (
+                vec!["rch", "worker", "repair"],
+                crate::ForbiddenAgentAction::WorkerFleetRepair,
+            ),
+        ] {
+            let mut plan =
+                AgentStartupProbePlan::no_network_fixture().expect("fixture plan validates");
+            let command = plan
+                .commands
+                .iter_mut()
+                .find(|command| command.label == "disk.capacity")
+                .expect("disk command exists");
+            command.command_redacted = argv.into_iter().map(str::to_owned).collect();
+
+            let err = plan
+                .validate()
+                .expect_err("approval-gated command is rejected");
+            assert!(matches!(
+                err,
+                AgentReadinessError::ForbiddenActionAttempted { action }
+                    if action == expected_action
+            ));
+        }
     }
 
     #[test]

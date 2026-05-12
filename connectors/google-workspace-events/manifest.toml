@@ -42,14 +42,12 @@ input_schema = { type = "object", additionalProperties = false, properties = { s
 output_schema = { type = "object", required = ["bundle", "effective_scopes"], additionalProperties = false, properties = { bundle = { type = "object" }, effective_scopes = { type = "array", items = { type = "string" } } } }
 
 [provides.operations."workspace_events.describe_provisioning".ai_hints]
-when_to_use = "Inspect the embedded Workspace Events and Pub/Sub setup contract before provisioning, widening consent, or creating subscriptions."
+when_to_use = "Inspect the embedded Workspace Events and Pub/Sub setup contract before provisioning or widening consent."
 common_mistakes = [
-  "Assuming Workspace Events has a broad standalone OAuth scope instead of product-specific event scopes",
-  "Skipping the provisioning readout before attempting to create a subscription or request additional scopes",
+  "Assuming Workspace Events has one broad standalone OAuth scope instead of product-specific event scopes.",
+  "Skipping this check before create_subscription can lead to missing Pub/Sub IAM or under-scoped consent.",
 ]
-examples = [
-  '{"scope_triggers":["create Workspace Events subscriptions for Chat spaces"]}',
-]
+examples = ['{"scope_triggers":["User selects Chat space metadata events."]}']
 
 [provides.operations."workspace_events.describe_provisioning".network_constraints]
 host_allow = ["none.invalid"]
@@ -80,14 +78,12 @@ input_schema = { type = "object", additionalProperties = false, properties = { p
 output_schema = { type = "object", required = ["subscriptions", "next_page_token"], additionalProperties = false, properties = { subscriptions = { type = "array", items = { type = "object" } }, next_page_token = { type = "string" } } }
 
 [provides.operations."workspace_events.list_subscriptions".ai_hints]
-when_to_use = "Inspect the current Workspace Events control-plane state before creating, reactivating, or deleting subscriptions."
+when_to_use = "Inspect the Workspace Events control-plane state before creating, reactivating, or deleting subscriptions."
 common_mistakes = [
-  "Assuming subscription expiration or suspension state is implicit instead of reading the current control-plane resource",
-  "Listing Workspace Events subscriptions when you need to pull pending Pub/Sub delivery messages instead",
+  "Assuming subscription expiration or suspension state is implicit instead of reading the current resource.",
+  "Treating this as a Pub/Sub delivery listing; it lists Workspace Events subscriptions only.",
 ]
-examples = [
-  '{"page_size":25}',
-]
+examples = ['{"page_size":25}']
 
 [provides.operations."workspace_events.list_subscriptions".network_constraints]
 host_allow = ["workspaceevents.googleapis.com"]
@@ -115,14 +111,12 @@ input_schema = { type = "object", required = ["subscription_name"], additionalPr
 output_schema = { type = "object", required = ["subscription"], additionalProperties = false, properties = { subscription = { type = "object" } } }
 
 [provides.operations."workspace_events.get_subscription".ai_hints]
-when_to_use = "Read exact state for one Workspace Events subscription, including TTL, state, target resource, and delivery configuration."
+when_to_use = "Read exact state for one Workspace Events subscription, including TTL, target resource, and delivery configuration."
 common_mistakes = [
-  "Passing a Pub/Sub subscription name instead of the Workspace Events subscription resource",
-  "Assuming a cached subscription state is current enough before lifecycle changes",
+  "Passing a Pub/Sub subscription name instead of the Workspace Events subscription resource.",
+  "Using list_subscriptions output without following up here when you need full details for one subscription.",
 ]
-examples = [
-  '{"subscription_name":"subscriptions/demo-chat-space"}',
-]
+examples = ['{"subscription_name":"subscriptions/AAAAA"}']
 
 [provides.operations."workspace_events.get_subscription".network_constraints]
 host_allow = ["workspaceevents.googleapis.com"]
@@ -150,14 +144,12 @@ input_schema = { type = "object", required = ["target_resource", "event_types", 
 output_schema = { type = "object", required = ["operation"], additionalProperties = false, properties = { operation = { type = "object" } } }
 
 [provides.operations."workspace_events.create_subscription".ai_hints]
-when_to_use = "Create a new Workspace Events subscription after Pub/Sub topic and IAM bootstrap are complete."
+when_to_use = "Create a new Workspace Events subscription after Pub/Sub topic and publisher IAM bootstrap are complete."
 common_mistakes = [
-  "Creating the upstream subscription before the Pub/Sub topic and publisher IAM are ready",
-  "Using a broad event scope set when a narrower event-type selection would suffice",
+  "Creating the upstream subscription before the Pub/Sub topic and publisher IAM are ready.",
+  "Using a broad event type set when a narrower target resource and event selection would suffice.",
 ]
-examples = [
-  '{"target_resource":"//chat.googleapis.com/spaces/AAAA","event_types":["google.workspace.chat.message.v1.created"],"pubsub_topic":"projects/demo/topics/workspace-events","include_resource":true,"field_mask":"message"}',
-]
+examples = ['{"target_resource":"//chat.googleapis.com/spaces/AAAA","event_types":["google.workspace.chat.message.v1.created"],"pubsub_topic":"projects/demo/topics/workspace-events"}']
 
 [provides.operations."workspace_events.create_subscription".network_constraints]
 host_allow = ["workspaceevents.googleapis.com"]
@@ -185,14 +177,12 @@ input_schema = { type = "object", required = ["subscription_name"], additionalPr
 output_schema = { type = "object", required = ["operation"], additionalProperties = false, properties = { operation = { type = "object" } } }
 
 [provides.operations."workspace_events.reactivate_subscription".ai_hints]
-when_to_use = "Recover a suspended subscription after fixing delivery, authorization, or lifecycle preconditions."
+when_to_use = "Recover a suspended Workspace Events subscription after fixing delivery or authorization preconditions."
 common_mistakes = [
-  "Reactivating before the underlying Pub/Sub or IAM problem is fixed",
-  "Changing the TTL without first confirming the subscription's current target and state",
+  "Reactivating before the underlying Pub/Sub or IAM problem is fixed.",
+  "Changing TTL while reactivating without confirming the subscription's existing expiration policy.",
 ]
-examples = [
-  '{"subscription_name":"subscriptions/demo-chat-space","ttl":"86400s"}',
-]
+examples = ['{"subscription_name":"subscriptions/AAAAA","ttl":"86400s"}']
 
 [provides.operations."workspace_events.reactivate_subscription".network_constraints]
 host_allow = ["workspaceevents.googleapis.com"]
@@ -220,14 +210,12 @@ input_schema = { type = "object", required = ["subscription_name"], additionalPr
 output_schema = { type = "object", required = ["operation"], additionalProperties = false, properties = { operation = { type = "object" } } }
 
 [provides.operations."workspace_events.delete_subscription".ai_hints]
-when_to_use = "Remove an obsolete Workspace Events subscription when you intentionally want delivery to stop."
+when_to_use = "Remove an obsolete Workspace Events subscription when delivery should intentionally stop."
 common_mistakes = [
-  "Deleting the Workspace Events subscription and assuming the Pub/Sub subscription is also cleaned up automatically",
-  "Skipping validate_only when checking whether a planned removal is permitted",
+  "Assuming the backing Pub/Sub subscription or topic is cleaned up automatically.",
+  "Skipping validate_only or policy approval before a high-risk destructive subscription deletion.",
 ]
-examples = [
-  '{"subscription_name":"subscriptions/demo-chat-space","validate_only":true}',
-]
+examples = ['{"subscription_name":"subscriptions/AAAAA","validate_only":true}']
 
 [provides.operations."workspace_events.delete_subscription".network_constraints]
 host_allow = ["workspaceevents.googleapis.com"]
@@ -257,12 +245,10 @@ output_schema = { type = "object", required = ["received_messages", "decoded_eve
 [provides.operations."workspace_events.pull_events".ai_hints]
 when_to_use = "Consume the next batch of Pub/Sub-delivered Workspace Events messages after control-plane setup is complete."
 common_mistakes = [
-  "Using the Workspace Events subscription name instead of the Pub/Sub delivery subscription",
-  "Forgetting to ack after successful processing when the delivery path requires ack",
+  "Using the Workspace Events subscription name instead of the Pub/Sub delivery subscription.",
+  "Forgetting to call ack_events after successful downstream processing when retries should stop.",
 ]
-examples = [
-  '{"pubsub_subscription":"projects/demo/subscriptions/workspace-events","max_messages":10}',
-]
+examples = ['{"pubsub_subscription":"projects/demo/subscriptions/workspace-events","max_messages":10}']
 
 [provides.operations."workspace_events.pull_events".network_constraints]
 host_allow = ["pubsub.googleapis.com"]
@@ -290,14 +276,12 @@ input_schema = { type = "object", required = ["pubsub_subscription", "ack_ids"],
 output_schema = { type = "object", required = ["status", "acked_count"], additionalProperties = false, properties = { status = { type = "string", const = "acked" }, acked_count = { type = "integer", minimum = 0 } } }
 
 [provides.operations."workspace_events.ack_events".ai_hints]
-when_to_use = "Acknowledge Pub/Sub messages only after downstream handling has succeeded and you want delivery retries to stop."
+when_to_use = "Acknowledge Pub/Sub messages only after downstream handling has succeeded and delivery retries should stop."
 common_mistakes = [
-  "Acking messages before processing completes, which can lose events on downstream failure",
-  "Reusing ack IDs from a previous pull response instead of acknowledging the current delivery batch",
+  "Acking messages before processing completes, which can lose events on downstream failure.",
+  "Passing message IDs instead of the Pub/Sub ack IDs returned by pull_events.",
 ]
-examples = [
-  '{"pubsub_subscription":"projects/demo/subscriptions/workspace-events","ack_ids":["ack-1","ack-2"]}',
-]
+examples = ['{"pubsub_subscription":"projects/demo/subscriptions/workspace-events","ack_ids":["ACK-1","ACK-2"]}']
 
 [provides.operations."workspace_events.ack_events".network_constraints]
 host_allow = ["pubsub.googleapis.com"]

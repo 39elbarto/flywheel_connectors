@@ -275,6 +275,53 @@ fn instance() -> serde_json::Value {
 }
 
 #[fcp_async_core::runtime::test]
+async fn client_health_check_uses_v2_instance_endpoint() {
+    init_logging();
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/instance"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "title": "Test Instance",
+            "version": "4.2.0"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client(&server);
+    let result = client.health_check().await;
+    assert!(result.is_ok());
+    let instance = result.unwrap();
+    assert_eq!(instance.title, "Test Instance");
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_falls_back_to_v1_instance_endpoint() {
+    init_logging();
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v2/instance"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/instance"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "uri": "test.instance",
+            "title": "Test v1 Instance",
+            "version": "3.5.0"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = client(&server);
+    let result = client.health_check().await;
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap().title, "Test v1 Instance");
+}
+
+#[fcp_async_core::runtime::test]
 async fn timeline_status_account_search_notifications_and_health_use_mastodon_contracts() {
     init_logging();
     tracing::info!(

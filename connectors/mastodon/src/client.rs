@@ -541,8 +541,6 @@ impl MastodonClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn client_creation() {
@@ -597,52 +595,5 @@ mod tests {
         assert!(MastodonClient::sanitize_path_segment("foo/bar").is_err());
         assert!(MastodonClient::sanitize_path_segment("").is_err());
         assert!(MastodonClient::sanitize_path_segment("foo\0bar").is_err());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_success() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/v2/instance"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "title": "Test Instance",
-                "version": "4.2.0"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client =
-            MastodonClient::new(&mock_server.uri(), "test_token", HttpRetryConfig::default())
-                .unwrap();
-        let result = client.health_check().await;
-        assert!(result.is_ok());
-        let instance = result.unwrap();
-        assert_eq!(instance.title, "Test Instance");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_v1_fallback() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/v2/instance"))
-            .respond_with(ResponseTemplate::new(404))
-            .mount(&mock_server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/instance"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "uri": "test.instance",
-                "title": "Test v1 Instance",
-                "version": "3.5.0"
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client =
-            MastodonClient::new(&mock_server.uri(), "test_token", HttpRetryConfig::default())
-                .unwrap();
-        let result = client.health_check().await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().title, "Test v1 Instance");
     }
 }

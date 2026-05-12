@@ -17,6 +17,7 @@
 //!
 //! - [`ed25519`] - Ed25519 signing and verification
 //! - [`frost`] - FROST threshold signing and distributed key generation
+//! - [`hybrid`] - Ed25519 + ML-DSA-65 signed envelopes
 //! - [`x25519`] - X25519 ECDH key exchange
 //! - [`hkdf`] - HKDF-SHA256 key derivation
 //! - [`aead`] - ChaCha20-Poly1305 and XChaCha20-Poly1305 AEAD
@@ -96,6 +97,7 @@ pub mod error;
 pub mod frost;
 pub mod hkdf;
 pub mod hpke_seal;
+pub mod hybrid;
 pub mod kid;
 pub mod mac;
 pub mod ml_dsa;
@@ -126,6 +128,9 @@ pub use hkdf::{
     hkdf_sha256_array,
 };
 pub use hpke_seal::{Fcp2Aad, HpkeSealedBox, hpke_open, hpke_seal};
+pub use hybrid::{
+    HYBRID_SIGNING_CONTEXT, HybridVerifyReport, PqSigningPolicy, SignatureStatus, SignedEnvelope,
+};
 pub use kid::KeyId;
 pub use mac::{Blake3Mac, MacKey, blake3_mac, blake3_mac_full, blake3_mac_verify};
 pub use ml_dsa::{ML_DSA_65_SEED_SIZE, MlDsa65SigningKey, MlDsa65VerifyingKey};

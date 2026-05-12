@@ -2802,6 +2802,7 @@ dependencies = [
  "fcp-google-discovery",
  "fcp-prelude",
  "fcp-sdk",
+ "fcp-testkit",
  "reqwest 0.13.2",
  "serde",
  "serde_json",

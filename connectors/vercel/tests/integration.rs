@@ -20,7 +20,7 @@ use fcp_vercel::types::{
     GitSource, TeamScope, VercelAuth,
 };
 use serde_json::{Value, json};
-use wiremock::matchers::{body_json, header, method, path, query_param};
+use wiremock::matchers::{body_json, body_partial_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TEST_TOKEN: &str = "vercel-token-for-tests";
@@ -72,6 +72,19 @@ fn client_with_timeout(server: &MockServer, request_timeout: Duration) -> Vercel
         request_timeout,
     )
     .expect("wiremock URI should build a Vercel client")
+    .with_base_url(&server.uri())
+}
+
+fn unscoped_client(server: &MockServer) -> VercelClient {
+    VercelClient::new(
+        VercelAuth::AccessToken {
+            access_token: "token".into(),
+        },
+        TeamScope::default(),
+        no_retry_config(),
+        Duration::from_millis(500),
+    )
+    .expect("wiremock URI should build an unscoped Vercel client")
     .with_base_url(&server.uri())
 }
 
@@ -445,6 +458,187 @@ fn manifest_operation_schemas_compile_and_validate_core_payloads() {
     assert_manifest_runtime_schema_parity(&manifest, &introspection.operations);
     assert_catalog_input_schema_examples(&manifest);
     assert_catalog_output_schema_examples(&manifest);
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_applies_scope_and_auth() {
+    init_logging();
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v9/projects"))
+        .and(query_param("limit", "1"))
+        .and(query_param("teamId", "team_123"))
+        .and(header("authorization", "Bearer token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "projects": [],
+            "pagination": { "count": 0 }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = VercelClient::new(
+        VercelAuth::AccessToken {
+            access_token: "token".into(),
+        },
+        TeamScope {
+            team_id: Some("team_123".into()),
+            team_slug: None,
+        },
+        no_retry_config(),
+        Duration::from_millis(500),
+    )
+    .unwrap()
+    .with_base_url(&server.uri());
+
+    client.health_check().await.unwrap();
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_create_deployment_posts_expected_shape() {
+    init_logging();
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v13/deployments"))
+        .and(body_partial_json(json!({
+            "name": "demo-web",
+            "gitSource": {
+                "type": "github",
+                "ref": "main"
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "uid": "dpl_123",
+            "name": "demo-web",
+            "readyState": "QUEUED"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = unscoped_client(&server);
+    let deployment = client
+        .create_deployment(&CreateDeploymentRequest {
+            name: "demo-web".into(),
+            project: Some("demo-web".into()),
+            target: Some("production".into()),
+            git_source: Some(GitSource {
+                source_type: "github".into(),
+                git_ref: "main".into(),
+                repo_id: None,
+                sha: None,
+                project_id: None,
+            }),
+            meta: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(deployment.id, "dpl_123");
+    assert_eq!(deployment.ready_state.as_deref(), Some("QUEUED"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_list_projects_returns_typed_payload() {
+    init_logging();
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v9/projects"))
+        .and(query_param("limit", "10"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "projects": [
+                { "id": "prj_1", "name": "demo", "framework": "nextjs" }
+            ],
+            "pagination": { "count": 1 }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = unscoped_client(&server);
+    let response = client.list_projects(Some(10)).await.unwrap();
+    assert_eq!(response.projects.len(), 1);
+    assert_eq!(response.projects[0].name, "demo");
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_add_domain_serializes_redirect_metadata() {
+    init_logging();
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v10/projects/demo/domains"))
+        .and(body_partial_json(json!({
+            "name": "demo.example.com",
+            "gitBranch": "main"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "demo.example.com",
+            "projectId": "prj_123",
+            "verified": true
+        })))
+        .mount(&server)
+        .await;
+
+    let client = unscoped_client(&server);
+    let domain = client
+        .add_domain(
+            "demo",
+            &AddDomainRequest {
+                name: "demo.example.com".into(),
+                git_branch: Some("main".into()),
+                redirect: None,
+                redirect_status_code: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(domain.name, "demo.example.com");
+    assert_eq!(domain.verified, Some(true));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_create_env_vars_posts_array_payload() {
+    init_logging();
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v10/projects/demo/env"))
+        .and(body_partial_json(json!([{
+            "key": "API_KEY",
+            "type": "encrypted",
+            "target": ["production"]
+        }])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "id": "env_123",
+                "key": "API_KEY",
+                "type": "encrypted",
+                "target": ["production"]
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    let client = unscoped_client(&server);
+    let created = client
+        .create_env_vars(
+            "demo",
+            &[CreateEnvVarRequest {
+                key: "API_KEY".into(),
+                value: "redacted".into(),
+                env_type: "encrypted".into(),
+                target: vec!["production".into()],
+                git_branch: None,
+                custom_environment_ids: vec![],
+            }],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].key, "API_KEY");
 }
 
 #[fcp_async_core::runtime::test]

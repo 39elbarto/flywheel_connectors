@@ -392,45 +392,6 @@ fn parse_error_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path, query_param},
-    };
-
-    #[test]
-    fn health_check_applies_scope_and_auth() {
-        fcp_async_core::runtime::block_on_sync(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/v9/projects"))
-                .and(query_param("limit", "1"))
-                .and(query_param("teamId", "team_123"))
-                .and(header("authorization", "Bearer token"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "projects": [],
-                    "pagination": { "count": 0 }
-                })))
-                .mount(&server)
-                .await;
-
-            let client = VercelClient::new(
-                VercelAuth::AccessToken {
-                    access_token: "token".into(),
-                },
-                TeamScope {
-                    team_id: Some("team_123".into()),
-                    team_slug: None,
-                },
-                HttpRetryConfig::default(),
-                Duration::from_secs(5),
-            )
-            .unwrap()
-            .with_base_url(&server.uri());
-
-            client.health_check().await.unwrap();
-        })
-        .unwrap();
-    }
 
     #[test]
     fn sanitize_path_segment_rejects_traversal() {

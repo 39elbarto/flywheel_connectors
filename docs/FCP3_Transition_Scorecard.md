@@ -66,6 +66,13 @@ Operator recovery steps: [Mesh Cutover Gates Runbook](runbooks/mesh_cutover_gate
 
 ## 2. Compatibility Shims
 
+Phase I.1 reconciliation: the bridge-plan guess that these were
+`fcp_core::compat::policy` and `fcp_core::compat::evidence` modules was false
+for the current checkout. No such `fcp-core` modules or callers exist. The two
+active scorecard shims are the SDK migration helpers below; see
+[`docs/cleanup/shim_inventory.md`](cleanup/shim_inventory.md) for the
+machine-readable inventory.
+
 | Shim | Location | Purpose | Delete After | Status |
 |------|----------|---------|-------------|--------|
 | ConnectorErrorMapping | fcp-sdk/src/migration.rs | V2->V3 error mapping bridge | P4 convergence | ACTIVE (all 150 connectors use it) |

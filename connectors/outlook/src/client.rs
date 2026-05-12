@@ -288,8 +288,6 @@ impl OutlookClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path, query_param};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn encode_path_segment_rejects_empty_or_control_ids() {
@@ -366,85 +364,6 @@ mod tests {
             Err(OutlookError::Config(_))
         ));
     }
-
-    #[fcp_async_core::runtime::test]
-    async fn list_folders_rejects_non_json_success_payload() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1.0/me/mailFolders"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string("ok")
-                    .insert_header("content-type", "text/plain"),
-            )
-            .mount(&server)
-            .await;
-
-        let config = OutlookConfig {
-            access_token: "tok".into(),
-            graph_host: server.uri(),
-            request_timeout_ms: 5_000,
-        };
-        let client = OutlookClient::from_config(&config).expect("client should build");
-        let err = client
-            .list_folders()
-            .await
-            .expect_err("non-json success payload should fail");
-
-        assert!(matches!(err, OutlookError::Http(_)));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn send_message_accepts_202_without_body() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1.0/me/sendMail"))
-            .respond_with(ResponseTemplate::new(202))
-            .mount(&server)
-            .await;
-
-        let config = OutlookConfig {
-            access_token: "tok".into(),
-            graph_host: server.uri(),
-            request_timeout_ms: 5_000,
-        };
-        let client = OutlookClient::from_config(&config).expect("client should build");
-        let response = client
-            .send_message(&[String::from("user@example.com")], "subject", "body", &[])
-            .await
-            .expect("202 Accepted without a body should succeed");
-
-        assert_eq!(response, json!({ "status": "ok" }));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn search_messages_escapes_quotes_and_backslashes() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1.0/me/messages"))
-            .and(query_param(
-                "$search",
-                "\"subject:\\\"Quarterly\\\" \\\\ archive\"",
-            ))
-            .and(query_param("$top", "7"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": [] })))
-            .mount(&server)
-            .await;
-
-        let config = OutlookConfig {
-            access_token: "tok".into(),
-            graph_host: server.uri(),
-            request_timeout_ms: 5_000,
-        };
-        let client = OutlookClient::from_config(&config).expect("client should build");
-        let response = client
-            .search_messages("subject:\"Quarterly\" \\ archive", Some(7))
-            .await
-            .expect("escaped search should succeed");
-
-        assert_eq!(response, json!({ "value": [] }));
-    }
-
     #[fcp_async_core::runtime::test]
     async fn send_message_rejects_blank_recipient_addresses() {
         let config = OutlookConfig {

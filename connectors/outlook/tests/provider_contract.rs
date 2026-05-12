@@ -1,8 +1,13 @@
 use fcp_manifest::ConnectorManifest;
 use fcp_outlook::OutlookConnector;
+use fcp_outlook::client::OutlookClient;
+use fcp_outlook::error::OutlookError;
+use fcp_outlook::types::OutlookConfig;
 use fcp_prelude::FcpConnector;
 use jsonschema::Validator;
 use serde_json::{Value, json};
+use wiremock::matchers::{method, path, query_param};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const EXPECTED_OPERATIONS: [&str; 7] = [
     "outlook.list_messages",
@@ -219,4 +224,72 @@ fn output_schema_contract_covers_graph_success_shapes() {
         output("outlook.create_event"),
         &json!({ "id": "event-id", "subject": "Meeting" }),
     );
+}
+
+fn client_config(server: &MockServer) -> OutlookConfig {
+    OutlookConfig {
+        access_token: "tok".into(),
+        graph_host: server.uri(),
+        request_timeout_ms: 5_000,
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_rejects_non_json_success_payload() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1.0/me/mailFolders"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("ok")
+                .insert_header("content-type", "text/plain"),
+        )
+        .mount(&server)
+        .await;
+
+    let client = OutlookClient::from_config(&client_config(&server)).expect("client should build");
+    let err = client
+        .list_folders()
+        .await
+        .expect_err("non-json success payload should fail");
+    assert!(matches!(err, OutlookError::Http(_)));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_send_message_accepts_202_without_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1.0/me/sendMail"))
+        .respond_with(ResponseTemplate::new(202))
+        .mount(&server)
+        .await;
+
+    let client = OutlookClient::from_config(&client_config(&server)).expect("client should build");
+    let response = client
+        .send_message(&[String::from("user@example.com")], "subject", "body", &[])
+        .await
+        .expect("202 Accepted without a body should succeed");
+    assert_eq!(response, json!({ "status": "ok" }));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_search_messages_escapes_quotes_and_backslashes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1.0/me/messages"))
+        .and(query_param(
+            "$search",
+            "\"subject:\\\"Quarterly\\\" \\\\ archive\"",
+        ))
+        .and(query_param("$top", "7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": [] })))
+        .mount(&server)
+        .await;
+
+    let client = OutlookClient::from_config(&client_config(&server)).expect("client should build");
+    let response = client
+        .search_messages("subject:\"Quarterly\" \\ archive", Some(7))
+        .await
+        .expect("escaped search should succeed");
+    assert_eq!(response, json!({ "value": [] }));
 }

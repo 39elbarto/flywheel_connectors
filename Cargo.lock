@@ -2792,6 +2792,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-bench"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "fcp-bigquery"
 version = "0.1.0"
 dependencies = [

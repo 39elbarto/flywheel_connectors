@@ -5,6 +5,7 @@ members = [
     "crates/fcp-async-core-macros",
     "crates/fcp-audit",
     "crates/fcp-auth-schema",
+    "crates/fcp-bench",
     "crates/fcp-bootstrap",
     "crates/fcp-cbor",
     "crates/fwc",
@@ -219,6 +220,7 @@ members = [
 default-members = [
     "crates/fcp-async-core",
     "crates/fcp-audit",
+    "crates/fcp-bench",
     "crates/fcp-bootstrap",
     "crates/fcp-cbor",
     "crates/fcp-core",
@@ -333,6 +335,7 @@ url = "2.5"
 fcp-async-core = { path = "crates/fcp-async-core" }
 fcp-audit = { path = "crates/fcp-audit" }
 fcp-auth-schema = { path = "crates/fcp-auth-schema" }
+fcp-bench = { path = "crates/fcp-bench" }
 fcp-bootstrap = { path = "crates/fcp-bootstrap" }
 fcp-cbor = { path = "crates/fcp-cbor" }
 fcp-core = { path = "crates/fcp-core" }

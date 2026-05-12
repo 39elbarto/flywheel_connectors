@@ -974,6 +974,9 @@ pub enum ConnectorStatus {
     /// operator approval. May not graduate without significant changes.
     /// Hidden from all default discovery surfaces.
     Quarantined,
+    /// Deliberately hostile connector used only by conformance and hardening
+    /// tests. It must never load in production deploy mode.
+    Adversarial,
 }
 
 impl ConnectorStatus {
@@ -987,7 +990,10 @@ impl ConnectorStatus {
     /// catalog, install, and discovery surfaces.
     #[must_use]
     pub const fn is_hidden_by_default(&self) -> bool {
-        matches!(self, Self::Incubating | Self::Quarantined | Self::Stub)
+        matches!(
+            self,
+            Self::Incubating | Self::Quarantined | Self::Stub | Self::Adversarial
+        )
     }
 
     /// Returns a human-readable rationale for why the connector is non-live.
@@ -999,6 +1005,7 @@ impl ConnectorStatus {
             Self::Deprecated => Some("Connector is deprecated; prefer the listed alternative"),
             Self::Incubating => Some("Runtime path is incomplete or lacks production evidence"),
             Self::Quarantined => Some("High-risk surface requiring explicit operator approval"),
+            Self::Adversarial => Some("Deliberately hostile test surface; production load refused"),
         }
     }
 
@@ -1015,6 +1022,7 @@ impl ConnectorStatus {
             Self::Quarantined => {
                 Some("Resolve architectural concerns, complete safety review, pass security audit")
             }
+            Self::Adversarial => Some("Never graduates; replace with a non-adversarial connector"),
         }
     }
 }
@@ -1028,6 +1036,7 @@ impl std::fmt::Display for ConnectorStatus {
             Self::Deprecated => write!(f, "deprecated"),
             Self::Incubating => write!(f, "incubating"),
             Self::Quarantined => write!(f, "quarantined"),
+            Self::Adversarial => write!(f, "adversarial"),
         }
     }
 }
@@ -1055,6 +1064,7 @@ impl StatusConsistencyResult {
     /// - `"deprecated"` → `ConnectorStatus::Deprecated`
     /// - `"incubating"` → `ConnectorStatus::Incubating`
     /// - `"quarantined"` → `ConnectorStatus::Quarantined`
+    /// - `"adversarial"` → `ConnectorStatus::Adversarial`
     #[must_use]
     pub fn check(manifest_status: ConnectorStatus, runtime_status: &str) -> Self {
         let runtime_canonical = match runtime_status {
@@ -1064,6 +1074,7 @@ impl StatusConsistencyResult {
             "deprecated" => Some(ConnectorStatus::Deprecated),
             "incubating" => Some(ConnectorStatus::Incubating),
             "quarantined" => Some(ConnectorStatus::Quarantined),
+            "adversarial" => Some(ConnectorStatus::Adversarial),
             _ => None,
         };
 
@@ -10153,6 +10164,7 @@ schema_version = "2.1"
         assert_eq!(ConnectorStatus::Deprecated.to_string(), "deprecated");
         assert_eq!(ConnectorStatus::Incubating.to_string(), "incubating");
         assert_eq!(ConnectorStatus::Quarantined.to_string(), "quarantined");
+        assert_eq!(ConnectorStatus::Adversarial.to_string(), "adversarial");
     }
 
     #[test]
@@ -10164,6 +10176,7 @@ schema_version = "2.1"
             ConnectorStatus::Deprecated,
             ConnectorStatus::Incubating,
             ConnectorStatus::Quarantined,
+            ConnectorStatus::Adversarial,
         ] {
             let json = serde_json::to_string(status).unwrap();
             let roundtrip: ConnectorStatus = serde_json::from_str(&json).unwrap();
@@ -10179,6 +10192,7 @@ schema_version = "2.1"
         assert!(!ConnectorStatus::Deprecated.is_live());
         assert!(!ConnectorStatus::Incubating.is_live());
         assert!(!ConnectorStatus::Quarantined.is_live());
+        assert!(!ConnectorStatus::Adversarial.is_live());
     }
 
     #[test]
@@ -10189,6 +10203,7 @@ schema_version = "2.1"
         assert!(ConnectorStatus::Stub.is_hidden_by_default());
         assert!(ConnectorStatus::Incubating.is_hidden_by_default());
         assert!(ConnectorStatus::Quarantined.is_hidden_by_default());
+        assert!(ConnectorStatus::Adversarial.is_hidden_by_default());
     }
 
     #[test]
@@ -10199,6 +10214,7 @@ schema_version = "2.1"
         assert!(ConnectorStatus::Deprecated.non_live_rationale().is_some());
         assert!(ConnectorStatus::Incubating.non_live_rationale().is_some());
         assert!(ConnectorStatus::Quarantined.non_live_rationale().is_some());
+        assert!(ConnectorStatus::Adversarial.non_live_rationale().is_some());
     }
 
     #[test]
@@ -10208,6 +10224,7 @@ schema_version = "2.1"
         assert!(ConnectorStatus::Incubating.graduation_guidance().is_some());
         assert!(ConnectorStatus::Quarantined.graduation_guidance().is_some());
         assert!(ConnectorStatus::Stub.graduation_guidance().is_some());
+        assert!(ConnectorStatus::Adversarial.graduation_guidance().is_some());
         assert!(
             ConnectorStatus::Experimental
                 .graduation_guidance()
@@ -10262,6 +10279,12 @@ schema_version = "2.1"
     }
 
     #[test]
+    fn status_consistency_check_adversarial_match() {
+        let result = StatusConsistencyResult::check(ConnectorStatus::Adversarial, "adversarial");
+        assert!(result.consistent);
+    }
+
+    #[test]
     fn status_consistency_check_unknown_runtime() {
         let result = StatusConsistencyResult::check(ConnectorStatus::Ready, "banana");
         assert!(!result.consistent);
@@ -10300,5 +10323,22 @@ status = "quarantined"
         let parsed: toml::Value = toml::from_str(toml_str).unwrap();
         let status_str = parsed["connector"]["status"].as_str().unwrap();
         assert_eq!(status_str, "quarantined");
+    }
+
+    #[test]
+    fn connector_status_toml_deserialize_adversarial() {
+        let toml_str = r#"
+[connector]
+id = "fcp.test"
+name = "Test"
+version = "0.1.0"
+description = "test connector"
+archetypes = ["request-response"]
+format = "native"
+status = "adversarial"
+"#;
+        let parsed: toml::Value = toml::from_str(toml_str).unwrap();
+        let status_str = parsed["connector"]["status"].as_str().unwrap();
+        assert_eq!(status_str, "adversarial");
     }
 }

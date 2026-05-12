@@ -63,6 +63,7 @@ mod log_scan;
 mod mock_server;
 pub mod provider_contract;
 pub mod readiness_helpers;
+pub mod secret_taint;
 pub mod secretless_replay;
 pub mod session_script;
 pub mod streaming_fixture;

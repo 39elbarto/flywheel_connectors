@@ -1,0 +1,33 @@
+[package]
+name = "fcp-adversarial"
+description = "Opt-in adversarial connector for FCP structured-error and taint-guard testing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "fcp_adversarial"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fcp-adversarial"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+fcp-async-core = { path = "../../crates/fcp-async-core" }
+fcp-core = { path = "../../crates/fcp-core" }
+fcp-manifest = { path = "../../crates/fcp-manifest" }
+fcp-prelude = { path = "../../crates/fcp-prelude" }
+
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

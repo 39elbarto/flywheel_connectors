@@ -39,6 +39,7 @@ members = [
     "crates/fcp-testkit",
     "crates/fcp-voice-call",
     "crates/fcp-webhook",
+    "connectors/_adversarial",
     "connectors/anthropic",
     "connectors/anthropic-vertex",
     "connectors/aws",
@@ -343,6 +344,7 @@ fcp-conformance = { path = "crates/fcp-conformance" }
 fcp-crypto = { path = "crates/fcp-crypto" }
 fcp-google-discovery = { path = "crates/fcp-google-discovery" }
 fcp-graphql = { path = "crates/fcp-graphql" }
+fcp-adversarial = { path = "connectors/_adversarial" }
 fcp-cerebras = { path = "connectors/cerebras" }
 fcp-deepseek = { path = "connectors/deepseek" }
 fcp-duckduckgo = { path = "connectors/duckduckgo" }

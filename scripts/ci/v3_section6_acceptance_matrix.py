@@ -295,8 +295,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_scan(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
-        data = json.load(handle)
+    try:
+        data = json.JSONDecoder().decode(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"{path} is not valid JSON: {error}") from error
     if data.get("$schema") != "fcp-test-coverage-scan-v1":
         raise SystemExit(f"{path} is not fcp-test-coverage-scan-v1 JSON")
     if not isinstance(data.get("connectors"), list):
@@ -336,14 +338,16 @@ def score_status(level: str, score: float | None, weak: bool, backing: str) -> s
 
 def build_row(spec: MatrixRowSpec, connectors: list[dict[str, Any]]) -> dict[str, Any]:
     scoped = connectors_for_scope(connectors, spec.total_scope)
-    scoped_ids = [connector["id"] for connector in scoped]
 
     affected = []
+    active_issue_codes: set[str] = set()
     if spec.scanner_issue_codes:
         code_set = set(spec.scanner_issue_codes)
         for connector in scoped:
-            if connector_issue_codes(connector) & code_set:
+            connector_codes = connector_issue_codes(connector) & code_set
+            if connector_codes:
                 affected.append(connector["id"])
+                active_issue_codes.update(connector_codes)
     affected = sorted(set(affected))
 
     if spec.scanner_backing == "no" or not scoped:
@@ -363,6 +367,7 @@ def build_row(spec: MatrixRowSpec, connectors: list[dict[str, Any]]) -> dict[str
         "level": spec.level,
         "requirement": spec.requirement,
         "scanner_issue_codes": list(spec.scanner_issue_codes),
+        "active_scanner_issue_codes": sorted(active_issue_codes),
         "scanner_backing": spec.scanner_backing,
         "total_scope": spec.total_scope,
         "total_count": len(scoped) if scoped else None,
@@ -444,7 +449,13 @@ def markdown_table(rows: list[dict[str, Any]]) -> str:
         score = "n/a" if row["score"] is None else f"{row['score']:.3f}"
         passing = "n/a" if row["passing_count"] is None else str(row["passing_count"])
         divergent = "n/a" if row["divergent_count"] is None else str(row["divergent_count"])
-        primary_gap = ", ".join(row["scanner_issue_codes"]) or "requires separate proof"
+        primary_gap = ", ".join(row["active_scanner_issue_codes"])
+        if not primary_gap:
+            primary_gap = (
+                "requires separate proof"
+                if not row["scanner_issue_codes"] or row["scanner_backing"] == "no"
+                else "none"
+            )
         lines.append(
             "| `{id}` | {section} | {level} | {backing} | {tested} | {passing} | "
             "{divergent} | {score} | {status} | {gap} |".format(

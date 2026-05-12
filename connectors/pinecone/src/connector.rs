@@ -5,7 +5,7 @@ use std::sync::Arc;
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, InstanceId, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -131,6 +131,12 @@ impl PineconeConnector {
             verifier: None,
             session_id: None,
         }
+    }
+
+    /// Return this connector instance's stable runtime identifier.
+    #[must_use]
+    pub fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
     }
 
     fn manifest_hash() -> String {

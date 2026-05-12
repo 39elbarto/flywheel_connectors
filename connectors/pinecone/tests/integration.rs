@@ -12,7 +12,7 @@
 
 use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
+use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError, InstanceId};
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -34,7 +34,11 @@ fn capability_for_operation(operation: &str) -> &'static str {
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, operation: &str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
+    operation: &str,
+) -> CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -50,9 +54,11 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, operation: &str) -> Cap
         .operations(&[operation])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
+        .target_instance(instance_id.as_str())
         .sign(signing_key)
-        .unwrap();
+        .expect("capability token should sign");
     CapabilityToken::from_raw(cose)
 }
 
@@ -591,7 +597,7 @@ async fn redaction_api_key_not_in_invoke_error() {
         .unwrap();
 
     let signing_key = setup_handshake(&mut connector, &["pinecone.query"]).await;
-    let token = generate_valid_token(&signing_key, "pinecone.query");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "pinecone.query");
 
     let result = connector
         .handle_invoke(json!({
@@ -662,7 +668,7 @@ async fn invoke_query_through_connector() {
     let mut connector = PineconeConnector::new();
     setup_configure(&mut connector, &ctrl.uri(), &data.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["pinecone.query"]).await;
-    let token = generate_valid_token(&signing_key, "pinecone.query");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "pinecone.query");
 
     let result = connector
         .handle_invoke(json!({
@@ -697,7 +703,7 @@ async fn invoke_upsert_through_connector() {
     let mut connector = PineconeConnector::new();
     setup_configure(&mut connector, &ctrl.uri(), &data.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["pinecone.upsert"]).await;
-    let token = generate_valid_token(&signing_key, "pinecone.upsert");
+    let token = generate_valid_token(&signing_key, connector.instance_id(), "pinecone.upsert");
 
     let result = connector
         .handle_invoke(json!({
@@ -738,7 +744,11 @@ async fn invoke_create_index_through_connector() {
     let mut connector = PineconeConnector::new();
     setup_configure(&mut connector, &ctrl.uri(), &data.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["pinecone.create_index"]).await;
-    let token = generate_valid_token(&signing_key, "pinecone.create_index");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "pinecone.create_index",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -773,7 +783,11 @@ async fn invoke_delete_index_through_connector() {
     let mut connector = PineconeConnector::new();
     setup_configure(&mut connector, &ctrl.uri(), &data.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["pinecone.delete_index"]).await;
-    let token = generate_valid_token(&signing_key, "pinecone.delete_index");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "pinecone.delete_index",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -798,7 +812,11 @@ async fn invoke_create_index_wrong_cap_rejected() {
     setup_configure(&mut connector, &ctrl.uri(), &data.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["pinecone.list_indexes"]).await;
     // Token is for list_indexes, not create_index
-    let token = generate_valid_token(&signing_key, "pinecone.list_indexes");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "pinecone.list_indexes",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -830,7 +848,11 @@ async fn invoke_list_indexes_through_connector() {
     let mut connector = PineconeConnector::new();
     setup_configure(&mut connector, &ctrl.uri(), &data.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["pinecone.list_indexes"]).await;
-    let token = generate_valid_token(&signing_key, "pinecone.list_indexes");
+    let token = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "pinecone.list_indexes",
+    );
 
     let result = connector
         .handle_invoke(json!({

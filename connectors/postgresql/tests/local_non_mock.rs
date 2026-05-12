@@ -42,7 +42,7 @@ struct HarnessState {
 
 async fn try_connect(conn_str: &str) -> Result<PgClient, tokio_postgres::Error> {
     let (client, connection) = tokio_postgres::connect(conn_str, NoTls).await?;
-    fcp_async_core::task::spawn_detached(async move {
+    tokio::spawn(async move {
         if let Err(error) = connection.await {
             eprintln!("tokio-postgres driver task error: {error}");
         }

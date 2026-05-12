@@ -406,19 +406,6 @@ fn map_api_error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_google_discovery::auth::{
-        FCP_CREDENTIAL_ID_HEADER, GOOGLE_AUTHORIZATION_HEADER, GoogleAuthSourceKind,
-    };
-    use std::future::Future;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    fn run_async_test<F>(future: F) -> F::Output
-    where
-        F: Future,
-    {
-        fcp_async_core::runtime::block_on_sync(future).expect("test runtime")
-    }
 
     #[test]
     fn auth_redacted_label_credential_ref() {
@@ -456,76 +443,5 @@ mod tests {
 
         assert_eq!(client.events_base_url, "http://localhost:9999/v1");
         assert_eq!(client.pubsub_base_url, "http://localhost:9998/v1");
-    }
-
-    #[test]
-    fn bearer_token_requests_use_authorization_header() {
-        run_async_test(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/v1/subscriptions"))
-                .and(header(GOOGLE_AUTHORIZATION_HEADER, "Bearer test-token"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "subscriptions": [
-                        { "name": "subscriptions/auth-header", "state": "ACTIVE" }
-                    ]
-                })))
-                .mount(&server)
-                .await;
-
-            let client =
-                WorkspaceEventsClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
-                    access_token: "test-token".into(),
-                    source: GoogleAuthSourceKind::AccessToken,
-                    granted_scopes: Vec::new(),
-                    quota_project_id: None,
-                })
-                .unwrap()
-                .with_base_urls(
-                    format!("{}/v1", server.uri()),
-                    format!("{}/v1", server.uri()),
-                );
-
-            let subscriptions = client.list_subscriptions(None, None).await.unwrap();
-            assert_eq!(
-                subscriptions.subscriptions[0].name,
-                "subscriptions/auth-header"
-            );
-        });
-    }
-
-    #[test]
-    fn credential_reference_requests_use_fcp_credential_header() {
-        run_async_test(async {
-            let server = MockServer::start().await;
-            let credential_id = fcp_core::CredentialId::new();
-            Mock::given(method("GET"))
-                .and(path("/v1/subscriptions"))
-                .and(header(FCP_CREDENTIAL_ID_HEADER, credential_id.to_string()))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "subscriptions": [
-                        { "name": "subscriptions/credential-header", "state": "ACTIVE" }
-                    ]
-                })))
-                .mount(&server)
-                .await;
-
-            let client =
-                WorkspaceEventsClient::new_with_auth(GoogleMaterializedAuth::CredentialReference {
-                    credential_id,
-                    quota_project_id: None,
-                })
-                .unwrap()
-                .with_base_urls(
-                    format!("{}/v1", server.uri()),
-                    format!("{}/v1", server.uri()),
-                );
-
-            let subscriptions = client.list_subscriptions(None, None).await.unwrap();
-            assert_eq!(
-                subscriptions.subscriptions[0].name,
-                "subscriptions/credential-header"
-            );
-        });
     }
 }

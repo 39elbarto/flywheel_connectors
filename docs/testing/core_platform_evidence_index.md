@@ -493,7 +493,15 @@ Targeted verification:
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-invoke-audit cargo test -p fcp-host invoke_audit_chain --lib
 
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-invoke-audit-bench cargo bench -p fcp-host --bench invoke_audit_throughput -- invoke_audit_same_zone --sample-size 10 --warm-up-time 1 --measurement-time 2
+
+USE_RCH=1 TARGET_DIR=/tmp/fcp-invoke-audit-storm-e2e scripts/e2e/invoke_audit_storm_verification.sh --run-id=invoke-audit-storm
 ```
+
+The `invoke_audit_storm_verification.sh` lane extracts
+`INVOKE_AUDIT_STORM_JSONL` records for c=128 and c=512 same-zone storms,
+including command line, source revision, worker identity, target directory,
+topology, latency samples, CAS retry/fallback counters, and chain
+isomorphism checks.
 
 ## Known Flakes and Workarounds
 

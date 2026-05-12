@@ -165,3 +165,77 @@ fn validate_embeddings_input(input: &EmbeddingsInvokeInput) -> FcpResult<()> {
         _ => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn chat_request_uses_connector_default_when_default_model_is_blank() {
+        let request = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            "   ",
+        )
+        .expect("chat request should decode");
+
+        assert_eq!(request.model, DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn max_completion_tokens_maps_to_openai_max_tokens() {
+        let request = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_completion_tokens": 128
+            }),
+            DEFAULT_MODEL,
+        )
+        .expect("chat request should decode");
+
+        assert_eq!(request.max_tokens, Some(128));
+    }
+
+    #[test]
+    fn conflicting_token_limits_are_rejected() {
+        let error = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 64,
+                "max_completion_tokens": 128
+            }),
+            DEFAULT_MODEL,
+        )
+        .expect_err("conflicting token limits should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn empty_chat_messages_are_rejected() {
+        let error = chat_request_from_value(
+            json!({
+                "messages": []
+            }),
+            DEFAULT_MODEL,
+        )
+        .expect_err("empty messages should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn blank_embedding_input_is_rejected() {
+        let error = embeddings_request_from_value(
+            json!({
+                "input": "   "
+            }),
+            DEFAULT_EMBEDDING_MODEL,
+        )
+        .expect_err("blank embedding input should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+}

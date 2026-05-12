@@ -182,3 +182,91 @@ fn validate_moonshot_chat_input(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_request_uses_connector_default_when_default_model_is_blank() {
+        let request = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            "   ",
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+        )
+        .expect("chat request should decode");
+
+        assert_eq!(request.model, DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn max_completion_tokens_are_carried_as_provider_extension() {
+        let request = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_completion_tokens": 512
+            }),
+            DEFAULT_MODEL,
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+        )
+        .expect("chat request should decode");
+
+        assert_eq!(request.max_tokens, None);
+        assert_eq!(
+            request.provider_extensions["max_completion_tokens"],
+            json!(512)
+        );
+    }
+
+    #[test]
+    fn thinking_payload_is_carried_as_provider_extension() {
+        let request = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "thinking": {"type": "enabled", "budget_tokens": 1024}
+            }),
+            DEFAULT_MODEL,
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+        )
+        .expect("chat request should decode");
+
+        assert_eq!(
+            request.provider_extensions["thinking"],
+            json!({"type": "enabled", "budget_tokens": 1024})
+        );
+    }
+
+    #[test]
+    fn multiple_candidates_are_rejected() {
+        let error = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "n": 2
+            }),
+            DEFAULT_MODEL,
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+        )
+        .expect_err("n greater than one should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn estimated_context_overflow_is_rejected() {
+        let error = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "estimated_input_tokens": 255_900,
+                "max_tokens": 256,
+                "context_window_tokens": 256_000
+            }),
+            DEFAULT_MODEL,
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+        )
+        .expect_err("context overflow should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+}

@@ -293,3 +293,93 @@ fn invalid<T>(message: &str) -> FcpResult<T> {
         message: message.into(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn text_chat_uses_default_model() {
+        let request = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            DEFAULT_MODEL,
+            DEFAULT_VISION_MODEL,
+        )
+        .expect("text chat should decode");
+
+        assert_eq!(request.model, DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn image_chat_uses_default_vision_model() {
+        let request = chat_request_from_value(
+            json!({
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "image_url", "image_url": {"url": "https://example.test/image.png"}}]
+                }]
+            }),
+            DEFAULT_MODEL,
+            DEFAULT_VISION_MODEL,
+        )
+        .expect("image chat should decode");
+
+        assert_eq!(request.model, DEFAULT_VISION_MODEL);
+        assert_eq!(count_image_url_blocks(&request.messages), 1);
+    }
+
+    #[test]
+    fn image_chat_rejects_non_vision_model() {
+        let error = chat_request_from_value(
+            json!({
+                "model": "qwen-plus",
+                "messages": [{
+                    "role": "user",
+                    "content": [{"type": "image_url", "image_url": {"url": "https://example.test/image.png"}}]
+                }]
+            }),
+            DEFAULT_MODEL,
+            DEFAULT_VISION_MODEL,
+        )
+        .expect_err("image chat with non-vision model should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn empty_user_text_content_is_rejected() {
+        let error = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "   "}]
+            }),
+            DEFAULT_MODEL,
+            DEFAULT_VISION_MODEL,
+        )
+        .expect_err("blank user text should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn audio_content_blocks_are_rejected() {
+        let error = chat_request_from_value(
+            json!({
+                "messages": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "input_audio",
+                        "input_audio": {"data": "UklGRg==", "format": "wav"}
+                    }]
+                }]
+            }),
+            DEFAULT_MODEL,
+            DEFAULT_VISION_MODEL,
+        )
+        .expect_err("audio input should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+}

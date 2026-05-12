@@ -41,7 +41,7 @@ HOLDOUTS_JSON='[
     "to": "fcp-crypto",
     "type_name": "SignedEnvelope / hybrid signed-object envelope",
     "canonical_path": "fcp-crypto::SignedEnvelope",
-    "status": "pending",
+    "status": "resolved",
     "detail_bead": "flywheel_connectors-angoc.3.5"
   }
 ]'
@@ -139,8 +139,9 @@ confirm that the crate pairs still exist in the current workspace and to record
 the direct dependency relation for each pair.
 
 The older crate-graph audit does not enumerate these three specific pairs as
-closed work. This file is the current delta ledger: \`pending=3\` means the
-detail beads have been filed, not that the type moves are already complete.
+closed work. This file is the current delta ledger: a nonzero \`pending\` count
+means detail beads have been filed, not that all type moves are already
+complete.
 
 <!-- forbidden-overlap-summary: baseline_pairs=3 current_pairs=${current_count} pending=${pending_count} resolved=${resolved_count} -->
 
@@ -172,6 +173,12 @@ Cryptographic signed-envelope semantics stay in \`fcp-crypto\` as
 \`fcp-protocol\` owns only FCPC/FCPS frame and session wire envelopes. Any
 protocol payload that needs hybrid signing imports the crypto-owned envelope
 instead of defining protocol-local signed-envelope semantics.
+
+Resolved 2026-05-12: \`fcp-protocol\` exposes
+\`HybridSignedFcpsFrame = fcp_crypto::SignedEnvelope<SignedFcpsFramePayload>\`
+and implements \`HybridSignable\` for the FCPS payload. The remaining
+\`SignedFcpsFrame\` type is the documented Ed25519 degraded/bootstrap frame,
+not the generic hybrid envelope owner.
 
 ## Machine-Readable Rows
 

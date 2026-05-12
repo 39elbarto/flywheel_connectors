@@ -10,18 +10,24 @@
     clippy::unused_async
 )]
 
+use std::time::Duration as StdDuration;
+
 use chrono::{Duration, Utc};
 use fcp_azure::{
     client::{
-        AzureApiVersions, DEFAULT_BLOB_API_VERSION, DEFAULT_KEYVAULT_API_VERSION,
+        AzureApiVersions, AzureClient, DEFAULT_BLOB_API_VERSION, DEFAULT_KEYVAULT_API_VERSION,
+        DEFAULT_RESOURCE_GROUPS_API_VERSION, DEFAULT_RESOURCES_API_VERSION,
         DEFAULT_SUBSCRIPTIONS_API_VERSION,
     },
     connector::AzureConnector,
+    error::AzureError,
+    types::AzureAuth,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_prelude::{
     ApprovalMode, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
-    HandshakeRequest, IdempotencyClass, InvokeRequest, OperationId, RequestId, SafetyTier, ZoneId,
+    HandshakeRequest, IdempotencyClass, InstanceId, InvokeRequest, OperationId, RequestId,
+    SafetyTier, ZoneId,
 };
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
@@ -34,7 +40,20 @@ const OP_LIST_SUBSCRIPTIONS: &str = "azure.management.list_subscriptions";
 const OP_BLOB_PUT: &str = "azure.storage.blob_put";
 const OP_KEYVAULT_WRITE_VALUE: &str = "azure.keyvault.set_secret";
 
-fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
+fn test_client(base_url: &str) -> AzureClient {
+    AzureClient::new(
+        AzureAuth::BearerToken {
+            bearer_token: "test-token".into(),
+        },
+        fcp_sdk::migration::HttpRetryConfig::default(),
+        AzureApiVersions::compiled_defaults(),
+        StdDuration::from_secs(5),
+    )
+    .unwrap()
+    .with_management_url(base_url)
+}
+
+fn handshake_req(host_public_key: [u8; 32], requested_instance_id: InstanceId) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0.0".into(),
         zone: ZoneId::work(),
@@ -48,11 +67,15 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
         ],
         host: None,
         transport_caps: None,
-        requested_instance_id: None,
+        requested_instance_id: Some(requested_instance_id),
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    op: &'static str,
+    target_instance: &InstanceId,
+) -> CapabilityToken {
     let capability = [
         (OP_LIST_SUBSCRIPTIONS, "azure.management.read"),
         (OP_BLOB_PUT, "azure.storage.write"),
@@ -76,6 +99,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
+        .target_instance(target_instance.as_str())
         .try_constraints_cbor(&cbor)
         .expect("constraints CBOR should validate")
         .sign(signing_key)
@@ -107,9 +131,10 @@ fn invoke_req(
     }
 }
 
-async fn setup_connector(management_url: &str) -> (AzureConnector, Ed25519SigningKey) {
+async fn setup_connector(management_url: &str) -> (AzureConnector, Ed25519SigningKey, InstanceId) {
     let mut connector = AzureConnector::new();
     let signing_key = Ed25519SigningKey::generate();
+    let requested_instance_id = InstanceId::new();
     connector
         .configure(json!({
             "mode": "bearer_token",
@@ -121,10 +146,300 @@ async fn setup_connector(management_url: &str) -> (AzureConnector, Ed25519Signin
         .await
         .unwrap();
     connector
-        .handshake(handshake_req(signing_key.verifying_key().to_bytes()))
+        .handshake(handshake_req(
+            signing_key.verifying_key().to_bytes(),
+            requested_instance_id.clone(),
+        ))
         .await
         .unwrap();
-    (connector, signing_key)
+    (connector, signing_key, requested_instance_id)
+}
+
+#[fcp_async_core::runtime::test]
+async fn list_subscriptions_returns_typed_payload() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/subscriptions"))
+        .and(query_param(
+            "api-version",
+            DEFAULT_SUBSCRIPTIONS_API_VERSION,
+        ))
+        .and(header("authorization", "Bearer test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [
+                {
+                    "subscriptionId": "sub-123",
+                    "displayName": "Test Sub",
+                    "state": "Enabled"
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server.uri());
+    let resp = client.list_subscriptions().await.unwrap();
+    assert_eq!(resp.value.len(), 1);
+    assert_eq!(resp.value[0].subscription_id.as_deref(), Some("sub-123"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn list_resource_groups_returns_typed_payload() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/subscriptions/sub-1/resourcegroups"))
+        .and(query_param(
+            "api-version",
+            DEFAULT_RESOURCE_GROUPS_API_VERSION,
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [
+                { "name": "rg-1", "location": "eastus" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server.uri());
+    let resp = client.list_resource_groups("sub-1").await.unwrap();
+    assert_eq!(resp.value.len(), 1);
+    assert_eq!(resp.value[0].name.as_deref(), Some("rg-1"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn list_resources_returns_typed_payload() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/subscriptions/sub-1/resourceGroups/rg-1/resources"))
+        .and(query_param("api-version", DEFAULT_RESOURCES_API_VERSION))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "value": [
+                { "name": "vm-1", "type": "Microsoft.Compute/virtualMachines", "location": "westus2" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server.uri());
+    let resp = client.list_resources("sub-1", "rg-1").await.unwrap();
+    assert_eq!(resp.value.len(), 1);
+    assert_eq!(resp.value[0].name.as_deref(), Some("vm-1"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn health_check_succeeds_when_subscriptions_ok() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/subscriptions"))
+        .and(query_param(
+            "api-version",
+            DEFAULT_SUBSCRIPTIONS_API_VERSION,
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "value": [] })))
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server.uri());
+    client.health_check().await.unwrap();
+}
+
+#[fcp_async_core::runtime::test]
+async fn blob_list_containers_parses_xml_response() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .and(query_param("comp", "list"))
+        .and(header("x-ms-version", DEFAULT_BLOB_API_VERSION))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<EnumerationResults ServiceEndpoint="https://acct.blob.core.windows.net/">
+  <Containers>
+    <Container>
+      <Name>audio</Name>
+      <Properties>
+        <Last-Modified>Wed, 26 Oct 2016 20:39:39 GMT</Last-Modified>
+        <PublicAccess>container</PublicAccess>
+      </Properties>
+    </Container>
+  </Containers>
+  <NextMarker>next-token</NextMarker>
+</EnumerationResults>"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server.uri());
+    let resp = client
+        .blob_list_containers("acct", Some(&server.uri()))
+        .await
+        .unwrap();
+    assert_eq!(resp.containers.len(), 1);
+    assert_eq!(resp.containers[0].name.as_deref(), Some("audio"));
+    assert_eq!(
+        resp.containers[0].last_modified.as_deref(),
+        Some("Wed, 26 Oct 2016 20:39:39 GMT")
+    );
+    assert_eq!(
+        resp.containers[0].public_access.as_deref(),
+        Some("container")
+    );
+    assert_eq!(resp.next_marker.as_deref(), Some("next-token"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn blob_list_blobs_parses_xml_response() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/docs"))
+        .and(query_param("restype", "container"))
+        .and(query_param("comp", "list"))
+        .and(header("x-ms-version", DEFAULT_BLOB_API_VERSION))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<EnumerationResults ServiceEndpoint="https://acct.blob.core.windows.net/" ContainerName="docs">
+  <Blobs>
+    <Blob>
+      <Name>report.txt</Name>
+      <Properties>
+        <Last-Modified>Wed, 26 Oct 2016 20:39:39 GMT</Last-Modified>
+        <Content-Length>1024</Content-Length>
+        <Content-Type>text/plain</Content-Type>
+      </Properties>
+    </Blob>
+  </Blobs>
+  <NextMarker>blob-next</NextMarker>
+</EnumerationResults>"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server.uri());
+    let resp = client
+        .blob_list_blobs("acct", "docs", Some(&server.uri()))
+        .await
+        .unwrap();
+    assert_eq!(resp.blobs.len(), 1);
+    assert_eq!(resp.blobs[0].name.as_deref(), Some("report.txt"));
+    assert_eq!(resp.blobs[0].content_length, Some(1024));
+    assert_eq!(resp.blobs[0].content_type.as_deref(), Some("text/plain"));
+    assert_eq!(
+        resp.blobs[0].last_modified.as_deref(),
+        Some("Wed, 26 Oct 2016 20:39:39 GMT")
+    );
+    assert_eq!(resp.next_marker.as_deref(), Some("blob-next"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn unauthorized_returns_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/subscriptions"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": {
+                "code": "AuthenticationFailed",
+                "message": "The access token is invalid."
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server.uri());
+    let err = client.list_subscriptions().await.unwrap_err();
+    assert!(matches!(err, AzureError::Unauthorized(_)));
+}
+
+#[fcp_async_core::runtime::test]
+async fn not_found_returns_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/subscriptions/sub-missing/resourcegroups"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": {
+                "code": "SubscriptionNotFound",
+                "message": "Subscription not found"
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server.uri());
+    let err = client
+        .list_resource_groups("sub-missing")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, AzureError::NotFound(_)));
+}
+
+#[fcp_async_core::runtime::test]
+async fn rate_limited_returns_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/subscriptions"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "5")
+                .set_body_json(json!({ "message": "throttled" })),
+        )
+        .mount(&server)
+        .await;
+
+    let no_retry = fcp_sdk::migration::HttpRetryConfig {
+        max_retries: 0,
+        ..fcp_sdk::migration::HttpRetryConfig::default()
+    };
+    let client = AzureClient::new(
+        AzureAuth::BearerToken {
+            bearer_token: "test-token".into(),
+        },
+        no_retry,
+        AzureApiVersions::compiled_defaults(),
+        StdDuration::from_secs(5),
+    )
+    .unwrap()
+    .with_management_url(&server.uri());
+    let err = client.list_subscriptions().await.unwrap_err();
+    assert!(matches!(
+        err,
+        AzureError::RateLimited {
+            retry_after_ms: 5_000
+        }
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn rate_limited_huge_retry_after_saturates() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/subscriptions"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", u64::MAX.to_string())
+                .set_body_json(json!({ "message": "throttled" })),
+        )
+        .mount(&server)
+        .await;
+
+    let no_retry = fcp_sdk::migration::HttpRetryConfig {
+        max_retries: 0,
+        ..fcp_sdk::migration::HttpRetryConfig::default()
+    };
+    let client = AzureClient::new(
+        AzureAuth::BearerToken {
+            bearer_token: "test-token".into(),
+        },
+        no_retry,
+        AzureApiVersions::compiled_defaults(),
+        StdDuration::from_secs(5),
+    )
+    .unwrap()
+    .with_management_url(&server.uri());
+    let err = client.list_subscriptions().await.unwrap_err();
+    assert!(matches!(
+        err,
+        AzureError::RateLimited {
+            retry_after_ms: u64::MAX
+        }
+    ));
 }
 
 #[fcp_async_core::runtime::test]
@@ -195,7 +510,7 @@ async fn self_check_ready_with_local_management_override_and_evidence() {
         .mount(&server)
         .await;
 
-    let (connector, _signing_key) = setup_connector(&server.uri()).await;
+    let (connector, _signing_key, _instance_id) = setup_connector(&server.uri()).await;
     let doctor = serde_json::to_value(connector.doctor()).unwrap();
     assert_doctor_response_valid(&doctor);
     assert_eq!(doctor["ready"], true);
@@ -247,7 +562,7 @@ async fn self_check_retryable_management_failure_reports_degraded() {
         .mount(&server)
         .await;
 
-    let (connector, _signing_key) = setup_connector(&server.uri()).await;
+    let (connector, _signing_key, _instance_id) = setup_connector(&server.uri()).await;
     let report = connector.self_check().await.unwrap();
     let value = serde_json::to_value(&report).unwrap();
     assert_self_check_not_ready(&value);
@@ -267,7 +582,7 @@ async fn invoke_blob_put_preserves_artifact_evidence() {
         .mount(&server)
         .await;
 
-    let (connector, signing_key) = setup_connector(&server.uri()).await;
+    let (connector, signing_key, instance_id) = setup_connector(&server.uri()).await;
     let response = connector
         .invoke(invoke_req(
             OP_BLOB_PUT,
@@ -278,7 +593,7 @@ async fn invoke_blob_put_preserves_artifact_evidence() {
                 "content_base64": "aGVsbG8=",
                 "blob_base_url": server.uri()
             }),
-            generate_valid_token(&signing_key, OP_BLOB_PUT),
+            generate_valid_token(&signing_key, OP_BLOB_PUT, &instance_id),
         ))
         .await
         .unwrap();
@@ -311,7 +626,7 @@ async fn invoke_keyvault_set_secret_preserves_artifact_evidence() {
         .mount(&server)
         .await;
 
-    let (connector, signing_key) = setup_connector(&server.uri()).await;
+    let (connector, signing_key, instance_id) = setup_connector(&server.uri()).await;
     let response = connector
         .invoke(invoke_req(
             OP_KEYVAULT_WRITE_VALUE,
@@ -322,7 +637,7 @@ async fn invoke_keyvault_set_secret_preserves_artifact_evidence() {
                 "vault_base_url": server.uri(),
                 "enabled": true
             }),
-            generate_valid_token(&signing_key, OP_KEYVAULT_WRITE_VALUE),
+            generate_valid_token(&signing_key, OP_KEYVAULT_WRITE_VALUE, &instance_id),
         ))
         .await
         .unwrap();

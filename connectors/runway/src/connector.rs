@@ -1081,6 +1081,43 @@ mod tests {
     }
 
     #[test]
+    fn generation_endpoint_metadata_matches_runway_paths() {
+        assert_eq!(GenerationEndpoint::ImageToVideo.path(), "image_to_video");
+        assert_eq!(
+            GenerationEndpoint::TextToVideo.operation_class(),
+            "text_to_video"
+        );
+        assert_eq!(
+            GenerationEndpoint::TextToImage.required_fields(),
+            &["model", "promptText"]
+        );
+        assert_eq!(
+            GenerationEndpoint::VideoToVideo.required_fields(),
+            &["model", "videoUri"]
+        );
+    }
+
+    #[test]
+    fn direct_body_from_input_omits_connector_control_fields() {
+        let body = direct_body_from_input(&json!({
+            "model": "gen4_turbo",
+            "promptText": "move",
+            "timeout_ms": 10_000,
+            "poll_interval_ms": 100,
+            "task_id": "job_123",
+            "operation": "runway.video.text_to_video"
+        }));
+
+        assert_eq!(
+            body,
+            json!({
+                "model": "gen4_turbo",
+                "promptText": "move"
+            })
+        );
+    }
+
+    #[test]
     fn task_output_summary_hashes_urls_and_counts_metadata() {
         let summary = redacted_task_output_summary(&json!({
             "output": [

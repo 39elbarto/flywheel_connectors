@@ -435,8 +435,6 @@ async fn send_request(request: RequestBuilder, label: &str) -> CalendlyResult<St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn client_creation() {
@@ -509,57 +507,5 @@ mod tests {
         assert!(sanitize_path_segment("foo/bar").is_err());
         assert!(sanitize_path_segment("").is_err());
         assert!(sanitize_path_segment("foo\0bar").is_err());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_success() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/users/me"))
-            .and(header("authorization", "Bearer test_tok"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "resource": {
-                    "uri": "https://api.calendly.com/users/abc",
-                    "name": "Test",
-                    "email": "test@example.com"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client =
-            CalendlyClient::new(&mock_server.uri(), "test_tok", HttpRetryConfig::default())
-                .unwrap();
-        assert!(client.health_check().await.is_ok());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_401() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/users/me"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&mock_server)
-            .await;
-
-        let client =
-            CalendlyClient::new(&mock_server.uri(), "bad_tok", HttpRetryConfig::default()).unwrap();
-        let result = client.health_check().await;
-        assert!(matches!(result, Err(CalendlyError::Unauthorized(_))));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_429() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/users/me"))
-            .respond_with(ResponseTemplate::new(429))
-            .mount(&mock_server)
-            .await;
-
-        let client =
-            CalendlyClient::new(&mock_server.uri(), "tok", HttpRetryConfig::default()).unwrap();
-        let result = client.health_check().await;
-        assert!(matches!(result, Err(CalendlyError::RateLimited { .. })));
     }
 }

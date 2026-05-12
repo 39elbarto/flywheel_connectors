@@ -33,10 +33,10 @@
 //! retainable behind a trait so a future durable backend can be
 //! swapped in without touching the call sites.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, RwLock};
 
-use fcp_audit::{AuditEntry, AuditEntryBuilder, AuditError, Severity};
+use fcp_audit::{AuditEntry, AuditEntryIdFields, AuditError, Severity, compute_audit_entry_id};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -178,6 +178,88 @@ pub struct InvokeAuditContext {
     /// committed audit timestamp so chain order remains verifiable
     /// when concurrent requests finish out of request-start order.
     pub occurred_at: u64,
+}
+
+#[derive(Debug)]
+struct InvokeAuditEntryTemplate {
+    event_type: &'static str,
+    severity: Severity,
+    actor: String,
+    zone_id: String,
+    connector_id: String,
+    operation_id: String,
+    correlation_id: String,
+    metadata: BTreeMap<String, serde_json::Value>,
+}
+
+impl InvokeAuditEntryTemplate {
+    fn new(ctx: &InvokeAuditContext, phase: InvokePhase) -> Self {
+        let event_type = phase.event_type();
+        let severity = phase.severity();
+        let mut metadata = BTreeMap::new();
+        metadata.insert("operation".to_string(), json!(&ctx.operation));
+        metadata.extend(phase.into_metadata());
+
+        Self {
+            event_type,
+            severity,
+            actor: ctx.actor.clone(),
+            zone_id: ctx.zone_id.clone(),
+            connector_id: ctx.connector_id.clone(),
+            operation_id: ctx.operation_id.clone(),
+            correlation_id: ctx.correlation_id.clone().unwrap_or_default(),
+            metadata,
+        }
+    }
+
+    fn compute_id(
+        &self,
+        seq: u64,
+        occurred_at: u64,
+        prev: Option<&str>,
+    ) -> Result<String, AuditError> {
+        compute_audit_entry_id(AuditEntryIdFields {
+            event_type: self.event_type,
+            severity: self.severity,
+            actor: &self.actor,
+            zone_id: &self.zone_id,
+            seq,
+            occurred_at,
+            prev,
+            correlation_id: &self.correlation_id,
+            trace_context: None,
+            connector_id: Some(&self.connector_id),
+            operation_id: Some(&self.operation_id),
+            metadata: &self.metadata,
+        })
+        .map_err(|e| AuditError::SerializationError(format!("invoke audit build: {e}")))
+    }
+
+    fn materialize(
+        &self,
+        seq: u64,
+        occurred_at: u64,
+        prev: Option<String>,
+        id: String,
+    ) -> AuditEntry {
+        AuditEntry {
+            id,
+            event_type: self.event_type.to_string(),
+            severity: self.severity,
+            actor: self.actor.clone(),
+            zone_id: self.zone_id.clone(),
+            seq,
+            occurred_at,
+            prev,
+            correlation_id: self.correlation_id.clone(),
+            trace_context: None,
+            connector_id: Some(self.connector_id.clone()),
+            operation_id: Some(self.operation_id.clone()),
+            metadata: self.metadata.clone(),
+            issuer_kid: None,
+            signature: None,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -341,29 +423,7 @@ impl InvokeAuditChain {
         retry_budget: usize,
         serialized_fallback_after: Option<usize>,
     ) -> Result<AuditEntry, AuditError> {
-        let event_type = phase.event_type();
-        let severity = phase.severity();
-        let metadata = phase.into_metadata();
-
-        // Build the immutable parts of the entry once; only seq +
-        // prev change between retries.
-        let base_builder = AuditEntryBuilder::new()
-            .event_type(event_type)
-            .severity(severity)
-            .actor(&ctx.actor)
-            .zone_id(&ctx.zone_id)
-            .connector_id(&ctx.connector_id)
-            .operation_id(&ctx.operation_id)
-            .meta("operation", json!(ctx.operation));
-        let base_builder = if let Some(cid) = ctx.correlation_id.clone() {
-            base_builder.correlation_id(cid)
-        } else {
-            base_builder
-        };
-        let base_builder = metadata
-            .into_iter()
-            .fold(base_builder, |b, (k, v)| b.meta(k, v));
-
+        let template = InvokeAuditEntryTemplate::new(ctx, phase);
         let zone = self.zone_handle(&ctx.zone_id);
 
         // br-uwlj5 optimistic-CAS retry loop. Constant in practice:
@@ -385,17 +445,12 @@ impl InvokeAuditChain {
             };
             let occurred_at = monotonic_occurred_at(ctx.occurred_at, last_occurred_at);
 
-            // 2. Build entry + encode canonical + hash OUTSIDE
-            //    any lock. This is the dominant cost; running it
-            //    lock-free is the load-bearing perf win.
-            let mut builder = base_builder.clone().seq(next_seq).occurred_at(occurred_at);
-            if let Some(p) = prev_snapshot {
-                builder = builder.prev(p);
-            }
-            let entry = builder
-                .build_with_computed_id()
-                .map_err(|e| AuditError::SerializationError(format!("invoke audit build: {e}")))?;
-            let real_id = entry.id.clone();
+            // 2. Encode canonical + hash OUTSIDE any lock. This is the
+            //    dominant cost; running it lock-free is the load-bearing
+            //    perf win. On failed CAS attempts, keep this path borrowed:
+            //    the full owned AuditEntry is only materialized after the
+            //    snapshot wins the commit race.
+            let real_id = template.compute_id(next_seq, occurred_at, prev_snapshot.as_deref())?;
 
             // 3. Re-lock + CAS commit. If another append landed
             //    on this zone between (1) and (3), our prev /
@@ -404,9 +459,10 @@ impl InvokeAuditChain {
             //    or sequential same-zone) this loop runs once.
             {
                 let mut z = zone.lock().expect("InvokeAuditChain zone mutex poisoned");
-                if z.last_id.as_deref() == entry.prev.as_deref() {
+                if z.last_id.as_deref() == prev_snapshot.as_deref() {
+                    let entry = template.materialize(next_seq, occurred_at, prev_snapshot, real_id);
                     z.last_seq = Some(next_seq);
-                    z.last_id = Some(real_id);
+                    z.last_id = Some(entry.id.clone());
                     z.last_occurred_at = Some(occurred_at);
                     z.entries.push(entry.clone());
                     z.metrics.entries = z.entries.len();
@@ -427,7 +483,7 @@ impl InvokeAuditChain {
             // whose snapshot cannot go stale because the snapshot and
             // commit happen in the same critical section.
             if serialized_fallback_after.is_some_and(|fallback_after| attempts >= fallback_after) {
-                return Self::append_serialized(&zone, &base_builder, ctx.occurred_at);
+                return Self::append_serialized(&zone, &template, ctx.occurred_at);
             }
 
             // Defence in depth against pathological retry storms
@@ -457,19 +513,15 @@ impl InvokeAuditChain {
 
     fn append_serialized(
         zone: &Arc<Mutex<ZoneChain>>,
-        base_builder: &AuditEntryBuilder,
+        template: &InvokeAuditEntryTemplate,
         requested_occurred_at: u64,
     ) -> Result<AuditEntry, AuditError> {
         let mut z = zone.lock().expect("InvokeAuditChain zone mutex poisoned");
         let next_seq = z.last_seq.map_or(0u64, |s| s.saturating_add(1));
         let occurred_at = monotonic_occurred_at(requested_occurred_at, z.last_occurred_at);
-        let mut builder = base_builder.clone().seq(next_seq).occurred_at(occurred_at);
-        if let Some(prev) = z.last_id.clone() {
-            builder = builder.prev(prev);
-        }
-        let entry = builder
-            .build_with_computed_id()
-            .map_err(|e| AuditError::SerializationError(format!("invoke audit build: {e}")))?;
+        let prev = z.last_id.clone();
+        let id = template.compute_id(next_seq, occurred_at, prev.as_deref())?;
+        let entry = template.materialize(next_seq, occurred_at, prev, id);
         z.last_seq = Some(next_seq);
         z.last_id = Some(entry.id.clone());
         z.last_occurred_at = Some(occurred_at);

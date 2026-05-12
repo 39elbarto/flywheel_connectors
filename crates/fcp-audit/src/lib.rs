@@ -336,6 +336,72 @@ struct AuditEntryIdMaterial<'a> {
     metadata: &'a std::collections::BTreeMap<String, serde_json::Value>,
 }
 
+/// Borrowed field set used to compute an [`AuditEntry`] canonical id without
+/// first materializing an owned entry.
+///
+/// This is useful on hot append paths that may need to speculatively compute
+/// an id and then discard it if an optimistic chain-head compare fails. The
+/// canonical payload is byte-identical to [`AuditEntry::computed_id`].
+#[derive(Debug, Clone, Copy)]
+pub struct AuditEntryIdFields<'a> {
+    /// Audit event type.
+    pub event_type: &'a str,
+    /// Event severity.
+    pub severity: Severity,
+    /// Actor who triggered the event.
+    pub actor: &'a str,
+    /// Zone where the event occurred.
+    pub zone_id: &'a str,
+    /// Monotonic chain sequence number.
+    pub seq: u64,
+    /// Event timestamp in Unix seconds.
+    pub occurred_at: u64,
+    /// Previous entry ID in the chain, if any.
+    pub prev: Option<&'a str>,
+    /// Correlation ID for request tracing.
+    pub correlation_id: &'a str,
+    /// Optional distributed trace context.
+    pub trace_context: Option<&'a TraceContext>,
+    /// Connector ID, if applicable.
+    pub connector_id: Option<&'a str>,
+    /// Operation ID, if applicable.
+    pub operation_id: Option<&'a str>,
+    /// Additional metadata as key-value pairs.
+    pub metadata: &'a std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// Compute the canonical id for an audit-entry payload from borrowed fields.
+///
+/// # Errors
+///
+/// Returns [`AuditError::SerializationError`] when canonical CBOR encoding of
+/// the entry payload fails.
+pub fn compute_audit_entry_id(fields: AuditEntryIdFields<'_>) -> Result<String, AuditError> {
+    let material = AuditEntryIdMaterial {
+        event_type: fields.event_type,
+        severity: fields.severity,
+        actor: fields.actor,
+        zone_id: fields.zone_id,
+        seq: fields.seq,
+        occurred_at: fields.occurred_at,
+        prev: fields.prev,
+        correlation_id: fields.correlation_id,
+        trace_context: fields.trace_context,
+        connector_id: fields.connector_id,
+        operation_id: fields.operation_id,
+        metadata: fields.metadata,
+    };
+
+    let canonical = fcp_cbor::to_canonical_cbor(&material).map_err(|err| {
+        AuditError::SerializationError(format!("failed to canonicalize audit entry: {err}"))
+    })?;
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(AUDIT_ENTRY_ID_DOMAIN);
+    hasher.update(&canonical);
+    Ok(hex::encode(hasher.finalize().as_bytes()))
+}
+
 impl AuditEntry {
     /// Check if this is a genesis entry (seq 0, no prev).
     #[must_use]
@@ -368,7 +434,7 @@ impl AuditEntry {
     /// Returns [`AuditError::SerializationError`] when canonical CBOR encoding
     /// of the entry payload fails.
     pub fn computed_id(&self) -> Result<String, AuditError> {
-        let material = AuditEntryIdMaterial {
+        compute_audit_entry_id(AuditEntryIdFields {
             event_type: &self.event_type,
             severity: self.severity,
             actor: &self.actor,
@@ -381,19 +447,7 @@ impl AuditEntry {
             connector_id: self.connector_id.as_deref(),
             operation_id: self.operation_id.as_deref(),
             metadata: &self.metadata,
-        };
-
-        let canonical = fcp_cbor::to_canonical_cbor(&material).map_err(|err| {
-            AuditError::SerializationError(format!(
-                "failed to canonicalize audit entry {}: {err}",
-                self.id
-            ))
-        })?;
-
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(AUDIT_ENTRY_ID_DOMAIN);
-        hasher.update(&canonical);
-        Ok(hex::encode(hasher.finalize().as_bytes()))
+        })
     }
 
     /// Canonical bytes that an issuer signs to bind their identity to
@@ -858,7 +912,7 @@ impl ChainHead {
     ///    || u32(zone_id_len, LE)   || zone_id
     ///    || u32(head_entry_len, LE) || head_entry
     ///    || u64(head_seq, LE)
-    ///    || u64(coverage_bits, LE)  // exact `f64::to_bits()` representation
+    ///    || u64(coverage_bits, LE)  // exact f64 to_bits representation
     ///    || u32(epoch_id_len, LE)   || epoch_id
     ///    || u32(signature_count, LE)`
     ///
@@ -3423,6 +3477,45 @@ mod tests {
         let recomputed = entry.computed_id()?;
         assert_eq!(entry.id, recomputed);
         assert_ne!(entry.id, "__provisional__");
+        Ok(())
+    }
+
+    #[test]
+    fn borrowed_audit_entry_id_fields_match_entry_computed_id() -> Result<(), AuditError> {
+        let trace_context = TraceContext::new("trace-id", "span-id").with_flags(1);
+        let entry = AuditEntryBuilder::new()
+            .event_type(event_types::CAPABILITY_INVOKE)
+            .severity(Severity::Warning)
+            .actor("user:alice")
+            .zone_id("z:work")
+            .seq(7)
+            .occurred_at(1_700_000_007)
+            .prev("prev-entry")
+            .correlation_id("corr-7")
+            .trace_context(trace_context.clone())
+            .connector_id("github")
+            .operation_id("list_repos")
+            .meta("operation", serde_json::json!("list_repos"))
+            .meta("success", serde_json::json!(true))
+            .build_with_computed_id()?;
+
+        let borrowed = compute_audit_entry_id(AuditEntryIdFields {
+            event_type: &entry.event_type,
+            severity: entry.severity,
+            actor: &entry.actor,
+            zone_id: &entry.zone_id,
+            seq: entry.seq,
+            occurred_at: entry.occurred_at,
+            prev: entry.prev.as_deref(),
+            correlation_id: &entry.correlation_id,
+            trace_context: entry.trace_context.as_ref(),
+            connector_id: entry.connector_id.as_deref(),
+            operation_id: entry.operation_id.as_deref(),
+            metadata: &entry.metadata,
+        })?;
+
+        assert_eq!(borrowed, entry.computed_id()?);
+        assert_eq!(borrowed, entry.id);
         Ok(())
     }
 

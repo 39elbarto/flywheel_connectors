@@ -545,8 +545,6 @@ impl LineClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn client_creation() {
@@ -630,98 +628,5 @@ mod tests {
             LineClient::sanitize_path_segment("  U1234567890abcdef  ").unwrap(),
             "U1234567890abcdef"
         );
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_success() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v2/bot/info"))
-            .and(header("authorization", "Bearer test_tok"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
-            .mount(&mock_server)
-            .await;
-
-        let client = LineClient::new(
-            &mock_server.uri(),
-            "test_tok",
-            HttpRetryConfig::default(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-        assert!(client.health_check().await.is_ok());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_401() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v2/bot/info"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&mock_server)
-            .await;
-
-        let client = LineClient::new(
-            &mock_server.uri(),
-            "bad_tok",
-            HttpRetryConfig::default(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-        let result = client.health_check().await;
-        assert!(matches!(result, Err(LineError::Unauthorized(_))));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn secretless_health_check_omits_auth() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v2/bot/info"))
-            .respond_with(ResponseTemplate::new(400))
-            .mount(&mock_server)
-            .await;
-
-        let client = LineClient::new(
-            &mock_server.uri(),
-            "",
-            HttpRetryConfig::default(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-        assert!(client.health_check().await.is_ok());
-
-        let requests = mock_server.received_requests().await.unwrap_or_default();
-        assert_eq!(requests.len(), 1);
-        assert!(requests[0].headers.get("authorization").is_none());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn group_members_start_query_is_percent_encoded() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v2/bot/group/C123/members/ids"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "memberIds": [],
-                "next": null
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = LineClient::new(
-            &mock_server.uri(),
-            "test_tok",
-            HttpRetryConfig::default(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
-        client
-            .get_group_members(&runtime, "C123", Some("tok&other=value"))
-            .await
-            .unwrap();
-
-        let requests = mock_server.received_requests().await.unwrap_or_default();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].url.query(), Some("start=tok%26other%3Dvalue"));
     }
 }

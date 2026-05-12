@@ -9,16 +9,19 @@
     clippy::unused_async
 )]
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration as StdDuration};
 
 use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_line::client::LineClient;
 use fcp_line::connector::{LineConnector, operations_info};
+use fcp_line::error::LineError;
 use fcp_prelude::{
     ApprovalMode, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
     FcpError, HandshakeRequest, IdempotencyClass, InstanceId, InvokeRequest, InvokeStatus,
     OperationId, RequestId, SafetyTier, ZoneId,
 };
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_sdk::{ChatCoordinationBackend, InMemoryThreadOwnershipChecker};
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
@@ -179,6 +182,89 @@ async fn mock_bot_info(server: &MockServer, status: u16) {
         .respond_with(response)
         .mount(server)
         .await;
+}
+
+fn line_client(server: &MockServer, token: &str) -> LineClient {
+    LineClient::new(
+        &server.uri(),
+        token,
+        HttpRetryConfig::default(),
+        StdDuration::from_secs(30),
+    )
+    .expect("wiremock URI should build LINE client")
+}
+
+fn client_runtime() -> ConnectorRuntime {
+    ConnectorRuntime::new(ConnectorRuntimeConfig::default())
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_statuses_and_secretless_auth_contracts() {
+    let success_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/bot/info"))
+        .and(header("authorization", &format!("Bearer {TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&success_server)
+        .await;
+    assert!(
+        line_client(&success_server, TOKEN)
+            .health_check()
+            .await
+            .is_ok()
+    );
+
+    let unauthorized_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/bot/info"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&unauthorized_server)
+        .await;
+    let unauthorized = line_client(&unauthorized_server, "bad_tok")
+        .health_check()
+        .await;
+    assert!(matches!(unauthorized, Err(LineError::Unauthorized(_))));
+
+    let secretless_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/bot/info"))
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&secretless_server)
+        .await;
+    assert!(
+        line_client(&secretless_server, "")
+            .health_check()
+            .await
+            .is_ok()
+    );
+    let requests = secretless_server
+        .received_requests()
+        .await
+        .unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].headers.get("authorization").is_none());
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_group_members_start_query_is_percent_encoded() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v2/bot/group/C123/members/ids"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "memberIds": [],
+            "next": null
+        })))
+        .mount(&server)
+        .await;
+
+    line_client(&server, TOKEN)
+        .get_group_members(&client_runtime(), "C123", Some("tok&other=value"))
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].url.query(), Some("start=tok%26other%3Dvalue"));
 }
 
 #[fcp_async_core::runtime::test]

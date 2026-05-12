@@ -18,7 +18,7 @@ use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_email_generic::EmailGenericConnector;
 use fcp_email_generic::client::EmailGenericClient;
-use fcp_email_generic::types::EmailGenericConfig;
+use fcp_email_generic::types::{EmailGenericConfig, EmailInboundPolicyDecision, EmailSeenUidCache};
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, FcpConnector, HealthState, InstanceId,
     OperationId, SelfCheckStatus, ShutdownRequest, SimulateRequest, ZoneId,
@@ -77,6 +77,141 @@ fn imap_loopback_lists_mailboxes_searches_uids_and_emits_redacted_jsonl() {
         folder_id_hash: hash_id("INBOX"),
         message_id_hash: hash_id("uid:2,5,8"),
         lifecycle_phase: "client_search",
+        latency_ms: elapsed_ms(started_at),
+        result: "ok",
+        error_code: None,
+        retry_decision: "none",
+        cleanup_result: "joined",
+        skip_reason: None,
+    });
+}
+
+#[test]
+fn imap_loopback_fetches_unseen_inbound_previews_with_policy_and_uid_cache() {
+    let fixture = ImapFixture::start(ImapMode::InboundFetch);
+    let config = EmailGenericConfig::from_value(json!({
+        "imap": {
+            "host": "127.0.0.1",
+            "port": fixture.port(),
+            "username": "user@example.com",
+            "password": "secret",
+            "tls": false
+        },
+        "smtp": {
+            "host": "127.0.0.1",
+            "port": 2525,
+            "username": "user@example.com",
+            "password": "secret",
+            "from_address": "user@example.com",
+            "starttls": false
+        },
+        "request_timeout_ms": 2_000,
+        "monitor_policy": {
+            "allowed_senders": ["human@example.com"],
+            "allow_attachments": false,
+            "seen_uid_cap": 8,
+            "max_body_chars": 128
+        }
+    }))
+    .expect("loopback config should parse");
+    let client = EmailGenericClient::from_config(&config).expect("client config");
+    let mut seen_uids =
+        EmailSeenUidCache::new(config.monitor_policy.seen_uid_cap).expect("seen UID cache");
+    let started_at = Instant::now();
+
+    let messages = client
+        .fetch_unseen_inbound_messages("Alerts", &mut seen_uids)
+        .expect("UID FETCH fixture should return inbound messages");
+    assert_eq!(messages.len(), 3);
+    assert!(seen_uids.contains("11"));
+    assert!(seen_uids.contains("12"));
+    assert!(seen_uids.contains("13"));
+
+    let previews = messages
+        .iter()
+        .map(|message| config.monitor_policy.prepare_inbound_message(message))
+        .collect::<Vec<_>>();
+    assert_eq!(previews[0].decision, EmailInboundPolicyDecision::Accept);
+    assert_eq!(
+        previews[1].decision,
+        EmailInboundPolicyDecision::DropSenderNotAllowed
+    );
+    assert_eq!(
+        previews[2].decision,
+        EmailInboundPolicyDecision::DropAutomated
+    );
+    let accepted = &previews[0];
+    assert_eq!(
+        accepted
+            .thread
+            .as_ref()
+            .expect("thread metadata")
+            .reply_subject,
+        "Re: Deploy ready"
+    );
+    assert!(
+        accepted
+            .text
+            .as_ref()
+            .expect("bounded text")
+            .text
+            .contains("[Subject: Deploy ready]")
+    );
+    assert_eq!(accepted.attachments.len(), 1);
+    assert_eq!(accepted.attachments[0].filename, "plan.pdf");
+    assert_eq!(accepted.attachments[0].media_type, "application/pdf");
+    assert_eq!(accepted.attachments[0].size_bytes, 4);
+    assert!(!accepted.attachments[0].exposed);
+    assert_eq!(
+        accepted.attachments[0].reason.as_deref(),
+        Some("attachments_disabled")
+    );
+    assert!(
+        !serde_json::to_string(&previews)
+            .expect("preview JSON")
+            .contains("cGxhbg"),
+        "attachment bytes must not leak into preview JSON"
+    );
+
+    let commands = fixture.join();
+    assert!(
+        commands.iter().any(|line| line == "a2 SELECT \"Alerts\""),
+        "fixture should observe mailbox binding"
+    );
+    assert!(
+        commands
+            .iter()
+            .filter(|line| line.contains("UID FETCH"))
+            .count()
+            == 3,
+        "fixture should fetch each previously unseen UID"
+    );
+
+    let repeat_fixture = ImapFixture::start(ImapMode::InboundFetch);
+    let repeat_config = config_with_ports(repeat_fixture.port(), 2525, false, false);
+    let repeat_client = EmailGenericClient::from_config(&repeat_config).expect("client config");
+    let repeat_messages = repeat_client
+        .fetch_unseen_inbound_messages("Alerts", &mut seen_uids)
+        .expect("seen cache should suppress repeated UIDs");
+    assert!(repeat_messages.is_empty());
+    let repeat_commands = repeat_fixture.join();
+    assert!(
+        repeat_commands
+            .iter()
+            .all(|line| !line.contains("UID FETCH")),
+        "seen cache must skip duplicate UID FETCH commands"
+    );
+
+    emit_fixture_log(&ProofLog {
+        event: "imap_inbound_monitor_once",
+        operation: OP_SEARCH_MESSAGES,
+        capability: CAP_READ,
+        zone: "z:private",
+        fixture_id: "imap-inbound-fetch",
+        account_id_hash: hash_id("user@example.com"),
+        folder_id_hash: hash_id("Alerts"),
+        message_id_hash: hash_id("uid:11,12,13"),
+        lifecycle_phase: "client_inbound_poll_once",
         latency_ms: elapsed_ms(started_at),
         result: "ok",
         error_code: None,
@@ -336,6 +471,7 @@ fn capability_token(
 #[derive(Clone, Copy)]
 enum ImapMode {
     Ok,
+    InboundFetch,
 }
 
 struct ImapFixture {
@@ -391,7 +527,7 @@ fn handle_imap(mut stream: TcpStream, mode: ImapMode, commands: &Arc<Mutex<Vec<S
         let tag = command.split_whitespace().next().unwrap_or("zz");
 
         match mode {
-            ImapMode::Ok if command.contains(" LOGIN ") => {
+            ImapMode::Ok | ImapMode::InboundFetch if command.contains(" LOGIN ") => {
                 write_response(&mut stream, &format!("{tag} OK LOGIN completed"));
             }
             ImapMode::Ok if command.contains("LIST \"\" \"*\"") => {
@@ -399,7 +535,7 @@ fn handle_imap(mut stream: TcpStream, mode: ImapMode, commands: &Arc<Mutex<Vec<S
                 write_response(&mut stream, "* LIST (\\HasNoChildren) \"/\" \"Archive\"");
                 write_response(&mut stream, &format!("{tag} OK LIST completed"));
             }
-            ImapMode::Ok if command.contains("SELECT ") => {
+            ImapMode::Ok | ImapMode::InboundFetch if command.contains("SELECT ") => {
                 write_response(&mut stream, "* 3 EXISTS");
                 write_response(&mut stream, &format!("{tag} OK SELECT completed"));
             }
@@ -407,16 +543,97 @@ fn handle_imap(mut stream: TcpStream, mode: ImapMode, commands: &Arc<Mutex<Vec<S
                 write_response(&mut stream, "* SEARCH 2 5 8");
                 write_response(&mut stream, &format!("{tag} OK SEARCH completed"));
             }
-            ImapMode::Ok if command.contains("LOGOUT") => {
+            ImapMode::InboundFetch if command.contains("UID SEARCH UNSEEN") => {
+                write_response(&mut stream, "* SEARCH 11 12 13");
+                write_response(&mut stream, &format!("{tag} OK SEARCH completed"));
+            }
+            ImapMode::InboundFetch if command.contains("UID FETCH 11") => {
+                write_fetch_literal(&mut stream, 1, 11, inbound_allowed_message());
+                write_response(&mut stream, &format!("{tag} OK FETCH completed"));
+            }
+            ImapMode::InboundFetch if command.contains("UID FETCH 12") => {
+                write_fetch_literal(&mut stream, 2, 12, inbound_denied_sender_message());
+                write_response(&mut stream, &format!("{tag} OK FETCH completed"));
+            }
+            ImapMode::InboundFetch if command.contains("UID FETCH 13") => {
+                write_fetch_literal(&mut stream, 3, 13, inbound_automated_message());
+                write_response(&mut stream, &format!("{tag} OK FETCH completed"));
+            }
+            ImapMode::Ok | ImapMode::InboundFetch if command.contains("LOGOUT") => {
                 write_response(&mut stream, "* BYE fixture closing");
                 write_response(&mut stream, &format!("{tag} OK LOGOUT completed"));
                 break;
             }
-            ImapMode::Ok => {
+            ImapMode::Ok | ImapMode::InboundFetch => {
                 write_response(&mut stream, &format!("{tag} BAD unsupported command"));
             }
         }
     }
+}
+
+fn write_fetch_literal(stream: &mut TcpStream, sequence: u32, uid: u32, body: &str) {
+    stream
+        .write_all(
+            format!(
+                "* {sequence} FETCH (UID {uid} RFC822 {{{}}}\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .expect("write FETCH literal header");
+    stream
+        .write_all(body.as_bytes())
+        .expect("write FETCH literal body");
+    stream
+        .write_all(b")\r\n")
+        .expect("write FETCH literal terminator");
+    stream.flush().expect("flush FETCH literal");
+}
+
+const fn inbound_allowed_message() -> &'static str {
+    concat!(
+        "From: Human <human@example.com>\r\n",
+        "Subject: Deploy ready\r\n",
+        "Message-ID: <msg-11@example.com>\r\n",
+        "In-Reply-To: <parent@example.com>\r\n",
+        "References: <root@example.com> <parent@example.com>\r\n",
+        "Content-Type: multipart/mixed; boundary=\"mix\"\r\n",
+        "\r\n",
+        "--mix\r\n",
+        "Content-Type: text/plain; charset=utf-8\r\n",
+        "\r\n",
+        "green\r\n",
+        "--mix\r\n",
+        "Content-Type: application/pdf; name=\"plan.pdf\"\r\n",
+        "Content-Disposition: attachment; filename=\"plan.pdf\"\r\n",
+        "Content-Transfer-Encoding: base64\r\n",
+        "\r\n",
+        "cGxhbg==\r\n",
+        "--mix--\r\n",
+    )
+}
+
+const fn inbound_denied_sender_message() -> &'static str {
+    concat!(
+        "From: outsider@example.net\r\n",
+        "Subject: Should be dropped\r\n",
+        "Message-ID: <msg-12@example.net>\r\n",
+        "Content-Type: text/plain; charset=utf-8\r\n",
+        "\r\n",
+        "outside sender\r\n",
+    )
+}
+
+const fn inbound_automated_message() -> &'static str {
+    concat!(
+        "From: noreply@example.com\r\n",
+        "Subject: Automated notice\r\n",
+        "Message-ID: <msg-13@example.com>\r\n",
+        "Auto-Submitted: auto-generated\r\n",
+        "Content-Type: text/plain; charset=utf-8\r\n",
+        "\r\n",
+        "robot notice\r\n",
+    )
 }
 
 #[derive(Clone, Copy)]

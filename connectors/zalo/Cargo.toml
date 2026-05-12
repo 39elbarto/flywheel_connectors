@@ -36,5 +36,6 @@ url.workspace = true
 
 [dev-dependencies]
 fcp-manifest.workspace = true
+fcp-testkit.workspace = true
 jsonschema.workspace = true
 wiremock.workspace = true

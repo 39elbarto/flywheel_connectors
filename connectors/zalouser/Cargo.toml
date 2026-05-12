@@ -35,3 +35,4 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 fcp-manifest = { path = "../../crates/fcp-manifest" }
+fcp-testkit.workspace = true

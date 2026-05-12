@@ -8,8 +8,8 @@ use chrono::Utc;
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
-    SafetyTier, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+    HandshakeResponse, IdempotencyClass, InstanceId, Introspection, OperationId, OperationInfo,
+    RiskLevel, SafetyTier, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -210,8 +210,16 @@ impl LinearConnector {
         }
     }
 
+    /// Stable connector instance identity used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
+    }
+
     fn record_webhook_delivery(&self, delivery_id: Uuid, webhook_timestamp: i64) -> FcpResult<()> {
-        let min_allowed_timestamp = webhook_timestamp - MAX_LINEAR_WEBHOOK_SKEW_MS as i64;
+        let max_skew_ms =
+            i64::try_from(MAX_LINEAR_WEBHOOK_SKEW_MS).expect("webhook skew fits in i64");
+        let min_allowed_timestamp = webhook_timestamp - max_skew_ms;
         let mut receipts = self
             .webhook_replay_receipts
             .lock()
@@ -226,6 +234,7 @@ impl LinearConnector {
             });
         }
         receipts.insert(delivery_id, webhook_timestamp);
+        drop(receipts);
         Ok(())
     }
 
@@ -1257,8 +1266,7 @@ impl LinearConnector {
             return Err(FcpError::InvalidRequest {
                 code: 1003,
                 message: format!(
-                    "payload.webhookTimestamp is outside the accepted {}ms replay window",
-                    MAX_LINEAR_WEBHOOK_SKEW_MS
+                    "payload.webhookTimestamp is outside the accepted {MAX_LINEAR_WEBHOOK_SKEW_MS}ms replay window"
                 ),
             });
         }
@@ -1502,7 +1510,8 @@ mod tests {
     fn generate_token_with_constraints(
         signing_key: &Ed25519SigningKey,
         op: &str,
-        constraints: CapabilityConstraints,
+        instance_id: &InstanceId,
+        constraints: &CapabilityConstraints,
     ) -> CapabilityToken {
         let cap = match op {
             "linear.create_issue" | "linear.update_issue" | "linear.add_comment" => "linear.write",
@@ -1520,17 +1529,24 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&constraints_cbor)
+            .try_constraints_cbor(&constraints_cbor)
+            .expect("constraints CBOR should be valid")
+            .target_instance(instance_id.as_str())
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
     }
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        op: &str,
+        instance_id: &InstanceId,
+    ) -> CapabilityToken {
         generate_token_with_constraints(
             signing_key,
             op,
-            CapabilityConstraints {
+            instance_id,
+            &CapabilityConstraints {
                 resource_allow: vec!["*".into()],
                 ..Default::default()
             },
@@ -1579,7 +1595,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "linear.get_issue");
+        let token = generate_valid_token(&signing_key, "linear.get_issue", connector.instance_id());
 
         let result = connector
             .handle_invoke(json!({
@@ -1616,7 +1632,8 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "linear.create_issue");
+        let token =
+            generate_valid_token(&signing_key, "linear.create_issue", connector.instance_id());
 
         let result = connector
             .handle_invoke(json!({
@@ -1691,7 +1708,8 @@ mod tests {
         let token = generate_token_with_constraints(
             &signing_key,
             "linear.get_issue",
-            CapabilityConstraints {
+            connector.instance_id(),
+            &CapabilityConstraints {
                 resource_allow: vec!["linear://issue/issue-allowed".into()],
                 ..Default::default()
             },
@@ -1731,7 +1749,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "linear.plan_sync");
+        let token = generate_valid_token(&signing_key, "linear.plan_sync", connector.instance_id());
         let result = connector
             .handle_invoke(json!({
                 "operation": "linear.plan_sync",
@@ -2007,7 +2025,11 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "linear.process_webhook");
+        let token = generate_valid_token(
+            &signing_key,
+            "linear.process_webhook",
+            connector.instance_id(),
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "linear.process_webhook",
@@ -2052,7 +2074,11 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "linear.process_webhook");
+        let token = generate_valid_token(
+            &signing_key,
+            "linear.process_webhook",
+            connector.instance_id(),
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "linear.process_webhook",
@@ -2097,7 +2123,11 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "linear.process_webhook");
+        let token = generate_valid_token(
+            &signing_key,
+            "linear.process_webhook",
+            connector.instance_id(),
+        );
         let delivery_id = Uuid::new_v4().to_string();
         let input = json!({
             "delivery_id": delivery_id,
@@ -2158,7 +2188,8 @@ mod tests {
         let token = generate_token_with_constraints(
             &signing_key,
             "linear.process_webhook",
-            CapabilityConstraints {
+            connector.instance_id(),
+            &CapabilityConstraints {
                 resource_allow: vec!["linear://issue/issue-allowed".into()],
                 ..Default::default()
             },

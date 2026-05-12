@@ -13,7 +13,7 @@
 
 use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
+use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError, InstanceId};
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -26,7 +26,11 @@ use fcp_linear::{client::LinearClient, connector::LinearConnector, error::Linear
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, operation: &str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    operation: &str,
+    instance_id: &InstanceId,
+) -> CapabilityToken {
     let capability = match operation {
         "linear.create_issue" | "linear.update_issue" | "linear.add_comment" => "linear.write",
         "linear.process_webhook" => "linear.process_webhook",
@@ -47,7 +51,9 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, operation: &str) -> Cap
         .operations(&[operation])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should be valid")
+        .target_instance(instance_id.as_str())
         .sign(signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)
@@ -630,7 +636,7 @@ async fn invoke_list_teams_through_connector() {
     let mut connector = LinearConnector::new();
     setup_configure(&mut connector, &format!("{}/graphql", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["linear.list_teams"]).await;
-    let token = generate_valid_token(&signing_key, "linear.list_teams");
+    let token = generate_valid_token(&signing_key, "linear.list_teams", connector.instance_id());
 
     let result = connector
         .handle_invoke(json!({
@@ -662,7 +668,7 @@ async fn invoke_get_issue_through_connector() {
     let mut connector = LinearConnector::new();
     setup_configure(&mut connector, &format!("{}/graphql", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["linear.get_issue"]).await;
-    let token = generate_valid_token(&signing_key, "linear.get_issue");
+    let token = generate_valid_token(&signing_key, "linear.get_issue", connector.instance_id());
 
     let result = connector
         .handle_invoke(json!({
@@ -696,7 +702,7 @@ async fn invoke_create_issue_through_connector() {
     let mut connector = LinearConnector::new();
     setup_configure(&mut connector, &format!("{}/graphql", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["linear.create_issue"]).await;
-    let token = generate_valid_token(&signing_key, "linear.create_issue");
+    let token = generate_valid_token(&signing_key, "linear.create_issue", connector.instance_id());
 
     let result = connector
         .handle_invoke(json!({
@@ -715,7 +721,7 @@ async fn invoke_create_issue_through_connector() {
 async fn invoke_plan_sync_through_connector() {
     let mut connector = LinearConnector::new();
     let signing_key = setup_handshake(&mut connector, &["linear.plan_sync"]).await;
-    let token = generate_valid_token(&signing_key, "linear.plan_sync");
+    let token = generate_valid_token(&signing_key, "linear.plan_sync", connector.instance_id());
 
     let result = connector
         .handle_invoke(json!({
@@ -766,7 +772,7 @@ async fn invoke_plan_sync_through_connector() {
 async fn invoke_plan_sync_surfaces_linkage_conflict() {
     let mut connector = LinearConnector::new();
     let signing_key = setup_handshake(&mut connector, &["linear.plan_sync"]).await;
-    let token = generate_valid_token(&signing_key, "linear.plan_sync");
+    let token = generate_valid_token(&signing_key, "linear.plan_sync", connector.instance_id());
 
     let result = connector
         .handle_invoke(json!({
@@ -816,7 +822,7 @@ async fn invoke_plan_sync_surfaces_linkage_conflict() {
 async fn invoke_plan_sync_conflicts_on_single_sided_claimed_linkage() {
     let mut connector = LinearConnector::new();
     let signing_key = setup_handshake(&mut connector, &["linear.plan_sync"]).await;
-    let token = generate_valid_token(&signing_key, "linear.plan_sync");
+    let token = generate_valid_token(&signing_key, "linear.plan_sync", connector.instance_id());
 
     let result = connector
         .handle_invoke(json!({
@@ -873,7 +879,7 @@ async fn invoke_add_comment_through_connector() {
     let mut connector = LinearConnector::new();
     setup_configure(&mut connector, &format!("{}/graphql", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["linear.add_comment"]).await;
-    let token = generate_valid_token(&signing_key, "linear.add_comment");
+    let token = generate_valid_token(&signing_key, "linear.add_comment", connector.instance_id());
 
     let result = connector
         .handle_invoke(json!({
@@ -895,7 +901,7 @@ async fn wrong_capability_rejected() {
     let mut connector = LinearConnector::new();
     setup_configure(&mut connector, &format!("{}/graphql", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["linear.list_teams"]).await;
-    let token = generate_valid_token(&signing_key, "linear.list_teams");
+    let token = generate_valid_token(&signing_key, "linear.list_teams", connector.instance_id());
 
     let result = connector
         .handle_invoke(json!({
@@ -916,7 +922,7 @@ async fn missing_required_field_returns_invalid_request() {
     let mut connector = LinearConnector::new();
     setup_configure(&mut connector, &format!("{}/graphql", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["linear.create_issue"]).await;
-    let token = generate_valid_token(&signing_key, "linear.create_issue");
+    let token = generate_valid_token(&signing_key, "linear.create_issue", connector.instance_id());
 
     let result = connector
         .handle_invoke(json!({
@@ -941,7 +947,7 @@ async fn unknown_operation_rejected() {
     let mut connector = LinearConnector::new();
     setup_configure(&mut connector, &format!("{}/graphql", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["linear.nonexistent"]).await;
-    let token = generate_valid_token(&signing_key, "linear.nonexistent");
+    let token = generate_valid_token(&signing_key, "linear.nonexistent", connector.instance_id());
 
     let result = connector
         .handle_invoke(json!({

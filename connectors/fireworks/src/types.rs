@@ -310,3 +310,110 @@ fn invalid<T>(message: &str) -> FcpResult<T> {
         message: message.into(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn chat_request_uses_default_model_and_provider_extensions() {
+        let request = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "reasoning_effort": "high",
+                "context_length_exceeded_behavior": "truncate"
+            }),
+            DEFAULT_MODEL,
+        )
+        .expect("valid chat input should decode");
+
+        assert_eq!(request.model, DEFAULT_MODEL);
+        assert_eq!(
+            request.provider_extensions["reasoning_effort"],
+            json!("high")
+        );
+        assert_eq!(
+            request.provider_extensions["context_length_exceeded_behavior"],
+            json!("truncate")
+        );
+    }
+
+    #[test]
+    fn account_scoped_model_ids_are_accepted() {
+        let model =
+            validate_fireworks_model_id("model", "accounts/flywheel/models/llama-v3p1-8b-instruct")
+                .expect("account-scoped model id should be valid");
+
+        assert_eq!(model, "accounts/flywheel/models/llama-v3p1-8b-instruct");
+    }
+
+    #[test]
+    fn invalid_chat_sampling_options_are_rejected() {
+        let error = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "top_logprobs": 6
+            }),
+            DEFAULT_MODEL,
+        )
+        .expect_err("top_logprobs over Fireworks limit should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn invalid_model_id_is_rejected() {
+        let error = chat_request_from_value(
+            json!({
+                "model": "bad model",
+                "messages": [{"role": "user", "content": "hello"}]
+            }),
+            DEFAULT_MODEL,
+        )
+        .expect_err("model ids may not contain whitespace");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn embeddings_reject_blank_input_and_zero_dimensions() {
+        let blank_error = embeddings_request_from_value(
+            json!({
+                "input": " ",
+                "model": DEFAULT_EMBEDDING_MODEL
+            }),
+            DEFAULT_EMBEDDING_MODEL,
+        )
+        .expect_err("blank embedding input should fail");
+        let dimensions_error = embeddings_request_from_value(
+            json!({
+                "input": "hello",
+                "dimensions": 0
+            }),
+            DEFAULT_EMBEDDING_MODEL,
+        )
+        .expect_err("zero dimensions should fail");
+
+        assert!(matches!(blank_error, FcpError::InvalidRequest { .. }));
+        assert!(matches!(dimensions_error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn legacy_completion_carries_context_behavior() {
+        let request = legacy_request_from_value(
+            json!({
+                "prompt": "complete this",
+                "context_length_exceeded_behavior": "error"
+            }),
+            DEFAULT_MODEL,
+        )
+        .expect("valid legacy completion input should decode");
+
+        assert_eq!(request.model, DEFAULT_MODEL);
+        assert_eq!(
+            request.provider_extensions["context_length_exceeded_behavior"],
+            json!("error")
+        );
+    }
+}

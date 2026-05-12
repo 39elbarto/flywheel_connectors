@@ -10,13 +10,18 @@
 )]
 
 use chrono::{Duration, Utc};
-use fcp_coda::connector::{CodaConnector, operations_info};
+use fcp_coda::{
+    client::CodaClient,
+    connector::{CodaConnector, operations_info},
+    error::CodaError,
+};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_prelude::{
     ApprovalMode, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
-    HandshakeRequest, IdempotencyClass, InvokeRequest, InvokeStatus, OperationId, RequestId,
-    SafetyTier, ZoneId,
+    HandshakeRequest, IdempotencyClass, InstanceId, InvokeRequest, InvokeStatus, OperationId,
+    RequestId, SafetyTier, ZoneId,
 };
+use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
 };
@@ -53,7 +58,11 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    op: &'static str,
+    instance_id: &InstanceId,
+) -> CapabilityToken {
     let capability = match op {
         OP_DOCS_LIST => "coda.docs.read",
         OP_ROWS_DELETE => "coda.rows.write",
@@ -74,7 +83,9 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should be valid")
+        .target_instance(instance_id.as_str())
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)
@@ -156,6 +167,47 @@ async fn mock_whoami(server: &MockServer, status: u16) {
         .respond_with(response)
         .mount(server)
         .await;
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_success() {
+    let server = MockServer::start().await;
+    mock_whoami(&server, 200).await;
+
+    let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+    let client = CodaClient::new(&server.uri(), TOKEN, 30_000, HttpRetryConfig::default())
+        .expect("loopback Coda client should build");
+    assert!(client.health_check(&runtime).await.is_ok());
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_401() {
+    let server = MockServer::start().await;
+    mock_whoami(&server, 401).await;
+
+    let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+    let client = CodaClient::new(&server.uri(), TOKEN, 30_000, HttpRetryConfig::default())
+        .expect("loopback Coda client should build");
+    let result = client.health_check(&runtime).await;
+    assert!(matches!(result, Err(CodaError::Unauthorized(_))));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_429() {
+    let server = MockServer::start().await;
+    mock_whoami(&server, 429).await;
+
+    let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+    let retry_config = HttpRetryConfig {
+        max_retries: 0,
+        initial_delay_ms: 1,
+        max_delay_ms: 1,
+        jitter_enabled: false,
+    };
+    let client = CodaClient::new(&server.uri(), TOKEN, 30_000, retry_config)
+        .expect("loopback Coda client should build");
+    let result = client.health_check(&runtime).await;
+    assert!(matches!(result, Err(CodaError::RateLimited { .. })));
 }
 
 #[fcp_async_core::runtime::test]
@@ -279,7 +331,7 @@ async fn invoke_docs_list_preserves_pagination_and_scope_evidence() {
                 "limit": 2,
                 "page_token": "next-1"
             }),
-            generate_valid_token(&signing_key, OP_DOCS_LIST),
+            generate_valid_token(&signing_key, OP_DOCS_LIST, connector.instance_id()),
         ))
         .await
         .unwrap();
@@ -339,7 +391,7 @@ async fn invoke_rows_delete_tracks_async_mutation_evidence() {
                 "table_id_or_name": "grid-tasks",
                 "row_ids": ["row-1"]
             }),
-            generate_valid_token(&signing_key, OP_ROWS_DELETE),
+            generate_valid_token(&signing_key, OP_ROWS_DELETE, connector.instance_id()),
         ))
         .await
         .unwrap();

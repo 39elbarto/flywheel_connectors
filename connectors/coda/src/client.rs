@@ -569,9 +569,6 @@ async fn send_request(request: RequestBuilder, label: &str) -> CodaResult<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_sdk::migration::ConnectorRuntimeConfig;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn client_creation() {
@@ -652,81 +649,5 @@ mod tests {
         assert!(sanitize_path_segment("foo/bar").is_err());
         assert!(sanitize_path_segment("").is_err());
         assert!(sanitize_path_segment("foo\0bar").is_err());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_success() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/whoami"))
-            .and(header("authorization", "Bearer test_tok"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "name": "Test User",
-                "loginId": "test@example.com",
-                "type": "user",
-                "scoped": true,
-                "tokenName": "test token",
-                "href": "https://coda.io/apis/v1/whoami",
-                "workspace": {
-                    "id": "ws-123",
-                    "type": "workspace"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        let client = CodaClient::new(
-            &mock_server.uri(),
-            "test_tok",
-            30_000,
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        assert!(client.health_check(&runtime).await.is_ok());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_401() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/whoami"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&mock_server)
-            .await;
-
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        let client = CodaClient::new(
-            &mock_server.uri(),
-            "bad_tok",
-            30_000,
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let result = client.health_check(&runtime).await;
-        assert!(matches!(result, Err(CodaError::Unauthorized(_))));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_429() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/whoami"))
-            .respond_with(ResponseTemplate::new(429))
-            .mount(&mock_server)
-            .await;
-
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        // Keep the rate-limit test deterministic; the production default policy
-        // intentionally backs off for much longer.
-        let retry_config = HttpRetryConfig {
-            max_retries: 0,
-            initial_delay_ms: 1,
-            max_delay_ms: 1,
-            jitter_enabled: false,
-        };
-        let client = CodaClient::new(&mock_server.uri(), "tok", 30_000, retry_config).unwrap();
-        let result = client.health_check(&runtime).await;
-        assert!(matches!(result, Err(CodaError::RateLimited { .. })));
     }
 }

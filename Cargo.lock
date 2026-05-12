@@ -6048,6 +6048,7 @@ dependencies = [
  "fcp-core",
  "fcp-prelude",
  "fcp-sdk",
+ "fcp-testkit",
  "percent-encoding",
  "reqwest 0.13.2",
  "serde",

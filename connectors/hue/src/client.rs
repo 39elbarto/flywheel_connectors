@@ -147,61 +147,8 @@ impl HueClient {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use wiremock::matchers::{body_json, header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-
-    #[fcp_async_core::runtime::test]
-    async fn list_lights_uses_hue_application_key_header() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/clip/v2/resource/light"))
-            .and(header("hue-application-key", "app-key"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
-            .mount(&server)
-            .await;
-
-        let config = HueConfig::from_value(json!({
-            "bridge_url": server.uri(),
-            "app_key": "app-key"
-        }))
-        .expect("config should parse");
-        let client = HueClient::from_config(&config).expect("client should build");
-        let result = client.list_lights().await.expect("list should succeed");
-        assert_eq!(result["data"], json!([]));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn set_light_state_sends_expected_payload() {
-        let server = MockServer::start().await;
-        Mock::given(method("PUT"))
-            .and(path("/clip/v2/resource/light/light-1"))
-            .and(body_json(json!({
-                "on": { "on": true },
-                "dimming": { "brightness": 50.0 }
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
-            .mount(&server)
-            .await;
-
-        let config = HueConfig::from_value(json!({
-            "bridge_url": server.uri(),
-            "app_key": "app-key"
-        }))
-        .expect("config should parse");
-        let client = HueClient::from_config(&config).expect("client should build");
-        let input = SetLightStateInput::from_value(json!({
-            "light_id": "light-1",
-            "on": true,
-            "brightness": 50.0
-        }))
-        .expect("input should parse");
-        client
-            .set_light_state(&input)
-            .await
-            .expect("set should succeed");
-    }
 
     #[test]
     fn debug_redacts_app_key() {
@@ -223,33 +170,5 @@ mod tests {
         assert_eq!(sanitize_path_segment("id/../../admin"), "id....admin");
         assert_eq!(sanitize_path_segment("normal-uuid-v4"), "normal-uuid-v4");
         assert!(!sanitize_path_segment("foo/bar").contains('/'));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn recall_scene_sends_expected_payload() {
-        let server = MockServer::start().await;
-        Mock::given(method("PUT"))
-            .and(path("/clip/v2/resource/scene/scene-1"))
-            .and(body_json(json!({
-                "recall": { "action": "active" }
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
-            .mount(&server)
-            .await;
-
-        let config = HueConfig::from_value(json!({
-            "bridge_url": server.uri(),
-            "app_key": "app-key"
-        }))
-        .expect("config should parse");
-        let client = HueClient::from_config(&config).expect("client should build");
-        let input = RecallSceneInput::from_value(json!({
-            "scene_id": "scene-1"
-        }))
-        .expect("input should parse");
-        client
-            .recall_scene(&input)
-            .await
-            .expect("scene recall should succeed");
     }
 }

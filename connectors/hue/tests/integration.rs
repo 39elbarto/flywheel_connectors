@@ -2,10 +2,14 @@
 
 use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_hue::HueConnector;
+use fcp_hue::{
+    HueConnector,
+    client::HueClient,
+    types::{HueConfig, RecallSceneInput, SetLightStateInput},
+};
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, FcpConnector, FcpError, HandshakeRequest,
-    InvokeRequest, OperationId, RequestId, SelfCheckStatus, ZoneId,
+    InstanceId, InvokeRequest, OperationId, RequestId, SelfCheckStatus, ZoneId,
 };
 use serde_json::{Value, json};
 use wiremock::{
@@ -22,7 +26,11 @@ const OP_SET_LIGHT_STATE: &str = "hue.set_light_state";
 const OP_RECALL_SCENE: &str = "hue.recall_scene";
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
-fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
+fn handshake_request(
+    host_public_key: [u8; 32],
+    capabilities: &[&str],
+    instance_id: &InstanceId,
+) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0.0".into(),
         zone: ZoneId::work(),
@@ -35,7 +43,7 @@ fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> Handsh
             .collect(),
         host: None,
         transport_caps: None,
-        requested_instance_id: None,
+        requested_instance_id: Some(instance_id.clone()),
     }
 }
 
@@ -43,6 +51,7 @@ fn capability_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &InstanceId,
 ) -> CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
@@ -57,6 +66,7 @@ fn capability_token(
         .zone_id("z:work")
         .principal("user:test")
         .operations(operations)
+        .target_instance(instance_id.as_str())
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
@@ -95,7 +105,7 @@ async fn setup_connector(
     bridge_url: &str,
     allow_insecure_ssl: bool,
     capabilities: &[&str],
-) -> (HueConnector, Ed25519SigningKey) {
+) -> (HueConnector, Ed25519SigningKey, InstanceId) {
     let mut connector = HueConnector::new();
     connector
         .configure(json!({
@@ -106,14 +116,16 @@ async fn setup_connector(
         .await
         .expect("configure should succeed");
     let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
     connector
         .handshake(handshake_request(
             signing_key.verifying_key().to_bytes(),
             capabilities,
+            &instance_id,
         ))
         .await
         .expect("handshake should succeed");
-    (connector, signing_key)
+    (connector, signing_key, instance_id)
 }
 
 async fn invoke_ok(
@@ -122,18 +134,98 @@ async fn invoke_ok(
     input: Value,
     capability: &str,
     signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
 ) -> Value {
     connector
         .invoke(invoke_request(
             connector,
             operation,
             input,
-            capability_token(signing_key, capability, &[operation]),
+            capability_token(signing_key, capability, &[operation], instance_id),
         ))
         .await
         .expect("invoke should succeed")
         .result
         .expect("successful invoke should carry a result")
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_list_lights_uses_hue_application_key_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/clip/v2/resource/light"))
+        .and(header("hue-application-key", "app-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
+        .mount(&server)
+        .await;
+
+    let config = HueConfig::from_value(json!({
+        "bridge_url": server.uri(),
+        "app_key": "app-key"
+    }))
+    .expect("config should parse");
+    let client = HueClient::from_config(&config).expect("client should build");
+    let result = client.list_lights().await.expect("list should succeed");
+    assert_eq!(result["data"], json!([]));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_set_light_state_sends_expected_payload() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/clip/v2/resource/light/light-1"))
+        .and(body_json(json!({
+            "on": { "on": true },
+            "dimming": { "brightness": 50.0 }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
+        .mount(&server)
+        .await;
+
+    let config = HueConfig::from_value(json!({
+        "bridge_url": server.uri(),
+        "app_key": "app-key"
+    }))
+    .expect("config should parse");
+    let client = HueClient::from_config(&config).expect("client should build");
+    let input = SetLightStateInput::from_value(json!({
+        "light_id": "light-1",
+        "on": true,
+        "brightness": 50.0
+    }))
+    .expect("input should parse");
+    client
+        .set_light_state(&input)
+        .await
+        .expect("set should succeed");
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_recall_scene_sends_expected_payload() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/clip/v2/resource/scene/scene-1"))
+        .and(body_json(json!({
+            "recall": { "action": "active" }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [] })))
+        .mount(&server)
+        .await;
+
+    let config = HueConfig::from_value(json!({
+        "bridge_url": server.uri(),
+        "app_key": "app-key"
+    }))
+    .expect("config should parse");
+    let client = HueClient::from_config(&config).expect("client should build");
+    let input = RecallSceneInput::from_value(json!({
+        "scene_id": "scene-1"
+    }))
+    .expect("input should parse");
+    client
+        .recall_scene(&input)
+        .await
+        .expect("scene recall should succeed");
 }
 
 #[fcp_async_core::runtime::test]
@@ -214,7 +306,7 @@ async fn self_check_reports_bridge_metadata_and_health() {
 
 #[fcp_async_core::runtime::test]
 async fn invoke_set_light_state_rejects_out_of_range_brightness() {
-    let (connector, signing_key) =
+    let (connector, signing_key, instance_id) =
         setup_connector("http://127.0.0.1:18080", false, &[CAP_WRITE]).await;
     let error = connector
         .invoke(invoke_request(
@@ -225,7 +317,7 @@ async fn invoke_set_light_state_rejects_out_of_range_brightness() {
                 "on": true,
                 "brightness": 150.0
             }),
-            capability_token(&signing_key, CAP_WRITE, &[OP_SET_LIGHT_STATE]),
+            capability_token(&signing_key, CAP_WRITE, &[OP_SET_LIGHT_STATE], &instance_id),
         ))
         .await
         .expect_err("out-of-range brightness must fail");
@@ -256,13 +348,15 @@ async fn invoke_recall_scene_hits_expected_endpoint() {
         .mount(&server)
         .await;
 
-    let (connector, signing_key) = setup_connector(&server.uri(), false, &[CAP_WRITE]).await;
+    let (connector, signing_key, instance_id) =
+        setup_connector(&server.uri(), false, &[CAP_WRITE]).await;
     let result = invoke_ok(
         &connector,
         OP_RECALL_SCENE,
         json!({ "scene_id": "scene-1" }),
         CAP_WRITE,
         &signing_key,
+        &instance_id,
     )
     .await;
 
@@ -271,9 +365,17 @@ async fn invoke_recall_scene_hits_expected_endpoint() {
 
 #[fcp_async_core::runtime::test]
 async fn invoke_health_reports_transport_metadata() {
-    let (connector, signing_key) =
+    let (connector, signing_key, instance_id) =
         setup_connector("http://127.0.0.1:18080", false, &[CAP_READ]).await;
-    let result = invoke_ok(&connector, OP_HEALTH, json!({}), CAP_READ, &signing_key).await;
+    let result = invoke_ok(
+        &connector,
+        OP_HEALTH,
+        json!({}),
+        CAP_READ,
+        &signing_key,
+        &instance_id,
+    )
+    .await;
 
     assert_eq!(result["status"], "ok");
     assert_eq!(result["transport"], "http-loopback");

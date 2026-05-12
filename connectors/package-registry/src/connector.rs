@@ -652,6 +652,10 @@ impl FcpConnector for PackageRegistryConnector {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        if let Some(requested_instance_id) = req.requested_instance_id {
+            self.base.instance_id = requested_instance_id;
+        }
+
         self.base.set_handshaken(true);
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,

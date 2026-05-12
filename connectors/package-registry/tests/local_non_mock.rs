@@ -22,7 +22,7 @@ use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_package_registry::connector::PackageRegistryConnector;
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
-    HandshakeRequest, InvokeRequest, InvokeStatus, OperationId, RequestId, ZoneId,
+    HandshakeRequest, InstanceId, InvokeRequest, InvokeStatus, OperationId, RequestId, ZoneId,
 };
 use serde_json::json;
 
@@ -106,7 +106,7 @@ fn handle_request(mut stream: TcpStream) -> FixtureObservation {
     }
 }
 
-fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
+fn handshake_req(host_public_key: [u8; 32], instance_id: InstanceId) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0.0".into(),
         zone: ZoneId::work(),
@@ -116,11 +116,11 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
         capabilities_requested: vec![CapabilityId::from_static("registry.search")],
         host: None,
         transport_caps: None,
-        requested_instance_id: None,
+        requested_instance_id: Some(instance_id),
     }
 }
 
-fn capability_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+fn capability_token(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec!["*".into()],
@@ -133,9 +133,11 @@ fn capability_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         .zone_id("z:work")
         .principal("user:local-non-mock")
         .operations(&["registry.search"])
+        .target_instance(instance_id.as_str())
         .issuer("node:local-non-mock")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)
@@ -146,6 +148,7 @@ async fn loopback_crates_search_uses_production_client_request() {
     let fixture = LoopbackFixture::start();
     let mut connector = PackageRegistryConnector::new();
     let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
 
     connector
         .configure(json!({
@@ -162,7 +165,10 @@ async fn loopback_crates_search_uses_production_client_request() {
         .await
         .expect("configure connector");
     connector
-        .handshake(handshake_req(signing_key.verifying_key().to_bytes()))
+        .handshake(handshake_req(
+            signing_key.verifying_key().to_bytes(),
+            instance_id.clone(),
+        ))
         .await
         .expect("handshake connector");
 
@@ -174,7 +180,7 @@ async fn loopback_crates_search_uses_production_client_request() {
             operation: OperationId::from_static("registry.search"),
             zone_id: ZoneId::work(),
             input: json!({"query": "serde", "limit": 1, "page": 1}),
-            capability_token: capability_token(&signing_key),
+            capability_token: capability_token(&signing_key, &instance_id),
             holder_proof: None,
             context: None,
             idempotency_key: None,
@@ -194,8 +200,9 @@ async fn loopback_crates_search_uses_production_client_request() {
     );
     assert!(observation.user_agent_seen);
     assert_eq!(response.status, InvokeStatus::Ok);
-    assert_eq!(response.output["results"][0]["name"], "serde");
-    assert_eq!(response.output["results"][0]["latest_version"], "1.0.228");
+    let result = response.result.as_ref().expect("invoke result");
+    assert_eq!(result["results"][0]["name"], "serde");
+    assert_eq!(result["results"][0]["latest_version"], "1.0.228");
 
     let artifact = json!({
         "connector": "package-registry",

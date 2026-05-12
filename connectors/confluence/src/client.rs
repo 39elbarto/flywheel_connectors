@@ -467,8 +467,6 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn client_creation() {
@@ -565,74 +563,5 @@ mod tests {
             .unwrap();
         let decoded_str = String::from_utf8(decoded).unwrap();
         assert_eq!(decoded_str, "user@example.com:api_token");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_success() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/rest/api/space"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "results": [],
-                "start": 0,
-                "limit": 1,
-                "size": 0
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = ConfluenceClient::new(
-            &mock_server.uri(),
-            "user@example.com",
-            "test_token",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        assert!(client.health_check().await.is_ok());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_unauthorized() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/rest/api/space"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&mock_server)
-            .await;
-
-        let client = ConfluenceClient::new(
-            &mock_server.uri(),
-            "user@example.com",
-            "bad_token",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let err = client.health_check().await.unwrap_err();
-        assert!(matches!(err, Error::Unauthorized(_)));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_rate_limited() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/rest/api/space"))
-            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "60"))
-            .mount(&mock_server)
-            .await;
-
-        let client = ConfluenceClient::new(
-            &mock_server.uri(),
-            "user@example.com",
-            "test_token",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        let err = client.health_check().await.unwrap_err();
-        assert!(matches!(
-            err,
-            Error::RateLimited {
-                retry_after_ms: 60000
-            }
-        ));
     }
 }

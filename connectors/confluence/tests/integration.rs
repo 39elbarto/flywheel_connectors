@@ -675,6 +675,46 @@ async fn auth_rate_limit_malformed_json_and_invalid_input_are_typed() {
     ));
 }
 
+#[fcp_async_core::runtime::test]
+async fn health_check_status_errors_are_typed() {
+    let unauthorized_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/space"))
+        .and(query_param("limit", "1"))
+        .and(header("Authorization", expected_auth_header()))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(1)
+        .mount(&unauthorized_server)
+        .await;
+
+    let unauthorized = client(&unauthorized_server)
+        .health_check()
+        .await
+        .expect_err("401 health check should map to unauthorized");
+    assert!(matches!(unauthorized, Error::Unauthorized(_)));
+
+    let rate_limit_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/space"))
+        .and(query_param("limit", "1"))
+        .and(header("Authorization", expected_auth_header()))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "60"))
+        .expect(1)
+        .mount(&rate_limit_server)
+        .await;
+
+    let rate_limited = client(&rate_limit_server)
+        .health_check()
+        .await
+        .expect_err("429 health check should map to rate limit");
+    assert!(matches!(
+        rate_limited,
+        Error::RateLimited {
+            retry_after_ms: 60_000
+        }
+    ));
+}
+
 #[test]
 fn async_timeout_and_cancellation_mapping_is_bounded() {
     let timeout = Error::from_async_error(AsyncError::Timeout { timeout_ms: 250 });

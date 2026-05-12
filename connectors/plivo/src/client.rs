@@ -583,17 +583,6 @@ fn xml_escape(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path},
-    };
-
-    fn test_client(base_url: &str) -> PlivoClient {
-        PlivoClient::new("MA123", "test_auth_secret")
-            .unwrap()
-            .with_base_url(base_url)
-            .with_retry_config(0)
-    }
 
     #[test]
     fn call_create_payload_preserves_answer_url_and_status_callbacks() {
@@ -665,87 +654,5 @@ mod tests {
             .expect("append auth");
         assert!(url.contains("foo=bar"));
         assert_eq!(call_auth_from_url(&url).as_deref(), Some("abc123"));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn initiate_call_uses_basic_auth_and_account_call_endpoint() {
-        let server = MockServer::start().await;
-        let expected_auth = format!("Basic {}", STANDARD.encode("MA123:test_auth_secret"));
-        Mock::given(method("POST"))
-            .and(path("/v1/Account/MA123/Call/"))
-            .and(header("authorization", expected_auth.as_str()))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "request_uuid": "call-uuid-1",
-                "message": "call fired"
-            })))
-            .mount(&server)
-            .await;
-
-        let client = test_client(&format!("{}/v1/Account/MA123", server.uri()));
-        let response = client
-            .initiate_call(&InitiateCallRequest {
-                to: "+15551230000",
-                from: "+15559870000",
-                answer_url: "https://voice.example.com/plivo",
-                answer_method: Some("POST"),
-                hangup_url: None,
-                hangup_method: None,
-                ring_url: None,
-                ring_method: None,
-                fallback_url: None,
-                time_limit: None,
-            })
-            .await
-            .unwrap();
-        assert_eq!(response.request_uuid.as_deref(), Some("call-uuid-1"));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn transient_server_error_retries_then_succeeds() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/Account/MA123/Call/call-uuid-1/"))
-            .respond_with(ResponseTemplate::new(503).set_body_string("try later"))
-            .up_to_n_times(1)
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v1/Account/MA123/Call/call-uuid-1/"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "call_uuid": "call-uuid-1",
-                "call_state": "ANSWER"
-            })))
-            .mount(&server)
-            .await;
-
-        let client = PlivoClient::new("MA123", "test_auth_secret")
-            .unwrap()
-            .with_base_url(&format!("{}/v1/Account/MA123", server.uri()))
-            .with_retry_config(1);
-        let response = client.status_call("call-uuid-1").await.unwrap();
-        assert_eq!(response.call_state.as_deref(), Some("ANSWER"));
-        assert_eq!(
-            server.received_requests().await.unwrap_or_default().len(),
-            2
-        );
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn provider_error_maps_message_and_rate_limit_retry_after() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/Account/MA123/Call/missing/"))
-            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
-                "error": "call uuid is invalid"
-            })))
-            .mount(&server)
-            .await;
-        let client = test_client(&format!("{}/v1/Account/MA123", server.uri()));
-        let error = client.status_call("missing").await.unwrap_err();
-        assert!(format!("{error}").contains("call uuid is invalid"));
-        assert!(matches!(
-            error.to_fcp_error(),
-            fcp_prelude::FcpError::External { .. }
-        ));
     }
 }

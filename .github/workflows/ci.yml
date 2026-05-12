@@ -37,6 +37,19 @@ env:
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
+  # README drift: stale path and symbol guard
+  # ─────────────────────────────────────────────────────────────────────────────
+  readme-drift:
+    name: README Drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check README references
+        run: bash scripts/ci/readme_drift_check.sh
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # Lint: Format + Clippy
   # ─────────────────────────────────────────────────────────────────────────────
   lint:

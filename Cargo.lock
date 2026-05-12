@@ -6816,6 +6816,7 @@ dependencies = [
  "fcp-core",
  "fcp-prelude",
  "fcp-sdk",
+ "fcp-testkit",
  "rusqlite",
  "serde",
  "serde_json",

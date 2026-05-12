@@ -31,6 +31,9 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use fcp_crypto::{
+    CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope, signing_bytes_for_payload,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{ObjectHeader, ObjectId, QuorumPolicy, RiskTier, SignatureSet, ZoneId};
@@ -149,6 +152,19 @@ impl RevocationObject {
     }
 }
 
+impl HybridSignable for RevocationObject {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::Revocation;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        let mut unsigned = self.clone();
+        unsigned.signature = [0_u8; 64];
+        signing_bytes_for_payload(Self::OBJECT_KIND, &unsigned)
+    }
+}
+
+/// Hybrid signed revocation-object envelope.
+pub type HybridSignedRevocationObject = SignedEnvelope<RevocationObject>;
+
 /// Revocation event chain node (NORMATIVE).
 ///
 /// Links revocation objects into a hash-chain with monotonic sequence numbers.
@@ -205,6 +221,19 @@ impl RevocationEvent {
         &self.header.zone_id
     }
 }
+
+impl HybridSignable for RevocationEvent {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::Revocation;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        let mut unsigned = self.clone();
+        unsigned.signature = [0_u8; 64];
+        signing_bytes_for_payload(Self::OBJECT_KIND, &unsigned)
+    }
+}
+
+/// Hybrid signed revocation-event envelope.
+pub type HybridSignedRevocationEvent = SignedEnvelope<RevocationEvent>;
 
 /// Epoch identifier for revocation head checkpoints.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -276,6 +305,19 @@ impl RevocationHead {
         now.saturating_sub(self.header.created_at)
     }
 }
+
+impl HybridSignable for RevocationHead {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::Revocation;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        let mut unsigned = self.clone();
+        unsigned.quorum_signatures = SignatureSet::new();
+        signing_bytes_for_payload(Self::OBJECT_KIND, &unsigned)
+    }
+}
+
+/// Hybrid signed revocation-head envelope.
+pub type HybridSignedRevocationHead = SignedEnvelope<RevocationHead>;
 
 /// Freshness policy for revocation checks (NORMATIVE).
 ///

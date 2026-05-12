@@ -16,6 +16,7 @@ blake3.workspace = true
 base64 = "0.22"
 fcp-cbor = { path = "../fcp-cbor" }
 fcp-core = { path = "../fcp-core" }
+fcp-crypto = { path = "../fcp-crypto" }
 fcp-prelude = { path = "../fcp-prelude" }
 hex.workspace = true
 ipnet = "2.9"
@@ -28,7 +29,6 @@ thiserror.workspace = true
 [dev-dependencies]
 chrono.workspace = true
 ciborium.workspace = true
-fcp-crypto = { path = "../fcp-crypto" }
 insta = { workspace = true, features = ["json"] }
 proptest.workspace = true
 tracing.workspace = true

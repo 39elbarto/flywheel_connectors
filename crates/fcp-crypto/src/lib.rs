@@ -96,6 +96,7 @@ pub mod error;
 pub mod frost;
 pub mod hkdf;
 pub mod hpke_seal;
+pub mod hybrid;
 pub mod kid;
 pub mod mac;
 pub mod ml_dsa;
@@ -126,6 +127,12 @@ pub use hkdf::{
     hkdf_sha256_array,
 };
 pub use hpke_seal::{Fcp2Aad, HpkeSealedBox, hpke_open, hpke_seal};
+pub use hybrid::{
+    EVENT_PQ_POLICY_DOWNGRADE, HYBRID_SIGNED_ENVELOPE_DOMAIN, HybridEnvelopeVerification,
+    HybridSignable, HybridSignedObjectKind, PqPolicyDowngradeAudit, PqPolicyDowngradeAuthorizer,
+    PqSigningPolicy, SignedEnvelope, downgrade_policy_to_either_ok,
+    signing_bytes_for_canonical_payload, signing_bytes_for_payload,
+};
 pub use kid::KeyId;
 pub use mac::{Blake3Mac, MacKey, blake3_mac, blake3_mac_full, blake3_mac_verify};
 pub use ml_dsa::{ML_DSA_65_SEED_SIZE, MlDsa65SigningKey, MlDsa65VerifyingKey};

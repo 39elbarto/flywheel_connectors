@@ -5,10 +5,10 @@
 
 use std::collections::HashSet;
 
-use fcp_crypto::Ed25519SigningKey;
+use fcp_crypto::{Ed25519SigningKey, MlDsa65SigningKey, PqSigningPolicy};
 use fcp_mesh::degraded::{
     ControlPlaneEnvelope, ControlPlaneHandler, DegradedModeDecoder, DegradedModeEncoder,
-    DegradedTransportError, InMemoryControlPlaneHandler, RetentionClass,
+    DegradedTransportError, InMemoryControlPlaneHandler, RetentionClass, SignedDegradedFrameAuth,
 };
 use fcp_mesh::device::{
     AvailabilityProfile, CpuArch, DeviceProfile, FitnessContext, GpuProfile, GpuVendor,
@@ -1466,6 +1466,7 @@ fn degraded_encoder_signed_roundtrip() {
     let envelope = test_envelope(&[0xAB; 128], 4, 5, RetentionClass::Required);
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
+    let pq_signing_key = MlDsa65SigningKey::generate().expect("ML-DSA signing key");
     let source_id = test_ts_node("sender-node");
     let zone_key = test_zone_key();
     let algorithm = test_zone_key_algorithm();
@@ -1479,6 +1480,7 @@ fn degraded_encoder_signed_roundtrip() {
             &source_id,
             1000,
             &signing_key,
+            &pq_signing_key,
         )
         .expect("encode_signed should succeed");
     assert!(!signed_frames.is_empty());
@@ -1490,11 +1492,15 @@ fn degraded_encoder_signed_roundtrip() {
         if let Some(decoded) = decoder
             .process_signed_frame_authenticated(
                 sf,
-                &verifying_key,
                 &zone,
                 RetentionClass::Required,
-                &zone_key,
-                algorithm,
+                &SignedDegradedFrameAuth {
+                    verifying_key: &verifying_key,
+                    pq_verifying_key: pq_signing_key.verifying_key(),
+                    signing_policy: PqSigningPolicy::BothRequired,
+                    zone_key: &zone_key,
+                    algorithm,
+                },
             )
             .expect("signed decode should succeed")
         {
@@ -1513,6 +1519,7 @@ fn degraded_decoder_wrong_signing_key_rejected() {
     let signing_key = Ed25519SigningKey::generate();
     let wrong_key = Ed25519SigningKey::generate();
     let wrong_verifying = wrong_key.verifying_key();
+    let pq_signing_key = MlDsa65SigningKey::generate().expect("ML-DSA signing key");
     let source_id = test_ts_node("bad-sender");
     let zone_key = test_zone_key();
     let algorithm = test_zone_key_algorithm();
@@ -1526,6 +1533,7 @@ fn degraded_decoder_wrong_signing_key_rejected() {
             &source_id,
             1000,
             &signing_key,
+            &pq_signing_key,
         )
         .unwrap();
 
@@ -1534,11 +1542,15 @@ fn degraded_decoder_wrong_signing_key_rejected() {
     let err = decoder
         .process_signed_frame_authenticated(
             &signed_frames[0],
-            &wrong_verifying,
             &zone,
             RetentionClass::Required,
-            &zone_key,
-            algorithm,
+            &SignedDegradedFrameAuth {
+                verifying_key: &wrong_verifying,
+                pq_verifying_key: pq_signing_key.verifying_key(),
+                signing_policy: PqSigningPolicy::BothRequired,
+                zone_key: &zone_key,
+                algorithm,
+            },
         )
         .unwrap_err();
     assert!(matches!(

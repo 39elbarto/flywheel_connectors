@@ -27,7 +27,11 @@
 //! ```
 
 use bitflags::bitflags;
-use fcp_crypto::{CryptoError, Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey};
+use fcp_crypto::{
+    CryptoError, Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, HybridSignable,
+    HybridSignedObjectKind, MlDsa65SigningKey, MlDsa65VerifyingKey, PqSigningPolicy,
+    SignedEnvelope,
+};
 use fcp_prelude::{ObjectHeader, ObjectId, TailscaleNodeId, ZoneId, ZoneIdHash, ZoneKeyId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1080,13 +1084,15 @@ impl SymbolRequest {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SignedFcpsFrame - Degraded/Bootstrap Mode (NORMATIVE when used)
+// HybridSignedFcpsFrame - Degraded/Bootstrap Mode (NORMATIVE when used)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Signed FCPS frame for degraded/bootstrap mode (NORMATIVE when used).
+/// Legacy Ed25519-only signed FCPS frame representation.
 ///
-/// This is a **non-default** path for when session MACs are unavailable,
-/// such as during initial bootstrap or in degraded network conditions.
+/// New degraded/bootstrap call sites must use [`HybridSignedFcpsFrame`]
+/// through [`SignedFcpsFrame::new_hybrid`] and
+/// [`verify_hybrid_signed_fcps_frame`]. This legacy struct is kept only for
+/// historical wire parsing and migration diagnostics.
 ///
 /// The signature covers: `"FCP2-FRAME-SIG-V1" || source_id || timestamp || frame_bytes`
 #[derive(Debug, Clone)]
@@ -1100,6 +1106,58 @@ pub struct SignedFcpsFrame {
     /// Ed25519 signature over the transcript.
     pub signature: Ed25519Signature,
 }
+
+/// Hybrid-signing payload for degraded/bootstrap FCPS gossip frames.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedFcpsFramePayload {
+    /// Canonical FCPS frame bytes.
+    pub frame_bytes: Vec<u8>,
+    /// Source node ID (Tailscale node identifier).
+    pub source_id: TailscaleNodeId,
+    /// Unix timestamp (seconds since epoch).
+    pub timestamp: u64,
+}
+
+impl HybridSignable for SignedFcpsFramePayload {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::GossipFrame;
+}
+
+impl SignedFcpsFramePayload {
+    /// Build a hybrid-signable payload from a frame and source metadata.
+    ///
+    /// # Errors
+    /// Returns `CryptoError::SerializationError` if the frame or source ID is invalid.
+    pub fn from_frame(
+        frame: &FcpsFrame,
+        source_id: TailscaleNodeId,
+        timestamp: u64,
+    ) -> Result<Self, CryptoError> {
+        SignedFcpsFrame::validate_source_id(&source_id).map_err(|err| {
+            CryptoError::SerializationError(format!("invalid signed FCPS frame: {err}"))
+        })?;
+        let frame_bytes = frame.encode().map_err(|err| {
+            CryptoError::SerializationError(format!("invalid signed FCPS frame: {err}"))
+        })?;
+        Ok(Self {
+            frame_bytes,
+            source_id,
+            timestamp,
+        })
+    }
+
+    /// Decode the carried FCPS frame bytes after signature verification.
+    ///
+    /// # Errors
+    /// Returns `CryptoError::SerializationError` if the embedded frame bytes are invalid.
+    pub fn decode_frame(&self, max_datagram_bytes: usize) -> Result<FcpsFrame, CryptoError> {
+        FcpsFrame::decode(&self.frame_bytes, max_datagram_bytes).map_err(|err| {
+            CryptoError::SerializationError(format!("invalid hybrid signed FCPS frame: {err}"))
+        })
+    }
+}
+
+/// Hybrid signed FCPS frame envelope.
+pub type HybridSignedFcpsFrame = SignedEnvelope<SignedFcpsFramePayload>;
 
 impl SignedFcpsFrame {
     /// Domain separator for frame signatures.
@@ -1124,7 +1182,7 @@ impl SignedFcpsFrame {
         Ok(())
     }
 
-    /// Create a new signed frame.
+    /// Create a legacy Ed25519-only signed frame.
     ///
     /// # Arguments
     ///
@@ -1134,6 +1192,10 @@ impl SignedFcpsFrame {
     /// * `signing_key` - Ed25519 signing key
     /// # Errors
     /// Returns `FrameError` if the frame cannot be encoded (e.g. payload length mismatch).
+    #[deprecated(
+        since = "0.1.0",
+        note = "use SignedFcpsFrame::new_hybrid so degraded/bootstrap FCPS frames carry Ed25519 and ML-DSA signatures"
+    )]
     pub fn new(
         frame: FcpsFrame,
         source_id: TailscaleNodeId,
@@ -1151,6 +1213,22 @@ impl SignedFcpsFrame {
             timestamp,
             signature,
         })
+    }
+
+    /// Create a hybrid signed frame for degraded/bootstrap mode.
+    ///
+    /// # Errors
+    /// Returns a crypto error if the frame cannot be encoded or either
+    /// signature operation fails.
+    pub fn new_hybrid(
+        frame: &FcpsFrame,
+        source_id: TailscaleNodeId,
+        timestamp: u64,
+        classical_key: &Ed25519SigningKey,
+        pq_key: &MlDsa65SigningKey,
+    ) -> Result<HybridSignedFcpsFrame, CryptoError> {
+        SignedFcpsFramePayload::from_frame(frame, source_id, timestamp)?
+            .sign_hybrid(classical_key, pq_key)
     }
 
     /// Build the signature transcript.
@@ -1176,11 +1254,15 @@ impl SignedFcpsFrame {
         transcript
     }
 
-    /// Verify the frame signature.
+    /// Verify a legacy Ed25519-only frame signature.
     ///
     /// # Errors
     /// Returns `CryptoError` if signature verification fails or the signed
     /// frame has been mutated into an invalid state.
+    #[deprecated(
+        since = "0.1.0",
+        note = "use verify_hybrid_signed_fcps_frame with PqSigningPolicy instead"
+    )]
     pub fn verify(&self, verifying_key: &Ed25519VerifyingKey) -> Result<(), CryptoError> {
         Self::validate_source_id(&self.source_id).map_err(|err| {
             CryptoError::SerializationError(format!("invalid signed FCPS frame: {err}"))
@@ -1192,7 +1274,15 @@ impl SignedFcpsFrame {
         verifying_key.verify(&transcript, &self.signature)
     }
 
-    /// Encode the signed frame to bytes.
+    /// Build the payload carried by a hybrid signed FCPS frame envelope.
+    ///
+    /// # Errors
+    /// Returns `CryptoError::SerializationError` if the frame or source ID is invalid.
+    pub fn hybrid_payload(&self) -> Result<SignedFcpsFramePayload, CryptoError> {
+        SignedFcpsFramePayload::from_frame(&self.frame, self.source_id.clone(), self.timestamp)
+    }
+
+    /// Encode a legacy Ed25519-only signed frame to bytes.
     ///
     /// Wire format:
     /// - `source_id` length (u16 LE)
@@ -1204,6 +1294,10 @@ impl SignedFcpsFrame {
     /// # Errors
     /// Returns `FrameError` if the signed frame has been mutated into an
     /// invalid state after construction.
+    #[deprecated(
+        since = "0.1.0",
+        note = "hybrid signed FCPS frames use SignedEnvelope serialization"
+    )]
     pub fn encode(&self) -> Result<Vec<u8>, FrameError> {
         self.try_encode()
     }
@@ -1225,10 +1319,14 @@ impl SignedFcpsFrame {
         Ok(out)
     }
 
-    /// Decode a signed frame from bytes.
+    /// Decode a legacy Ed25519-only signed frame from bytes.
     ///
     /// # Errors
     /// Returns `FrameError` if the frame is malformed.
+    #[deprecated(
+        since = "0.1.0",
+        note = "hybrid signed FCPS frames use SignedEnvelope serialization"
+    )]
     pub fn decode(bytes: &[u8], max_datagram_bytes: usize) -> Result<Self, FrameError> {
         // Minimum: 2 (source_id_len) + 1 (min source_id) + 8 (timestamp) + 64 (sig) + 114 (min frame)
         const MIN_LEN: usize = 2 + 1 + 8 + 64 + FCPS_HEADER_LEN;
@@ -1290,6 +1388,22 @@ impl SignedFcpsFrame {
     }
 }
 
+/// Verify a hybrid signed FCPS frame and decode the enclosed frame.
+///
+/// # Errors
+/// Returns a crypto error if the envelope fails policy verification or carries
+/// invalid frame bytes.
+pub fn verify_hybrid_signed_fcps_frame(
+    envelope: &HybridSignedFcpsFrame,
+    classical_key: &Ed25519VerifyingKey,
+    pq_key: &MlDsa65VerifyingKey,
+    policy: PqSigningPolicy,
+    max_datagram_bytes: usize,
+) -> Result<FcpsFrame, CryptoError> {
+    envelope.verify_signable(classical_key, pq_key, policy)?;
+    envelope.payload.decode_frame(max_datagram_bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1318,6 +1432,10 @@ mod tests {
             data: vec![0xAA; symbol_size as usize],
             auth_tag: [0xBB; 16],
         }
+    }
+
+    fn test_pq_signing_key() -> MlDsa65SigningKey {
+        MlDsa65SigningKey::generate().expect("ML-DSA signing key")
     }
 
     #[test]
@@ -1460,12 +1578,13 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // SignedFcpsFrame Tests
+    // HybridSignedFcpsFrame Tests
     // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn signed_frame_sign_and_verify() {
+    fn hybrid_signed_frame_sign_and_verify() {
         let signing_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
@@ -1473,18 +1592,31 @@ mod tests {
         let source_id = TailscaleNodeId::new("node-test");
         let timestamp = 1_704_067_200;
 
-        let signed = SignedFcpsFrame::new(frame, source_id, timestamp, &signing_key).expect("sign");
+        let signed = SignedFcpsFrame::new_hybrid(
+            &frame,
+            source_id,
+            timestamp,
+            &signing_key,
+            &pq_signing_key,
+        )
+        .expect("sign");
 
-        // Verify should succeed with correct key
-        signed
-            .verify(&signing_key.verifying_key())
-            .expect("verify ok");
+        let verified = verify_hybrid_signed_fcps_frame(
+            &signed,
+            &signing_key.verifying_key(),
+            &pq_signing_key.verifying_key(),
+            PqSigningPolicy::BothRequired,
+            2000,
+        )
+        .expect("verify ok");
+        assert_eq!(verified.header, frame.header);
     }
 
     #[test]
-    fn signed_frame_rejects_wrong_key() {
+    fn hybrid_signed_frame_rejects_wrong_key() {
         let signing_key = Ed25519SigningKey::generate();
         let wrong_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
 
         let header = test_header();
         // Use 2 symbols to match header.symbol_count
@@ -1492,15 +1624,25 @@ mod tests {
         let frame = FcpsFrame { header, symbols };
 
         let source_id = TailscaleNodeId::new("node-wrong-key");
-        let signed = SignedFcpsFrame::new(frame, source_id, 1000, &signing_key).expect("sign");
+        let signed =
+            SignedFcpsFrame::new_hybrid(&frame, source_id, 1000, &signing_key, &pq_signing_key)
+                .expect("sign");
 
-        // Verify should fail with wrong key
-        assert!(signed.verify(&wrong_key.verifying_key()).is_err());
+        let err = verify_hybrid_signed_fcps_frame(
+            &signed,
+            &wrong_key.verifying_key(),
+            &pq_signing_key.verifying_key(),
+            PqSigningPolicy::BothRequired,
+            2000,
+        )
+        .expect_err("wrong classical key should fail");
+        assert!(matches!(err, CryptoError::KeyIdMismatch { .. }));
     }
 
     #[test]
-    fn signed_frame_encode_decode_roundtrip() {
+    fn hybrid_signed_frame_json_roundtrip() {
         let signing_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame {
@@ -1511,142 +1653,183 @@ mod tests {
         let source_id = TailscaleNodeId::new("node-roundtrip");
         let timestamp = 1_704_067_200;
 
-        let signed =
-            SignedFcpsFrame::new(frame, source_id.clone(), timestamp, &signing_key).expect("sign");
-        let encoded = signed.encode().expect("encode");
+        let signed = SignedFcpsFrame::new_hybrid(
+            &frame,
+            source_id.clone(),
+            timestamp,
+            &signing_key,
+            &pq_signing_key,
+        )
+        .expect("sign");
+        let encoded = serde_json::to_vec(&signed).expect("encode");
 
-        let decoded = SignedFcpsFrame::decode(&encoded, 2000).expect("decode ok");
+        let decoded: HybridSignedFcpsFrame = serde_json::from_slice(&encoded).expect("decode ok");
 
-        assert_eq!(decoded.source_id.as_str(), source_id.as_str());
-        assert_eq!(decoded.timestamp, timestamp);
-        assert_eq!(decoded.frame.header, header);
-        assert_eq!(decoded.frame.symbols.len(), 2);
+        assert_eq!(decoded.payload.source_id.as_str(), source_id.as_str());
+        assert_eq!(decoded.payload.timestamp, timestamp);
 
-        // Verify signature is still valid after decode
-        decoded
-            .verify(&signing_key.verifying_key())
-            .expect("verify after decode");
+        let verified = verify_hybrid_signed_fcps_frame(
+            &decoded,
+            &signing_key.verifying_key(),
+            &pq_signing_key.verifying_key(),
+            PqSigningPolicy::BothRequired,
+            2000,
+        )
+        .expect("verify after decode");
+        assert_eq!(verified.header, header);
+        assert_eq!(verified.symbols.len(), 2);
     }
 
     #[test]
-    fn signed_frame_rejects_oversized_source_id() {
+    fn hybrid_signed_frame_rejects_oversized_source_id() {
         let signing_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
         let oversized = "n".repeat(usize::from(u16::MAX) + 1);
 
-        let err = SignedFcpsFrame::new(
-            frame,
+        let err = SignedFcpsFrame::new_hybrid(
+            &frame,
             TailscaleNodeId::new(oversized),
             1_704_067_200,
             &signing_key,
+            &pq_signing_key,
         )
         .expect_err("oversized source_id should fail");
 
-        assert!(matches!(
-            err,
-            FrameError::InvalidSourceIdLength { len, max }
-                if len == usize::from(u16::MAX) + 1 && max == usize::from(u16::MAX)
-        ));
+        assert!(matches!(err, CryptoError::SerializationError(_)));
     }
 
     #[test]
-    fn signed_frame_new_rejects_empty_source_id() {
+    fn hybrid_signed_frame_new_rejects_empty_source_id() {
         let signing_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
 
-        let err =
-            SignedFcpsFrame::new(frame, TailscaleNodeId::new(""), 1_704_067_200, &signing_key)
-                .expect_err("empty source_id must be rejected at new()");
+        let err = SignedFcpsFrame::new_hybrid(
+            &frame,
+            TailscaleNodeId::new(""),
+            1_704_067_200,
+            &signing_key,
+            &pq_signing_key,
+        )
+        .expect_err("empty source_id must be rejected at new_hybrid()");
         assert!(
-            matches!(err, FrameError::SourceIdEmpty),
-            "expected SourceIdEmpty, got {err:?}"
+            matches!(err, CryptoError::SerializationError(_)),
+            "expected serialization error, got {err:?}"
         );
     }
 
     #[test]
-    fn signed_frame_encode_rejects_mutated_empty_source_id() {
+    fn hybrid_signed_frame_verify_rejects_mutated_empty_source_id() {
         let signing_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
-        let mut signed = SignedFcpsFrame::new(
-            frame,
+        let mut signed = SignedFcpsFrame::new_hybrid(
+            &frame,
             TailscaleNodeId::new("node-x"),
             1_704_067_200,
             &signing_key,
+            &pq_signing_key,
         )
         .expect("sign");
 
-        // Simulate a mutated struct that bypassed new()'s validator; encode
-        // and verify must both fail — not silently produce a frame that
-        // subsequently fails to decode on the wire.
-        signed.source_id = TailscaleNodeId::new("");
+        // Simulate a mutated envelope that bypassed construction-time
+        // validation; verification must fail before processing.
+        signed.payload.source_id = TailscaleNodeId::new("");
 
-        let err = signed
-            .encode()
-            .expect_err("mutated empty source_id must fail to encode");
-        assert!(matches!(err, FrameError::SourceIdEmpty), "got {err:?}");
+        verify_hybrid_signed_fcps_frame(
+            &signed,
+            &signing_key.verifying_key(),
+            &pq_signing_key.verifying_key(),
+            PqSigningPolicy::BothRequired,
+            2000,
+        )
+        .expect_err("mutated empty source_id must fail verification");
     }
 
     #[test]
-    fn signed_frame_encode_rejects_mutated_oversized_source_id() {
+    fn hybrid_signed_frame_verify_rejects_mutated_oversized_source_id() {
         let signing_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
-        let mut signed = SignedFcpsFrame::new(
-            frame,
+        let mut signed = SignedFcpsFrame::new_hybrid(
+            &frame,
             TailscaleNodeId::new("node-mutable"),
             1_704_067_200,
             &signing_key,
+            &pq_signing_key,
         )
         .expect("sign");
 
-        signed.source_id = TailscaleNodeId::new("n".repeat(usize::from(u16::MAX) + 1));
+        signed.payload.source_id = TailscaleNodeId::new("n".repeat(usize::from(u16::MAX) + 1));
 
-        let err = signed
-            .encode()
-            .expect_err("mutated oversized source_id should fail");
-        assert!(matches!(
-            err,
-            FrameError::InvalidSourceIdLength { len, max }
-                if len == usize::from(u16::MAX) + 1 && max == usize::from(u16::MAX)
-        ));
+        verify_hybrid_signed_fcps_frame(
+            &signed,
+            &signing_key.verifying_key(),
+            &pq_signing_key.verifying_key(),
+            PqSigningPolicy::BothRequired,
+            2000,
+        )
+        .expect_err("mutated oversized source_id should fail verification");
     }
 
     #[test]
-    fn signed_frame_decode_rejects_short_input() {
-        let too_short = vec![0u8; 50];
-        let err = SignedFcpsFrame::decode(&too_short, 2000).expect_err("should fail");
-        assert!(matches!(err, FrameError::TooShort { .. }));
-    }
-
-    #[test]
-    fn signed_frame_verify_rejects_mutated_invalid_frame_without_panic() {
+    fn hybrid_signed_frame_decode_rejects_short_payload() {
         let signing_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
+        let payload = SignedFcpsFramePayload {
+            frame_bytes: vec![0u8; 50],
+            source_id: TailscaleNodeId::new("node-short"),
+            timestamp: 1000,
+        };
+        let signed = payload
+            .sign_hybrid(&signing_key, &pq_signing_key)
+            .expect("sign malformed payload");
+        let err = verify_hybrid_signed_fcps_frame(
+            &signed,
+            &signing_key.verifying_key(),
+            &pq_signing_key.verifying_key(),
+            PqSigningPolicy::BothRequired,
+            2000,
+        )
+        .expect_err("short payload should fail decode after signature verify");
+        assert!(matches!(err, CryptoError::SerializationError(_)));
+    }
+
+    #[test]
+    fn hybrid_signed_frame_verify_rejects_mutated_invalid_frame_without_panic() {
+        let signing_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
-        let mut signed = SignedFcpsFrame::new(
-            frame,
+        let mut signed = SignedFcpsFrame::new_hybrid(
+            &frame,
             TailscaleNodeId::new("node-invalid-frame"),
             1_704_067_200,
             &signing_key,
+            &pq_signing_key,
         )
         .expect("sign");
 
-        signed.frame.header.symbol_count += 1;
+        signed.payload.frame_bytes[0] ^= 0xFF;
 
-        // Mutating symbol_count changes the encoded frame, so the signature
-        // no longer matches the transcript. This produces a signature
-        // verification error, not a serialization error.
-        signed
-            .verify(&signing_key.verifying_key())
-            .expect_err("mutated frame should fail verification");
+        verify_hybrid_signed_fcps_frame(
+            &signed,
+            &signing_key.verifying_key(),
+            &pq_signing_key.verifying_key(),
+            PqSigningPolicy::BothRequired,
+            2000,
+        )
+        .expect_err("mutated frame should fail verification");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2626,43 +2809,78 @@ mod tests {
     }
 
     #[test]
-    fn signed_frame_tampered_frame_fails_verify() {
+    fn hybrid_signed_frame_tampered_frame_fails_verify() {
         let signing_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
 
         let source_id = TailscaleNodeId::new("node-tamper");
-        let mut signed = SignedFcpsFrame::new(frame, source_id, 1000, &signing_key).expect("sign");
-        // Tamper with a symbol
-        signed.frame.symbols[0].data[0] ^= 0xFF;
-        assert!(signed.verify(&signing_key.verifying_key()).is_err());
+        let mut signed =
+            SignedFcpsFrame::new_hybrid(&frame, source_id, 1000, &signing_key, &pq_signing_key)
+                .expect("sign");
+        signed.payload.frame_bytes[FCPS_HEADER_LEN] ^= 0xFF;
+        assert!(
+            verify_hybrid_signed_fcps_frame(
+                &signed,
+                &signing_key.verifying_key(),
+                &pq_signing_key.verifying_key(),
+                PqSigningPolicy::BothRequired,
+                2000,
+            )
+            .is_err()
+        );
     }
 
     #[test]
-    fn signed_frame_tampered_timestamp_fails_verify() {
+    fn hybrid_signed_frame_tampered_timestamp_fails_verify() {
         let signing_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
 
         let source_id = TailscaleNodeId::new("node-ts");
-        let mut signed = SignedFcpsFrame::new(frame, source_id, 1000, &signing_key).expect("sign");
-        signed.timestamp += 1;
-        assert!(signed.verify(&signing_key.verifying_key()).is_err());
+        let mut signed =
+            SignedFcpsFrame::new_hybrid(&frame, source_id, 1000, &signing_key, &pq_signing_key)
+                .expect("sign");
+        signed.payload.timestamp += 1;
+        assert!(
+            verify_hybrid_signed_fcps_frame(
+                &signed,
+                &signing_key.verifying_key(),
+                &pq_signing_key.verifying_key(),
+                PqSigningPolicy::BothRequired,
+                2000,
+            )
+            .is_err()
+        );
     }
 
     #[test]
-    fn signed_frame_tampered_source_id_fails_verify() {
+    fn hybrid_signed_frame_tampered_source_id_fails_verify() {
         let signing_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
 
         let source_id = TailscaleNodeId::new("node-original");
-        let mut signed = SignedFcpsFrame::new(frame, source_id, 1000, &signing_key).expect("sign");
-        signed.source_id = TailscaleNodeId::new("node-spoofed");
-        assert!(signed.verify(&signing_key.verifying_key()).is_err());
+        let mut signed =
+            SignedFcpsFrame::new_hybrid(&frame, source_id, 1000, &signing_key, &pq_signing_key)
+                .expect("sign");
+        signed.payload.source_id = TailscaleNodeId::new("node-spoofed");
+        assert!(
+            verify_hybrid_signed_fcps_frame(
+                &signed,
+                &signing_key.verifying_key(),
+                &pq_signing_key.verifying_key(),
+                PqSigningPolicy::BothRequired,
+                2000,
+            )
+            .is_err()
+        );
     }
 
     // ── FrameError display ─────────────────────────────────────────────
@@ -3130,7 +3348,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_frame_signature_domain_constant() {
+    fn legacy_signed_frame_signature_domain_constant() {
         assert_eq!(SignedFcpsFrame::SIGNATURE_DOMAIN, b"FCP2-FRAME-SIG-V1");
     }
 
@@ -3293,16 +3511,22 @@ mod tests {
     }
 
     #[test]
-    fn signed_frame_debug_format() {
+    fn hybrid_signed_frame_debug_format() {
         let signing_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
-        let signed =
-            SignedFcpsFrame::new(frame, TailscaleNodeId::new("dbg-node"), 1000, &signing_key)
-                .expect("sign");
+        let signed = SignedFcpsFrame::new_hybrid(
+            &frame,
+            TailscaleNodeId::new("dbg-node"),
+            1000,
+            &signing_key,
+            &pq_signing_key,
+        )
+        .expect("sign");
         let dbg = format!("{signed:?}");
-        assert!(dbg.contains("SignedFcpsFrame"));
+        assert!(dbg.contains("SignedEnvelope"));
     }
 
     #[test]
@@ -3504,22 +3728,27 @@ mod tests {
     }
 
     #[test]
-    fn signed_frame_clone() {
+    fn hybrid_signed_frame_clone() {
         let signing_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
-        let signed = SignedFcpsFrame::new(
-            frame,
+        let signed = SignedFcpsFrame::new_hybrid(
+            &frame,
             TailscaleNodeId::new("clone-test"),
             1000,
             &signing_key,
+            &pq_signing_key,
         )
         .expect("sign");
         let cloned = signed.clone();
-        assert_eq!(cloned.timestamp, signed.timestamp);
-        assert_eq!(cloned.source_id.as_str(), signed.source_id.as_str());
-        assert_eq!(cloned.frame.symbols.len(), signed.frame.symbols.len());
+        assert_eq!(cloned.payload.timestamp, signed.payload.timestamp);
+        assert_eq!(
+            cloned.payload.source_id.as_str(),
+            signed.payload.source_id.as_str()
+        );
+        assert_eq!(cloned.payload.frame_bytes, signed.payload.frame_bytes);
     }
 
     // ── Batch 5: SunnyMoose edge-case and integration tests ──
@@ -3675,36 +3904,55 @@ mod tests {
     }
 
     #[test]
-    fn signed_frame_zero_timestamp() {
+    fn hybrid_signed_frame_zero_timestamp() {
         let signing_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
-        let signed = SignedFcpsFrame::new(frame, TailscaleNodeId::new("zero-ts"), 0, &signing_key)
-            .expect("sign");
-        signed
-            .verify(&signing_key.verifying_key())
-            .expect("verify zero ts");
-        assert_eq!(signed.timestamp, 0);
+        let signed = SignedFcpsFrame::new_hybrid(
+            &frame,
+            TailscaleNodeId::new("zero-ts"),
+            0,
+            &signing_key,
+            &pq_signing_key,
+        )
+        .expect("sign");
+        verify_hybrid_signed_fcps_frame(
+            &signed,
+            &signing_key.verifying_key(),
+            &pq_signing_key.verifying_key(),
+            PqSigningPolicy::BothRequired,
+            2000,
+        )
+        .expect("verify zero ts");
+        assert_eq!(signed.payload.timestamp, 0);
     }
 
     #[test]
-    fn signed_frame_max_timestamp() {
+    fn hybrid_signed_frame_max_timestamp() {
         let signing_key = Ed25519SigningKey::generate();
+        let pq_signing_key = test_pq_signing_key();
         let header = test_header();
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
-        let signed = SignedFcpsFrame::new(
-            frame,
+        let signed = SignedFcpsFrame::new_hybrid(
+            &frame,
             TailscaleNodeId::new("max-ts"),
             u64::MAX,
             &signing_key,
+            &pq_signing_key,
         )
         .expect("sign");
-        signed
-            .verify(&signing_key.verifying_key())
-            .expect("verify max ts");
-        assert_eq!(signed.timestamp, u64::MAX);
+        verify_hybrid_signed_fcps_frame(
+            &signed,
+            &signing_key.verifying_key(),
+            &pq_signing_key.verifying_key(),
+            PqSigningPolicy::BothRequired,
+            2000,
+        )
+        .expect("verify max ts");
+        assert_eq!(signed.payload.timestamp, u64::MAX);
     }
 
     #[test]

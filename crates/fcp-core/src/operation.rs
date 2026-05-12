@@ -26,12 +26,15 @@
 //! execution lease fencing token. This prevents zombie lease holders from executing
 //! operations after losing the lease.
 
+use fcp_crypto::{
+    CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope, signing_bytes_for_payload,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    CapabilityId, IdempotencyClass, InstanceId, NodeSignature, ObjectHeader, ObjectId, PrincipalId,
-    RequestId, TailscaleNodeId, UsageMetric, ZoneId,
+    CapabilityId, IdempotencyClass, InstanceId, NodeId, NodeSignature, ObjectHeader, ObjectId,
+    PrincipalId, RequestId, TailscaleNodeId, UsageMetric, ZoneId,
 };
 
 /// Tracing span name for canonical operation execution.
@@ -326,6 +329,20 @@ impl OperationReceipt {
         bytes
     }
 }
+
+impl HybridSignable for OperationReceipt {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::OperationReceipt;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        let mut unsigned = self.clone();
+        unsigned.signature =
+            NodeSignature::new(NodeId::new(self.signature.node_id.as_str()), [0_u8; 64], 0);
+        signing_bytes_for_payload(Self::OBJECT_KIND, &unsigned)
+    }
+}
+
+/// Hybrid signed operation-receipt envelope.
+pub type HybridSignedOperationReceipt = SignedEnvelope<OperationReceipt>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Operation Status (public operation lifecycle)

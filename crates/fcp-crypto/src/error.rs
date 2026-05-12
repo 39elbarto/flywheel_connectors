@@ -27,6 +27,14 @@ pub enum CryptoError {
     #[error("signature verification failed")]
     SignatureVerificationFailed,
 
+    /// Hybrid envelope is missing its required classical Ed25519 signature.
+    #[error("classical Ed25519 signature missing")]
+    ClassicalSignatureMissing,
+
+    /// Hybrid envelope is missing its required post-quantum signature.
+    #[error("post-quantum signature missing")]
+    PqSignatureMissing,
+
     /// Invalid key ID format.
     #[error("invalid key ID: {0}")]
     InvalidKeyId(String),

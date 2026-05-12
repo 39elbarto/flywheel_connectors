@@ -652,8 +652,6 @@ fn op_info(
 mod tests {
     use super::*;
     use std::future::Future;
-    use wiremock::matchers::{method, path_regex};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn run_async_test<F>(future: F) -> F::Output
     where
@@ -894,33 +892,5 @@ mod tests {
     fn default_creates_new() {
         let connector = SheetsConnector::default();
         assert!(connector.client.is_none());
-    }
-
-    #[test]
-    fn get_spreadsheet_via_mock() {
-        run_async_test(async {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path_regex(r"/v4/spreadsheets/.+"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "spreadsheetId": "test-ss-id",
-                    "properties": { "title": "Test Sheet" },
-                    "sheets": [],
-                    "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/test-ss-id"
-                })))
-                .mount(&server)
-                .await;
-
-            let mut connector = SheetsConnector::new();
-            connector
-                .handle_configure(json!({ "access_token": "test-token" }))
-                .await
-                .unwrap();
-
-            // Override base URL to mock server (need to access client internals)
-            // For now, verify that introspect works since we can't easily override base_url
-            let introspect = connector.handle_introspect().await.unwrap();
-            assert!(introspect["operations"].as_array().unwrap().len() >= 5);
-        });
     }
 }

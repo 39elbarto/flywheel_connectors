@@ -1,6 +1,7 @@
 use fcp_crypto::{
-    CryptoError, Ed25519SigningKey, MlDsa65SigningKey, PqSigningPolicy, SignedEnvelope,
-    canonical_signing_bytes, canonicalize::to_deterministic_cbor,
+    CryptoError, CryptoResult, EVENT_PQ_POLICY_DOWNGRADE, Ed25519SigningKey, MlDsa65SigningKey,
+    PqPolicyDowngradeAuthorizer, PqSigningPolicy, SignedEnvelope, canonical_signing_bytes,
+    canonicalize::to_deterministic_cbor, downgrade_policy_to_either_ok,
 };
 use serde::{Deserialize, Serialize};
 
@@ -271,3 +272,37 @@ hybrid_roundtrip_suite!(
     zone_checkpoint_either_ok_policy_accepts_one,
     zone_checkpoint_both_required_policy_rejects_one
 );
+
+struct MockHardwareToken {
+    fingerprint: &'static str,
+}
+
+impl PqPolicyDowngradeAuthorizer for MockHardwareToken {
+    fn operator_fingerprint(&self) -> &str {
+        self.fingerprint
+    }
+
+    fn authorize_pq_policy_downgrade(&self, _reason: &str) -> CryptoResult<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn test_policy_downgrade_emits_audit() {
+    let token = MockHardwareToken {
+        fingerprint: "op-fpr:8b7f",
+    };
+    let (policy, audit) = downgrade_policy_to_either_ok(
+        PqSigningPolicy::BothRequired,
+        "temporary pq verifier outage",
+        &token,
+    )
+    .expect("mock hardware token authorizes downgrade");
+
+    assert_eq!(policy, PqSigningPolicy::EitherOk);
+    assert_eq!(audit.event_type, EVENT_PQ_POLICY_DOWNGRADE);
+    assert_eq!(audit.operator_fingerprint, "op-fpr:8b7f");
+    assert_eq!(audit.from_policy, PqSigningPolicy::BothRequired);
+    assert_eq!(audit.to_policy, PqSigningPolicy::EitherOk);
+    assert_eq!(audit.reason, "temporary pq verifier outage");
+}

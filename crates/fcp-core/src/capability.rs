@@ -44,6 +44,10 @@ use chrono::Utc;
 use fcp_async_core::time;
 use fcp_auth_schema::claims::CURRENT_SCHEMA_VERSION;
 use fcp_crypto::ed25519::Ed25519VerifyingKey;
+use fcp_crypto::{
+    CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope,
+    signing_bytes_for_canonical_payload,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
@@ -1202,6 +1206,20 @@ impl<S> Clone for CapabilityToken<S> {
 impl<S> From<&Self> for CapabilityToken<S> {
     fn from(token: &Self) -> Self {
         token.clone()
+    }
+}
+
+pub type HybridSignedCapabilityToken<S = Unverified> = SignedEnvelope<CapabilityToken<S>>;
+
+impl<S> HybridSignable for CapabilityToken<S> {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::CapabilityToken;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        let token_cbor = self.raw.to_cbor()?;
+        Ok(signing_bytes_for_canonical_payload(
+            Self::OBJECT_KIND,
+            &token_cbor,
+        ))
     }
 }
 

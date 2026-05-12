@@ -33,6 +33,10 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use fcp_crypto::{
+    CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope, signing_bytes_for_payload,
+};
+
 use crate::{ObjectHeader, ObjectId, QuorumPolicy, RiskTier, SignatureSet, ZoneId};
 
 /// Scope of a revocation (NORMATIVE).
@@ -149,6 +153,18 @@ impl RevocationObject {
     }
 }
 
+pub type HybridSignedRevocationObject = SignedEnvelope<RevocationObject>;
+
+impl HybridSignable for RevocationObject {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::Revocation;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        let mut unsigned = self.clone();
+        unsigned.signature = [0_u8; 64];
+        signing_bytes_for_payload(Self::OBJECT_KIND, &unsigned)
+    }
+}
+
 /// Revocation event chain node (NORMATIVE).
 ///
 /// Links revocation objects into a hash-chain with monotonic sequence numbers.
@@ -203,6 +219,18 @@ impl RevocationEvent {
     #[must_use]
     pub const fn zone_id(&self) -> &ZoneId {
         &self.header.zone_id
+    }
+}
+
+pub type HybridSignedRevocationEvent = SignedEnvelope<RevocationEvent>;
+
+impl HybridSignable for RevocationEvent {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::Revocation;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        let mut unsigned = self.clone();
+        unsigned.signature = [0_u8; 64];
+        signing_bytes_for_payload(Self::OBJECT_KIND, &unsigned)
     }
 }
 
@@ -274,6 +302,18 @@ impl RevocationHead {
     #[must_use]
     pub const fn age_secs(&self, now: u64) -> u64 {
         now.saturating_sub(self.header.created_at)
+    }
+}
+
+pub type HybridSignedRevocationHead = SignedEnvelope<RevocationHead>;
+
+impl HybridSignable for RevocationHead {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::Revocation;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        let mut unsigned = self.clone();
+        unsigned.quorum_signatures = SignatureSet::new();
+        signing_bytes_for_payload(Self::OBJECT_KIND, &unsigned)
     }
 }
 

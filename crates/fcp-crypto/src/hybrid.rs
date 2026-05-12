@@ -4,17 +4,201 @@
 //! need to move from Ed25519-only authenticity to dual Ed25519 plus ML-DSA-65
 //! authenticity without inventing policy logic at every call site.
 
-use std::time::Instant;
+use std::{fmt, time::Instant};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     CryptoError, CryptoResult, Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey,
-    MlDsa65SignatureBytes, MlDsa65SigningKey, MlDsa65VerifyingKey,
+    MlDsa65SignatureBytes, MlDsa65SigningKey, MlDsa65VerifyingKey, canonical_signing_bytes,
+    canonicalize::to_deterministic_cbor,
 };
 
 /// Domain separator used by both Ed25519 and ML-DSA-65 hybrid envelope signing.
 pub const HYBRID_SIGNING_CONTEXT: &[u8] = b"FCP-HYBRID-SIGNED-ENVELOPE-V1";
+
+/// Audit event kind emitted when an operator authorizes transitional PQ downgrade.
+pub const EVENT_PQ_POLICY_DOWNGRADE: &str = "pq.policy_downgrade";
+
+/// Stable object families covered by FCP hybrid signed envelopes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HybridSignedObjectKind {
+    /// Capability-token envelope.
+    CapabilityToken,
+    /// Audit event envelope.
+    AuditEvent,
+    /// Connector manifest envelope.
+    Manifest,
+    /// FCPS gossip/data-plane frame envelope.
+    GossipFrame,
+    /// Revocation object, event, or head envelope.
+    Revocation,
+    /// Operation receipt envelope.
+    OperationReceipt,
+    /// Zone checkpoint envelope.
+    ZoneCheckpoint,
+}
+
+impl HybridSignedObjectKind {
+    /// Stable object-type label carried by [`SignedEnvelope`].
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CapabilityToken => "capability_token",
+            Self::AuditEvent => "audit_event",
+            Self::Manifest => "manifest",
+            Self::GossipFrame => "gossip_frame",
+            Self::Revocation => "revocation",
+            Self::OperationReceipt => "operation_receipt",
+            Self::ZoneCheckpoint => "zone_checkpoint",
+        }
+    }
+
+    /// Schema identifier used for canonical hybrid signing bytes.
+    #[must_use]
+    pub const fn schema_id(self) -> &'static str {
+        match self {
+            Self::CapabilityToken => "fcp.hybrid-signing.capability_token.v1",
+            Self::AuditEvent => "fcp.hybrid-signing.audit_event.v1",
+            Self::Manifest => "fcp.hybrid-signing.manifest.v1",
+            Self::GossipFrame => "fcp.hybrid-signing.gossip_frame.v1",
+            Self::Revocation => "fcp.hybrid-signing.revocation.v1",
+            Self::OperationReceipt => "fcp.hybrid-signing.operation_receipt.v1",
+            Self::ZoneCheckpoint => "fcp.hybrid-signing.zone_checkpoint.v1",
+        }
+    }
+}
+
+impl fmt::Display for HybridSignedObjectKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Build canonical hybrid signing bytes from an already-canonical payload.
+#[must_use]
+pub fn signing_bytes_for_canonical_payload(
+    object_kind: HybridSignedObjectKind,
+    canonical_payload: &[u8],
+) -> Vec<u8> {
+    canonical_signing_bytes(object_kind.schema_id(), canonical_payload)
+}
+
+/// Deterministically encode a payload and build hybrid signing bytes.
+///
+/// # Errors
+///
+/// Returns an error if deterministic CBOR encoding fails.
+pub fn signing_bytes_for_payload<T: Serialize>(
+    object_kind: HybridSignedObjectKind,
+    payload: &T,
+) -> CryptoResult<Vec<u8>> {
+    let payload_cbor = to_deterministic_cbor(payload)?;
+    Ok(signing_bytes_for_canonical_payload(
+        object_kind,
+        &payload_cbor,
+    ))
+}
+
+/// Object-specific adapter for FCP hybrid signed envelopes.
+pub trait HybridSignable: Sized + Clone {
+    /// Stable object family covered by this implementation.
+    const OBJECT_KIND: HybridSignedObjectKind;
+
+    /// Compute the canonical bytes signed by both algorithms.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the object cannot be encoded into its canonical
+    /// signing transcript.
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>>;
+
+    /// Sign this object with the default both-required hybrid policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if signing fails.
+    fn sign_hybrid(
+        &self,
+        classical_signer: &Ed25519SigningKey,
+        pq_signer: &MlDsa65SigningKey,
+    ) -> CryptoResult<SignedEnvelope<Self>> {
+        self.sign_hybrid_with_policy(
+            PqSigningPolicy::BothRequired,
+            Some(classical_signer),
+            Some(pq_signer),
+        )
+    }
+
+    /// Sign this object with an explicit hybrid policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the policy cannot be satisfied or signing fails.
+    fn sign_hybrid_with_policy(
+        &self,
+        policy: PqSigningPolicy,
+        classical_signer: Option<&Ed25519SigningKey>,
+        pq_signer: Option<&MlDsa65SigningKey>,
+    ) -> CryptoResult<SignedEnvelope<Self>> {
+        let signing_bytes = self.hybrid_signing_bytes()?;
+        SignedEnvelope::sign_with_policy(
+            Self::OBJECT_KIND.as_str(),
+            self.clone(),
+            &signing_bytes,
+            policy,
+            classical_signer,
+            pq_signer,
+        )
+    }
+}
+
+/// Verify an envelope against the payload's hybrid signing transcript.
+///
+/// # Errors
+///
+/// Returns an error if the envelope object type is wrong, if the payload cannot
+/// produce signing bytes, or if signature verification fails.
+pub fn verify_signable<T: HybridSignable>(
+    envelope: &SignedEnvelope<T>,
+    classical_verifier: &Ed25519VerifyingKey,
+    pq_verifier: &MlDsa65VerifyingKey,
+) -> CryptoResult<HybridVerifyReport> {
+    verify_signable_with_policy(
+        envelope,
+        PqSigningPolicy::BothRequired,
+        Some(classical_verifier),
+        Some(pq_verifier),
+    )
+}
+
+/// Verify an envelope against the payload's transcript under an explicit policy.
+///
+/// # Errors
+///
+/// Returns an error if the envelope object type is wrong, if the payload cannot
+/// produce signing bytes, or if signature verification fails.
+pub fn verify_signable_with_policy<T: HybridSignable>(
+    envelope: &SignedEnvelope<T>,
+    policy: PqSigningPolicy,
+    classical_verifier: Option<&Ed25519VerifyingKey>,
+    pq_verifier: Option<&MlDsa65VerifyingKey>,
+) -> CryptoResult<HybridVerifyReport> {
+    if envelope.object_type != T::OBJECT_KIND.as_str() {
+        return Err(CryptoError::HybridPolicyViolation {
+            policy: policy.as_str(),
+            reason: format!(
+                "envelope object type '{}' does not match expected '{}'",
+                envelope.object_type,
+                T::OBJECT_KIND.as_str()
+            ),
+        });
+    }
+
+    let signing_bytes = envelope.payload.hybrid_signing_bytes()?;
+    envelope.verify_with_policy(&signing_bytes, policy, classical_verifier, pq_verifier)
+}
 
 /// Verification policy for classical and post-quantum signatures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,7 +215,9 @@ pub enum PqSigningPolicy {
 }
 
 impl PqSigningPolicy {
-    const fn as_str(self) -> &'static str {
+    /// Stable policy label used in logs and audit records.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::ClassicalOnly => "ClassicalOnly",
             Self::PqOnly => "PqOnly",
@@ -55,6 +241,83 @@ impl PqSigningPolicy {
             Self::EitherOk => has_pq_signer,
         }
     }
+}
+
+/// Authorization context for hardware-token-gated PQ policy downgrade.
+pub trait PqPolicyDowngradeAuthorizer {
+    /// Stable redaction-safe operator fingerprint for the audit record.
+    fn operator_fingerprint(&self) -> &str;
+
+    /// Authorize a downgrade from a strict policy to [`PqSigningPolicy::EitherOk`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operator token is absent or invalid.
+    fn authorize_pq_policy_downgrade(&self, reason: &str) -> CryptoResult<()>;
+}
+
+/// Audit payload emitted for an operator-authorized transitional policy downgrade.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PqPolicyDowngradeAudit {
+    /// Stable event kind for audit-chain storage.
+    pub event_type: String,
+    /// Redaction-safe operator fingerprint from the authorizing token.
+    pub operator_fingerprint: String,
+    /// Previous strict policy.
+    pub from_policy: PqSigningPolicy,
+    /// Transitional target policy.
+    pub to_policy: PqSigningPolicy,
+    /// Operator-supplied reason for the downgrade.
+    pub reason: String,
+}
+
+/// Downgrade a strict hybrid policy to `EitherOk` and return the audit payload.
+///
+/// # Errors
+///
+/// Returns an error if the current policy is already transitional, if the
+/// reason is empty, or if the authorizer rejects the operation.
+pub fn downgrade_policy_to_either_ok<A: PqPolicyDowngradeAuthorizer>(
+    current_policy: PqSigningPolicy,
+    reason: impl Into<String>,
+    authorizer: &A,
+) -> CryptoResult<(PqSigningPolicy, PqPolicyDowngradeAudit)> {
+    let reason = reason.into();
+    if reason.trim().is_empty() {
+        return Err(CryptoError::HybridPolicyViolation {
+            policy: current_policy.as_str(),
+            reason: "downgrade reason must not be empty".to_string(),
+        });
+    }
+    if matches!(current_policy, PqSigningPolicy::EitherOk) {
+        return Err(CryptoError::HybridPolicyViolation {
+            policy: current_policy.as_str(),
+            reason: "policy is already transitional".to_string(),
+        });
+    }
+    if !matches!(current_policy, PqSigningPolicy::BothRequired) {
+        return Err(CryptoError::HybridPolicyViolation {
+            policy: current_policy.as_str(),
+            reason: "only BothRequired may be downgraded to EitherOk".to_string(),
+        });
+    }
+
+    authorizer.authorize_pq_policy_downgrade(&reason)?;
+    let audit = PqPolicyDowngradeAudit {
+        event_type: EVENT_PQ_POLICY_DOWNGRADE.to_owned(),
+        operator_fingerprint: authorizer.operator_fingerprint().to_owned(),
+        from_policy: current_policy,
+        to_policy: PqSigningPolicy::EitherOk,
+        reason,
+    };
+    tracing::info!(
+        event_type = EVENT_PQ_POLICY_DOWNGRADE,
+        operator_fingerprint = %audit.operator_fingerprint,
+        from_policy = ?audit.from_policy,
+        to_policy = ?audit.to_policy,
+        "hybrid signed envelope policy downgrade authorized"
+    );
+    Ok((PqSigningPolicy::EitherOk, audit))
 }
 
 /// Payload plus optional classical and post-quantum signatures.
@@ -182,16 +445,19 @@ impl<T> SignedEnvelope<T> {
         classical_verifier: Option<&Ed25519VerifyingKey>,
         pq_verifier: Option<&MlDsa65VerifyingKey>,
     ) -> CryptoResult<HybridVerifyReport> {
-        let _verify_span = tracing::info_span!(
-            "hybrid_signed_envelope_verify",
-            object_type = %self.object_type,
-            policy = ?policy,
-        )
-        .entered();
         let signatures_present = SignatureStatus {
             classical: self.sig_classical.is_some(),
             pq: self.sig_pq.is_some(),
         };
+        let verify_span = tracing::info_span!(
+            "fcp.crypto.verify",
+            object_type = %self.object_type,
+            sig_kinds = %signatures_present.label(),
+            policy = ?policy,
+            latency_us = tracing::field::Empty,
+        );
+        let _entered = verify_span.enter();
+        let _verify_latency = VerifyLatency::new(&verify_span);
 
         if matches!(
             policy,
@@ -409,6 +675,27 @@ pub struct SignatureStatus {
     pub classical: bool,
     /// ML-DSA-65 signature state.
     pub pq: bool,
+}
+
+struct VerifyLatency<'a> {
+    span: &'a tracing::Span,
+    started: Instant,
+}
+
+impl<'a> VerifyLatency<'a> {
+    fn new(span: &'a tracing::Span) -> Self {
+        Self {
+            span,
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for VerifyLatency<'_> {
+    fn drop(&mut self) {
+        let elapsed_us = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        self.span.record("latency_us", elapsed_us);
+    }
 }
 
 impl SignatureStatus {

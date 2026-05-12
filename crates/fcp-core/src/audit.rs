@@ -6,9 +6,13 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use fcp_crypto::{
+    CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope, signing_bytes_for_payload,
+};
+
 use crate::{
-    ConnectorId, CorrelationId, EpochId, NodeSignature, ObjectHeader, ObjectId, OperationId,
-    PrincipalId, SignatureSet, ZoneId,
+    ConnectorId, CorrelationId, EpochId, NodeId, NodeSignature, ObjectHeader, ObjectId,
+    OperationId, PrincipalId, SignatureSet, ZoneId,
 };
 
 /// Required audit event types (NORMATIVE).
@@ -235,6 +239,18 @@ impl AuditEvent {
     }
 }
 
+pub type HybridSignedAuditEvent = SignedEnvelope<AuditEvent>;
+
+impl HybridSignable for AuditEvent {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::AuditEvent;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        let mut unsigned = self.clone();
+        unsigned.signature = NodeSignature::new(NodeId::new(""), [0_u8; 64], 0);
+        signing_bytes_for_payload(Self::OBJECT_KIND, &unsigned)
+    }
+}
+
 /// Audit head checkpoint (NORMATIVE).
 ///
 /// Quorum-signed checkpoint of the audit chain head. Enables fast sync
@@ -306,6 +322,18 @@ impl ZoneCheckpoint {
     #[must_use]
     pub const fn zone_id(&self) -> &ZoneId {
         &self.zone_id
+    }
+}
+
+pub type HybridSignedZoneCheckpoint = SignedEnvelope<ZoneCheckpoint>;
+
+impl HybridSignable for ZoneCheckpoint {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::ZoneCheckpoint;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        let mut unsigned = self.clone();
+        unsigned.quorum_signatures = SignatureSet::new();
+        signing_bytes_for_payload(Self::OBJECT_KIND, &unsigned)
     }
 }
 

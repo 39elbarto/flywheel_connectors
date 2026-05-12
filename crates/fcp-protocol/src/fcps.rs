@@ -27,7 +27,11 @@
 //! ```
 
 use bitflags::bitflags;
-use fcp_crypto::{CryptoError, Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey};
+use fcp_crypto::{
+    CryptoError, CryptoResult, Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey,
+    HybridSignable, HybridSignedObjectKind, HybridVerifyReport, MlDsa65SigningKey,
+    MlDsa65VerifyingKey, SignedEnvelope, signing_bytes_for_canonical_payload, verify_signable,
+};
 use fcp_prelude::{ObjectHeader, ObjectId, TailscaleNodeId, ZoneId, ZoneIdHash, ZoneKeyId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1083,6 +1087,81 @@ impl SymbolRequest {
 // SignedFcpsFrame - Degraded/Bootstrap Mode (NORMATIVE when used)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Payload carried by a hybrid-signed FCPS frame envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedFcpsFramePayload {
+    /// Source node ID (Tailscale node identifier).
+    pub source_id: TailscaleNodeId,
+    /// Unix timestamp (seconds since epoch).
+    pub timestamp: u64,
+    /// Encoded FCPS frame bytes.
+    pub frame_bytes: Vec<u8>,
+}
+
+impl SignedFcpsFramePayload {
+    /// Build a hybrid-signable payload from an FCPS frame.
+    ///
+    /// # Errors
+    /// Returns `CryptoError::SerializationError` if source validation or frame
+    /// encoding fails.
+    pub fn new(
+        frame: &FcpsFrame,
+        source_id: TailscaleNodeId,
+        timestamp: u64,
+    ) -> CryptoResult<Self> {
+        SignedFcpsFrame::validate_source_id(&source_id).map_err(|err| {
+            CryptoError::SerializationError(format!("invalid signed FCPS frame: {err}"))
+        })?;
+        let frame_bytes = frame.encode().map_err(|err| {
+            CryptoError::SerializationError(format!("invalid signed FCPS frame: {err}"))
+        })?;
+        Ok(Self {
+            source_id,
+            timestamp,
+            frame_bytes,
+        })
+    }
+
+    /// Decode the embedded FCPS frame.
+    ///
+    /// # Errors
+    /// Returns `FrameError` if the frame bytes are malformed or exceed the MTU.
+    pub fn decode_frame(&self, max_datagram_bytes: usize) -> Result<FcpsFrame, FrameError> {
+        FcpsFrame::decode(&self.frame_bytes, max_datagram_bytes)
+    }
+
+    fn transcript_bytes(&self) -> Vec<u8> {
+        SignedFcpsFrame::build_transcript(&self.source_id, self.timestamp, &self.frame_bytes)
+    }
+}
+
+impl HybridSignable for SignedFcpsFramePayload {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::GossipFrame;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        Ok(signing_bytes_for_canonical_payload(
+            Self::OBJECT_KIND,
+            &self.transcript_bytes(),
+        ))
+    }
+}
+
+/// Hybrid-signed FCPS frame envelope.
+pub type HybridSignedFcpsFrame = SignedEnvelope<SignedFcpsFramePayload>;
+
+/// Verify a hybrid-signed FCPS frame envelope.
+///
+/// # Errors
+/// Returns an error if either signature is missing or invalid, or if the
+/// envelope object type does not match FCPS gossip frames.
+pub fn verify_hybrid_signed_fcps_frame(
+    envelope: &HybridSignedFcpsFrame,
+    classical_verifier: &Ed25519VerifyingKey,
+    pq_verifier: &MlDsa65VerifyingKey,
+) -> CryptoResult<HybridVerifyReport> {
+    verify_signable(envelope, classical_verifier, pq_verifier)
+}
+
 /// Signed FCPS frame for degraded/bootstrap mode (NORMATIVE when used).
 ///
 /// This is a **non-default** path for when session MACs are unavailable,
@@ -1151,6 +1230,30 @@ impl SignedFcpsFrame {
             timestamp,
             signature,
         })
+    }
+
+    /// Create a new hybrid-signed frame envelope.
+    ///
+    /// # Errors
+    /// Returns an error if the frame cannot be encoded, source validation
+    /// fails, or either signing algorithm fails.
+    pub fn new_hybrid(
+        frame: &FcpsFrame,
+        source_id: TailscaleNodeId,
+        timestamp: u64,
+        classical_signer: &Ed25519SigningKey,
+        pq_signer: &MlDsa65SigningKey,
+    ) -> CryptoResult<HybridSignedFcpsFrame> {
+        let payload = SignedFcpsFramePayload::new(frame, source_id, timestamp)?;
+        payload.sign_hybrid(classical_signer, pq_signer)
+    }
+
+    /// Convert an existing signed frame into its hybrid-signable payload.
+    ///
+    /// # Errors
+    /// Returns an error if the frame cannot be encoded or the source ID is invalid.
+    pub fn hybrid_payload(&self) -> CryptoResult<SignedFcpsFramePayload> {
+        SignedFcpsFramePayload::new(&self.frame, self.source_id.clone(), self.timestamp)
     }
 
     /// Build the signature transcript.

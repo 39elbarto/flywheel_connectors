@@ -129,8 +129,11 @@ pub use hkdf::{
 };
 pub use hpke_seal::{Fcp2Aad, HpkeSealedBox, hpke_open, hpke_seal};
 pub use hybrid::{
-    HYBRID_SIGNING_CONTEXT, HybridVerifyReport, HybridVerifyWarning, PqSigningPolicy,
-    SignatureStatus, SignedEnvelope,
+    EVENT_PQ_POLICY_DOWNGRADE, HYBRID_SIGNING_CONTEXT, HybridSignable, HybridSignedObjectKind,
+    HybridVerifyReport, HybridVerifyWarning, PqPolicyDowngradeAudit, PqPolicyDowngradeAuthorizer,
+    PqSigningPolicy, SignatureStatus, SignedEnvelope, downgrade_policy_to_either_ok,
+    signing_bytes_for_canonical_payload, signing_bytes_for_payload, verify_signable,
+    verify_signable_with_policy,
 };
 pub use kid::KeyId;
 pub use mac::{Blake3Mac, MacKey, blake3_mac, blake3_mac_full, blake3_mac_verify};

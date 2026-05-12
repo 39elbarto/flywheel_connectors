@@ -129,7 +129,8 @@ pub use hkdf::{
 };
 pub use hpke_seal::{Fcp2Aad, HpkeSealedBox, hpke_open, hpke_seal};
 pub use hybrid::{
-    HYBRID_SIGNING_CONTEXT, HybridVerifyReport, PqSigningPolicy, SignatureStatus, SignedEnvelope,
+    HYBRID_SIGNING_CONTEXT, HybridVerifyReport, HybridVerifyWarning, PqSigningPolicy,
+    SignatureStatus, SignedEnvelope,
 };
 pub use kid::KeyId;
 pub use mac::{Blake3Mac, MacKey, blake3_mac, blake3_mac_full, blake3_mac_verify};

@@ -198,6 +198,17 @@ impl<T> SignedEnvelope<T> {
             PqSigningPolicy::ClassicalOnly | PqSigningPolicy::BothRequired
         ) && !signatures_present.classical
         {
+            if matches!(policy, PqSigningPolicy::BothRequired) {
+                self.log_downgrade_rejection(
+                    policy,
+                    signatures_present,
+                    if signatures_present.pq {
+                        "stripped_classical_signature"
+                    } else {
+                        "missing_classical_signature"
+                    },
+                );
+            }
             self.log_verdict(
                 policy,
                 signatures_present,
@@ -214,6 +225,17 @@ impl<T> SignedEnvelope<T> {
             PqSigningPolicy::PqOnly | PqSigningPolicy::BothRequired
         ) && !signatures_present.pq
         {
+            if matches!(policy, PqSigningPolicy::BothRequired) {
+                self.log_downgrade_rejection(
+                    policy,
+                    signatures_present,
+                    if signatures_present.classical {
+                        "stripped_pq_signature"
+                    } else {
+                        "missing_pq_signature"
+                    },
+                );
+            }
             self.log_verdict(
                 policy,
                 signatures_present,
@@ -241,11 +263,16 @@ impl<T> SignedEnvelope<T> {
         };
 
         if accepted {
+            let warning = HybridVerifyWarning::for_policy(policy, signatures_present);
+            if let Some(warning) = warning {
+                self.log_transitional_warning(policy, signatures_present, warning);
+            }
             self.log_verdict(policy, signatures_present, signatures_verified, "accepted");
             Ok(HybridVerifyReport {
                 policy,
                 signatures_present,
                 signatures_verified,
+                warning,
             })
         } else {
             self.log_verdict(policy, signatures_present, signatures_verified, "rejected");
@@ -340,6 +367,39 @@ impl<T> SignedEnvelope<T> {
             "hybrid signed envelope verification"
         );
     }
+
+    fn log_downgrade_rejection(
+        &self,
+        policy: PqSigningPolicy,
+        signatures_present: SignatureStatus,
+        attempted_downgrade: &'static str,
+    ) {
+        tracing::info!(
+            object_type = %self.object_type,
+            attempted_downgrade,
+            reason_code = "DowngradeAttempt",
+            attacker_pubkey_fpr = "unknown",
+            sig_kinds_present = signatures_present.label(),
+            policy = ?policy,
+            "hybrid signed envelope downgrade attack rejected"
+        );
+    }
+
+    fn log_transitional_warning(
+        &self,
+        policy: PqSigningPolicy,
+        signatures_present: SignatureStatus,
+        warning: HybridVerifyWarning,
+    ) {
+        tracing::warn!(
+            object_type = %self.object_type,
+            reason_code = warning.reason_code,
+            missing_signature_kind = warning.missing_signature_kind,
+            sig_kinds_present = signatures_present.label(),
+            policy = ?policy,
+            "hybrid signed envelope transitional verification warning"
+        );
+    }
 }
 
 /// Signature-kind state for an envelope or verification report.
@@ -367,6 +427,38 @@ impl SignatureStatus {
     }
 }
 
+/// Warning returned for an envelope accepted under a transitional policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HybridVerifyWarning {
+    /// Stable reason code for audit and conformance assertions.
+    pub reason_code: &'static str,
+    /// Signature kind absent from an otherwise accepted transitional envelope.
+    pub missing_signature_kind: &'static str,
+}
+
+impl HybridVerifyWarning {
+    const fn for_policy(
+        policy: PqSigningPolicy,
+        signatures_present: SignatureStatus,
+    ) -> Option<Self> {
+        if !matches!(policy, PqSigningPolicy::EitherOk) {
+            return None;
+        }
+
+        match (signatures_present.classical, signatures_present.pq) {
+            (true, false) => Some(Self {
+                reason_code: "PqSignatureMismatch",
+                missing_signature_kind: "ml-dsa-65",
+            }),
+            (false, true) => Some(Self {
+                reason_code: "PqSignatureMismatch",
+                missing_signature_kind: "ed25519",
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// Verification details returned for accepted hybrid envelopes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HybridVerifyReport {
@@ -376,4 +468,6 @@ pub struct HybridVerifyReport {
     pub signatures_present: SignatureStatus,
     /// Signature kinds that verified successfully.
     pub signatures_verified: SignatureStatus,
+    /// Transitional warning emitted while accepting an envelope with one signature.
+    pub warning: Option<HybridVerifyWarning>,
 }

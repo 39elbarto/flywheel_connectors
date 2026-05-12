@@ -192,6 +192,27 @@ pub enum CryptoError {
     },
 }
 
+impl CryptoError {
+    /// Stable reason code for hybrid-signing verification failures.
+    ///
+    /// This is intentionally narrower than `Display`: callers can use it for
+    /// audit records, conformance assertions, and machine-readable downgrade
+    /// handling without parsing a human-readable error string.
+    #[must_use]
+    pub const fn hybrid_reason_code(&self) -> Option<&'static str> {
+        match self {
+            Self::MissingClassicalSignature { .. } | Self::MissingPqSignature { .. } => {
+                Some("DowngradeAttempt")
+            }
+            Self::MissingClassicalVerifier { .. } | Self::MissingPqVerifier { .. } => {
+                Some("MissingVerifier")
+            }
+            Self::HybridPolicyViolation { .. } => Some("HybridPolicyViolation"),
+            _ => None,
+        }
+    }
+}
+
 /// Result type alias for cryptographic operations.
 pub type CryptoResult<T> = Result<T, CryptoError>;
 

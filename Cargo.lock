@@ -3767,6 +3767,7 @@ dependencies = [
  "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "testcontainers",
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",

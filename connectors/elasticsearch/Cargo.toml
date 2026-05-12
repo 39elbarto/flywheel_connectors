@@ -36,8 +36,21 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 
+# Integration-testcontainer deps - only pulled in when the
+# `integration-testcontainer` feature is enabled. Kept in
+# `[dependencies]` (not `[dev-dependencies]`) because Cargo disallows
+# `optional = true` on dev-dependencies; they are feature-gated so
+# default builds stay offline-friendly and docker-less.
+testcontainers = { version = "0.23", optional = true }
+
 [dev-dependencies]
 wiremock.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }
+
+[features]
+default = []
+# Enable real-Elasticsearch testcontainer acceptance tests. Requires a
+# running Docker daemon. See tests/local_non_mock.rs.
+integration-testcontainer = ["dep:testcontainers"]

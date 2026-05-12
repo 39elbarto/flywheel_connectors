@@ -23,12 +23,14 @@ use fcp_async_core::net::{TcpListener, TcpStream};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_prelude::{CapabilityConstraints, FcpError};
-use fcp_testkit::{AsyncTestContext, MockApiServer};
+use fcp_testkit::{AsyncTestContext, LogCapture, MockApiServer};
 use futures_util::StreamExt;
 use serde_json::json;
+use std::collections::HashMap;
 use std::future::poll_fn;
 use std::io;
 use std::pin::Pin;
+use std::sync::{LazyLock, Mutex};
 use std::task::Poll;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -38,9 +40,10 @@ use wiremock::{
 // ──────────────── re-export the connector under test ────────────────
 use base64::Engine;
 use fcp_manifest::{ConnectorManifest, NetworkConstraints};
-use fcp_openai::client::OpenAIClient;
+use fcp_openai::client::{OpenAIClient, VideoPollingOptions};
 use fcp_openai::connector::OpenAIConnector;
-use fcp_openai::types::Model;
+use fcp_openai::error::OpenAIError;
+use fcp_openai::types::{Model, VideoDurationSeconds, VideoModel, VideoSize, VideoStatus};
 
 // ============================================================================
 // Helpers
@@ -56,6 +59,9 @@ fn capability_for_operation(op: &str) -> &str {
         other => other,
     }
 }
+
+static TOKEN_INSTANCE_BINDINGS: LazyLock<Mutex<HashMap<[u8; 32], String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[test]
 fn manifest_declares_strict_per_operation_network_constraints() {
@@ -241,7 +247,14 @@ fn generate_valid_token_with_instance(
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("constraints CBOR should validate");
-    if let Some(instance_id) = instance_id {
+    let target_instance = instance_id.map(str::to_owned).or_else(|| {
+        TOKEN_INSTANCE_BINDINGS
+            .lock()
+            .expect("token instance binding registry should not be poisoned")
+            .get(&signing_key.verifying_key().to_bytes())
+            .cloned()
+    });
+    if let Some(instance_id) = target_instance.as_deref() {
         builder = builder.target_instance(instance_id);
     }
     let cose = builder.sign(signing_key).unwrap();
@@ -264,6 +277,11 @@ async fn setup_handshake(connector: &mut OpenAIConnector, caps: &[&str]) -> Ed25
         }))
         .await
         .expect("handshake should succeed");
+
+    TOKEN_INSTANCE_BINDINGS
+        .lock()
+        .expect("token instance binding registry should not be poisoned")
+        .insert(verifying_key.to_bytes(), connector.instance_id().to_owned());
 
     signing_key
 }
@@ -436,6 +454,340 @@ fn build_sse_body(events: &[serde_json::Value]) -> String {
     }
     body.push_str("data: [DONE]\n\n");
     body
+}
+
+// ============================================================================
+// Client HTTP Boundary Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn client_chat_success_tracks_usage() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("Authorization", "Bearer test_key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-123",
+            "object": "chat.completion",
+            "created": 1_677_652_288,
+            "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello! How can I help you today?"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 8,
+                "total_tokens": 18
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = OpenAIClient::new("test_key")
+        .unwrap()
+        .with_base_url(mock_server.uri());
+
+    let response = client
+        .chat(Model::Gpt4o, "Hi", None, Some(1024))
+        .await
+        .unwrap();
+
+    assert_eq!(response, "Hello! How can I help you today?");
+    assert_eq!(client.total_prompt_tokens(), 10);
+    assert_eq!(client.total_completion_tokens(), 8);
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_unauthorized_maps_invalid_key() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": {
+                "message": "Incorrect API key provided",
+                "type": "invalid_request_error",
+                "param": null,
+                "code": "invalid_api_key"
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = OpenAIClient::new("bad_key")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(1, 10, 100);
+
+    let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
+
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), OpenAIError::InvalidApiKey));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_rate_limited_maps_retryable_error() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+            "error": {
+                "message": "Rate limit exceeded",
+                "type": "rate_limit_error",
+                "param": null,
+                "code": null
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = OpenAIClient::new("test_key")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(1, 10, 100);
+
+    let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
+
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        OpenAIError::RateLimited { .. }
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_overloaded_maps_retryable_error() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+            "error": {
+                "message": "Server overloaded",
+                "type": "server_error",
+                "param": null,
+                "code": null
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = OpenAIClient::new("test_key")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(1, 10, 100);
+
+    let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
+
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        OpenAIError::Overloaded { .. }
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_context_length_exceeded_maps_error() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": {
+                "message": "maximum context length exceeded",
+                "type": "invalid_request_error",
+                "param": null,
+                "code": null
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = OpenAIClient::new("test_key")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(1, 10, 100);
+
+    let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
+
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        OpenAIError::ContextLengthExceeded { .. }
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_content_filtered_maps_error() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": {
+                "message": "Content filtered",
+                "type": "invalid_request_error",
+                "param": null,
+                "code": "content_filter"
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = OpenAIClient::new("test_key")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(1, 10, 100);
+
+    let result = client.chat(Model::Gpt4o, "Hi", None, Some(1024)).await;
+
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        OpenAIError::ContentFiltered { .. }
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_logs_redact_api_key_and_prompt() {
+    let capture = LogCapture::new();
+    let _guard = capture.install_json_with_filter("debug");
+    let scenario = AsyncTestContext::for_scenario("openai.client.log_redaction");
+    tracing::debug!(
+        run_id = %scenario.run_id(),
+        scenario_id = %scenario.scenario_id(),
+        correlation_id = %scenario.correlation_id(),
+        "log_capture_ready"
+    );
+
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("Authorization", "Bearer test_key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-123",
+            "object": "chat.completion",
+            "created": 1_677_652_288,
+            "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello! How can I help you today?"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 8,
+                "total_tokens": 18
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = OpenAIClient::new("test_key")
+        .unwrap()
+        .with_base_url(mock_server.uri());
+    let secret_prompt = "TopSecretPrompt";
+    let _ = client
+        .chat(Model::Gpt4o, secret_prompt, None, Some(1024))
+        .await
+        .unwrap();
+
+    let logs = capture.jsonl();
+    assert!(
+        logs.contains("log_capture_ready"),
+        "expected debug logs to be captured"
+    );
+    assert!(
+        logs.contains(scenario.correlation_id()),
+        "scenario correlation id should be present in logs"
+    );
+    assert!(
+        !logs.contains("test_key"),
+        "API key should not appear in logs"
+    );
+    assert!(
+        !logs.contains(secret_prompt),
+        "prompt text should not appear in logs"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_generate_video_success() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/videos"))
+        .and(header("Authorization", "Bearer test_key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "video-123",
+            "model": "sora-2",
+            "status": "queued",
+            "seconds": "4",
+            "size": "1280x720"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/videos/video-123"))
+        .and(header("Authorization", "Bearer test_key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "video-123",
+            "model": "sora-2",
+            "status": "completed",
+            "seconds": "4",
+            "size": "1280x720"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/videos/video-123/content"))
+        .and(header("Authorization", "Bearer test_key"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "video/mp4")
+                .set_body_bytes(b"video-bytes".to_vec()),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let client = OpenAIClient::new("test_key")
+        .unwrap()
+        .with_base_url(mock_server.uri());
+
+    let video = client
+        .generate_video(
+            VideoModel::Sora2,
+            "A quiet product shot",
+            Some(VideoDurationSeconds::Seconds4),
+            Some(VideoSize::Size1280x720),
+            VideoPollingOptions {
+                poll_interval_ms: 1,
+                max_poll_attempts: 2,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(video.video_id, "video-123");
+    assert_eq!(video.model, "sora-2");
+    assert_eq!(video.status, VideoStatus::Completed);
+    assert_eq!(video.seconds.as_deref(), Some("4"));
+    assert_eq!(video.size.as_deref(), Some("1280x720"));
+    assert_eq!(video.mime_type, "video/mp4");
+    assert_eq!(video.bytes, b"video-bytes");
 }
 
 // ============================================================================

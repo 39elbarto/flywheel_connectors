@@ -23,15 +23,18 @@ use fcp_testkit::AsyncTestContext;
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{method, path},
+    matchers::{header, method, path},
 };
 
 use fcp_figma::client::FigmaClient;
 use fcp_figma::connector::FigmaConnector;
+use fcp_figma::error::FigmaError;
 
 // ============================================================================
 // Helpers
 // ============================================================================
+
+const TEST_INSTANCE_ID: &str = "inst_figma_integration";
 
 fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
     let cap = match op {
@@ -53,6 +56,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
         .zone_id("z:work")
         .principal("user:test")
         .operations(&[op])
+        .target_instance(TEST_INSTANCE_ID)
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
@@ -72,7 +76,8 @@ async fn setup_handshake(connector: &mut FigmaConnector, caps: &[&str]) -> Ed255
             "zone": "z:work",
             "host_public_key": verifying_key.to_bytes(),
             "nonce": vec![0u8; 32],
-            "capabilities_requested": caps
+            "capabilities_requested": caps,
+            "requested_instance_id": TEST_INSTANCE_ID
         }))
         .await
         .expect("handshake should succeed");
@@ -2132,4 +2137,290 @@ async fn styles_list_missing_file_key() {
         }
         e => assert!(matches!(e, fcp_core::FcpError::InvalidRequest { .. })),
     }
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_get_file_uses_token_header() {
+    let mock_server = MockServer::start().await;
+
+    let file_response = json!({
+        "name": "Test File",
+        "document": { "id": "0:0", "type": "DOCUMENT", "children": [] },
+        "lastModified": "2025-01-01T00:00:00Z",
+        "version": "123456",
+        "components": {},
+        "styles": {}
+    });
+
+    Mock::given(method("GET"))
+        .and(path("/files/abc123"))
+        .and(header("X-FIGMA-TOKEN", "test-auth-value"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&file_response))
+        .mount(&mock_server)
+        .await;
+
+    let client = FigmaClient::new("test-auth-value")
+        .unwrap()
+        .with_base_url(mock_server.uri());
+
+    let file = client
+        .get_file("abc123", None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(file.name, "Test File");
+    assert_eq!(file.version, "123456");
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_get_file_nodes_uses_token_header() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/abc123/nodes"))
+        .and(header("X-FIGMA-TOKEN", "test-auth-value"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "nodes": { "1:2": { "document": { "id": "1:2" } } }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = FigmaClient::new("test-auth-value")
+        .unwrap()
+        .with_base_url(mock_server.uri());
+
+    let result = client.get_file_nodes("abc123", "1:2", None).await;
+    assert!(result.is_ok());
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_list_comments_uses_token_header() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/abc123/comments"))
+        .and(header("X-FIGMA-TOKEN", "test-auth-value"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "comments": [
+                {
+                    "id": "c1",
+                    "message": "Looks good!",
+                    "created_at": "2025-01-01T00:00:00Z"
+                }
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = FigmaClient::new("test-auth-value")
+        .unwrap()
+        .with_base_url(mock_server.uri());
+
+    let resp = client.list_comments("abc123", None).await.unwrap();
+    assert_eq!(resp.comments.len(), 1);
+    assert_eq!(resp.comments[0].message, "Looks good!");
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_post_comment_uses_token_header() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/files/abc123/comments"))
+        .and(header("X-FIGMA-TOKEN", "test-auth-value"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "c2",
+            "message": "New comment",
+            "created_at": "2025-01-01T12:00:00Z"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = FigmaClient::new("test-auth-value")
+        .unwrap()
+        .with_base_url(mock_server.uri());
+
+    let comment = client
+        .post_comment("abc123", "New comment", None, None)
+        .await
+        .unwrap();
+    assert_eq!(comment.id, "c2");
+    assert_eq!(comment.message, "New comment");
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_maps_forbidden_to_unauthorized() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/abc123"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "status": 403,
+            "err": "Forbidden"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = FigmaClient::new("bad-auth-value")
+        .unwrap()
+        .with_base_url(mock_server.uri());
+
+    let result = client.get_file("abc123", None, None, None, None).await;
+    assert!(matches!(result.unwrap_err(), FigmaError::Unauthorized));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_preserves_retry_after_without_retries() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/abc123"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30"))
+        .mount(&mock_server)
+        .await;
+
+    let client = FigmaClient::new("test-auth-value")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(0, 100, 200);
+
+    let result = client.get_file("abc123", None, None, None, None).await;
+    assert!(matches!(
+        result.unwrap_err(),
+        FigmaError::RateLimited {
+            retry_after_secs: 30
+        }
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_maps_not_found_as_api_error() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/nonexistent"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "status": 404,
+            "err": "Not found"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = FigmaClient::new("test-auth-value")
+        .unwrap()
+        .with_base_url(mock_server.uri());
+
+    let result = client.get_file("nonexistent", None, None, None, None).await;
+    assert!(matches!(
+        result.unwrap_err(),
+        FigmaError::Api { status: 404, .. }
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_export_images_uses_token_header() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/images/abc123"))
+        .and(header("X-FIGMA-TOKEN", "test-auth-value"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "images": { "1:2": "https://figma-alpha.s3.amazonaws.com/img/abc.png" }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = FigmaClient::new("test-auth-value")
+        .unwrap()
+        .with_base_url(mock_server.uri());
+
+    let result = client
+        .export_images("abc123", "1:2", "png", Some(2.0), None, None, None)
+        .await;
+    assert!(result.is_ok());
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_delete_comment_uses_token_header() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("DELETE"))
+        .and(path("/files/abc123/comments/c1"))
+        .and(header("X-FIGMA-TOKEN", "test-auth-value"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&mock_server)
+        .await;
+
+    let client = FigmaClient::new("test-auth-value")
+        .unwrap()
+        .with_base_url(mock_server.uri());
+
+    let result = client.delete_comment("abc123", "c1").await;
+    assert!(result.is_ok());
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_rate_limit_retries_count_single_logical_request() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/abc123"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "0"))
+        .mount(&mock_server)
+        .await;
+
+    let client = FigmaClient::new("test-auth-value")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(2, 10, 50);
+
+    let result = client.get_file("abc123", None, None, None, None).await;
+    assert!(result.is_err());
+    assert_eq!(
+        client.total_requests(),
+        1,
+        "total_requests counts logical client invocations, not HTTP attempts"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_rate_limit_exhausts_retries() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/abc123"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "0"))
+        .mount(&mock_server)
+        .await;
+
+    let client = FigmaClient::new("test-auth-value")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(2, 10, 50);
+
+    let result = client.get_file("abc123", None, None, None, None).await;
+    assert!(
+        matches!(result.unwrap_err(), FigmaError::RateLimited { .. }),
+        "should return RateLimited after exhausting retries"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_total_requests_counter_counts_component_fetch() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/files/abc123/components"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "meta": { "components": [] }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = FigmaClient::new("test-auth-value")
+        .unwrap()
+        .with_base_url(mock_server.uri());
+
+    assert_eq!(client.total_requests(), 0);
+    let _ = client.get_file_components("abc123").await;
+    assert_eq!(client.total_requests(), 1);
 }

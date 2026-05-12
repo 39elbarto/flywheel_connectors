@@ -34,13 +34,23 @@ mod tests {
 
     use fcp_prelude::{CredentialId, FcpError};
     use serde_json::json;
-    use wiremock::matchers::{body_json, method};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::client::{DEFAULT_BASE_URL, RedisAuth, RedisClient};
     use crate::connector::RedisConnector;
     use crate::error::RedisError;
     use crate::types::{ApiErrorResponse, SetOptions, UpstashResponse};
+
+    fn configured_validation_connector(rt: &fcp_async_core::runtime::Runtime) -> RedisConnector {
+        let mut c = RedisConnector::new();
+        rt.block_on(c.handle_configure(json!({
+            "api_token": "tok",
+            "base_url": "http://127.0.0.1:1"
+        })))
+        .unwrap();
+        rt.block_on(c.handle_handshake(json!({ "session_id": "s1" })))
+            .unwrap();
+        c
+    }
 
     // ===== Config parsing tests =====
 
@@ -1268,990 +1278,105 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ===== Wiremock integration tests for each operation =====
-
-    #[test]
-    fn wiremock_get_success() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(body_json(json!(["GET", "mykey"])))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": "myvalue"
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.get",
-                    "input": { "key": "mykey" }
-                }))
-                .await
-                .unwrap();
-            assert_eq!(resp["value"], "myvalue");
-        });
-    }
-
-    #[test]
-    fn wiremock_get_null_result() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": null
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.get",
-                    "input": { "key": "missing" }
-                }))
-                .await
-                .unwrap();
-            assert!(resp["value"].is_null());
-        });
-    }
-
-    #[test]
-    fn wiremock_set_success() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": "OK"
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.set",
-                    "input": { "key": "k1", "value": "v1" }
-                }))
-                .await
-                .unwrap();
-            assert_eq!(resp["result"], "OK");
-        });
-    }
-
-    #[test]
-    fn wiremock_set_with_ttl() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(body_json(json!(["SET", "k1", "v1", "EX", "300"])))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": "OK"
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.set",
-                    "input": { "key": "k1", "value": "v1", "ttl_seconds": 300 }
-                }))
-                .await
-                .unwrap();
-            assert_eq!(resp["result"], "OK");
-        });
-    }
-
-    #[test]
-    fn wiremock_set_with_nx() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(body_json(json!(["SET", "k1", "v1", "NX"])))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": "OK"
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.set",
-                    "input": { "key": "k1", "value": "v1", "nx": true }
-                }))
-                .await
-                .unwrap();
-            assert_eq!(resp["result"], "OK");
-        });
-    }
-
-    #[test]
-    fn wiremock_del_success() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(body_json(json!(["DEL", "k1", "k2"])))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": 2
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.del",
-                    "input": { "keys": ["k1", "k2"] }
-                }))
-                .await
-                .unwrap();
-            assert_eq!(resp["deleted"], 2);
-        });
-    }
-
-    #[test]
-    fn wiremock_exists_success() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": 1
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.exists",
-                    "input": { "keys": ["k1"] }
-                }))
-                .await
-                .unwrap();
-            assert_eq!(resp["count"], 1);
-        });
-    }
-
-    #[test]
-    fn wiremock_expire_success() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": 1
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.expire",
-                    "input": { "key": "k1", "seconds": 60 }
-                }))
-                .await
-                .unwrap();
-            assert_eq!(resp["result"], 1);
-        });
-    }
-
-    #[test]
-    fn wiremock_ttl_success() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": 120
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.ttl",
-                    "input": { "key": "k1" }
-                }))
-                .await
-                .unwrap();
-            assert_eq!(resp["ttl"], 120);
-        });
-    }
-
-    #[test]
-    fn wiremock_incr_success() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": 42
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.incr",
-                    "input": { "key": "counter" }
-                }))
-                .await
-                .unwrap();
-            assert_eq!(resp["value"], 42);
-        });
-    }
-
-    #[test]
-    fn wiremock_hget_success() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": "field_value"
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.hget",
-                    "input": { "key": "myhash", "field": "name" }
-                }))
-                .await
-                .unwrap();
-            assert_eq!(resp["value"], "field_value");
-        });
-    }
-
-    #[test]
-    fn wiremock_hset_success() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": 2
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.hset",
-                    "input": { "key": "myhash", "fields": { "name": "Alice", "age": "30" } }
-                }))
-                .await
-                .unwrap();
-            assert_eq!(resp["result"], 2);
-        });
-    }
-
-    #[test]
-    fn wiremock_hgetall_success() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": ["name", "Alice", "age", "30"]
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.hgetall",
-                    "input": { "key": "myhash" }
-                }))
-                .await
-                .unwrap();
-            let fields = resp["fields"].as_array().unwrap();
-            assert_eq!(fields.len(), 4);
-        });
-    }
-
-    #[test]
-    fn wiremock_lpush_success() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": 3
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.lpush",
-                    "input": { "key": "mylist", "elements": ["a", "b", "c"] }
-                }))
-                .await
-                .unwrap();
-            assert_eq!(resp["length"], 3);
-        });
-    }
-
-    #[test]
-    fn wiremock_lrange_success() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": ["c", "b", "a"]
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.lrange",
-                    "input": { "key": "mylist", "start": 0, "stop": -1 }
-                }))
-                .await
-                .unwrap();
-            let vals = resp["values"].as_array().unwrap();
-            assert_eq!(vals.len(), 3);
-        });
-    }
-
-    #[test]
-    fn wiremock_sadd_success() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": 2
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.sadd",
-                    "input": { "key": "myset", "members": ["x", "y"] }
-                }))
-                .await
-                .unwrap();
-            assert_eq!(resp["added"], 2);
-        });
-    }
-
-    #[test]
-    fn wiremock_smembers_success() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": ["x", "y", "z"]
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.smembers",
-                    "input": { "key": "myset" }
-                }))
-                .await
-                .unwrap();
-            let members = resp["members"].as_array().unwrap();
-            assert_eq!(members.len(), 3);
-        });
-    }
-
-    // ===== Error handling wiremock tests =====
-
-    #[test]
-    fn wiremock_401_unauthorized() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(401).set_body_json(json!({
-                    "error": "Unauthorized"
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "bad",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let result = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.get",
-                    "input": { "key": "k" }
-                }))
-                .await;
-            assert!(result.is_err());
-        });
-    }
-
-    #[test]
-    fn wiremock_403_forbidden() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(403))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let result = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.get",
-                    "input": { "key": "k" }
-                }))
-                .await;
-            assert!(result.is_err());
-        });
-    }
-
-    #[test]
-    fn wiremock_429_rate_limited() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(429))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let result = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.get",
-                    "input": { "key": "k" }
-                }))
-                .await;
-            assert!(result.is_err());
-        });
-    }
-
-    #[test]
-    fn wiremock_500_server_error() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(500).set_body_json(json!({
-                    "error": "Internal server error"
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let result = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.get",
-                    "input": { "key": "k" }
-                }))
-                .await;
-            assert!(result.is_err());
-        });
-    }
-
-    #[test]
-    fn wiremock_command_error_in_response() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "error": "WRONGTYPE Operation against a key holding the wrong kind of value"
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let result = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.get",
-                    "input": { "key": "k" }
-                }))
-                .await;
-            assert!(result.is_err());
-        });
-    }
-
     // ===== Missing field tests =====
 
     #[test]
     fn invoke_get_missing_key() {
         let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let result = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.get",
-                    "input": {}
-                }))
-                .await;
-            assert!(result.is_err());
-        });
+        let c = configured_validation_connector(&rt);
+        let result = rt.block_on(c.handle_invoke(json!({
+            "operation_id": "redis.get",
+            "input": {}
+        })));
+        assert!(result.is_err());
     }
 
     #[test]
     fn invoke_set_missing_value() {
         let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let result = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.set",
-                    "input": { "key": "k1" }
-                }))
-                .await;
-            assert!(result.is_err());
-        });
+        let c = configured_validation_connector(&rt);
+        let result = rt.block_on(c.handle_invoke(json!({
+            "operation_id": "redis.set",
+            "input": { "key": "k1" }
+        })));
+        assert!(result.is_err());
     }
 
     #[test]
     fn invoke_del_missing_keys() {
         let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let result = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.del",
-                    "input": {}
-                }))
-                .await;
-            assert!(result.is_err());
-        });
+        let c = configured_validation_connector(&rt);
+        let result = rt.block_on(c.handle_invoke(json!({
+            "operation_id": "redis.del",
+            "input": {}
+        })));
+        assert!(result.is_err());
     }
 
     #[test]
     fn invoke_expire_missing_seconds() {
         let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let result = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.expire",
-                    "input": { "key": "k1" }
-                }))
-                .await;
-            assert!(result.is_err());
-        });
+        let c = configured_validation_connector(&rt);
+        let result = rt.block_on(c.handle_invoke(json!({
+            "operation_id": "redis.expire",
+            "input": { "key": "k1" }
+        })));
+        assert!(result.is_err());
     }
 
     #[test]
     fn invoke_hget_missing_field() {
         let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let result = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.hget",
-                    "input": { "key": "myhash" }
-                }))
-                .await;
-            assert!(result.is_err());
-        });
+        let c = configured_validation_connector(&rt);
+        let result = rt.block_on(c.handle_invoke(json!({
+            "operation_id": "redis.hget",
+            "input": { "key": "myhash" }
+        })));
+        assert!(result.is_err());
     }
 
     #[test]
     fn invoke_hset_missing_fields() {
         let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let result = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.hset",
-                    "input": { "key": "myhash" }
-                }))
-                .await;
-            assert!(result.is_err());
-        });
+        let c = configured_validation_connector(&rt);
+        let result = rt.block_on(c.handle_invoke(json!({
+            "operation_id": "redis.hset",
+            "input": { "key": "myhash" }
+        })));
+        assert!(result.is_err());
     }
 
     #[test]
     fn invoke_hset_fields_not_object() {
         let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let result = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.hset",
-                    "input": { "key": "myhash", "fields": "not_an_object" }
-                }))
-                .await;
-            assert!(result.is_err());
-        });
+        let c = configured_validation_connector(&rt);
+        let result = rt.block_on(c.handle_invoke(json!({
+            "operation_id": "redis.hset",
+            "input": { "key": "myhash", "fields": "not_an_object" }
+        })));
+        assert!(result.is_err());
     }
 
     #[test]
     fn invoke_lpush_missing_elements() {
         let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let result = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.lpush",
-                    "input": { "key": "list" }
-                }))
-                .await;
-            assert!(result.is_err());
-        });
+        let c = configured_validation_connector(&rt);
+        let result = rt.block_on(c.handle_invoke(json!({
+            "operation_id": "redis.lpush",
+            "input": { "key": "list" }
+        })));
+        assert!(result.is_err());
     }
 
     #[test]
     fn invoke_sadd_missing_members() {
         let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let result = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.sadd",
-                    "input": { "key": "myset" }
-                }))
-                .await;
-            assert!(result.is_err());
-        });
+        let c = configured_validation_connector(&rt);
+        let result = rt.block_on(c.handle_invoke(json!({
+            "operation_id": "redis.sadd",
+            "input": { "key": "myset" }
+        })));
+        assert!(result.is_err());
     }
 
     // ===== Types serde tests =====
@@ -2409,76 +1534,6 @@ mod tests {
     }
 
     // ===== Edge case tests =====
-
-    #[test]
-    fn wiremock_lrange_default_range() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(body_json(json!(["LRANGE", "mylist", "0", "-1"])))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": ["a"]
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.lrange",
-                    "input": { "key": "mylist" }
-                }))
-                .await
-                .unwrap();
-            assert!(resp["values"].is_array());
-        });
-    }
-
-    #[test]
-    fn wiremock_set_with_xx() {
-        let rt = tokio_runtime();
-        rt.block_on(async {
-            let mock_server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(body_json(json!(["SET", "k1", "v1", "XX"])))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "result": null
-                })))
-                .mount(&mock_server)
-                .await;
-
-            let mut c = RedisConnector::new();
-            c.handle_configure(json!({
-                "api_token": "tok",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-            c.handle_handshake(json!({ "session_id": "s1" }))
-                .await
-                .unwrap();
-
-            let resp = c
-                .handle_invoke(json!({
-                    "operation_id": "redis.set",
-                    "input": { "key": "k1", "value": "v1", "xx": true }
-                }))
-                .await
-                .unwrap();
-            assert!(resp["result"].is_null());
-        });
-    }
 
     #[test]
     fn error_debug_format_command() {

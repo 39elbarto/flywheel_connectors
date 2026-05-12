@@ -1531,7 +1531,7 @@ mod tests {
         };
         let se = structured_from_fcp_error(&err);
         assert!(se.retryable);
-        assert!(se.details.as_ref().unwrap()["service"] == "github");
+        assert_eq!(se.details.as_ref().unwrap()["service"], "github");
     }
 
     #[test]

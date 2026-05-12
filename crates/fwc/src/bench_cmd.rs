@@ -3200,30 +3200,30 @@ mod tests {
 
     #[test]
     fn output_format_equality() {
-        assert!(OutputFormat::Json == OutputFormat::Json);
-        assert!(OutputFormat::Human == OutputFormat::Human);
-        assert!(OutputFormat::Json != OutputFormat::Human);
+        assert_eq!(OutputFormat::Json, OutputFormat::Json);
+        assert_eq!(OutputFormat::Human, OutputFormat::Human);
+        assert_ne!(OutputFormat::Json, OutputFormat::Human);
     }
 
     #[test]
     fn mesh_path_equality() {
-        assert!(MeshPath::Direct == MeshPath::Direct);
-        assert!(MeshPath::Derp == MeshPath::Derp);
-        assert!(MeshPath::Direct != MeshPath::Derp);
+        assert_eq!(MeshPath::Direct, MeshPath::Direct);
+        assert_eq!(MeshPath::Derp, MeshPath::Derp);
+        assert_ne!(MeshPath::Direct, MeshPath::Derp);
     }
 
     #[test]
     fn cbor_target_equality() {
-        assert!(CborTarget::All == CborTarget::All);
-        assert!(CborTarget::SchemaHash == CborTarget::SchemaHash);
-        assert!(CborTarget::Serialize != CborTarget::Deserialize);
+        assert_eq!(CborTarget::All, CborTarget::All);
+        assert_eq!(CborTarget::SchemaHash, CborTarget::SchemaHash);
+        assert_ne!(CborTarget::Serialize, CborTarget::Deserialize);
     }
 
     #[test]
     fn primitive_target_equality() {
-        assert!(PrimitiveTarget::All == PrimitiveTarget::All);
-        assert!(PrimitiveTarget::ObjectId == PrimitiveTarget::ObjectId);
-        assert!(PrimitiveTarget::SessionMac != PrimitiveTarget::FcpsFrame);
+        assert_eq!(PrimitiveTarget::All, PrimitiveTarget::All);
+        assert_eq!(PrimitiveTarget::ObjectId, PrimitiveTarget::ObjectId);
+        assert_ne!(PrimitiveTarget::SessionMac, PrimitiveTarget::FcpsFrame);
     }
 
     // ── placeholder with format! name ───────────────────────────────────

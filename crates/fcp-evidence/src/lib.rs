@@ -181,6 +181,28 @@ pub use high_core_swarm_evidence::{
     rank_swarm_proof_debt,
 };
 
+// ── Agent Readiness Evidence (y2mlu.1) ────────────────────────────
+
+pub mod agent_readiness;
+
+pub use agent_readiness::{
+    AGENT_READINESS_EVENT_SCHEMA, AGENT_READINESS_REPORT_SCHEMA, AgentMailReadiness,
+    AgentReadinessError, AgentReadinessJsonlEvent, AgentReadinessPolicyMapping,
+    AgentReadinessProbes, AgentReadinessReport, BeadsReadiness, DiskMountState, DiskReadiness,
+    ForbiddenAgentAction, GitReadiness, LockState, PathKind, PathRedactionScope, ProbeResult,
+    RchReadiness, ReadinessAction, ReadinessDecision, ReadinessEventKind, ReadinessOperatingMode,
+    ReadinessRedactionContract, ReadinessStatus, ReadinessSubsystem, RedactedPath, RedactionTarget,
+    TelemetryState, WorktreeReadiness,
+};
+
+pub mod agent_readiness_probe;
+
+pub use agent_readiness_probe::{
+    AGENT_READINESS_PROBE_PLAN_SCHEMA, AgentStartupProbePlan, NoNetworkProbeFixture,
+    NoNetworkProbeScenario, ProbeCommandPlan, ProbeExecutionMode, ProbeMutationScope,
+    ProbeNetworkPolicy, ProbeRetryPolicy,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

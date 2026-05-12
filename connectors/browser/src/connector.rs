@@ -223,7 +223,8 @@ impl BrowserConnector {
             .map_err(|e| FcpError::Internal {
                 message: format!("Failed to create HTTP client: {e}"),
             })?
-            .with_browser_url(&config.browser_url);
+            .with_browser_url(&config.browser_url)
+            .continue_direct_cdp_manager_from(self.client.as_ref());
         if let Some(launcher_config) = config.rust_owned_launcher.clone() {
             client = client
                 .with_rust_owned_launcher(launcher_config)

@@ -265,6 +265,22 @@ type = "boolean"
 description = "CSS selector to extract from (default: body)"
 type = "string"
 
+[provides.operations."browser.extract_text".input_schema.properties.output_mode]
+default = "text"
+description = "Connector post-processing mode after extraction guardrails"
+enum = [
+    "text",
+    "markdown",
+]
+type = "string"
+
+[provides.operations."browser.extract_text".input_schema.properties.max_chars]
+default = 200000
+description = "Maximum output characters after invisible Unicode stripping"
+maximum = 1000000
+minimum = 1
+type = "integer"
+
 [provides.operations."browser.extract_text".output_schema]
 required = ["text"]
 type = "object"
@@ -274,6 +290,25 @@ type = "string"
 
 [provides.operations."browser.extract_text".output_schema.properties.word_count]
 type = "integer"
+
+[provides.operations."browser.extract_text".output_schema.properties.output_mode]
+enum = [
+    "text",
+    "markdown",
+]
+type = "string"
+
+[provides.operations."browser.extract_text".output_schema.properties.guardrails]
+description = "Readable-content bounds and sanitization decisions"
+type = "object"
+
+[provides.operations."browser.extract_text".output_schema.properties.external_content]
+description = "Taint metadata for untrusted browser page text"
+type = "object"
+
+[provides.operations."browser.extract_text".output_schema.properties.readability]
+description = "Readable-content extraction decision metadata"
+type = "object"
 
 [provides.operations."browser.extract_text".network_constraints]
 host_allow = [
@@ -544,6 +579,11 @@ type = "boolean"
 default = true
 type = "boolean"
 
+[provides.operations."browser.render_pdf".input_schema.properties.max_pages]
+description = "Reject rendered PDFs with more pages than this cap"
+minimum = 1
+type = "integer"
+
 [provides.operations."browser.render_pdf".output_schema]
 required = [
     "pdf_data",
@@ -557,6 +597,14 @@ type = "integer"
 [provides.operations."browser.render_pdf".output_schema.properties.pdf_data]
 description = "Base64-encoded PDF"
 type = "string"
+
+[provides.operations."browser.render_pdf".output_schema.properties.external_content]
+description = "Taint metadata for untrusted rendered browser output"
+type = "object"
+
+[provides.operations."browser.render_pdf".output_schema.properties.document_extraction]
+description = "Document extraction decision and cap metadata"
+type = "object"
 
 [provides.operations."browser.render_pdf".network_constraints]
 host_allow = [

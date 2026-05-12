@@ -4162,6 +4162,17 @@ impl BrowserClient {
         self
     }
 
+    #[must_use]
+    pub(crate) fn continue_direct_cdp_manager_from(mut self, previous: Option<&Self>) -> Self {
+        if let Some(previous) = previous
+            && let Ok(manager) = previous.direct_cdp_manager.lock()
+            && !manager.shutdown
+        {
+            self.direct_cdp_manager = Arc::clone(&previous.direct_cdp_manager);
+        }
+        self
+    }
+
     /// Enable the Rust-owned browser launcher supervisor for proxy operations.
     pub fn with_rust_owned_launcher(
         mut self,
@@ -5896,6 +5907,28 @@ mod tests {
         assert!(!jsonl.contains("page-alpha"));
         assert!(!jsonl.contains("page-beta"));
         assert!(!jsonl.contains("ws://127.0.0.1:9222/devtools/page/page"));
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_direct_cdp_manager_continues_across_reconfigured_client() -> BrowserResult<()> {
+        let original =
+            BrowserClient::new(None)?.with_browser_url("ws://127.0.0.1:9/devtools/page/page-alpha");
+        assert!(original.health_check().await.is_err());
+
+        let reconfigured = BrowserClient::new(None)?
+            .with_browser_url("ws://127.0.0.1:9/devtools/page/page-beta")
+            .continue_direct_cdp_manager_from(Some(&original));
+        assert!(reconfigured.health_check().await.is_err());
+
+        let jsonl = reconfigured.direct_cdp_manager_events_jsonl()?;
+        assert!(jsonl.contains("\"event_kind\":\"stale_target_recovery\""));
+        assert!(jsonl.contains("\"operation_id\":\"browser.health_check\""));
+        assert!(jsonl.contains(
+            "\"current_tab_decision\":\"stale_target_recovered_and_current_tab_updated\""
+        ));
+        assert!(!jsonl.contains("page-alpha"));
+        assert!(!jsonl.contains("page-beta"));
         Ok(())
     }
 

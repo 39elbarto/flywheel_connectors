@@ -105,6 +105,57 @@ The current Browser README slice documents the existing runtime surface:
 - readable-content and document-output guardrails
 - deterministic integration and real-browser proof surfaces
 
+## Readable And Document Extraction Parity Decision
+
+The Browser connector adopts the OpenClaw-style readable-content guardrail
+shape where it fits the FCP browser-control boundary, and deliberately defers
+the parts that would turn `fcp.browser` into a general web-fetch or document
+processing runtime.
+
+Reference context: OpenClaw documents `web_fetch` as plain HTTP fetch plus
+readable extraction, while JS-heavy or login-protected pages are routed to the
+Browser tool instead. See <https://docs.openclaw.ai/tools/web-fetch> and
+<https://docs.openclaw.ai/browser>.
+
+Adopted for `browser.extract_text`:
+
+- Plain-text and markdown output modes are part of the manifest contract.
+- Invisible Unicode stripping is required before output is returned.
+- The default output cap is `200000` characters and the absolute request cap is
+  `1000000` characters.
+- Output metadata records guardrail decisions, external-content taint, and the
+  readability decision so downstream agents can distinguish trusted connector
+  metadata from hostile page content.
+
+Adopted for `browser.render_pdf`:
+
+- Callers can request a `max_pages` bound.
+- Runtime output records rendered-PDF external-content metadata and an explicit
+  document-extraction decision.
+- PDF text extraction is not silently implied by PDF rendering.
+
+Consciously deferred or rejected for this connector:
+
+- Raw HTTP `web_fetch`-style fetching is not adopted here. `fcp.browser` acts on
+  an already-controlled browser target; generic HTTP fetch belongs in a
+  web-fetch, Firecrawl-like, or shared extraction surface with its own network
+  policy and fixture matrix.
+- Raw-HTML parser bounds such as exact DOM nesting-depth rejection are not
+  adopted in the Browser connector's post-render text path. The connector reads
+  browser-produced page output through the control boundary instead of accepting
+  arbitrary untrusted HTML blobs for tree parsing.
+- PDF text extraction, OCR, image-render dependency fallbacks, and document
+  page-selection extraction are deferred to a Rust/self-contained document
+  extraction helper or connector. They must not introduce Node, Python, or other
+  interpreted runtime dependencies.
+- Browser automation remains separate from content crawling, robots policy,
+  search indexing, and bot-circumvention policy.
+
+The current test contract exercises the adopted surface through deterministic
+loopback readable-content and print/PDF fixtures, oversized output denial,
+capability denial before control routing, timeout/cancellation evidence, stale
+session fencing, shutdown cleanup, and redaction-safe JSONL logs.
+
 ## Auth And Scope Boundary
 
 - Authentication mechanisms: none, browser-control API key, or host credential reference.
@@ -132,7 +183,7 @@ The current Browser README slice documents the existing runtime surface:
 - Runtime browser-control host allowlist: loopback plus `*.browser.mesh.internal` and `*.browser.flywheel.internal`.
 - Non-loopback browser-control URLs must use HTTPS.
 - Direct DevTools WebSocket support is limited to loopback page targets.
-- Direct DevTools target metadata records the configured page target as the current-tab/export target and disables stale-target recovery for raw page WebSocket mode.
+- Direct DevTools target metadata records the configured page target as the current-tab/export target; reconfiguring an active connector to a new loopback page target preserves the Rust manager and records stale-target recovery before the next operation connects.
 - Raw DevTools discovery endpoints are rejected as control-plane bases.
 - Manifest target-page host allowlist currently includes `*.github.com`, `*.google.com`, `*.wikipedia.org`, and `*.amazonaws.com`.
 - Manifest target-page ports are `80` and `443`.

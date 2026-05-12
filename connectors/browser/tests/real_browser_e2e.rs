@@ -461,6 +461,7 @@ async fn run_live_browser_suite(
         Some(browser) => devtools_browser_version(&browser.devtools_http_base).await,
         None => None,
     };
+    let mut stale_target_recovery_evidence = Value::Null;
 
     if let Err(error) = connector
         .handle_configure(json!({ "browser_url": control_url.as_str() }))
@@ -528,6 +529,143 @@ async fn run_live_browser_suite(
         json!({ "expression": "document.title" }),
     )
     .await?;
+
+    invoke_and_log(
+        &connector,
+        &signing_key,
+        correlation_id,
+        &mut logger,
+        &evidence,
+        "browser.navigate",
+        json!({ "url": site.url("/readable-fixture"), "wait_until": "load", "timeout_ms": 10_000 }),
+    )
+    .await?;
+    invoke_and_log(
+        &connector,
+        &signing_key,
+        correlation_id,
+        &mut logger,
+        &evidence,
+        "browser.wait_for_selector",
+        json!({ "selector": "#readable-fixture", "state": "visible", "timeout_ms": 5_000 }),
+    )
+    .await?;
+    let bounded_readable = invoke_and_log(
+        &connector,
+        &signing_key,
+        correlation_id,
+        &mut logger,
+        &evidence,
+        "browser.extract_text",
+        json!({
+            "selector": "#readable-fixture",
+            "include_hidden": false,
+            "output_mode": "text",
+            "max_chars": 120
+        }),
+    )
+    .await?;
+    assert_readable_output(&bounded_readable, 120, true, "text")
+        .map_err(|error| (logger.drain(), error))?;
+    invoke_expected_error_and_log(
+        &connector,
+        &signing_key,
+        correlation_id,
+        &mut logger,
+        &evidence,
+        ExpectedErrorOperation {
+            operation: "browser.extract_text",
+            input: json!({
+                "selector": "#readable-fixture",
+                "output_mode": "text",
+                "max_chars": 1_000_001
+            }),
+            expected_reason: "oversized_content_denial_expected",
+        },
+    )
+    .await?;
+
+    invoke_and_log(
+        &connector,
+        &signing_key,
+        correlation_id,
+        &mut logger,
+        &evidence,
+        "browser.navigate",
+        json!({ "url": site.url("/print-fixture"), "wait_until": "load", "timeout_ms": 10_000 }),
+    )
+    .await?;
+    invoke_and_log(
+        &connector,
+        &signing_key,
+        correlation_id,
+        &mut logger,
+        &evidence,
+        "browser.wait_for_selector",
+        json!({ "selector": "#print-fixture", "state": "visible", "timeout_ms": 5_000 }),
+    )
+    .await?;
+    let print_pdf = invoke_and_log(
+        &connector,
+        &signing_key,
+        correlation_id,
+        &mut logger,
+        &evidence,
+        "browser.render_pdf",
+        json!({ "format": "a4", "print_background": true, "max_pages": 100 }),
+    )
+    .await?;
+    assert_multi_page_pdf_output(&print_pdf).map_err(|error| (logger.drain(), error))?;
+    invoke_expected_error_and_log(
+        &connector,
+        &signing_key,
+        correlation_id,
+        &mut logger,
+        &evidence,
+        ExpectedErrorOperation {
+            operation: "browser.render_pdf",
+            input: json!({ "format": "a4", "print_background": true, "max_pages": 1 }),
+            expected_reason: "render_pdf_max_pages_denial_expected",
+        },
+    )
+    .await?;
+
+    invoke_denied_capability_and_log(
+        &connector,
+        &signing_key,
+        correlation_id,
+        &mut logger,
+        &evidence,
+        DeniedCapabilityOperation {
+            operation: "browser.evaluate_js",
+            grant_operation: "browser.navigate",
+            input: json!({ "expression": "document.cookie" }),
+            expected_reason: "denied_capability_before_control_route_expected",
+        },
+    )
+    .await?;
+
+    invoke_and_log(
+        &connector,
+        &signing_key,
+        correlation_id,
+        &mut logger,
+        &evidence,
+        "browser.navigate",
+        json!({ "url": page_url, "wait_until": "networkidle", "timeout_ms": 10_000 }),
+    )
+    .await?;
+    invoke_and_log(
+        &connector,
+        &signing_key,
+        correlation_id,
+        &mut logger,
+        &evidence,
+        "browser.wait_for_selector",
+        json!({ "selector": "#ready", "state": "visible", "timeout_ms": 5_000 }),
+    )
+    .await?;
+
     invoke_and_log(
         &connector,
         &signing_key,
@@ -585,7 +723,7 @@ async fn run_live_browser_suite(
     let pdf_artifact =
         persist_base64_artifact(&pdf_path, pdf.get("pdf_data").and_then(Value::as_str));
 
-    invoke_and_log(
+    let readable = invoke_and_log(
         &connector,
         &signing_key,
         correlation_id,
@@ -600,6 +738,8 @@ async fn run_live_browser_suite(
         }),
     )
     .await?;
+    assert_readable_output(&readable, 2_000, false, "markdown")
+        .map_err(|error| (logger.drain(), error))?;
     invoke_and_log(
         &connector,
         &signing_key,
@@ -725,6 +865,114 @@ async fn run_live_browser_suite(
     )
     .await?;
 
+    if let Some(browser) = launched_browser.as_ref() {
+        let recovered_control_url = create_page_websocket_url(&browser.devtools_http_base)
+            .await
+            .map_err(|error| (logger.drain(), error))?;
+        let recovered_endpoint_kind =
+            classify_control_endpoint(Some(recovered_control_url.as_str())).reason;
+        let recovered_evidence =
+            OperationEvidenceContext::new(recovered_control_url.as_str(), recovered_endpoint_kind);
+        if recovered_evidence.target_id_hash == evidence.target_id_hash {
+            return Err((
+                logger.drain(),
+                "stale target recovery target hash matched the original direct-CDP page"
+                    .to_string(),
+            ));
+        }
+
+        let reconfigure_start = Instant::now();
+        let reconfigure_output = connector
+            .handle_configure(json!({ "browser_url": recovered_control_url.as_str() }))
+            .await
+            .map_err(|error| {
+                logger.push(operation_log_entry(
+                    correlation_id,
+                    "browser.configure",
+                    HarnessStatus::Failed,
+                    elapsed_ms(reconfigure_start),
+                    json!({
+                        "operation": "browser.configure",
+                        "target_id": "direct-cdp-recovered-page",
+                        "target_id_hash": recovered_evidence.target_id_hash.as_str(),
+                        "endpoint_kind": recovered_evidence.endpoint_kind.as_str(),
+                        "command_line": recovered_evidence.command_line.as_str(),
+                        "git_revision": recovered_evidence.git_revision.as_str(),
+                        "url_redaction_decision": redact_url_for_artifact(recovered_control_url.as_str()),
+                        "endpoint_policy_decision": "direct_cdp_websocket",
+                        "navigation_policy_decision": "not_applicable",
+                        "error": error.to_string(),
+                        "retry_backoff": { "attempt": 1, "next_delay_ms": null },
+                        "output": { "byte_count": 0 },
+                        "stale_target_recovery": {
+                            "expected": true,
+                            "manager_event_source": DIRECT_CDP_MANAGER_EVENTS_ARTIFACT,
+                        },
+                    }),
+                ));
+                (logger.drain(), error.to_string())
+            })?;
+        logger.push(operation_log_entry(
+            correlation_id,
+            "browser.configure",
+            HarnessStatus::Passed,
+            elapsed_ms(reconfigure_start),
+            json!({
+                "operation": "browser.configure",
+                "target_id": "direct-cdp-recovered-page",
+                "target_id_hash": recovered_evidence.target_id_hash.as_str(),
+                "endpoint_kind": recovered_evidence.endpoint_kind.as_str(),
+                "command_line": recovered_evidence.command_line.as_str(),
+                "git_revision": recovered_evidence.git_revision.as_str(),
+                "url_redaction_decision": redact_url_for_artifact(recovered_control_url.as_str()),
+                "endpoint_policy_decision": "direct_cdp_websocket",
+                "navigation_policy_decision": "not_applicable",
+                "retry_backoff": { "attempt": 1, "next_delay_ms": null },
+                "output": reconfigure_output,
+                "stale_target_recovery": {
+                    "expected": true,
+                    "original_target_id_hash": evidence.target_id_hash.as_str(),
+                    "recovered_target_id_hash": recovered_evidence.target_id_hash.as_str(),
+                    "manager_event_source": DIRECT_CDP_MANAGER_EVENTS_ARTIFACT,
+                },
+            }),
+        ));
+
+        let recovered_page_url = site.url("/readable-fixture");
+        invoke_and_log(
+            &connector,
+            &signing_key,
+            correlation_id,
+            &mut logger,
+            &recovered_evidence,
+            "browser.navigate",
+            json!({ "url": recovered_page_url, "wait_until": "load", "timeout_ms": 10_000 }),
+        )
+        .await?;
+        invoke_and_log(
+            &connector,
+            &signing_key,
+            correlation_id,
+            &mut logger,
+            &recovered_evidence,
+            "browser.wait_for_selector",
+            json!({ "selector": "#readable-fixture", "state": "visible", "timeout_ms": 5_000 }),
+        )
+        .await?;
+
+        stale_target_recovery_evidence = json!({
+            "operation": "browser.navigate",
+            "configure_operation": "browser.configure",
+            "original_target_id_hash": evidence.target_id_hash.as_str(),
+            "recovered_target_id_hash": recovered_evidence.target_id_hash.as_str(),
+            "original_endpoint": redact_url_for_artifact(control_url.as_str()),
+            "recovered_endpoint": redact_url_for_artifact(recovered_control_url.as_str()),
+            "current_tab_decision": "stale_target_recovered_and_current_tab_updated",
+            "manager_event_source": DIRECT_CDP_MANAGER_EVENTS_ARTIFACT,
+            "direct_cdp_manager_continuity": "preserved_across_configure",
+        });
+    }
+
     logger.push(blocked_navigation_log_entry(correlation_id));
 
     let shutdown = connector
@@ -774,6 +1022,15 @@ async fn run_live_browser_suite(
     ));
 
     let direct_cdp_manager_events_jsonl = direct_cdp_manager_events_jsonl(&connector);
+    if !stale_target_recovery_evidence.is_null()
+        && let Some(jsonl) = direct_cdp_manager_events_jsonl.as_deref()
+        && !jsonl.contains("\"event_kind\":\"stale_target_recovery\"")
+    {
+        return Err((
+            logger.drain(),
+            "direct CDP manager events did not include stale_target_recovery".to_string(),
+        ));
+    }
     let manager_event_count = direct_cdp_manager_events_jsonl
         .as_deref()
         .map_or(0, |jsonl| jsonl.lines().count());
@@ -795,6 +1052,11 @@ async fn run_live_browser_suite(
         "target_id_hash": evidence.target_id_hash.as_str(),
         "operations_exercised": LIVE_OPERATIONS,
         "blocked_navigation_exercised": true,
+        "denied_capability_exercised": true,
+        "oversized_content_denial_exercised": true,
+        "stale_target_recovery_exercised": !stale_target_recovery_evidence.is_null(),
+        "stale_target_recovery_evidence": stale_target_recovery_evidence,
+        "deterministic_document_fixtures_exercised": ["readable-fixture", "print-fixture"],
         "timeout_cancellation_exercised": true,
         "proxy_fail_closed_exercised": true,
         "endpoint_kind": evidence.endpoint_kind.as_str(),
@@ -991,6 +1253,28 @@ async fn discover_page_websocket_url(devtools_http_base: &str) -> Result<String,
     }
 }
 
+async fn create_page_websocket_url(devtools_http_base: &str) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let new_target_url = format!("{devtools_http_base}/json/new?about:blank");
+    let response = client
+        .put(&new_target_url)
+        .send()
+        .await
+        .map_err(|error| format!("create Chrome/Chromium page target: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!(
+            "Chrome/Chromium refused page target creation at {new_target_url}: status {status}"
+        ));
+    }
+    let target = response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("decode Chrome/Chromium page target: {error}"))?;
+    page_websocket_url_from_devtools_target(&target)
+        .ok_or_else(|| "Chrome/Chromium did not return a page WebSocket for new target".to_string())
+}
+
 async fn devtools_browser_version(devtools_http_base: &str) -> Option<String> {
     let client = reqwest::Client::new();
     let version_url = format!("{devtools_http_base}/json/version");
@@ -1009,14 +1293,19 @@ async fn devtools_browser_version(devtools_http_base: &str) -> Option<String> {
 }
 
 fn page_websocket_url_from_devtools_targets(targets: &Value) -> Option<String> {
-    targets.as_array()?.iter().find_map(|target| {
-        let target_type = target.get("type").and_then(Value::as_str)?;
-        let websocket_url = target.get("webSocketDebuggerUrl").and_then(Value::as_str)?;
-        (target_type == "page"
-            && websocket_url.starts_with("ws://")
-            && websocket_url.contains("/devtools/page/"))
-        .then(|| websocket_url.to_string())
-    })
+    targets
+        .as_array()?
+        .iter()
+        .find_map(page_websocket_url_from_devtools_target)
+}
+
+fn page_websocket_url_from_devtools_target(target: &Value) -> Option<String> {
+    let target_type = target.get("type").and_then(Value::as_str)?;
+    let websocket_url = target.get("webSocketDebuggerUrl").and_then(Value::as_str)?;
+    (target_type == "page"
+        && websocket_url.starts_with("ws://")
+        && websocket_url.contains("/devtools/page/"))
+    .then(|| websocket_url.to_string())
 }
 
 #[cfg(feature = "test-support")]
@@ -1028,7 +1317,7 @@ fn direct_cdp_manager_events_jsonl(connector: &BrowserConnector) -> Option<Strin
 }
 
 #[cfg(not(feature = "test-support"))]
-fn direct_cdp_manager_events_jsonl(_connector: &BrowserConnector) -> Option<String> {
+const fn direct_cdp_manager_events_jsonl(_connector: &BrowserConnector) -> Option<String> {
     None
 }
 
@@ -1171,6 +1460,13 @@ struct ExpectedErrorOperation {
     expected_reason: &'static str,
 }
 
+struct DeniedCapabilityOperation {
+    operation: &'static str,
+    grant_operation: &'static str,
+    input: Value,
+    expected_reason: &'static str,
+}
+
 async fn invoke_expected_error_and_log(
     connector: &BrowserConnector,
     signing_key: &Ed25519SigningKey,
@@ -1232,6 +1528,168 @@ async fn invoke_expected_error_and_log(
             Ok(())
         }
     }
+}
+
+async fn invoke_denied_capability_and_log(
+    connector: &BrowserConnector,
+    signing_key: &Ed25519SigningKey,
+    correlation_id: &str,
+    logger: &mut E2eLogger,
+    evidence: &OperationEvidenceContext,
+    denied: DeniedCapabilityOperation,
+) -> Result<(), (Vec<E2eLogEntry>, String)> {
+    let start = Instant::now();
+    let operation = denied.operation;
+    let grant_operation = denied.grant_operation;
+    let capability_grant = generate_valid_grant(signing_key, connector, grant_operation);
+    let mut request = json!({
+        "operation": operation,
+        "input": denied.input,
+        "capability_token": capability_grant
+    });
+    if requires_execution_approval(operation) {
+        request["approval_token"] = json!(generate_execution_approval(operation));
+    }
+
+    match connector.handle_invoke(request).await {
+        Ok(output) => {
+            let error = format!(
+                "{operation} unexpectedly succeeded during {} with grant for {grant_operation}",
+                denied.expected_reason
+            );
+            logger.push(operation_log_entry(
+                correlation_id,
+                operation,
+                HarnessStatus::Failed,
+                elapsed_ms(start),
+                operation_details(
+                    operation,
+                    evidence,
+                    HarnessStatus::Failed,
+                    &output,
+                    Some(error.clone()),
+                ),
+            ));
+            Err((logger.drain(), error))
+        }
+        Err(error) => {
+            let error_text = error.to_string();
+            let mut details = operation_details(
+                operation,
+                evidence,
+                HarnessStatus::Passed,
+                &json!({
+                    "expected_error": error_text,
+                    "expected_reason": denied.expected_reason
+                }),
+                None,
+            );
+            details["capability_decision"] = json!("denied_before_control_route");
+            details["granted_for_operation"] = json!(grant_operation);
+            details["worker_request_sent"] = json!(false);
+            logger.push(operation_log_entry(
+                correlation_id,
+                operation,
+                HarnessStatus::Passed,
+                elapsed_ms(start),
+                details,
+            ));
+            Ok(())
+        }
+    }
+}
+
+fn assert_readable_output(
+    output: &Value,
+    requested_max_chars: u64,
+    expect_truncated: bool,
+    expected_output_mode: &str,
+) -> Result<(), String> {
+    let text = output
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "extract_text output must include text".to_string())?;
+    if text.chars().count() > usize::try_from(requested_max_chars).unwrap_or(usize::MAX) {
+        return Err(format!(
+            "extract_text exceeded requested max_chars {requested_max_chars}: {} chars",
+            text.chars().count()
+        ));
+    }
+    if text.contains('\u{200B}') {
+        return Err("extract_text output retained zero-width content".to_string());
+    }
+    let guardrails = output
+        .get("guardrails")
+        .ok_or_else(|| "extract_text output must include guardrails".to_string())?;
+    if guardrails
+        .get("requested_max_chars")
+        .and_then(Value::as_u64)
+        != Some(requested_max_chars)
+    {
+        return Err("extract_text guardrails did not echo requested_max_chars".to_string());
+    }
+    if guardrails.get("truncated").and_then(Value::as_bool) != Some(expect_truncated) {
+        return Err(format!(
+            "extract_text guardrails truncated did not match {expect_truncated}"
+        ));
+    }
+    if guardrails
+        .get("stripped_invisible_chars")
+        .and_then(Value::as_u64)
+        .is_some_and(|count| count > 0)
+        != expect_truncated
+    {
+        return Err(
+            "extract_text guardrails did not prove invisible-character stripping".to_string(),
+        );
+    }
+    if output.get("output_mode").and_then(Value::as_str) != Some(expected_output_mode) {
+        return Err(format!(
+            "extract_text output_mode did not match {expected_output_mode}"
+        ));
+    }
+    if output
+        .pointer("/external_content/kind")
+        .and_then(Value::as_str)
+        != Some("page_text")
+    {
+        return Err("extract_text external_content kind must be page_text".to_string());
+    }
+    if output
+        .pointer("/readability/decision")
+        .and_then(Value::as_str)
+        != Some("adopted_for_active_page_text")
+    {
+        return Err("extract_text readability decision was not recorded".to_string());
+    }
+    Ok(())
+}
+
+fn assert_multi_page_pdf_output(output: &Value) -> Result<(), String> {
+    let page_count = output
+        .get("page_count")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "render_pdf output must include page_count".to_string())?;
+    if page_count <= 1 {
+        return Err(format!(
+            "print fixture should produce a multi-page PDF, got page_count {page_count}"
+        ));
+    }
+    if output
+        .pointer("/external_content/kind")
+        .and_then(Value::as_str)
+        != Some("rendered_pdf")
+    {
+        return Err("render_pdf external_content kind must be rendered_pdf".to_string());
+    }
+    if output
+        .pointer("/document_extraction/decision")
+        .and_then(Value::as_str)
+        != Some("deferred")
+    {
+        return Err("render_pdf document extraction decision was not recorded".to_string());
+    }
+    Ok(())
 }
 
 fn operation_details(
@@ -1592,6 +2050,18 @@ fn redact_url_for_artifact(raw_url: &str) -> UrlRedactionDecision {
         redacted_fields.push("fragment".to_string());
         parsed.set_fragment(None);
     }
+    if is_direct_cdp_page_websocket_path(parsed.path())
+        && let Some(target_id) = parsed
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .map(str::to_string)
+    {
+        redacted_fields.push("direct_cdp_target_id".to_string());
+        parsed.set_path(&format!(
+            "/devtools/page/target-hash-{}",
+            short_redaction_hash(&target_id)
+        ));
+    }
     UrlRedactionDecision {
         redacted_url: parsed.to_string(),
         secret_removed: !redacted_fields.is_empty(),
@@ -1908,10 +2378,31 @@ fn serve_loopback_request(mut stream: TcpStream) {
     let n = stream.read(&mut buffer).unwrap_or(0);
     let request = String::from_utf8_lossy(&buffer[..n]);
     let path = request.split_whitespace().nth(1).unwrap_or("/");
-    let body = if path == "/submit" {
-        "<html><body><div id=\"ready\">submitted</div></body></html>"
-    } else {
-        r#"
+    let response = loopback_response_for_path(path);
+    let wire_response = format!(
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\nSet-Cookie: fcp_browser_e2e=loopback; Path=/; SameSite=Lax\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        response.status,
+        response.content_type,
+        response.body.len(),
+        response.body
+    );
+    let _ = stream.write_all(wire_response.as_bytes());
+    let _ = stream.shutdown(Shutdown::Both);
+}
+
+struct LoopbackResponse {
+    status: &'static str,
+    content_type: &'static str,
+    body: String,
+}
+
+fn loopback_response_for_path(path: &str) -> LoopbackResponse {
+    let path = normalize_loopback_request_path(path);
+    let body = match path.as_str() {
+        "/submit" => "<html><body><div id=\"ready\">submitted</div></body></html>".to_string(),
+        "/readable-fixture" => readable_fixture_body(),
+        "/print-fixture" => print_fixture_body(),
+        _ => r#"
 <!doctype html>
 <html>
   <head><title>FCP Browser E2E</title></head>
@@ -1929,14 +2420,65 @@ fn serve_loopback_request(mut stream: TcpStream) {
   </body>
 </html>
 "#
+        .to_string(),
     };
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nSet-Cookie: fcp_browser_e2e=loopback; Path=/; SameSite=Lax\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    let _ = stream.write_all(response.as_bytes());
-    let _ = stream.shutdown(Shutdown::Both);
+    LoopbackResponse {
+        status: "200 OK",
+        content_type: "text/html; charset=utf-8",
+        body,
+    }
+}
+
+fn normalize_loopback_request_path(raw_path: &str) -> String {
+    if let Ok(url) = Url::parse(raw_path) {
+        return url.path().to_string();
+    }
+    raw_path.split('?').next().unwrap_or(raw_path).to_string()
+}
+
+fn readable_fixture_body() -> String {
+    let oversized_text = " visible bounded browser content with hostile markup nearby".repeat(64);
+    format!(
+        r#"<!doctype html>
+<html>
+  <head>
+    <title>Readable Fixture</title>
+    <style>.hidden {{ display: none; }}</style>
+    <script>document.documentElement.dataset.scriptRan = "true";</script>
+  </head>
+  <body>
+    <main id="readable-fixture">
+      <section><article><div><p>Readable alpha &#8203; beta.</p></div></article></section>
+      <div class="hidden">Hidden content must not appear in visible extraction.</div>
+      <noscript>Noscript fallback text remains inert document text.</noscript>
+      <p>{oversized_text}</p>
+    </main>
+  </body>
+</html>"#
+    )
+}
+
+fn print_fixture_body() -> String {
+    r#"<!doctype html>
+<html>
+  <head>
+    <title>Print Fixture</title>
+    <style>
+      @page { size: A4; margin: 0.5in; }
+      body { font-family: sans-serif; }
+      .page { break-after: page; min-height: 10in; }
+      .page:last-child { break-after: auto; }
+    </style>
+  </head>
+  <body>
+    <main id="print-fixture">
+      <section class="page"><h1>Document page one</h1><p>Browser render proof.</p></section>
+      <section class="page"><h1>Document page two</h1><p>Multi-page guardrail proof.</p></section>
+      <section class="page"><h1>Document page three</h1><p>Document extraction remains deferred.</p></section>
+    </main>
+  </body>
+</html>"#
+        .to_string()
 }
 
 #[test]
@@ -2196,6 +2738,24 @@ fn url_redaction_removes_credentials_query_and_fragment() {
     assert!(decision.redacted_fields.contains(&"fragment".to_string()));
     assert!(!decision.redacted_url.contains("credential"));
     assert!(!decision.redacted_url.contains("trace_id"));
+}
+
+#[test]
+fn url_redaction_hashes_direct_cdp_page_target_ids() {
+    let decision = redact_url_for_artifact("ws://127.0.0.1:9222/devtools/page/raw-target-secret");
+
+    assert!(decision.secret_removed);
+    assert!(
+        decision
+            .redacted_fields
+            .contains(&"direct_cdp_target_id".to_string())
+    );
+    assert!(
+        decision
+            .redacted_url
+            .contains("/devtools/page/target-hash-")
+    );
+    assert!(!decision.redacted_url.contains("raw-target-secret"));
 }
 
 #[test]

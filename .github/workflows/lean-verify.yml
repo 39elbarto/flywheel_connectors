@@ -1,0 +1,36 @@
+name: Lean Verify
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  lean-verify:
+    name: make lean-verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: leanprover/lean-action@v1
+        with:
+          build: false
+          test: false
+          lint: false
+          use-mathlib-cache: false
+
+      - name: Run Lean proof gate
+        run: |
+          mkdir -p artifacts/lean
+          make lean-verify | tee "artifacts/lean/${GITHUB_SHA}.txt"
+
+      - name: Upload Lean proof artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lean-verify-${{ github.sha }}
+          path: artifacts/lean/
+          retention-days: 14

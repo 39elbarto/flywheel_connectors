@@ -1168,7 +1168,7 @@ impl ConnectorStateStore for FcpStoreConnectorStateStore {
         connector_id: &ConnectorId,
     ) -> std::result::Result<ConnectorStateCanonicalStatus, ConnectorStateError> {
         self.ensure_requested_connector(connector_id)?;
-        FcpStoreConnectorStateStore::canonical_status(self, None)
+        Self::canonical_status(self, None)
             .await
             .map_err(|err| self.to_connector_state_error(err))
     }

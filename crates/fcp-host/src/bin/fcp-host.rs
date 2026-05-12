@@ -108,14 +108,16 @@ use fcp_policy::{
     RequestDescriptor, TRUTH_PRECEDENCE_DEFAULT_ENV,
 };
 use fcp_prelude::{
-    ApprovalToken, CapabilityConstraints, CapabilityVerifier, CorrelationId,
-    CostEstimateConfidence, CredentialId, Decision, LeasePurpose as CoreLeasePurpose, ObjectId,
-    PolicySimulationInput, ResourceAvailability, RolloutPolicy, SafetyTier, TailscaleNodeId,
-    TransportMode, UsageMetric, UsageMetricKind, ZoneId, ZonePolicyObject,
-    simulate_policy_decision,
+    ApprovalToken, CapabilityConstraints, CapabilityVerifier, ConnectorStateCanonicalStatus,
+    CorrelationId, CostEstimateConfidence, CredentialId, Decision,
+    LeasePurpose as CoreLeasePurpose, ObjectId, PolicySimulationInput, ResourceAvailability,
+    RolloutPolicy, SafetyTier, TailscaleNodeId, TransportMode, UsageMetric, UsageMetricKind,
+    ZoneId, ZonePolicyObject, simulate_policy_decision,
 };
 #[cfg(test)]
-use fcp_prelude::{DecisionReceiptPolicy, ObjectHeader, Provenance, ZoneTransportPolicy};
+use fcp_prelude::{
+    ConnectorStateModel, DecisionReceiptPolicy, ObjectHeader, Provenance, ZoneTransportPolicy,
+};
 use fcp_provider_auth::{
     ApiKeyAuth, AuthError, AuthMethod, AuthMethodKind, AuthProfile, AuthProfileStore,
     InMemoryAuthProfileStore, OAuthAuthCodeAuth, OAuthAuthCodeCallback, OAuthAuthCodeConfig,
@@ -2265,6 +2267,16 @@ fn host_connector_state_explain_payload(
     zone: Option<&ZoneId>,
     state_root: &StdPath,
 ) -> Value {
+    host_connector_state_explain_payload_with_canonical_status(connector_id, zone, state_root, None)
+}
+
+#[must_use]
+fn host_connector_state_explain_payload_with_canonical_status(
+    connector_id: &ConnectorId,
+    zone: Option<&ZoneId>,
+    state_root: &StdPath,
+    canonical_status: Option<&ConnectorStateCanonicalStatus>,
+) -> Value {
     let mut warnings = Vec::new();
     let connector_cache_dir = connector_state_cache_dir(state_root, connector_id);
     let zone_cache_dir = zone.map(|zone| connector_zone_state_dir(state_root, connector_id, zone));
@@ -2277,7 +2289,15 @@ fn host_connector_state_explain_payload(
         || zone_cache_dir.as_deref().is_some_and(StdPath::is_dir)
         || connector_marker.present()
         || zone_marker.is_some_and(ConnectorStateCacheMarkerObservation::present);
-    let canonical_storage = if connector_marker.present()
+    let canonical_status = usable_connector_state_canonical_status(
+        canonical_status,
+        connector_id,
+        zone,
+        &mut warnings,
+    );
+    let canonical_root_present = canonical_status.is_some_and(|status| status.root_present);
+    let canonical_storage = if canonical_root_present
+        || connector_marker.present()
         || zone_marker.is_some_and(ConnectorStateCacheMarkerObservation::present)
     {
         "mesh"
@@ -2285,33 +2305,68 @@ fn host_connector_state_explain_payload(
         "local"
     };
 
-    if !connector_marker.present()
+    if !canonical_root_present
+        && !connector_marker.present()
         && !zone_marker.is_some_and(ConnectorStateCacheMarkerObservation::present)
     {
         warnings.push(
             "No connector state cache marker was found, so host explain treats the local state path as canonical until cache-only markers exist."
-                .to_string(),
+            .to_string(),
         );
     }
-    warnings.push(
-        "Last canonical sequence and mesh replica count are not proven by cache markers; they remain null until the canonical fcp-store route exposes them."
-            .to_string(),
-    );
+    match canonical_status {
+        Some(status) if status.root_present => {
+            if status.mesh_replica_count.is_none() {
+                warnings.push(
+                    "Canonical fcp-store status is available, but mesh replica count is not proven because symbol distribution evidence was not supplied."
+                        .to_string(),
+                );
+            }
+        }
+        _ => warnings.push(
+            "Last canonical sequence and mesh replica count are not proven by cache markers; they remain null until the canonical fcp-store route exposes them."
+                .to_string(),
+        ),
+    }
 
     json!({
         "status": "ok",
         "command": "fcp-host",
         "subcommand": "connector state explain",
         "schema_version": "1.0.0",
-        "source": "host-cache-markers",
+        "source": if canonical_root_present {
+            "host-canonical-state"
+        } else {
+            "host-cache-markers"
+        },
         "connector_id": connector_id.to_string(),
         "state_root": {
             "path": state_root.display().to_string(),
             "source": "host",
         },
         "canonical_storage": canonical_storage,
-        "last_canonical_seq": Value::Null,
-        "mesh_replica_count": Value::Null,
+        "last_canonical_seq": canonical_status
+            .and_then(|status| status.last_canonical_seq)
+            .map_or(Value::Null, Value::from),
+        "mesh_replica_count": canonical_status
+            .and_then(|status| status.mesh_replica_count)
+            .map_or(Value::Null, |count| json!(count)),
+        "canonical_state": {
+            "root_present": canonical_status.is_some_and(|status| status.root_present),
+            "root_object_id": canonical_status
+                .and_then(|status| status.root_object_id)
+                .map(|object_id| object_id.to_string()),
+            "head_object_id": canonical_status
+                .and_then(|status| status.head_object_id)
+                .map(|object_id| object_id.to_string()),
+            "state_schema_version": canonical_status
+                .and_then(|status| status.state_schema_version),
+            "status_source": if canonical_status.is_some() {
+                "fcp-store"
+            } else {
+                "not-supplied"
+            },
+        },
         "local_cache_path": connector_cache_dir.display().to_string(),
         "local_cache_present": local_cache_present,
         "local_cache_marker_present": connector_marker.present(),
@@ -2347,6 +2402,35 @@ fn host_connector_state_explain_payload(
         },
         "warnings": warnings,
     })
+}
+
+fn usable_connector_state_canonical_status<'a>(
+    canonical_status: Option<&'a ConnectorStateCanonicalStatus>,
+    connector_id: &ConnectorId,
+    zone: Option<&ZoneId>,
+    warnings: &mut Vec<String>,
+) -> Option<&'a ConnectorStateCanonicalStatus> {
+    let Some(status) = canonical_status else {
+        return None;
+    };
+    if &status.connector_id != connector_id {
+        warnings.push(
+            "Canonical fcp-store status was supplied for a different connector; ignoring it."
+                .to_string(),
+        );
+        return None;
+    }
+    if status.root_present
+        && let Some(requested_zone) = zone
+        && status.zone_id.as_ref() != Some(requested_zone)
+    {
+        warnings.push(
+            "Canonical fcp-store status was supplied for a different zone; ignoring it."
+                .to_string(),
+        );
+        return None;
+    }
+    Some(status)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -13613,6 +13697,60 @@ deny_ptrace = true
             fcp_store::CONNECTOR_STATE_FALL_THROUGH_EVENT
         );
         assert_eq!(payload["live_host"]["route_available"], true);
+    }
+
+    #[test]
+    fn host_connector_state_explain_payload_reports_canonical_status_evidence() {
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let connector_id = ConnectorId::from_static("fcp.test:state:1.0.0");
+        let zone_id: ZoneId = "z:project:alpha".parse().expect("zone should parse");
+        let root_object_id = ObjectId::from_unscoped_bytes(b"connector-state-root");
+        let head_object_id = ObjectId::from_unscoped_bytes(b"connector-state-head");
+        let status = ConnectorStateCanonicalStatus {
+            connector_id: connector_id.clone(),
+            instance_id: None,
+            zone_id: Some(zone_id.clone()),
+            model: Some(ConnectorStateModel::SingletonWriter),
+            root_present: true,
+            root_object_id: Some(root_object_id),
+            head_object_id: Some(head_object_id),
+            last_canonical_seq: Some(17),
+            state_schema_version: Some(1),
+            mesh_replica_count: Some(2),
+        };
+
+        let payload = host_connector_state_explain_payload_with_canonical_status(
+            &connector_id,
+            Some(&zone_id),
+            tempdir.path(),
+            Some(&status),
+        );
+
+        assert_eq!(payload["source"], "host-canonical-state");
+        assert_eq!(payload["canonical_storage"], "mesh");
+        assert_eq!(payload["last_canonical_seq"], 17);
+        assert_eq!(payload["mesh_replica_count"], 2);
+        assert_eq!(payload["canonical_state"]["root_present"], true);
+        assert_eq!(
+            payload["canonical_state"]["root_object_id"],
+            root_object_id.to_string()
+        );
+        assert_eq!(
+            payload["canonical_state"]["head_object_id"],
+            head_object_id.to_string()
+        );
+        assert_eq!(payload["canonical_state"]["state_schema_version"], 1);
+        assert_eq!(payload["canonical_state"]["status_source"], "fcp-store");
+        assert_eq!(payload["local_cache_present"], false);
+        let warnings = payload["warnings"]
+            .as_array()
+            .expect("warnings should be an array");
+        assert!(
+            warnings.iter().all(|warning| !warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("not proven by cache markers"))),
+            "canonical status should suppress cache-marker-only proof warning: {warnings:?}"
+        );
     }
 
     async fn test_app_state_with_connectors_file(

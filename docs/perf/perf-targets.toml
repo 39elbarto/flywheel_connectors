@@ -1,0 +1,46 @@
+# Workspace performance regression targets consumed by scripts/ci/perf_regression_gate.sh.
+
+[cold_start]
+target_p99_ms = 500.0
+machine_class = "workspace"
+tolerance_pct = 10.0
+
+[local_invoke]
+target_p99_ms = 10.0
+machine_class = "workspace"
+tolerance_pct = 10.0
+
+[lan_invoke]
+target_p99_ms = 100.0
+machine_class = "workspace"
+tolerance_pct = 10.0
+
+[derp_invoke]
+target_p99_ms = 500.0
+machine_class = "workspace"
+tolerance_pct = 10.0
+
+[symbol_recon]
+target_p99_ms = 100.0
+machine_class = "workspace"
+tolerance_pct = 10.0
+
+[secret_recon]
+target_p99_ms = 100.0
+machine_class = "workspace"
+tolerance_pct = 10.0
+
+[memory_overhead]
+target_p99_ms = 10.0
+machine_class = "workspace"
+tolerance_pct = 10.0
+
+[cpu_overhead]
+target_p99_ms = 1.0
+machine_class = "workspace"
+tolerance_pct = 10.0
+
+[pq_signing]
+target_p99_ms = 2.0
+machine_class = "workspace"
+tolerance_pct = 10.0

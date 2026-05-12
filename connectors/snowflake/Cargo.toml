@@ -34,4 +34,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+fcp-testkit.workspace = true
 wiremock.workspace = true

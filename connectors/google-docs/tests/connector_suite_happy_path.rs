@@ -149,7 +149,7 @@ impl FcpConnector for GoogleDocsAdapter {
     }
 }
 
-fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
+fn handshake_request(host_public_key: [u8; 32], instance_id: InstanceId) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0".to_string(),
         zone: ZoneId::work(),
@@ -159,11 +159,11 @@ fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
         capabilities_requested: vec![CapabilityId::from_static(CAP_READ)],
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        requested_instance_id: Some(instance_id),
     }
 }
 
-fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+fn build_token(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec![format!("google-docs:document:{DOCUMENT_ID}")],
@@ -183,6 +183,7 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("valid constraints cbor")
+        .target_instance(instance_id.as_str())
         .sign(signing_key)
         .expect("capability token");
     CapabilityToken::from_raw(raw)
@@ -220,6 +221,7 @@ async fn connector_suite_happy_path_gets_document() {
         .await;
 
     let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
     let invoke = InvokeRequest {
         r#type: "invoke".to_string(),
         id: RequestId::new("google-docs-connector-suite"),
@@ -227,7 +229,7 @@ async fn connector_suite_happy_path_gets_document() {
         operation: OperationId::from_static(OP_GET_DOCUMENT),
         zone_id: ZoneId::work(),
         input: json!({ "document_id": DOCUMENT_ID }),
-        capability_token: build_token(&signing_key),
+        capability_token: build_token(&signing_key, &instance_id),
         holder_proof: None,
         context: None,
         idempotency_key: None,
@@ -244,7 +246,7 @@ async fn connector_suite_happy_path_gets_document() {
             "access_token": "ya29_test_docs",
             "base_url": format!("{}/v1", server.uri()),
         }),
-        handshake: handshake_request(signing_key.verifying_key().to_bytes()),
+        handshake: handshake_request(signing_key.verifying_key().to_bytes(), instance_id),
         invoke: Some(invoke),
         invoke_expectations: InvokeExpectations::default(),
     };

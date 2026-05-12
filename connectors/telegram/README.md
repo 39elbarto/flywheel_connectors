@@ -1,9 +1,9 @@
 # Telegram Connector V3 Contract
 
-> **Status**: runtime contract documented; Bot API polling/webhook drift documented
-> **Bead**: `flywheel_connectors-4kw5f.12`
-> **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Status**: runtime contract documented; no-live-credential Bot API/webhook loopback proof tracked
+> **Bead**: `flywheel_connectors-6n7.2`
+> **Parent**: `flywheel_connectors-6n7`
+> **Verification script**: `scripts/e2e/telegram_connector_verification.sh`
 > **Telegram Bot API upstream**: https://core.telegram.org/bots/api
 
 ## Purpose
@@ -115,7 +115,7 @@ This README documents runtime truth and keeps current drift visible:
 - Runtime setWebhook support does not upload custom TLS certificates or multipart files.
 - Runtime `subscribe` confirms topics but does not filter them against the advertised Telegram event catalog.
 - Event replay is not supported.
-- There is no dedicated tracked verification shell script for this connector.
+- The tracked no-live-credential verifier exercises a local Bot API loopback plus host-forwarded webhook ingest, but the connector still does not open an inbound webhook listener itself; inbound HTTP remains a host responsibility.
 
 A follow-up parity bead should reconcile Telegram's current update taxonomy, decide whether polling and host-forwarded webhook modes should be mutually exclusive at runtime, add custom-certificate handling if needed, filter handshake grants, expose approval metadata, enforce rate-limit pools, and replace the placeholder interface hash.
 
@@ -130,7 +130,7 @@ The current Telegram README slice documents the existing runtime surface:
 - lifecycle, doctor, health, self-check, simulate, introspect, invoke, subscribe, and shutdown behavior
 - provider error handling, retry behavior, local path safety, and message/caption limits
 - runtime/manifest/provider-doc drift around update taxonomy, approval tokens, grant filtering, rate limits, and interface hashes
-- deterministic WireMock and connector-suite tests
+- deterministic WireMock, connector-suite tests, and the no-live-credential loopback JSONL verifier
 
 ## Auth And Zone Boundary
 
@@ -223,11 +223,23 @@ The current implementation does not include:
 
 ## Verification
 
-README-only changes do not require Cargo or `rch` compilation. For this connector contract, use:
+The connector proof lane is tracked at `scripts/e2e/telegram_connector_verification.sh`.
+It offloads Cargo work through `rch`, runs format, the no-live-credential
+loopback JSONL matrix, the Telegram conformance contract, optional live-smoke
+structured skip handling, clippy, and a diff whitespace check on the owned
+Telegram proof files.
 
 ```bash
-git diff --check -- connectors/telegram/README.md
-LC_ALL=C rg -n '[^ -~]' connectors/telegram/README.md
-rg -n '\bmaster\b' connectors/telegram/README.md
-ubs connectors/telegram/README.md
+bash scripts/e2e/telegram_connector_verification.sh
 ```
+
+By default the script writes artifacts under `/tmp/fcp-telegram-e2e/<run-id>/`.
+The primary evidence file is `evidence/loopback_matrix.jsonl`; the live lane
+emits `evidence/live_optional_skip.jsonl` unless `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_LIVE_WRITE_APPROVAL=yes` are both present.
+
+The loopback evidence records are redaction-safe and include command line, git
+revision, fixture ID, operation, update/chat/user hashes, sender-policy
+decision, capability decision, retry/backoff outcome, HTTP status, FCP error
+mapping, event topic, payload byte counts, artifact paths, cleanup state, and
+skip reason.

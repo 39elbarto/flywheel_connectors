@@ -18,6 +18,27 @@ use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_prelude::{CapabilityConstraints, FcpError};
 use fcp_testkit::AsyncTestContext;
 use serde_json::json;
+#[cfg(feature = "test-support")]
+use sha2::{Digest, Sha256};
+#[cfg(feature = "test-support")]
+use std::collections::{BTreeMap, HashMap};
+#[cfg(feature = "test-support")]
+use std::fs::{self, File};
+#[cfg(feature = "test-support")]
+use std::io::{Read, Write};
+#[cfg(feature = "test-support")]
+use std::net::{TcpListener, TcpStream};
+#[cfg(feature = "test-support")]
+use std::path::PathBuf;
+#[cfg(feature = "test-support")]
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+#[cfg(feature = "test-support")]
+use std::thread;
+#[cfg(feature = "test-support")]
+use std::time::Duration as StdDuration;
 use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -35,6 +56,16 @@ const TEST_BOT_SUFFIX: &str = "ABCDEFGHIJKLMNOPQRSTUVWXyz012345";
 const TEST_INSTANCE_ID: &str = "inst_telegram_integration";
 const TELEGRAM_API_HOST: &str = "api.telegram.org";
 const NO_EGRESS_HOST: &str = "none.invalid";
+#[cfg(feature = "test-support")]
+const TELEGRAM_LOOPBACK_E2E_JSONL_PREFIX: &str = "TELEGRAM_LOOPBACK_E2E_JSONL";
+#[cfg(feature = "test-support")]
+const TELEGRAM_LOOPBACK_E2E_ARTIFACT_ENV: &str = "TELEGRAM_LOOPBACK_E2E_ARTIFACT";
+#[cfg(feature = "test-support")]
+const DEFAULT_TELEGRAM_LOOPBACK_E2E_ARTIFACT: &str = "target/fcp-telegram/loopback-evidence.jsonl";
+#[cfg(feature = "test-support")]
+const TELEGRAM_LOOPBACK_COMMAND_LINE: &str = "cargo test -p fcp-telegram --features test-support --test integration telegram_loopback_e2e_jsonl_matrix -- --nocapture";
+#[cfg(feature = "test-support")]
+const TELEGRAM_LOOPBACK_WEBHOOK_SECRET: &str = "telegram-loopback-secret_1";
 const TELEGRAM_EGRESS_OPERATION_IDS: &[&str] = &[
     "telegram.answer_callback_query",
     "telegram.delete_webhook",
@@ -381,6 +412,951 @@ async fn full_setup(
     setup_configure(connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(connector, &mock_server, caps).await;
     (mock_server, signing_key)
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Clone, Debug)]
+struct TelegramLoopbackRequest {
+    method: String,
+    path: String,
+    body: serde_json::Value,
+}
+
+#[cfg(feature = "test-support")]
+struct TelegramLoopbackServer {
+    base_url: String,
+    addr: String,
+    stop: Arc<AtomicBool>,
+    handle: thread::JoinHandle<()>,
+    requests: Arc<Mutex<Vec<TelegramLoopbackRequest>>>,
+    counts: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+#[cfg(feature = "test-support")]
+impl TelegramLoopbackServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind Telegram loopback server");
+        let addr = listener
+            .local_addr()
+            .expect("Telegram loopback server local addr")
+            .to_string();
+        let stop = Arc::new(AtomicBool::new(false));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let counts = Arc::new(Mutex::new(HashMap::new()));
+        let thread_stop = Arc::clone(&stop);
+        let thread_requests = Arc::clone(&requests);
+        let thread_counts = Arc::clone(&counts);
+
+        let handle = thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else {
+                    break;
+                };
+                if thread_stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let Some(request) = read_telegram_loopback_request(&mut stream) else {
+                    continue;
+                };
+                let (status, body) = telegram_loopback_response(&request, &thread_counts);
+                thread_requests
+                    .lock()
+                    .expect("lock Telegram loopback requests")
+                    .push(request);
+                write_telegram_loopback_response(&mut stream, status, &body);
+            }
+        });
+
+        Self {
+            base_url: format!("http://{addr}"),
+            addr,
+            stop,
+            handle,
+            requests,
+            counts,
+        }
+    }
+
+    fn count_for(&self, key: &str) -> usize {
+        self.counts
+            .lock()
+            .expect("lock Telegram loopback counts")
+            .get(key)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn shutdown(self) -> Vec<TelegramLoopbackRequest> {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect(&self.addr);
+        self.handle
+            .join()
+            .expect("Telegram loopback server thread joins");
+        self.requests
+            .lock()
+            .expect("lock Telegram loopback requests")
+            .clone()
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn bump_telegram_loopback_count(counts: &Arc<Mutex<HashMap<String, usize>>>, key: &str) -> usize {
+    let mut counts_guard = counts.lock().expect("lock Telegram loopback counts");
+    let count = counts_guard.entry(key.to_owned()).or_insert(0);
+    let previous = *count;
+    *count = count.saturating_add(1);
+    drop(counts_guard);
+    previous
+}
+
+#[cfg(feature = "test-support")]
+fn telegram_loopback_response(
+    request: &TelegramLoopbackRequest,
+    counts: &Arc<Mutex<HashMap<String, usize>>>,
+) -> (u16, serde_json::Value) {
+    let path_only = request
+        .path
+        .split('?')
+        .next()
+        .unwrap_or(request.path.as_str());
+    let endpoint = path_only
+        .strip_prefix(&format!("/bot{}/", test_bot_credential()))
+        .unwrap_or("");
+
+    match (request.method.as_str(), endpoint) {
+        ("GET", "getMe") => {
+            bump_telegram_loopback_count(counts, "getMe");
+            (
+                200,
+                json!({
+                    "ok": true,
+                    "result": {
+                        "id": 123456789,
+                        "is_bot": true,
+                        "first_name": "Loopback Bot",
+                        "username": "loopback_bot"
+                    }
+                }),
+            )
+        }
+        ("POST", "getUpdates") => {
+            bump_telegram_loopback_count(counts, "getUpdates");
+            (200, json!({ "ok": true, "result": [] }))
+        }
+        ("POST", "setWebhook") => {
+            bump_telegram_loopback_count(counts, "setWebhook");
+            (200, json!({ "ok": true, "result": true }))
+        }
+        ("POST", "deleteWebhook") => {
+            bump_telegram_loopback_count(counts, "deleteWebhook");
+            (200, json!({ "ok": true, "result": true }))
+        }
+        ("GET", "getWebhookInfo") => {
+            bump_telegram_loopback_count(counts, "getWebhookInfo");
+            (
+                200,
+                json!({
+                    "ok": true,
+                    "result": {
+                        "url": "https://fcp.example.com/hooks/telegram",
+                        "has_custom_certificate": false,
+                        "pending_update_count": 0,
+                        "allowed_updates": ["message", "callback_query"]
+                    }
+                }),
+            )
+        }
+        ("GET", "getFile") => {
+            bump_telegram_loopback_count(counts, "getFile");
+            (
+                200,
+                json!({
+                    "ok": true,
+                    "result": {
+                        "file_id": "telegram-loopback-file",
+                        "file_unique_id": "telegram-loopback-file-unique",
+                        "file_size": 2048,
+                        "file_path": "documents/telegram-loopback.bin"
+                    }
+                }),
+            )
+        }
+        ("POST", "sendPhoto") => {
+            bump_telegram_loopback_count(counts, "sendPhoto");
+            (
+                200,
+                json!({
+                    "ok": true,
+                    "result": {
+                        "message_id": 9100,
+                        "chat": { "id": 208214988, "type": "private", "first_name": "Loopback" },
+                        "date": 1700000100,
+                        "photo": [{
+                            "file_id": "telegram-loopback-photo",
+                            "file_unique_id": "telegram-loopback-photo-unique",
+                            "width": 90,
+                            "height": 90,
+                            "file_size": 512
+                        }]
+                    }
+                }),
+            )
+        }
+        ("POST", "sendChatAction") => {
+            bump_telegram_loopback_count(counts, "sendChatAction");
+            (
+                401,
+                json!({
+                    "ok": false,
+                    "error_code": 401,
+                    "description": "Unauthorized"
+                }),
+            )
+        }
+        ("POST", "setMessageReaction") => {
+            bump_telegram_loopback_count(counts, "setMessageReaction");
+            (200, json!({ "ok": true, "result": true }))
+        }
+        ("POST", "sendMessage") => {
+            let text = request.body.get("text").and_then(serde_json::Value::as_str);
+            if text == Some("retry transient") {
+                let attempt = bump_telegram_loopback_count(counts, "sendMessage_retry_transient");
+                if attempt == 0 {
+                    return (
+                        503,
+                        json!({
+                            "ok": false,
+                            "error_code": 503,
+                            "description": "Service Unavailable"
+                        }),
+                    );
+                }
+                return (
+                    200,
+                    json!({
+                        "ok": true,
+                        "result": {
+                            "message_id": 9001,
+                            "chat": { "id": 208214988, "type": "private", "first_name": "Loopback" },
+                            "date": 1700000090,
+                            "text": "retry transient"
+                        }
+                    }),
+                );
+            }
+
+            if text == Some("rate limit fixture") {
+                bump_telegram_loopback_count(counts, "sendMessage_rate_limited");
+                return (
+                    429,
+                    json!({
+                        "ok": false,
+                        "error_code": 429,
+                        "description": "Too Many Requests: retry after 0",
+                        "parameters": { "retry_after": 0 }
+                    }),
+                );
+            }
+
+            bump_telegram_loopback_count(counts, "sendMessage");
+            (
+                200,
+                json!({
+                    "ok": true,
+                    "result": {
+                        "message_id": 9000,
+                        "chat": { "id": 208214988, "type": "private", "first_name": "Loopback" },
+                        "date": 1700000080,
+                        "text": "ok"
+                    }
+                }),
+            )
+        }
+        _ => {
+            bump_telegram_loopback_count(counts, "unexpected");
+            (
+                404,
+                json!({
+                    "ok": false,
+                    "error_code": 404,
+                    "description": "unexpected Telegram loopback route"
+                }),
+            )
+        }
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn read_telegram_loopback_request(stream: &mut TcpStream) -> Option<TelegramLoopbackRequest> {
+    stream
+        .set_read_timeout(Some(StdDuration::from_secs(2)))
+        .ok();
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    loop {
+        let read = stream.read(&mut chunk).ok()?;
+        if read == 0 {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        if telegram_loopback_http_request_complete(&bytes) {
+            break;
+        }
+        if bytes.len() > 32 * 1024 {
+            return None;
+        }
+    }
+
+    let header_end = bytes.windows(4).position(|window| window == b"\r\n\r\n")?;
+    let headers = String::from_utf8_lossy(&bytes[..header_end]);
+    let request_line = headers.lines().next()?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?.to_owned();
+    let path = parts.next()?.to_owned();
+    let body_bytes = &bytes[header_end + 4..];
+    let body = if body_bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(body_bytes).unwrap_or(serde_json::Value::Null)
+    };
+
+    Some(TelegramLoopbackRequest { method, path, body })
+}
+
+#[cfg(feature = "test-support")]
+fn telegram_loopback_http_request_complete(bytes: &[u8]) -> bool {
+    let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let headers = String::from_utf8_lossy(&bytes[..header_end]);
+    let content_length = headers
+        .lines()
+        .find_map(|line| line.split_once(':'))
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    bytes.len() >= header_end + 4 + content_length
+}
+
+#[cfg(feature = "test-support")]
+fn write_telegram_loopback_response(stream: &mut TcpStream, status: u16, body: &serde_json::Value) {
+    let reason = match status {
+        200 => "OK",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        429 => "Too Many Requests",
+        503 => "Service Unavailable",
+        _ => "Unknown",
+    };
+    let body = body.to_string();
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len(),
+    );
+    stream
+        .write_all(response.as_bytes())
+        .expect("write Telegram loopback response");
+    stream.flush().expect("flush Telegram loopback response");
+}
+
+#[cfg(feature = "test-support")]
+fn telegram_loopback_hash(label: &str, value: impl AsRef<str>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(label.as_bytes());
+    hasher.update(b":");
+    hasher.update(value.as_ref().as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    format!("sha256:{label}:{}", &digest[..16])
+}
+
+#[cfg(feature = "test-support")]
+fn telegram_loopback_e2e_write_jsonl(records: &[serde_json::Value]) -> String {
+    let path = std::env::var(TELEGRAM_LOOPBACK_E2E_ARTIFACT_ENV).map_or_else(
+        |_| PathBuf::from(DEFAULT_TELEGRAM_LOOPBACK_E2E_ARTIFACT),
+        PathBuf::from,
+    );
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create Telegram loopback evidence directory");
+    }
+    let mut file = File::create(&path).expect("create Telegram loopback evidence JSONL");
+    for record in records {
+        writeln!(file, "{record}").expect("write Telegram loopback evidence JSONL record");
+        println!("{TELEGRAM_LOOPBACK_E2E_JSONL_PREFIX} {record}");
+    }
+    path.to_string_lossy().to_string()
+}
+
+#[cfg(feature = "test-support")]
+#[fcp_async_core::test]
+async fn telegram_loopback_e2e_jsonl_matrix() {
+    let git_revision =
+        std::env::var("FCP_TELEGRAM_E2E_GIT_REVISION").unwrap_or_else(|_| "unknown".to_string());
+    let artifact_path = std::env::var(TELEGRAM_LOOPBACK_E2E_ARTIFACT_ENV)
+        .unwrap_or_else(|_| DEFAULT_TELEGRAM_LOOPBACK_E2E_ARTIFACT.to_string());
+    let env_presence = BTreeMap::from([
+        ("TELEGRAM_BOT_TOKEN".to_string(), false),
+        ("TELEGRAM_WEBHOOK_SECRET_TOKEN".to_string(), false),
+        ("TELEGRAM_LIVE_WRITE_APPROVAL".to_string(), false),
+    ]);
+
+    let server = TelegramLoopbackServer::start();
+    let mut connector = TelegramConnector::new();
+    connector
+        .handle_configure(json!({
+            "credential": test_bot_credential(),
+            "base_url": server.base_url.clone(),
+            "poll_timeout": 1,
+            "webhook_secret_token": TELEGRAM_LOOPBACK_WEBHOOK_SECRET,
+            "inbound_policy": {
+                "mode": "allowlist",
+                "allowed_user_ids": [208214988]
+            }
+        }))
+        .await
+        .expect("configure should hit loopback getMe");
+
+    let signing_key = Ed25519SigningKey::generate();
+    let mut event_rx = connector.subscribe_events_for_test();
+    connector
+        .handle_handshake(json!({
+            "protocol_version": "1.0.0",
+            "zone": "z:work",
+            "zone_dir": unique_zone_dir("telegram-loopback-e2e-jsonl"),
+            "host_public_key": signing_key.verifying_key().to_bytes(),
+            "nonce": vec![0u8; 32],
+            "capabilities_requested": ["telegram.send", "telegram.read", "telegram.webhook"],
+            "requested_instance_id": TEST_INSTANCE_ID
+        }))
+        .await
+        .expect("handshake should start polling against loopback");
+
+    let chat_hash = telegram_loopback_hash("chat", "208214988");
+    let user_hash = telegram_loopback_hash("user", "208214988");
+    let denied_user_hash = telegram_loopback_hash("user", "999999999");
+    let mut records = Vec::new();
+    let mut common = |scenario: &str,
+                      operation: &str,
+                      update_id: Option<i64>,
+                      chat_id_hash: Option<String>,
+                      user_id_hash: Option<String>,
+                      sender_policy_decision: &str,
+                      capability_decision: &str,
+                      retry_backoff: &str,
+                      http_status: Option<u16>,
+                      fcp_error_mapping: &str,
+                      event_topic: Option<&str>,
+                      payload_byte_count: Option<usize>,
+                      cleanup: &str| {
+        records.push(json!({
+            "log_version": "v1",
+            "connector_id": "fcp.telegram",
+            "event": "telegram_loopback_e2e",
+            "scenario": scenario,
+            "result": "pass",
+            "provider_mode": "no_live_credential_loopback",
+            "command_line": TELEGRAM_LOOPBACK_COMMAND_LINE,
+            "git_revision": git_revision,
+            "artifact_paths": [artifact_path],
+            "env_presence": env_presence,
+            "fixture_id": "telegram-loopback-webhook-v1",
+            "operation": operation,
+            "update_id_hash": update_id.map(|id| telegram_loopback_hash("update", id.to_string())),
+            "chat_id_hash": chat_id_hash,
+            "user_id_hash": user_id_hash,
+            "sender_policy_decision": sender_policy_decision,
+            "capability_decision": capability_decision,
+            "retry_backoff": retry_backoff,
+            "http_status": http_status,
+            "fcp_error_mapping": fcp_error_mapping,
+            "event_topic": event_topic,
+            "payload_byte_count": payload_byte_count,
+            "cleanup": cleanup,
+            "skip_reason": null,
+            "redaction_decision": "redaction-safe: bot token, webhook secret, raw Telegram user/chat/update IDs, message text, media IDs, and provider payloads are not logged; evidence carries stable scenario names, hashes, status codes, byte counts, and outcome enums"
+        }));
+    };
+
+    let set_webhook_token = generate_valid_token(&signing_key, "telegram.set_webhook");
+    connector
+        .handle_invoke(json!({
+            "operation": "telegram.set_webhook",
+            "input": {
+                "url": "https://fcp.example.com/hooks/telegram",
+                "allowed_updates": ["message", "callback_query"],
+                "drop_pending_updates": true
+            },
+            "capability_token": set_webhook_token
+        }))
+        .await
+        .expect("set_webhook should succeed against loopback Bot API");
+    common(
+        "set_webhook_secret_allowed_updates",
+        "telegram.set_webhook",
+        None,
+        None,
+        None,
+        "not_applicable_outbound",
+        "bound_capability_verified",
+        "not_needed",
+        Some(200),
+        "none",
+        None,
+        None,
+        "no_cleanup_required",
+    );
+
+    let webhook_token = generate_valid_token(&signing_key, "telegram.ingest_webhook_update");
+    let authorized_payload = json!({
+        "update_id": 2003,
+        "message": {
+            "message_id": 13,
+            "message_thread_id": 17585,
+            "from": {
+                "id": 208214988,
+                "is_bot": false,
+                "first_name": "Loopback"
+            },
+            "chat": {
+                "id": 208214988,
+                "type": "private",
+                "first_name": "Loopback"
+            },
+            "date": 1700000010,
+            "text": "authorized webhook"
+        }
+    })
+    .to_string();
+    let response = connector
+        .handle_invoke(json!({
+            "operation": "telegram.ingest_webhook_update",
+            "input": {
+                "payload": authorized_payload,
+                "secret_token": TELEGRAM_LOOPBACK_WEBHOOK_SECRET,
+                "delivery_id": "telegram-loopback-delivery-authorized"
+            },
+            "capability_token": webhook_token.clone()
+        }))
+        .await
+        .expect("authorized webhook ingest should succeed");
+    assert_eq!(response["event_emitted"], true);
+    assert_eq!(response["topic"], "telegram.message.new");
+    assert_eq!(
+        response["resource_uris"],
+        json!([
+            "telegram:chat:208214988:topic:17585",
+            "telegram:chat:208214988",
+            "telegram:user:208214988"
+        ])
+    );
+    let event = fcp_async_core::time::timeout(StdDuration::from_secs(3), event_rx.recv())
+        .await
+        .expect("timed out waiting for authorized webhook event")
+        .expect("broadcast receive should succeed")
+        .expect("event payload should be ok");
+    assert_eq!(event.topic, "telegram.message.new");
+    common(
+        "authorized_webhook_event",
+        "telegram.ingest_webhook_update",
+        Some(2003),
+        Some(chat_hash.clone()),
+        Some(user_hash.clone()),
+        "allowed",
+        "bound_capability_verified",
+        "not_needed",
+        None,
+        "none",
+        Some("telegram.message.new"),
+        response
+            .to_string()
+            .len()
+            .checked_add(event.data.payload.to_string().len()),
+        "no_cleanup_required",
+    );
+
+    let denied_payload = json!({
+        "update_id": 2004,
+        "message": {
+            "message_id": 14,
+            "from": {
+                "id": 999999999,
+                "is_bot": false,
+                "first_name": "Denied"
+            },
+            "chat": {
+                "id": 999999999,
+                "type": "private",
+                "first_name": "Denied"
+            },
+            "date": 1700000011,
+            "text": "denied webhook"
+        }
+    })
+    .to_string();
+    let denied_response = connector
+        .handle_invoke(json!({
+            "operation": "telegram.ingest_webhook_update",
+            "input": {
+                "payload": denied_payload,
+                "secret_token": TELEGRAM_LOOPBACK_WEBHOOK_SECRET,
+                "delivery_id": "telegram-loopback-delivery-denied"
+            },
+            "capability_token": webhook_token.clone()
+        }))
+        .await
+        .expect("denied sender should be acknowledged and dropped");
+    assert_eq!(denied_response["event_emitted"], false);
+    assert_eq!(
+        denied_response["reason"],
+        "inbound_policy_denied_or_unknown_update"
+    );
+    common(
+        "denied_sender_drop",
+        "telegram.ingest_webhook_update",
+        Some(2004),
+        Some(telegram_loopback_hash("chat", "999999999")),
+        Some(denied_user_hash),
+        "denied",
+        "bound_capability_verified",
+        "not_needed",
+        None,
+        "suppressed_before_event_envelope",
+        None,
+        Some(denied_response.to_string().len()),
+        "no_cleanup_required",
+    );
+
+    let duplicate_payload = json!({
+        "update_id": 2003,
+        "message": {
+            "message_id": 13,
+            "from": {
+                "id": 208214988,
+                "is_bot": false,
+                "first_name": "Loopback"
+            },
+            "chat": {
+                "id": 208214988,
+                "type": "private",
+                "first_name": "Loopback"
+            },
+            "date": 1700000010,
+            "text": "authorized webhook duplicate"
+        }
+    })
+    .to_string();
+    let duplicate_response = connector
+        .handle_invoke(json!({
+            "operation": "telegram.ingest_webhook_update",
+            "input": {
+                "payload": duplicate_payload,
+                "secret_token": TELEGRAM_LOOPBACK_WEBHOOK_SECRET,
+                "delivery_id": "telegram-loopback-delivery-duplicate"
+            },
+            "capability_token": webhook_token
+        }))
+        .await
+        .expect("duplicate webhook ingest should be acknowledged");
+    assert_eq!(duplicate_response["event_emitted"], false);
+    assert_eq!(duplicate_response["reason"], "duplicate_update");
+    common(
+        "duplicate_update_replay",
+        "telegram.ingest_webhook_update",
+        Some(2003),
+        Some(chat_hash.clone()),
+        Some(user_hash.clone()),
+        "allowed_then_duplicate_suppressed",
+        "bound_capability_verified",
+        "not_needed",
+        None,
+        "duplicate_update_suppressed",
+        None,
+        Some(duplicate_response.to_string().len()),
+        "no_cleanup_required",
+    );
+
+    let send_token = generate_valid_token(&signing_key, "telegram.send_message");
+    let send_response = connector
+        .handle_invoke(json!({
+            "operation": "telegram.send_message",
+            "input": {
+                "chat_id": 208214988,
+                "text": "retry transient"
+            },
+            "capability_token": send_token.clone()
+        }))
+        .await
+        .expect("send_message should retry a transient loopback failure");
+    assert_eq!(send_response["message_id"], 9001);
+    assert_eq!(server.count_for("sendMessage_retry_transient"), 2);
+    common(
+        "send_message_transient_retry",
+        "telegram.send_message",
+        None,
+        Some(chat_hash.clone()),
+        None,
+        "not_applicable_outbound",
+        "bound_capability_verified",
+        "transient_503_retried_to_success",
+        Some(200),
+        "none",
+        None,
+        Some(send_response.to_string().len()),
+        "no_cleanup_required",
+    );
+
+    let media_token = generate_valid_token(&signing_key, "telegram.send_media");
+    let media_response = connector
+        .handle_invoke(json!({
+            "operation": "telegram.send_media",
+            "input": {
+                "chat_id": 208214988,
+                "media_type": "photo",
+                "media": "telegram-loopback-photo",
+                "caption": "loopback media"
+            },
+            "capability_token": media_token
+        }))
+        .await
+        .expect("send_media should succeed against loopback Bot API");
+    assert_eq!(media_response["message_id"], 9100);
+    common(
+        "send_media_photo_metadata",
+        "telegram.send_media",
+        None,
+        Some(chat_hash.clone()),
+        None,
+        "not_applicable_outbound",
+        "bound_capability_verified",
+        "not_needed",
+        Some(200),
+        "none",
+        None,
+        Some(media_response.to_string().len()),
+        "no_cleanup_required",
+    );
+
+    let read_token = generate_valid_token(&signing_key, "telegram.get_file");
+    let file_response = connector
+        .handle_invoke(json!({
+            "operation": "telegram.get_file",
+            "input": {
+                "file_id": "telegram-loopback-file"
+            },
+            "capability_token": read_token
+        }))
+        .await
+        .expect("get_file should succeed against loopback Bot API");
+    assert_eq!(file_response["file_size"], 2048);
+    common(
+        "media_download_metadata",
+        "telegram.get_file",
+        None,
+        None,
+        None,
+        "not_applicable_outbound",
+        "bound_capability_verified",
+        "not_needed",
+        Some(200),
+        "none",
+        None,
+        Some(file_response.to_string().len()),
+        "no_cleanup_required",
+    );
+
+    let chat_action_token = generate_valid_token(&signing_key, "telegram.send_chat_action");
+    for _ in 0..2 {
+        let error = connector
+            .handle_invoke(json!({
+                "operation": "telegram.send_chat_action",
+                "input": {
+                    "chat_id": 208214988,
+                    "action": "typing"
+                },
+                "capability_token": chat_action_token.clone()
+            }))
+            .await
+            .expect_err("first two chat actions should surface Telegram Unauthorized");
+        assert!(matches!(error, FcpError::Unauthorized { .. }));
+    }
+    let suspended = connector
+        .handle_invoke(json!({
+            "operation": "telegram.send_chat_action",
+            "input": {
+                "chat_id": 208214988,
+                "action": "typing"
+            },
+            "capability_token": chat_action_token
+        }))
+        .await
+        .expect_err("third chat action should be locally suspended");
+    assert!(matches!(suspended, FcpError::External { .. }));
+    assert_eq!(server.count_for("sendChatAction"), 2);
+    common(
+        "send_chat_action_401_suspension",
+        "telegram.send_chat_action",
+        None,
+        Some(chat_hash.clone()),
+        None,
+        "not_applicable_outbound",
+        "bound_capability_verified",
+        "unauthorized_circuit_opened_before_third_http_call",
+        Some(401),
+        "local_retryable_suspension",
+        None,
+        None,
+        "no_cleanup_required",
+    );
+
+    let reaction_token = generate_valid_token(&signing_key, "telegram.set_message_reaction");
+    let reaction_response = connector
+        .handle_invoke(json!({
+            "operation": "telegram.set_message_reaction",
+            "input": {
+                "chat_id": 208214988,
+                "message_id": 13,
+                "reaction": [{ "type": "emoji", "emoji": "👍" }]
+            },
+            "capability_token": reaction_token
+        }))
+        .await
+        .expect("set_message_reaction should succeed against loopback Bot API");
+    assert_eq!(reaction_response["success"], true);
+    common(
+        "set_message_reaction",
+        "telegram.set_message_reaction",
+        None,
+        Some(chat_hash.clone()),
+        None,
+        "not_applicable_outbound",
+        "bound_capability_verified",
+        "not_needed",
+        Some(200),
+        "none",
+        None,
+        Some(reaction_response.to_string().len()),
+        "no_cleanup_required",
+    );
+
+    let rate_limited = connector
+        .handle_invoke(json!({
+            "operation": "telegram.send_message",
+            "input": {
+                "chat_id": 208214988,
+                "text": "rate limit fixture"
+            },
+            "capability_token": send_token
+        }))
+        .await
+        .expect_err("rate-limit fixture should map to FCP RateLimited");
+    assert!(matches!(rate_limited, FcpError::RateLimited { .. }));
+    assert_eq!(server.count_for("sendMessage_rate_limited"), 3);
+    common(
+        "rate_limit_response",
+        "telegram.send_message",
+        None,
+        Some(chat_hash),
+        None,
+        "not_applicable_outbound",
+        "bound_capability_verified",
+        "retry_after_zero_then_retry_budget_exhausted",
+        Some(429),
+        "rate_limited",
+        None,
+        None,
+        "no_cleanup_required",
+    );
+
+    let delete_webhook_token = generate_valid_token(&signing_key, "telegram.delete_webhook");
+    connector
+        .handle_invoke(json!({
+            "operation": "telegram.delete_webhook",
+            "input": {
+                "drop_pending_updates": true
+            },
+            "capability_token": delete_webhook_token
+        }))
+        .await
+        .expect("delete_webhook should succeed against loopback Bot API");
+    common(
+        "delete_webhook_cleanup",
+        "telegram.delete_webhook",
+        None,
+        None,
+        None,
+        "not_applicable_outbound",
+        "bound_capability_verified",
+        "not_needed",
+        Some(200),
+        "none",
+        None,
+        None,
+        "delete_webhook_called",
+    );
+
+    connector
+        .handle_shutdown(json!({}))
+        .await
+        .expect("shutdown should stop polling");
+    let request_log = server.shutdown();
+    assert!(
+        request_log
+            .iter()
+            .any(|request| request.path == token_path("setWebhook")),
+        "setWebhook route should be exercised"
+    );
+    assert!(
+        request_log
+            .iter()
+            .any(|request| request.path == token_path("deleteWebhook")),
+        "deleteWebhook route should be exercised"
+    );
+    common(
+        "manual_shutdown",
+        "connector.shutdown",
+        None,
+        None,
+        None,
+        "not_applicable",
+        "not_applicable",
+        "not_needed",
+        None,
+        "none",
+        None,
+        None,
+        "polling_stopped_loopback_server_joined",
+    );
+
+    let written_path = telegram_loopback_e2e_write_jsonl(&records);
+    assert_eq!(written_path, artifact_path);
+    assert!(records.len() >= 11);
+
+    let rendered = records
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let credential = test_bot_credential();
+    for forbidden in [
+        credential.as_str(),
+        TELEGRAM_LOOPBACK_WEBHOOK_SECRET,
+        "208214988",
+        "999999999",
+        "2003",
+        "authorized webhook",
+        "denied webhook",
+        "retry transient",
+        "rate limit fixture",
+        "telegram-loopback-photo",
+        "telegram-loopback-file",
+    ] {
+        assert!(
+            !rendered.contains(forbidden),
+            "Telegram loopback JSONL leaked sensitive fixture fragment {forbidden}"
+        );
+    }
+    assert!(rendered.contains("\"scenario\":\"authorized_webhook_event\""));
+    assert!(rendered.contains("\"fcp_error_mapping\":\"rate_limited\""));
+    assert!(rendered.contains("\"cleanup\":\"polling_stopped_loopback_server_joined\""));
 }
 
 // ============================================================================

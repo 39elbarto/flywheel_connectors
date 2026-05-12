@@ -2,6 +2,7 @@
 
 > **Status**: runtime contract documented; Graph/Bot Framework drift documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
+> **Coordination bead**: `flywheel_connectors-6n7.16`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: none tracked; use the commands below
 > **Microsoft Graph joinedTeams**: https://learn.microsoft.com/en-us/graph/api/user-list-joinedteams?view=graph-rest-1.0
@@ -43,6 +44,7 @@ Important runtime truths the contract preserves:
 - Default `graph_base_url` is `https://graph.microsoft.com/v1.0`.
 - Default `bot_service_url` is `https://smba.trafficmanager.net`.
 - Default `timeout_ms` is `30000`.
+- Optional `chat_coordination` config supports `enabled`, `ttl_seconds`, `fail_open`, `allowlist_channels`, `backend`, and `dm_mode`; the connector defaults to the in-memory backend.
 - Auth modes are `access_token`, `client_credentials`, and `credential_id`.
 - Direct `access_token` mode sends bearer auth.
 - `credential_id` mode sends `x-fcp-credential-id` and expects host/egress injection; it validates only that the value is a legal HTTP header value.
@@ -73,6 +75,8 @@ This README documents runtime truth and keeps current drift visible:
 - Runtime `simulate()` is unconditional and does not mirror invoke authorization or input validation.
 - Runtime bound-token verification uses empty resource URI lists, so tokens are capability/operation-bound but not team/channel/chat/resource-bound by this connector.
 - Runtime response cache applies to send, card, reply, update, and ingest operations when an idempotency key is present; read operations are not cached.
+- Runtime `teams.send_channel_message`, `teams.send_chat_message`, `teams.send_card`, and `teams.reply_message` claim chat ownership before Microsoft Graph HTTP; duplicate active ownership returns `Unauthorized` code `4090` before provider dispatch.
+- Successful send/card/reply outputs include redaction-safe `coordination` audit records.
 - Runtime health can report ready before handshake if direct access-token config is valid, while invoke still requires handshake.
 - Runtime health degrades for `credential_id` mode and `client_credentials` mode even when local configuration is structurally valid.
 - Runtime self-check calls `/me` only for direct delegated access-token mode.
@@ -94,6 +98,7 @@ The current Teams README slice documents the existing runtime surface:
 - bound capability-token verification for invoke
 - lifecycle, health, doctor, self-check, simulation, introspection, subscribe, and shutdown behavior
 - deterministic connector tests and direct proof commands
+- outbound send/reply chat coordination, duplicate-claim denial, and redaction-safe audit output
 
 ## Auth And Scope Boundary
 
@@ -133,6 +138,16 @@ The current Teams README slice documents the existing runtime surface:
 - Conversation state is in-memory and keyed by conversation ID.
 - Event caps report no streaming, no replay, zero minimum buffer, and no ack requirement.
 
+## Outbound Chat Coordination
+
+Outbound Teams send operations use the shared SDK chat coordination guard before issuing Microsoft Graph HTTP requests:
+
+- `teams.send_channel_message`, `teams.send_chat_message`, and `teams.send_card` coordinate on `team:{team_id}:channel:{channel_id}` or `chat:{chat_id}`.
+- `teams.reply_message` coordinates on the same target plus `message:{message_id}` as the thread identifier.
+- Duplicate active owners return `FcpError::Unauthorized` with code `4090` before any Graph send/reply request is made.
+- Successful outputs include redaction-safe `coordination` audit records. Raw team IDs, channel IDs, chat IDs, message IDs, message bodies, tokens, and provider response bodies are not copied into coordination records.
+- `chat_coordination` is optional and accepts `enabled`, `ttl_seconds`, `fail_open`, `allowlist_channels`, `backend`, and `dm_mode`. Recognized backends are `agent_mail`, `mesh_gossip`, and `in_memory`; recognized DM modes are `skip` and `treat_as_thread`.
+
 ## Operation Inventory
 
 | Operation | Runtime request/behavior | Capability | SafetyTier | RiskLevel | Idempotency | Required input |
@@ -141,12 +156,12 @@ The current Teams README slice documents the existing runtime surface:
 | `teams.get_team` | `GET /teams/{team_id}` | `teams.read` | `Safe` | `Low` | `Strict` | `team_id` |
 | `teams.list_channels` | `GET /teams/{team_id}/channels` | `teams.read` | `Safe` | `Low` | `Strict` | `team_id` |
 | `teams.get_channel` | `GET /teams/{team_id}/channels/{channel_id}` | `teams.read` | `Safe` | `Low` | `Strict` | `team_id`, `channel_id` |
-| `teams.send_channel_message` | `POST /teams/{team_id}/channels/{channel_id}/messages` | `teams.write` | `Risky` | `Medium` | `None` | `team_id`, `channel_id`, `content` |
+| `teams.send_channel_message` | Chat coordination claim, then `POST /teams/{team_id}/channels/{channel_id}/messages` | `teams.write` | `Risky` | `Medium` | `None` | `team_id`, `channel_id`, `content` |
 | `teams.list_chats` | `GET /me/chats` | `teams.read` | `Safe` | `Low` | `Strict` | none |
-| `teams.send_chat_message` | `POST /chats/{chat_id}/messages` | `teams.write` | `Risky` | `Medium` | `None` | `chat_id`, `content` |
+| `teams.send_chat_message` | Chat coordination claim, then `POST /chats/{chat_id}/messages` | `teams.write` | `Risky` | `Medium` | `None` | `chat_id`, `content` |
 | `teams.list_chat_messages` | `GET /chats/{chat_id}/messages` | `teams.read` | `Safe` | `Low` | `Strict` | `chat_id` |
-| `teams.send_card` | Send message payload with adaptive-card attachment | `teams.write` | `Risky` | `Medium` | `BestEffort` | channel target or chat target plus `adaptive_card` |
-| `teams.reply_message` | Channel replies or chat `replyWithQuote`, with flat fallback on Graph 400 | `teams.write` | `Risky` | `Medium` | `BestEffort` | channel target or chat target, `message_id`, `content` or card |
+| `teams.send_card` | Chat coordination claim, then send message payload with adaptive-card attachment | `teams.write` | `Risky` | `Medium` | `BestEffort` | channel target or chat target plus `adaptive_card` |
+| `teams.reply_message` | Chat coordination claim, then channel replies or chat `replyWithQuote`, with flat fallback on Graph 400 | `teams.write` | `Risky` | `Medium` | `BestEffort` | channel target or chat target, `message_id`, `content` or card |
 | `teams.update_message` | PATCH channel/chat message or channel reply | `teams.write` | `Risky` | `Medium` | `BestEffort` | channel target or chat target, `message_id`, `content` or card |
 | `teams.ingest_activity` | Normalize host-forwarded Bot Framework activity and update conversation cache | `teams.write` | `Risky` | `Medium` | `BestEffort` | valid activity with conversation |
 | `teams.get_conversation_state` | Read cached conversation state | `teams.read` | `Safe` | `Low` | `Strict` | `conversation_id` |
@@ -188,6 +203,7 @@ The deterministic integration evidence is anchored on connector-local tests cove
 - bound capability-token enforcement for invoke
 - Graph path encoding, pagination, credential-header mode, client-credentials token acquisition, and provider error classes
 - message send, card payloads, channel/chat replies, threaded-reply fallback, updates, attachments, mentions, and idempotency caching
+- outbound send/reply coordination audit output and duplicate-owner denial before Graph HTTP
 - host-forwarded activity ingestion, self-message drop, allowlists, file-consent handling, duplicate activities, service URL validation, conversation state, and event envelope shaping
 
 ## Source Notes

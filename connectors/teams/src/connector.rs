@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fmt::Write as _,
-    sync::{Mutex, atomic::Ordering},
+    sync::{Arc, Mutex, atomic::Ordering},
     time::{Duration, Instant},
 };
 
@@ -17,6 +17,11 @@ use fcp_prelude::{
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_sdk::prelude::*;
+use fcp_sdk::{
+    AgentId, ChannelId, ChatCoordinationAuditRecord, ChatCoordinationBackend,
+    ChatCoordinationConfig, ChatCoordinationSendDecision, ChatCoordinationSendRequest, DmMode,
+    InMemoryThreadOwnershipChecker, ThreadId, ThreadOwnershipChecker,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -69,6 +74,148 @@ const CAP_WRITE: &str = "teams.write";
 
 const IDEMPOTENT_RESPONSE_LIMIT: usize = 512;
 const ACTIVITY_DEDUP_LIMIT: usize = 1024;
+
+fn default_teams_chat_coordination_config() -> ChatCoordinationConfig {
+    ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
+}
+
+fn parse_teams_chat_coordination_config(
+    value: Option<&Value>,
+    base: ChatCoordinationConfig,
+) -> FcpResult<ChatCoordinationConfig> {
+    let Some(value) = value else {
+        return Ok(base);
+    };
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "chat_coordination must be an object".into(),
+    })?;
+
+    let mut config = base;
+    if let Some(enabled) = object.get("enabled") {
+        config = config.with_enabled(json_bool(enabled, "chat_coordination.enabled")?);
+    }
+    if let Some(ttl_seconds) = object.get("ttl_seconds") {
+        let seconds = ttl_seconds
+            .as_u64()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be an integer".into(),
+            })?;
+        if seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be greater than zero".into(),
+            });
+        }
+        config = config.with_ttl(Duration::from_secs(seconds));
+    }
+    if let Some(fail_open) = object.get("fail_open") {
+        config = config.with_fail_open(json_bool(fail_open, "chat_coordination.fail_open")?);
+    }
+    if let Some(allowlist) = object.get("allowlist_channels") {
+        let channels = allowlist
+            .as_array()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels must be an array".into(),
+            })?;
+        let mut normalized = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let raw = channel.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels entries must be strings".into(),
+            })?;
+            let channel_id = raw.trim();
+            if channel_id.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_coordination.allowlist_channels entries must not be empty"
+                        .into(),
+                });
+            }
+            normalized.push(ChannelId::new(channel_id.to_owned()));
+        }
+        config = config.with_allowlist_channels(normalized);
+    }
+    if let Some(backend) = object.get("backend") {
+        config = config.with_backend(parse_chat_coordination_backend(backend)?);
+    }
+    if let Some(dm_mode) = object.get("dm_mode") {
+        config = config.with_dm_mode(parse_chat_coordination_dm_mode(dm_mode)?);
+    }
+    Ok(config)
+}
+
+fn json_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a boolean"),
+    })
+}
+
+fn parse_chat_coordination_backend(value: &Value) -> FcpResult<ChatCoordinationBackend> {
+    match value.as_str() {
+        Some("agent_mail") => Ok(ChatCoordinationBackend::AgentMail),
+        Some("mesh_gossip") => Ok(ChatCoordinationBackend::MeshGossip),
+        Some("in_memory") => Ok(ChatCoordinationBackend::InMemory),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.backend: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.backend must be a string".into(),
+        }),
+    }
+}
+
+fn parse_chat_coordination_dm_mode(value: &Value) -> FcpResult<DmMode> {
+    match value.as_str() {
+        Some("skip") => Ok(DmMode::Skip),
+        Some("treat_as_thread") => Ok(DmMode::TreatAsThread),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.dm_mode: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.dm_mode must be a string".into(),
+        }),
+    }
+}
+
+fn teams_coordination_audit_records(
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> Vec<ChatCoordinationAuditRecord> {
+    let mut records = decision.audit_records().to_vec();
+    if let Some(record) = decision.send_executed_audit_record(backend, claimant_agent_id) {
+        records.push(record);
+    }
+    records
+}
+
+fn teams_insert_coordination(
+    output: &mut Value,
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> FcpResult<()> {
+    let object = output.as_object_mut().ok_or_else(|| FcpError::Internal {
+        message: "Teams dispatch output was not an object".into(),
+    })?;
+    object.insert(
+        "coordination".into(),
+        json!(teams_coordination_audit_records(
+            decision,
+            backend,
+            claimant_agent_id,
+        )),
+    );
+    Ok(())
+}
 
 #[derive(Debug)]
 struct BoundedJsonCache {
@@ -431,7 +578,6 @@ fn operator_guidance() -> OperatorGuidance {
 }
 
 /// Microsoft Teams connector.
-#[derive(Debug)]
 pub struct TeamsConnector {
     base: BaseConnector,
     config: Option<crate::types::TeamsConfig>,
@@ -443,6 +589,37 @@ pub struct TeamsConnector {
     conversation_states: Mutex<HashMap<String, TeamsConversationState>>,
     idempotent_results: Mutex<BoundedJsonCache>,
     seen_activity_ids: Mutex<BoundedKeySet>,
+    chat_coordination_config: ChatCoordinationConfig,
+    thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
+}
+
+impl std::fmt::Debug for TeamsConnector {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TeamsConnector")
+            .field("base", &self.base)
+            .field("config", &self.config)
+            .field("client", &self.client)
+            .field("runtime", &self.runtime)
+            .field("retry_config", &self.retry_config)
+            .field("started_at", &self.started_at)
+            .field("verifier", &self.verifier)
+            .field(
+                "conversation_state_count",
+                &lock_unpoisoned(&self.conversation_states).len(),
+            )
+            .field(
+                "idempotent_result_count",
+                &lock_unpoisoned(&self.idempotent_results).entries.len(),
+            )
+            .field(
+                "seen_activity_id_count",
+                &lock_unpoisoned(&self.seen_activity_ids).entries.len(),
+            )
+            .field("chat_coordination_config", &self.chat_coordination_config)
+            .field("thread_ownership_checker", &"<thread-ownership-checker>")
+            .finish()
+    }
 }
 
 impl TeamsConnector {
@@ -480,6 +657,33 @@ impl TeamsConnector {
             Some("html") => "html",
             _ => "text",
         }
+    }
+
+    fn chat_coordination_agent_id(&self) -> AgentId {
+        AgentId::new(self.base.instance_id.as_str().to_owned())
+    }
+
+    async fn claim_before_teams_send(
+        &self,
+        zone_id: ZoneId,
+        target: MessageTarget<'_>,
+        thread_id: Option<ThreadId>,
+        claimant_agent_id: AgentId,
+    ) -> ChatCoordinationSendDecision {
+        let cx = fcp_async_core::compatibility_cx();
+        self.chat_coordination_config
+            .claim_before_send(
+                &cx,
+                self.thread_ownership_checker.as_ref(),
+                ChatCoordinationSendRequest::new(
+                    zone_id,
+                    self.base.id.clone(),
+                    teams_coordination_channel_id(target),
+                    thread_id,
+                    claimant_agent_id,
+                ),
+            )
+            .await
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1225,6 +1429,19 @@ impl TeamsConnector {
     ) -> FcpResult<Value> {
         let target = MessageTarget::from_input(&req.input)?;
         let payload = Self::build_message_payload(&req.input)?;
+        let claimant_agent_id = self.chat_coordination_agent_id();
+        let coordination = self
+            .claim_before_teams_send(req.zone_id.clone(), target, None, claimant_agent_id.clone())
+            .await;
+        if let Some(error) = coordination.denial_error() {
+            warn!(
+                operation = %req.operation,
+                target = target.label(),
+                error = %error,
+                "Teams send denied by chat coordination"
+            );
+            return Err(error.clone());
+        }
         let message = match target {
             MessageTarget::Channel {
                 team_id,
@@ -1245,11 +1462,18 @@ impl TeamsConnector {
             "outbound_send",
         );
 
-        Ok(json!({
+        let mut output = json!({
             "message_id": message.id.unwrap_or_default(),
             "target": target.label(),
             "conversation_id": target.conversation_id(),
-        }))
+        });
+        teams_insert_coordination(
+            &mut output,
+            &coordination,
+            self.chat_coordination_config.backend(),
+            &claimant_agent_id,
+        )?;
+        Ok(output)
     }
 
     async fn invoke_reply_operation(
@@ -1260,6 +1484,24 @@ impl TeamsConnector {
         let target = MessageTarget::from_input(&req.input)?;
         let message_id = require_str(&req.input, "message_id")?;
         let payload = Self::build_message_payload(&req.input)?;
+        let claimant_agent_id = self.chat_coordination_agent_id();
+        let coordination = self
+            .claim_before_teams_send(
+                req.zone_id.clone(),
+                target,
+                Some(teams_coordination_thread_id(message_id)),
+                claimant_agent_id.clone(),
+            )
+            .await;
+        if let Some(error) = coordination.denial_error() {
+            warn!(
+                operation = %req.operation,
+                target = target.label(),
+                error = %error,
+                "Teams reply denied by chat coordination"
+            );
+            return Err(error.clone());
+        }
         let (reply, delivery_mode, fallback_diagnostic) =
             match Self::send_threaded_reply(client, target, message_id, &payload).await {
                 Ok(reply) => (reply, "threaded", None),
@@ -1292,7 +1534,7 @@ impl TeamsConnector {
             activity_type,
         );
 
-        Ok(json!({
+        let mut output = json!({
             "message_id": reply.id.unwrap_or_default(),
             "reply_to_id": message_id,
             "target": target.label(),
@@ -1300,7 +1542,14 @@ impl TeamsConnector {
             "threaded_attempted": true,
             "delivery_mode": delivery_mode,
             "fallback_diagnostic": fallback_diagnostic,
-        }))
+        });
+        teams_insert_coordination(
+            &mut output,
+            &coordination,
+            self.chat_coordination_config.backend(),
+            &claimant_agent_id,
+        )?;
+        Ok(output)
     }
 
     async fn send_threaded_reply(
@@ -1420,7 +1669,21 @@ impl TeamsConnector {
             conversation_states: Mutex::new(HashMap::new()),
             idempotent_results: Mutex::new(BoundedJsonCache::new(IDEMPOTENT_RESPONSE_LIMIT)),
             seen_activity_ids: Mutex::new(BoundedKeySet::new(ACTIVITY_DEDUP_LIMIT)),
+            chat_coordination_config: default_teams_chat_coordination_config(),
+            thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
         }
+    }
+
+    /// Replace the thread ownership checker used by outbound chat coordination.
+    #[must_use]
+    pub fn with_thread_ownership_checker(
+        mut self,
+        checker: Arc<dyn ThreadOwnershipChecker>,
+        backend: ChatCoordinationBackend,
+    ) -> Self {
+        self.thread_ownership_checker = checker;
+        self.chat_coordination_config = self.chat_coordination_config.with_backend(backend);
+        self
     }
 
     /// Return this connector instance identifier for bound capability tokens.
@@ -1825,6 +2088,20 @@ impl<'a> MessageTarget<'a> {
     }
 }
 
+fn teams_coordination_channel_id(target: MessageTarget<'_>) -> ChannelId {
+    match target {
+        MessageTarget::Channel {
+            team_id,
+            channel_id,
+        } => ChannelId::new(format!("team:{team_id}:channel:{channel_id}")),
+        MessageTarget::Chat { chat_id } => ChannelId::new(format!("chat:{chat_id}")),
+    }
+}
+
+fn teams_coordination_thread_id(message_id: &str) -> ThreadId {
+    ThreadId::new(format!("message:{message_id}"))
+}
+
 fcp_core::impl_fcp_sealed!(TeamsConnector);
 
 #[async_trait]
@@ -1834,6 +2111,10 @@ impl FcpConnector for TeamsConnector {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
+        let chat_coordination_config = parse_teams_chat_coordination_config(
+            config.get("chat_coordination"),
+            self.chat_coordination_config.clone(),
+        )?;
         let config: crate::types::TeamsConfig =
             serde_json::from_value(config).map_err(|e| FcpError::InvalidRequest {
                 code: 1001,
@@ -1888,6 +2169,7 @@ impl FcpConnector for TeamsConnector {
 
         self.client = Some(client);
         self.config = Some(config);
+        self.chat_coordination_config = chat_coordination_config;
         lock_unpoisoned(&self.conversation_states).clear();
         *lock_unpoisoned(&self.idempotent_results) =
             BoundedJsonCache::new(IDEMPOTENT_RESPONSE_LIMIT);
@@ -2249,6 +2531,7 @@ impl TeamsConnector {
 mod tests {
     use super::*;
     use fcp_prelude::{IdempotencyClass, SafetyTier};
+    use fcp_sdk::ClaimOutcome;
     use std::collections::BTreeSet;
 
     fn manually_configured_connector(
@@ -2272,12 +2555,12 @@ mod tests {
         connector
     }
 
-    fn reply_request(input: Value) -> InvokeRequest {
+    fn invoke_request(operation: &'static str, input: Value) -> InvokeRequest {
         InvokeRequest {
             r#type: "invoke".into(),
-            id: RequestId::new("req_reply"),
+            id: RequestId::new(format!("req_{operation}")),
             connector_id: ConnectorId::from_static("fcp.teams"),
-            operation: OperationId::from_static(OP_REPLY_MSG),
+            operation: OperationId::from_static(operation),
             zone_id: ZoneId::work(),
             input,
             capability_token: CapabilityToken::test_token(),
@@ -2290,6 +2573,27 @@ mod tests {
             provenance: None,
             approval_tokens: Vec::new(),
         }
+    }
+
+    fn reply_request(input: Value) -> InvokeRequest {
+        invoke_request(OP_REPLY_MSG, input)
+    }
+
+    fn assert_coordinated_operation_schema(
+        operations: &BTreeMap<String, fcp_manifest::OperationSection>,
+        operation_id: &str,
+    ) {
+        let operation = operations
+            .get(operation_id)
+            .expect("coordinated Teams operation should be declared");
+        assert_eq!(
+            operation.output_schema["properties"]["coordination"]["type"],
+            json!("array")
+        );
+        assert_eq!(
+            operation.output_schema["properties"]["coordination"]["items"]["type"],
+            json!("object")
+        );
     }
 
     #[test]
@@ -2377,6 +2681,14 @@ mod tests {
             send.input_schema["required"],
             json!(["team_id", "channel_id", "content"])
         );
+        for operation_id in [
+            OP_SEND_CHANNEL_MSG,
+            OP_SEND_CHAT_MSG,
+            OP_SEND_CARD,
+            OP_REPLY_MSG,
+        ] {
+            assert_coordinated_operation_schema(&operations, operation_id);
+        }
 
         let ingest = operations
             .get(OP_INGEST_ACTIVITY)
@@ -2550,6 +2862,82 @@ mod tests {
             "chat_id": "chat_1",
         });
         assert!(MessageTarget::from_input(&ambiguous_input).is_err());
+    }
+
+    #[test]
+    fn test_teams_coordination_target_ids_are_stable_and_namespaced() {
+        assert_eq!(
+            teams_coordination_channel_id(MessageTarget::Channel {
+                team_id: "team_1",
+                channel_id: "channel_1",
+            })
+            .as_str(),
+            "team:team_1:channel:channel_1"
+        );
+        assert_eq!(
+            teams_coordination_channel_id(MessageTarget::Chat { chat_id: "chat_1" }).as_str(),
+            "chat:chat_1"
+        );
+        assert_eq!(
+            teams_coordination_thread_id("message_1").as_str(),
+            "message:message_1"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_send_denies_duplicate_claim_before_graph_http() {
+        let mock_server = wiremock::MockServer::start().await;
+        let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+        let checker_for_connector: Arc<dyn ThreadOwnershipChecker> = checker.clone();
+        let connector = TeamsConnector::new().with_thread_ownership_checker(
+            checker_for_connector,
+            ChatCoordinationBackend::InMemory,
+        );
+        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+
+        let claim_key = ClaimKey::for_chat_message(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.teams"),
+            teams_coordination_channel_id(MessageTarget::Chat { chat_id: "chat_1" }),
+            None,
+            DmMode::TreatAsThread,
+        )
+        .expect("threadless chat send should coordinate on chat id");
+        assert!(matches!(
+            checker.claim_now(claim_key, AgentId::new("peer-agent"), Instant::now()),
+            ClaimOutcome::Granted(_)
+        ));
+
+        let error = connector
+            .invoke_send_operation(
+                &client,
+                &invoke_request(
+                    OP_SEND_CHAT_MSG,
+                    json!({
+                        "chat_id": "chat_1",
+                        "content": "coordination must block this before Graph",
+                    }),
+                ),
+            )
+            .await
+            .expect_err("duplicate active claim should deny before Graph HTTP");
+
+        match error {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 4090);
+                assert!(message.starts_with("thread_owned_by_peer:"));
+                assert!(!message.contains("coordination must block"));
+            }
+            other => panic!("expected Unauthorized duplicate-claim denial, got {other:?}"),
+        }
+        let received = mock_server
+            .received_requests()
+            .await
+            .expect("wiremock should report received requests");
+        assert!(
+            received.is_empty(),
+            "Graph HTTP must not run after duplicate coordination denial"
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -3000,6 +3388,41 @@ mod tests {
         assert!(result.is_ok());
         assert!(connector.config.is_some());
         assert!(connector.client.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_accepts_chat_coordination_options() {
+        let mut connector = TeamsConnector::new();
+        connector
+            .configure(json!({
+                "auth": { "mode": "access_token", "access_token": "tok_123" },
+                "chat_coordination": {
+                    "enabled": false,
+                    "ttl_seconds": 45,
+                    "fail_open": false,
+                    "allowlist_channels": ["chat:chat_1"],
+                    "backend": "in_memory",
+                    "dm_mode": "skip"
+                }
+            }))
+            .await
+            .expect("chat_coordination options should configure");
+
+        assert!(!connector.chat_coordination_config.enabled());
+        assert_eq!(
+            connector.chat_coordination_config.ttl(),
+            Duration::from_secs(45)
+        );
+        assert!(!connector.chat_coordination_config.fail_open());
+        assert_eq!(
+            connector.chat_coordination_config.backend(),
+            ChatCoordinationBackend::InMemory
+        );
+        assert_eq!(connector.chat_coordination_config.dm_mode(), DmMode::Skip);
+        assert_eq!(
+            connector.chat_coordination_config.allowlist_channels(),
+            &[ChannelId::new("chat:chat_1")]
+        );
     }
 
     #[test]

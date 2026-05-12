@@ -13,7 +13,8 @@ use fcp_google_places::{
 };
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, HandshakeRequest,
-    IdempotencyClass, InvokeRequest, OperationId, RequestId, RiskLevel, SafetyTier, ZoneId,
+    IdempotencyClass, InstanceId, InvokeRequest, OperationId, RequestId, RiskLevel, SafetyTier,
+    ZoneId,
 };
 use fcp_sdk::prelude::*;
 use serde_json::json;
@@ -28,7 +29,11 @@ fn fieldmask_regex(mask: &str) -> String {
     format!("^{}$", mask.replace('.', r"\."))
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    op: &str,
+    instance_id: &InstanceId,
+) -> CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -42,6 +47,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         .zone_id("z:private")
         .principal("user:test")
         .operations(&[op])
+        .target_instance(instance_id.as_str())
         .issuer("node:test")
         .validity(now, now + chrono::Duration::hours(1))
         .try_constraints_cbor(&cbor)
@@ -55,6 +61,7 @@ async fn setup_handshake(
     connector: &mut GooglePlacesConnector,
     signing_key: &Ed25519SigningKey,
     _capabilities: &[&str],
+    instance_id: &InstanceId,
 ) {
     let verifying_key = signing_key.verifying_key();
     connector
@@ -67,7 +74,7 @@ async fn setup_handshake(
             capabilities_requested: vec![CapabilityId::from_static("google_places.read")],
             host: None,
             transport_caps: None,
-            requested_instance_id: None,
+            requested_instance_id: Some(instance_id.clone()),
         })
         .await
         .expect("handshake should succeed");
@@ -303,10 +310,17 @@ async fn invoke_search_text_uses_default_operation_field_mask() {
 
     let mut connector = GooglePlacesConnector::new();
     let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
     setup_configure(&mut connector, &server.uri()).await;
-    setup_handshake(&mut connector, &signing_key, &["google_places.search_text"]).await;
+    setup_handshake(
+        &mut connector,
+        &signing_key,
+        &["google_places.search_text"],
+        &instance_id,
+    )
+    .await;
 
-    let capability = generate_valid_token(&signing_key, "google_places.search_text");
+    let capability = generate_valid_token(&signing_key, "google_places.search_text", &instance_id);
     let result = connector
         .invoke(InvokeRequest {
             r#type: "invoke".into(),
@@ -362,15 +376,17 @@ async fn invoke_autocomplete_uses_autocomplete_specific_field_mask() {
 
     let mut connector = GooglePlacesConnector::new();
     let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
     setup_configure(&mut connector, &server.uri()).await;
     setup_handshake(
         &mut connector,
         &signing_key,
         &["google_places.autocomplete"],
+        &instance_id,
     )
     .await;
 
-    let capability = generate_valid_token(&signing_key, "google_places.autocomplete");
+    let capability = generate_valid_token(&signing_key, "google_places.autocomplete", &instance_id);
     let result = connector
         .invoke(InvokeRequest {
             r#type: "invoke".into(),
@@ -424,10 +440,17 @@ async fn invoke_get_place_uses_place_details_field_mask_and_language_code() {
 
     let mut connector = GooglePlacesConnector::new();
     let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
     setup_configure(&mut connector, &server.uri()).await;
-    setup_handshake(&mut connector, &signing_key, &["google_places.get_place"]).await;
+    setup_handshake(
+        &mut connector,
+        &signing_key,
+        &["google_places.get_place"],
+        &instance_id,
+    )
+    .await;
 
-    let capability = generate_valid_token(&signing_key, "google_places.get_place");
+    let capability = generate_valid_token(&signing_key, "google_places.get_place", &instance_id);
     let result = connector
         .invoke(InvokeRequest {
             r#type: "invoke".into(),

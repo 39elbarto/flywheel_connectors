@@ -505,6 +505,9 @@ impl FcpConnector for GooglePlacesConnector {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        if let Some(requested_instance_id) = req.requested_instance_id.clone() {
+            self.base.instance_id = requested_instance_id;
+        }
         self.base.set_handshaken(true);
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -678,7 +681,7 @@ fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
 mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-    use fcp_prelude::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
+    use fcp_prelude::{CapabilityConstraints, CapabilityToken, InstanceId, RequestId, ZoneId};
 
     use super::*;
 
@@ -817,7 +820,7 @@ mod tests {
         })
     }
 
-    fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
+    fn handshake_request(host_public_key: [u8; 32], instance_id: &InstanceId) -> HandshakeRequest {
         HandshakeRequest {
             protocol_version: "2.0.0".into(),
             zone: ZoneId::work(),
@@ -827,13 +830,14 @@ mod tests {
             capabilities_requested: vec![CapabilityId::from_static(CAP_READ)],
             host: None,
             transport_caps: None,
-            requested_instance_id: None,
+            requested_instance_id: Some(instance_id.clone()),
         }
     }
 
     fn capability_token(
         signing_key: &Ed25519SigningKey,
         operation: &'static str,
+        instance_id: &InstanceId,
     ) -> CapabilityToken {
         let constraints = CapabilityConstraints {
             resource_allow: vec!["*".into()],
@@ -847,6 +851,7 @@ mod tests {
             .zone_id("z:work")
             .principal("user:test")
             .operations(&[operation])
+            .target_instance(instance_id.as_str())
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
             .try_constraints_cbor(&cbor)
@@ -867,8 +872,12 @@ mod tests {
             .await
             .expect("configure should succeed");
         let signing_key = Ed25519SigningKey::generate();
+        let instance_id = InstanceId::new();
         connector
-            .handshake(handshake_request(signing_key.verifying_key().to_bytes()))
+            .handshake(handshake_request(
+                signing_key.verifying_key().to_bytes(),
+                &instance_id,
+            ))
             .await
             .expect("handshake should succeed");
         let response = connector
@@ -879,7 +888,7 @@ mod tests {
                 operation: OperationId::from_static(OP_HEALTH),
                 zone_id: ZoneId::work(),
                 input: json!({}),
-                capability_token: capability_token(&signing_key, OP_HEALTH),
+                capability_token: capability_token(&signing_key, OP_HEALTH, &instance_id),
                 holder_proof: None,
                 context: None,
                 idempotency_key: None,

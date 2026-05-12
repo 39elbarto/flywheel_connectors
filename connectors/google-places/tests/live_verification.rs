@@ -3,7 +3,7 @@ use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_google_places::GooglePlacesConnector;
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, HandshakeRequest,
-    InvokeRequest, OperationId, RequestId, ZoneId,
+    InstanceId, InvokeRequest, OperationId, RequestId, ZoneId,
 };
 use fcp_sdk::prelude::FcpConnector;
 use serde_json::{Value, json};
@@ -24,7 +24,10 @@ fn env_value(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
+) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec!["*".into()],
@@ -37,6 +40,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         .zone_id("z:private")
         .principal("user:live-smoke")
         .operations(&[OPERATION])
+        .target_instance(instance_id.as_str())
         .issuer("node:live-smoke")
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&cbor)
@@ -46,7 +50,11 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
     CapabilityToken::from_raw(cose)
 }
 
-async fn setup_handshake(connector: &mut GooglePlacesConnector, signing_key: &Ed25519SigningKey) {
+async fn setup_handshake(
+    connector: &mut GooglePlacesConnector,
+    signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
+) {
     connector
         .handshake(HandshakeRequest {
             protocol_version: "1.0.0".into(),
@@ -57,7 +65,7 @@ async fn setup_handshake(connector: &mut GooglePlacesConnector, signing_key: &Ed
             capabilities_requested: vec![CapabilityId::from_static("google_places.read")],
             host: None,
             transport_caps: None,
-            requested_instance_id: None,
+            requested_instance_id: Some(instance_id.clone()),
         })
         .await
         .expect("Google Places handshake should succeed");
@@ -109,8 +117,9 @@ async fn google_places_live_read_text_search_or_structured_skip_jsonl() {
         .expect("configure Google Places API key");
 
     let signing_key = Ed25519SigningKey::generate();
-    setup_handshake(&mut connector, &signing_key).await;
-    let capability = generate_valid_token(&signing_key);
+    let instance_id = InstanceId::new();
+    setup_handshake(&mut connector, &signing_key, &instance_id).await;
+    let capability = generate_valid_token(&signing_key, &instance_id);
 
     match connector
         .invoke(InvokeRequest {

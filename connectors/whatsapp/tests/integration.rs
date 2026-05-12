@@ -18,7 +18,10 @@ use fcp_prelude::{
     HealthState, InstanceId, InvokeRequest, OperationId, RequestId, SelfCheckStatus,
     ShutdownRequest, ZoneId,
 };
-use fcp_sdk::{ChatCoordinationBackend, InMemoryThreadOwnershipChecker, ThreadOwnershipChecker};
+use fcp_sdk::{
+    ChatCoordinationBackend, InMemoryThreadOwnershipChecker, ThreadOwnershipChecker,
+    migration::HttpRetryConfig,
+};
 use fcp_testkit::AsyncTestContext;
 use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
@@ -28,7 +31,10 @@ use wiremock::{
     matchers::{body_json, header, method, path, query_param},
 };
 
-use fcp_whatsapp::connector::{WhatsAppConnector, operations_info};
+use fcp_whatsapp::{
+    client::WhatsAppClient,
+    connector::{WhatsAppConnector, operations_info},
+};
 
 const PHONE_NUMBER_ID: &str = "123456789";
 const ACCESS_TOKEN: &str = "test_access_token_xyz";
@@ -737,6 +743,49 @@ async fn self_check_rate_limited_is_degraded() {
     let report = connector.self_check().await.expect("self-check should run");
     assert_eq!(report.status, SelfCheckStatus::Degraded);
     assert_eq!(report.reason_code.as_deref(), Some("self_check_retryable"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_secretless_health_check_omits_authorization_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/{PHONE_NUMBER_ID}")))
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&server)
+        .await;
+
+    let client = WhatsAppClient::new(
+        &server.uri(),
+        PHONE_NUMBER_ID,
+        "",
+        HttpRetryConfig::default(),
+    )
+    .expect("test client should initialize");
+    assert!(client.health_check().await.is_ok());
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].headers.get("authorization").is_none());
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_health_check_with_token_sends_authorization_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/{PHONE_NUMBER_ID}")))
+        .and(header("authorization", "Bearer real_token"))
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&server)
+        .await;
+
+    let client = WhatsAppClient::new(
+        &server.uri(),
+        PHONE_NUMBER_ID,
+        "real_token",
+        HttpRetryConfig::default(),
+    )
+    .expect("test client should initialize");
+    assert!(client.health_check().await.is_ok());
 }
 
 #[fcp_async_core::runtime::test]

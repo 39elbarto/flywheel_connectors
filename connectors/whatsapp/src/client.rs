@@ -424,8 +424,6 @@ fn authenticate(request: RequestBuilder, access_token: &str) -> RequestBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn normalize_base_url_accepts_graph_facebook_com() {
@@ -562,45 +560,6 @@ mod tests {
         )
         .unwrap();
         assert!(!client.is_secretless());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn secretless_health_check_omits_authorization_header() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/123456"))
-            .respond_with(ResponseTemplate::new(400))
-            .mount(&mock_server)
-            .await;
-
-        let client =
-            WhatsAppClient::new(&mock_server.uri(), "123456", "", HttpRetryConfig::default())
-                .unwrap();
-        assert!(client.health_check().await.is_ok());
-
-        let requests = mock_server.received_requests().await.unwrap_or_default();
-        assert_eq!(requests.len(), 1);
-        assert!(requests[0].headers.get("authorization").is_none());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_with_token_sends_authorization_header() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/123456"))
-            .and(header("authorization", "Bearer real_token"))
-            .respond_with(ResponseTemplate::new(400))
-            .mount(&mock_server)
-            .await;
-
-        let client = WhatsAppClient::new(
-            &mock_server.uri(),
-            "123456",
-            "real_token",
-            HttpRetryConfig::default(),
-        )
-        .unwrap();
-        assert!(client.health_check().await.is_ok());
     }
 
     // ── sanitize_path_segment tests ─────────────────────────────────

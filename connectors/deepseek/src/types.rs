@@ -184,4 +184,18 @@ mod tests {
 
         assert!(matches!(error, FcpError::InvalidRequest { .. }));
     }
+
+    #[test]
+    fn invalid_thinking_type_is_rejected() {
+        let error = chat_request_from_value(
+            json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "thinking": {"type": "verbose"}
+            }),
+            DEFAULT_MODEL,
+        )
+        .expect_err("invalid thinking type should fail");
+
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
 }

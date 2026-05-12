@@ -852,7 +852,7 @@ pub struct ConnectorStateCanonicalStatus {
 impl ConnectorStateCanonicalStatus {
     /// Build a missing-root status for a connector.
     #[must_use]
-    pub fn missing(connector_id: ConnectorId) -> Self {
+    pub const fn missing(connector_id: ConnectorId) -> Self {
         Self {
             connector_id,
             instance_id: None,

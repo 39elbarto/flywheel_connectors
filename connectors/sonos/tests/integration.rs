@@ -12,7 +12,7 @@ use fcp_prelude::{
     InvokeRequest, OperationId, RequestId, SelfCheckStatus, ZoneId,
 };
 use fcp_sdk::migration::ConnectorErrorMapping;
-use fcp_sonos::{SonosConnector, error::SonosError, types::SonosConfig};
+use fcp_sonos::{SonosConnector, client::SonosClient, error::SonosError, types::SonosConfig};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -191,6 +191,29 @@ async fn mount_av_transport_action(server: &MockServer, action: &str) {
         .expect(1)
         .mount(server)
         .await;
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_play_uses_avtransport_soap_action() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/MediaRenderer/AVTransport/Control"))
+        .and(header(
+            "soapaction",
+            "\"urn:schemas-upnp-org:service:AVTransport:1#Play\"",
+        ))
+        .and(body_string_contains("<u:Play"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<ok/>"))
+        .mount(&server)
+        .await;
+
+    let config = SonosConfig::from_value(json!({
+        "device_url": server.uri()
+    }))
+    .expect("config should parse");
+    let client = SonosClient::from_config(&config).expect("client should build");
+    let result = client.play().await.expect("play should succeed");
+    assert_eq!(result["action"], "play");
 }
 
 #[fcp_async_core::runtime::test]

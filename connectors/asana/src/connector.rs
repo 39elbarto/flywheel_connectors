@@ -1493,9 +1493,12 @@ mod tests {
                 .iter()
                 .any(|cap| cap.as_str() == "asana.tasks.delete")
         );
+        let rate_limits = manifest
+            .rate_limits
+            .as_ref()
+            .expect("manifest should declare rate limits");
         assert_eq!(
-            manifest
-                .rate_limits
+            rate_limits
                 .operation_pools
                 .get("asana.tasks.delete")
                 .map(|pools| pools.iter().map(|pool| pool.as_str()).collect::<Vec<_>>()),

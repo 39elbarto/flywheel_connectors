@@ -149,6 +149,17 @@ pub enum CryptoError {
     },
 }
 
+impl CryptoError {
+    /// Stable machine-readable reason code for crypto policy/audit surfaces.
+    #[must_use]
+    pub const fn reason_code(&self) -> Option<&'static str> {
+        match self {
+            Self::ClassicalSignatureMissing | Self::PqSignatureMissing => Some("DowngradeAttempt"),
+            _ => None,
+        }
+    }
+}
+
 /// Result type alias for cryptographic operations.
 pub type CryptoResult<T> = Result<T, CryptoError>;
 

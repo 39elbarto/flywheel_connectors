@@ -88,6 +88,24 @@ pub struct HybridEnvelopeVerification {
     pub sig_kinds_present: Vec<&'static str>,
     /// Signature kinds that were cryptographically verified.
     pub sig_kinds_verified: Vec<&'static str>,
+    /// Transitional-policy warnings emitted while accepting the envelope.
+    pub warnings: Vec<HybridDowngradeWarning>,
+}
+
+/// Redaction-safe warning emitted when transitional policy accepts a
+/// single-signature envelope that steady-state policy would reject.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HybridDowngradeWarning {
+    /// Object family being verified.
+    pub object_type: HybridSignedObjectKind,
+    /// Effective verifier policy.
+    pub policy: PqSigningPolicy,
+    /// Machine-readable downgrade or mismatch reason.
+    pub reason_code: &'static str,
+    /// Stable label for the accepted downgrade shape.
+    pub attempted_downgrade: &'static str,
+    /// Redaction-safe signing key fingerprint.
+    pub attacker_pubkey_fpr: String,
 }
 
 /// Hardware-token authorization hook for emergency PQ-policy downgrade.
@@ -409,11 +427,13 @@ where
         let verify_start = std::time::Instant::now();
         let present = self.sig_kinds_present();
         let mut verified = Vec::new();
+        let mut warnings = Vec::new();
         let span = tracing::info_span!(
             "fcp.crypto.verify",
             object_type = self.object_type.as_str(),
             sig_kinds = tracing::field::Empty,
             latency_us = tracing::field::Empty,
+            downgrade_attempt = tracing::field::Empty,
         );
         let _span_guard = span.enter();
 
@@ -429,13 +449,51 @@ where
             PqSigningPolicy::EitherOk => {
                 if self.verify_classical(classical_key, signing_bytes).is_ok() {
                     verified.push("ed25519");
+                    if self.sig_pq.is_none() {
+                        let warning = self.transitional_warning(
+                            policy,
+                            "PqSignatureMismatch",
+                            "pq-signature-absent-under-either-ok",
+                            key_fingerprint("ed25519", &classical_key.key_id()),
+                        );
+                        self.log_transitional_warning(&warning);
+                        warnings.push(warning);
+                    }
                 } else if self.verify_pq(pq_key, signing_bytes).is_ok() {
                     verified.push("ml-dsa-65");
+                    if self.sig_classical.is_none() {
+                        let warning = self.transitional_warning(
+                            policy,
+                            "ClassicalSignatureMismatch",
+                            "classical-signature-absent-under-either-ok",
+                            key_fingerprint("ml-dsa-65", &pq_key.key_id()),
+                        );
+                        self.log_transitional_warning(&warning);
+                        warnings.push(warning);
+                    }
                 } else {
                     return Err(CryptoError::SignatureVerificationFailed);
                 }
             }
             PqSigningPolicy::BothRequired => {
+                if self.sig_classical.is_none() {
+                    span.record("downgrade_attempt", true);
+                    self.log_downgrade_rejection(
+                        policy,
+                        "classical-signature-absent-under-both-required",
+                        &key_fingerprint("ml-dsa-65", &pq_key.key_id()),
+                    );
+                    return Err(CryptoError::ClassicalSignatureMissing);
+                }
+                if self.sig_pq.is_none() {
+                    span.record("downgrade_attempt", true);
+                    self.log_downgrade_rejection(
+                        policy,
+                        "pq-signature-absent-under-both-required",
+                        &key_fingerprint("ed25519", &classical_key.key_id()),
+                    );
+                    return Err(CryptoError::PqSignatureMissing);
+                }
                 self.verify_classical(classical_key, signing_bytes)?;
                 verified.push("ed25519");
                 self.verify_pq(pq_key, signing_bytes)?;
@@ -446,11 +504,13 @@ where
         let latency_us = u64::try_from(verify_start.elapsed().as_micros()).unwrap_or(u64::MAX);
         span.record("sig_kinds", tracing::field::debug(&verified));
         span.record("latency_us", latency_us);
+        span.record("downgrade_attempt", !warnings.is_empty());
         tracing::info!(
             object_type = self.object_type.as_str(),
             ?policy,
             sig_kinds_present = ?present,
             sig_kinds_verified = ?verified,
+            downgrade_attempt = !warnings.is_empty(),
             verdict = "ok",
             "hybrid signed envelope verified",
         );
@@ -460,7 +520,53 @@ where
             policy,
             sig_kinds_present: present,
             sig_kinds_verified: verified,
+            warnings,
         })
+    }
+
+    #[allow(clippy::missing_const_for_fn)] // Moves a String payload into the warning record.
+    fn transitional_warning(
+        &self,
+        policy: PqSigningPolicy,
+        reason_code: &'static str,
+        attempted_downgrade: &'static str,
+        attacker_pubkey_fpr: String,
+    ) -> HybridDowngradeWarning {
+        HybridDowngradeWarning {
+            object_type: self.object_type,
+            policy,
+            reason_code,
+            attempted_downgrade,
+            attacker_pubkey_fpr,
+        }
+    }
+
+    fn log_transitional_warning(&self, warning: &HybridDowngradeWarning) {
+        tracing::warn!(
+            object_type = self.object_type.as_str(),
+            ?warning.policy,
+            reason_code = warning.reason_code,
+            attempted_downgrade = warning.attempted_downgrade,
+            attacker_pubkey_fpr = %warning.attacker_pubkey_fpr,
+            "hybrid signed envelope accepted by transitional downgrade policy",
+        );
+    }
+
+    fn log_downgrade_rejection(
+        &self,
+        policy: PqSigningPolicy,
+        attempted_downgrade: &'static str,
+        attacker_pubkey_fpr: &str,
+    ) {
+        tracing::info!(
+            object_type = self.object_type.as_str(),
+            ?policy,
+            attempted_downgrade,
+            reason_code = "DowngradeAttempt",
+            attacker_pubkey_fpr = %attacker_pubkey_fpr,
+            verdict = "rejected",
+            "hybrid signed envelope downgrade attempt rejected",
+        );
     }
 
     fn verify_classical(
@@ -545,6 +651,10 @@ where
         }
         present
     }
+}
+
+fn key_fingerprint(algorithm: &'static str, kid: &KeyId) -> String {
+    format!("{algorithm}:kid:{kid}")
 }
 
 /// Downgrade steady-state hybrid verification policy to transitional

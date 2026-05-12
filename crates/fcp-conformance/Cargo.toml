@@ -72,12 +72,14 @@ fcp-streaming = { path = "../fcp-streaming" }
 fcp-audit = { path = "../fcp-audit" }
 fcp-policy = { path = "../fcp-policy" }
 fcp-kernel = { path = "../fcp-kernel" }
+fcp-bench = { path = "../fcp-bench" }
 fwc = { workspace = true }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 futures-util = { workspace = true }
 url.workspace = true
 criterion.workspace = true
+proptest.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 toml.workspace = true

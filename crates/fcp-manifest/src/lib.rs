@@ -107,6 +107,8 @@ pub struct ConnectorManifest {
     pub event_caps: Option<EventCapsSection>,
     #[serde(default)]
     pub timeouts: Option<ManifestTimeouts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub performance_budget: Option<PerformanceBudget>,
     pub sandbox: SandboxSection,
     #[serde(default)]
     pub rate_limits: Option<RateLimitsSection>,
@@ -233,6 +235,9 @@ impl ConnectorManifest {
         }
         if let Some(ref timeouts) = self.timeouts {
             timeouts.validate()?;
+        }
+        if let Some(ref performance_budget) = self.performance_budget {
+            performance_budget.validate()?;
         }
         self.sandbox.validate()?;
         if let Some(ref rate_limits) = self.rate_limits {
@@ -421,6 +426,12 @@ pub enum ManifestError {
 
     #[error("invalid manifest field `{field}`: {message}")]
     Invalid {
+        field: &'static str,
+        message: String,
+    },
+
+    #[error("invalid performance budget field `{field}`: {message}")]
+    InvalidPerformanceBudget {
         field: &'static str,
         message: String,
     },
@@ -2193,6 +2204,56 @@ const fn default_manifest_connect_timeout_ms() -> u64 {
 
 const fn default_manifest_wall_clock_timeout_ms() -> u64 {
     60_000
+}
+
+/// Optional per-connector p99 resource and latency graduation budgets.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PerformanceBudget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cold_start_max_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_invoke_max_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_uss_max_mb: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_cpu_max_pct: Option<f64>,
+}
+
+impl PerformanceBudget {
+    fn validate(&self) -> Result<(), ManifestError> {
+        validate_performance_budget_value(
+            "performance_budget.cold_start_max_ms",
+            self.cold_start_max_ms,
+        )?;
+        validate_performance_budget_value(
+            "performance_budget.local_invoke_max_ms",
+            self.local_invoke_max_ms,
+        )?;
+        validate_performance_budget_value(
+            "performance_budget.memory_uss_max_mb",
+            self.memory_uss_max_mb,
+        )?;
+        validate_performance_budget_value(
+            "performance_budget.idle_cpu_max_pct",
+            self.idle_cpu_max_pct,
+        )
+    }
+}
+
+fn validate_performance_budget_value(
+    field: &'static str,
+    value: Option<f64>,
+) -> Result<(), ManifestError> {
+    if let Some(value) = value
+        && (!value.is_finite() || value < 0.0)
+    {
+        return Err(ManifestError::InvalidPerformanceBudget {
+            field,
+            message: "must be a finite non-negative number".into(),
+        });
+    }
+    Ok(())
 }
 
 /// `[sandbox]` section (NORMATIVE).

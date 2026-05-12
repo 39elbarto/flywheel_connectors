@@ -69,6 +69,13 @@ impl StatPack {
         let mean = arithmetic_mean(&sorted);
         let variance = sample_variance(&sorted, mean);
         let std = variance.sqrt();
+        tracing::debug!(
+            target: "fcp.bench.stats",
+            fcp_bench_stats_phase = "sample_summary",
+            fcp_bench_stats_sample_count = sample_count,
+            fcp_bench_stats_bootstrap_resamples = resamples,
+            "fcp.bench.stats sample loop summary"
+        );
         let p50 = percentile(&sorted, 0.500);
         let p99 = percentile(&sorted, 0.990);
         let p999 = percentile(&sorted, 0.999);
@@ -163,6 +170,16 @@ impl StatPack {
     pub fn log_info_json_line(&self) {
         tracing::info!(
             target: "fcp.bench.stats",
+            fcp_bench_stats_p50 = self.p50,
+            fcp_bench_stats_p99 = self.p99,
+            fcp_bench_stats_p999 = self.p999,
+            fcp_bench_stats_mean = self.mean,
+            fcp_bench_stats_std = self.std,
+            fcp_bench_stats_welch_t = self.welch_t,
+            fcp_bench_stats_bootstrap_ci_low = self.bootstrap_ci.0,
+            fcp_bench_stats_bootstrap_ci_high = self.bootstrap_ci.1,
+            fcp_bench_stats_tail_amp = self.tail_amp,
+            fcp_bench_stats_sample_count = self.sample_count,
             statpack = %self.to_json_value(),
             "fcp.bench.stats.statpack"
         );
@@ -266,7 +283,14 @@ fn bootstrap_mean_ci(sorted: &[f64], resamples: usize) -> (f64, f64) {
     let mut seed = bootstrap_seed(sorted);
     let mut means = Vec::with_capacity(resamples);
 
-    for _ in 0..resamples {
+    for resample_index in 0..resamples {
+        tracing::debug!(
+            target: "fcp.bench.stats",
+            fcp_bench_stats_phase = "bootstrap_resample",
+            fcp_bench_stats_resample_index = resample_index,
+            fcp_bench_stats_sample_count = sorted.len(),
+            "fcp.bench.stats bootstrap resample"
+        );
         let mut sum = 0.0;
         for _ in 0..sorted.len() {
             let index = next_index(&mut seed, sorted.len());

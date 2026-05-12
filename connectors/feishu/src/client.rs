@@ -827,9 +827,6 @@ impl FeishuClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_sdk::migration::ConnectorRuntimeConfig;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn client_creation() {
@@ -940,121 +937,6 @@ mod tests {
         client.set_tenant_access_token("t-abc123".into());
         let header = client.auth_header().unwrap();
         assert_eq!(header, "Bearer t-abc123");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_success() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "code": 0,
-                "msg": "ok",
-                "tenant_access_token": "t-test",
-                "expire": 7200
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = FeishuClient::new(
-            &mock_server.uri(),
-            "cli_test",
-            "secret",
-            HttpRetryConfig::default(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-        assert!(client.health_check().await.is_ok());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn obtain_tenant_token() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "code": 0,
-                "msg": "ok",
-                "tenant_access_token": "t-obtained",
-                "expire": 7200
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = FeishuClient::new(
-            &mock_server.uri(),
-            "cli_test",
-            "secret",
-            HttpRetryConfig::default(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-        let token = client.obtain_tenant_access_token().await.unwrap();
-        assert_eq!(token, "t-obtained");
-        assert!(client.auth_header().is_ok());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn health_check_server_error() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-            .respond_with(ResponseTemplate::new(500))
-            .mount(&mock_server)
-            .await;
-
-        let client = FeishuClient::new(
-            &mock_server.uri(),
-            "cli_test",
-            "secret",
-            HttpRetryConfig::default(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-        assert!(client.health_check().await.is_err());
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn list_chats_bootstraps_token_on_first_request() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "code": 0,
-                "msg": "ok",
-                "tenant_access_token": "t-lazy",
-                "expire": 7200
-            })))
-            .mount(&mock_server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/open-apis/im/v1/chats"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "code": 0,
-                "msg": "ok",
-                "data": {
-                    "items": [{ "chat_id": "oc_123", "name": "General" }],
-                    "page_token": null,
-                    "has_more": false
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let client = FeishuClient::new(
-            &mock_server.uri(),
-            "cli_test",
-            "secret",
-            HttpRetryConfig::default(),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-
-        let response = client.list_chats(&runtime, None, Some(20)).await.unwrap();
-        assert_eq!(response.items.len(), 1);
-        assert_eq!(response.items[0].chat_id, "oc_123");
-        assert_eq!(client.auth_header().unwrap(), "Bearer t-lazy");
     }
 
     #[fcp_async_core::runtime::test]

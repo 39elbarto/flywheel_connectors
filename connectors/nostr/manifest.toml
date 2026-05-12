@@ -74,6 +74,11 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
 
+[provides.operations.notes_publish.ai_hints]
+when_to_use = "Use when an agent needs to publish one public kind-1 note through the connector's bound Nostr identity to every configured relay."
+common_mistakes = ["Do not use this for encrypted direct messages; use dm_send for NIP-04 DMs.", "Do not set kind to anything other than 1; this operation is scoped to public notes.", "Publishing fans out to every configured relay, so avoid blind retries after an unknown delivery result."]
+examples = ['{"input":{"content":"Release notes are ready for review.","kind":1,"tags":[["t","release"]]},"output":{"accepted_relays":[{"relay":"wss://relay.example.com","ok":true}],"rejected_relays":[]}}']
+
 [provides.operations.dm_send]
 summary = "Encrypt and publish a NIP-04 direct message to configured relays"
 capability = "nostr.dm.write"
@@ -100,6 +105,11 @@ max_redirects = 0
 connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
+
+[provides.operations.dm_send.ai_hints]
+when_to_use = "Use when an agent needs to send one encrypted NIP-04 direct message to a known Nostr pubkey through the configured relay set."
+common_mistakes = ["Recipient aliases must all refer to the same pubkey when more than one is supplied.", "Plaintext is capped and is never returned in connector output, so keep any durable transcript outside this operation.", "Self-send is denied unless allow_self_send is explicitly true."]
+examples = ['{"input":{"recipient_pubkey":"1111111111111111111111111111111111111111111111111111111111111111","plaintext":"Can you review the incident summary?"},"output":{"event_kind":4,"accepted_relays":[{"relay":"wss://relay.example.com","ok":true}]}}']
 
 [provides.operations.profile_publish]
 summary = "Validate, sign, publish, and persist NIP-01 profile metadata"
@@ -128,6 +138,11 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
 
+[provides.operations.profile_publish.ai_hints]
+when_to_use = "Use when the connector's bound Nostr identity should publish or replace its public NIP-01 profile metadata."
+common_mistakes = ["Do not send public notes through this operation; it creates a kind-0 profile event only.", "Profile URLs must be https and must not point at loopback, private, link-local, .local, or .internal hosts.", "Persisted profile state updates only after at least one configured relay accepts the event."]
+examples = ['{"input":{"profile":{"display_name":"FCP Operations","about":"Automation status and handoff notes","website":"https://example.com/fcp"}},"output":{"event_kind":0,"persisted":true,"accepted_relays":[{"relay":"wss://relay.example.com","ok":true}]}}']
+
 [provides.operations.profile_state]
 summary = "Read local NIP-01 profile publish state"
 capability = "nostr.profile.read"
@@ -154,6 +169,11 @@ max_redirects = 0
 connect_timeout_ms = 1000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
+
+[provides.operations.profile_state.ai_hints]
+when_to_use = "Use to inspect the connector-local profile publish cache before deciding whether to republish or import profile metadata."
+common_mistakes = ["This operation never queries relays; use profile_import for relay-backed reads.", "No signing key material is stored or returned in profile state.", "Memory-only state means no zone directory was available, not that relay publication failed."]
+examples = ['{"input":{},"output":{"persistence":"zone_dir","last_published_event_id":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","last_profile":{"display_name":"FCP Operations"}}}']
 
 [provides.operations.profile_import]
 summary = "Import newest verified NIP-01 profile metadata from configured relays"
@@ -182,6 +202,11 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
 
+[provides.operations.profile_import.ai_hints]
+when_to_use = "Use before displaying or editing a Nostr profile when an agent needs the newest verified kind-0 metadata from configured relays."
+common_mistakes = ["Import reads only the configured relays and does not discover new relays from profile metadata.", "Unsafe imported URL fields are dropped and reported instead of being returned for browser or fetch use.", "If pubkey is omitted, the connector imports the profile for its own bound public key."]
+examples = ['{"input":{"pubkey":"2222222222222222222222222222222222222222222222222222222222222222","local_profile":{"display_name":"Local fallback"}},"output":{"ok":true,"pubkey_hex":"2222222222222222222222222222222222222222222222222222222222222222","relays_queried":["wss://relay.example.com"]}}']
+
 [provides.operations.events_query]
 summary = "Query bounded public Nostr events from configured relays"
 capability = "nostr.events.read"
@@ -208,6 +233,11 @@ max_redirects = 0
 connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
+
+[provides.operations.events_query.ai_hints]
+when_to_use = "Use for bounded public Nostr event reads when the agent already knows the relay set and filter shape."
+common_mistakes = ["This is not a long-lived subscription or DM sync surface.", "Omitting limit uses the connector default, while excessive limits are rejected by schema.", "Results may duplicate events across relays, so callers should dedupe by event id when needed."]
+examples = ['{"input":{"authors":["3333333333333333333333333333333333333333333333333333333333333333"],"kinds":[1],"limit":20},"output":{"subscription_id":"sub-001","results":[{"relay":"wss://relay.example.com","events":[]}]}}']
 
 [provides.operations.relays_list]
 summary = "List configured Nostr relays"
@@ -236,6 +266,11 @@ connect_timeout_ms = 1000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
 
+[provides.operations.relays_list.ai_hints]
+when_to_use = "Use to inspect the static relay allowlist and public key configured for this connector instance."
+common_mistakes = ["This operation does not discover relays from NIP metadata.", "It does not mutate relay policy or test reachability; use health or relays_health for runtime checks."]
+examples = ['{"input":{},"output":{"relays":["wss://relay.example.com"],"public_key_hex":"4444444444444444444444444444444444444444444444444444444444444444"}}']
+
 [provides.operations.health]
 summary = "Verify relay connectivity and local signing identity"
 capability = "nostr.health.read"
@@ -263,6 +298,11 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
 
+[provides.operations.health.ai_hints]
+when_to_use = "Use before publish or read actions to confirm the configured relay set is reachable and the bound signing identity is coherent."
+common_mistakes = ["Health verifies WebSocket reachability and key derivation, not successful note publication.", "It does not prove encrypted DM support or rank relays.", "A single unhealthy relay can coexist with a usable connector when other configured relays are reachable."]
+examples = ['{"input":{},"output":{"public_key_hex":"5555555555555555555555555555555555555555555555555555555555555555","relay_health":[{"relay":"wss://relay.example.com","ok":true}]}}']
+
 [provides.operations.relays_health]
 summary = "Score relay health with latency and NIP support metrics"
 capability = "nostr.health.read"
@@ -289,6 +329,11 @@ max_redirects = 0
 connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
+
+[provides.operations.relays_health.ai_hints]
+when_to_use = "Use when an agent needs detailed per-relay latency and NIP support signals rather than the basic reachability status."
+common_mistakes = ["Relay kind support is inferred from bounded REQ probes and may be affected by relay indexing policy.", "NIP-44 support is inferred from kind 1059 support, not negotiated directly.", "Latency reflects WebSocket connection setup, not full query round-trip time."]
+examples = ['{"input":{},"output":{"public_key_hex":"6666666666666666666666666666666666666666666666666666666666666666","relay_scores":[{"relay":"wss://relay.example.com","score":100}],"scored_count":1}}']
 
 # Top-level event_caps is intentionally omitted here because the current
 # manifest schema requires min_buffer_events > 0 whenever streaming = true.

@@ -89,7 +89,7 @@ async fn handle_query(
         client
             .batch_execute(&sql)
             .await
-            .map_err(|error| internal(format!("execute failed: {error}")))?;
+            .map_err(|error| internal(&format!("execute failed: {error}")))?;
         return Ok(Json(json!({
             "affected_rows": 0,
             "status": "executed"
@@ -99,7 +99,7 @@ async fn handle_query(
     let rows = client
         .query(&sql, &[])
         .await
-        .map_err(|error| internal(format!("query failed: {error}")))?;
+        .map_err(|error| internal(&format!("query failed: {error}")))?;
     let result_rows = rows
         .iter()
         .map(|row| {
@@ -129,7 +129,7 @@ async fn handle_tables(
             &[&schema],
         )
         .await
-        .map_err(|error| internal(format!("table list failed: {error}")))?;
+        .map_err(|error| internal(&format!("table list failed: {error}")))?;
     let tables = rows
         .iter()
         .map(|row| json!({ "name": row.get::<_, String>("table_name") }))
@@ -144,7 +144,7 @@ async fn handle_health(
     let row = client
         .query_one("SELECT 1 AS ok", &[])
         .await
-        .map_err(|error| internal(format!("health query failed: {error}")))?;
+        .map_err(|error| internal(&format!("health query failed: {error}")))?;
     let ok = row.get::<_, i32>("ok");
     Ok(Json(json!({ "status": "ok", "postgres_ping": ok })))
 }
@@ -166,7 +166,7 @@ async fn handle_transaction(
             client
                 .batch_execute(&begin_sql)
                 .await
-                .map_err(|error| internal(format!("BEGIN failed: {error}")))?;
+                .map_err(|error| internal(&format!("BEGIN failed: {error}")))?;
 
             let mut next = state.next_transaction_id.lock().await;
             *next += 1;
@@ -187,11 +187,11 @@ async fn handle_transaction(
                 .lock()
                 .await
                 .remove(&txn_id)
-                .ok_or_else(|| not_found(format!("unknown txn_id {txn_id}")))?;
+                .ok_or_else(|| not_found(&format!("unknown txn_id {txn_id}")))?;
             client
                 .batch_execute("COMMIT")
                 .await
-                .map_err(|error| internal(format!("COMMIT failed: {error}")))?;
+                .map_err(|error| internal(&format!("COMMIT failed: {error}")))?;
             Ok(Json(json!({ "status": "committed", "txn_id": txn_id })))
         }
         "rollback" => {
@@ -201,11 +201,11 @@ async fn handle_transaction(
                 .lock()
                 .await
                 .remove(&txn_id)
-                .ok_or_else(|| not_found(format!("unknown txn_id {txn_id}")))?;
+                .ok_or_else(|| not_found(&format!("unknown txn_id {txn_id}")))?;
             client
                 .batch_execute("ROLLBACK")
                 .await
-                .map_err(|error| internal(format!("ROLLBACK failed: {error}")))?;
+                .map_err(|error| internal(&format!("ROLLBACK failed: {error}")))?;
             Ok(Json(json!({ "status": "rolled_back", "txn_id": txn_id })))
         }
         other => Err((
@@ -227,14 +227,14 @@ fn require_str(body: &Value, field: &str) -> Result<String, (StatusCode, Json<Va
         })
 }
 
-fn internal(message: String) -> (StatusCode, Json<Value>) {
+fn internal(message: &str) -> (StatusCode, Json<Value>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({ "error": message })),
     )
 }
 
-fn not_found(message: String) -> (StatusCode, Json<Value>) {
+fn not_found(message: &str) -> (StatusCode, Json<Value>) {
     (StatusCode::NOT_FOUND, Json(json!({ "error": message })))
 }
 
@@ -458,13 +458,10 @@ async fn postgresql_testcontainer_acceptance_exercises_connector_boundary() {
         json!({ "schema": "public" }),
     )
     .await;
-    assert!(
-        tables["tables"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|table| table["name"] == TABLE_NAME)
-    );
+    let table_rows = tables["tables"]["tables"]
+        .as_array()
+        .expect("schema table array");
+    assert!(table_rows.iter().any(|table| table["name"] == TABLE_NAME));
 
     let begin = invoke(
         &connector,

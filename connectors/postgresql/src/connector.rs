@@ -407,7 +407,7 @@ impl PostgreSqlConnector {
                 code: 1003,
                 message: "Missing operation_id".into(),
             };
-            return Ok(simulate_denied(error.to_string(), error.error_code()));
+            return Ok(simulate_denied(error.to_string(), &error.error_code()));
         }
 
         let Some(operation_info) = typed_operations_info()
@@ -418,7 +418,7 @@ impl PostgreSqlConnector {
                 code: 1004,
                 message: format!("Unknown operation: {operation}"),
             };
-            return Ok(simulate_denied(error.to_string(), error.error_code()));
+            return Ok(simulate_denied(error.to_string(), &error.error_code()));
         };
 
         let input = params.get("input").unwrap_or(&serde_json::Value::Null);
@@ -427,16 +427,16 @@ impl PostgreSqlConnector {
                 code: 1003,
                 message,
             };
-            return Ok(simulate_denied(error.to_string(), error.error_code()));
+            return Ok(simulate_denied(error.to_string(), &error.error_code()));
         }
 
         if let Err(error) = self.base.check_ready() {
-            return Ok(simulate_denied(error.to_string(), error.error_code()));
+            return Ok(simulate_denied(error.to_string(), &error.error_code()));
         }
 
         if self.client.is_none() {
             let error = FcpError::NotConfigured;
-            return Ok(simulate_denied(error.to_string(), error.error_code()));
+            return Ok(simulate_denied(error.to_string(), &error.error_code()));
         }
 
         Ok(json!({
@@ -634,7 +634,7 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         .ok_or_else(|| PostgresError::Query(format!("Missing required field: {field}")))
 }
 
-fn simulate_denied(reason: impl Into<String>, error_code: String) -> serde_json::Value {
+fn simulate_denied(reason: impl Into<String>, error_code: &str) -> serde_json::Value {
     json!({
         "allowed": false,
         "reason": reason.into(),

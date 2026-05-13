@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod architecture;
 mod control_plane;
 mod fcpc;
 mod fcps;

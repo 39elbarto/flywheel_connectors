@@ -104,6 +104,7 @@ fn golden_audit_receipt_envelope_canonical_cbor() {
         ),
         connector_id: Some("stripe".to_string()),
         operation_id: Some("charges.create".to_string()),
+        confidence: None,
         issuer_kid: None,
         signature: None,
     };
@@ -231,6 +232,7 @@ fn snapshot_decision_receipt_allow_with_evidence() {
         ),
         connector_id: Some("stripe".to_string()),
         operation_id: Some("charges.create".to_string()),
+        confidence: None,
         issuer_kid: None,
         signature: None,
     };
@@ -260,6 +262,7 @@ fn snapshot_decision_receipt_deny_with_explanation() {
         trace_context: None,
         connector_id: Some("stripe".to_string()),
         operation_id: Some("refunds.create".to_string()),
+        confidence: None,
         issuer_kid: None,
         signature: None,
     };
@@ -286,6 +289,7 @@ fn snapshot_decision_receipt_allow_minimal() {
         trace_context: None,
         connector_id: None,
         operation_id: None,
+        confidence: None,
         issuer_kid: None,
         signature: None,
     };
@@ -312,6 +316,7 @@ fn snapshot_decision_receipt_minimal_deny() {
         trace_context: None,
         connector_id: None,
         operation_id: None,
+        confidence: None,
         issuer_kid: None,
         signature: None,
     };

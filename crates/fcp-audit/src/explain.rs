@@ -516,10 +516,21 @@ fn receipt_reason(receipt: &DecisionReceipt) -> CausalReason {
         .as_deref()
         .or_else(|| non_empty(receipt.reason_code.as_str()))
         .unwrap_or("allow");
+    let confidence = receipt
+        .confidence
+        .as_ref()
+        .map_or_else(String::new, |score| {
+            format!(
+                " with confidence {} (n={}, nonconforming={})",
+                score.display_value(),
+                score.sample_count,
+                score.nonconforming_count
+            )
+        });
     CausalReason {
         kind: CausalReasonKind::DecisionReceipt,
         statement: format!(
-            "decision receipt {} returned {} with reason {explanation}",
+            "decision receipt {} returned {}{confidence} with reason {explanation}",
             receipt.id, receipt.decision
         ),
         evidence: vec![format!("receipt:{}", receipt.id)],
@@ -700,6 +711,7 @@ mod tests {
             trace_context: None,
             connector_id: entry.connector_id.clone(),
             operation_id: entry.operation_id.clone(),
+            confidence: None,
             issuer_kid: None,
             signature: None,
         }

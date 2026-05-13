@@ -8,7 +8,9 @@ on:
       - ".github/workflows/formal-models.yml"
       - "crates/fcp-host/src/cutover/**"
       - "crates/fcp-host/src/lib.rs"
+      - "crates/fcp-core/src/capability.rs"
       - "crates/fcp-e2e/tests/cutover_tla_model_alignment_e2e.rs"
+      - "crates/fcp-e2e/tests/capability_lifecycle_tla_alignment_e2e.rs"
   push:
     branches:
       - main
@@ -18,7 +20,9 @@ on:
       - ".github/workflows/formal-models.yml"
       - "crates/fcp-host/src/cutover/**"
       - "crates/fcp-host/src/lib.rs"
+      - "crates/fcp-core/src/capability.rs"
       - "crates/fcp-e2e/tests/cutover_tla_model_alignment_e2e.rs"
+      - "crates/fcp-e2e/tests/capability_lifecycle_tla_alignment_e2e.rs"
   workflow_dispatch:
 
 permissions:
@@ -74,11 +78,25 @@ jobs:
         shell: bash
         run: make tla-check-broken TLA2TOOLS_JAR="${TLA2TOOLS_JAR}"
 
+      - name: Run capability lifecycle TLC gate
+        shell: bash
+        run: make tla-check-capability-lifecycle TLA2TOOLS_JAR="${TLA2TOOLS_JAR}"
+
+      - name: Run capability lifecycle broken-spec TLC smoke
+        shell: bash
+        run: make tla-check-capability-lifecycle-broken TLA2TOOLS_JAR="${TLA2TOOLS_JAR}"
+
       - name: Run Rust alignment E2E
         shell: bash
         run: |
           cargo test -p fcp-e2e --no-default-features \
             --test cutover_tla_model_alignment_e2e -- --nocapture
+
+      - name: Run capability lifecycle Rust alignment E2E
+        shell: bash
+        run: |
+          cargo test -p fcp-e2e --no-default-features \
+            --test capability_lifecycle_tla_alignment_e2e -- --nocapture
 
       - name: Upload formal-model artifacts
         uses: actions/upload-artifact@v4

@@ -9,10 +9,13 @@ TLA2TOOLS_JAR ?= tools/tla2tools.jar
 TLA_CUTOVER_SPEC := specs/tla/cutover.tla
 TLA_CUTOVER_CFG := specs/tla/cutover.cfg
 TLA_CUTOVER_BROKEN_SPEC := specs/tla/_fixtures/cutover_broken.tla
+TLA_CAPABILITY_LIFECYCLE_SPEC := specs/tla/capability_lifecycle.tla
+TLA_CAPABILITY_LIFECYCLE_CFG := specs/tla/capability_lifecycle.cfg
+TLA_CAPABILITY_LIFECYCLE_BROKEN_SPEC := specs/tla/_fixtures/capability_lifecycle_broken.tla
 TLA_ARTIFACT_DIR := artifacts/formal/tla
 TLA_STATE_DIR := $(TLA_ARTIFACT_DIR)/states
 
-.PHONY: lean-verify lean-verify-verbose tla-check tla-check-broken
+.PHONY: lean-verify lean-verify-verbose tla-check tla-check-broken tla-check-capability-lifecycle tla-check-capability-lifecycle-broken
 
 lean-verify:
 	@set -eu; \
@@ -73,5 +76,48 @@ tla-check-broken:
 		cat "$(TLA_ARTIFACT_DIR)/cutover_broken.log"; \
 		duration=$$(( $$(date +%s) - start )); \
 		printf 'ERROR {"span":"fcp.formal.tla_check","spec":"%s","depth":20,"verdict":"red_without_safety_invariant","duration_s":%s}\n' "$(TLA_CUTOVER_BROKEN_SPEC)" "$$duration"; \
+		exit 1; \
+	fi
+
+tla-check-capability-lifecycle:
+	@set -eu; \
+	mkdir -p "$(TLA_ARTIFACT_DIR)" "$(TLA_STATE_DIR)/capability_lifecycle"; \
+	if [ ! -f "$(TLA2TOOLS_JAR)" ]; then \
+		printf 'ERROR {"span":"fcp.formal.tla_check","spec":"%s","verdict":"toolchain_missing","message":"set TLA2TOOLS_JAR to tla2tools.jar"}\n' "$(TLA_CAPABILITY_LIFECYCLE_SPEC)"; \
+		exit 127; \
+	fi; \
+	start=$$(date +%s); \
+	if java -cp "$(TLA2TOOLS_JAR)" tlc2.TLC -deadlock -metadir "$(TLA_STATE_DIR)/capability_lifecycle" -config "$(TLA_CAPABILITY_LIFECYCLE_CFG)" "$(TLA_CAPABILITY_LIFECYCLE_SPEC)" | tee "$(TLA_ARTIFACT_DIR)/capability_lifecycle.log"; then \
+		duration=$$(( $$(date +%s) - start )); \
+		states=$$(sed -n 's/^\([0-9][0-9]*\) states generated.*/\1/p' "$(TLA_ARTIFACT_DIR)/capability_lifecycle.log" | tail -n 1); \
+		states=$${states:-unknown}; \
+		printf 'INFO {"span":"fcp.formal.tla_check","spec":"%s","depth":20,"states_explored":"%s","invariants_checked":["RevokeBeforeUse","NoDoubleSpend","RevocationPropagationSLO"],"verdict":"green","duration_s":%s}\n' "$(TLA_CAPABILITY_LIFECYCLE_SPEC)" "$$states" "$$duration"; \
+	else \
+		duration=$$(( $$(date +%s) - start )); \
+		printf 'ERROR {"span":"fcp.formal.tla_check","spec":"%s","depth":20,"states_explored":"unknown","invariants_checked":["RevokeBeforeUse","NoDoubleSpend","RevocationPropagationSLO"],"verdict":"red","duration_s":%s}\n' "$(TLA_CAPABILITY_LIFECYCLE_SPEC)" "$$duration"; \
+		exit 1; \
+	fi
+
+tla-check-capability-lifecycle-broken:
+	@set -eu; \
+	mkdir -p "$(TLA_ARTIFACT_DIR)" "$(TLA_STATE_DIR)/capability_lifecycle_broken"; \
+	if [ ! -f "$(TLA2TOOLS_JAR)" ]; then \
+		printf 'ERROR {"span":"fcp.formal.tla_check","spec":"%s","verdict":"toolchain_missing","message":"set TLA2TOOLS_JAR to tla2tools.jar"}\n' "$(TLA_CAPABILITY_LIFECYCLE_BROKEN_SPEC)"; \
+		exit 127; \
+	fi; \
+	start=$$(date +%s); \
+	if java -cp "$(TLA2TOOLS_JAR)" tlc2.TLC -deadlock -metadir "$(TLA_STATE_DIR)/capability_lifecycle_broken" -config "$(TLA_CAPABILITY_LIFECYCLE_CFG)" "$(TLA_CAPABILITY_LIFECYCLE_BROKEN_SPEC)" > "$(TLA_ARTIFACT_DIR)/capability_lifecycle_broken.log" 2>&1; then \
+		cat "$(TLA_ARTIFACT_DIR)/capability_lifecycle_broken.log"; \
+		duration=$$(( $$(date +%s) - start )); \
+		printf 'ERROR {"span":"fcp.formal.tla_check","spec":"%s","depth":20,"verdict":"unexpected_green","duration_s":%s}\n' "$(TLA_CAPABILITY_LIFECYCLE_BROKEN_SPEC)" "$$duration"; \
+		exit 1; \
+	fi; \
+	if grep -q "RevokeBeforeUse" "$(TLA_ARTIFACT_DIR)/capability_lifecycle_broken.log"; then \
+		duration=$$(( $$(date +%s) - start )); \
+		printf 'INFO {"span":"fcp.formal.tla_check","spec":"%s","depth":20,"invariants_checked":["RevokeBeforeUse"],"verdict":"expected_red","duration_s":%s}\n' "$(TLA_CAPABILITY_LIFECYCLE_BROKEN_SPEC)" "$$duration"; \
+	else \
+		cat "$(TLA_ARTIFACT_DIR)/capability_lifecycle_broken.log"; \
+		duration=$$(( $$(date +%s) - start )); \
+		printf 'ERROR {"span":"fcp.formal.tla_check","spec":"%s","depth":20,"verdict":"red_without_revoke_before_use_invariant","duration_s":%s}\n' "$(TLA_CAPABILITY_LIFECYCLE_BROKEN_SPEC)" "$$duration"; \
 		exit 1; \
 	fi

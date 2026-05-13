@@ -1129,6 +1129,456 @@ impl AnyVerified for BoundVerified {}
 impl AnyVerified for UnboundVerified {}
 impl AnyVerified for ConstraintsEnforced {}
 
+/// TLA+ invariant clause names mirrored by
+/// `specs/tla/capability_lifecycle.tla`.
+pub const CAPABILITY_LIFECYCLE_TLA_INVARIANT_CLAUSES: &[&str] = &[
+    "RevokeBeforeUse",
+    "NoDoubleSpend",
+    "RevocationPropagationSLO",
+];
+
+/// Abstract capability-token lifecycle states mirrored by the TLA+ model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum CapabilityLifecycleState {
+    Pending,
+    Approved,
+    Used,
+    Revoked,
+    Expired,
+}
+
+impl CapabilityLifecycleState {
+    pub const ALL: [Self; 5] = [
+        Self::Pending,
+        Self::Approved,
+        Self::Used,
+        Self::Revoked,
+        Self::Expired,
+    ];
+
+    #[must_use]
+    pub const fn tla_name(self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Approved => "Approved",
+            Self::Used => "Used",
+            Self::Revoked => "Revoked",
+            Self::Expired => "Expired",
+        }
+    }
+}
+
+impl fmt::Display for CapabilityLifecycleState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.tla_name())
+    }
+}
+
+impl TryFrom<&str> for CapabilityLifecycleState {
+    type Error = CapabilityLifecycleParseError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Pending" => Ok(Self::Pending),
+            "Approved" => Ok(Self::Approved),
+            "Used" => Ok(Self::Used),
+            "Revoked" => Ok(Self::Revoked),
+            "Expired" => Ok(Self::Expired),
+            _ => Err(CapabilityLifecycleParseError::UnknownState {
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
+/// Abstract lifecycle transitions mirrored by the TLA+ action set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum CapabilityLifecycleTransition {
+    Approve,
+    UseAndEmitReceipt,
+    RevokePending,
+    RevokeApproved,
+    ExpirePending,
+    ExpireApproved,
+    PushRevocation,
+    AdvanceRevocationClock,
+}
+
+impl CapabilityLifecycleTransition {
+    pub const ALL: [Self; 8] = [
+        Self::Approve,
+        Self::UseAndEmitReceipt,
+        Self::RevokePending,
+        Self::RevokeApproved,
+        Self::ExpirePending,
+        Self::ExpireApproved,
+        Self::PushRevocation,
+        Self::AdvanceRevocationClock,
+    ];
+
+    #[must_use]
+    pub const fn tla_name(self) -> &'static str {
+        match self {
+            Self::Approve => "Approve",
+            Self::UseAndEmitReceipt => "UseAndEmitReceipt",
+            Self::RevokePending => "RevokePending",
+            Self::RevokeApproved => "RevokeApproved",
+            Self::ExpirePending => "ExpirePending",
+            Self::ExpireApproved => "ExpireApproved",
+            Self::PushRevocation => "PushRevocation",
+            Self::AdvanceRevocationClock => "AdvanceRevocationClock",
+        }
+    }
+
+    #[must_use]
+    pub const fn from_state(self) -> CapabilityLifecycleState {
+        match self {
+            Self::Approve | Self::RevokePending | Self::ExpirePending => {
+                CapabilityLifecycleState::Pending
+            }
+            Self::UseAndEmitReceipt | Self::RevokeApproved | Self::ExpireApproved => {
+                CapabilityLifecycleState::Approved
+            }
+            Self::PushRevocation | Self::AdvanceRevocationClock => {
+                CapabilityLifecycleState::Revoked
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn to_state(self) -> CapabilityLifecycleState {
+        match self {
+            Self::Approve => CapabilityLifecycleState::Approved,
+            Self::UseAndEmitReceipt => CapabilityLifecycleState::Used,
+            Self::RevokePending | Self::RevokeApproved => CapabilityLifecycleState::Revoked,
+            Self::ExpirePending | Self::ExpireApproved => CapabilityLifecycleState::Expired,
+            Self::PushRevocation | Self::AdvanceRevocationClock => {
+                CapabilityLifecycleState::Revoked
+            }
+        }
+    }
+}
+
+impl fmt::Display for CapabilityLifecycleTransition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.tla_name())
+    }
+}
+
+impl TryFrom<&str> for CapabilityLifecycleTransition {
+    type Error = CapabilityLifecycleParseError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Approve" => Ok(Self::Approve),
+            "UseAndEmitReceipt" => Ok(Self::UseAndEmitReceipt),
+            "RevokePending" => Ok(Self::RevokePending),
+            "RevokeApproved" => Ok(Self::RevokeApproved),
+            "ExpirePending" => Ok(Self::ExpirePending),
+            "ExpireApproved" => Ok(Self::ExpireApproved),
+            "PushRevocation" => Ok(Self::PushRevocation),
+            "AdvanceRevocationClock" => Ok(Self::AdvanceRevocationClock),
+            _ => Err(CapabilityLifecycleParseError::UnknownTransition {
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
+/// Unique abstract state edges in `CapabilityLifecycleTransition::ALL`.
+pub const CAPABILITY_LIFECYCLE_TRANSITIONS: &[(
+    CapabilityLifecycleState,
+    CapabilityLifecycleState,
+)] = &[
+    (
+        CapabilityLifecycleState::Pending,
+        CapabilityLifecycleState::Approved,
+    ),
+    (
+        CapabilityLifecycleState::Approved,
+        CapabilityLifecycleState::Used,
+    ),
+    (
+        CapabilityLifecycleState::Pending,
+        CapabilityLifecycleState::Revoked,
+    ),
+    (
+        CapabilityLifecycleState::Approved,
+        CapabilityLifecycleState::Revoked,
+    ),
+    (
+        CapabilityLifecycleState::Pending,
+        CapabilityLifecycleState::Expired,
+    ),
+    (
+        CapabilityLifecycleState::Approved,
+        CapabilityLifecycleState::Expired,
+    ),
+    (
+        CapabilityLifecycleState::Revoked,
+        CapabilityLifecycleState::Revoked,
+    ),
+];
+
+/// Error returned when parsing model labels from TLA+ fixtures.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CapabilityLifecycleParseError {
+    #[error("unknown capability lifecycle state {value}")]
+    UnknownState { value: String },
+    #[error("unknown capability lifecycle transition {value}")]
+    UnknownTransition { value: String },
+}
+
+/// Runtime lifecycle violation that corresponds to the TLA+ state machine.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CapabilityLifecycleError {
+    #[error("invalid capability lifecycle transition {transition} from {state}")]
+    InvalidTransition {
+        state: CapabilityLifecycleState,
+        transition: CapabilityLifecycleTransition,
+    },
+    #[error("capability token was already spent")]
+    AlreadyUsed,
+    #[error("capability token was revoked before use")]
+    RevokedBeforeUse,
+    #[error("capability token is expired")]
+    Expired,
+    #[error("revocation propagation exceeded bound ({age_steps} steps > {bound_steps} steps)")]
+    RevocationPropagationSloBreached { age_steps: u32, bound_steps: u32 },
+}
+
+/// Snapshot consumed by runtime assertions that mirror the TLA+ invariants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapabilityLifecycleSnapshot {
+    pub state: CapabilityLifecycleState,
+    pub used_receipts: u8,
+    pub revoked_seen: bool,
+    pub revocation_pending: bool,
+    pub revocation_age_steps: u32,
+    pub revocation_propagation_bound: u32,
+}
+
+/// Assert runtime invariants mirrored by
+/// `specs/tla/capability_lifecycle.tla`.
+///
+/// # Panics
+/// Panics when a runtime state violates one of the named TLA+ invariants.
+pub fn assert_capability_lifecycle_invariants(snapshot: &CapabilityLifecycleSnapshot) {
+    assert!(
+        !(snapshot.revoked_seen && snapshot.used_receipts > 0),
+        "TLA_INVARIANT:RevokeBeforeUse revoked tokens cannot emit receipts"
+    );
+    assert!(
+        snapshot.used_receipts <= 1,
+        "TLA_INVARIANT:NoDoubleSpend capability tokens emit at most one receipt"
+    );
+    assert!(
+        !snapshot.revocation_pending
+            || snapshot.revocation_age_steps <= snapshot.revocation_propagation_bound,
+        "TLA_INVARIANT:RevocationPropagationSLO revocation push exceeded propagation bound"
+    );
+}
+
+/// Small runtime mirror for the capability lifecycle TLA+ model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityLifecycle {
+    state: CapabilityLifecycleState,
+    used_receipt_id: Option<ObjectId>,
+    revoked_seen: bool,
+    revocation_pending: bool,
+    revocation_age_steps: u32,
+    revocation_propagation_bound: u32,
+}
+
+impl CapabilityLifecycle {
+    #[must_use]
+    pub const fn pending(revocation_propagation_bound: u32) -> Self {
+        Self {
+            state: CapabilityLifecycleState::Pending,
+            used_receipt_id: None,
+            revoked_seen: false,
+            revocation_pending: false,
+            revocation_age_steps: 0,
+            revocation_propagation_bound,
+        }
+    }
+
+    #[must_use]
+    pub const fn approved(revocation_propagation_bound: u32) -> Self {
+        Self {
+            state: CapabilityLifecycleState::Approved,
+            used_receipt_id: None,
+            revoked_seen: false,
+            revocation_pending: false,
+            revocation_age_steps: 0,
+            revocation_propagation_bound,
+        }
+    }
+
+    #[must_use]
+    pub const fn state(&self) -> CapabilityLifecycleState {
+        self.state
+    }
+
+    #[must_use]
+    pub const fn used_receipt_id(&self) -> Option<ObjectId> {
+        self.used_receipt_id
+    }
+
+    #[must_use]
+    pub const fn snapshot(&self) -> CapabilityLifecycleSnapshot {
+        CapabilityLifecycleSnapshot {
+            state: self.state,
+            used_receipts: if self.used_receipt_id.is_some() { 1 } else { 0 },
+            revoked_seen: self.revoked_seen,
+            revocation_pending: self.revocation_pending,
+            revocation_age_steps: self.revocation_age_steps,
+            revocation_propagation_bound: self.revocation_propagation_bound,
+        }
+    }
+
+    /// Move a pending token into the approved state.
+    ///
+    /// # Errors
+    /// Returns an error if the token is not pending.
+    pub fn approve(&mut self) -> Result<(), CapabilityLifecycleError> {
+        self.require_transition(CapabilityLifecycleTransition::Approve)?;
+        self.state = CapabilityLifecycleState::Approved;
+        self.assert_invariants();
+        Ok(())
+    }
+
+    /// Spend an approved token and bind it to the emitted operation receipt.
+    ///
+    /// # Errors
+    /// Returns an error when the token is not approved, has already been used,
+    /// was revoked, or has expired.
+    pub fn mark_used(&mut self, receipt_id: ObjectId) -> Result<(), CapabilityLifecycleError> {
+        match self.state {
+            CapabilityLifecycleState::Approved => {
+                self.state = CapabilityLifecycleState::Used;
+                self.used_receipt_id = Some(receipt_id);
+                self.assert_invariants();
+                Ok(())
+            }
+            CapabilityLifecycleState::Used => Err(CapabilityLifecycleError::AlreadyUsed),
+            CapabilityLifecycleState::Revoked => Err(CapabilityLifecycleError::RevokedBeforeUse),
+            CapabilityLifecycleState::Expired => Err(CapabilityLifecycleError::Expired),
+            CapabilityLifecycleState::Pending => Err(CapabilityLifecycleError::InvalidTransition {
+                state: self.state,
+                transition: CapabilityLifecycleTransition::UseAndEmitReceipt,
+            }),
+        }
+    }
+
+    /// Revoke a pending or approved token before it can emit a receipt.
+    ///
+    /// # Errors
+    /// Returns an error if the token has already reached a terminal state.
+    pub fn revoke(&mut self) -> Result<(), CapabilityLifecycleError> {
+        let transition = match self.state {
+            CapabilityLifecycleState::Pending => CapabilityLifecycleTransition::RevokePending,
+            CapabilityLifecycleState::Approved => CapabilityLifecycleTransition::RevokeApproved,
+            CapabilityLifecycleState::Used => return Err(CapabilityLifecycleError::AlreadyUsed),
+            CapabilityLifecycleState::Revoked | CapabilityLifecycleState::Expired => {
+                return Err(CapabilityLifecycleError::InvalidTransition {
+                    state: self.state,
+                    transition: CapabilityLifecycleTransition::RevokeApproved,
+                });
+            }
+        };
+        self.require_transition(transition)?;
+        self.state = CapabilityLifecycleState::Revoked;
+        self.revoked_seen = true;
+        self.revocation_pending = true;
+        self.revocation_age_steps = 0;
+        self.assert_invariants();
+        Ok(())
+    }
+
+    /// Expire a pending or approved token.
+    ///
+    /// # Errors
+    /// Returns an error if the token has already reached a terminal state.
+    pub fn expire(&mut self) -> Result<(), CapabilityLifecycleError> {
+        let transition = match self.state {
+            CapabilityLifecycleState::Pending => CapabilityLifecycleTransition::ExpirePending,
+            CapabilityLifecycleState::Approved => CapabilityLifecycleTransition::ExpireApproved,
+            CapabilityLifecycleState::Used => return Err(CapabilityLifecycleError::AlreadyUsed),
+            CapabilityLifecycleState::Revoked => {
+                return Err(CapabilityLifecycleError::RevokedBeforeUse);
+            }
+            CapabilityLifecycleState::Expired => return Err(CapabilityLifecycleError::Expired),
+        };
+        self.require_transition(transition)?;
+        self.state = CapabilityLifecycleState::Expired;
+        self.revocation_pending = false;
+        self.revocation_age_steps = 0;
+        self.assert_invariants();
+        Ok(())
+    }
+
+    /// Mark that revocation propagation reached the local executor.
+    ///
+    /// # Errors
+    /// Returns an error if there is no pending revocation push.
+    pub fn push_revocation(&mut self) -> Result<(), CapabilityLifecycleError> {
+        self.require_transition(CapabilityLifecycleTransition::PushRevocation)?;
+        if !self.revocation_pending {
+            return Err(CapabilityLifecycleError::InvalidTransition {
+                state: self.state,
+                transition: CapabilityLifecycleTransition::PushRevocation,
+            });
+        }
+        self.revocation_pending = false;
+        self.revocation_age_steps = 0;
+        self.assert_invariants();
+        Ok(())
+    }
+
+    /// Advance the abstract revocation propagation clock by one step.
+    ///
+    /// # Errors
+    /// Returns an error when advancing would breach the propagation SLO.
+    pub fn advance_revocation_clock(&mut self) -> Result<(), CapabilityLifecycleError> {
+        self.require_transition(CapabilityLifecycleTransition::AdvanceRevocationClock)?;
+        if !self.revocation_pending {
+            return Err(CapabilityLifecycleError::InvalidTransition {
+                state: self.state,
+                transition: CapabilityLifecycleTransition::AdvanceRevocationClock,
+            });
+        }
+        let next_age = self.revocation_age_steps.saturating_add(1);
+        if next_age > self.revocation_propagation_bound {
+            return Err(CapabilityLifecycleError::RevocationPropagationSloBreached {
+                age_steps: next_age,
+                bound_steps: self.revocation_propagation_bound,
+            });
+        }
+        self.revocation_age_steps = next_age;
+        self.assert_invariants();
+        Ok(())
+    }
+
+    fn require_transition(
+        &self,
+        transition: CapabilityLifecycleTransition,
+    ) -> Result<(), CapabilityLifecycleError> {
+        if transition.from_state() == self.state {
+            Ok(())
+        } else {
+            Err(CapabilityLifecycleError::InvalidTransition {
+                state: self.state,
+                transition,
+            })
+        }
+    }
+
+    fn assert_invariants(&self) {
+        assert_capability_lifecycle_invariants(&self.snapshot());
+    }
+}
+
 /// Bridge trait for promoting a bound token after request-level constraint
 /// evaluation.
 ///

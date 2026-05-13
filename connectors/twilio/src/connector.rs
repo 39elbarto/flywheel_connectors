@@ -17,6 +17,7 @@ use fcp_voice_call::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::client::{DEFAULT_API_BASE, TwilioAuth, TwilioClient};
@@ -33,6 +34,7 @@ const TWILIO_WEBHOOK_INGRESS_TIMEOUT_MS: u64 = 5_000;
 const TWILIO_WEBHOOK_INGRESS_CONCURRENCY_LIMIT: u64 = 32;
 const TWILIO_WEBHOOK_INGRESS_RATE_LIMIT_MAX: u64 = 200;
 const TWILIO_WEBHOOK_INGRESS_RATE_LIMIT_WINDOW_MS: u64 = 60_000;
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 impl TwilioConfig {
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
@@ -679,6 +681,12 @@ impl TwilioConnector {
         self.base.instance_id.as_str()
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure method.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
@@ -745,7 +753,7 @@ impl TwilioConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:twilio-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -5509,6 +5517,18 @@ mod tests {
             .compute_interface_hash()
             .expect("compute interface hash");
         assert_eq!(computed, computed2);
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        let actual = TwilioConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "sha256:twilio-connector-v1");
     }
 
     // ── Additional require_str edge cases ────────────────────────────

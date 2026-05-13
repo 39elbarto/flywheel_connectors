@@ -45,6 +45,7 @@ Important runtime truths the contract preserves:
 - `lm_studio.models.list` uses `GET /v1/models` and supports `{"refresh": true}` to invalidate the in-memory cache.
 - FCP subscribe is not implemented; streaming is exposed as the bounded invoke operation `lm_studio.chat.completions_stream`.
 - The connector never loads, downloads, unloads, or auto-evicts LM Studio models.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 

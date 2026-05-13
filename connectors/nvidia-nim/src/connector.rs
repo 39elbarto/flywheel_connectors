@@ -14,6 +14,7 @@ use fcp_prelude::{
 };
 use futures_util::StreamExt as _;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::client::{
@@ -30,6 +31,7 @@ use crate::types::{
 
 pub const CONNECTOR_ID: &str = "fcp.nvidia_nim";
 pub const CONNECTOR_VERSION: &str = "0.1.0";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 const OP_CHAT: &str = "nvidia_nim.chat.completions";
 const OP_CHAT_STREAM: &str = "nvidia_nim.chat.completions_stream";
@@ -205,6 +207,12 @@ impl NvidiaNimConnector {
         &self.base.instance_id
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
         let config = NvidiaNimConfig::from_params(&params)?;
         let client = config.build_client();
@@ -276,7 +284,7 @@ impl NvidiaNimConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:nvidia-nim-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -1102,6 +1110,19 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(NvidiaNimConnector::manifest_hash(), expected);
+        assert_ne!(
+            NvidiaNimConnector::manifest_hash(),
+            "sha256:nvidia-nim-connector-v1"
+        );
+    }
 
     #[test]
     fn config_defaults_hosted_mode_to_documented_nvidia_endpoints() {

@@ -1705,7 +1705,7 @@ impl AzureSpeechConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:azure-speech-connector-v1".into(),
+            manifest_hash: azure_speech_manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -3597,6 +3597,13 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+fn azure_speech_manifest_hash() -> String {
+    format!(
+        "sha256:{}",
+        sha256_hex(AZURE_SPEECH_MANIFEST_TOML.as_bytes())
+    )
+}
+
 fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -3611,6 +3618,20 @@ mod tests {
     use super::*;
 
     const TEST_RESOURCE_ID: &str = "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg/providers/Microsoft.CognitiveServices/accounts/speech";
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let expected = format!(
+            "sha256:{}",
+            sha256_hex(AZURE_SPEECH_MANIFEST_TOML.as_bytes())
+        );
+
+        assert_eq!(azure_speech_manifest_hash(), expected);
+        assert_ne!(
+            azure_speech_manifest_hash(),
+            "sha256:azure-speech-connector-v1"
+        );
+    }
 
     #[test]
     fn region_validation_rejects_url_like_values() {

@@ -60,6 +60,7 @@ Important runtime truths the contract preserves:
 - `doctor` checks local configuration, client initialization, base URL, auth mode, network constraint label, and credential-injection mode.
 - `self_check` calls `GET /me` for direct-token mode, and returns `credential_injection_required` for credential-id mode.
 - Runtime handshake installs a `CapabilityVerifier`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - `invoke` requires a serialized `capability_token`, resolves the required operation capability, and verifies a bound capability token before provider execution.
 - `simulate` validates configured state, handshaken state, known operation, and bound capability token before returning an allow/deny response.
 - Runtime introspection exposes 19 operations and no event resource types.
@@ -69,7 +70,6 @@ Important runtime truths the contract preserves:
 This README documents the runtime truth and keeps current drift visible:
 
 - Manifest connector ID is `fcp.figma`, while runtime `BaseConnector` ID is `figma`.
-- Runtime handshake returns placeholder manifest hash `sha256:figma-connector-v1`.
 - Manifest and runtime default to `https://api.figma.com/v1`, while official Figma REST docs describe the common base URL as `https://api.figma.com` with endpoint paths under `/v1`.
 - Official Figma docs also describe Figma for Government as `https://api.figma-gov.com`; runtime custom `base_url` could point there, but the manifest host policy only names `api.figma.com` and related image/CDN hosts.
 - Runtime configuration does not enforce the manifest network constraints or reject unsafe/custom origins.
@@ -82,7 +82,7 @@ This README documents the runtime truth and keeps current drift visible:
 - `handle_shutdown` is local status only. It does not clear config, client, verifier, session, configured flags, or handshaken flags, and it does not call `FigmaClient::shutdown()`.
 - Manifest `event_caps` and handshake event caps advertise streaming, but runtime introspection has no events and this connector does not receive or verify inbound Figma webhooks.
 
-A follow-up parity bead should align connector ID spelling, replace placeholder manifest proofs, add base URL policy enforcement, reconcile `figma.export` and `media.download`, decide how Figma Government is represented in policy, add approval metadata to runtime introspection, tighten input validation, and reset lifecycle state consistently on shutdown.
+A follow-up parity bead should align connector ID spelling, add base URL policy enforcement, reconcile `figma.export` and `media.download`, decide how Figma Government is represented in policy, add approval metadata to runtime introspection, tighten input validation, and reset lifecycle state consistently on shutdown.
 
 ## First-Slice Scope
 

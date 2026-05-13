@@ -126,20 +126,20 @@ fn declassification_token(
     issued_at_ms: u64,
     expires_at_ms: u64,
 ) -> ApprovalToken {
-    ApprovalToken {
-        token_id: "decl-test".into(),
+    ApprovalToken::approved(
+        "decl-test",
         issued_at_ms,
         expires_at_ms,
-        issuer: "issuer:cross-zone".into(),
-        scope: ApprovalScope::Declassification(DeclassificationScope {
+        "issuer:cross-zone",
+        ApprovalScope::Declassification(DeclassificationScope {
             from_zone,
             to_zone,
             object_ids,
             target_confidentiality,
         }),
-        zone_id: token_zone,
-        signature: None,
-    }
+        token_zone,
+        None,
+    )
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -179,19 +179,19 @@ fn cross_zone_elevation_scoped_token_does_not_satisfy_declassification_requireme
     // Present an Elevation-scoped token when the flow requires
     // Declassification. The scope filter in apply_declassification
     // drops the token and the fall-through is MissingDeclassification.
-    let elevation = ApprovalToken {
-        token_id: "elev-wrongscope".into(),
-        issued_at_ms: NOW_MS.saturating_sub(1_000),
-        expires_at_ms: NOW_MS.saturating_add(TOKEN_TTL_MS),
-        issuer: "issuer".into(),
-        scope: ApprovalScope::Elevation(ElevationScope {
+    let elevation = ApprovalToken::approved(
+        "elev-wrongscope",
+        NOW_MS.saturating_sub(1_000),
+        NOW_MS.saturating_add(TOKEN_TTL_MS),
+        "issuer",
+        ApprovalScope::Elevation(ElevationScope {
             operation_id: "op.cross_zone".into(),
             original_provenance_id: ObjectId::from_unscoped_bytes(b"crr6l-req"),
             target_integrity: IntegrityLevel::Work,
         }),
-        zone_id: ZoneId::community(),
-        signature: None,
-    };
+        ZoneId::community(),
+        None,
+    );
     let approvals = vec![elevation];
     let engine = engine_for(ZoneId::community());
     let input = cross_zone_input(ZoneId::work(), ZoneId::community(), &approvals);

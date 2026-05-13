@@ -36,15 +36,15 @@ fn make_approval_token(
     issued_at_ms: u64,
     expires_at_ms: u64,
 ) -> ApprovalToken {
-    ApprovalToken {
-        token_id: token_id.to_string(),
+    ApprovalToken::approved(
+        token_id.to_string(),
         issued_at_ms,
         expires_at_ms,
-        issuer: "test-issuer".to_string(),
+        "test-issuer".to_string(),
         scope,
-        zone_id: zone,
-        signature: None,
-    }
+        zone,
+        None,
+    )
 }
 
 fn make_sanitizer_receipt(

@@ -54,21 +54,21 @@ fn generate_valid_token(
 
 fn generate_execution_approval(method_pattern: &str) -> ApprovalToken {
     let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
-    ApprovalToken {
-        token_id: format!("approval-{method_pattern}"),
-        issued_at_ms: now_ms.saturating_sub(1_000),
-        expires_at_ms: now_ms + 60_000,
-        issuer: "approver:test".into(),
-        scope: ApprovalScope::Execution(ExecutionScope {
+    ApprovalToken::approved(
+        format!("approval-{method_pattern}"),
+        now_ms.saturating_sub(1_000),
+        now_ms + 60_000,
+        "approver:test",
+        ApprovalScope::Execution(ExecutionScope {
             connector_id: "fcp.s3".into(),
             method_pattern: method_pattern.into(),
             request_object_id: None,
             input_hash: None,
             input_constraints: Vec::new(),
         }),
-        zone_id: ZoneId::work(),
-        signature: None,
-    }
+        ZoneId::work(),
+        None,
+    )
 }
 
 async fn setup_handshake(

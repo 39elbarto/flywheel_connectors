@@ -248,21 +248,21 @@ fn build_token(
 
 fn build_execution_approval(method_pattern: &str) -> ApprovalToken {
     let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
-    ApprovalToken {
-        token_id: format!("approval-{method_pattern}-{now_ms}"),
-        issued_at_ms: now_ms.saturating_sub(1_000),
-        expires_at_ms: now_ms + 300_000,
-        issuer: "owner:test".to_string(),
-        scope: ApprovalScope::Execution(ExecutionScope {
+    ApprovalToken::approved(
+        format!("approval-{method_pattern}-{now_ms}"),
+        now_ms.saturating_sub(1_000),
+        now_ms + 300_000,
+        "owner:test",
+        ApprovalScope::Execution(ExecutionScope {
             connector_id: "fcp.browser".to_string(),
             method_pattern: method_pattern.to_string(),
             request_object_id: None,
             input_hash: None,
             input_constraints: Vec::new(),
         }),
-        zone_id: ZoneId::work(),
-        signature: None,
-    }
+        ZoneId::work(),
+        None,
+    )
 }
 
 fn invoke_request(

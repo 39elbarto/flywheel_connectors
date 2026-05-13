@@ -5,38 +5,28 @@ use serde_json::json;
 fn test_taint_tracker_detects_registered_secret() {
     let mut tracker = SecretTaintTracker::new();
     let secret = "sk-test-secret-material-123";
-    let handle = tracker
-        .register_secret("provider_api_key", secret)
-        .expect("secret registration should work");
+    assert!(tracker.register_secret("provider_api_key", secret));
 
-    let report = tracker.scan_json(
-        "connector.log",
-        &json!({
+    let alert = tracker
+        .scan_json(&json!({
             "message": "request failed",
             "authorization": format!("Bearer {secret}")
-        }),
-    );
+        }))
+        .expect("registered secret should be detected");
 
-    assert!(report.has_leaks());
-    assert_eq!(report.leak_count, 1);
-    assert_eq!(report.leaks[0].secret_id, handle.id);
-    assert_eq!(report.leaks[0].label_hash, handle.label_hash);
-    assert!(!format!("{report:?}").contains(secret));
+    assert_eq!(alert.label, "provider_api_key");
+    assert_eq!(alert.secret_len, secret.len());
+    assert!(alert.offset > 0);
+    assert!(!alert.secret_fingerprint.is_empty());
+    assert!(!format!("{alert:?}").contains(secret));
 }
 
 #[test]
 fn test_taint_tracker_does_not_false_positive_on_random() {
     let mut tracker = SecretTaintTracker::new();
-    tracker
-        .register_secret("provider_api_key", "sk-test-secret-material-123")
-        .expect("secret registration should work");
+    assert!(tracker.register_secret("provider_api_key", "sk-test-secret-material-123"));
 
-    let report = tracker.scan_text(
-        "connector.log",
-        "request_id=3df1a7 status=429 token_count=128 retryable=true",
-    );
+    let report = tracker.scan_str("request_id=3df1a7 status=429 token_count=128 retryable=true");
 
-    assert!(!report.has_leaks());
-    assert_eq!(report.leak_count, 0);
-    assert!(report.leaks.is_empty());
+    assert!(report.is_none());
 }

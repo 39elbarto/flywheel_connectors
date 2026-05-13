@@ -86,7 +86,10 @@ fn parse_ledger() -> Vec<LedgerRow> {
                 current_fields.clear();
             }
             // Header is "### N. <claim title>".
-            let after_number = rest.split_once('.').map(|(_, rest)| rest.trim()).unwrap_or(rest);
+            let after_number = rest
+                .split_once('.')
+                .map(|(_, rest)| rest.trim())
+                .unwrap_or(rest);
             current_claim = Some(after_number.to_string());
         } else if trimmed.starts_with("- ") {
             if let Some((key, value)) = trimmed.trim_start_matches("- ").split_once(':') {
@@ -131,8 +134,8 @@ fn readme_status_claims() -> BTreeSet<String> {
     let readme = read_to_string(repo_root().join("README.md"));
     // The status table rows look like:
     //   | **<Claim>** | `STATUS` | ... | ... |
-    let re = Regex::new(r"^\|\s*\*\*([^*]+)\*\*\s*\|\s*`[A-Z][A-Z\- ()]+`")
-        .expect("regex compiles");
+    let re =
+        Regex::new(r"^\|\s*\*\*([^*]+)\*\*\s*\|\s*`[A-Z][A-Z\- ()]+`").expect("regex compiles");
     let mut claims = BTreeSet::new();
     for line in readme.lines() {
         if let Some(captures) = re.captures(line) {

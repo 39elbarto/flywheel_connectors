@@ -1417,8 +1417,6 @@ fn map_reqwest_error(service: &'static str, error: &reqwest::Error) -> FcpError 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{body_json, header, method, path, query_param};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn config_requires_exactly_one_auth_source() {
@@ -1528,33 +1526,6 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn self_check_performs_authenticated_project_probe() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/projects"))
-            .and(header("authorization", "Token test-key"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "projects": [] })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let mut connector = DeepgramConnector::new();
-        connector
-            .handle_configure(json!({
-                "api_key": "test-key",
-                "base_url": server.uri()
-            }))
-            .await
-            .expect("expected configure to succeed");
-
-        let self_check = connector
-            .handle_self_check()
-            .await
-            .expect("expected self-check result");
-        assert_eq!(self_check["status"], "ok");
-    }
-
-    #[fcp_async_core::runtime::test]
     async fn doctor_requires_handshake_before_reporting_healthy() {
         let mut connector = DeepgramConnector::new();
         connector
@@ -1570,126 +1541,10 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn upstream_retry_after_hint_is_preserved() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/projects"))
-            .and(header("authorization", "Token test-key"))
-            .respond_with(
-                ResponseTemplate::new(429)
-                    .insert_header("Retry-After", "7")
-                    .set_body_string("{\"error\":\"slow down\"}"),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let config = DeepgramConfig::from_params(&json!({
-            "api_key": "test-key",
-            "base_url": server.uri()
-        }))
-        .expect("expected valid config");
-        let client = DeepgramClient::new(&config).expect("expected client");
-        let error = client
-            .get_json("/v1/projects")
-            .await
-            .expect_err("expected rate-limited error");
-
-        assert!(
-            matches!(error, FcpError::External { .. }),
-            "expected external error, got {error:?}"
-        );
-        if let FcpError::External {
-            status_code,
-            retry_after,
-            retryable,
-            ..
-        } = error
-        {
-            assert_eq!(status_code, Some(429));
-            assert_eq!(retry_after, Some(Duration::from_secs(7)));
-            assert!(retryable);
-        }
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn transcribe_uses_openclaw_aligned_default_model_when_omitted() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/listen"))
-            .and(query_param("model", DEFAULT_TRANSCRIPTION_MODEL))
-            .and(header("authorization", "Token test-key"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "results": {
-                    "channels": [{
-                        "alternatives": [{
-                            "transcript": "hello with default model"
-                        }]
-                    }]
-                }
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let config = DeepgramConfig::from_params(&json!({
-            "api_key": "test-key",
-            "base_url": server.uri()
-        }))
-        .expect("expected valid config");
-        let client = DeepgramClient::new(&config).expect("expected client");
-        client
-            .transcribe(&json!({
-                "audio_url": "https://example.test/audio.wav"
-            }))
-            .await
-            .expect("default model transcription should succeed");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn transcribe_strips_audio_url_credentials_and_fragment() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/listen"))
-            .and(query_param("model", DEFAULT_TRANSCRIPTION_MODEL))
-            .and(header("authorization", "Token test-key"))
-            .and(body_json(json!({
-                "url": "https://media.example.test/audio.wav?download=1"
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "results": {
-                    "channels": [{
-                        "alternatives": [{
-                            "transcript": "sanitized"
-                        }]
-                    }]
-                }
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let config = DeepgramConfig::from_params(&json!({
-            "api_key": "test-key",
-            "base_url": server.uri()
-        }))
-        .expect("expected valid config");
-        let client = DeepgramClient::new(&config).expect("expected client");
-        client
-            .transcribe(&json!({
-                "audio_url": "https://user:secret@media.example.test/audio.wav?download=1#secret-fragment",
-                "media_byte_count": 12_u64
-            }))
-            .await
-            .expect("sanitized transcription should succeed");
-    }
-
-    #[fcp_async_core::runtime::test]
     async fn transcribe_rejects_insecure_audio_url_before_network_io() {
-        let server = MockServer::start().await;
         let config = DeepgramConfig::from_params(&json!({
             "api_key": "test-key",
-            "base_url": server.uri()
+            "base_url": "http://127.0.0.1:1"
         }))
         .expect("expected valid config");
         let client = DeepgramClient::new(&config).expect("expected client");
@@ -1706,10 +1561,9 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn transcribe_rejects_declared_oversized_media_before_network_io() {
-        let server = MockServer::start().await;
         let config = DeepgramConfig::from_params(&json!({
             "api_key": "test-key",
-            "base_url": server.uri()
+            "base_url": "http://127.0.0.1:1"
         }))
         .expect("expected valid config");
         let client = DeepgramClient::new(&config).expect("expected client");

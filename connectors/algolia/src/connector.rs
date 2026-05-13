@@ -663,10 +663,10 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
     )
 }
 
-/// Reject base_url overrides with userinfo, query, or fragment. The
-/// AlgoliaClient concatenates via format!("{}{path}", self.base_url)
+/// Reject `base_url` overrides with userinfo, query, or fragment. The
+/// `AlgoliaClient` concatenates via `format!("{}{path}", self.base_url)`
 /// in every request method (client.rs:143/154/166). Without this
-/// check, a base_url like
+/// check, a `base_url` like
 /// `https://{app_id}-dsn.algolia.net?leak=x` would leak
 /// attacker-chosen query values on every request and put the endpoint
 /// path after the `?` boundary. Userinfo would bake into every
@@ -1387,7 +1387,7 @@ mod tests {
         let recipe = provisioning_recipe();
         let v = serde_json::to_value(&recipe).unwrap();
         assert_eq!(v["id"], "algolia.api_key");
-        assert!(v["steps"].as_array().unwrap().len() == 3);
+        assert_eq!(v["steps"].as_array().unwrap().len(), 3);
     }
 
     #[test]

@@ -19,7 +19,7 @@ use fcp_algolia::connector::AlgoliaConnector;
 
 /// br-uh9e9: shared auth-header matcher values.
 ///
-/// Every Mock::given chain that hits a `setup_connector(...)` route MUST
+/// Every `Mock::given` chain that hits a `setup_connector(...)` route MUST
 /// assert both `X-Algolia-Application-Id: TESTAPP` and
 /// `X-Algolia-API-Key: test-api-key`. Without these matchers a regression
 /// that dropped the auth headers in `connectors/algolia/src/client.rs`

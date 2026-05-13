@@ -3799,6 +3799,7 @@ dependencies = [
  "futures-util",
  "fwc",
  "pretty_assertions",
+ "proptest",
  "reqwest 0.13.2",
  "semver",
  "serde",

@@ -59,7 +59,7 @@ Important runtime truths the contract preserves:
 This README documents the runtime truth and keeps current drift visible:
 
 - Manifest connector ID is `fcp.google-ai`, while runtime `BaseConnector` and requests use `google-ai`.
-- Runtime handshake returns placeholder manifest hash `sha256:google-ai-connector-v1`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Runtime `simulate` returns allowed for any operation ID; it does not validate configured state, handshake state, operation inventory, input schema, capability token, or approval policy.
 - Runtime `handle_shutdown` shuts down the client runtime but does not clear config, client, verifier, session, or configured/handshaken flags.
 - Runtime `google-ai.generate_content_stream` calls the provider stream endpoint but parses the full HTTP response as a JSON array or single object, merges chunks, and returns one aggregate JSON response to FCP callers.
@@ -67,7 +67,7 @@ This README documents the runtime truth and keeps current drift visible:
 - Runtime `google-ai.live.create_browser_session` supports `prefix_padding_ms` and `silence_duration_ms` fields in introspection, while the manifest lists other Live VAD fields but omits those two names.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should align connector IDs, manifest hash, simulate behavior, shutdown semantics, approval metadata, and Live schema field names before describing this connector as policy-complete.
+A follow-up parity bead should align connector IDs, simulate behavior, shutdown semantics, approval metadata, and Live schema field names before describing this connector as policy-complete.
 
 ## First-Slice Scope
 

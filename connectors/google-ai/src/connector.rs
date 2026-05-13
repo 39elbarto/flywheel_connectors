@@ -12,6 +12,7 @@ use fcp_prelude::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::client::{DEFAULT_BASE_URL, GoogleAiAuth, GoogleAiClient};
@@ -22,6 +23,7 @@ use crate::types::{
 };
 
 const GOOGLE_AI_ALLOWED_HOST: &str = "generativelanguage.googleapis.com";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 fn invalid_base_url(message: impl Into<String>) -> FcpError {
     FcpError::InvalidRequest {
@@ -208,6 +210,13 @@ impl GoogleAiConnector {
         self.base.instance_id.as_str()
     }
 
+    #[must_use]
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure method.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
@@ -265,7 +274,7 @@ impl GoogleAiConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:google-ai-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -1725,6 +1734,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["status"], "accepted");
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(GoogleAiConnector::manifest_hash(), expected);
+        assert_ne!(
+            GoogleAiConnector::manifest_hash(),
+            "sha256:google-ai-connector-v1"
+        );
     }
 
     #[fcp_async_core::runtime::test]

@@ -45,7 +45,7 @@ struct BackpressureTraceCollector {
 }
 
 impl BackpressureTraceCollector {
-    fn new(seen_requests: Arc<AtomicU64>) -> Self {
+    const fn new(seen_requests: Arc<AtomicU64>) -> Self {
         Self { seen_requests }
     }
 }
@@ -55,7 +55,7 @@ struct BackpressureMetricsCollector {
 }
 
 impl BackpressureMetricsCollector {
-    fn new(seen_requests: Arc<AtomicU64>) -> Self {
+    const fn new(seen_requests: Arc<AtomicU64>) -> Self {
         Self { seen_requests }
     }
 }
@@ -95,7 +95,7 @@ struct BackpressureLogsCollector {
 }
 
 impl BackpressureLogsCollector {
-    fn new(seen_requests: Arc<AtomicU64>) -> Self {
+    const fn new(seen_requests: Arc<AtomicU64>) -> Self {
         Self { seen_requests }
     }
 }

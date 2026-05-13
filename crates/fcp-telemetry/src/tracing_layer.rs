@@ -768,12 +768,12 @@ mod tests {
                 .count(),
             1
         );
-        assert!(
+        assert_eq!(
             headers
                 .keys()
                 .filter(|name| name.eq_ignore_ascii_case(TRACESTATE_HEADER))
-                .count()
-                == 1
+                .count(),
+            1
         );
     }
 

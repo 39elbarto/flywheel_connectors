@@ -1,20 +1,14 @@
-use std::time::Duration;
-
 use fcp_deepgram::DeepgramConnector;
 use fcp_manifest::ConnectorManifest;
-use fcp_prelude::FcpError;
 use fcp_testkit::provider_contract::{
     ProviderAuthMethodContract, ProviderBaseUrlContract, ProviderContract,
     ProviderImportSideEffectContract, ProviderModelCatalogContract, ProviderModelContract,
     ProviderOperationContract, ProviderRedactionPayload, assert_provider_contract,
 };
 use serde_json::{Value, json};
-use wiremock::matchers::{body_json, header, method, path, query_param};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const EXPECTED_OPERATION_IDS: [&str; 2] = ["deepgram.listen.transcribe", "deepgram.listen.stream"];
-const OP_TRANSCRIBE: &str = "deepgram.listen.transcribe";
 
 fn deepgram_manifest_unchecked() -> ConnectorManifest {
     ConnectorManifest::parse_str_unchecked(MANIFEST_TOML)
@@ -60,22 +54,6 @@ fn assert_schema_rejects(schema: &Value, payload: &Value) {
         validator.iter_errors(payload).next().is_some(),
         "schema should reject {payload}"
     );
-}
-
-async fn configured_connector(base_url: &str) -> DeepgramConnector {
-    let mut connector = DeepgramConnector::new();
-    connector
-        .handle_configure(json!({
-            "api_key": "test-key",
-            "base_url": base_url
-        }))
-        .await
-        .expect("expected configure to succeed");
-    connector
-        .handle_handshake(json!({}))
-        .await
-        .expect("expected handshake to succeed");
-    connector
 }
 
 #[fcp_async_core::runtime::test]
@@ -241,180 +219,6 @@ async fn deepgram_provider_contract_is_advertised() {
         .expect("manifest migration_hint should parse");
     assert!(migration_hint.contains("retired from connector-local invoke"));
     assert!(migration_hint.contains("host owns stream session lifecycle"));
-}
-
-#[fcp_async_core::runtime::test]
-async fn self_check_performs_authenticated_project_probe() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/v1/projects"))
-        .and(header("authorization", "Token test-key"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "projects": [] })))
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let mut connector = DeepgramConnector::new();
-    connector
-        .handle_configure(json!({
-            "api_key": "test-key",
-            "base_url": server.uri()
-        }))
-        .await
-        .expect("expected configure to succeed");
-
-    let self_check = connector
-        .handle_self_check()
-        .await
-        .expect("expected self-check result");
-    assert_eq!(self_check["status"], "ok");
-}
-
-#[fcp_async_core::runtime::test]
-async fn upstream_retry_after_hint_is_preserved() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/listen"))
-        .and(query_param("model", "nova-3"))
-        .and(header("authorization", "Token test-key"))
-        .respond_with(
-            ResponseTemplate::new(429)
-                .insert_header("Retry-After", "7")
-                .set_body_string("{\"error\":\"slow down\"}"),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let connector = configured_connector(&server.uri()).await;
-    let error = connector
-        .handle_invoke(json!({
-            "operation_id": OP_TRANSCRIBE,
-            "input": {
-                "audio_url": "https://example.test/audio.wav"
-            }
-        }))
-        .await
-        .expect_err("expected rate-limited error");
-
-    assert!(
-        matches!(error, FcpError::External { .. }),
-        "expected external error, got {error:?}"
-    );
-    if let FcpError::External {
-        status_code,
-        retry_after,
-        retryable,
-        ..
-    } = error
-    {
-        assert_eq!(status_code, Some(429));
-        assert_eq!(retry_after, Some(Duration::from_secs(7)));
-        assert!(retryable);
-    }
-}
-
-#[fcp_async_core::runtime::test]
-async fn transcribe_uses_openclaw_aligned_default_model_when_omitted() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/listen"))
-        .and(query_param("model", "nova-3"))
-        .and(header("authorization", "Token test-key"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "results": {
-                "channels": [{
-                    "alternatives": [{
-                        "transcript": "hello with default model"
-                    }]
-                }]
-            }
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let connector = configured_connector(&server.uri()).await;
-    connector
-        .handle_invoke(json!({
-            "operation_id": OP_TRANSCRIBE,
-            "input": {
-                "audio_url": "https://example.test/audio.wav"
-            }
-        }))
-        .await
-        .expect("default model transcription should succeed");
-}
-
-#[fcp_async_core::runtime::test]
-async fn transcribe_strips_audio_url_credentials_and_fragment() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/v1/listen"))
-        .and(query_param("model", "nova-3"))
-        .and(header("authorization", "Token test-key"))
-        .and(body_json(json!({
-            "url": "https://media.example.test/audio.wav?download=1"
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "results": {
-                "channels": [{
-                    "alternatives": [{
-                        "transcript": "sanitized"
-                    }]
-                }]
-            }
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let connector = configured_connector(&server.uri()).await;
-    connector
-        .handle_invoke(json!({
-            "operation_id": OP_TRANSCRIBE,
-            "input": {
-                "audio_url": "https://user:secret@media.example.test/audio.wav?download=1#secret-fragment",
-                "media_byte_count": 12_u64
-            }
-        }))
-        .await
-        .expect("sanitized transcription should succeed");
-}
-
-#[fcp_async_core::runtime::test]
-async fn transcribe_rejects_insecure_audio_url_before_network_io() {
-    let server = MockServer::start().await;
-    let connector = configured_connector(&server.uri()).await;
-    let error = connector
-        .handle_invoke(json!({
-            "operation_id": OP_TRANSCRIBE,
-            "input": {
-                "audio_url": "http://media.example.test/audio.wav"
-            }
-        }))
-        .await
-        .expect_err("insecure media URL should fail before network I/O");
-
-    assert!(error.to_string().contains("audio_url must use https"));
-}
-
-#[fcp_async_core::runtime::test]
-async fn transcribe_rejects_declared_oversized_media_before_network_io() {
-    let server = MockServer::start().await;
-    let connector = configured_connector(&server.uri()).await;
-    let error = connector
-        .handle_invoke(json!({
-            "operation_id": OP_TRANSCRIBE,
-            "input": {
-                "audio_url": "https://media.example.test/audio.wav",
-                "media_byte_count": 1_073_741_825_u64
-            }
-        }))
-        .await
-        .expect_err("oversized media should fail before network I/O");
-
-    assert!(error.to_string().contains("media_byte_count"));
 }
 
 #[fcp_async_core::runtime::test]

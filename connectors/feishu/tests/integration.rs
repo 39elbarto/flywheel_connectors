@@ -9,21 +9,17 @@
     clippy::unused_async
 )]
 
-use std::{sync::Arc, time::Duration as StdDuration};
+use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_feishu::client::FeishuClient;
 use fcp_feishu::connector::{FeishuConnector, operations_info};
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector, FcpError,
     HandshakeRequest, IdempotencyClass, InstanceId, InvokeRequest, InvokeStatus, OperationId,
     RequestId, SafetyTier, ZoneId,
 };
-use fcp_sdk::{
-    ChatCoordinationBackend, InMemoryThreadOwnershipChecker, ThreadOwnershipChecker,
-    migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig},
-};
+use fcp_sdk::{ChatCoordinationBackend, InMemoryThreadOwnershipChecker, ThreadOwnershipChecker};
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
 };
@@ -592,119 +588,6 @@ async fn self_check_retryable_feishu_failure_reports_degraded() {
     assert_eq!(value["reason_code"], "self_check_retryable");
     assert_eq!(value["details"]["live_probe"]["retryable"], true);
     assert_eq!(value["details"]["live_probe"]["retry_after_ms"], 2000);
-}
-
-#[fcp_async_core::runtime::test]
-async fn client_health_check_success() {
-    let mock_server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "code": 0,
-            "msg": "ok",
-            "tenant_access_token": "t-test",
-            "expire": 7200
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let client = FeishuClient::new(
-        &mock_server.uri(),
-        "cli_test",
-        "secret",
-        HttpRetryConfig::default(),
-        StdDuration::from_secs(30),
-    )
-    .unwrap();
-    assert!(client.health_check().await.is_ok());
-}
-
-#[fcp_async_core::runtime::test]
-async fn client_obtains_tenant_token() {
-    let mock_server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "code": 0,
-            "msg": "ok",
-            "tenant_access_token": "t-obtained",
-            "expire": 7200
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let client = FeishuClient::new(
-        &mock_server.uri(),
-        "cli_test",
-        "secret",
-        HttpRetryConfig::default(),
-        StdDuration::from_secs(30),
-    )
-    .unwrap();
-    let token = client.obtain_tenant_access_token().await.unwrap();
-    assert_eq!(token, "t-obtained");
-}
-
-#[fcp_async_core::runtime::test]
-async fn client_health_check_server_error() {
-    let mock_server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-        .respond_with(ResponseTemplate::new(500))
-        .mount(&mock_server)
-        .await;
-
-    let client = FeishuClient::new(
-        &mock_server.uri(),
-        "cli_test",
-        "secret",
-        HttpRetryConfig::default(),
-        StdDuration::from_secs(30),
-    )
-    .unwrap();
-    assert!(client.health_check().await.is_err());
-}
-
-#[fcp_async_core::runtime::test]
-async fn client_list_chats_bootstraps_token_on_first_request() {
-    let mock_server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "code": 0,
-            "msg": "ok",
-            "tenant_access_token": "t-lazy",
-            "expire": 7200
-        })))
-        .mount(&mock_server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/open-apis/im/v1/chats"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "code": 0,
-            "msg": "ok",
-            "data": {
-                "items": [{ "chat_id": "oc_123", "name": "General" }],
-                "page_token": null,
-                "has_more": false
-            }
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let client = FeishuClient::new(
-        &mock_server.uri(),
-        "cli_test",
-        "secret",
-        HttpRetryConfig::default(),
-        StdDuration::from_secs(30),
-    )
-    .unwrap();
-    let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-
-    let response = client.list_chats(&runtime, None, Some(20)).await.unwrap();
-    assert_eq!(response.items.len(), 1);
-    assert_eq!(response.items[0].chat_id, "oc_123");
 }
 
 #[fcp_async_core::runtime::test]

@@ -30,6 +30,7 @@ use fcp_voice_call::{
 };
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 use url::Url;
 
@@ -51,6 +52,7 @@ const PLIVO_WEBHOOK_INGRESS_CONCURRENCY_LIMIT: u64 = 32;
 const PLIVO_WEBHOOK_INGRESS_RATE_LIMIT_MAX: u64 = 200;
 const PLIVO_WEBHOOK_INGRESS_RATE_LIMIT_WINDOW_MS: u64 = 60_000;
 const PLIVO_SESSION_TTL_MINUTES: i64 = 60;
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 #[derive(Debug, Clone)]
 struct PlivoConfig {
@@ -248,6 +250,12 @@ impl PlivoConnector {
         self.base.instance_id.as_str()
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
@@ -310,7 +318,7 @@ impl PlivoConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:fcp-plivo-manifest".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: request.nonce,
             event_caps: Some(EventCaps::default()),
             auth_caps: None,
@@ -1853,6 +1861,17 @@ mod tests {
     use fcp_prelude::{CapabilityConstraints, ZoneId};
 
     const TEST_AUTH_SECRET: &str = "plivo_test_auth_secret";
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+        let actual = PlivoConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "sha256:fcp-plivo-manifest");
+    }
 
     fn generate_valid_token(
         signing_key: &Ed25519SigningKey,

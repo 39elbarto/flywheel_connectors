@@ -52,7 +52,7 @@ Important runtime truths the contract preserves:
 - `handle_doctor()` checks local configuration, static provider status, network policy, credential-injection mode, and budget settings.
 - `handle_self_check()` reports provider readiness, credential-injection requirements, network-policy failures, unavailable providers, and providers with no models.
 - `handle_handshake()` creates a new session ID, marks the base connector handshaken, and creates a `CapabilityVerifier` from the host public key, zone, and requested instance ID.
-- Runtime handshake returns placeholder manifest hash `blake3-256:fcp.interface.v2:pending`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - `invoke` expects `operation`, `input`, and `capability_token`.
 - Proper FCP capability tokens are verified against the operation capability when a verifier exists.
 - Legacy string `capability_token` values are accepted as a presence check.

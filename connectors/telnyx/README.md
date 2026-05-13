@@ -23,6 +23,7 @@
 - Telnyx webhook signatures are verified with `Telnyx-Signature-Ed25519` and `Telnyx-Timestamp` through `fcp-voice-call`.
 - Replay cache insertion occurs only after a valid signature.
 - Callback/session binding uses an FCP-issued `CallAuthToken` embedded in Telnyx `client_state`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - E2E logs hash or mask call IDs and phone numbers and must never include full E.164 numbers, API keys, auth tokens, raw audio, transcripts, or full webhook bodies.
 
 ## Verification

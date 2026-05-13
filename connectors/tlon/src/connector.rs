@@ -15,6 +15,7 @@ use fcp_prelude::{
 use fcp_sdk::prelude::*;
 use reqwest::{Client, Response, StatusCode, header};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 use url::Url;
 
@@ -40,6 +41,7 @@ const DEFAULT_CHANNEL_MARK: &str = "tlon-channel-action";
 const DEFAULT_TIMEOUT_MS: u64 = 15_000;
 const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_TARGET_BYTES: usize = 512;
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 fn default_tlon_chat_coordination_config() -> ChatCoordinationConfig {
     ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
@@ -518,6 +520,12 @@ impl TlonConnector {
         &self.base.instance_id
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     #[must_use]
     pub fn with_thread_ownership_checker(
         mut self,
@@ -610,7 +618,7 @@ impl TlonConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "blake3-256:fcp.tlon.manifest.v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: request.nonce,
             event_caps: Some(EventCaps::default()),
             auth_caps: None,
@@ -1283,6 +1291,17 @@ impl Default for TlonConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+        let actual = TlonConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "blake3-256:fcp.tlon.manifest.v1");
+    }
 
     fn valid_config() -> Value {
         json!({

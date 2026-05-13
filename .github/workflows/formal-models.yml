@@ -96,6 +96,14 @@ jobs:
         shell: bash
         run: make tla-check-audit-liveness-broken TLA2TOOLS_JAR="${TLA2TOOLS_JAR}"
 
+      - name: Run agent-mail ordering TLC gate
+        shell: bash
+        run: make tla-check-agent-mail-ordering TLA2TOOLS_JAR="${TLA2TOOLS_JAR}"
+
+      - name: Run agent-mail ordering broken-spec TLC smoke
+        shell: bash
+        run: make tla-check-agent-mail-ordering-broken TLA2TOOLS_JAR="${TLA2TOOLS_JAR}"
+
       - name: Run Rust alignment E2E
         shell: bash
         run: |

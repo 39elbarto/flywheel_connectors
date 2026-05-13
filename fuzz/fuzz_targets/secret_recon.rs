@@ -50,14 +50,20 @@ const MAX_PARTICIPANTS_PER_RUN: usize = 16;
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput<'a> {
-    /// Raw bytes to feed through every deserialization entrypoint.
-    raw: &'a [u8],
     /// Threshold (k) for the ceremony — clamped to [1, total].
     threshold: u8,
     /// Total participants (n) — clamped to [1, MAX_PARTICIPANTS_PER_RUN].
     total: u8,
     /// Arbitrary participant-id bytes to drive add_commitment / add_shares.
     participant_seed: u8,
+    /// Raw bytes to feed through every deserialization entrypoint.
+    /// **Last field on purpose:** `arbitrary`'s derive uses `take_rest` for
+    /// a trailing `&[u8]` field, giving the fuzzer the largest possible
+    /// slice of input bytes to mutate. If this field is moved earlier in
+    /// the struct, the derive falls back to a length-prefixed slice and
+    /// the deserialization paths get short, structurally-uninteresting
+    /// input on most iterations.
+    raw: &'a [u8],
 }
 
 fuzz_target!(|data: &[u8]| {

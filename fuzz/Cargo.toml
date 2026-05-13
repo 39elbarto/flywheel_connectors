@@ -121,6 +121,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_fcps_frame_parser"
+path = "fuzz_targets/fcps_frame_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_fcps_datagram"
 path = "fuzz_targets/fcps_datagram.rs"
 test = false
@@ -130,6 +137,27 @@ bench = false
 [[bin]]
 name = "fuzz_fcpc_frame"
 path = "fuzz_targets/fcpc_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_fcpc_frame_parser"
+path = "fuzz_targets/fcpc_frame_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_cose_envelope_parser"
+path = "fuzz_targets/cose_envelope_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_capability_claim_parser"
+path = "fuzz_targets/capability_claim_parser.rs"
 test = false
 doc = false
 bench = false

@@ -1307,5 +1307,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_secret_recon"
+path = "fuzz_targets/secret_recon.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

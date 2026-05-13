@@ -3506,6 +3506,7 @@ mod tests {
             }),
             zone_id: ZoneId::work(),
             signature: None,
+            _state: std::marker::PhantomData,
         };
 
         let id1 = approval_token_object_id(&token);
@@ -4960,6 +4961,7 @@ mod tests {
             }),
             zone_id: ZoneId::work(),
             signature: None,
+            _state: std::marker::PhantomData,
         }
     }
 

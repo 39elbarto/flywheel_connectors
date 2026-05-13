@@ -697,6 +697,7 @@ fn decision_vector_requires_declassification() {
         }),
         zone_id: ZoneId::public(),
         signature: None,
+        _state: std::marker::PhantomData,
     };
 
     let approvals = vec![approval];
@@ -741,6 +742,7 @@ fn decision_vector_execution_scope_binding() {
         }),
         zone_id: zone.clone(),
         signature: None,
+        _state: std::marker::PhantomData,
     };
 
     let approvals = vec![mismatch_token];
@@ -792,6 +794,7 @@ fn decision_vector_execution_scope_binding() {
         }),
         zone_id: zone,
         signature: None,
+        _state: std::marker::PhantomData,
     };
 
     let approvals = vec![matching_token];
@@ -1791,6 +1794,7 @@ fn decision_vector_denies_expired_approval_token() {
         }),
         zone_id: zone.clone(),
         signature: None,
+        _state: std::marker::PhantomData,
     };
 
     let approvals = vec![expired_token];

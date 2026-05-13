@@ -893,6 +893,12 @@ impl ApprovalToken<Pending> {
     }
 }
 
+impl Default for ApprovalToken<Pending> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ApprovalToken<Approved> {
     /// Construct an already-approved token from validated approval material.
     #[must_use]
@@ -941,13 +947,13 @@ pub struct DeclassificationEvent {
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum DeclassificationError {
     #[error("approval token is expired or not yet valid")]
-    InvalidApprover { event: DeclassificationEvent },
+    InvalidApprover { event: Box<DeclassificationEvent> },
     #[error("approval token scope is not a matching declassification scope")]
-    ScopeMismatch { event: DeclassificationEvent },
+    ScopeMismatch { event: Box<DeclassificationEvent> },
     #[error("invalid declassification: {source}")]
     InvalidFlow {
         source: ProvenanceViolation,
-        event: DeclassificationEvent,
+        event: Box<DeclassificationEvent>,
     },
 }
 
@@ -967,6 +973,12 @@ impl DeclassificationError {
 ///
 /// A pending approval cannot be passed to this function: the compiler requires
 /// `ApprovalToken<Approved>`, and trybuild fixtures pin that boundary.
+///
+/// # Errors
+///
+/// Returns [`DeclassificationError`] when the approved token is invalid for the
+/// requested flow. Every error variant carries the redaction-safe audit event
+/// that must be appended by the caller.
 pub fn declassify(
     approval: ApprovalToken<Approved>,
     provenance: &mut ProvenanceRecord,
@@ -997,7 +1009,9 @@ pub fn declassify(
             reason_code = %event.reason_code,
             "declassification rejected"
         );
-        return Err(DeclassificationError::InvalidApprover { event });
+        return Err(DeclassificationError::InvalidApprover {
+            event: Box::new(event),
+        });
     }
 
     let ApprovalScope::Declassification(scope) = &approval.scope else {
@@ -1013,7 +1027,9 @@ pub fn declassify(
             reason_code = %event.reason_code,
             "declassification rejected"
         );
-        return Err(DeclassificationError::ScopeMismatch { event });
+        return Err(DeclassificationError::ScopeMismatch {
+            event: Box::new(event),
+        });
     };
 
     if scope.from_zone != provenance.current_zone
@@ -1032,7 +1048,9 @@ pub fn declassify(
             reason_code = %event.reason_code,
             "declassification rejected"
         );
-        return Err(DeclassificationError::ScopeMismatch { event });
+        return Err(DeclassificationError::ScopeMismatch {
+            event: Box::new(event),
+        });
     }
 
     let approval_token_id = approval_token_event_object_id(&approval);
@@ -1051,7 +1069,10 @@ pub fn declassify(
             reason_code = %event.reason_code,
             "declassification rejected"
         );
-        return Err(DeclassificationError::InvalidFlow { source, event });
+        return Err(DeclassificationError::InvalidFlow {
+            source,
+            event: Box::new(event),
+        });
     }
 
     event.accepted = true;

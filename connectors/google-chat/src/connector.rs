@@ -22,6 +22,7 @@ use fcp_sdk::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::client::{ChatClient, MessageReplyOption, MessageThreadTarget};
@@ -41,6 +42,7 @@ const DEFAULT_WEBHOOK_REPLAY_MAX_ENTRIES: usize = 1_000;
 const DEFAULT_MEDIA_MAX_BYTES: usize = 20 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_MENTION_TEXT: &str = "@flywheel";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 fn default_google_chat_chat_coordination_config() -> ChatCoordinationConfig {
     ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
@@ -460,6 +462,13 @@ impl ChatConnector {
         self.base.instance_id.as_str()
     }
 
+    #[must_use]
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Replace the thread ownership checker used by outbound chat coordination.
     #[must_use]
     pub fn with_thread_ownership_checker(
@@ -583,7 +592,7 @@ impl ChatConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:google-chat-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -2831,6 +2840,19 @@ mod tests {
         let connector = ChatConnector::new();
         let result = run_async_test(connector.handle_health()).unwrap();
         assert_eq!(result["status"], "not_configured");
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(ChatConnector::manifest_hash(), expected);
+        assert_ne!(
+            ChatConnector::manifest_hash(),
+            "sha256:google-chat-connector-v1"
+        );
     }
 
     #[test]

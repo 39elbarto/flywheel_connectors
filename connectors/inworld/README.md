@@ -40,6 +40,7 @@ Optional URL overrides are accepted for deterministic loopback tests:
 
 Production URLs are restricted to `api.inworld.ai` and loopback plaintext
 `ws://` / `http://` URLs are only allowed for local fixtures.
+Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## Redaction Contract
 

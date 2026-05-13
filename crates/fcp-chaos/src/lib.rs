@@ -8,6 +8,7 @@
 
 pub mod dsl;
 pub mod injector;
+pub mod scenarios;
 
 pub use dsl::{ChaosScenario, DslError, RollbackStep};
 pub use injector::{ChaosError, ChaosInjector, ChaosOutcome, ChaosStatus, Env, run_scenario};

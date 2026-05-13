@@ -1,0 +1,20 @@
+name = "net_partition_asymmetric"
+blast_radius = 2
+recovery_objective_secs = 60
+
+[[rollback_steps]]
+name = "restore_asymmetric_links"
+action = "restore_network_links"
+target = "synthetic_mesh_partition"
+
+[rollback_steps.args]
+partition = "asymmetric"
+peer_count = "4"
+
+[[rollback_steps]]
+name = "verify_reconciliation"
+action = "wait_for_gossip_convergence"
+target = "synthetic_mesh"
+
+[rollback_steps.args]
+timeout_secs = "60"

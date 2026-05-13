@@ -1,0 +1,19 @@
+name = "bandwidth_throttle_1mbps"
+blast_radius = 3
+recovery_objective_secs = 90
+
+[[rollback_steps]]
+name = "clear_bandwidth_throttle"
+action = "clear_tc_tbf"
+target = "synthetic_mesh"
+
+[rollback_steps.args]
+rate = "1mbps"
+
+[[rollback_steps]]
+name = "verify_bandwidth_normalized"
+action = "wait_for_bandwidth_above_threshold"
+target = "synthetic_mesh"
+
+[rollback_steps.args]
+minimum_rate = "10mbps"

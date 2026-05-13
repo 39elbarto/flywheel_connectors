@@ -1,0 +1,20 @@
+name = "net_partition_derp_only"
+blast_radius = 3
+recovery_objective_secs = 90
+
+[[rollback_steps]]
+name = "restore_direct_paths"
+action = "restore_network_links"
+target = "synthetic_mesh_tailnet"
+
+[rollback_steps.args]
+partition = "derp_only"
+peer_count = "5"
+
+[[rollback_steps]]
+name = "verify_derp_fallback_cleared"
+action = "wait_for_direct_path_preferred"
+target = "synthetic_mesh"
+
+[rollback_steps.args]
+timeout_secs = "90"

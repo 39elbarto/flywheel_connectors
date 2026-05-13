@@ -14,7 +14,8 @@ const CONNECTOR_VERSION: &str = "0.1.0";
 const DEFAULT_BASE_URL: &str = "https://api.exa.ai";
 const BOUNDARY: &str = "This first slice is read-only and covers Exa search. Content expansion and crawling stay out of scope for now.";
 const EXA_INTEGRATION: &str = "fcp";
-const EXA_MAX_SEARCH_RESULTS: u64 = 100;
+const EXA_MIN_SEARCH_RESULTS: u32 = 1;
+const EXA_MAX_SEARCH_RESULTS: u32 = 100;
 const EXA_MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const OPERATION_ORDER: [&str; 1] = ["exa.search"];
 const EXA_SEARCH_TYPES: &[&str] = &[
@@ -526,6 +527,15 @@ fn copy_if_present(target: &mut Value, source: &Value, field: &str) {
 }
 
 fn validated_num_results(value: &Value) -> FcpResult<u64> {
+    if let Some(raw) = value.as_u64() {
+        return Ok(clamp_num_results(raw));
+    }
+    if let Some(raw) = value.as_i64() {
+        return raw.try_into().map_or_else(
+            |_| Ok(u64::from(EXA_MIN_SEARCH_RESULTS)),
+            |unsigned| Ok(clamp_num_results(unsigned)),
+        );
+    }
     let Some(raw) = value.as_f64() else {
         return Err(FcpError::InvalidRequest {
             code: 1003,
@@ -538,7 +548,30 @@ fn validated_num_results(value: &Value) -> FcpResult<u64> {
             message: "numResults must be finite".into(),
         });
     }
-    Ok(raw.floor().clamp(1.0, EXA_MAX_SEARCH_RESULTS as f64) as u64)
+    Ok(floor_clamped_num_results(raw))
+}
+
+fn clamp_num_results(raw: u64) -> u64 {
+    raw.clamp(
+        u64::from(EXA_MIN_SEARCH_RESULTS),
+        u64::from(EXA_MAX_SEARCH_RESULTS),
+    )
+}
+
+fn floor_clamped_num_results(raw: f64) -> u64 {
+    if raw <= f64::from(EXA_MIN_SEARCH_RESULTS) {
+        return u64::from(EXA_MIN_SEARCH_RESULTS);
+    }
+    if raw >= f64::from(EXA_MAX_SEARCH_RESULTS) {
+        return u64::from(EXA_MAX_SEARCH_RESULTS);
+    }
+
+    for candidate in (EXA_MIN_SEARCH_RESULTS..EXA_MAX_SEARCH_RESULTS).rev() {
+        if raw >= f64::from(candidate) {
+            return u64::from(candidate);
+        }
+    }
+    u64::from(EXA_MIN_SEARCH_RESULTS)
 }
 
 fn validated_search_type(value: &Value) -> FcpResult<&str> {

@@ -90,6 +90,7 @@ fn redacted_normalized_event(event: &Value) -> Value {
         "reply_to_hash": hash_field(event, "reply_to"),
         "has_attachments": bool_field(event, "has_attachments"),
         "attachment_count": attachment_count(event),
+        "attachment_total_bytes": attachment_total_bytes(event),
         "attachment_content_types": attachment_content_types(event),
         "attachment_url_hashes": attachment_url_hashes(event),
     })
@@ -153,6 +154,19 @@ fn text_len(value: &Value) -> Option<usize> {
 
 fn attachment_count(event: &Value) -> usize {
     attachments(event).map_or(0, <[Value]>::len)
+}
+
+fn attachment_total_bytes(event: &Value) -> Option<u64> {
+    let mut total = 0_u64;
+    let mut saw_size = false;
+    for size in attachments(event)?
+        .iter()
+        .filter_map(|attachment| attachment.get("size").and_then(Value::as_u64))
+    {
+        saw_size = true;
+        total = total.saturating_add(size);
+    }
+    saw_size.then_some(total)
 }
 
 fn attachment_content_types(event: &Value) -> Vec<String> {
@@ -314,7 +328,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
                     "group_policy": "allowlist",
                     "group_allow_from": ["group-allowed"],
                     "group_require_mention": true,
-                    "bot_user_id": "bot-openid"
+                    "bot_user_id": "bot-openid",
+                    "max_attachment_bytes": 4096
                 }
             }
         }))
@@ -397,6 +412,46 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         &missing_mention,
     );
 
+    let oversized_media = invoke_projection(
+        &connector,
+        &signing_key,
+        &instance_id,
+        "qq-gateway-oversized-media",
+        json!({
+            "op": 0,
+            "s": 3,
+            "t": "GROUP_AT_MESSAGE_CREATE",
+            "id": "evt-oversized-media",
+            "d": {
+                "id": "msg-oversized-media",
+                "content": "bot-openid too large",
+                "group_openid": "group-allowed",
+                "group_member_openid": "member-1",
+                "attachments": [
+                    {
+                        "url": "https://cdn.qq.example/private/oversized.bin",
+                        "filename": "oversized.bin",
+                        "content_type": "application/octet-stream",
+                        "size": 4097
+                    }
+                ]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(oversized_media["accepted"], false);
+    assert_eq!(oversized_media["reason_code"], "attachment_bytes_exceeded");
+    assert_eq!(
+        oversized_media["policy"]["reason_code"],
+        "attachment_bytes_exceeded"
+    );
+    log_projection_step(
+        &mut logs,
+        "oversized_media_policy_drop",
+        "ok",
+        &oversized_media,
+    );
+
     let reply_media = invoke_projection(
         &connector,
         &signing_key,
@@ -404,7 +459,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "qq-gateway-reply-media",
         json!({
             "op": 0,
-            "s": 3,
+            "s": 4,
             "t": "GROUP_AT_MESSAGE_CREATE",
             "id": "evt-reply-media",
             "d": {
@@ -440,7 +495,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "qq-gateway-duplicate",
         json!({
             "op": 0,
-            "s": 4,
+            "s": 5,
             "t": "GROUP_AT_MESSAGE_CREATE",
             "id": "evt-accepted",
             "d": {
@@ -488,8 +543,10 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "hello-1",
         "evt-accepted",
         "evt-reply-media",
+        "evt-oversized-media",
         "msg-accepted",
         "msg-reply-media",
+        "msg-oversized-media",
         "msg-root",
         "bot-openid",
         "group-allowed",
@@ -497,8 +554,10 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "Alice",
         "deploy status",
         "see attached trace",
+        "too large",
         "cdn.qq.example",
         "trace.png",
+        "oversized.bin",
     ] {
         assert!(
             !log_contents.contains(forbidden),
@@ -508,5 +567,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert!(log_contents.contains("message_id_hash"));
     assert!(log_contents.contains("reply_to_hash"));
     assert!(log_contents.contains("attachment_count"));
+    assert!(log_contents.contains("attachment_total_bytes"));
     assert!(log_contents.contains("attachment_url_hashes"));
+    assert!(log_contents.contains("attachment_bytes_exceeded"));
 }

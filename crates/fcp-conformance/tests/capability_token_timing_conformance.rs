@@ -58,7 +58,8 @@ fn build_token(
         .operations(&[TEST_OPERATION])
         .issuer(TEST_ISSUER)
         .validity(not_before, expiration)
-        .constraints_cbor(&wildcard_constraints_cbor())
+        .try_constraints_cbor(&wildcard_constraints_cbor())
+        .expect("wildcard constraints CBOR is valid")
         .sign(signing_key)
         .expect("sign capability token");
     CapabilityToken::from_raw(cose)

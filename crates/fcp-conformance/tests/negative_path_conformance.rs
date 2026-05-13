@@ -107,7 +107,7 @@ fn try_verify_token(bytes: &[u8], pubkey_hex: &str) -> Result<(), String> {
 fn capability_golden_signature_single_byte_tamper_is_rejected() {
     let vectors = CapabilityTokenGoldenVector::load_all();
     let mut total_mutations = 0usize;
-    let mut all_rejected = true;
+    let all_rejected = true;
 
     for v in &vectors {
         let baseline = hex_to_bytes(&v.expected_token_cbor);
@@ -128,7 +128,6 @@ fn capability_golden_signature_single_byte_tamper_is_rejected() {
 
             let verdict = try_verify_token(&tampered, &v.expected_public_key);
             if verdict.is_ok() {
-                all_rejected = false;
                 panic!(
                     "vector '{}': flipping signature byte at offset {} did \
                      NOT invalidate verification — Ed25519 is supposed to \
@@ -162,7 +161,7 @@ fn capability_golden_signature_single_byte_tamper_is_rejected() {
 fn capability_golden_payload_byte_tamper_is_rejected() {
     let vectors = CapabilityTokenGoldenVector::load_all();
     let mut total_mutations = 0usize;
-    let mut all_rejected = true;
+    let all_rejected = true;
 
     for v in &vectors {
         let baseline = hex_to_bytes(&v.expected_token_cbor);
@@ -186,7 +185,6 @@ fn capability_golden_payload_byte_tamper_is_rejected() {
 
             let verdict = try_verify_token(&tampered, &v.expected_public_key);
             if verdict.is_ok() {
-                all_rejected = false;
                 panic!(
                     "vector '{}': flipping payload byte at offset {} did NOT \
                      invalidate verification — the signature must cover the \

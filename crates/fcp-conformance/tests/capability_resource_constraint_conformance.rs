@@ -57,7 +57,8 @@ fn build_token(
         .operations(&["op.test"])
         .issuer("node:primary")
         .validity(now - Duration::minutes(1), now + Duration::hours(1))
-        .constraints_cbor(&constraints_cbor(constraints))
+        .try_constraints_cbor(&constraints_cbor(constraints))
+        .expect("constraints CBOR is valid")
         .sign(signing_key)
         .expect("sign capability token");
     CapabilityToken::from_raw(cose)

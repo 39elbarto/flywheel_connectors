@@ -662,8 +662,9 @@ mod identifier_canonicity {
 
     #[test]
     fn zone_id_custom() {
-        let zone: ZoneId = "z:custom_zone".parse().unwrap();
-        assert_eq!(zone.as_str(), "z:custom_zone");
+        let zone: ZoneId = "z:custom-zone".parse().unwrap();
+        assert_eq!(zone.as_str(), "z:custom-zone");
+        // Hash removed due to underscore-to-hyphen validation fix
     }
 
     #[test]

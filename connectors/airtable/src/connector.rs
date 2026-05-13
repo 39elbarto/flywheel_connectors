@@ -293,10 +293,15 @@ impl AirtableConnector {
                 message: format!("Invalid handshake request: {e}"),
             })?;
 
+        let verifier_instance_id = req
+            .requested_instance_id
+            .clone()
+            .unwrap_or_else(|| self.base.instance_id.clone());
+
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
-            self.base.instance_id.clone(),
+            verifier_instance_id,
         ));
         self.zone_id = Some(req.zone.clone());
 

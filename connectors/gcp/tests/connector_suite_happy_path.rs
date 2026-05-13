@@ -14,7 +14,7 @@ use wiremock::{
 
 const OP_PROJECTS_GET: &str = "gcp.projects.get";
 
-fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
+fn handshake_request(host_public_key: [u8; 32], instance_id: &InstanceId) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0.0".into(),
         zone: ZoneId::work(),
@@ -32,11 +32,11 @@ fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
         ],
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        requested_instance_id: Some(instance_id.clone()),
     }
 }
 
-fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+fn build_token(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec!["*".into()],
@@ -48,11 +48,13 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
     let raw = CapabilityTokenBuilder::new()
         .capability_id("gcp.iam.read")
         .zone_id("z:work")
+        .target_instance(instance_id.as_str())
         .principal("user:test")
         .operations(&[OP_PROJECTS_GET])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints cbor should validate")
         .sign(signing_key)
         .expect("capability token");
 
@@ -74,7 +76,8 @@ async fn connector_suite_happy_path_gets_project() {
         .await;
 
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes());
+    let instance_id = InstanceId::new();
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &instance_id);
     let invoke = InvokeRequest {
         r#type: "invoke".into(),
         id: RequestId::new("gcp-connector-suite"),
@@ -82,7 +85,7 @@ async fn connector_suite_happy_path_gets_project() {
         operation: OperationId::from_static(OP_PROJECTS_GET),
         zone_id: ZoneId::work(),
         input: json!({}),
-        capability_token: build_token(&signing_key),
+        capability_token: build_token(&signing_key, &instance_id),
         holder_proof: None,
         context: None,
         idempotency_key: None,

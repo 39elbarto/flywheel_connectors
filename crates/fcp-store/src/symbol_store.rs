@@ -12,7 +12,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::Bytes;
 use fcp_prelude::{ObjectId, ZoneId};
+#[cfg(test)]
 use fcp_raptorq::ObjectTransmissionInformation;
+pub use fcp_raptorq::ObjectTransmissionInformation as ObjectTransmissionInfo;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
@@ -78,69 +80,6 @@ pub struct StoredSymbol {
     pub meta: SymbolMeta,
     /// Symbol data.
     pub data: Bytes,
-}
-
-/// Serializable object transmission information.
-///
-/// This is a serializable wrapper around raptorq's `ObjectTransmissionInformation`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ObjectTransmissionInfo {
-    /// Transfer length (object size in bytes).
-    pub transfer_length: u64,
-    /// Symbol size in bytes.
-    pub symbol_size: u16,
-    /// Number of source blocks.
-    pub source_blocks: u8,
-    /// Number of sub-blocks.
-    pub sub_blocks: u16,
-    /// Symbol alignment.
-    pub alignment: u8,
-    /// Optional end-to-end payload hash used to reject false-positive decodes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub payload_hash: Option<[u8; 32]>,
-}
-
-impl ObjectTransmissionInfo {
-    /// Create from raptorq's `ObjectTransmissionInformation`.
-    #[must_use]
-    pub const fn from_oti(oti: ObjectTransmissionInformation) -> Self {
-        Self {
-            transfer_length: oti.transfer_length(),
-            symbol_size: oti.symbol_size(),
-            source_blocks: oti.source_blocks(),
-            sub_blocks: oti.sub_blocks(),
-            alignment: oti.symbol_alignment(),
-            payload_hash: oti.payload_hash(),
-        }
-    }
-
-    /// Convert to raptorq's `ObjectTransmissionInformation`.
-    #[must_use]
-    pub const fn to_oti(self) -> ObjectTransmissionInformation {
-        let oti = ObjectTransmissionInformation::new(
-            self.transfer_length,
-            self.symbol_size,
-            self.source_blocks,
-            self.sub_blocks,
-            self.alignment,
-        );
-        match self.payload_hash {
-            Some(payload_hash) => oti.with_payload_hash(payload_hash),
-            None => oti,
-        }
-    }
-}
-
-impl From<ObjectTransmissionInformation> for ObjectTransmissionInfo {
-    fn from(oti: ObjectTransmissionInformation) -> Self {
-        Self::from_oti(oti)
-    }
-}
-
-impl From<ObjectTransmissionInfo> for ObjectTransmissionInformation {
-    fn from(info: ObjectTransmissionInfo) -> Self {
-        info.to_oti()
-    }
 }
 
 /// Object metadata for symbol reconstruction.
@@ -2672,14 +2611,14 @@ mod tests {
     }
 
     #[test]
-    fn oti_from_trait_impl() {
-        run_store_test("oti_from_trait", "verify", "codec", 2, || async {
+    fn oti_alias_assigns_to_canonical_type() {
+        run_store_test("oti_alias_assigns", "verify", "codec", 2, || async {
             let raptorq_oti = ObjectTransmissionInformation::new(1024, 64, 1, 1, 8);
-            let info: ObjectTransmissionInfo = raptorq_oti.into();
+            let info: ObjectTransmissionInfo = raptorq_oti;
             assert_eq!(info.transfer_length, 1024);
             assert_eq!(info.symbol_size, 64);
 
-            let back: ObjectTransmissionInformation = info.into();
+            let back: ObjectTransmissionInformation = info;
             assert_eq!(back.transfer_length(), 1024);
 
             StoreLogData {
@@ -2735,10 +2674,10 @@ mod tests {
                 payload_hash: None,
             };
             let dbg = format!("{oti:?}");
-            assert!(dbg.contains("ObjectTransmissionInfo"));
+            assert!(dbg.contains("ObjectTransmissionInformation"));
 
             StoreLogData {
-                details: Some(json!({"debug_contains": "ObjectTransmissionInfo"})),
+                details: Some(json!({"debug_contains": "ObjectTransmissionInformation"})),
                 ..StoreLogData::default()
             }
         });
@@ -3371,7 +3310,7 @@ mod tests {
             payload_hash: None,
         };
         let dbg = format!("{oti:?}");
-        assert!(dbg.contains("ObjectTransmissionInfo"));
+        assert!(dbg.contains("ObjectTransmissionInformation"));
         assert!(dbg.contains("1024"));
     }
 
@@ -3602,7 +3541,7 @@ mod tests {
             payload_hash: None,
         };
         let dbg = format!("{info:?}");
-        assert!(dbg.contains("ObjectTransmissionInfo"));
+        assert!(dbg.contains("ObjectTransmissionInformation"));
     }
 
     #[test]
@@ -3615,15 +3554,15 @@ mod tests {
     }
 
     #[test]
-    fn object_transmission_info_from_trait() {
+    fn object_transmission_info_alias_from_canonical() {
         let oti = ObjectTransmissionInformation::new(4096, 64, 1, 1, 1);
-        let info: ObjectTransmissionInfo = oti.into();
+        let info: ObjectTransmissionInfo = oti;
         assert_eq!(info.transfer_length, 4096);
         assert_eq!(info.symbol_size, 64);
     }
 
     #[test]
-    fn object_transmission_info_into_oti_trait() {
+    fn object_transmission_info_alias_to_canonical() {
         let info = ObjectTransmissionInfo {
             transfer_length: 2048,
             symbol_size: 32,
@@ -3632,7 +3571,7 @@ mod tests {
             alignment: 1,
             payload_hash: None,
         };
-        let oti: ObjectTransmissionInformation = info.into();
+        let oti: ObjectTransmissionInformation = info;
         assert_eq!(oti.transfer_length(), 2048);
     }
 

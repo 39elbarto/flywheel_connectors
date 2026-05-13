@@ -64,6 +64,7 @@ Important runtime truths the contract preserves:
 - Control-plane requests carry the `X-FCP-Browser-*` operation, timeout, response-budget, target, stale-recovery, current-tab, and export-guard headers.
 - Control budget classes are small `10000 ms` / `1048576` bytes, standard `30000 ms` / `10485760` bytes, and capture `60000 ms` / `52428800` bytes.
 - Runtime handshake installs a `CapabilityVerifier`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - `invoke` requires `operation`, `input`, and `capability_token`.
 - `invoke` verifies a bound capability token for the operation capability before dispatch.
 - Runtime capability-token verification currently passes an empty resource URI list.
@@ -80,7 +81,6 @@ Important runtime truths the contract preserves:
 
 This README documents the runtime truth and keeps current drift visible:
 
-- Runtime handshake returns placeholder manifest hash `sha256:browser-connector-v1`.
 - Manifest target-page network constraints allow selected external host patterns, while runtime `browser_url` validation controls only the browser-control endpoint.
 - Runtime `simulate` deserializes the request and unconditionally returns allowed; it does not check operation inventory, input shape, configured state, handshake state, capability token, or resource bindings.
 - Runtime verifies bound capability tokens with an empty resource URI list for every operation.
@@ -91,7 +91,7 @@ This README documents the runtime truth and keeps current drift visible:
 - Manifest state hints mention browser profile state and page cache metadata, but the runtime session store in this slice is process-local.
 - The tracked target/session manager verification script covers direct-CDP manager JSONL evidence; there is still no full Browser connector verification bundle for every operation mode.
 
-A follow-up parity bead should replace placeholder manifest proof, make `simulate` enforce the same readiness and token checks as `invoke`, decide whether resource URI binding is required for browser targets, reconcile approval metadata with runtime enforcement, and clarify whether browser session objects need durable state.
+A follow-up parity bead should make `simulate` enforce the same readiness and token checks as `invoke`, decide whether resource URI binding is required for browser targets, reconcile approval metadata with runtime enforcement, and clarify whether browser session objects need durable state.
 
 ## First-Slice Scope
 

@@ -33,7 +33,7 @@ const WECOM_TOKEN_PROBE: &str = "GET /cgi-bin/gettoken";
 
 fn wecom_manifest_hash() -> String {
     let mut hasher = Sha256::new();
-    hasher.update(include_str!("../manifest.toml").as_bytes());
+    hasher.update(include_bytes!("../manifest.toml"));
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 

@@ -19,6 +19,7 @@ use fcp_sdk::runtime::{
     SupervisorConfig,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, instrument};
 
 use crate::{
@@ -28,6 +29,8 @@ use crate::{
     stream::{FilteredStream, StreamEvent},
     types::{CreateTweetRequest, SearchTweetsParams, StreamRule, TweetReply, User},
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // FCP-level provisioning config
@@ -211,6 +214,12 @@ impl TwitterConnector {
         }
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle the configure method.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(&mut self, params: Value) -> Result<Value, FcpError> {
@@ -321,7 +330,7 @@ impl TwitterConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:twitter-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -1864,6 +1873,19 @@ mod tests {
             connector.base.instance_id.clone(),
         ));
         connector.base.set_handshaken(true);
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(TwitterConnector::manifest_hash(), expected);
+        assert_ne!(
+            TwitterConnector::manifest_hash(),
+            "sha256:twitter-connector-v1"
+        );
     }
 
     // ───────────────────────── Schema completeness tests ─────────────────────────

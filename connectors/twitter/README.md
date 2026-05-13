@@ -61,7 +61,7 @@ Important runtime truths the contract preserves:
 - Runtime request timeout is 30 seconds.
 - Runtime retry defaults are three attempts, 1000 ms initial delay, and 60000 ms maximum delay.
 - `handle_configure()` creates the API client, clears authenticated user, verifier, and session state, and marks the base configured but not handshaken.
-- `handshake()` performs a live `GET /2/users/me` probe, stores the authenticated user, installs a `CapabilityVerifier`, grants every requested capability unfiltered, and returns hard-coded `manifest_hash = "sha256:twitter-connector-v1"`.
+- `handshake()` performs a live `GET /2/users/me` probe, stores the authenticated user, installs a `CapabilityVerifier`, grants every requested capability unfiltered, and returns a SHA-256 hash of the bundled `manifest.toml`.
 - Runtime event caps report streaming support, no replay, no ack requirement, and zero minimum buffer in handshake.
 - Runtime introspection reports event caps with streaming support, no replay, no ack requirement, and minimum buffer of 100.
 - `health()` reports local readiness, request counters, active stream flag, and subscriber count. It does not call X.
@@ -130,7 +130,6 @@ This README documents runtime truth and keeps current drift visible:
 - Manifest declares `twitter.tweet.delete` capability `twitter.delete`; runtime requires `twitter.write.tweets`.
 - Runtime introspection includes `twitter.stream.rules.delete`, but some existing introspection tests only assert a smaller subset.
 - Handshake grants every requested capability unfiltered. It does not intersect requested capabilities with the actual runtime catalog.
-- Handshake returns a hard-coded manifest hash instead of hashing the checked-in manifest.
 - Runtime introspection does not include provider approval metadata even for post creation, replies, deletes, reposts, likes, and direct messages.
 - Runtime `simulate` validates known operation, required input shape, configured state, handshake state, capability token, and current resource URI binding, but it does not model provider rate limits, access tiers, account suspension, write permissions, app review state, DM access, or filtered-stream plan limits.
 - Runtime resource URI binding only covers `user_id` and `tweet_id`; it does not bind `username`, `reply_to`, `conversation_id`, `participant_id`, `rule_ids`, or `woeid`.
@@ -140,7 +139,7 @@ This README documents runtime truth and keeps current drift visible:
 - Stream subscription has no replay or durable offset contract.
 - No dedicated tracked verification shell script exists for this connector.
 
-A follow-up parity bead should reconcile manifest capabilities and input schemas with runtime introspection, filter handshake grants, hash the manifest, add approval metadata for social write operations, bind capability tokens to more resource arguments, surface required provider scopes/access levels, and document or implement a durable streaming acknowledgement contract.
+A follow-up parity bead should reconcile manifest capabilities and input schemas with runtime introspection, filter handshake grants, add approval metadata for social write operations, bind capability tokens to more resource arguments, surface required provider scopes/access levels, and document or implement a durable streaming acknowledgement contract.
 
 ## First-Slice Scope
 

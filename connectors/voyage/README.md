@@ -43,6 +43,7 @@ Important runtime truths the contract preserves:
 - `top_k`, when present, must be at least 1 and no greater than the number of documents.
 - `voyage.models.list` returns a static documented catalog and does not call a provider model-list endpoint.
 - `voyage.health` returns local readiness metadata and documented model count.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 

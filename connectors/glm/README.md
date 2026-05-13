@@ -45,6 +45,7 @@ Important runtime truths the contract preserves:
 - Chat input rejects empty messages, duplicate `max_tokens` plus `max_completion_tokens`, and zero `n` before network dispatch.
 - Embedding input rejects empty strings, empty batches, empty batch entries, and zero `dimensions` before network dispatch.
 - FCP subscribe is not implemented; streaming is exposed as the bounded invoke operation `glm.chat.completions_stream`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 

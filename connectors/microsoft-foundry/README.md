@@ -30,6 +30,10 @@ Optional:
 
 `credential_id` mode is the production path for host-owned credential injection. Entra credential references request the `https://ai.azure.com/.default` token scope from the host credential broker. The connector never shells out to Azure CLI on production invocation paths.
 
+## Runtime Contract
+
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
+
 ## Security Boundaries
 
 - The `model` field is a Foundry deployment name, not an Azure resource path.

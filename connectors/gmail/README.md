@@ -64,7 +64,7 @@ Important runtime truths the contract preserves:
 
 This README documents the runtime truth and keeps current drift visible:
 
-- Runtime handshake returns placeholder manifest hash `sha256:gmail-connector-v1`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Manifest event caps say `streaming = true` with `min_buffer_events = 50`, but runtime handshake reports `streaming = false` with `min_buffer_events = 100`.
 - Manifest `gmail.list_messages` input schema mentions `label_ids`, but runtime input validation and client dispatch use `query`, `max_results`, and `page_token`.
 - Manifest AI hints mention `gmail.search_messages` and `gmail.modify_labels`, but neither operation exists in runtime dispatch.
@@ -73,7 +73,7 @@ This README documents the runtime truth and keeps current drift visible:
 - Runtime `handle_shutdown` does not clear stored `config`, `client`, `verifier`, or `session_id` fields, though it marks base configured/handshaken flags false.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should align list-message schema, event caps, idempotency metadata, base URL policy wording, manifest hints, shutdown state cleanup, and placeholder manifest proof.
+A follow-up parity bead should align list-message schema, event caps, idempotency metadata, base URL policy wording, manifest hints, and shutdown state cleanup.
 
 ## First-Slice Scope
 

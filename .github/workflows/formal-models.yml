@@ -112,6 +112,14 @@ jobs:
         shell: bash
         run: make tla-check-mesh-admission-broken TLA2TOOLS_JAR="${TLA2TOOLS_JAR}"
 
+      - name: Run FROST DKG TLC gate
+        shell: bash
+        run: make tla-check-frost-dkg TLA2TOOLS_JAR="${TLA2TOOLS_JAR}"
+
+      - name: Run FROST DKG broken-spec TLC smoke
+        shell: bash
+        run: make tla-check-frost-dkg-broken TLA2TOOLS_JAR="${TLA2TOOLS_JAR}"
+
       - name: Run Rust alignment E2E
         shell: bash
         run: |

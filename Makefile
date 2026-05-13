@@ -21,10 +21,13 @@ TLA_AGENT_MAIL_ORDERING_BROKEN_SPEC := specs/tla/_fixtures/agent_mail_ordering_b
 TLA_MESH_ADMISSION_SPEC := specs/tla/mesh_admission.tla
 TLA_MESH_ADMISSION_CFG := specs/tla/mesh_admission.cfg
 TLA_MESH_ADMISSION_BROKEN_SPEC := specs/tla/_fixtures/mesh_admission_broken.tla
+TLA_FROST_DKG_SPEC := specs/tla/frost_dkg.tla
+TLA_FROST_DKG_CFG := specs/tla/frost_dkg.cfg
+TLA_FROST_DKG_BROKEN_SPEC := specs/tla/_fixtures/frost_dkg_broken.tla
 TLA_ARTIFACT_DIR := artifacts/formal/tla
 TLA_STATE_DIR := $(TLA_ARTIFACT_DIR)/states
 
-.PHONY: lean-verify lean-verify-verbose tla-check tla-check-broken tla-check-capability-lifecycle tla-check-capability-lifecycle-broken tla-check-audit-liveness tla-check-audit-liveness-broken tla-check-agent-mail-ordering tla-check-agent-mail-ordering-broken tla-check-mesh-admission tla-check-mesh-admission-broken
+.PHONY: lean-verify lean-verify-verbose tla-check tla-check-broken tla-check-capability-lifecycle tla-check-capability-lifecycle-broken tla-check-audit-liveness tla-check-audit-liveness-broken tla-check-agent-mail-ordering tla-check-agent-mail-ordering-broken tla-check-mesh-admission tla-check-mesh-admission-broken tla-check-frost-dkg tla-check-frost-dkg-broken
 
 lean-verify:
 	@set -eu; \
@@ -257,5 +260,48 @@ tla-check-mesh-admission-broken:
 		cat "$(TLA_ARTIFACT_DIR)/mesh_admission_broken.log"; \
 		duration=$$(( $$(date +%s) - start )); \
 		printf 'ERROR {"span":"fcp.formal.tla_check","spec":"%s","depth":20,"verdict":"red_without_safety_quorum_violation","duration_s":%s}\n' "$(TLA_MESH_ADMISSION_BROKEN_SPEC)" "$$duration"; \
+		exit 1; \
+	fi
+
+tla-check-frost-dkg:
+	@set -eu; \
+	mkdir -p "$(TLA_ARTIFACT_DIR)" "$(TLA_STATE_DIR)/frost_dkg"; \
+	if [ ! -f "$(TLA2TOOLS_JAR)" ]; then \
+		printf 'ERROR {"span":"fcp.formal.tla_check","spec":"%s","verdict":"toolchain_missing","message":"set TLA2TOOLS_JAR to tla2tools.jar"}\n' "$(TLA_FROST_DKG_SPEC)"; \
+		exit 127; \
+	fi; \
+	start=$$(date +%s); \
+	if java -cp "$(TLA2TOOLS_JAR)" tlc2.TLC -deadlock -metadir "$(TLA_STATE_DIR)/frost_dkg" -config "$(TLA_FROST_DKG_CFG)" "$(TLA_FROST_DKG_SPEC)" | tee "$(TLA_ARTIFACT_DIR)/frost_dkg.log"; then \
+		duration=$$(( $$(date +%s) - start )); \
+		states=$$(sed -n 's/^\([0-9][0-9]*\) states generated.*/\1/p' "$(TLA_ARTIFACT_DIR)/frost_dkg.log" | tail -n 1); \
+		states=$${states:-unknown}; \
+		printf 'INFO {"span":"fcp.formal.tla_check","spec":"%s","depth":20,"states_explored":"%s","invariants_checked":["Safety","SafetyNoKeyAfterAbort","SafetyFaultyImpliesAbort","Liveness","Recoverability"],"verdict":"green","duration_s":%s}\n' "$(TLA_FROST_DKG_SPEC)" "$$states" "$$duration"; \
+	else \
+		duration=$$(( $$(date +%s) - start )); \
+		printf 'ERROR {"span":"fcp.formal.tla_check","spec":"%s","depth":20,"states_explored":"unknown","invariants_checked":["Safety","SafetyNoKeyAfterAbort","SafetyFaultyImpliesAbort","Liveness","Recoverability"],"verdict":"red","duration_s":%s}\n' "$(TLA_FROST_DKG_SPEC)" "$$duration"; \
+		exit 1; \
+	fi
+
+tla-check-frost-dkg-broken:
+	@set -eu; \
+	mkdir -p "$(TLA_ARTIFACT_DIR)" "$(TLA_STATE_DIR)/frost_dkg_broken"; \
+	if [ ! -f "$(TLA2TOOLS_JAR)" ]; then \
+		printf 'ERROR {"span":"fcp.formal.tla_check","spec":"%s","verdict":"toolchain_missing","message":"set TLA2TOOLS_JAR to tla2tools.jar"}\n' "$(TLA_FROST_DKG_BROKEN_SPEC)"; \
+		exit 127; \
+	fi; \
+	start=$$(date +%s); \
+	if java -cp "$(TLA2TOOLS_JAR)" tlc2.TLC -deadlock -metadir "$(TLA_STATE_DIR)/frost_dkg_broken" -config "$(TLA_FROST_DKG_CFG)" "$(TLA_FROST_DKG_BROKEN_SPEC)" > "$(TLA_ARTIFACT_DIR)/frost_dkg_broken.log" 2>&1; then \
+		cat "$(TLA_ARTIFACT_DIR)/frost_dkg_broken.log"; \
+		duration=$$(( $$(date +%s) - start )); \
+		printf 'ERROR {"span":"fcp.formal.tla_check","spec":"%s","depth":20,"verdict":"unexpected_green","duration_s":%s}\n' "$(TLA_FROST_DKG_BROKEN_SPEC)" "$$duration"; \
+		exit 1; \
+	fi; \
+	if grep -qi "SafetyFaultyImpliesAbort\|SafetyNoKeyAfterAbort\|Safety\|Invariant" "$(TLA_ARTIFACT_DIR)/frost_dkg_broken.log"; then \
+		duration=$$(( $$(date +%s) - start )); \
+		printf 'INFO {"span":"fcp.formal.tla_check","spec":"%s","depth":20,"invariants_checked":["SafetyFaultyImpliesAbort"],"verdict":"expected_red","duration_s":%s}\n' "$(TLA_FROST_DKG_BROKEN_SPEC)" "$$duration"; \
+	else \
+		cat "$(TLA_ARTIFACT_DIR)/frost_dkg_broken.log"; \
+		duration=$$(( $$(date +%s) - start )); \
+		printf 'ERROR {"span":"fcp.formal.tla_check","spec":"%s","depth":20,"verdict":"red_without_safety_violation","duration_s":%s}\n' "$(TLA_FROST_DKG_BROKEN_SPEC)" "$$duration"; \
 		exit 1; \
 	fi

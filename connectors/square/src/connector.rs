@@ -233,11 +233,11 @@ fn auth_mode_label(config: &SquareConfig) -> &'static str {
 fn operator_guidance() -> OperatorGuidance {
     OperatorGuidance {
         prerequisites: vec![
-            "Use a dedicated Square Sandbox seller account or a localhost wiremock override before running the verification bundle against payment or order mutations.",
+            "Use a dedicated Square Sandbox seller account or a localhost deterministic HTTP override before running the verification bundle against payment or order mutations.",
             "Provision a bearer token that can read locations, payments, orders, catalog objects, and customers for the same seller boundary the connector will operate inside.",
-            "Treat square.payments.create, square.payments.refund, and square.orders.create as real merchant mutations unless you are pointed at a localhost mock server.",
+            "Treat square.payments.create, square.payments.refund, and square.orders.create as real merchant mutations unless you are pointed at a localhost deterministic HTTP server.",
         ],
-        dedicated_environment: "Prefer a Square Sandbox seller with disposable customers, locations, and catalog fixtures. Use localhost-only overrides for deterministic wiremock verification and never point the closeout bundle at a production seller unless the resulting mutations are explicitly acceptable.",
+        dedicated_environment: "Prefer a Square Sandbox seller with disposable customers, locations, and catalog fixtures. Use localhost-only overrides for deterministic local HTTP verification and never point the closeout bundle at a production seller unless the resulting mutations are explicitly acceptable.",
         redaction_rules: vec![
             "Redact bearer tokens, Authorization headers, idempotency keys, and any copied request or response bodies before sharing artifacts.",
             "Treat payment IDs, refund IDs, order IDs, location IDs, customer IDs, receipt URLs, and business names as sensitive merchant data.",
@@ -282,7 +282,7 @@ fn operator_guidance() -> OperatorGuidance {
             RemediationHint {
                 code: "network_constraints_invalid",
                 symptom: "doctor reports that base_url falls outside the accepted Square hosts",
-                action: "Use https://connect.squareup.com/v2 or https://connect.squareupsandbox.com/v2 for live verification, or a localhost /v2 override for deterministic mock tests.",
+                action: "Use https://connect.squareup.com/v2 or https://connect.squareupsandbox.com/v2 for live verification, or a localhost /v2 override for deterministic local HTTP tests.",
             },
         ],
         rerun_commands: VERIFY_COMMANDS.to_vec(),

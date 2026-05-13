@@ -109,6 +109,57 @@ pub enum CryptoError {
     #[error("missing required field: {0}")]
     MissingField(String),
 
+    /// Missing Ed25519 signer for a hybrid signing policy that needs it.
+    #[error("missing classical signer for hybrid signing policy {policy}")]
+    MissingClassicalSigner {
+        /// Policy that required the signer.
+        policy: &'static str,
+    },
+
+    /// Missing ML-DSA signer for a hybrid signing policy that needs it.
+    #[error("missing post-quantum signer for hybrid signing policy {policy}")]
+    MissingPqSigner {
+        /// Policy that required the signer.
+        policy: &'static str,
+    },
+
+    /// Missing Ed25519 signature for a hybrid verification policy that needs it.
+    #[error("missing classical signature for hybrid signing policy {policy}")]
+    MissingClassicalSignature {
+        /// Policy that required the signature.
+        policy: &'static str,
+    },
+
+    /// Missing ML-DSA signature for a hybrid verification policy that needs it.
+    #[error("missing post-quantum signature for hybrid signing policy {policy}")]
+    MissingPqSignature {
+        /// Policy that required the signature.
+        policy: &'static str,
+    },
+
+    /// Missing Ed25519 verifier for a hybrid verification policy that needs it.
+    #[error("missing classical verifier for hybrid signing policy {policy}")]
+    MissingClassicalVerifier {
+        /// Policy that required the verifier.
+        policy: &'static str,
+    },
+
+    /// Missing ML-DSA verifier for a hybrid verification policy that needs it.
+    #[error("missing post-quantum verifier for hybrid signing policy {policy}")]
+    MissingPqVerifier {
+        /// Policy that required the verifier.
+        policy: &'static str,
+    },
+
+    /// Hybrid verification could not satisfy the requested signature policy.
+    #[error("hybrid signing policy {policy} rejected envelope: {reason}")]
+    HybridPolicyViolation {
+        /// Policy that rejected the envelope.
+        policy: &'static str,
+        /// Human-readable rejection reason.
+        reason: String,
+    },
+
     /// COSE protected-header algorithm did not match what the verifier expects.
     #[error("algorithm mismatch: expected {expected}, got {got}")]
     AlgorithmMismatch {
@@ -155,6 +206,32 @@ impl CryptoError {
     pub const fn reason_code(&self) -> Option<&'static str> {
         match self {
             Self::ClassicalSignatureMissing | Self::PqSignatureMissing => Some("DowngradeAttempt"),
+            Self::MissingClassicalSignature { .. } | Self::MissingPqSignature { .. } => {
+                Some("DowngradeAttempt")
+            }
+            Self::MissingClassicalVerifier { .. } | Self::MissingPqVerifier { .. } => {
+                Some("MissingVerifier")
+            }
+            Self::HybridPolicyViolation { .. } => Some("HybridPolicyViolation"),
+            _ => None,
+        }
+    }
+
+    /// Stable reason code for hybrid-signing verification failures.
+    ///
+    /// This is intentionally narrower than `Display`: callers can use it for
+    /// audit records, conformance assertions, and machine-readable downgrade
+    /// handling without parsing a human-readable error string.
+    #[must_use]
+    pub const fn hybrid_reason_code(&self) -> Option<&'static str> {
+        match self {
+            Self::MissingClassicalSignature { .. } | Self::MissingPqSignature { .. } => {
+                Some("DowngradeAttempt")
+            }
+            Self::MissingClassicalVerifier { .. } | Self::MissingPqVerifier { .. } => {
+                Some("MissingVerifier")
+            }
+            Self::HybridPolicyViolation { .. } => Some("HybridPolicyViolation"),
             _ => None,
         }
     }

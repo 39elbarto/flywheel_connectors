@@ -32,6 +32,11 @@ use fcp_crypto::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use fcp_crypto::{
+    CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope,
+    signing_bytes_for_canonical_payload,
+};
+
 use crate::{
     CapabilityId, IdempotencyClass, InstanceId, NodeId, NodeSignature, ObjectHeader, ObjectId,
     PrincipalId, RequestId, TailscaleNodeId, UsageMetric, ZoneId,
@@ -330,19 +335,20 @@ impl OperationReceipt {
     }
 }
 
+/// Hybrid signed operation-receipt envelope.
+pub type HybridSignedOperationReceipt = SignedEnvelope<OperationReceipt>;
+
 impl HybridSignable for OperationReceipt {
     const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::OperationReceipt;
 
     fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
-        let mut unsigned = self.clone();
-        unsigned.signature =
-            NodeSignature::new(NodeId::new(self.signature.node_id.as_str()), [0_u8; 64], 0);
-        signing_bytes_for_payload(Self::OBJECT_KIND, &unsigned)
+        Ok(signing_bytes_for_canonical_payload(
+            Self::OBJECT_KIND,
+            &self.signable_bytes(),
+        ))
     }
 }
 
-/// Hybrid signed operation-receipt envelope.
-pub type HybridSignedOperationReceipt = SignedEnvelope<OperationReceipt>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Operation Status (public operation lifecycle)

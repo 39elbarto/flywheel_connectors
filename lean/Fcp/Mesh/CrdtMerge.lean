@@ -1,25 +1,39 @@
 namespace Fcp.Mesh.CrdtMerge
 
-/--
-TODO: lift this idempotent root model to the mesh connector-state CRDT with
-hybrid-logical-clock tie breaks and revocation-vector tombstones.
--/
-structure CrdtRoot where
+structure ConnectorStateRoot where
   version : Nat
   deriving DecidableEq, Repr
 
-def merge (left right : CrdtRoot) : CrdtRoot :=
+def merge (left right : ConnectorStateRoot) : ConnectorStateRoot :=
   { version := Nat.max left.version right.version }
 
-theorem crdt_merge_lattice_laws
-    (root : CrdtRoot) :
+theorem merge_idempotent
+    (root : ConnectorStateRoot) :
     merge root root = root := by
   cases root
   simp [merge]
 
-theorem crdt_merge_left_observed
-    (left right : CrdtRoot) :
-    left.version <= (merge left right).version :=
-  Nat.le_max_left left.version right.version
+theorem merge_commutative
+    (left right : ConnectorStateRoot) :
+    merge left right = merge right left := by
+  cases left
+  cases right
+  simp [merge, Nat.max_comm]
+
+theorem merge_associative
+    (left middle right : ConnectorStateRoot) :
+    merge (merge left middle) right = merge left (merge middle right) := by
+  cases left
+  cases middle
+  cases right
+  simp [merge, Nat.max_assoc]
+
+theorem crdt_merge_lattice_laws :
+    (forall root, merge root root = root) /\
+      (forall left right, merge left right = merge right left) /\
+      (forall left middle right,
+        merge (merge left middle) right = merge left (merge middle right)) := by
+  exact And.intro merge_idempotent
+    (And.intro merge_commutative merge_associative)
 
 end Fcp.Mesh.CrdtMerge

@@ -229,6 +229,12 @@ impl NotionConnector {
         }
     }
 
+    /// Return the connector instance ID used for bound capability verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &fcp_prelude::InstanceId {
+        &self.base.instance_id
+    }
+
     /// Handle configure method.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
@@ -1510,6 +1516,7 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         cap: &str,
         operations: &[&str],
+        instance_id: &fcp_prelude::InstanceId,
     ) -> CapabilityToken {
         use fcp_prelude::CapabilityConstraints;
 
@@ -1526,6 +1533,7 @@ mod tests {
             .zone_id("z:work")
             .principal("user:test")
             .operations(operations)
+            .target_instance(instance_id.as_str())
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&constraints_cbor)
@@ -1577,7 +1585,12 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "notion.read", &["notion.get_page"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "notion.read",
+            &["notion.get_page"],
+            &connector.base.instance_id,
+        );
 
         let result = connector
             .handle_invoke(json!({
@@ -1616,7 +1629,12 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "notion.read", &["notion.get_page"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "notion.read",
+            &["notion.get_page"],
+            &connector.base.instance_id,
+        );
 
         let result = connector
             .handle_invoke(json!({
@@ -1689,7 +1707,12 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "notion.read", &["notion.get_database"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "notion.read",
+            &["notion.get_database"],
+            &connector.base.instance_id,
+        );
 
         let result = connector
             .handle_invoke(json!({
@@ -1733,7 +1756,12 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "notion.write", &["notion.create_database"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "notion.write",
+            &["notion.create_database"],
+            &connector.base.instance_id,
+        );
 
         // Missing parent
         let result = connector
@@ -1752,8 +1780,12 @@ mod tests {
         }
 
         // Missing title
-        let token2 =
-            generate_valid_token(&signing_key, "notion.write", &["notion.create_database"]);
+        let token2 = generate_valid_token(
+            &signing_key,
+            "notion.write",
+            &["notion.create_database"],
+            &connector.base.instance_id,
+        );
         let result2 = connector
             .handle_invoke(json!({
                 "operation": "notion.create_database",
@@ -1770,8 +1802,12 @@ mod tests {
         }
 
         // Missing properties
-        let token3 =
-            generate_valid_token(&signing_key, "notion.write", &["notion.create_database"]);
+        let token3 = generate_valid_token(
+            &signing_key,
+            "notion.write",
+            &["notion.create_database"],
+            &connector.base.instance_id,
+        );
         let result3 = connector
             .handle_invoke(json!({
                 "operation": "notion.create_database",
@@ -1813,7 +1849,12 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "notion.read", &["notion.get_block"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "notion.read",
+            &["notion.get_block"],
+            &connector.base.instance_id,
+        );
 
         let result = connector
             .handle_invoke(json!({
@@ -1857,7 +1898,12 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "notion.delete", &["notion.delete_block"]);
+        let token = generate_valid_token(
+            &signing_key,
+            "notion.delete",
+            &["notion.delete_block"],
+            &connector.base.instance_id,
+        );
 
         let result = connector
             .handle_invoke(json!({

@@ -501,11 +501,18 @@ pub fn evaluate_inbound_policy(
     event: &NormalizedQqEvent,
     policy: &QqInboundPolicyConfig,
 ) -> QqInboundPolicyDecision {
-    match event.routing {
+    let mut decision = match event.routing {
         QqRouting::C2c => evaluate_c2c_policy(event, policy),
         QqRouting::Group => evaluate_group_policy(event, policy),
         QqRouting::Channel => evaluate_channel_policy(event, policy),
+    };
+    if decision.allowed
+        && let Some(reason_code) = attachment_policy_denial(event, policy)
+    {
+        decision.allowed = false;
+        decision.reason_code = reason_code;
     }
+    decision
 }
 
 fn evaluate_c2c_policy(
@@ -613,6 +620,36 @@ fn mentions_bot(event: &NormalizedQqEvent, policy: &QqInboundPolicyConfig) -> bo
         .text
         .as_deref()
         .is_some_and(|text| text.contains(bot_user_id))
+}
+
+fn attachment_policy_denial(
+    event: &NormalizedQqEvent,
+    policy: &QqInboundPolicyConfig,
+) -> Option<&'static str> {
+    let max_attachment_bytes = policy.max_attachment_bytes?;
+    let attachments = event.raw.get("attachments").and_then(Value::as_array)?;
+    if attachments.is_empty() {
+        return None;
+    }
+
+    let mut total_bytes = 0_u64;
+    for attachment in attachments {
+        let Some(size) = attachment.get("size").and_then(Value::as_u64) else {
+            return Some("attachment_size_unknown");
+        };
+        if size > max_attachment_bytes {
+            return Some("attachment_bytes_exceeded");
+        }
+        let Some(next_total) = total_bytes.checked_add(size) else {
+            return Some("attachment_bytes_exceeded");
+        };
+        if next_total > max_attachment_bytes {
+            return Some("attachment_bytes_exceeded");
+        }
+        total_bytes = next_total;
+    }
+
+    None
 }
 
 fn validate_host(raw: &str, allowed_hosts: &[&str]) -> QqResult<()> {
@@ -1755,6 +1792,110 @@ mod tests {
             .unwrap();
         assert!(!overflow.accepted);
         assert_eq!(overflow.reason_code, "queue_full");
+    }
+
+    #[test]
+    fn gateway_runtime_enforces_attachment_byte_policy() {
+        let mut config = QqGatewayRuntimeConfig {
+            enabled: true,
+            max_queue_depth: 8,
+            ..QqGatewayRuntimeConfig::default()
+        };
+        config.policy.max_attachment_bytes = Some(4_096);
+        let mut runtime = QqGatewayRuntime::new(config);
+
+        let allowed = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-attachment-ok",
+                    "content": "bot see these",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1",
+                    "attachments": [
+                        {"url": "https://example.com/a.png", "size": 1024},
+                        {"url": "https://example.com/b.png", "size": 2048}
+                    ]
+                })),
+                id: Some("evt-attachment-ok".into()),
+            })
+            .unwrap();
+        assert!(allowed.accepted);
+        assert_eq!(
+            allowed.policy.as_ref().map(|policy| policy.reason_code),
+            Some("group_allowed")
+        );
+
+        let oversized = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(2),
+                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-attachment-too-large",
+                    "content": "bot see oversized",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1",
+                    "attachments": [
+                        {"url": "https://example.com/part-a.bin", "size": 2048},
+                        {"url": "https://example.com/part-b.bin", "size": 2049}
+                    ]
+                })),
+                id: Some("evt-attachment-too-large".into()),
+            })
+            .unwrap();
+        assert!(!oversized.accepted);
+        assert_eq!(oversized.reason_code, "attachment_bytes_exceeded");
+        assert_eq!(
+            oversized.policy.as_ref().map(|policy| policy.reason_code),
+            Some("attachment_bytes_exceeded")
+        );
+
+        let unknown_size = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(3),
+                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-attachment-unknown",
+                    "content": "bot see unsized",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1",
+                    "attachments": [
+                        {"url": "https://example.com/unknown.bin"}
+                    ]
+                })),
+                id: Some("evt-attachment-unknown".into()),
+            })
+            .unwrap();
+        assert!(!unknown_size.accepted);
+        assert_eq!(unknown_size.reason_code, "attachment_size_unknown");
+
+        let mut uncapped_runtime = QqGatewayRuntime::new(QqGatewayRuntimeConfig {
+            enabled: true,
+            max_queue_depth: 8,
+            ..QqGatewayRuntimeConfig::default()
+        });
+        let uncapped = uncapped_runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-attachment-uncapped",
+                    "content": "bot see uncapped",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1",
+                    "attachments": [
+                        {"url": "https://example.com/unknown.bin"}
+                    ]
+                })),
+                id: Some("evt-attachment-uncapped".into()),
+            })
+            .unwrap();
+        assert!(uncapped.accepted);
     }
 
     #[test]

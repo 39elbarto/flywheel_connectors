@@ -18,7 +18,7 @@ from dataclasses import dataclass
 INLINE_CODE_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
 PATH_RE = re.compile(
     r"(?P<path>(?:\.github|artifacts|connectors|crates|docs|scripts|specs|fuzz)/"
-    r"[A-Za-z0-9_./*{}@:+-]+)"
+    r"[A-Za-z0-9_./*{},@:+-]+)"
 )
 SYMBOL_RE = re.compile(r"\b(?P<symbol>[a-z][a-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+)\b")
 SUPPORTED_EXTENSIONS = {
@@ -60,7 +60,7 @@ def resolve_path(path_text: str, repo_root: pathlib.Path) -> pathlib.Path:
 
 
 def normalize_path_token(token: str) -> str:
-    return token.rstrip(".,;:)]}")
+    return token.rstrip(".,;:)]")
 
 
 def is_candidate_path(path_text: str) -> bool:
@@ -111,10 +111,10 @@ def rust_sources(source_root: pathlib.Path) -> list[pathlib.Path]:
     return sorted(path for path in source_root.rglob("*.rs") if path.is_file())
 
 
-def symbol_exists(symbol: str, repo_root: pathlib.Path) -> bool:
+def symbol_exists(symbol: str, repo_root: pathlib.Path) -> bool | None:
     source_root = crate_source_root(symbol, repo_root)
     if source_root is None:
-        return False
+        return None
     needle = symbol.rsplit("::", 1)[-1]
     pattern = re.compile(rf"\b{re.escape(needle)}\b")
     for source in rust_sources(source_root):
@@ -126,9 +126,24 @@ def symbol_exists(symbol: str, repo_root: pathlib.Path) -> bool:
     return False
 
 
+def expand_braces(path_text: str) -> list[str]:
+    start = path_text.find("{")
+    end = path_text.find("}", start + 1)
+    if start == -1 or end == -1:
+        return [path_text]
+    prefix = path_text[:start]
+    suffix = path_text[end + 1:]
+    expanded: list[str] = []
+    for option in path_text[start + 1:end].split(","):
+        expanded.extend(expand_braces(f"{prefix}{option}{suffix}"))
+    return expanded
+
+
 def path_exists(path_text: str, repo_root: pathlib.Path) -> bool:
+    if "{" in path_text or "}" in path_text:
+        return any(path_exists(expanded, repo_root) for expanded in expand_braces(path_text))
     absolute = resolve_path(path_text, repo_root)
-    if "*" in path_text or "{" in path_text or "}" in path_text:
+    if "*" in path_text:
         return bool(list(repo_root.glob(path_text)))
     return absolute.exists()
 
@@ -156,8 +171,10 @@ def main() -> int:
             if not ok:
                 paths_missing.append(reference)
         elif reference.kind == "symbol":
-            symbols_checked += 1
             ok = symbol_exists(reference.value, repo_root)
+            if ok is None:
+                continue
+            symbols_checked += 1
             if args.debug:
                 print(
                     f"DEBUG symbol {reference.value} line={reference.line} ok={ok}",

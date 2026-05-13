@@ -811,7 +811,10 @@ impl PackageRegistryClient {
             async move {
                 debug!(attempt, provider = provider.as_str(), url = %redact_url(&url), "package registry GET");
 
-                let mut request = client.get(&url);
+                let mut request =
+                    client
+                        .get(&url)
+                        .header(reqwest::header::USER_AGENT, "fcp-package-registry/0.1");
                 request = with_auth(request, token.as_deref());
                 if !query.is_empty() {
                     request = request.query(&query);

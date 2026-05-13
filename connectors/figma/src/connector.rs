@@ -150,6 +150,14 @@ impl FigmaConnector {
                 message: format!("Invalid handshake request: {e}"),
             })?;
 
+        if let Some(requested_instance_id) = req.requested_instance_id {
+            let base = Arc::get_mut(&mut self.base).ok_or_else(|| FcpError::Internal {
+                message: "Cannot assign requested instance ID after connector state is shared"
+                    .into(),
+            })?;
+            base.instance_id = requested_instance_id;
+        }
+
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
@@ -2246,7 +2254,7 @@ fn audit_naming(meta: &serde_json::Value, findings: &mut Vec<DesignAuditFinding>
                 message: format!(
                     "Component name exceeds 80 characters ({} chars): {}...",
                     name.len(),
-                    &name.chars().take(60).collect::<String>()
+                    name.chars().take(60).collect::<String>()
                 ),
                 details: None,
             });
@@ -2478,8 +2486,13 @@ mod tests {
     use chrono::{Duration, Utc};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_prelude::InstanceId;
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        op: &str,
+        instance_id: &InstanceId,
+    ) -> CapabilityToken {
         let cap = match op {
             "figma.post_comment" => "figma.write",
             "figma.delete_comment" | "figma.delete_webhook" => "figma.delete",
@@ -2498,6 +2511,7 @@ mod tests {
             .zone_id("z:work")
             .principal("user:test")
             .operations(&[op])
+            .target_instance(instance_id.as_str())
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&cbor)
@@ -2564,7 +2578,8 @@ mod tests {
             .await
             .unwrap();
 
-        let capability = generate_valid_token(&signing_key, "figma.get_file");
+        let capability =
+            generate_valid_token(&signing_key, "figma.get_file", &connector.base.instance_id);
 
         let result = connector
             .handle_invoke(json!({
@@ -2603,7 +2618,11 @@ mod tests {
             .await
             .unwrap();
 
-        let capability = generate_valid_token(&signing_key, "figma.get_file_nodes");
+        let capability = generate_valid_token(
+            &signing_key,
+            "figma.get_file_nodes",
+            &connector.base.instance_id,
+        );
 
         let result = connector
             .handle_invoke(json!({
@@ -2690,7 +2709,11 @@ mod tests {
             .await
             .unwrap();
 
-        let capability = generate_valid_token(&signing_key, "figma.nonexistent");
+        let capability = generate_valid_token(
+            &signing_key,
+            "figma.nonexistent",
+            &connector.base.instance_id,
+        );
 
         let result = connector
             .handle_invoke(json!({
@@ -2742,7 +2765,8 @@ mod tests {
             }))
             .await
             .unwrap();
-        let capability = generate_valid_token(&signing_key, "figma.get_file");
+        let capability =
+            generate_valid_token(&signing_key, "figma.get_file", &connector.base.instance_id);
 
         let result = connector
             .handle_simulate(json!({
@@ -2782,7 +2806,8 @@ mod tests {
             }))
             .await
             .unwrap();
-        let capability = generate_valid_token(&signing_key, "figma.get_file");
+        let capability =
+            generate_valid_token(&signing_key, "figma.get_file", &connector.base.instance_id);
 
         let result = connector
             .handle_simulate(json!({

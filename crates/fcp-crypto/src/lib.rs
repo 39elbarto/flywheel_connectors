@@ -17,6 +17,7 @@
 //!
 //! - [`ed25519`] - Ed25519 signing and verification
 //! - [`frost`] - FROST threshold signing and distributed key generation
+//! - [`hybrid`] - Ed25519 + ML-DSA-65 signed envelopes
 //! - [`x25519`] - X25519 ECDH key exchange
 //! - [`hkdf`] - HKDF-SHA256 key derivation
 //! - [`aead`] - ChaCha20-Poly1305 and XChaCha20-Poly1305 AEAD
@@ -128,10 +129,11 @@ pub use hkdf::{
 };
 pub use hpke_seal::{Fcp2Aad, HpkeSealedBox, hpke_open, hpke_seal};
 pub use hybrid::{
-    EVENT_PQ_POLICY_DOWNGRADE, HYBRID_SIGNED_ENVELOPE_DOMAIN, HybridEnvelopeVerification,
-    HybridSignable, HybridSignedObjectKind, PqPolicyDowngradeAudit, PqPolicyDowngradeAuthorizer,
-    PqSigningPolicy, SignedEnvelope, downgrade_policy_to_either_ok,
-    signing_bytes_for_canonical_payload, signing_bytes_for_payload,
+    EVENT_PQ_POLICY_DOWNGRADE, HYBRID_SIGNING_CONTEXT, HybridSignable, HybridSignedObjectKind,
+    HybridVerifyReport, HybridVerifyWarning, PqPolicyDowngradeAudit, PqPolicyDowngradeAuthorizer,
+    PqSigningPolicy, SignatureStatus, SignedEnvelope, downgrade_policy_to_either_ok,
+    signing_bytes_for_canonical_payload, signing_bytes_for_payload, verify_signable,
+    verify_signable_with_policy,
 };
 pub use kid::KeyId;
 pub use mac::{Blake3Mac, MacKey, blake3_mac, blake3_mac_full, blake3_mac_verify};

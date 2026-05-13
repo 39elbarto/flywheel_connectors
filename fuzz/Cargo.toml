@@ -65,6 +65,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_capability_claim_parser"
+path = "fuzz_targets/capability_claim_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_canonical_id_validate"
 path = "fuzz_targets/canonical_id_validate.rs"
 test = false
@@ -81,6 +88,13 @@ bench = false
 [[bin]]
 name = "fuzz_cose_parse_adversarial"
 path = "fuzz_targets/cose_parse_adversarial.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_cose_envelope_parser"
+path = "fuzz_targets/cose_envelope_parser.rs"
 test = false
 doc = false
 bench = false

@@ -170,9 +170,9 @@ fn discover_manifests_in(connectors: &Path) -> Result<Vec<(String, PathBuf)>, St
         .map_err(|error| format!("cannot read {}: {error}", connectors.display()))?;
     let mut manifests = Vec::new();
     for entry_result in entries {
-        let entry = entry_result
+        let entry_result = entry_result
             .map_err(|error| format!("cannot read connector directory entry: {error}"))?;
-        let path = entry.path();
+        let path = entry_result.path();
         if !path.is_dir() {
             continue;
         }

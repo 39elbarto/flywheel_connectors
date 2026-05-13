@@ -8,7 +8,12 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
+use fcp_crypto::{HybridSignable, SignedEnvelope};
+use fcp_protocol::{HybridSignedFcpsFrame, SignedFcpsFramePayload};
+
 const STATUS_DOC: &str = "docs/cleanup/forbidden_overlap_status.md";
+const FCP_CRYPTO_HYBRID_RS: &str = include_str!("../../fcp-crypto/src/hybrid.rs");
+const FCP_PROTOCOL_FCPS_RS: &str = include_str!("../../fcp-protocol/src/fcps.rs");
 
 const EXPECTED_BASELINE: &[ExpectedOverlap] = &[
     ExpectedOverlap {
@@ -53,7 +58,8 @@ fn workspace_root() -> PathBuf {
 }
 
 fn status_doc() -> String {
-    fs::read_to_string(workspace_root().join(STATUS_DOC)).expect("read forbidden-overlap status doc")
+    fs::read_to_string(workspace_root().join(STATUS_DOC))
+        .expect("read forbidden-overlap status doc")
 }
 
 fn field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
@@ -85,6 +91,16 @@ fn overlap_rows(doc: &str) -> Vec<OverlapRow> {
         })
         .collect()
 }
+
+fn row_status<'a>(rows: &'a [OverlapRow], id: &str) -> &'a str {
+    rows.iter()
+        .find(|row| row.id == id)
+        .unwrap_or_else(|| panic!("overlap row `{id}` is present"))
+        .status
+        .as_str()
+}
+
+fn assert_crypto_envelope_alias<T: HybridSignable>(_alias: Option<SignedEnvelope<T>>) {}
 
 #[test]
 #[ignore = "Phase I.2 child beads still track three pending holdouts"]
@@ -144,5 +160,38 @@ fn test_baseline_unchanged() {
         pending_rows + resolved_rows,
         rows.len(),
         "rows must be either pending or resolved"
+    );
+}
+
+#[test]
+fn test_protocol_crypto_overlap_uses_crypto_envelope_owner() {
+    assert_crypto_envelope_alias::<SignedFcpsFramePayload>(None::<HybridSignedFcpsFrame>);
+
+    assert!(
+        FCP_CRYPTO_HYBRID_RS.contains("pub struct SignedEnvelope<T>"),
+        "fcp-crypto must remain the canonical SignedEnvelope owner"
+    );
+    assert!(
+        FCP_PROTOCOL_FCPS_RS
+            .contains("pub type HybridSignedFcpsFrame = SignedEnvelope<SignedFcpsFramePayload>;"),
+        "fcp-protocol hybrid FCPS signing must use fcp_crypto::SignedEnvelope"
+    );
+    assert!(
+        FCP_PROTOCOL_FCPS_RS.contains("impl HybridSignable for SignedFcpsFramePayload"),
+        "fcp-protocol payloads that need hybrid signing must implement the crypto adapter"
+    );
+    assert!(
+        !FCP_PROTOCOL_FCPS_RS.contains("pub struct SignedEnvelope")
+            && !FCP_PROTOCOL_FCPS_RS.contains("struct SignedEnvelope<"),
+        "fcp-protocol must not define a protocol-local SignedEnvelope owner"
+    );
+
+    let doc = status_doc();
+    let rows = overlap_rows(&doc);
+    assert_eq!(
+        row_status(&rows, "I2-PROTOCOL-CRYPTO"),
+        "resolved",
+        "the status doc may only mark the protocol/crypto overlap resolved when \
+         the canonical fcp_crypto::SignedEnvelope alias remains in fcp-protocol"
     );
 }

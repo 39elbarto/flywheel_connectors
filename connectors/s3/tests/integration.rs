@@ -19,7 +19,11 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    op: &str,
+    instance_id: &str,
+) -> CapabilityToken {
     let cap = match op {
         "s3.put_object" | "s3.create_bucket" | "s3.copy_object" => "s3.write",
         "s3.delete_object" | "s3.delete_bucket" => "s3.delete",
@@ -42,6 +46,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         .validity(now, now + chrono::Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .unwrap()
+        .target_instance(instance_id)
         .sign(signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)
@@ -299,6 +304,38 @@ async fn client_delete_object() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn client_create_bucket() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/test-bucket"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    let result = client.create_bucket("test-bucket").await.unwrap();
+
+    assert_eq!(result.bucket, "test-bucket");
+    assert!(result.created);
+}
+
+#[fcp_async_core::runtime::test]
+async fn client_delete_bucket() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/test-bucket"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri());
+    let result = client.delete_bucket("test-bucket").await.unwrap();
+
+    assert_eq!(result.bucket, "test-bucket");
+    assert!(result.deleted);
+}
+
+#[fcp_async_core::runtime::test]
 async fn client_copy_object() {
     let server = MockServer::start().await;
     Mock::given(method("PUT"))
@@ -380,6 +417,24 @@ async fn client_unauthorized_error() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn client_not_found_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/test-bucket/missing-key"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "code": "NoSuchKey",
+            "message": "missing-key"
+        })))
+        .mount(&server)
+        .await;
+
+    let client = make_client(&server.uri()).with_retry_config(1, 10, 100);
+    let result = client.get_object("test-bucket", "missing-key").await;
+
+    assert!(matches!(result.unwrap_err(), S3Error::NotFound { .. }));
+}
+
+#[fcp_async_core::runtime::test]
 async fn client_rate_limited_no_retry() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -412,7 +467,11 @@ async fn invoke_put_object_through_connector() {
     setup_configure(&mut connector, &server.uri()).await;
     setup_handshake(&mut connector, &signing_key, &["s3.put_object"]).await;
 
-    let token = generate_valid_token(&signing_key, "s3.put_object");
+    let token = generate_valid_token(
+        &signing_key,
+        "s3.put_object",
+        connector.instance_id().as_str(),
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "s3.put_object",
@@ -446,7 +505,11 @@ async fn invoke_list_buckets_through_connector() {
     setup_configure(&mut connector, &server.uri()).await;
     setup_handshake(&mut connector, &signing_key, &["s3.list_buckets"]).await;
 
-    let token = generate_valid_token(&signing_key, "s3.list_buckets");
+    let token = generate_valid_token(
+        &signing_key,
+        "s3.list_buckets",
+        connector.instance_id().as_str(),
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "s3.list_buckets",
@@ -467,7 +530,7 @@ async fn invoke_wrong_capability_rejected() {
     setup_configure(&mut connector, "http://localhost:1").await;
     setup_handshake(&mut connector, &signing_key, &["s3.read"]).await;
 
-    let token = generate_valid_token(&signing_key, "s3.read");
+    let token = generate_valid_token(&signing_key, "s3.read", connector.instance_id().as_str());
     let result = connector
         .handle_invoke(json!({
             "operation": "s3.put_object",
@@ -491,7 +554,11 @@ async fn invoke_unknown_operation_rejected() {
     setup_configure(&mut connector, "http://localhost:1").await;
     setup_handshake(&mut connector, &signing_key, &["s3.nonexistent"]).await;
 
-    let token = generate_valid_token(&signing_key, "s3.nonexistent");
+    let token = generate_valid_token(
+        &signing_key,
+        "s3.nonexistent",
+        connector.instance_id().as_str(),
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "s3.nonexistent",
@@ -517,7 +584,11 @@ async fn invoke_missing_required_field_rejected() {
     setup_configure(&mut connector, &server.uri()).await;
     setup_handshake(&mut connector, &signing_key, &["s3.put_object"]).await;
 
-    let token = generate_valid_token(&signing_key, "s3.put_object");
+    let token = generate_valid_token(
+        &signing_key,
+        "s3.put_object",
+        connector.instance_id().as_str(),
+    );
     // Missing key and body
     let result = connector
         .handle_invoke(json!({
@@ -554,7 +625,11 @@ async fn invoke_get_object_through_connector() {
     setup_configure(&mut connector, &server.uri()).await;
     setup_handshake(&mut connector, &signing_key, &["s3.get_object"]).await;
 
-    let token = generate_valid_token(&signing_key, "s3.get_object");
+    let token = generate_valid_token(
+        &signing_key,
+        "s3.get_object",
+        connector.instance_id().as_str(),
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "s3.get_object",
@@ -586,7 +661,11 @@ async fn invoke_delete_object_through_connector() {
     setup_configure(&mut connector, &server.uri()).await;
     setup_handshake(&mut connector, &signing_key, &["s3.delete_object"]).await;
 
-    let token = generate_valid_token(&signing_key, "s3.delete_object");
+    let token = generate_valid_token(
+        &signing_key,
+        "s3.delete_object",
+        connector.instance_id().as_str(),
+    );
     let approval = generate_execution_approval("s3.delete_object");
     let result = connector
         .handle_invoke(json!({
@@ -621,7 +700,11 @@ async fn invoke_create_bucket_through_connector() {
     setup_configure(&mut connector, &server.uri()).await;
     setup_handshake(&mut connector, &signing_key, &["s3.create_bucket"]).await;
 
-    let token = generate_valid_token(&signing_key, "s3.create_bucket");
+    let token = generate_valid_token(
+        &signing_key,
+        "s3.create_bucket",
+        connector.instance_id().as_str(),
+    );
     let approval = generate_execution_approval("s3.create_bucket");
     let result = connector
         .handle_invoke(json!({
@@ -655,7 +738,11 @@ async fn invoke_delete_bucket_through_connector() {
     setup_configure(&mut connector, &server.uri()).await;
     setup_handshake(&mut connector, &signing_key, &["s3.delete_bucket"]).await;
 
-    let token = generate_valid_token(&signing_key, "s3.delete_bucket");
+    let token = generate_valid_token(
+        &signing_key,
+        "s3.delete_bucket",
+        connector.instance_id().as_str(),
+    );
     let approval = generate_execution_approval("s3.delete_bucket");
     let result = connector
         .handle_invoke(json!({
@@ -691,7 +778,11 @@ async fn invoke_head_object_missing_field() {
     setup_configure(&mut connector, &server.uri()).await;
     setup_handshake(&mut connector, &signing_key, &["s3.head_object"]).await;
 
-    let token = generate_valid_token(&signing_key, "s3.head_object");
+    let token = generate_valid_token(
+        &signing_key,
+        "s3.head_object",
+        connector.instance_id().as_str(),
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "s3.head_object",
@@ -730,7 +821,11 @@ async fn invoke_list_objects_through_connector() {
     setup_configure(&mut connector, &server.uri()).await;
     setup_handshake(&mut connector, &signing_key, &["s3.list_objects"]).await;
 
-    let token = generate_valid_token(&signing_key, "s3.list_objects");
+    let token = generate_valid_token(
+        &signing_key,
+        "s3.list_objects",
+        connector.instance_id().as_str(),
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "s3.list_objects",
@@ -765,7 +860,11 @@ async fn invoke_copy_object_through_connector() {
     setup_configure(&mut connector, &server.uri()).await;
     setup_handshake(&mut connector, &signing_key, &["s3.copy_object"]).await;
 
-    let token = generate_valid_token(&signing_key, "s3.copy_object");
+    let token = generate_valid_token(
+        &signing_key,
+        "s3.copy_object",
+        connector.instance_id().as_str(),
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "s3.copy_object",
@@ -793,7 +892,11 @@ async fn invoke_generate_presigned_url_through_connector() {
     setup_configure(&mut connector, &server.uri()).await;
     setup_handshake(&mut connector, &signing_key, &["s3.generate_presigned_url"]).await;
 
-    let token = generate_valid_token(&signing_key, "s3.generate_presigned_url");
+    let token = generate_valid_token(
+        &signing_key,
+        "s3.generate_presigned_url",
+        connector.instance_id().as_str(),
+    );
     let approval = generate_execution_approval("s3.generate_presigned_url");
     let result = connector
         .handle_invoke(json!({
@@ -838,7 +941,11 @@ async fn invoke_generate_presigned_url_with_credential_id_returns_unsigned_url()
         .unwrap();
     setup_handshake(&mut connector, &signing_key, &["s3.generate_presigned_url"]).await;
 
-    let token = generate_valid_token(&signing_key, "s3.generate_presigned_url");
+    let token = generate_valid_token(
+        &signing_key,
+        "s3.generate_presigned_url",
+        connector.instance_id().as_str(),
+    );
     let approval = generate_execution_approval("s3.generate_presigned_url");
     let result = connector
         .handle_invoke(json!({
@@ -874,7 +981,11 @@ async fn invoke_dangerous_operation_requires_approval_token() {
     setup_configure(&mut connector, &server.uri()).await;
     setup_handshake(&mut connector, &signing_key, &["s3.delete_object"]).await;
 
-    let token = generate_valid_token(&signing_key, "s3.delete_object");
+    let token = generate_valid_token(
+        &signing_key,
+        "s3.delete_object",
+        connector.instance_id().as_str(),
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "s3.delete_object",
@@ -936,7 +1047,11 @@ async fn invoke_copy_object_missing_field() {
     setup_configure(&mut connector, &server.uri()).await;
     setup_handshake(&mut connector, &signing_key, &["s3.copy_object"]).await;
 
-    let token = generate_valid_token(&signing_key, "s3.copy_object");
+    let token = generate_valid_token(
+        &signing_key,
+        "s3.copy_object",
+        connector.instance_id().as_str(),
+    );
     // Missing dest_key
     let result = connector
         .handle_invoke(json!({

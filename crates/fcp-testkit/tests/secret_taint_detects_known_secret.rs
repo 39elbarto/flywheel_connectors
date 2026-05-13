@@ -1,29 +1,42 @@
-use fcp_testkit::SecretTaintTracker;
+use fcp_testkit::secret_taint::SecretTaintTracker;
+use serde_json::json;
 
 #[test]
 fn test_taint_tracker_detects_registered_secret() {
     let mut tracker = SecretTaintTracker::new();
-    assert!(tracker.register_secret("provider_api_key", b"sk-test-secret-value"));
+    let secret = "sk-test-secret-material-123";
+    let handle = tracker
+        .register_secret("provider_api_key", secret)
+        .expect("secret registration should work");
 
-    let alert = tracker
-        .scan_str("provider returned sk-test-secret-value in an error")
-        .expect("registered secret should be detected");
+    let report = tracker.scan_json(
+        "connector.log",
+        &json!({
+            "message": "request failed",
+            "authorization": format!("Bearer {secret}")
+        }),
+    );
 
-    assert_eq!(alert.label, "provider_api_key");
-    assert_eq!(alert.secret_len, "sk-test-secret-value".len());
-    assert_eq!(alert.offset, "provider returned ".len());
-    assert!(!alert.secret_fingerprint.contains("sk-test-secret-value"));
+    assert!(report.has_leaks());
+    assert_eq!(report.leak_count, 1);
+    assert_eq!(report.leaks[0].secret_id, handle.id);
+    assert_eq!(report.leaks[0].label_hash, handle.label_hash);
+    assert!(!format!("{report:?}").contains(secret));
 }
 
 #[test]
 fn test_taint_tracker_does_not_false_positive_on_random() {
     let mut tracker = SecretTaintTracker::new();
-    assert!(tracker.register_secret("provider_api_key", b"sk-test-secret-value"));
+    tracker
+        .register_secret("provider_api_key", "sk-test-secret-material-123")
+        .expect("secret registration should work");
 
-    assert!(
-        tracker
-            .scan_str("provider returned a normal structured error")
-            .is_none()
+    let report = tracker.scan_text(
+        "connector.log",
+        "request_id=3df1a7 status=429 token_count=128 retryable=true",
     );
-    assert_eq!(tracker.registered_count(), 1);
+
+    assert!(!report.has_leaks());
+    assert_eq!(report.leak_count, 0);
+    assert!(report.leaks.is_empty());
 }

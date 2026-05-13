@@ -2233,6 +2233,7 @@ fn parse_connector_status_label(value: &str) -> Option<ConnectorStatus> {
         "deprecated" => Some(ConnectorStatus::Deprecated),
         "incubating" => Some(ConnectorStatus::Incubating),
         "quarantined" => Some(ConnectorStatus::Quarantined),
+        "adversarial" => Some(ConnectorStatus::Adversarial),
         _ => None,
     }
 }

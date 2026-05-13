@@ -1662,6 +1662,18 @@ impl<S> From<&Self> for CapabilityToken<S> {
 /// Hybrid signed capability-token envelope.
 pub type HybridSignedCapabilityToken<S = Unverified> = SignedEnvelope<CapabilityToken<S>>;
 
+impl<S> HybridSignable for CapabilityToken<S> {
+    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::CapabilityToken;
+
+    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
+        let token_cbor = self.raw.to_cbor()?;
+        Ok(signing_bytes_for_canonical_payload(
+            Self::OBJECT_KIND,
+            &token_cbor,
+        ))
+    }
+}
+
 // Methods available on ALL token states
 impl<S> CapabilityToken<S> {
     /// Access the raw COSE token.

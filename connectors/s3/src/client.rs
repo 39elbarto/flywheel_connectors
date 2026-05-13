@@ -2,7 +2,8 @@
 //!
 //! This implements a simplified S3-compatible REST client. For production use
 //! with real AWS S3, you would need full AWS SigV4 request signing. This
-//! implementation uses bearer-style auth headers for mock/test friendliness
+//! implementation uses bearer-style auth headers so local contract tests and
+//! egress-proxy deployments can exercise deterministic request headers
 //! and constructs standard S3 REST API URLs.
 
 use fcp_prelude::log_redaction::redact_url;
@@ -193,7 +194,7 @@ impl S3Client {
         })
     }
 
-    /// Set the base URL (for testing with mock servers).
+    /// Set the base URL for alternate S3-compatible endpoints.
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();

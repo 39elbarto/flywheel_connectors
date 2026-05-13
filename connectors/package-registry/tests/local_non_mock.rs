@@ -133,6 +133,7 @@ fn capability_token(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -
         .zone_id("z:work")
         .principal("user:local-non-mock")
         .operations(&["registry.search"])
+        .target_instance(instance_id.as_str())
         .issuer("node:local-non-mock")
         .target_instance(instance_id.as_str())
         .validity(now, now + ChronoDuration::hours(1))

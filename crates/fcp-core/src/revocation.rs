@@ -36,6 +36,10 @@ use fcp_crypto::{
 };
 use serde::{Deserialize, Serialize};
 
+use fcp_crypto::{
+    CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope, signing_bytes_for_payload,
+};
+
 use crate::{ObjectHeader, ObjectId, QuorumPolicy, RiskTier, SignatureSet, ZoneId};
 
 /// Scope of a revocation (NORMATIVE).

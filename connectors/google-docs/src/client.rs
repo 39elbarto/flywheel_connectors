@@ -304,6 +304,7 @@ pub mod __fuzz {
     use super::sanitize_path_segment;
 
     /// Validate an arbitrary Docs URL path segment candidate.
+    #[must_use]
     pub fn sanitize_path_segment_candidate(value: &str) -> bool {
         sanitize_path_segment(value, "document_id").is_ok()
     }

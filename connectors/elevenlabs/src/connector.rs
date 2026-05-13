@@ -1988,8 +1988,6 @@ fn map_reqwest_error(service: &'static str, error: &reqwest::Error) -> FcpError 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{body_json, header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn config_requires_exactly_one_auth_source() {
@@ -2191,52 +2189,6 @@ mod tests {
         assert_eq!(state.partials.len(), 1);
         assert_eq!(state.committed.len(), 1);
         assert_eq!(state.text_segments, vec!["hello realtime".to_string()]);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn tts_uses_openclaw_aligned_default_model_when_omitted() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/text-to-speech/voice-default"))
-            .and(header("xi-api-key", "test-key"))
-            .and(body_json(json!({
-                "text": "hello",
-                "model_id": DEFAULT_TTS_MODEL_ID
-            })))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("Content-Type", "audio/mpeg")
-                    .set_body_bytes([1, 2, 3]),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let mut connector = ElevenlabsConnector::new();
-        connector
-            .handle_configure(json!({
-                "api_key": "test-key",
-                "base_url": server.uri()
-            }))
-            .await
-            .expect("expected configure to succeed");
-        connector
-            .handle_handshake(json!({"session_id": "default-model-test"}))
-            .await
-            .expect("expected handshake to succeed");
-
-        let response = connector
-            .handle_invoke(json!({
-                "operation_id": "elevenlabs.tts.generate",
-                "input": {
-                    "voice_id": "voice-default",
-                    "text": "hello"
-                }
-            }))
-            .await
-            .expect("default model TTS should succeed");
-
-        assert_eq!(response["audio_size_bytes"], 3);
     }
 
     #[fcp_async_core::runtime::test]

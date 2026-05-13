@@ -1270,15 +1270,25 @@ impl FcpConnector for AzureConnector {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        let HandshakeRequest {
+            host_public_key,
+            zone,
+            nonce,
+            capabilities_requested,
+            requested_instance_id,
+            ..
+        } = req;
+        if let Some(instance_id) = requested_instance_id {
+            self.base.instance_id = instance_id;
+        }
         self.base.set_handshaken(true);
         self.verifier = Some(CapabilityVerifier::new(
-            req.host_public_key,
-            req.zone.clone(),
+            host_public_key,
+            zone,
             self.base.instance_id.clone(),
         ));
 
-        let capabilities_granted = req
-            .capabilities_requested
+        let capabilities_granted = capabilities_requested
             .into_iter()
             .map(|capability| CapabilityGrant {
                 capability,
@@ -1291,7 +1301,7 @@ impl FcpConnector for AzureConnector {
             capabilities_granted,
             session_id: SessionId::new(),
             manifest_hash: Self::manifest_hash(),
-            nonce: req.nonce,
+            nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
                 replay: false,

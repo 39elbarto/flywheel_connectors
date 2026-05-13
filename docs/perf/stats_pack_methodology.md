@@ -24,3 +24,7 @@ artifacts.
 Redaction posture: StatPack logs and JSON values contain only aggregate numeric
 statistics and sample counts. Raw samples, command lines, hostnames, user names,
 connector IDs, and secret-bearing artifact paths are not emitted by this helper.
+Structured tracing uses target `fcp.bench.stats`; field names use the
+`fcp_bench_stats_*` prefix because Rust tracing macros require identifier-safe
+field names, and OTLP exporters can map that prefix back to the documented
+`fcp.bench.stats.*` attribute namespace.

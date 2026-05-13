@@ -116,13 +116,15 @@ This slice is intentionally closer to "outbound bot message dispatch plus connec
       "group_policy": "allowlist",
       "group_allow_from": ["GROUP_OPENID"],
       "group_require_mention": true,
-      "bot_user_id": "BOT_OPENID"
+      "bot_user_id": "BOT_OPENID",
+      "max_attachment_bytes": 10485760
     }
   }
 }
 ```
 
 The projection operation does not log `client_secret`, access tokens, or raw transport credentials. It returns the normalized message payload already present in the incoming gateway frame, a policy decision, and a runtime snapshot with counters and bounded state sizes.
+When `policy.max_attachment_bytes` is set, gateway projection denies message events whose declared attachment byte total exceeds the cap or whose attachment size metadata is missing.
 
 ## Chat Coordination Configuration
 

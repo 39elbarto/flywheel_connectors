@@ -203,7 +203,7 @@ fn operator_guidance() -> OperatorGuidance {
             RemediationHint {
                 code: "zoom_host_override_invalid",
                 symptom: "doctor reports api_base_url or oauth_base_url outside allowed hosts",
-                action: "Use the default Zoom hosts for live runs or localhost-only overrides for deterministic wiremock verification.",
+                action: "Use the default Zoom hosts for live runs or localhost-only overrides for deterministic local HTTP verification.",
             },
         ],
         rerun_commands: VERIFY_COMMANDS.to_vec(),

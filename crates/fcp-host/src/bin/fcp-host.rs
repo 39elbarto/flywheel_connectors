@@ -134,6 +134,7 @@ use fcp_sandbox::{
     EgressTcpConnectRequest, HttpHeader, NoOpCredentialInjector, TlsVerifier, WasiConfig,
     WasiConnectorRunner, host_matches_allow_list,
 };
+use fcp_telemetry::{TelemetryConfig, TelemetryError, otlp_readiness};
 use futures_util::future::join_all;
 use hyper::body::Incoming;
 use hyper_util::{
@@ -143,7 +144,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
 use tower::ServiceExt;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 type ConnectorConfig = ManagedConnectorConfig;
 
@@ -3057,6 +3057,7 @@ struct AppState {
     /// from connector inventory so a connector-config rollout cannot
     /// accidentally drop policy state.
     zone_policies: Arc<RwLock<HashMap<ZoneId, ZonePolicyObject>>>,
+    telemetry_config: TelemetryConfig,
     /// Per-zone hash-linked invoke audit chain (br-mvax3).
     ///
     /// Appended at four phases of every `/rpc/invoke`: preflight allow,
@@ -5506,8 +5507,8 @@ fn main() -> HostResult<()> {
             return Ok(());
         }
     }
-    init_tracing();
-    match fcp_async_core::runtime::block_on_sync(async_main()) {
+    let telemetry_config = init_host_telemetry()?;
+    match fcp_async_core::runtime::block_on_sync(async_main(telemetry_config)) {
         Ok(result) => result,
         Err(err) => Err(HostError::Internal(format!(
             "runtime bootstrap failed: {err}"
@@ -5515,24 +5516,59 @@ fn main() -> HostResult<()> {
     }
 }
 
-fn init_tracing() {
-    tracing_subscriber::registry()
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,fcp_host=debug")),
-        )
-        .with(
-            tracing_subscriber::fmt::layer()
-                .json()
-                .flatten_event(true)
-                .with_ansi(false)
-                .with_current_span(false)
-                .with_writer(std::io::stderr),
-        )
-        .init();
+#[cfg(test)]
+fn default_host_telemetry_config() -> TelemetryConfig {
+    let mut config = TelemetryConfig::new("fcp-host");
+    config.log_level = "info,fcp_host=debug".to_string();
+    config
 }
 
-async fn async_main() -> HostResult<()> {
+fn host_telemetry_config_from_env() -> Result<TelemetryConfig, TelemetryError> {
+    let mut config = TelemetryConfig::from_env()?;
+    let default_service_name = TelemetryConfig::default().service_name;
+    let explicit_service_name = std::env::var(fcp_telemetry::OTEL_SERVICE_NAME_ENV_VAR)
+        .ok()
+        .and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then_some(())
+        })
+        .is_some()
+        || config
+            .otlp_resource_attributes
+            .iter()
+            .any(|attribute| attribute.key == "service.name");
+
+    if config.service_name == default_service_name && !explicit_service_name {
+        config.service_name = "fcp-host".to_string();
+    }
+    config.log_level = "info,fcp_host=debug".to_string();
+    Ok(config)
+}
+
+fn telemetry_error_to_host(error: TelemetryError) -> HostError {
+    match error {
+        TelemetryError::Config(message) => {
+            HostError::InvalidFilter(format!("telemetry configuration error: {message}"))
+        }
+        TelemetryError::LoggingInit(message)
+        | TelemetryError::MetricsInit(message)
+        | TelemetryError::TracingInit(message) => {
+            HostError::Internal(format!("telemetry initialization error: {message}"))
+        }
+    }
+}
+
+fn init_host_telemetry() -> HostResult<TelemetryConfig> {
+    let config = host_telemetry_config_from_env().map_err(telemetry_error_to_host)?;
+    let mut init_config = config.clone();
+    if init_config.otlp_enabled && !fcp_telemetry::otlp_feature_compiled() {
+        init_config.otlp_enabled = false;
+    }
+    fcp_telemetry::init_telemetry(init_config).map_err(telemetry_error_to_host)?;
+    Ok(config)
+}
+
+async fn async_main(telemetry_config: TelemetryConfig) -> HostResult<()> {
     let bind_target = resolve_bind_target()?;
     let capability_verifying_key = resolve_verifying_key(
         "FCP_HOST_CAPABILITY_PUBLIC_KEY",
@@ -5610,6 +5646,7 @@ async fn async_main() -> HostResult<()> {
         admin_bearer_token: resolve_admin_bearer_token()?,
         connectors_file: loaded_configs.connectors_file,
         zone_policies: Arc::new(RwLock::new(zone_policies)),
+        telemetry_config,
         invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
         started_at: Instant::now(),
     });
@@ -5698,6 +5735,10 @@ async fn async_main() -> HostResult<()> {
         .route(
             "/rpc/admin/events/acknowledge",
             post(event_acknowledge_handler),
+        )
+        .route(
+            "/rpc/admin/telemetry/otlp/readiness",
+            get(host_telemetry_otlp_readiness_handler),
         )
         .route(
             "/rpc/admin/credentials/pools",
@@ -11809,6 +11850,27 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HostHealthRe
     Json(response)
 }
 
+fn host_telemetry_otlp_readiness_message(status: &str) -> &'static str {
+    match status {
+        "ready" => "OTLP export is configured and supported by this host build",
+        "unavailable" => "OTLP export is configured but this host build lacks exporter support",
+        "fail" => "OTLP export configuration is invalid or incomplete",
+        "disabled" => "OTLP export is disabled by configuration",
+        _ => "OTLP readiness status is unknown",
+    }
+}
+
+async fn host_telemetry_otlp_readiness_handler(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let readiness = otlp_readiness(&state.telemetry_config);
+    let status = readiness.status;
+    Json(json!({
+        "status": status,
+        "source": "host-admin-api",
+        "message": host_telemetry_otlp_readiness_message(status),
+        "readiness": readiness,
+    }))
+}
+
 async fn ensure_registered_connector(
     state: &AppState,
     connector_id: &ConnectorId,
@@ -12835,6 +12897,7 @@ deny_ptrace = true
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(zone_policies)),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         })
@@ -13830,6 +13893,7 @@ deny_ptrace = true
             admin_bearer_token: None,
             connectors_file: Some(connectors_file),
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         })
@@ -17975,6 +18039,7 @@ deny_ptrace = true
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         });
@@ -18367,6 +18432,7 @@ deny_ptrace = true
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         });
@@ -22144,6 +22210,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
@@ -22181,6 +22248,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
@@ -22223,6 +22291,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
@@ -22265,6 +22334,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
@@ -22324,6 +22394,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
@@ -22370,6 +22441,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
@@ -22481,6 +22553,7 @@ done"#;
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
@@ -22533,6 +22606,7 @@ done"#;
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         });
@@ -22929,6 +23003,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            telemetry_config: default_host_telemetry_config(),
             invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         })
@@ -23029,6 +23104,29 @@ done"#;
             .route(
                 "/rpc/admin/connectors/{connector_id}/state/explain",
                 get(connector_state_explain_handler),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                admin_auth_middleware,
+            ));
+        axum::Router::new()
+            .merge(protected)
+            .with_state(Arc::clone(&state))
+    }
+
+    fn host_telemetry_test_state(telemetry_config: TelemetryConfig) -> Arc<AppState> {
+        let base = cancel_route_test_state();
+        Arc::new(AppState {
+            telemetry_config,
+            ..(*base).clone()
+        })
+    }
+
+    fn host_telemetry_otlp_readiness_test_app(state: Arc<AppState>) -> axum::Router {
+        let protected = axum::Router::new()
+            .route(
+                "/rpc/admin/telemetry/otlp/readiness",
+                get(host_telemetry_otlp_readiness_handler),
             )
             .route_layer(axum::middleware::from_fn_with_state(
                 Arc::clone(&state),
@@ -23425,6 +23523,63 @@ done"#;
         .await?;
 
         assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn host_telemetry_otlp_readiness_admin_route_rejects_unauthenticated_requests()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let state = host_telemetry_test_state(default_host_telemetry_config());
+        let app = host_telemetry_otlp_readiness_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/telemetry/otlp/readiness",
+            serde_json::json!({}),
+            &[],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn host_telemetry_otlp_readiness_reports_redaction_safe_config()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let telemetry_config = default_host_telemetry_config()
+            .with_otlp("https://api-key@collector.example.com:4317")
+            .try_with_otlp_headers("authorization=Bearer%20redaction-sentinel-otlp-secret")?
+            .try_with_otlp_resource_attributes("cloud.account.id=redaction-sentinel-account")?;
+        let state = host_telemetry_test_state(telemetry_config);
+        let app = host_telemetry_otlp_readiness_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/telemetry/otlp/readiness",
+            serde_json::json!({}),
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["status"], "fail");
+        assert_eq!(payload["readiness"]["boundary"], "fcp-telemetry-crate");
+        assert_eq!(payload["readiness"]["endpoint_class"], "invalid");
+        assert_eq!(payload["readiness"]["collector_header_count"], 1);
+        assert_eq!(payload["readiness"]["resource_attribute_count"], 1);
+
+        let rendered = payload.to_string();
+        assert!(!rendered.contains("redaction-sentinel-otlp-secret"));
+        assert!(!rendered.contains("redaction-sentinel-account"));
+        assert!(!rendered.contains("api-key@collector"));
         Ok(())
     }
 

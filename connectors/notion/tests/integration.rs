@@ -30,7 +30,11 @@ use fcp_notion::{
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    op: &str,
+    connector: &NotionConnector,
+) -> CapabilityToken {
     let cap = match op {
         "notion.create_page"
         | "notion.update_page"
@@ -56,6 +60,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         .zone_id("z:work")
         .principal("user:test")
         .operations(&[op])
+        .target_instance(connector.instance_id().as_str())
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
@@ -554,7 +559,7 @@ async fn invoke_search_through_connector() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.search"]).await;
-    let token = generate_valid_token(&signing_key, "notion.search");
+    let token = generate_valid_token(&signing_key, "notion.search", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -583,7 +588,7 @@ async fn invoke_get_page_through_connector() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.get_page"]).await;
-    let token = generate_valid_token(&signing_key, "notion.get_page");
+    let token = generate_valid_token(&signing_key, "notion.get_page", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -616,7 +621,7 @@ async fn invoke_query_database_through_connector() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.query_database"]).await;
-    let token = generate_valid_token(&signing_key, "notion.query_database");
+    let token = generate_valid_token(&signing_key, "notion.query_database", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -645,7 +650,7 @@ async fn invoke_create_page_through_connector() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.create_page"]).await;
-    let token = generate_valid_token(&signing_key, "notion.create_page");
+    let token = generate_valid_token(&signing_key, "notion.create_page", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -676,7 +681,7 @@ async fn invoke_update_page_through_connector() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.update_page"]).await;
-    let token = generate_valid_token(&signing_key, "notion.update_page");
+    let token = generate_valid_token(&signing_key, "notion.update_page", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -711,7 +716,7 @@ async fn invoke_delete_page_through_connector() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.delete_page"]).await;
-    let token = generate_valid_token(&signing_key, "notion.delete_page");
+    let token = generate_valid_token(&signing_key, "notion.delete_page", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -744,7 +749,7 @@ async fn invoke_get_database_through_connector() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.get_database"]).await;
-    let token = generate_valid_token(&signing_key, "notion.get_database");
+    let token = generate_valid_token(&signing_key, "notion.get_database", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -778,7 +783,7 @@ async fn invoke_create_database_through_connector() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.create_database"]).await;
-    let token = generate_valid_token(&signing_key, "notion.create_database");
+    let token = generate_valid_token(&signing_key, "notion.create_database", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -815,7 +820,7 @@ async fn invoke_update_database_through_connector() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.update_database"]).await;
-    let token = generate_valid_token(&signing_key, "notion.update_database");
+    let token = generate_valid_token(&signing_key, "notion.update_database", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -854,7 +859,7 @@ async fn invoke_get_block_through_connector() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.get_block"]).await;
-    let token = generate_valid_token(&signing_key, "notion.get_block");
+    let token = generate_valid_token(&signing_key, "notion.get_block", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -890,7 +895,7 @@ async fn invoke_update_block_through_connector() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.update_block"]).await;
-    let token = generate_valid_token(&signing_key, "notion.update_block");
+    let token = generate_valid_token(&signing_key, "notion.update_block", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -926,7 +931,7 @@ async fn invoke_delete_block_through_connector() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.delete_block"]).await;
-    let token = generate_valid_token(&signing_key, "notion.delete_block");
+    let token = generate_valid_token(&signing_key, "notion.delete_block", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -961,7 +966,7 @@ async fn invoke_get_block_children_through_connector() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.get_block_children"]).await;
-    let token = generate_valid_token(&signing_key, "notion.get_block_children");
+    let token = generate_valid_token(&signing_key, "notion.get_block_children", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -996,7 +1001,7 @@ async fn invoke_append_blocks_through_connector() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.append_blocks"]).await;
-    let token = generate_valid_token(&signing_key, "notion.append_blocks");
+    let token = generate_valid_token(&signing_key, "notion.append_blocks", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -1040,7 +1045,7 @@ async fn invoke_add_comment_through_connector() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.add_comment"]).await;
-    let token = generate_valid_token(&signing_key, "notion.add_comment");
+    let token = generate_valid_token(&signing_key, "notion.add_comment", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -1078,7 +1083,7 @@ async fn invoke_list_comments_through_connector() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.list_comments"]).await;
-    let token = generate_valid_token(&signing_key, "notion.list_comments");
+    let token = generate_valid_token(&signing_key, "notion.list_comments", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -1101,7 +1106,7 @@ async fn wrong_capability_rejected() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.search"]).await;
-    let token = generate_valid_token(&signing_key, "notion.search");
+    let token = generate_valid_token(&signing_key, "notion.search", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -1122,7 +1127,7 @@ async fn missing_required_field_returns_invalid_request() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.get_page"]).await;
-    let token = generate_valid_token(&signing_key, "notion.get_page");
+    let token = generate_valid_token(&signing_key, "notion.get_page", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -1147,7 +1152,7 @@ async fn unknown_operation_rejected() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.nonexistent"]).await;
-    let token = generate_valid_token(&signing_key, "notion.nonexistent");
+    let token = generate_valid_token(&signing_key, "notion.nonexistent", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -1182,7 +1187,7 @@ async fn search_includes_sensitivity_metadata() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.search"]).await;
-    let token = generate_valid_token(&signing_key, "notion.search");
+    let token = generate_valid_token(&signing_key, "notion.search", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -1225,7 +1230,7 @@ async fn search_with_filter() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.search"]).await;
-    let token = generate_valid_token(&signing_key, "notion.search");
+    let token = generate_valid_token(&signing_key, "notion.search", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -1261,7 +1266,7 @@ async fn search_empty_results() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.search"]).await;
-    let token = generate_valid_token(&signing_key, "notion.search");
+    let token = generate_valid_token(&signing_key, "notion.search", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -1325,7 +1330,7 @@ async fn search_redacts_person_emails() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.search"]).await;
-    let token = generate_valid_token(&signing_key, "notion.search");
+    let token = generate_valid_token(&signing_key, "notion.search", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -1366,7 +1371,7 @@ async fn search_requires_search_capability() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.read"]).await;
-    let token = generate_valid_token(&signing_key, "notion.read");
+    let token = generate_valid_token(&signing_key, "notion.read", &connector);
 
     let result = connector
         .handle_invoke(json!({
@@ -1423,7 +1428,7 @@ async fn search_redacts_created_by_last_edited_by_property_types() {
     let mut connector = NotionConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["notion.search"]).await;
-    let token = generate_valid_token(&signing_key, "notion.search");
+    let token = generate_valid_token(&signing_key, "notion.search", &connector);
 
     let result = connector
         .handle_invoke(json!({

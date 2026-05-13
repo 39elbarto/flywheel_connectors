@@ -6,21 +6,22 @@
 > Current tracker source: `docs/reality/2026-05-12-reality-check-bridge-plan.md` Phase I.2
 
 This status file pins the three Phase I.2 holdouts as a forward-only baseline.
-The cleanup script uses `cargo metadata --format-version 1 --no-deps` plus `jq`
-to confirm that the crate pairs still exist in the current workspace and to
-record the direct dependency relation for each pair.
+The cleanup script uses `cargo metadata --format-version 1` plus `jq` to
+confirm that the crate pairs still exist in the current workspace and to record
+the direct dependency relation for each pair.
 
 The older crate-graph audit does not enumerate these three specific pairs as
-closed work. This file is the current delta ledger: `pending=3` means the
-detail beads have been filed, not that the type moves are already complete.
+closed work. This file is the current delta ledger: a nonzero `pending` count
+means detail beads have been filed, not that all type moves are already
+complete.
 
-<!-- forbidden-overlap-summary: baseline_pairs=3 current_pairs=3 pending=3 resolved=0 -->
+<!-- forbidden-overlap-summary: baseline_pairs=3 current_pairs=3 pending=2 resolved=1 -->
 
 | ID | Type surface | From crate | Canonical owner | Canonical path | Status | Direct dependency | Detail bead |
 |----|--------------|------------|-----------------|----------------|--------|-------------------|-------------|
 | I2-HOST-MESH | SimulateResourceAvailability / mesh placement availability summary | fcp-host | fcp-mesh | `fcp-mesh::planner::ResourcePoolDecisionSummary` | pending | fcp-host->fcp-mesh | flywheel_connectors-angoc.3.3 |
 | I2-STORE-RAPTORQ | ObjectTransmissionInfo / RaptorQ transmission metadata | fcp-store | fcp-raptorq | `fcp-raptorq::ObjectTransmissionInformation` | pending | fcp-store->fcp-raptorq | flywheel_connectors-angoc.3.4 |
-| I2-PROTOCOL-CRYPTO | SignedEnvelope / hybrid signed-object envelope | fcp-protocol | fcp-crypto | `fcp-crypto::SignedEnvelope` | pending | fcp-protocol->fcp-crypto | flywheel_connectors-angoc.3.5 |
+| I2-PROTOCOL-CRYPTO | SignedEnvelope / hybrid signed-object envelope | fcp-protocol | fcp-crypto | `fcp-crypto::SignedEnvelope` | resolved | fcp-protocol->fcp-crypto | flywheel_connectors-angoc.3.5 |
 
 ## Boundary Statements
 
@@ -48,8 +49,14 @@ Cryptographic signed-envelope semantics stay in `fcp-crypto` as
 protocol payload that needs hybrid signing imports the crypto-owned envelope
 instead of defining protocol-local signed-envelope semantics.
 
+Resolved 2026-05-12: `fcp-protocol` exposes
+`HybridSignedFcpsFrame = fcp_crypto::SignedEnvelope<SignedFcpsFramePayload>`
+and implements `HybridSignable` for the FCPS payload. The remaining
+`SignedFcpsFrame` type is the documented Ed25519 degraded/bootstrap frame,
+not the generic hybrid envelope owner.
+
 ## Machine-Readable Rows
 
 <!-- forbidden-overlap-row: id=I2-HOST-MESH from=fcp-host to=fcp-mesh canonical=fcp-mesh::planner::ResourcePoolDecisionSummary status=pending relation=fcp-host->fcp-mesh from_exists=true to_exists=true audit_pair_mentioned=true detail_bead=flywheel_connectors-angoc.3.3 -->
 <!-- forbidden-overlap-row: id=I2-STORE-RAPTORQ from=fcp-store to=fcp-raptorq canonical=fcp-raptorq::ObjectTransmissionInformation status=pending relation=fcp-store->fcp-raptorq from_exists=true to_exists=true audit_pair_mentioned=true detail_bead=flywheel_connectors-angoc.3.4 -->
-<!-- forbidden-overlap-row: id=I2-PROTOCOL-CRYPTO from=fcp-protocol to=fcp-crypto canonical=fcp-crypto::SignedEnvelope status=pending relation=fcp-protocol->fcp-crypto from_exists=true to_exists=true audit_pair_mentioned=true detail_bead=flywheel_connectors-angoc.3.5 -->
+<!-- forbidden-overlap-row: id=I2-PROTOCOL-CRYPTO from=fcp-protocol to=fcp-crypto canonical=fcp-crypto::SignedEnvelope status=resolved relation=fcp-protocol->fcp-crypto from_exists=true to_exists=true audit_pair_mentioned=false detail_bead=flywheel_connectors-angoc.3.5 -->

@@ -1,66 +1,57 @@
-# FCP3 Compat Shim Inventory
+# FCP3 Compatibility Shim Inventory
 
-Bead: `flywheel_connectors-angoc.3.1`
+> Bead: `flywheel_connectors-angoc.3.1`
+> Generated: 2026-05-12
 
-This inventory covers the planned cleanup for legacy
-`fcp_core::compat::policy` and `fcp_core::compat::evidence` re-export shims.
+This inventory reconciles the Phase I.1 bridge-plan guess against the current
+checkout. The guessed `fcp_core::compat::policy` and
+`fcp_core::compat::evidence` modules do not exist, and there are no workspace
+callers to migrate for those paths.
 
-forbidden_compat_caller_baseline: 0
+The two active compatibility shims in `docs/FCP3_Transition_Scorecard.md` are
+not `fcp_core::compat` modules. They are the `ConnectorRuntime` and
+`ConnectorErrorMapping` helpers in `crates/fcp-sdk/src/migration.rs`.
 
-## Commands
+<!-- compat-shim-inventory-summary: suspected_core_compat_modules=0 suspected_core_compat_callers=0 scorecard_active_shims=2 -->
 
-The bridge-plan command recorded in the bead was tried first:
+## Suspected Core Compat Paths
+
+| Shim guess | Module exists | Caller count | Status | Notes |
+|------------|---------------|--------------|--------|-------|
+| `fcp_core::compat::policy` | no | 0 | absent | No `compat` module is declared under `crates/fcp-core/src/`; no Rust caller uses this path. |
+| `fcp_core::compat::evidence` | no | 0 | absent | No `compat` module is declared under `crates/fcp-core/src/`; no Rust caller uses this path. |
+
+<!-- compat-shim-row: id=FCP-CORE-COMPAT-POLICY path=fcp_core::compat::policy module_exists=false caller_count=0 status=absent -->
+<!-- compat-shim-row: id=FCP-CORE-COMPAT-EVIDENCE path=fcp_core::compat::evidence module_exists=false caller_count=0 status=absent -->
+
+## Active Scorecard Shims
+
+| Shim | Location | Status | Boundary |
+|------|----------|--------|----------|
+| `ConnectorRuntime` | `crates/fcp-sdk/src/migration.rs` | active | Shared connector lifecycle helper for request/background contexts and shutdown. |
+| `ConnectorErrorMapping` | `crates/fcp-sdk/src/migration.rs` | active | Shared connector error-to-`FcpError` mapping contract. |
+
+<!-- scorecard-shim-row: id=FCP-SDK-CONNECTOR-RUNTIME symbol=ConnectorRuntime location=crates/fcp-sdk/src/migration.rs status=active -->
+<!-- scorecard-shim-row: id=FCP-SDK-CONNECTOR-ERROR-MAPPING symbol=ConnectorErrorMapping location=crates/fcp-sdk/src/migration.rs status=active -->
+
+## Verification Commands
+
+Commands run from the workspace root:
 
 ```bash
-ast-grep run -l Rust -p '#[deprecated($$$)] $$$ITEM' crates/fcp-core/src/
-```
-
-With the installed `ast-grep`, that pattern is not valid Rust syntax because it
-contains multiple top-level AST nodes. The inventory therefore used narrower
-valid queries plus a plain text cross-check:
-
-```bash
-ast-grep run -l Rust -p 'pub mod compat { $$$BODY }' crates/fcp-core/src/
-ast-grep run -l Rust -p 'mod compat { $$$BODY }' crates/fcp-core/src/
-ast-grep run -l Rust -p 'fcp_core::compat::policy::$$$ITEM' .
-ast-grep run -l Rust -p 'fcp_core::compat::evidence::$$$ITEM' .
-rg -n '\b(pub\s+)?mod\s+compat\b|fcp_core::compat::(policy|evidence)|compat::(policy|evidence)' crates docs --glob '*.rs' --glob '*.md'
+sg run -l Rust -p 'fcp_core::compat::policy::$$$ITEM' crates connectors tests
+sg run -l Rust -p 'fcp_core::compat::evidence::$$$ITEM' crates connectors tests
+rg -n '^(pub mod|mod) compat\b|fcp_core::compat::(policy|evidence)|compat::(policy|evidence)' crates/fcp-core/src crates connectors tests
 rg -n '#\[deprecated' crates/fcp-core/src
 ```
 
-## Results
+The two `sg` caller queries and the targeted `rg` compat query returned no
+matches. The deprecated-attribute query found only capability-token deprecation
+markers in `crates/fcp-core/src/capability.rs`; those are unrelated to the
+Phase I.1 `policy`/`evidence` shim guess.
 
-No `pub mod compat` or private `mod compat` module exists under
-`crates/fcp-core/src`.
-
-No Rust caller imports or paths exist for:
-
-- `fcp_core::compat::policy`
-- `fcp_core::compat::evidence`
-- `compat::policy`
-- `compat::evidence`
-
-The only text matches for those planned paths are in
-`docs/reality/2026-05-12-reality-check-bridge-plan.md`, where the cleanup plan
-was proposed.
-
-The deprecated items currently present in `crates/fcp-core/src` are:
-
-- `crates/fcp-core/src/capability.rs:1046`:
-  `CryptographicallyVerified`
-- `crates/fcp-core/src/capability.rs:1168`: `VerifiedToken`
-- `crates/fcp-core/src/capability.rs:1980`: `CapabilityVerifier::verify`
-
-Those are typestate compatibility markers and a deprecated verifier method, not
-`fcp_core::compat::policy` or `fcp_core::compat::evidence` shim modules.
-
-## Migration Decision
-
-There are zero workspace callers to migrate for the two planned compat shim
-paths. New code should import policy-owned semantics from `fcp_policy` and
-evidence-owned semantics from `fcp_evidence`; the current owner crates still
-re-export many definitions from `fcp_core` while the FCP3 carve-out continues.
-
-The companion conformance test
-`crates/fcp-conformance/tests/compat_caller_count_decreasing.rs` pins the zero
-caller baseline so new Rust code cannot reintroduce those forbidden paths.
+The bridge-plan pattern
+`ast-grep run -l Rust -p '#[deprecated($$$)] $$$ITEM' crates/fcp-core/src/`
+does not parse as a valid single Rust pattern in `ast-grep 0.40.5`, so the
+inventory uses the targeted caller queries above plus the raw
+`#[deprecated]` scan for the current checkout.

@@ -1,0 +1,39 @@
+name: Performance Regression Gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  synthetic-gate:
+    name: Synthetic gate e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Validate perf target schema
+        run: python3 -c 'import pathlib, tomllib; tomllib.loads(pathlib.Path("docs/perf/perf-targets.toml").read_text())'
+
+      - name: Run synthetic perf regression e2e
+        run: cargo test -p fcp-e2e --no-default-features --test perf_regression_gate_e2e -- --nocapture

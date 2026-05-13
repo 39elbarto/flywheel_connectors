@@ -9,6 +9,10 @@ use fcp_crypto::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use fcp_crypto::{
+    CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope, signing_bytes_for_payload,
+};
+
 use crate::{
     ConnectorId, CorrelationId, EpochId, NodeId, NodeSignature, ObjectHeader, ObjectId,
     OperationId, PrincipalId, SignatureSet, ZoneId,
@@ -238,6 +242,9 @@ impl AuditEvent {
     }
 }
 
+/// Hybrid signed audit-event envelope.
+pub type HybridSignedAuditEvent = SignedEnvelope<AuditEvent>;
+
 impl HybridSignable for AuditEvent {
     const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::AuditEvent;
 
@@ -248,8 +255,6 @@ impl HybridSignable for AuditEvent {
     }
 }
 
-/// Hybrid signed audit-event envelope.
-pub type HybridSignedAuditEvent = SignedEnvelope<AuditEvent>;
 
 /// Audit head checkpoint (NORMATIVE).
 ///
@@ -325,6 +330,9 @@ impl ZoneCheckpoint {
     }
 }
 
+/// Hybrid signed zone-checkpoint envelope.
+pub type HybridSignedZoneCheckpoint = SignedEnvelope<ZoneCheckpoint>;
+
 impl HybridSignable for ZoneCheckpoint {
     const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::ZoneCheckpoint;
 
@@ -335,8 +343,6 @@ impl HybridSignable for ZoneCheckpoint {
     }
 }
 
-/// Hybrid signed zone-checkpoint envelope.
-pub type HybridSignedZoneCheckpoint = SignedEnvelope<ZoneCheckpoint>;
 
 /// Decision receipt for explainable allow/deny (NORMATIVE).
 ///

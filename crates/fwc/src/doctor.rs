@@ -3,6 +3,8 @@
 //! Diagnoses common connector issues (auth failure, rate limiting, high latency,
 //! config errors) and suggests specific fix-it commands or automatic repairs.
 
+pub mod self_test;
+
 use serde::Serialize;
 use serde_json::Value;
 use std::fmt::Write as _;
@@ -29,6 +31,7 @@ pub enum Severity {
 
 impl Severity {
     /// Human-readable label.
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Info => "info",
@@ -71,6 +74,7 @@ pub enum DiagnosisCategory {
 
 impl DiagnosisCategory {
     /// Human-readable display name.
+    #[must_use]
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::Auth => "Authentication",
@@ -172,6 +176,7 @@ pub enum HealthStatus {
 }
 
 impl HealthStatus {
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Healthy => "healthy",
@@ -209,11 +214,13 @@ impl DiagnosticReport {
     }
 
     /// Whether this report has any issues.
+    #[must_use]
     pub fn has_issues(&self) -> bool {
         !self.diagnoses.is_empty()
     }
 
     /// Count of auto-safe fixes available.
+    #[must_use]
     pub fn auto_fixable_count(&self) -> usize {
         self.diagnoses
             .iter()
@@ -223,6 +230,7 @@ impl DiagnosticReport {
     }
 
     /// All fix commands across all diagnoses.
+    #[must_use]
     pub fn all_fix_commands(&self) -> Vec<&str> {
         self.diagnoses
             .iter()
@@ -232,6 +240,7 @@ impl DiagnosticReport {
     }
 
     /// Render as TOON-style summary.
+    #[must_use]
     pub fn summary_line(&self) -> String {
         if self.diagnoses.is_empty() {
             format!("{}  {}", self.connector_id, self.status)
@@ -253,6 +262,7 @@ impl DiagnosticReport {
     }
 
     /// Render as structured JSON value.
+    #[must_use]
     pub fn to_json(&self) -> Value {
         serde_json::to_value(self).unwrap_or(Value::Null)
     }
@@ -292,6 +302,7 @@ pub struct Symptoms {
 }
 
 /// Diagnose symptoms for a connector.
+#[must_use]
 pub fn diagnose(connector_id: &str, symptoms: &Symptoms) -> DiagnosticReport {
     let mut diagnoses = Vec::new();
 
@@ -548,6 +559,7 @@ fn diagnose_rate_limit(connector_id: &str, percent: u8) -> Option<Diagnosis> {
 // ── TOON formatting ───────────────────────────────────────────────
 
 /// Format a single diagnostic report as TOON text.
+#[must_use]
 pub fn format_report_toon(report: &DiagnosticReport) -> String {
     let mut out = String::new();
     let indicator = match report.status {
@@ -624,6 +636,7 @@ pub fn format_fleet_toon(reports: &[DiagnosticReport]) -> String {
 }
 
 /// Collect all auto-safe fix commands from a set of reports.
+#[must_use]
 pub fn collect_auto_fixes(reports: &[DiagnosticReport]) -> Vec<AutoFix> {
     reports
         .iter()
@@ -685,7 +698,7 @@ const LEAN_PROOF_OBLIGATIONS: [(&str, &str, &str); 5] = [
 /// Machine-readable status for a Lean doctor check.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum LeanDoctorStatus {
+pub enum LeanDoctorStatus {
     /// The check passed.
     Pass,
     /// The check could not run or found a non-blocking advisory.
@@ -706,7 +719,7 @@ impl LeanDoctorStatus {
 
 /// A single read-only Lean doctor check result.
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct LeanDoctorCheck {
+pub struct LeanDoctorCheck {
     /// Stable check identifier.
     pub id: String,
     /// Result status.
@@ -719,7 +732,7 @@ pub(crate) struct LeanDoctorCheck {
 
 /// Operator-facing report for `fwc doctor lean`.
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct LeanDoctorReport {
+pub struct LeanDoctorReport {
     /// Stable JSON schema identifier.
     pub schema_version: &'static str,
     /// True only when all required checks pass.
@@ -736,7 +749,7 @@ pub(crate) struct LeanDoctorReport {
 
 /// A Lean proof file/module/theorem tuple covered by the formal gate.
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct LeanProofObligation {
+pub struct LeanProofObligation {
     /// Repository-relative Lean file path.
     pub path: &'static str,
     /// Lake module name.
@@ -746,7 +759,8 @@ pub(crate) struct LeanProofObligation {
 }
 
 /// Build the read-only Lean formal-proof doctor report.
-pub(crate) fn lean_doctor_report(
+#[must_use]
+pub fn lean_doctor_report(
     workspace_root: &Path,
     run_compile: bool,
     check_binaries: bool,
@@ -1068,8 +1082,7 @@ fn push_latest_ci_artifact_check(checks: &mut Vec<LeanDoctorCheck>, root: &Path)
             Some((_, latest_modified)) => match (modified.as_ref(), latest_modified.as_ref()) {
                 (Some(candidate), Some(current)) => candidate > current,
                 (Some(_), None) => true,
-                (None, Some(_)) => false,
-                (None, None) => false,
+                (None, Some(_) | None) => false,
             },
         };
         if replace_latest {

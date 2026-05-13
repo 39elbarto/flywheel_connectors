@@ -405,6 +405,7 @@ Examples:
   fwc ops github
   fwc schema github issues.create
   fwc doctor --zone z:work --host http://127.0.0.1:8787
+  fwc doctor self-test --fixture crates/fwc/fixtures/healthy_env --json
   fwc budget --host http://127.0.0.1:8787
   fwc telemetry otlp-readiness --endpoint http://127.0.0.1:4317 --json
   fwc capabilities report
@@ -1551,7 +1552,7 @@ struct DoctorArgs {
     check: Option<DoctorLocalCheck>,
 
     /// Zone to diagnose.
-    #[arg(long, short = 'z', required_unless_present = "check")]
+    #[arg(long, short = 'z')]
     zone: Option<String>,
 
     /// Connector ids, aliases, or family names to self-check.
@@ -1569,6 +1570,28 @@ struct DoctorArgs {
     /// Auto-apply safe fixes (e.g. clear caches, retry health checks). Unsafe fixes require confirmation.
     #[arg(long, default_value_t = false)]
     fix: bool,
+
+    #[command(subcommand)]
+    command: Option<DoctorCommand>,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum DoctorCommand {
+    /// Run doctor checks against a fixture environment without touching live services.
+    #[command(name = "self-test")]
+    SelfTest(DoctorSelfTestArgs),
+}
+
+#[derive(Args, Debug, Serialize)]
+struct DoctorSelfTestArgs {
+    /// Fixture directory containing self_test.toml.
+    #[arg(
+        long,
+        value_name = "FIXTURE",
+        default_value = "crates/fwc/fixtures/healthy_env"
+    )]
+    fixture: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, ValueEnum)]
@@ -11712,10 +11735,31 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
         return doctor_lean_dispatch();
     }
 
-    let zone_arg = args
-        .zone
-        .as_deref()
-        .expect("clap requires --zone unless a local doctor check is selected");
+    if let Some(command) = &args.command {
+        return doctor_subcommand_dispatch(command);
+    }
+
+    let Some(zone_arg) = args.zone.as_deref() else {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "doctor",
+                "error": {
+                    "type": "missing-zone",
+                    "message": "`fwc doctor` requires `--zone` unless a local check or doctor subcommand such as `self-test` is used.",
+                    "recoverable": true,
+                },
+                "details": serde_json::to_value(args)?,
+                "next_actions": [
+                    "fwc doctor --zone z:work --host <endpoint>",
+                    "fwc doctor lean",
+                    "fwc doctor self-test --fixture crates/fwc/fixtures/healthy_env",
+                ],
+            }),
+            exit_code: CliExitCode::Validation,
+        });
+    };
+
     let Some(host) = resolve_host_config(explicit_host)? else {
         return Ok(missing_host_dispatch(
             "doctor",
@@ -11936,6 +11980,40 @@ fn doctor_lean_dispatch() -> Result<DispatchOutcome> {
             "report": report,
         }),
         exit_code,
+    })
+}
+
+fn doctor_subcommand_dispatch(command: &DoctorCommand) -> Result<DispatchOutcome> {
+    match command {
+        DoctorCommand::SelfTest(args) => doctor_self_test_dispatch(args),
+    }
+}
+
+fn doctor_self_test_dispatch(args: &DoctorSelfTestArgs) -> Result<DispatchOutcome> {
+    let report = doctor::self_test::run_self_test(&args.fixture)?;
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "doctor self-test");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "doctor self-test",
+        "source": "fixture",
+        "message": format!("Ran fwc doctor self-test against `{}`.", args.fixture.display()),
+        "summary": {
+            "score": report.score,
+            "status": report.status,
+            "check_count": report.checks.len(),
+            "remediation_count": report.remediation_messages.len(),
+            "executed_command_count": report.executed_commands.len(),
+        },
+        "report": report,
+        "next_actions": [
+            "fwc doctor self-test --fixture crates/fwc/fixtures/broken_env --json",
+            "fwc doctor --zone z:work --host <endpoint>",
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
     })
 }
 

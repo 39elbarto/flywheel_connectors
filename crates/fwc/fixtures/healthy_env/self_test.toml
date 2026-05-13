@@ -1,0 +1,30 @@
+[fixture]
+name = "healthy_env"
+
+[[checks]]
+name = "agent_mail_api"
+subsystem = "agent-mail"
+verdict = "pass"
+latency_ms = 4
+message = "Agent Mail fixture API is reachable."
+
+[[checks]]
+name = "beads_database"
+subsystem = "beads"
+verdict = "pass"
+latency_ms = 3
+message = "Beads fixture database opens and WAL state is clean."
+
+[[checks]]
+name = "operator_pubkey"
+subsystem = "pubkey"
+verdict = "pass"
+latency_ms = 1
+message = "Operator public key fixture is present and parseable."
+
+[[checks]]
+name = "otlp_config"
+subsystem = "otlp"
+verdict = "pass"
+latency_ms = 2
+message = "OTLP fixture endpoint and headers validate."

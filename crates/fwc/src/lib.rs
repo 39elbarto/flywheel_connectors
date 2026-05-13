@@ -6,6 +6,7 @@
 
 pub mod access_cmd;
 pub mod connector_state;
+pub mod doctor;
 pub mod mesh_cmd;
 pub mod pipe;
 pub mod readiness;

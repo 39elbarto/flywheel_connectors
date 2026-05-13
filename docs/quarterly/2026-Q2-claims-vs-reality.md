@@ -32,8 +32,9 @@ one connector-inventory underclaim, and one stale evidence path.
   connector-family E2Es.
 - **Underclaims fixed:** rows with direct E2E/conformance/golden proof moved
   from `IMPLEMENTED` to `PROVEN`.
-- **Still intentionally limited:** `Zone Isolation` remains `LIMITED` because
-  `allowed_zones` is opt-in in the host-backed path.
+- **Still intentionally limited:** `Zone Isolation` remains `LIMITED` pending
+  the full five-zone E2E and formal-proof gates, even though the host-backed
+  empty-`allowed_zones` path now fails closed.
 - **Still not operational:** `Mesh-Native Architecture` remains
   `STEADY-STATE TARGET (NOT YET OPERATIONAL)` under the br-lvz4t pin.
 
@@ -47,7 +48,7 @@ live multi-node production deployment.
 |---------|--------------------------------|-------------------|---------|------------------|-------|
 | Host-First Control Plane | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fcp-conformance/tests/host_invoke_loop_conformance.rs`, `crates/fcp-e2e/tests/capability_enforcement_concurrent_e2e.rs`, `crates/fcp-host/src/{supervisor,enforcement,health}.rs` | Current operator path has direct conformance and concurrent E2E proof. |
 | Truthful Runtime Resolution | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fwc/src/{truth,catalog}.rs`, `crates/fwc/tests/{cual_integration,readme_status_pinning}.rs` | Truth-source taxonomy and README drift pinning are tested. |
-| Zone Isolation | `LIMITED` | `LIMITED` | Accurate | `crates/fcp-core/src/{zone_keys,pcs,policy}.rs`, `crates/fcp-host/src/bin/fcp-host.rs`, host/e2e capability tests | Remains limited because empty `allowed_zones` is still permissive in the host-backed path. |
+| Zone Isolation | `LIMITED` | `LIMITED` | Accurate | `crates/fcp-core/src/{zone_keys,pcs,policy}.rs`, `crates/fcp-host/src/bin/fcp-host.rs`, `crates/fcp-host/tests/allowed_zones_required.rs`, `crates/fcp-conformance/tests/no_permissive_empty_zone_branch.rs`, host/e2e capability tests | Host-backed empty `allowed_zones` now fails closed with `ZoneEnvelopeRequired`; the row remains limited pending the full five-zone E2E and formal-proof gates. |
 | Capability Tokens (CWT/COSE) | `PROVEN` | `IMPLEMENTED` | Overclaim fixed at 2026-05-03; restored 2026-05-05 | `crates/fcp-crypto/src/cose.rs`, `crates/fcp-core/src/capability.rs`, `crates/fcp-core/tests/capability_verifier_predicate_matrix.rs`, `crates/fcp-conformance/tests/capability_*.rs`, `crates/fcp-host/tests/capability_token_typestate_runtime.rs` | Historical May 3 result was blocked by open `flywheel_connectors-01yaq`; the follow-up fix now rejects missing `INSTANCE_ID` for `BoundVerified`. |
 | Tamper-Evident Audit | `PROVEN` | `PROVEN` | Accurate | `crates/fcp-audit/`, `crates/fcp-core/src/audit.rs`, audit golden/vector tests | Hash-linked chain and checkpoints remain directly proven. |
 | Revocation | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fcp-e2e/tests/revocation_cascade_e2e.rs`, `crates/fcp-e2e/tests/capability_enforcement_concurrent_e2e.rs`, `crates/fcp-conformance/tests/host_invoke_loop_conformance.rs` | Revocation freshness and rejection are now in E2E/conformance paths. |
@@ -132,8 +133,9 @@ refresh-token redaction controls.
 
 ## Still-Honest Limits
 
-- `Zone Isolation` stays `LIMITED`; the host-backed path still has an opt-in
-  `allowed_zones` branch.
+- `Zone Isolation` stays `LIMITED`; the host-backed empty-`allowed_zones`
+  branch now fails closed, but the full five-zone E2E and formal-proof gates
+  still need to converge before the row can move.
 - `Mesh-Native Architecture` stays `STEADY-STATE TARGET (NOT YET OPERATIONAL)`;
   mesh components are real, but production operator invoke remains host-first.
 

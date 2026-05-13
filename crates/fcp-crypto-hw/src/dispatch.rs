@@ -1,6 +1,7 @@
 //! One-shot function table selection for cryptographic hot paths.
 
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
+
 use tracing::info;
 
 use crate::cpuid::{HwFeatureSet, detect};
@@ -29,9 +30,9 @@ pub enum DispatchTier {
     X86Avx2,
     /// x86 AVX-512 and VAES-capable tier.
     X86Avx512Vaes,
-    /// AArch64 crypto extension tier.
+    /// `AArch64` crypto extension tier.
     Aarch64Crypto,
-    /// AArch64 SVE tier.
+    /// `AArch64` SVE tier.
     Aarch64Sve,
 }
 
@@ -65,7 +66,7 @@ pub struct FunctionTable {
     pub ntt: NttDispatch,
 }
 
-static FUNCTION_TABLE: Lazy<FunctionTable> = Lazy::new(|| build_function_table(detect()));
+static FUNCTION_TABLE: LazyLock<FunctionTable> = LazyLock::new(|| build_function_table(detect()));
 
 /// Return the process-wide crypto hardware function table.
 #[must_use]
@@ -93,7 +94,7 @@ pub fn build_function_table(features: HwFeatureSet) -> FunctionTable {
     }
 }
 
-fn select_tier(features: HwFeatureSet) -> DispatchTier {
+const fn select_tier(features: HwFeatureSet) -> DispatchTier {
     if features.has_avx512_vaes {
         DispatchTier::X86Avx512Vaes
     } else if features.has_avx2 {

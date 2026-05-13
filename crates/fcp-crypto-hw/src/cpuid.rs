@@ -5,6 +5,7 @@ use tracing::info;
 
 /// Hardware features relevant to FCP cryptographic dispatch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct HwFeatureSet {
     /// x86 AVX2 vector support.
     pub has_avx2: bool,
@@ -16,11 +17,11 @@ pub struct HwFeatureSet {
     pub has_aes_ni: bool,
     /// x86 carry-less multiply support.
     pub has_clmul: bool,
-    /// AArch64 AES instruction support.
+    /// `AArch64` AES instruction support.
     pub has_aarch64_aes: bool,
-    /// AArch64 SHA-2 instruction support.
+    /// `AArch64` SHA-2 instruction support.
     pub has_aarch64_sha2: bool,
-    /// AArch64 SVE support.
+    /// `AArch64` SVE support.
     pub has_aarch64_sve: bool,
     /// Apple platform with Secure Enclave availability expected.
     pub has_apple_secure_enclave: bool,
@@ -125,7 +126,7 @@ fn detect_aarch64(features: &mut HwFeatureSet) {
 }
 
 #[cfg(not(target_arch = "aarch64"))]
-fn detect_aarch64(_features: &mut HwFeatureSet) {}
+const fn detect_aarch64(_features: &mut HwFeatureSet) {}
 
 #[cfg(all(target_os = "macos", target_vendor = "apple"))]
 fn detect_macos_secure_enclave(features: &mut HwFeatureSet) {
@@ -133,4 +134,4 @@ fn detect_macos_secure_enclave(features: &mut HwFeatureSet) {
 }
 
 #[cfg(not(all(target_os = "macos", target_vendor = "apple")))]
-fn detect_macos_secure_enclave(_features: &mut HwFeatureSet) {}
+const fn detect_macos_secure_enclave(_features: &mut HwFeatureSet) {}

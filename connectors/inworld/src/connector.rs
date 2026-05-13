@@ -12,6 +12,7 @@ use fcp_prelude::{
     SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::client::{InworldAuth, InworldClient};
@@ -21,6 +22,7 @@ use crate::types::{
 
 pub const CONNECTOR_ID: &str = "fcp.inworld";
 pub const CONNECTOR_VERSION: &str = "0.1.0";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 pub const OP_REALTIME_TEXT: &str = "inworld.realtime.text_turn";
 pub const OP_REALTIME_AUDIO: &str = "inworld.realtime.audio_turn";
@@ -99,6 +101,12 @@ impl InworldConnector {
         &self.base.instance_id
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
         let config = InworldConfig::from_params(&params)?;
         let client = config.build_client()?;
@@ -150,7 +158,7 @@ impl InworldConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:inworld-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -875,5 +883,17 @@ mod tests {
             assert!(operation.input_schema.is_object());
             assert!(operation.output_schema.is_object());
         }
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        let actual = InworldConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "sha256:inworld-connector-v1");
     }
 }

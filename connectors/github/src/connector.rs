@@ -20,6 +20,7 @@ use fcp_prelude::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::client::{DEFAULT_BASE_URL, GitHubAuth, GitHubClient};
@@ -29,6 +30,7 @@ use crate::types::{CreateIssueRequest, CreatePullRequestRequest, MergePullReques
 const GITHUB_DEFAULT_OAUTH_SCOPES: &[&str] = &["repo", "read:user"];
 const WEBHOOK_DELIVERY_CACHE_LIMIT: usize = 1024;
 const GITHUB_API_HOST: &str = "api.github.com";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 /// Parsed configuration for the GitHub connector.
 struct GitHubConfig {
@@ -208,6 +210,12 @@ impl GitHubConnector {
         &self.base.instance_id
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     fn claim_webhook_delivery(&self, delivery_id: &str) -> FcpResult<()> {
         {
             let mut seen = self
@@ -301,7 +309,7 @@ impl GitHubConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:github-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -2544,6 +2552,19 @@ mod tests {
             .compute_interface_hash()
             .expect("compute interface hash");
         assert_eq!(computed, computed2);
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut expected = Sha256::new();
+        expected.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(expected.finalize()));
+
+        assert_eq!(GitHubConnector::manifest_hash(), expected);
+        assert_ne!(
+            GitHubConnector::manifest_hash(),
+            "sha256:github-connector-v1"
+        );
     }
 
     // ── Provisioning automation tests ──────────────────────────────────

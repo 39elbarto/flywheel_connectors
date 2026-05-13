@@ -56,6 +56,7 @@ Important runtime truths the contract preserves:
 - Owner and repository names are validated locally before URL construction.
 - File paths are percent-encoded by path segment before content lookup.
 - Runtime handshake installs a `CapabilityVerifier`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - `invoke` requires `operation`, `input`, and `capability_token`; it validates input, computes resource URIs, and verifies a bound capability token before provider execution.
 - `simulate` validates operation inventory, input shape, configured state, handshaken state, resource URI construction, and bound capability token before returning an allowed result.
 - `github.process_webhook` never calls GitHub. It accepts only host-forwarded structured payloads with `signature_validated = true`, requires repository context, and deduplicates the latest 1024 delivery IDs in process memory.
@@ -66,7 +67,6 @@ Important runtime truths the contract preserves:
 
 This README documents the runtime truth and keeps current drift visible:
 
-- Runtime handshake returns placeholder manifest hash `sha256:github-connector-v1`.
 - Manifest optional capabilities include `github.search`, but runtime capability verification uses `github.read` for all search operations.
 - `rate_limits.operation_pools` maps search operations to `github.search`; manifest operation metadata and runtime introspection map them to `github.read`.
 - `rate_limits.operation_pools` maps `github.process_webhook` to `github.read`; manifest operation metadata and runtime verification use `github.process_webhook`.
@@ -77,7 +77,7 @@ This README documents the runtime truth and keeps current drift visible:
 - Manifest event caps say streaming is enabled, but the runtime exposes no event stream catalog; the only event-shaped output is returned by `github.process_webhook`.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should reconcile search/rate-limit capability mapping, align webhook schemas, surface approval modes in introspection, either publish or remove the OAuth helper paths, replace placeholder manifest proof, and add a tracked verification bundle.
+A follow-up parity bead should reconcile search/rate-limit capability mapping, align webhook schemas, surface approval modes in introspection, either publish or remove the OAuth helper paths, and add a tracked verification bundle.
 
 ## First-Slice Scope
 

@@ -35,6 +35,7 @@ Important runtime truths the contract preserves:
 - Together model IDs must include a namespace and model segment, for example `openai/gpt-oss-20b`.
 - SSE chat streaming returns redaction-safe chunk metadata and assembled text from a bounded invoke call; FCP subscribe is not implemented.
 - The legacy completions operation exists only for older callers that cannot send chat messages.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 

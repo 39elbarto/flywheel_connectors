@@ -54,7 +54,7 @@ Important runtime truths the contract preserves:
 - Runtime `invoke` requires a serialized `capability_token`.
 - Runtime installs a `CapabilityVerifier` during handshake and verifies bound capability tokens for invoke and simulate.
 - `handle_configure()` replaces the old client, clears verifier/session state, sets configured, and clears the handshaken flag.
-- `handle_handshake()` requires prior configuration, stores a host-key verifier, creates a fresh session ID, and returns a placeholder manifest hash.
+- `handle_handshake()` requires prior configuration, stores a host-key verifier, creates a fresh session ID, and returns a SHA-256 hash of the bundled `manifest.toml`.
 - `health()` reports configured/not_configured and request counters; it does not report handshake state.
 - `doctor()` reports configuration, client, base URL, auth mode, network target, and credential-injection mode; it does not do a live probe.
 - `self_check()` calls `list_buckets()` in direct-key mode and returns degraded for `credential_id` mode.
@@ -72,7 +72,6 @@ This README documents runtime truth and keeps current drift visible:
 - Manifest marks `s3.put_object` and `s3.copy_object` as policy-approved risky writes. Runtime introspection also says risky operations require policy approval, but invoke only requires `approval_token` for `s3.delete_object`, `s3.create_bucket`, `s3.delete_bucket`, and `s3.generate_presigned_url`.
 - Runtime approval-token checks validate local time, execution scope, connector ID, operation pattern, and input constraints. They do not validate token signatures in this connector.
 - Runtime `s3.generate_presigned_url` creates a SigV4 presigned URL only in direct-key mode. In `credential_id` mode it returns an unsigned object URL because the connector does not hold the secret key.
-- Handshake grants the host-requested capabilities and returns `manifest_hash = "sha256:s3-connector-v1"`, not the manifest interface hash.
 - Manifest says connector state uses singleton-writer storage. Runtime keeps configuration in process memory and does not persist connector state itself.
 - Manifest rate-limit pools are documented intent only; runtime does not enforce connector-local rate limits.
 - There is no dedicated tracked verification shell script for this connector.

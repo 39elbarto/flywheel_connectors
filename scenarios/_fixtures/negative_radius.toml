@@ -1,0 +1,7 @@
+name = "negative_radius"
+blast_radius = -1
+recovery_objective_secs = 30
+
+[[rollback_steps]]
+name = "restore"
+action = "noop"

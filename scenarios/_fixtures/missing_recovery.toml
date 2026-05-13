@@ -1,0 +1,6 @@
+name = "missing_recovery"
+blast_radius = 1
+
+[[rollback_steps]]
+name = "restore"
+action = "noop"

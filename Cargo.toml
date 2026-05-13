@@ -9,6 +9,7 @@ members = [
     "crates/fcp-bench",
     "crates/fcp-bootstrap",
     "crates/fcp-cbor",
+    "crates/fcp-chaos",
     "crates/fwc",
     "crates/fcp-core",
     "crates/fcp-conformance",

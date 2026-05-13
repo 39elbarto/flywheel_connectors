@@ -3,6 +3,7 @@
 use std::fmt;
 use std::time::Duration;
 
+use fcp_prelude::log_redaction::redact_url;
 use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
@@ -448,7 +449,7 @@ impl LinearClient {
             let request = &request;
             let retry_ctx = retry_ctx.clone();
             async move {
-                debug!(attempt, api_url = %self.api_url, "GraphQL request");
+                debug!(attempt, api_url = %redact_url(&self.api_url), "GraphQL request");
 
                 let builder = self
                     .http

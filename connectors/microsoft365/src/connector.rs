@@ -15,6 +15,7 @@ use base64::{
     engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64_URL},
 };
 use fcp_prelude::{
+    log_redaction::redact_url,
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
@@ -1151,7 +1152,7 @@ impl M365Connector {
         });
         self.client = Some(client);
         self.base.set_configured(true);
-        info!(auth = %auth_label, api_url = %api_url, "Microsoft 365 connector configured");
+        info!(auth = %auth_label, api_url = %redact_url(&api_url), "Microsoft 365 connector configured");
 
         Ok(json!({
             "status": "configured",

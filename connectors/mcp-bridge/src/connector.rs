@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_prelude::{
+    log_redaction::redact_url,
     AgentHint, ApprovalMode, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult,
     IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
     ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
@@ -246,7 +247,7 @@ impl McpBridgeConnector {
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let config = McpBridgeConfig::from_params(&params)?;
-        info!(auth = %config.auth.redacted_label(), mcp_url = %config.mcp_url, "Configuring MCP Bridge connector");
+        info!(auth = %config.auth.redacted_label(), mcp_url = %redact_url(&config.mcp_url), "Configuring MCP Bridge connector");
 
         let client =
             McpClient::new(config.auth.clone(), &config.mcp_url).map_err(|e| e.to_fcp_error())?;

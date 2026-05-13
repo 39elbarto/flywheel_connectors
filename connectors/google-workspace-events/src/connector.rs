@@ -15,9 +15,12 @@ use fcp_prelude::{
 };
 use reqwest::Url;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::client::{DEFAULT_EVENTS_BASE_URL, DEFAULT_PUBSUB_BASE_URL, WorkspaceEventsClient};
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 /// Validated connector configuration.
 struct WorkspaceEventsConfig {
@@ -252,6 +255,13 @@ impl WorkspaceEventsConnector {
         }
     }
 
+    #[must_use]
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     pub async fn handle_configure(
         &mut self,
         params: serde_json::Value,
@@ -322,7 +332,7 @@ impl WorkspaceEventsConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:google-workspace-events-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -1096,6 +1106,19 @@ mod tests {
         let connector = WorkspaceEventsConnector::new();
         let result = run_async_test(connector.handle_health()).unwrap();
         assert_eq!(result["status"], "not_configured");
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(WorkspaceEventsConnector::manifest_hash(), expected);
+        assert_ne!(
+            WorkspaceEventsConnector::manifest_hash(),
+            "sha256:google-workspace-events-connector-v1"
+        );
     }
 
     #[test]

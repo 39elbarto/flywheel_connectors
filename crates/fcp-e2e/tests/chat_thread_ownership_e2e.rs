@@ -27,6 +27,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TEST_NAME: &str = "chat_thread_ownership_cross_connector_e2e";
 const SCENARIO_ID: &str = "chat-thread-ownership-cross-connector";
+const ARTIFACT_PATH: &str = "target/fcp-chat-thread-ownership/chat-thread-ownership-e2e.jsonl";
 const INTENT_GUILDS: u64 = 1 << 0;
 const INTENT_GUILD_MESSAGES: u64 = 1 << 9;
 const INTENT_DIRECT_MESSAGES: u64 = 1 << 12;
@@ -96,6 +97,13 @@ async fn slack_and_discord_chat_coordination_emit_redacted_cross_connector_evide
         "redaction scanner found leaked evidence fields: {:?}",
         scan.findings
     );
+
+    logger
+        .write_json_lines(ARTIFACT_PATH)
+        .expect("chat-thread ownership JSONL artifact should write");
+    let persisted_jsonl =
+        std::fs::read_to_string(ARTIFACT_PATH).expect("chat-thread ownership artifact should read");
+    assert_eq!(persisted_jsonl.trim_end(), jsonl.as_str());
 
     for forbidden in [
         "xoxb-test-token-xyz",
@@ -651,7 +659,8 @@ fn push_evidence(logger: &mut E2eLogger, step_number: u32, phase: &str, context:
         context,
     )
     .with_scenario_id(SCENARIO_ID)
-    .with_step(format!("chat-coordination-step-{step_number}"), step_number);
+    .with_step(format!("chat-coordination-step-{step_number}"), step_number)
+    .with_artifacts([ARTIFACT_PATH]);
     entry
         .validate()
         .expect("e2e evidence entry should validate");

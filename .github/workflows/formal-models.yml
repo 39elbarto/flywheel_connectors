@@ -104,6 +104,14 @@ jobs:
         shell: bash
         run: make tla-check-agent-mail-ordering-broken TLA2TOOLS_JAR="${TLA2TOOLS_JAR}"
 
+      - name: Run mesh-admission TLC gate
+        shell: bash
+        run: make tla-check-mesh-admission TLA2TOOLS_JAR="${TLA2TOOLS_JAR}"
+
+      - name: Run mesh-admission broken-spec TLC smoke
+        shell: bash
+        run: make tla-check-mesh-admission-broken TLA2TOOLS_JAR="${TLA2TOOLS_JAR}"
+
       - name: Run Rust alignment E2E
         shell: bash
         run: |

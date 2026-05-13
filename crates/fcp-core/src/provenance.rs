@@ -30,6 +30,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::marker::PhantomData;
 
 use serde::{Deserialize, Serialize};
 
@@ -767,6 +768,25 @@ pub enum ProvenanceViolation {
 // Unified ApprovalToken
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Marker type: approval token has been requested but not approved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Pending;
+
+/// Marker type: approval token has been approved and may authorize flows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Approved;
+
+mod approval_token_state {
+    pub trait Sealed {}
+    impl Sealed for super::Pending {}
+    impl Sealed for super::Approved {}
+}
+
+/// Type-state marker implemented only by FCP approval-token states.
+pub trait ApprovalTokenState: approval_token_state::Sealed {}
+impl ApprovalTokenState for Pending {}
+impl ApprovalTokenState for Approved {}
+
 /// Unified [`ApprovalToken`] (NORMATIVE).
 ///
 /// A first-class mesh object for authorization with a closed set of scopes:
@@ -774,7 +794,7 @@ pub enum ProvenanceViolation {
 /// - [`ApprovalScope::Declassification`]: Lower confidentiality level
 /// - [`ApprovalScope::Execution`]: Authorize specific operation invocation
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApprovalToken {
+pub struct ApprovalToken<S = Approved> {
     /// Unique token ID (becomes [`ObjectId`] when stored)
     pub token_id: String,
 
@@ -796,9 +816,14 @@ pub struct ApprovalToken {
     /// `COSE_Sign1` signature over canonical encoding
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<Vec<u8>>,
+
+    /// Compile-time approval state. This is intentionally absent from the wire
+    /// representation; signed approval material remains byte-stable.
+    #[serde(skip, default)]
+    pub _state: PhantomData<S>,
 }
 
-impl ApprovalToken {
+impl<S> ApprovalToken<S> {
     /// Check if the token is expired.
     #[must_use]
     pub const fn is_expired(&self, now_ms: u64) -> bool {
@@ -816,6 +841,244 @@ impl ApprovalToken {
     pub const fn is_valid(&self, now_ms: u64) -> bool {
         !self.is_expired(now_ms) && !self.is_not_yet_valid(now_ms)
     }
+
+    /// Return a redaction-safe fingerprint for logging/audit correlation.
+    #[must_use]
+    pub fn approver_fingerprint(&self) -> String {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"FCP/ApprovalToken/approver-fingerprint/v1");
+        hasher.update(self.issuer.as_bytes());
+        if let Some(signature) = &self.signature {
+            hasher.update(signature);
+        }
+        hex::encode(&hasher.finalize().as_bytes()[..16])
+    }
+}
+
+impl ApprovalToken<Pending> {
+    /// Construct a deterministic pending token for tests and policy simulations.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            token_id: "pending-approval-token".to_owned(),
+            issued_at_ms: 0,
+            expires_at_ms: u64::MAX,
+            issuer: "pending-issuer".to_owned(),
+            scope: ApprovalScope::Execution(ExecutionScope {
+                connector_id: "pending.connector".to_owned(),
+                method_pattern: "pending.operation".to_owned(),
+                request_object_id: None,
+                input_hash: None,
+                input_constraints: Vec::new(),
+            }),
+            zone_id: ZoneId::work(),
+            signature: None,
+            _state: PhantomData,
+        }
+    }
+
+    /// Promote a pending approval into the approved typestate.
+    #[must_use]
+    pub fn approve(self, signature: Option<Vec<u8>>) -> ApprovalToken<Approved> {
+        ApprovalToken {
+            token_id: self.token_id,
+            issued_at_ms: self.issued_at_ms,
+            expires_at_ms: self.expires_at_ms,
+            issuer: self.issuer,
+            scope: self.scope,
+            zone_id: self.zone_id,
+            signature,
+            _state: PhantomData,
+        }
+    }
+}
+
+impl ApprovalToken<Approved> {
+    /// Construct an already-approved token from validated approval material.
+    #[must_use]
+    pub fn approved(
+        token_id: impl Into<String>,
+        issued_at_ms: u64,
+        expires_at_ms: u64,
+        issuer: impl Into<String>,
+        scope: ApprovalScope,
+        zone_id: ZoneId,
+        signature: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            token_id: token_id.into(),
+            issued_at_ms,
+            expires_at_ms,
+            issuer: issuer.into(),
+            scope,
+            zone_id,
+            signature,
+            _state: PhantomData,
+        }
+    }
+}
+
+/// Audit-facing record emitted for every declassification attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeclassificationEvent {
+    /// Opaque approval/capability correlation ID.
+    pub capability_id: String,
+    /// Redaction-safe approver fingerprint.
+    pub approver_fingerprint: String,
+    /// Source confidentiality label before the attempt.
+    pub src_label: ConfidentialityLevel,
+    /// Requested destination confidentiality label.
+    pub dst_label: ConfidentialityLevel,
+    /// Hybrid logical clock timestamp in milliseconds for this local event.
+    pub hlc: u64,
+    /// Whether the declassification was accepted.
+    pub accepted: bool,
+    /// Stable reason code for audit-chain consumers.
+    pub reason_code: String,
+}
+
+/// Error returned by [`declassify`] while still carrying the audit event.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum DeclassificationError {
+    #[error("approval token is expired or not yet valid")]
+    InvalidApprover { event: DeclassificationEvent },
+    #[error("approval token scope is not a matching declassification scope")]
+    ScopeMismatch { event: DeclassificationEvent },
+    #[error("invalid declassification: {source}")]
+    InvalidFlow {
+        source: ProvenanceViolation,
+        event: DeclassificationEvent,
+    },
+}
+
+impl DeclassificationError {
+    /// Audit event emitted for the rejected attempt.
+    #[must_use]
+    pub const fn event(&self) -> &DeclassificationEvent {
+        match self {
+            Self::InvalidApprover { event }
+            | Self::ScopeMismatch { event }
+            | Self::InvalidFlow { event, .. } => event,
+        }
+    }
+}
+
+/// Declassify provenance using an approved token.
+///
+/// A pending approval cannot be passed to this function: the compiler requires
+/// `ApprovalToken<Approved>`, and trybuild fixtures pin that boundary.
+pub fn declassify(
+    approval: ApprovalToken<Approved>,
+    provenance: &mut ProvenanceRecord,
+    object_id: ObjectId,
+    target_confidentiality: ConfidentialityLevel,
+    now_ms: u64,
+) -> Result<DeclassificationEvent, DeclassificationError> {
+    let mut event = DeclassificationEvent {
+        capability_id: approval.token_id.clone(),
+        approver_fingerprint: approval.approver_fingerprint(),
+        src_label: provenance.confidentiality_label,
+        dst_label: target_confidentiality,
+        hlc: now_ms,
+        accepted: false,
+        reason_code: "pending".to_owned(),
+    };
+
+    if !approval.is_valid(now_ms) || approval.signature.is_none() {
+        event.reason_code = "InvalidApprover".to_owned();
+        tracing::info!(
+            target: "fcp.zone.declassify",
+            capability_id = %event.capability_id,
+            approver_fingerprint = %event.approver_fingerprint,
+            src_label = ?event.src_label,
+            dst_label = ?event.dst_label,
+            hlc = event.hlc,
+            accepted = false,
+            reason_code = %event.reason_code,
+            "declassification rejected"
+        );
+        return Err(DeclassificationError::InvalidApprover { event });
+    }
+
+    let ApprovalScope::Declassification(scope) = &approval.scope else {
+        event.reason_code = "ScopeMismatch".to_owned();
+        tracing::info!(
+            target: "fcp.zone.declassify",
+            capability_id = %event.capability_id,
+            approver_fingerprint = %event.approver_fingerprint,
+            src_label = ?event.src_label,
+            dst_label = ?event.dst_label,
+            hlc = event.hlc,
+            accepted = false,
+            reason_code = %event.reason_code,
+            "declassification rejected"
+        );
+        return Err(DeclassificationError::ScopeMismatch { event });
+    };
+
+    if scope.from_zone != provenance.current_zone
+        || scope.target_confidentiality != target_confidentiality
+        || !scope.object_ids.contains(&object_id)
+    {
+        event.reason_code = "ScopeMismatch".to_owned();
+        tracing::info!(
+            target: "fcp.zone.declassify",
+            capability_id = %event.capability_id,
+            approver_fingerprint = %event.approver_fingerprint,
+            src_label = ?event.src_label,
+            dst_label = ?event.dst_label,
+            hlc = event.hlc,
+            accepted = false,
+            reason_code = %event.reason_code,
+            "declassification rejected"
+        );
+        return Err(DeclassificationError::ScopeMismatch { event });
+    }
+
+    let approval_token_id = approval_token_event_object_id(&approval);
+    if let Err(source) =
+        provenance.apply_declassification(target_confidentiality, approval_token_id, now_ms)
+    {
+        event.reason_code = "InvalidDeclassification".to_owned();
+        tracing::info!(
+            target: "fcp.zone.declassify",
+            capability_id = %event.capability_id,
+            approver_fingerprint = %event.approver_fingerprint,
+            src_label = ?event.src_label,
+            dst_label = ?event.dst_label,
+            hlc = event.hlc,
+            accepted = false,
+            reason_code = %event.reason_code,
+            "declassification rejected"
+        );
+        return Err(DeclassificationError::InvalidFlow { source, event });
+    }
+
+    event.accepted = true;
+    event.reason_code = "Accepted".to_owned();
+    tracing::info!(
+        target: "fcp.zone.declassify",
+        capability_id = %event.capability_id,
+        approver_fingerprint = %event.approver_fingerprint,
+        src_label = ?event.src_label,
+        dst_label = ?event.dst_label,
+        hlc = event.hlc,
+        accepted = true,
+        reason_code = %event.reason_code,
+        "declassification accepted"
+    );
+    Ok(event)
+}
+
+fn approval_token_event_object_id(approval: &ApprovalToken<Approved>) -> ObjectId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"FCP/ApprovalToken/object-id/v1");
+    hasher.update(approval.token_id.as_bytes());
+    hasher.update(approval.issuer.as_bytes());
+    hasher.update(&approval.issued_at_ms.to_le_bytes());
+    hasher.update(&approval.expires_at_ms.to_le_bytes());
+    hasher.update(approval.zone_id.as_bytes());
+    ObjectId::from_bytes(*hasher.finalize().as_bytes())
 }
 
 /// Approval scope - the closed set of authorization types (NORMATIVE).

@@ -52,7 +52,7 @@ pub const ML_DSA_65_SEED_SIZE: usize = 32;
 /// [`Zeroizing`] so it is wiped on drop.
 pub struct MlDsa65SigningKey {
     seed: Zeroizing<[u8; ML_DSA_65_SEED_SIZE]>,
-    expanded: ml_dsa::ExpandedSigningKey<MlDsa65>,
+    signing_key: Box<MlDsaSigningKey<MlDsa65>>,
     verifying_key: MlDsa65VerifyingKey,
 }
 
@@ -60,7 +60,7 @@ impl core::fmt::Debug for MlDsa65SigningKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MlDsa65SigningKey")
             .field("seed", &"[redacted; 32 bytes]")
-            .field("expanded", &"[redacted; expanded signing key]")
+            .field("signing_key", &"[redacted; upstream signing key]")
             .field("verifying_key", &self.verifying_key.key_id())
             .finish()
     }
@@ -101,12 +101,12 @@ impl MlDsa65SigningKey {
         Ok(Self::from_seed_inner(seed))
     }
 
+    #[allow(clippy::large_stack_frames)] // upstream ML-DSA key expansion builds FIPS polynomial buffers internally
     fn from_seed_inner(seed: Zeroizing<[u8; ML_DSA_65_SEED_SIZE]>) -> Self {
         let xi = B32::try_from(seed.as_slice())
             .expect("ML_DSA_65_SEED_SIZE is 32 bytes by construction");
-        let kp = MlDsaSigningKey::<MlDsa65>::from_seed(&xi);
-        let expanded = kp.expanded_key().clone();
-        let upstream_vk = kp.verifying_key();
+        let signing_key = Box::new(MlDsaSigningKey::<MlDsa65>::from_seed(&xi));
+        let upstream_vk = signing_key.verifying_key();
         let vk_bytes_array = upstream_vk.encode();
         let vk_bytes = MlDsa65VerifyingKeyBytes::try_from_bytes(vk_bytes_array.as_slice().to_vec())
             .expect("ml-dsa always emits a 1952-byte verifying key for MlDsa65 parameter set");
@@ -116,7 +116,7 @@ impl MlDsa65SigningKey {
         };
         Self {
             seed,
-            expanded,
+            signing_key,
             verifying_key,
         }
     }
@@ -186,7 +186,8 @@ impl MlDsa65SigningKey {
     pub fn sign(&self, message: &[u8], context: &[u8]) -> CryptoResult<MlDsa65SignatureBytes> {
         let mut rng = OsRngV10;
         let sig = self
-            .expanded
+            .signing_key
+            .expanded_key()
             .sign_randomized(message, context, &mut rng)
             .map_err(|e| CryptoError::SerializationError(format!("ml-dsa-65 sign failed: {e}")))?;
         sig_to_bytes(&sig)
@@ -208,7 +209,8 @@ impl MlDsa65SigningKey {
         context: &[u8],
     ) -> CryptoResult<MlDsa65SignatureBytes> {
         let sig = self
-            .expanded
+            .signing_key
+            .expanded_key()
             .sign_deterministic(message, context)
             .map_err(|e| {
                 CryptoError::SerializationError(format!("ml-dsa-65 deterministic sign failed: {e}"))

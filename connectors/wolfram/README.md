@@ -28,6 +28,7 @@ Important runtime truths the contract preserves:
 - All three operations share capability `wolfram.query`.
 - Invocation verifies a bound capability token when a verifier and token are present.
 - The runtime is non-streaming and reports event streaming/replay disabled in handshake response.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 

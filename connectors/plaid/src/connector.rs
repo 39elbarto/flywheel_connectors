@@ -11,6 +11,7 @@ use fcp_prelude::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::{client::PlaidClient, error::PlaidError};
@@ -23,6 +24,7 @@ const PLAID_HOSTS: &[&str] = &[
     "development.plaid.com",
     "production.plaid.com",
 ];
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 #[derive(Debug, Clone, Copy)]
 enum PlaidEnvironment {
@@ -238,6 +240,12 @@ impl PlaidConnector {
         }
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure method.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
@@ -313,7 +321,7 @@ impl PlaidConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:plaid-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -1616,6 +1624,18 @@ mod tests {
             .compute_interface_hash()
             .expect("compute interface hash");
         assert_eq!(computed, computed2);
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        let actual = PlaidConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "sha256:plaid-connector-v1");
     }
 
     #[test]

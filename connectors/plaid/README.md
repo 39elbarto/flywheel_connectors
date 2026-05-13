@@ -74,7 +74,7 @@ This README documents runtime truth and keeps current drift visible:
 - `self_check` uses `accounts_get("test", None)` in direct-secret mode, so it is a connectivity smoke check rather than a complete account-link proof.
 - `doctor` performs a direct `link_token_create` probe in direct-secret mode and skips direct credential validation in `credential_id` mode.
 - Runtime `handle_handshake()` does not require prior successful configure.
-- Runtime returns a placeholder manifest hash: `sha256:plaid-connector-v1`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - There is no tracked verification shell script for this connector.
 
 A follow-up parity bead should enforce approval-token semantics, persist or explicitly remove the advertised cursor/access-token state contract, align event-cap advertisement with actual event delivery, enforce endpoint policy at configure time, decide whether `development` remains a first-class environment, and make credential-id materialization a real host-mediated path.

@@ -101,7 +101,7 @@ This README documents runtime truth and keeps current drift visible:
 - Runtime doctor accepts HTTPS or local test hosts. Runtime configure also accepts non-local HTTP URLs; doctor later marks them failed.
 - `credential_id` mode cannot issue direct Qdrant API requests in the current runtime because no HTTP client is created. Health reports degraded pending materialization, and self-check reports `not_configured`.
 - Handshake grants every requested capability without filtering against the manifest optional capability list.
-- Handshake returns the hardcoded manifest hash `sha256:qdrant-connector-v1`, not the manifest interface hash.
+- Handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Runtime introspection reports no `requires_approval` metadata for write or delete operations.
 - Manifest operation approval modes mark create/upsert as policy and delete operations as interactive. Runtime invokes do not enforce approval tokens.
 - Manifest rate-limit pools exist for collections-read, collections-write, points-read, and points-write operations. Runtime introspection reports no rate-limit metadata and the client does not enforce those manifest pools.

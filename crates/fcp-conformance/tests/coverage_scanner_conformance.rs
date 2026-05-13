@@ -165,11 +165,25 @@ fn parse_scanner_output(stdout: &str) -> Vec<ScannerRow> {
         .map(|line| {
             let value: serde_json::Value = serde_json::from_str(line)
                 .unwrap_or_else(|e| panic!("scanner emitted non-JSON line `{line}`: {e}"));
+            // Field-level `.as_str()` / `.as_bool()` may return None if the
+            // scanner emits a partially-malformed object. Panic with the
+            // specific field + offending line so the failure points at the
+            // scanner, not at a generic unwrap site in this test.
+            let field_str = |field: &str| -> String {
+                value[field].as_str().unwrap_or_else(|| {
+                    panic!("scanner row missing string field `{field}` in line `{line}`")
+                }).to_string()
+            };
+            let field_bool = |field: &str| -> bool {
+                value[field].as_bool().unwrap_or_else(|| {
+                    panic!("scanner row missing bool field `{field}` in line `{line}`")
+                })
+            };
             ScannerRow {
-                connector: value["connector"].as_str().unwrap().to_string(),
-                has_local_non_mock: value["has_local_non_mock"].as_bool().unwrap(),
-                has_live_verification: value["has_live_verification"].as_bool().unwrap(),
-                verdict: value["verdict"].as_str().unwrap().to_string(),
+                connector: field_str("connector"),
+                has_local_non_mock: field_bool("has_local_non_mock"),
+                has_live_verification: field_bool("has_live_verification"),
+                verdict: field_str("verdict"),
             }
         })
         .collect()

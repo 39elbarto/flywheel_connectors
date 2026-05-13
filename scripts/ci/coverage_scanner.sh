@@ -50,7 +50,7 @@ while IFS= read -r connector_dir; do
 
     printf '{"connector":"%s","has_local_non_mock":%s,"has_live_verification":%s,"verdict":"%s"}\n' \
         "${connector}" "${has_local}" "${has_live}" "${verdict}"
-done < <(find "${CONNECTORS_DIR}" -maxdepth 1 -mindepth 1 -type d | sort)
+done < <(find "${CONNECTORS_DIR}" -maxdepth 1 -mindepth 1 -type d | LC_ALL=C sort)
 
 # Final summary to stderr so stdout stays clean JSONL.
 echo "coverage_scanner: covered=${covered_count} gap=${gap_count}" >&2

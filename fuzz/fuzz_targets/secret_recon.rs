@@ -21,10 +21,14 @@
 //!      must reject all malformed inputs without panicking and without
 //!      producing a valid `ThresholdCeremony` that can sign on behalf of
 //!      a different key set.
-//!   4. `add_commitment` + `add_shares` adversarial sequences against a
-//!      freshly-initialized ceremony — arbitrary participant indices,
-//!      duplicate adds, mismatched from/to indices, oversized vectors —
-//!      asserts no panic; well-typed `Err(String)` is the expected outcome.
+//!   4. `add_commitment` adversarial sequences against a freshly-
+//!      initialized ceremony — arbitrary participant indices, duplicate
+//!      adds, oversized commitment vectors — asserts no panic; well-
+//!      typed `Err(String)` is the expected outcome. The `add_shares`
+//!      path is exercised only at the deserialization boundary
+//!      (`EncryptedShare` JSON parse) because the ceremony's
+//!      `add_shares_with_rng` API requires a `RngCore + CryptoRng`
+//!      pair that is not a direct fuzz dep.
 //!
 //! Invariant: **no input ever produces a `ThresholdSignatureArtifact` for
 //! a ceremony whose participants did not legitimately complete the
@@ -97,14 +101,21 @@ fuzz_target!(|data: &[u8]| {
         let _resumed = ThresholdCeremony::resume(checkpoint);
     }
 
-    // ── Path 4: adversarial add_commitment / add_shares sequence ────────
+    // ── Path 4: adversarial add_commitment sequence ─────────────────────
     // Build a fresh ceremony and feed it arbitrary participant/commitment
     // sequences. The threshold and total are bounded to small values so
     // the fuzzer doesn't get bogged down in legitimate large-state work.
-    let threshold = (input.threshold as u32).max(1).min(input.total as u32).max(1);
+    //
+    // Clamp `total` first so it lives in [1, MAX_PARTICIPANTS_PER_RUN],
+    // THEN clamp `threshold` to [1, total]. This ordering guarantees the
+    // invariant `1 <= threshold <= total`, which ThresholdConfig::new
+    // requires; the prior ordering let a large input.threshold survive
+    // past the `min(input.total)` clamp before total was capped at
+    // MAX_PARTICIPANTS_PER_RUN, producing threshold > total.
     let total = (input.total as u32)
-        .max(threshold)
+        .max(1)
         .min(MAX_PARTICIPANTS_PER_RUN as u32);
+    let threshold = (input.threshold as u32).max(1).min(total);
     let config = ThresholdConfig::new(threshold, total);
     let mut ceremony = ThresholdCeremony::with_config(config);
 

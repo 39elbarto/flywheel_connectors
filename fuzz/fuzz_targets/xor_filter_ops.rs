@@ -32,10 +32,14 @@
 use fcp_mesh::gossip::XorFilterPlaceholder;
 use libfuzzer_sys::fuzz_target;
 
-/// Cap individual item size and total per-filter inserts to keep the
-/// fuzzer fast. A real gossip XOR filter holds a few thousand
-/// `ObjectId` (32-byte) keys; we test up to 256 inserts per fuzz
-/// iteration of up to 4 KiB each.
+/// Cap total per-filter inserts to keep the fuzzer fast. A real gossip
+/// XOR filter holds a few thousand `ObjectId` (32-byte) keys; we test up
+/// to 256 inserts per fuzz iteration. Each item is at most 255 bytes
+/// because we use a single-byte length prefix from the fuzz input
+/// (`item_len = data[cursor] as usize`); `MAX_ITEM_BYTES` is a defensive
+/// upper bound that never actually clips in this prefix scheme, but
+/// keeps the slice expression honest if the prefix scheme later changes
+/// to multi-byte length encoding.
 const MAX_ITEM_BYTES: usize = 4 * 1024;
 const MAX_INSERTS_PER_RUN: usize = 256;
 

@@ -18,6 +18,7 @@ use fcp_prelude::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::{
@@ -31,6 +32,7 @@ const DEFAULT_CONTACT_FIELDS: &[&str] =
     &["names", "emailAddresses", "phoneNumbers", "organizations"];
 const DEFAULT_DIRECTORY_FIELDS: &[&str] = &["names", "emailAddresses", "organizations"];
 const DEFAULT_GROUP_FIELDS: &[&str] = &["name", "formattedName", "groupType", "memberCount"];
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 fn is_local_test_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
@@ -326,6 +328,13 @@ impl GooglePeopleConnector {
         }
     }
 
+    #[must_use]
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     #[instrument(skip(self, params))]
     pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
         let config = GooglePeopleConfig::from_params(&params).await?;
@@ -388,7 +397,7 @@ impl GooglePeopleConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:google-people-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -1535,6 +1544,19 @@ mod tests {
             .await
             .unwrap();
         (connector, signing_key)
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(GooglePeopleConnector::manifest_hash(), expected);
+        assert_ne!(
+            GooglePeopleConnector::manifest_hash(),
+            "sha256:google-people-connector-v1"
+        );
     }
 
     #[test]

@@ -58,14 +58,14 @@ Important runtime truths the contract preserves:
 This README documents the runtime truth and keeps current drift visible:
 
 - Manifest connector ID is `fcp.google-people`, while runtime `BaseConnector` ID is `google-people`.
-- Runtime handshake returns placeholder manifest hash `sha256:google-people-connector-v1` even though the manifest carries a concrete `interface_hash`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Manifest `[capabilities].optional` is empty even though manifest operations and runtime introspection use `people.contacts.read`, `people.profile.read`, `people.other_contacts.read`, `people.directory.read`, `people.contact_groups.read`, `people.contacts.write`, and `people.contacts.delete`.
 - Runtime capability-token verification currently uses an empty resource URI list for People operations. Capabilities are operation-bound but not resource-bound to a contact, directory person, group, or search corpus.
 - Manifest input schema for `people.update_contact` does not express the runtime `person.etag` requirement or the runtime `resource_name` versus `person.resourceName` consistency check.
 - Runtime `handle_shutdown` calls client shutdown, but it does not clear config, client, verifier, session, configured flags, or handshaken flags.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should populate manifest optional capabilities, add resource URI binding, replace the placeholder handshake hash, align manifest schemas with runtime update-contact validation, and reset lifecycle state consistently on shutdown.
+A follow-up parity bead should populate manifest optional capabilities, add resource URI binding, align manifest schemas with runtime update-contact validation, and reset lifecycle state consistently on shutdown.
 
 ## First-Slice Scope
 

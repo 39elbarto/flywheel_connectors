@@ -163,20 +163,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_cose_envelope_parser"
-path = "fuzz_targets/cose_envelope_parser.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "fuzz_capability_claim_parser"
-path = "fuzz_targets/capability_claim_parser.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "fuzz_session_transcript"
 path = "fuzz_targets/session_transcript.rs"
 test = false

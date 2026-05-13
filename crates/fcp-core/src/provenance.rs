@@ -1091,23 +1091,14 @@ pub fn declassify(
     Ok(event)
 }
 
-fn approval_token_event_object_id(approval: ApprovalToken<Approved>) -> ObjectId {
-    let ApprovalToken {
-        token_id,
-        issued_at_ms,
-        expires_at_ms,
-        issuer,
-        zone_id,
-        ..
-    } = approval;
-
+fn approval_token_event_object_id(approval: &ApprovalToken<Approved>) -> ObjectId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"FCP/ApprovalToken/object-id/v1");
-    hasher.update(token_id.as_bytes());
-    hasher.update(issuer.as_bytes());
-    hasher.update(&issued_at_ms.to_le_bytes());
-    hasher.update(&expires_at_ms.to_le_bytes());
-    hasher.update(zone_id.as_bytes());
+    hasher.update(approval.token_id.as_bytes());
+    hasher.update(approval.issuer.as_bytes());
+    hasher.update(&approval.issued_at_ms.to_le_bytes());
+    hasher.update(&approval.expires_at_ms.to_le_bytes());
+    hasher.update(approval.zone_id.as_bytes());
     ObjectId::from_bytes(*hasher.finalize().as_bytes())
 }
 

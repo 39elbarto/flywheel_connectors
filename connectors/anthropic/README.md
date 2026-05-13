@@ -47,6 +47,7 @@ Important runtime truths the contract preserves:
 - Thinking is rejected with non-default temperature and forced tool choice before provider I/O.
 - Thinking content is never returned verbatim in `content_blocks`; it is represented as `{"type":"thinking","redacted":true}`.
 - FCP subscribe is not implemented; streaming is exposed through `anthropic.message.stream`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 

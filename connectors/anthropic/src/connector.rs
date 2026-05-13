@@ -12,6 +12,7 @@ use fcp_prelude::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::{
@@ -23,6 +24,8 @@ use crate::{
         ServiceTier, Tool, ToolChoice, Usage,
     },
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 /// Parsed and validated Anthropic connector configuration.
 #[derive(Debug, Clone)]
@@ -681,6 +684,12 @@ impl AnthropicConnector {
         &self.base.instance_id
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Get total errors.
     #[must_use]
     pub fn total_errors(&self) -> u64 {
@@ -782,7 +791,7 @@ impl AnthropicConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:anthropic-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -3283,6 +3292,18 @@ mod tests {
         assert_eq!(c.total_cost(), 0.0);
         assert_eq!(c.total_requests(), 0);
         assert_eq!(c.total_errors(), 0);
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        let actual = AnthropicConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "sha256:anthropic-connector-v1");
     }
 
     // --- AnthropicConfig edge cases ---

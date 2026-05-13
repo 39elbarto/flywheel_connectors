@@ -34,6 +34,7 @@ Important runtime truths the contract preserves:
 - Multimodal `image_url` chat defaults to `qwen-vl-plus` when no model is supplied.
 - Embeddings default to `text-embedding-v4`.
 - SSE chat streaming returns redaction-safe chunk metadata and assembled text from a bounded invoke call; FCP subscribe is not implemented.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 

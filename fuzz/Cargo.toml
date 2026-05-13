@@ -1300,5 +1300,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_xor_filter_ops"
+path = "fuzz_targets/xor_filter_ops.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "connectors/_adversarial",
     "crates/fcp-async-core",
     "crates/fcp-async-core-macros",
     "crates/fcp-audit",

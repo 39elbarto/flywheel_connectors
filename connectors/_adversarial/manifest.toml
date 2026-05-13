@@ -1,0 +1,79 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:e9f6e3180477d76f81a6335b5cf9fb4fff31eb2f6f6aa611fc9f6fa9e5e482ef"
+
+[connector]
+id = "fcp.adversarial"
+name = "FCP Adversarial Connector"
+version = "0.1.0"
+status = "quarantined"
+description = "ADVERSARIAL opt-in connector for malformed provider-response and hostile boundary testing. Production deploy mode refuses to load it."
+archetypes = ["request-response"]
+format = "native"
+
+[zones]
+home = "z:project:adversarial"
+allowed_sources = ["z:owner", "z:private", "z:work", "z:project:adversarial"]
+allowed_targets = ["z:project:adversarial"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["adversarial.emit"]
+optional = []
+forbidden = ["system.exec", "network.listen", "network.egress", "network.tls.sni", "system.privileged"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 10
+wall_clock_timeout_ms = 5000
+deny_exec = true
+deny_ptrace = true
+
+[provides.operations."adversarial.emit"]
+description = "Return a structured FCP error for one hostile provider-response scenario."
+capability = "adversarial.emit"
+risk_level = "high"
+safety_tier = "safe"
+requires_approval = "interactive"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."adversarial.emit".input_schema]
+type = "object"
+required = ["scenario"]
+additionalProperties = false
+
+[provides.operations."adversarial.emit".input_schema.properties.scenario]
+type = "string"
+enum = [
+  "oversized_payload",
+  "mid_stream_disconnect",
+  "time_skew_plus_1y",
+  "time_skew_minus_1y",
+  "invalid_utf8_header",
+  "deeply_nested_json",
+  "oversized_json_key",
+  "null_byte_injection",
+  "header_smuggling",
+  "crlf_injection",
+]
+
+[provides.operations."adversarial.emit".output_schema]
+type = "object"
+required = ["scenario", "fcp_error", "layer_caught_it"]
+additionalProperties = false
+
+[provides.operations."adversarial.emit".output_schema.properties.scenario]
+type = "string"
+
+[provides.operations."adversarial.emit".output_schema.properties.fcp_error]
+type = "string"
+
+[provides.operations."adversarial.emit".output_schema.properties.layer_caught_it]
+type = "string"

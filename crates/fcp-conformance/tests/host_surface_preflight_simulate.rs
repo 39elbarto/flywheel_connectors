@@ -47,6 +47,7 @@ type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 struct TestRegistry {
     summary: ConnectorSummary,
     introspection: Introspection,
+    allowed_zones: Vec<String>,
 }
 
 impl TestRegistry {
@@ -93,11 +94,17 @@ impl TestRegistry {
         Self {
             summary,
             introspection,
+            allowed_zones: vec![ZoneId::work().as_str().to_string()],
         }
     }
 
+    fn with_allowed_zones(mut self, allowed_zones: Vec<String>) -> Self {
+        self.allowed_zones = allowed_zones;
+        self
+    }
+
     async fn allowed_zones(&self, id: &ConnectorId) -> Option<Vec<String>> {
-        (id == &self.summary.id).then(Vec::new)
+        (id == &self.summary.id).then(|| self.allowed_zones.clone())
     }
 
     async fn simulate(&self, request: SimulateRequest) -> Result<SimulateResponse, HostError> {
@@ -215,6 +222,7 @@ fn map_host_error(error: HostError) -> (StatusCode, String) {
     let message = error.to_string();
     let status = match error {
         HostError::InvalidFilter(_) | HostError::PreflightFailed(_) => StatusCode::BAD_REQUEST,
+        HostError::ZoneEnvelopeRequired(_) => StatusCode::FORBIDDEN,
         HostError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         HostError::RegistryError(_) => StatusCode::BAD_GATEWAY,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -381,16 +389,21 @@ async fn verify_live_request(
     request: &InvokeRequest,
     principal_override: Option<&str>,
 ) -> Result<VerifiedLiveRequest, HostError> {
-    if let Some(allowed) = state.registry.allowed_zones(&request.connector_id).await
-        && !allowed.is_empty()
-        && !allowed.iter().any(|zone| zone == request.zone_id.as_str())
-    {
-        return Err(HostError::PreflightFailed(format!(
-            "connector `{}` is not bound to zone `{}` (allowed: [{}])",
-            request.connector_id,
-            request.zone_id.as_str(),
-            allowed.join(", ")
-        )));
+    if let Some(allowed) = state.registry.allowed_zones(&request.connector_id).await {
+        if allowed.is_empty() {
+            return Err(HostError::ZoneEnvelopeRequired(format!(
+                "connector `{}` has no `allowed_zones`; configure at least one explicit zone before host RPC",
+                request.connector_id
+            )));
+        }
+        if !allowed.iter().any(|zone| zone == request.zone_id.as_str()) {
+            return Err(HostError::PreflightFailed(format!(
+                "connector `{}` is not bound to zone `{}` (allowed: [{}])",
+                request.connector_id,
+                request.zone_id.as_str(),
+                allowed.join(", ")
+            )));
+        }
     }
 
     let introspection = state.discovery.introspect(&request.connector_id).await?;
@@ -819,7 +832,19 @@ where
 }
 
 fn test_state(connector_id: ConnectorId, signing_key: &Ed25519SigningKey) -> Arc<TestAppState> {
-    let registry = Arc::new(TestRegistry::new(connector_id));
+    test_state_with_allowed_zones(
+        connector_id,
+        signing_key,
+        vec![ZoneId::work().as_str().to_string()],
+    )
+}
+
+fn test_state_with_allowed_zones(
+    connector_id: ConnectorId,
+    signing_key: &Ed25519SigningKey,
+    allowed_zones: Vec<String>,
+) -> Arc<TestAppState> {
+    let registry = Arc::new(TestRegistry::new(connector_id).with_allowed_zones(allowed_zones));
     let budget = Arc::new(BudgetPolicyEngine::new());
     let discovery = Arc::new(DiscoveryEndpoint::new(
         Arc::clone(&registry),
@@ -924,6 +949,65 @@ async fn conformance_preflight_surface_covers_allow_missing_capability_and_princ
             .as_deref()
             .is_some_and(|reason| reason.contains(TEST_FORGED_PRINCIPAL)),
         "{forged_principal:?}"
+    );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn conformance_live_surfaces_reject_empty_allowed_zones() -> TestResult<()> {
+    let connector_id = route_test_connector_id("empty-zone-envelope");
+    let signing_key = Ed25519SigningKey::generate();
+    let state = test_state_with_allowed_zones(connector_id.clone(), &signing_key, Vec::new());
+    let valid_token = issue_live_capability_token(
+        state.lifecycle.as_ref(),
+        &signing_key,
+        &connector_id,
+        TEST_CAPABILITY_ID,
+        TEST_PRINCIPAL,
+        TEST_OPERATION,
+        &ZoneId::work(),
+    )
+    .await?;
+    let app = test_router(state);
+
+    let (_, preflight_denied): (_, PreflightResponse) = post_json_response(
+        &app,
+        "/rpc/preflight",
+        preflight_request(connector_id.clone(), Some(valid_token.clone())),
+        None,
+    )
+    .await?;
+    assert!(!preflight_denied.allowed, "{preflight_denied:?}");
+    assert!(
+        preflight_denied.reason.as_deref().is_some_and(|reason| {
+            reason.contains("zone envelope required") && reason.contains("allowed_zones")
+        }),
+        "{preflight_denied:?}"
+    );
+
+    let (_, simulate_denied): (_, HostSimulateResponse) = post_json_response(
+        &app,
+        "/rpc/simulate",
+        simulate_request(
+            &connector_id,
+            Some(valid_token),
+            "simulate-empty-zone-envelope",
+        ),
+        None,
+    )
+    .await?;
+    assert!(!simulate_denied.preflight_allowed, "{simulate_denied:?}");
+    assert!(!simulate_denied.would_succeed, "{simulate_denied:?}");
+    assert_eq!(simulate_denied.phase, SimulatePhase::PreflightOnly);
+    assert!(
+        simulate_denied
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| {
+                reason.contains("zone envelope required") && reason.contains("allowed_zones")
+            }),
+        "{simulate_denied:?}"
     );
 
     Ok(())

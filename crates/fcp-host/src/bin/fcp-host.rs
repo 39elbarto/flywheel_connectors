@@ -986,6 +986,14 @@ impl ConnectorRuntime {
         }
     }
 
+    fn static_summary(&self) -> ConnectorSummary {
+        match self {
+            Self::Native(connector) => connector.summary.clone(),
+            Self::Wasi(connector) => connector.summary.clone(),
+            Self::UnavailableNativeProxyOnly(connector) => connector.summary.clone(),
+        }
+    }
+
     async fn self_check(&self) -> HostResult<SelfCheckReport> {
         match self {
             Self::Native(connector) => connector.self_check().await,
@@ -1251,6 +1259,22 @@ impl SubprocessRegistry {
             .values()
             .map(|entry| entry.config.clone())
             .collect()
+    }
+
+    async fn zone_envelope_status(&self, connector_id: &ConnectorId) -> HostResult<()> {
+        let state = self.state.read().await;
+        let entry = state
+            .connectors
+            .get(connector_id)
+            .ok_or_else(|| HostError::ConnectorNotFound(connector_id.to_string()))?;
+        require_allowed_zones_configured(connector_id, &entry.config.allowed_zones)
+    }
+
+    async fn first_zone_envelope_error(&self) -> Option<HostError> {
+        let state = self.state.read().await;
+        state.connectors.iter().find_map(|(connector_id, entry)| {
+            require_allowed_zones_configured(connector_id, &entry.config.allowed_zones).err()
+        })
     }
 
     async fn prepare_configs(
@@ -1839,35 +1863,64 @@ impl ConnectorRegistry for SubprocessRegistry {
             let state = self.state.read().await;
             state
                 .connectors
-                .values()
-                .map(|entry| entry.connector.clone())
+                .iter()
+                .map(|(connector_id, entry)| {
+                    (
+                        entry.connector.clone(),
+                        require_allowed_zones_configured(connector_id, &entry.config.allowed_zones)
+                            .err(),
+                    )
+                })
                 .collect::<Vec<_>>()
         };
         let mut results = Vec::new();
-        for connector in connectors {
-            results.push(connector.summary_snapshot().await);
+        for (connector, zone_envelope_error) in connectors {
+            if let Some(error) = zone_envelope_error {
+                let mut summary = connector.static_summary();
+                summary.health = ConnectorHealth::unavailable(error.to_string());
+                summary.last_health_check = Some(chrono::Utc::now());
+                results.push(summary);
+            } else {
+                results.push(connector.summary_snapshot().await);
+            }
         }
         results
     }
 
     async fn get(&self, id: &ConnectorId) -> Option<ConnectorSummary> {
-        let connector = {
+        let (connector, zone_envelope_error) = {
             let state = self.state.read().await;
-            state
-                .connectors
-                .get(id)
-                .map(|entry| entry.connector.clone())
+            state.connectors.get(id).map(|entry| {
+                (
+                    entry.connector.clone(),
+                    require_allowed_zones_configured(id, &entry.config.allowed_zones).err(),
+                )
+            })
         }?;
-        Some(connector.summary_snapshot().await)
+        if let Some(error) = zone_envelope_error {
+            let mut summary = connector.static_summary();
+            summary.health = ConnectorHealth::unavailable(error.to_string());
+            summary.last_health_check = Some(chrono::Utc::now());
+            Some(summary)
+        } else {
+            Some(connector.summary_snapshot().await)
+        }
     }
 
     async fn get_introspection(&self, id: &ConnectorId) -> Option<Introspection> {
         let connector = {
             let state = self.state.read().await;
-            state
-                .connectors
-                .get(id)
-                .map(|entry| entry.connector.clone())
+            let entry = state.connectors.get(id)?;
+            if let Err(error) = require_allowed_zones_configured(id, &entry.config.allowed_zones) {
+                tracing::warn!(
+                    event = "introspection_zone_envelope_required",
+                    connector_id = %id,
+                    error = %error,
+                    "rejecting connector introspection before connector RPC"
+                );
+                return None;
+            }
+            Some(entry.connector.clone())
         }?;
         connector.introspect().await.ok()
     }
@@ -4408,15 +4461,11 @@ async fn verify_live_request(
     // from a `z:secure` request). The gateway never consulted any
     // connector-side zone declaration before this check.
     //
-    // Enforcement is opt-in: when `allowed_zones` is empty (the default for
-    // existing inventories), the gateway preserves pre-binding behavior.
-    // Operators set the list per-connector to fail-closed against
-    // unintended zones. The error path emits a distinct rejection message
-    // so receipts and logs distinguish zone-binding violations from
-    // generic preflight failures.
-    // br-v2kt4: explicit fail-closed semantics for empty allowed_zones
-    // when the operator opted in via enforce_empty_allow_lists. Default
-    // (false) preserves the back-compat permissive path.
+    // Enforcement is mandatory: an empty `allowed_zones` list means the
+    // connector has no explicit zone envelope, so host-facing RPC rejects
+    // before consulting connector self-report. The error path emits a
+    // distinct rejection message so receipts and logs distinguish missing
+    // zone-envelope inventory from generic preflight failures.
     //
     // br-l9tt6: snapshot ALL THREE allow-list fields under one registry
     // read-lock so the zone gate and the operation gate that follows
@@ -4432,16 +4481,8 @@ async fn verify_live_request(
         .await;
     if let Some(snapshot) = &allow_snapshot {
         let allowed = &snapshot.allowed_zones;
-        if allowed.is_empty() {
-            if snapshot.enforce_empty_allow_lists {
-                return Err(HostError::PreflightFailed(format!(
-                    "connector `{}` has no `allowed_zones` and is configured \
-                     enforce_empty_allow_lists=true; deny-all (br-v2kt4)",
-                    request.connector_id
-                )));
-            }
-            // empty + !enforce_empty -> back-compat permissive path
-        } else if !allowed.iter().any(|zone| zone == request.zone_id.as_str()) {
+        require_allowed_zones_configured(&request.connector_id, allowed)?;
+        if !allowed.iter().any(|zone| zone == request.zone_id.as_str()) {
             return Err(HostError::PreflightFailed(format!(
                 "connector `{}` is not bound to zone `{}` (allowed: [{}])",
                 request.connector_id,
@@ -4477,7 +4518,8 @@ async fn verify_live_request(
                     request.connector_id
                 )));
             }
-            // empty + !enforce_empty -> back-compat permissive path
+            // Empty allowed_operations with the legacy flag disabled falls
+            // through to the connector introspection operation check.
         } else if !allowed_ops
             .iter()
             .any(|op| op == request.operation.as_str())
@@ -7527,6 +7569,15 @@ async fn introspect_handler(
     Path(connector_id): Path<String>,
 ) -> Result<(HeaderMap, Json<IntrospectionResponse>), (StatusCode, String)> {
     let connector_id = parse_connector_id(&connector_id)?;
+    if let Err(error) = state.registry.zone_envelope_status(&connector_id).await {
+        tracing::warn!(
+            event = "introspect_zone_envelope_required",
+            connector_id = %connector_id,
+            error = %error,
+            "rejecting introspection before connector RPC"
+        );
+        return Err(map_host_error(error));
+    }
     let cache_validator = cache_validator_from_headers(&headers);
     let started_at = Instant::now();
     tracing::debug!(
@@ -11452,6 +11503,7 @@ fn batch_error_from_host_error(err: HostError) -> BatchOperationError {
         HostError::InvalidFilter(_) => "INVALID_REQUEST",
         HostError::RegistryError(_) => "CONNECTOR_ERROR",
         HostError::PreflightFailed(_) => "PREFLIGHT_DENIED",
+        HostError::ZoneEnvelopeRequired(_) => "ZONE_ENVELOPE_REQUIRED",
         HostError::CacheError(_) => "CACHE_ERROR",
         HostError::Unavailable(_) => "UNAVAILABLE",
         HostError::Internal(_) => "INTERNAL_ERROR",
@@ -11810,8 +11862,18 @@ async fn supply_chain_verify_handler(
     }
 }
 
-async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HostHealthResponse> {
+async fn health_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<HostHealthResponse>, (StatusCode, String)> {
     let started_at = Instant::now();
+    if let Some(error) = state.registry.first_zone_envelope_error().await {
+        tracing::warn!(
+            event = "health_zone_envelope_required",
+            error = %error,
+            "rejecting host health before connector health RPC"
+        );
+        return Err(map_host_error(error));
+    }
     let summaries = state.registry.list().await;
     let mut connectors = HashMap::with_capacity(summaries.len());
     let mut status = HostHealthStatus::Healthy;
@@ -11847,7 +11909,7 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HostHealthRe
         duration_ms = started_at.elapsed().as_millis() as u64,
         "health request complete"
     );
-    Json(response)
+    Ok(Json(response))
 }
 
 fn host_telemetry_otlp_readiness_message(status: &str) -> &'static str {
@@ -12441,13 +12503,32 @@ fn map_host_error(err: HostError) -> (StatusCode, String) {
     match err {
         HostError::ConnectorNotFound(_) => (StatusCode::NOT_FOUND, err.to_string()),
         HostError::InvalidFilter(_) => (StatusCode::BAD_REQUEST, err.to_string()),
-        HostError::PreflightFailed(_) => (StatusCode::FORBIDDEN, err.to_string()),
+        HostError::PreflightFailed(_) | HostError::ZoneEnvelopeRequired(_) => {
+            (StatusCode::FORBIDDEN, err.to_string())
+        }
         HostError::CacheError(_) | HostError::Unavailable(_) => {
             (StatusCode::SERVICE_UNAVAILABLE, err.to_string())
         }
         HostError::RegistryError(_) | HostError::Internal(_) => {
             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
         }
+    }
+}
+
+fn zone_envelope_required_error(connector_id: &ConnectorId) -> HostError {
+    HostError::ZoneEnvelopeRequired(format!(
+        "connector `{connector_id}` has no `allowed_zones`; configure at least one explicit zone before host RPC"
+    ))
+}
+
+fn require_allowed_zones_configured(
+    connector_id: &ConnectorId,
+    allowed_zones: &[String],
+) -> HostResult<()> {
+    if allowed_zones.is_empty() {
+        Err(zone_envelope_required_error(connector_id))
+    } else {
+        Ok(())
     }
 }
 
@@ -12512,7 +12593,7 @@ mod tests {
             config: Some(json!({})),
             categories: vec!["test".to_string()],
             version: None,
-            allowed_zones: Vec::new(),
+            allowed_zones: vec![ZoneId::work().as_str().to_string()],
             allowed_operations: Vec::new(),
             enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
@@ -12649,7 +12730,7 @@ deny_ptrace = true
         manifest_constraints: ManifestOperationConstraintCatalog,
     ) -> AllowListSnapshot {
         AllowListSnapshot {
-            allowed_zones: Vec::new(),
+            allowed_zones: vec![ZoneId::work().as_str().to_string()],
             allowed_operations: Vec::new(),
             enforce_operation_network_constraints: enforce,
             enforce_empty_allow_lists: false,
@@ -12961,13 +13042,59 @@ deny_ptrace = true
             config: None,
             categories: vec!["test".to_string()],
             version: None,
-            allowed_zones: Vec::new(),
+            allowed_zones: vec![ZoneId::work().as_str().to_string()],
             allowed_operations: Vec::new(),
             enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
             operation_network_constraints: BTreeMap::new(),
         }
+    }
+
+    fn zone_gate_dispatcher_state(
+        connector_id: &'static str,
+        allowed_zones: Vec<String>,
+    ) -> Arc<AppState> {
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(4);
+        let runner_task = task::spawn(async move {
+            while let Some(request) = runner_rx.recv().await {
+                match request.method.as_str() {
+                    "introspect" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": dispatcher_introspection(
+                                "test.echo",
+                                "cap.test.echo",
+                                SafetyTier::Safe,
+                            ),
+                        })));
+                    }
+                    "health" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": dispatcher_health_result(),
+                        })));
+                    }
+                    method => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": {
+                                "message": format!(
+                                    "zone gate test should not dispatch `{method}`"
+                                )
+                            },
+                        })));
+                    }
+                }
+            }
+        });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let mut config = dispatcher_test_config(connector_id);
+        config.allowed_zones = allowed_zones;
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
+        dispatcher_app_state(
+            registry,
+            Arc::new(HostAdminStateStore::new()),
+            None,
+            HashMap::new(),
+        )
     }
 
     fn runtime_network_test_constraints(
@@ -14144,7 +14271,7 @@ deny_ptrace = true
     /// br-ike8x defense-in-depth: when allowed_operations is empty
     /// (the back-compat default), the gate must fall through to the
     /// pre-existing introspection-based check. This locks in the
-    /// "empty = permissive" semantic — same shape as allowed_zones.
+    /// legacy operation-only "empty = permissive" semantic.
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
     async fn verify_live_request_empty_allowed_operations_falls_through() {
         if maybe_compiled_test_connector_binary().is_none() {
@@ -14219,28 +14346,121 @@ deny_ptrace = true
         }
     }
 
-    /// br-v2kt4: explicit fail-closed for empty allowed_zones when
-    /// the operator opts in. Pre-fix, an empty allowed_zones list was
-    /// always treated as permissive ("no restriction"), so the
-    /// security ergonomics were inverted: a misconfigured operator
-    /// got the LEAST restrictive behaviour. With
-    /// enforce_empty_allow_lists=true, an empty list now means
-    /// deny-all.
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
-    async fn verify_live_request_v2kt4_empty_allowed_zones_with_enforce_flag_denies_all() {
+    async fn test_empty_zone_set_rejects_invoke() {
+        let connector_id = "fcp.test.empty-zones-invoke:utility:1.0.0";
+        let state = zone_gate_dispatcher_state(connector_id, Vec::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: ConnectorId::from_static(connector_id),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "empty zones reject before connector RPC" }),
+            capability_token: test_capability_token(
+                &signing_key,
+                "cap.test.echo",
+                "test.echo",
+                ZoneId::work().as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let error = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("empty allowed_zones must reject invoke");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("zone envelope required") && msg.contains("allowed_zones"),
+            "expected zone-envelope rejection, got: {msg}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn test_empty_zone_set_rejects_health_check() {
+        let connector_id = "fcp.test.empty-zones-health:utility:1.0.0";
+        let state = zone_gate_dispatcher_state(connector_id, Vec::new());
+
+        let (status, message) = health_handler(State(state))
+            .await
+            .expect_err("empty allowed_zones must reject host health before connector RPC");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            message.contains("zone envelope required") && message.contains("allowed_zones"),
+            "expected zone-envelope rejection, got: {message}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn test_empty_zone_set_rejects_introspect() {
+        let connector_id = "fcp.test.empty-zones-introspect:utility:1.0.0";
+        let state = zone_gate_dispatcher_state(connector_id, Vec::new());
+
+        let (status, message) = introspect_handler(
+            State(state),
+            HeaderMap::new(),
+            Path(connector_id.to_string()),
+        )
+        .await
+        .expect_err("empty allowed_zones must reject introspection before connector RPC");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            message.contains("zone envelope required") && message.contains("allowed_zones"),
+            "expected zone-envelope rejection, got: {message}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn test_one_zone_works() {
+        let connector_id = "fcp.test.one-zone-health:utility:1.0.0";
+        let state =
+            zone_gate_dispatcher_state(connector_id, vec![ZoneId::work().as_str().to_string()]);
+
+        let response = health_handler(State(state))
+            .await
+            .expect("one explicit allowed zone should permit health")
+            .0;
+        assert_eq!(response.status, HostHealthStatus::Healthy);
+        assert!(
+            response
+                .connectors
+                .contains_key(&ConnectorId::from_static(connector_id)),
+            "health response must include configured connector"
+        );
+    }
+
+    /// angoc.2.1: empty allowed_zones is no longer a permissive
+    /// back-compat path. A connector inventory entry without an
+    /// explicit zone envelope must reject before connector self-report.
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn verify_live_request_empty_allowed_zones_requires_zone_envelope() {
         if maybe_compiled_test_connector_binary().is_none() {
-            eprintln!("compiled fcp-test-connector missing; skipping v2kt4 zone deny-all test");
+            eprintln!("compiled fcp-test-connector missing; skipping empty-zone envelope test");
             return;
         }
 
-        let connector_id = "fcp.test.v2kt4-empty-zones-deny:utility:1.0.0";
+        let connector_id = "fcp.test.empty-zones-require-envelope:utility:1.0.0";
         let lifecycle = Arc::new(HostAdminStateStore::new());
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
 
         let mut config = subprocess_test_connector_config(connector_id);
-        // Empty allowed_zones + enforce flag = deny-all.
-        assert!(config.allowed_zones.is_empty(), "test fixture starts empty");
-        config.enforce_empty_allow_lists = true;
+        config.allowed_zones.clear();
+        assert!(
+            config.allowed_zones.is_empty(),
+            "test fixture must be empty"
+        );
+        assert!(
+            !config.enforce_empty_allow_lists,
+            "zone envelope enforcement must not depend on the legacy operation flag"
+        );
 
         let tempdir = tempfile::tempdir().expect("tempdir");
         let connectors_file = tempdir.path().join("connectors.json");
@@ -14281,13 +14501,11 @@ deny_ptrace = true
 
         let error = verify_live_request(state.as_ref(), &request, None)
             .await
-            .expect_err("v2kt4: empty allowed_zones + enforce flag must deny-all");
+            .expect_err("empty allowed_zones must require an explicit zone envelope");
         let msg = error.to_string();
         assert!(
-            msg.contains("no `allowed_zones`")
-                && msg.contains("enforce_empty_allow_lists=true")
-                && msg.contains("br-v2kt4"),
-            "expected v2kt4 zone deny-all rejection naming the flag, got: {msg}"
+            msg.contains("zone envelope required") && msg.contains("no `allowed_zones`"),
+            "expected zone-envelope rejection, got: {msg}"
         );
     }
 
@@ -14361,24 +14579,23 @@ deny_ptrace = true
         );
     }
 
-    /// br-v2kt4 back-compat: with the flag at its default `false`,
-    /// empty allowed_zones / allowed_operations preserve the legacy
-    /// permissive path. Ensures the explicit-deny mechanism is opt-in
-    /// only — existing deployments that don't set the flag see no
-    /// behaviour change.
+    /// angoc.2.1: the legacy `enforce_empty_allow_lists=false`
+    /// default no longer makes empty allowed_zones permissive. The
+    /// flag still controls empty allowed_operations, but zones require
+    /// an explicit envelope unconditionally.
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
-    async fn verify_live_request_v2kt4_default_flag_preserves_legacy_permissive_path() {
+    async fn verify_live_request_default_flag_still_requires_allowed_zones() {
         if maybe_compiled_test_connector_binary().is_none() {
-            eprintln!("compiled fcp-test-connector missing; skipping v2kt4 back-compat test");
+            eprintln!("compiled fcp-test-connector missing; skipping default empty-zone test");
             return;
         }
 
-        let connector_id = "fcp.test.v2kt4-default-permissive:utility:1.0.0";
+        let connector_id = "fcp.test.default-empty-zones-required:utility:1.0.0";
         let lifecycle = Arc::new(HostAdminStateStore::new());
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
 
-        let config = subprocess_test_connector_config(connector_id);
-        // Default config: empty allow-lists, enforce_empty_allow_lists=false.
+        let mut config = subprocess_test_connector_config(connector_id);
+        config.allowed_zones.clear();
         assert!(config.allowed_zones.is_empty());
         assert!(config.allowed_operations.is_empty());
         assert!(!config.enforce_empty_allow_lists, "default must be false");
@@ -14408,7 +14625,7 @@ deny_ptrace = true
             connector_id: connector_id.parse().expect("connector id"),
             operation: OperationId::from_static("test.echo"),
             zone_id: ZoneId::work(),
-            input: json!({ "message": "v2kt4 back-compat permissive" }),
+            input: json!({ "message": "default empty zones must reject" }),
             capability_token: token,
             holder_proof: None,
             context: None,
@@ -14420,18 +14637,14 @@ deny_ptrace = true
             approval_tokens: Vec::new(),
         };
 
-        let outcome = verify_live_request(state.as_ref(), &request, None).await;
-        // Either succeeds OR fails for some OTHER reason — just must NOT
-        // fail with the v2kt4 deny-all message (the back-compat permissive
-        // path must keep flowing through to the downstream introspection
-        // check, same as pre-v2kt4 behaviour).
-        if let Err(err) = outcome {
-            let msg = err.to_string();
-            assert!(
-                !msg.contains("br-v2kt4"),
-                "v2kt4 deny-all must NOT fire when flag is at default false: {msg}"
-            );
-        }
+        let error = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("default false flag must not make empty allowed_zones permissive");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("zone envelope required") && msg.contains("allowed_zones"),
+            "expected zone-envelope rejection, got: {msg}"
+        );
     }
 
     /// br-l9tt6 (P2 review-mode): the v2kt4 fail-closed gates used to
@@ -17834,7 +18047,7 @@ deny_ptrace = true
                 config: None,
                 categories: vec!["test".to_string()],
                 version: None,
-                allowed_zones: Vec::new(),
+                allowed_zones: vec![ZoneId::work().as_str().to_string()],
                 allowed_operations: Vec::new(),
                 enforce_operation_network_constraints: false,
                 enforce_empty_allow_lists: false,
@@ -17995,7 +18208,7 @@ deny_ptrace = true
                     config: None,
                     categories: vec!["test".to_string()],
                     version: None,
-                    allowed_zones: Vec::new(),
+                    allowed_zones: vec![ZoneId::work().as_str().to_string()],
                     allowed_operations: Vec::new(),
                     enforce_operation_network_constraints: false,
                     enforce_empty_allow_lists: false,
@@ -18194,7 +18407,7 @@ deny_ptrace = true
                 config: Some(invoke_token_bucket_config(operation_id)),
                 categories: vec!["test".to_string()],
                 version: None,
-                allowed_zones: Vec::new(),
+                allowed_zones: vec![ZoneId::work().as_str().to_string()],
                 allowed_operations: Vec::new(),
                 enforce_operation_network_constraints: false,
                 enforce_empty_allow_lists: false,
@@ -18388,7 +18601,7 @@ deny_ptrace = true
                     config: None,
                     categories: vec!["test".to_string()],
                     version: None,
-                    allowed_zones: Vec::new(),
+                    allowed_zones: vec![ZoneId::work().as_str().to_string()],
                     allowed_operations: Vec::new(),
                     enforce_operation_network_constraints: false,
                     enforce_empty_allow_lists: false,
@@ -18538,7 +18751,7 @@ deny_ptrace = true
                 config: None,
                 categories: vec!["test".to_string()],
                 version: None,
-                allowed_zones: Vec::new(),
+                allowed_zones: vec![ZoneId::work().as_str().to_string()],
                 allowed_operations: Vec::new(),
                 enforce_operation_network_constraints: false,
                 enforce_empty_allow_lists: false,

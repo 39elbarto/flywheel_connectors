@@ -68,12 +68,12 @@ pub struct ManagedConnectorConfig {
     /// Optional explicit semantic version override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    /// Allowed invocation zones — when non-empty, the host gateway rejects
-    /// any `InvokeRequest` whose `zone_id` is not present here, even with
-    /// a structurally-valid capability token. Empty (the default) preserves
-    /// pre-binding behavior so existing inventories don't break, but
-    /// production deployments should pin every connector to its declared
-    /// `home/allowed_sources` set per the manifest's `[zones]` section.
+    /// Allowed invocation zones. The host gateway rejects any connector
+    /// RPC whose config leaves this list empty, and rejects any
+    /// `InvokeRequest` whose `zone_id` is not present here even with a
+    /// structurally-valid capability token. Production deployments must pin
+    /// every connector to its declared `home/allowed_sources` set per the
+    /// manifest's `[zones]` section.
     /// br-flywheel_connectors-by4vu.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_zones: Vec<String>,
@@ -98,8 +98,8 @@ pub struct ManagedConnectorConfig {
     ///
     /// Empty (the default) preserves pre-pinning behavior so
     /// existing inventories don't break. Production deployments
-    /// should pin the list per connector. Same shape as
-    /// `allowed_zones`.
+    /// should pin the list per connector. Unlike `allowed_zones`,
+    /// an empty operation list remains a legacy fall-through.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_operations: Vec<String>,
     /// Fail closed on live invokes unless `manifest_path` declares
@@ -113,19 +113,11 @@ pub struct ManagedConnectorConfig {
     /// connector manifest.
     #[serde(default, skip_serializing_if = "is_false")]
     pub enforce_operation_network_constraints: bool,
-    /// br-v2kt4: explicit fail-closed flag for empty `allowed_zones`
-    /// / `allowed_operations` lists. The pre-v2kt4 semantics treated
-    /// `Some(empty)` as "no restriction" (back-compat permissive)
-    /// — same end-state as None. That made the security ergonomics
-    /// inverted: an operator who forgot to populate either list got
-    /// the LEAST restrictive behaviour. There was no way to express
-    /// "deny everything for this connector."
-    ///
-    /// When `enforce_empty_allow_lists = true`, an empty
-    /// `allowed_zones` rejects EVERY zone and an empty
-    /// `allowed_operations` rejects EVERY operation. When the flag
-    /// is `false` (default for back-compat), empty lists preserve
-    /// the legacy permissive path.
+    /// br-v2kt4: explicit fail-closed flag for empty
+    /// `allowed_operations` lists. Empty `allowed_zones` now fail
+    /// closed unconditionally as a missing zone envelope; this flag
+    /// only controls whether an empty operation allow-list rejects
+    /// every operation or preserves the legacy operation fall-through.
     ///
     /// New deployments should set this to `true` and explicitly
     /// populate the allowlists. Existing deployments deserialize

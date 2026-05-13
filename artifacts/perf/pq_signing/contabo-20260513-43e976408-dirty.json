@@ -1,0 +1,39 @@
+{
+  "schema": "fcp.pq-signing-overhead.v1",
+  "machine_class": "contabo",
+  "artifact_path": "artifacts/perf/pq_signing/contabo-20260513-43e976408-dirty.json",
+  "git_sha": "43e976408+dirty",
+  "sample_count": 10000,
+  "verify_hybrid": {
+    "p50": 0.141456,
+    "p99": 0.15964849000000003,
+    "p999": 0.20859571800000096,
+    "mean": 0.1423169263000004,
+    "std": 0.008829877593358801,
+    "welch_t": 614.2872778827799,
+    "bootstrap_ci": [
+      0.1421528581000002,
+      0.14249313070000028
+    ],
+    "tail_amp": 2.69051834026023
+  },
+  "baseline_classical_verify": {
+    "p50": 0.049243,
+    "p99": 0.0625532,
+    "p999": 0.10774091200000017,
+    "mean": 0.049506741200000134,
+    "std": 0.012259810138892314,
+    "welch_t": 0.0,
+    "bootstrap_ci": [
+      0.049280431700000085,
+      0.049738125099999954
+    ],
+    "tail_amp": 3.3949686706435793
+  },
+  "welch_p": 0.0,
+  "bootstrap_p99_ci_ms": [
+    0.15888839999999999,
+    0.16053179000000004
+  ],
+  "verdict": "pass"
+}

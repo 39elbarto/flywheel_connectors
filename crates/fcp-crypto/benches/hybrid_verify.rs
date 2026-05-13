@@ -83,6 +83,7 @@ impl Config {
                 "--git-sha" => {
                     git_sha = Some(next_value(&mut iter, "--git-sha")?);
                 }
+                "--bench" => {}
                 "--help" | "-h" => {
                     print_usage();
                     std::process::exit(0);
@@ -150,10 +151,13 @@ fn run_benchmark(config: &Config) -> Result<Value, Box<dyn Error>> {
         )
     })?;
 
-    let baseline_pack = StatPack::with_resamples(&baseline_samples, DEFAULT_RESAMPLES);
-    let hybrid_pack = StatPack::with_resamples(&hybrid_samples, DEFAULT_RESAMPLES)
-        .with_welch_baseline(&baseline_pack);
+    let mut baseline_pack = StatPack::with_resamples(&baseline_samples, DEFAULT_RESAMPLES);
+    baseline_pack.welch_t = 0.0;
+    let mut hybrid_pack = StatPack::with_resamples(&hybrid_samples, DEFAULT_RESAMPLES);
     let comparison = hybrid_pack.compare_welch(&baseline_pack);
+    hybrid_pack.welch_t =
+        finite_welch_t(comparison.t, &hybrid_pack, &baseline_pack, config.samples);
+    let welch_p = finite_welch_p(comparison.p_value, hybrid_pack.welch_t);
     let p99_ci = bootstrap_p99_ci(&hybrid_samples, DEFAULT_RESAMPLES);
     let verdict = if hybrid_pack.p99 <= PQ_SIGNING_BUDGET_MS && p99_ci[1] <= PQ_SIGNING_BUDGET_MS {
         "pass"
@@ -169,10 +173,41 @@ fn run_benchmark(config: &Config) -> Result<Value, Box<dyn Error>> {
         "sample_count": config.samples,
         "verify_hybrid": hybrid_pack.to_json_value(),
         "baseline_classical_verify": baseline_pack.to_json_value(),
-        "welch_p": comparison.p_value,
+        "welch_p": welch_p,
         "bootstrap_p99_ci_ms": p99_ci,
         "verdict": verdict,
     }))
+}
+
+fn finite_welch_t(
+    value: f64,
+    observed: &StatPack,
+    baseline: &StatPack,
+    sample_count: usize,
+) -> f64 {
+    if value.is_finite() {
+        return value;
+    }
+
+    let sample_count = sample_count.max(1) as f64;
+    let standard_error = ((observed.std * observed.std / sample_count)
+        + (baseline.std * baseline.std / sample_count))
+        .sqrt();
+    if standard_error <= f64::EPSILON {
+        0.0
+    } else {
+        (observed.mean - baseline.mean) / standard_error
+    }
+}
+
+fn finite_welch_p(value: f64, welch_t: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else if welch_t.abs() <= f64::EPSILON {
+        1.0
+    } else {
+        0.0
+    }
 }
 
 fn warm_up(

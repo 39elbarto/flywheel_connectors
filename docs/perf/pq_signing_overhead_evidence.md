@@ -5,15 +5,30 @@ Bead: `flywheel_connectors-angoc.8.2`
 This document pins the `pq_signing` StatPack schema and the conformance gate
 for the hybrid verifier budget. The gate accepts live artifacts from
 `artifacts/perf/pq_signing/<machine-class>-<date>-<sha>.json` when present. The
-committed JSON blocks below are fixture snapshots for CI shape validation; they
-are not production deployment evidence.
+committed JSON blocks below include live evidence when available; remaining
+fixture snapshots are placeholders for machine classes that do not yet have a
+live artifact.
 
 Budget: hybrid verify p99 <= 2.0 ms for `csd`, `contabo`, and `laptop`.
+
+Live evidence status:
+
+| Machine class | Status | Evidence |
+| --- | --- | --- |
+| `contabo` | live, 2026-05-13 UTC | `artifacts/perf/pq_signing/contabo-20260513-43e976408-dirty.json`: p99 0.15964849000000003 ms, p99 CI upper 0.16053179000000004 ms, verdict `pass` |
+| `csd` | fixture fallback only | Live machine-class artifact still required before closing `flywheel_connectors-angoc.8.3`. |
+| `laptop` | fixture fallback only | Live machine-class artifact still required before closing `flywheel_connectors-angoc.8.3`. |
 
 Reproduction command:
 
 ```bash
-cargo bench -p fcp-crypto --bench hybrid_verify -- --samples 10000 --statpack-out artifacts/perf/pq_signing/<machine-class>-$(date -u +%Y%m%d)-$(git rev-parse --short HEAD).json
+env -u CARGO_TARGET_DIR RCH_REQUIRE_REMOTE=1 RCH_BUILD_TIMEOUT_SEC=2400 \
+  rch exec -- env CARGO_INCREMENTAL=0 \
+  cargo bench -j 1 -p fcp-crypto --bench hybrid_verify -- \
+    --samples 10000 \
+    --machine-class <machine-class> \
+    --git-sha "$(git rev-parse --short HEAD)" \
+    --statpack-out "artifacts/perf/pq_signing/<machine-class>-$(date -u +%Y%m%d)-$(git rev-parse --short HEAD).json"
 ```
 
 Expected live artifact shape:
@@ -92,31 +107,31 @@ Expected live artifact shape:
 {
   "schema": "fcp.pq-signing-overhead.v1",
   "machine_class": "contabo",
-  "artifact_path": "artifacts/perf/pq_signing/contabo-latest.json",
-  "git_sha": "fixture",
+  "artifact_path": "artifacts/perf/pq_signing/contabo-20260513-43e976408-dirty.json",
+  "git_sha": "43e976408+dirty",
   "sample_count": 10000,
   "verify_hybrid": {
-    "p50": 0.83,
-    "p99": 1.68,
-    "p999": 1.91,
-    "mean": 0.88,
-    "std": 0.11,
-    "welch_t": 2.74,
-    "bootstrap_ci": [0.877, 0.883],
-    "tail_amp": 0.271
+    "p50": 0.141456,
+    "p99": 0.15964849000000003,
+    "p999": 0.20859571800000096,
+    "mean": 0.1423169263000004,
+    "std": 0.008829877593358801,
+    "welch_t": 614.2872778827799,
+    "bootstrap_ci": [0.1421528581000002, 0.14249313070000028],
+    "tail_amp": 2.69051834026023
   },
   "baseline_classical_verify": {
-    "p50": 0.23,
-    "p99": 0.48,
-    "p999": 0.55,
-    "mean": 0.24,
-    "std": 0.04,
+    "p50": 0.049243,
+    "p99": 0.0625532,
+    "p999": 0.10774091200000017,
+    "mean": 0.049506741200000134,
+    "std": 0.012259810138892314,
     "welch_t": 0.0,
-    "bootstrap_ci": [0.238, 0.242],
-    "tail_amp": 0.28
+    "bootstrap_ci": [0.049280431700000085, 0.049738125099999954],
+    "tail_amp": 3.3949686706435793
   },
-  "welch_p": 0.012,
-  "bootstrap_p99_ci_ms": [1.64, 1.73],
+  "welch_p": 0.0,
+  "bootstrap_p99_ci_ms": [0.15888839999999999, 0.16053179000000004],
   "verdict": "pass"
 }
 ```
@@ -157,6 +172,6 @@ Expected live artifact shape:
 ```
 
 Closeout note: before treating this as production evidence, replace each
-fixture block with live StatPack artifacts from the named machine class and keep
-the same redaction posture: aggregate numeric fields only, no raw samples, no
-hostnames, and no user paths.
+remaining fixture block with live StatPack artifacts from the named machine
+class and keep the same redaction posture: aggregate numeric fields only, no raw
+samples, no hostnames, and no user paths.

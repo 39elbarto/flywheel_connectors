@@ -1,6 +1,6 @@
 # Stripe Connector V3 Contract
 
-> **Status**: runtime contract documented with approval, webhook, form-encoding, and manifest-hash drift
+> **Status**: runtime contract documented with approval, webhook, form-encoding, and runtime/manifest drift
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: none tracked; use the commands below
@@ -65,6 +65,7 @@ Important runtime truths the contract preserves:
 - Side-effect operations accept explicit `idempotency_key`, or derive one from top-level `operation_id` or `request_id`.
 - `stripe.ingest_webhook_event` requires the original raw payload string, `stripe_signature`, configured `webhook_signing_secret`, and optional `received_at`/`delivery_id`.
 - Webhook replay protection is process-local and keyed by Stripe `event.id`, not the optional host `delivery_id`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - `health()` is local state and metrics only.
 - `self_check()` calls `GET /balance` only in direct-secret mode and degrades in `credential_id` mode.
 - `handle_shutdown()` shuts down the client runtime but does not clear connector configuration.
@@ -73,7 +74,6 @@ Important runtime truths the contract preserves:
 
 This README documents runtime truth and keeps current drift visible:
 
-- Runtime handshake returns placeholder manifest hash `sha256:stripe-connector-v1`.
 - Runtime handshake advertises streaming/replay event caps, while introspection exposes no events and no event caps.
 - Manifest marks mutating payment/customer operations as `policy` or `interactive`, but runtime introspection sets `requires_approval = None` for every operation and invoke checks no approval token.
 - Official Stripe examples use form-style request parameters for API calls; this runtime currently sends JSON bodies for create/update/confirm/capture/cancel/refund/subscription operations.
@@ -84,7 +84,7 @@ This README documents runtime truth and keeps current drift visible:
 - Manifest says connector format is `wasi`; the current Rust crate is a normal package/bin using reqwest and the FCP runtime helpers.
 - There is no tracked verification shell script for this connector.
 
-A follow-up parity bead should replace the placeholder manifest hash, align approval metadata and runtime enforcement, decide whether JSON request bodies are an intentional Stripe facade or live API drift, reconcile idempotency behavior for DELETE paths, add pagination/search/expand support if needed, and add a tracked deterministic verification bundle.
+A follow-up parity bead should align approval metadata and runtime enforcement, decide whether JSON request bodies are an intentional Stripe facade or live API drift, reconcile idempotency behavior for DELETE paths, add pagination/search/expand support if needed, and add a tracked deterministic verification bundle.
 
 ## First-Slice Scope
 
@@ -95,7 +95,7 @@ The current Stripe README slice documents the existing runtime surface:
 - customer, payment intent, refund, subscription, invoice, balance, and webhook-ingest operations
 - bound capability-token verification and resource URI binding during both `invoke` and `simulate`
 - doctor, health, self-check, simulate, introspect, shutdown, redaction posture, and deterministic tests
-- runtime/manifest drift around approvals, event caps, form encoding, idempotency, manifest hash, and webhook persistence
+- runtime/manifest drift around approvals, event caps, form encoding, idempotency, and webhook persistence
 
 ## Auth And Zone Boundary
 

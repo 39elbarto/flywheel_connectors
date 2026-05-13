@@ -13,6 +13,7 @@ use fcp_prelude::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 use uuid::Uuid;
 
@@ -23,6 +24,7 @@ use crate::{
 };
 
 const MAX_LINEAR_WEBHOOK_SKEW_MS: u64 = 60_000;
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 /// Parsed and validated Linear connector configuration.
 #[derive(Debug, Clone)]
@@ -214,6 +216,12 @@ impl LinearConnector {
     #[must_use]
     pub fn instance_id(&self) -> &InstanceId {
         &self.base.instance_id
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
     fn record_webhook_delivery(&self, delivery_id: Uuid, webhook_timestamp: i64) -> FcpResult<()> {
@@ -440,7 +448,7 @@ impl LinearConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:linear-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -2340,6 +2348,19 @@ mod tests {
             .compute_interface_hash()
             .expect("compute interface hash");
         assert_eq!(computed, computed2);
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut expected = Sha256::new();
+        expected.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(expected.finalize()));
+
+        assert_eq!(LinearConnector::manifest_hash(), expected);
+        assert_ne!(
+            LinearConnector::manifest_hash(),
+            "sha256:linear-connector-v1"
+        );
     }
 
     // ── Sync unit tests: config, helpers ──────────────────────────

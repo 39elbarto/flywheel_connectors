@@ -3030,7 +3030,7 @@ mod tests {
         for i in 0..50 {
             reg.register_tool(
                 ZoneScopedTool::new("github", format!("op_{i}"))
-                    .with_zone(ZoneId::new(format!("z:zone_{i}"))),
+                    .with_zone(ZoneId::new(format!("z:zone-{i}"))),
             );
         }
         assert_eq!(reg.tool_count(), 50);

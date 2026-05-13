@@ -12,10 +12,13 @@ use fcp_prelude::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::client::{ZendeskAuth, ZendeskClient};
 use crate::error::ZendeskError;
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 // ── Provisioning configuration ───────────────────────────────────────
 
@@ -145,6 +148,13 @@ impl ZendeskConnector {
         }
     }
 
+    #[must_use]
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure method.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
@@ -210,7 +220,7 @@ impl ZendeskConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:zendesk-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -1285,6 +1295,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["status"], "accepted");
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(ZendeskConnector::manifest_hash(), expected);
+        assert_ne!(
+            ZendeskConnector::manifest_hash(),
+            "sha256:zendesk-connector-v1"
+        );
     }
 
     #[fcp_async_core::runtime::test]

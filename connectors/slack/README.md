@@ -36,7 +36,7 @@ Important runtime truths the contract preserves:
 - Runtime `BaseConnector` ID is `slack`.
 - Manifest connector ID is `fcp.slack`.
 - Manifest interface hash is `blake3-256:fcp.interface.v2:465bcd3768e237219ee05f9bfeb616589fd0ba695399a70fdb3c27f85de231ff`.
-- Runtime handshake returns `manifest_hash = "sha256:slack-connector-v1"`, not the manifest interface hash.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`, not the manifest interface hash.
 - Configuration requires a nonblank `token`.
 - Optional `app_token` is used for Socket Mode when present.
 - If `app_token` is omitted, Socket Mode uses the bot token as a fallback.

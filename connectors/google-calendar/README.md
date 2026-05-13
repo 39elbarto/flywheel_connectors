@@ -53,7 +53,7 @@ Important runtime truths the contract preserves:
 This README documents the runtime truth and keeps current drift visible:
 
 - Runtime `BaseConnector` ID is `google-calendar`, while the manifest connector ID is `fcp.google-calendar`.
-- Runtime handshake returns placeholder manifest hash `sha256:google-calendar-connector-v1`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Manifest `event_caps.streaming = true`, but runtime handshake reports `streaming = false`, runtime introspection has no events, and no watch/channel flow is implemented.
 - Runtime `simulate` returns allowed for any syntactically valid `SimulateRequest`; it does not validate operation inventory, readiness, input schema, capability, or capability token.
 - Manifest `gcal.create_event` declares `start` and `end` as objects, while runtime requires RFC3339 strings and wraps them as `EventDateTime.dateTime`.
@@ -62,7 +62,7 @@ This README documents the runtime truth and keeps current drift visible:
 - Runtime `handle_shutdown` shuts down the client runtime but does not clear config, client, verifier, session, or configured/handshaken flags.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should align simulation, manifest/runtime event capability, start/end schemas, update semantics, output schemas, manifest hash/interface proof, and shutdown state reset.
+A follow-up parity bead should align simulation, manifest/runtime event capability, start/end schemas, update semantics, output schemas, interface proof, and shutdown state reset.
 
 ## First-Slice Scope
 

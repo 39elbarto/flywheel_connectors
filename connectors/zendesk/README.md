@@ -52,7 +52,7 @@ Important runtime truths the contract preserves:
 - Runtime reqwest timeout is `30 seconds`.
 - Runtime request context timeout is `30 seconds`.
 - Runtime retry policy uses `max_retries = 2`.
-- Runtime handshake returns placeholder manifest hash `sha256:zendesk-connector-v1`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Runtime handshake advertises streaming capability, replay disabled, minimum buffer events `50`, and ack not required.
 - Runtime verifies a bound capability token before provider dispatch.
 - Runtime `invoke` uses `operation`, not `operation_id`.
@@ -64,7 +64,6 @@ Important runtime truths the contract preserves:
 
 This README documents runtime truth and keeps current drift visible:
 
-- Runtime handshake uses a placeholder manifest hash.
 - Manifest and introspection mark write/delete operations with policy or interactive approval metadata, but connector-local invoke enforcement is capability-token based rather than an approval workflow.
 - Manifest declares a streaming archetype and runtime handshake advertises streaming event caps, but this connector exposes no inbound webhook/event stream, cursor, replay, or durable event buffer in the current implementation.
 - `zendesk.apply_macro` calls `GET /tickets/{ticket_id}/macros/{macro_id}/apply.json`, which matches Zendesk's "show changes" style response more than an actual ticket mutation. The current method name says "apply", so operators must not assume it has persisted changes unless verified against live provider behavior.
@@ -72,7 +71,7 @@ This README documents runtime truth and keeps current drift visible:
 - The current runtime does not implement OAuth access tokens even though Zendesk documents OAuth as the recommended distribution path for multi-customer apps.
 - There is no tracked connector verification shell script yet.
 
-A follow-up parity bead should add a tracked verification bundle, replace the placeholder manifest hash, reconcile streaming/event claims, decide whether macro preview should be renamed or followed by an explicit update operation, document delete semantics with live Zendesk evidence, and make approval enforcement responsibilities explicit.
+A follow-up parity bead should add a tracked verification bundle, reconcile streaming/event claims, decide whether macro preview should be renamed or followed by an explicit update operation, document delete semantics with live Zendesk evidence, and make approval enforcement responsibilities explicit.
 
 ## First-Slice Scope
 
@@ -83,7 +82,7 @@ The current Zendesk README slice documents the existing runtime surface:
 - ticket CRUD, ticket search, ticket comments, Help Center article search/read, user search, macro changes, SLA, ticket metrics, and satisfaction rating operations
 - bound capability-token verification and operation capability mapping during `invoke`
 - doctor, health, self-check, simulate, introspect, shutdown, redaction posture, and deterministic tests
-- runtime/manifest drift around streaming claims, approvals, macro semantics, delete semantics, OAuth support, and placeholder manifest hash
+- runtime/manifest drift around streaming claims, approvals, macro semantics, delete semantics, and OAuth support
 
 ## Auth And Zone Boundary
 

@@ -14,6 +14,7 @@ use fcp_prelude::{
 };
 use futures_util::StreamExt as _;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::client::{
@@ -25,6 +26,7 @@ use crate::types::chat_request_from_value;
 
 pub const CONNECTOR_ID: &str = "fcp.cerebras";
 pub const CONNECTOR_VERSION: &str = "0.1.0";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 const OP_CHAT: &str = "cerebras.chat.completions";
 const OP_CHAT_STREAM: &str = "cerebras.chat.completions_stream";
@@ -153,6 +155,12 @@ impl CerebrasConnector {
         &self.base.instance_id
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
         let config = CerebrasConfig::from_params(&params)?;
         let client = config.build_client();
@@ -202,7 +210,7 @@ impl CerebrasConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:cerebras-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -852,5 +860,23 @@ pub fn test_handshake_request(
         host: None,
         transport_caps: None,
         requested_instance_id: Some(InstanceId::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(CerebrasConnector::manifest_hash(), expected);
+        assert_ne!(
+            CerebrasConnector::manifest_hash(),
+            "sha256:cerebras-connector-v1"
+        );
     }
 }

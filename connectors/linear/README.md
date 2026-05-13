@@ -51,7 +51,7 @@ Important runtime truths the contract preserves:
 - `self_check` performs the live viewer query only for direct-auth mode; credential-id mode reports `credential_injection_required`.
 - `health` reports only local client configuration and request metrics, not live provider reachability.
 - `doctor` checks configuration, client initialization, API URL, auth mode, a string-based host policy, and credential-injection status.
-- `handshake` constructs a `CapabilityVerifier`, records a new session, grants requested capabilities back, and returns placeholder manifest hash `sha256:linear-connector-v1`.
+- `handshake` constructs a `CapabilityVerifier`, records a new session, grants requested capabilities back, and returns a SHA-256 hash of the bundled `manifest.toml`.
 - `invoke` expects `operation`, `input`, and `capability_token`.
 - `invoke` verifies a bound FCP capability token against the operation capability and operation-specific resource URIs before dispatching.
 - `simulate` deserializes `SimulateRequest` and returns allowed without checking operation ID, configured state, handshake state, capability tokens, or approval policy.
@@ -64,7 +64,6 @@ This README documents runtime truth and keeps current drift visible:
 - Linear's current GraphQL docs distinguish OAuth bearer tokens from personal API keys. OAuth tokens are passed as `Authorization: Bearer <ACCESS_TOKEN>`, while personal API keys are documented as `Authorization: <API_KEY>`. Runtime direct `api_key` mode always sends a bearer header.
 - Linear OAuth apps were migrated to refresh-token behavior on April 1, 2026, and access tokens are short-lived. Runtime does not implement OAuth, token refresh, revocation, migration, client credentials, PKCE, or actor authorization.
 - Runtime `BaseConnector` ID is `linear`, while the manifest connector ID is `fcp.linear`.
-- Runtime handshake returns placeholder manifest hash `sha256:linear-connector-v1` instead of a manifest-content hash.
 - Runtime `simulate` is permissive and does not mirror invoke's capability-token verification.
 - Runtime operation metadata sets `requires_approval = None` in introspection, while the manifest marks create, update, and comment creation as policy-gated.
 - Manifest rate-limit operation pools map `linear.process_webhook` to `linear.read`, while runtime introspection and token verification use `linear.process_webhook`.
@@ -75,7 +74,7 @@ This README documents runtime truth and keeps current drift visible:
 - Runtime `health` can report healthy for a configured client before handshake and without a live provider check.
 - Runtime shutdown does not reset lifecycle state.
 
-A follow-up parity bead should decide whether direct auth is an OAuth token or a personal API key, align the header accordingly, implement or explicitly exclude OAuth refresh behavior, replace the placeholder manifest hash, make simulation deny by the same policy family as invoke, align approval metadata, map `linear.process_webhook` to its own rate-limit pool, and tighten credential-id endpoint policy.
+A follow-up parity bead should decide whether direct auth is an OAuth token or a personal API key, align the header accordingly, implement or explicitly exclude OAuth refresh behavior, make simulation deny by the same policy family as invoke, align approval metadata, map `linear.process_webhook` to its own rate-limit pool, and tighten credential-id endpoint policy.
 
 ## First-Slice Scope
 

@@ -51,6 +51,7 @@ Important runtime truths the contract preserves:
 - Rerank input requires a query plus 1 to 512 passages, trims text, rejects empty text, rejects text longer than 9,728 bytes, accepts `truncate` values `START`, `END`, and `NONE`, and accepts image fields only as bounded `data:image/...` URLs.
 - `nvidia_nim.models.list` uses `GET /v1/models` and supports `{"refresh": true}` to invalidate the in-memory cache.
 - FCP subscribe is not implemented; streaming is exposed as the bounded invoke operation `nvidia_nim.chat.completions_stream`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 

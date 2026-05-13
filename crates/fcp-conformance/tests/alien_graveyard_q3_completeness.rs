@@ -127,9 +127,9 @@ fn test_top5_bucket_set_matches_score_pipeline() {
     let lower = content.to_lowercase();
     // Look for the commitment block under the "Top-5 commitment" header.
     let header = "## top-5 commitment";
-    let start = lower.find(header).unwrap_or_else(|| {
-        panic!("artifact must contain a `## Top-5 commitment` section")
-    });
+    let start = lower
+        .find(header)
+        .unwrap_or_else(|| panic!("artifact must contain a `## Top-5 commitment` section"));
     // Bound the search to JUST the Top-5 commitment section: from the header
     // line to the next top-level `## ` header. Without this bound, a future
     // edit that demotes (say) Q.G to the Q4-deferred section would still
@@ -164,9 +164,9 @@ fn test_top5_bucket_set_matches_score_pipeline() {
     // For each expected Top-5 bucket, verify it appears on the SAME LINE as
     // a `**Top-5 (Q3)**` annotation in the ranked-table region.
     for bucket in &expected_top5 {
-        let found_on_top5_row = pre_section.lines().any(|line| {
-            line.contains(&format!("**{bucket}**")) && line.contains("**Top-5 (Q3)**")
-        });
+        let found_on_top5_row = pre_section
+            .lines()
+            .any(|line| line.contains(&format!("**{bucket}**")) && line.contains("**Top-5 (Q3)**"));
         assert!(
             found_on_top5_row,
             "ranked-table has no row with both `**{bucket}**` and `**Top-5 (Q3)**`; \

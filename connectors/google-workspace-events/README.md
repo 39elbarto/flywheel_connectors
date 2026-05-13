@@ -52,7 +52,7 @@ Important runtime truths the contract preserves:
 This README documents the runtime truth and keeps current drift visible:
 
 - Manifest connector ID is `fcp.workspace-events`, while runtime `BaseConnector` ID is `google-workspace-events`.
-- Runtime handshake returns placeholder manifest hash `sha256:google-workspace-events-connector-v1`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Handshake grants every requested capability instead of filtering to the manifest/runtime capability set.
 - Runtime `handle_invoke` does not parse or verify capability tokens for any operation.
 - Runtime `handle_invoke` does not enforce approval tokens, even though the manifest marks create/reactivate/delete operations as requiring policy or interactive approval.
@@ -61,7 +61,7 @@ This README documents the runtime truth and keeps current drift visible:
 - `handle_shutdown` clears the client but does not reset verifier, session ID, configured flag, or handshaken flag.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should enforce bound capability tokens and approval tokens in invoke, filter handshake grants, align connector IDs and manifest hash, make simulation policy-aware, and decide whether event caps should describe Pub/Sub pull/ack or a future subscribe API.
+A follow-up parity bead should enforce bound capability tokens and approval tokens in invoke, filter handshake grants, align connector IDs, make simulation policy-aware, and decide whether event caps should describe Pub/Sub pull/ack or a future subscribe API.
 
 ## First-Slice Scope
 

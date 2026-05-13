@@ -1427,7 +1427,12 @@ pub fn verify_hybrid_signed_fcps_frame(
     max_datagram_bytes: usize,
 ) -> Result<FcpsFrame, CryptoError> {
     verify_signable_with_policy(envelope, policy, Some(classical_key), Some(pq_key))?;
-    envelope.payload.decode_frame(max_datagram_bytes)
+    envelope
+        .payload
+        .decode_frame(max_datagram_bytes)
+        .map_err(|err| {
+            CryptoError::SerializationError(format!("invalid hybrid signed FCPS frame: {err}"))
+        })
 }
 
 #[cfg(test)]

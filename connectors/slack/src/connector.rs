@@ -24,6 +24,7 @@ use fcp_sdk::{
 use fcp_streaming::{WsClient, WsConnection, WsMessage};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument, warn};
 use url::Url;
 
@@ -50,6 +51,7 @@ const SLACK_PROGRESS_DETAIL_MAX_CHARS: usize = 48;
 const SLACK_PROGRESS_DRAFT_MIN_THROTTLE_MS: u64 = 250;
 const SLACK_EVENTS_API_OPERATION: &str = "slack.handle_events_api";
 const SLACK_EVENTS_API_VERIFIED_SIGNATURE_RESULT: &str = "verified";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 fn is_local_test_host(host: &str) -> bool {
     (cfg!(test) || cfg!(debug_assertions)) && matches!(host, "localhost" | "127.0.0.1" | "::1")
@@ -316,6 +318,13 @@ impl SlackConnector {
         self.base.instance_id.as_str()
     }
 
+    #[must_use]
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure method.
     ///
     /// # Errors
@@ -433,7 +442,7 @@ impl SlackConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:slack-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -3875,6 +3884,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(result["status"], "accepted");
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(SlackConnector::manifest_hash(), expected);
+        assert_ne!(SlackConnector::manifest_hash(), "sha256:slack-connector-v1");
     }
 
     #[fcp_async_core::runtime::test]

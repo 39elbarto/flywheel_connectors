@@ -10,9 +10,12 @@ use fcp_prelude::{
 };
 use reqwest::Url;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::client::SheetsClient;
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 fn is_local_test_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
@@ -124,6 +127,12 @@ impl SheetsConnector {
         }
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     pub async fn handle_configure(
         &mut self,
         params: serde_json::Value,
@@ -210,7 +219,7 @@ impl SheetsConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:google-sheets-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -892,5 +901,18 @@ mod tests {
     fn default_creates_new() {
         let connector = SheetsConnector::default();
         assert!(connector.client.is_none());
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut expected = Sha256::new();
+        expected.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(expected.finalize()));
+
+        assert_eq!(SheetsConnector::manifest_hash(), expected);
+        assert_ne!(
+            SheetsConnector::manifest_hash(),
+            "sha256:google-sheets-connector-v1"
+        );
     }
 }

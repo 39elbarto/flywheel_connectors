@@ -46,6 +46,7 @@ Important runtime truths the contract preserves:
 - `ollama.models.list` uses `GET /v1/models` and supports `{"refresh": true}` to invalidate the in-memory cache.
 - FCP subscribe is not implemented; streaming is exposed as the bounded invoke operation `ollama.chat.completions_stream`.
 - The connector never calls `/api/pull`, `/api/tags`, `/api/generate`, `/api/chat`, or any other Ollama-native endpoint.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 

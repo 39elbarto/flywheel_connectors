@@ -324,6 +324,7 @@ fcp-evidence = { workspace = true }
 fcp-crypto = { workspace = true, features = ["test-utils"] }
 fcp-telemetry = { workspace = true }
 pretty_assertions = { workspace = true }
+proptest = { workspace = true }
 reqwest = { workspace = true }
 fcp-manifest = { workspace = true }
 futures-util = { workspace = true }

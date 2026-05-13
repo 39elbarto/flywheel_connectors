@@ -25,6 +25,8 @@ Connector-local managed identity acquisition is intentionally rejected with stru
 
 All invoke paths require a bound FCP capability token after handshake. The connector verifies the token zone, target instance, operation, capability, and resource constraints before any provider request is built, so a wrong-zone or wrong-instance grant is denied without contacting Azure.
 
+Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
+
 ## Speech-to-text REST Status
 
 `flywheel_connectors-4kw5f.2.9.6.1.3` covers the current `2025-10-15` REST paths that are explicit in Microsoft Learn: fast transcription via `/speechtotext/transcriptions:transcribe` and batch transcription submit/status/files via `/speechtotext/transcriptions:submit` plus the transcription resource and files links returned by that API. Batch input accepts storage URLs or a Blob container URL; runtime output redacts provider URLs and SAS-bearing file links into hashes/descriptors. Batch submit also accepts validated custom `project`, `dataset`, and `model` references, including ergonomic `*_id` and `*_url` inputs. These references are pinned to the configured Speech-to-text host and `api-version=2025-10-15`; retired v3.x URLs and cross-region hosts are rejected before provider egress.

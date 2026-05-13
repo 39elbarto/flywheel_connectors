@@ -1,4 +1,4 @@
-//! Pin the full 31-variant Display surface of [`CryptoError`].
+//! Pin the full 33-variant Display surface of [`CryptoError`].
 //!
 //! The inline `mod tests` block at `crates/fcp-crypto/src/error.rs:138`
 //! has 18-variant exhaustion lists that pre-date the COSE-era additions:
@@ -48,6 +48,14 @@ fn core_crypto_error_display_matrix() -> Vec<CryptoErrorDisplayCase> {
         (
             CryptoError::SignatureVerificationFailed,
             "signature verification failed",
+        ),
+        (
+            CryptoError::ClassicalSignatureMissing,
+            "classical Ed25519 signature missing",
+        ),
+        (
+            CryptoError::PqSignatureMissing,
+            "post-quantum signature missing",
         ),
         (
             CryptoError::InvalidKeyId(String::from("bad hex")),
@@ -191,8 +199,8 @@ fn crypto_error_full_variant_matrix_pins_display_per_variant() {
     let matrix = variant_display_matrix();
     assert_eq!(
         matrix.len(),
-        31,
-        "CryptoError variant matrix length drift: expected 31, got {}",
+        33,
+        "CryptoError variant matrix length drift: expected 33, got {}",
         matrix.len()
     );
     for (variant, expected) in &matrix {
@@ -213,6 +221,8 @@ fn crypto_error_exhaustive_match_sentinel() {
         CryptoError::InvalidKeyLength { .. }
         | CryptoError::InvalidSignatureLength { .. }
         | CryptoError::SignatureVerificationFailed
+        | CryptoError::ClassicalSignatureMissing
+        | CryptoError::PqSignatureMissing
         | CryptoError::InvalidKeyId(_)
         | CryptoError::AeadEncryptFailed
         | CryptoError::AeadDecryptFailed

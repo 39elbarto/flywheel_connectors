@@ -39,6 +39,7 @@ Important runtime truths the contract preserves:
 - `groq.models.list` uses the shared OpenAI-compatible model cache and supports `{"refresh": true}` to invalidate it.
 - `groq.completions.legacy` is available only for old prompt-completion callers; new work should use chat completions.
 - FCP subscribe is not implemented; streaming is exposed as the bounded invoke operation `groq.chat.completions_stream`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 

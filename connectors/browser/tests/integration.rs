@@ -89,21 +89,21 @@ fn generate_execution_approval(
 /// Generate a valid execution-scope approval token for a method pattern.
 fn generate_execution_approval_with_pattern(method_pattern: &str) -> fcp_core::ApprovalToken {
     let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
-    fcp_core::ApprovalToken {
-        token_id: format!("approval-{method_pattern}-{now_ms}"),
-        issued_at_ms: now_ms.saturating_sub(1_000),
-        expires_at_ms: now_ms + 300_000,
-        issuer: "owner:test".into(),
-        scope: fcp_core::ApprovalScope::Execution(fcp_core::ExecutionScope {
+    fcp_core::ApprovalToken::approved(
+        format!("approval-{method_pattern}-{now_ms}"),
+        now_ms.saturating_sub(1_000),
+        now_ms + 300_000,
+        "owner:test",
+        fcp_core::ApprovalScope::Execution(fcp_core::ExecutionScope {
             connector_id: "fcp.browser".into(),
             method_pattern: method_pattern.into(),
             request_object_id: None,
             input_hash: None,
             input_constraints: vec![],
         }),
-        zone_id: fcp_core::ZoneId::work(),
-        signature: None,
-    }
+        fcp_core::ZoneId::work(),
+        None,
+    )
 }
 
 /// Perform handshake on a connector, returning the signing key for token generation.

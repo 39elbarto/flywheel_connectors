@@ -972,7 +972,7 @@ impl DeclassificationError {
 /// Declassify provenance using an approved token.
 ///
 /// A pending approval cannot be passed to this function: the compiler requires
-/// `ApprovalToken<Approved>`, and trybuild fixtures pin that boundary.
+/// `&ApprovalToken<Approved>`, and trybuild fixtures pin that boundary.
 ///
 /// # Errors
 ///
@@ -980,7 +980,7 @@ impl DeclassificationError {
 /// requested flow. Every error variant carries the redaction-safe audit event
 /// that must be appended by the caller.
 pub fn declassify(
-    approval: ApprovalToken<Approved>,
+    approval: &ApprovalToken<Approved>,
     provenance: &mut ProvenanceRecord,
     object_id: ObjectId,
     target_confidentiality: ConfidentialityLevel,
@@ -2377,6 +2377,7 @@ mod tests {
             }),
             zone_id: ZoneId::work(),
             signature: None,
+            _state: PhantomData::<Approved>,
         };
 
         assert!(token.is_not_yet_valid(500));
@@ -2687,6 +2688,7 @@ mod tests {
             }),
             zone_id: ZoneId::work(),
             signature: None,
+            _state: PhantomData::<Approved>,
         };
 
         // Token is expired at current time 5000ms
@@ -2725,6 +2727,7 @@ mod tests {
             }),
             zone_id: ZoneId::work(),
             signature: None,
+            _state: PhantomData::<Approved>,
         };
 
         // Token is not yet valid at current time 1000ms
@@ -3111,6 +3114,7 @@ mod tests {
             }),
             zone_id: ZoneId::work(),
             signature: None,
+            _state: PhantomData::<Approved>,
         };
 
         // Before valid: t=500
@@ -3719,6 +3723,7 @@ mod tests {
             scope: ApprovalScope::Execution(scope),
             zone_id: ZoneId::work(),
             signature: None,
+            _state: PhantomData::<Approved>,
         };
 
         // Roundtrip through JSON
@@ -3766,6 +3771,7 @@ mod tests {
             }),
             zone_id: ZoneId::work(),
             signature: None,
+            _state: PhantomData::<Approved>,
         };
 
         assert_eq!(token.zone_id, ZoneId::work());
@@ -3832,6 +3838,7 @@ mod tests {
             }),
             zone_id: ZoneId::work(),
             signature: None,
+            _state: PhantomData::<Approved>,
         };
 
         // Extract and validate scope
@@ -3883,6 +3890,7 @@ mod tests {
             }),
             zone_id: ZoneId::private(),
             signature: None,
+            _state: PhantomData::<Approved>,
         };
 
         // Extract and validate scope
@@ -3938,6 +3946,7 @@ mod tests {
             }),
             zone_id: ZoneId::work(),
             signature: None,
+            _state: PhantomData::<Approved>,
         };
 
         assert!(
@@ -3984,6 +3993,7 @@ mod tests {
             }),
             zone_id: ZoneId::private(),
             signature: None,
+            _state: PhantomData::<Approved>,
         };
 
         assert!(
@@ -4032,6 +4042,7 @@ mod tests {
             }),
             zone_id: ZoneId::work(),
             signature: None,
+            _state: PhantomData::<Approved>,
         };
 
         let signed_token = ApprovalToken {
@@ -4046,6 +4057,7 @@ mod tests {
             }),
             zone_id: ZoneId::work(),
             signature: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]), // Mock signature
+            _state: PhantomData::<Approved>,
         };
 
         // Unsigned token has no signature
@@ -4082,6 +4094,7 @@ mod tests {
             }),
             zone_id: ZoneId::work(),
             signature: None,
+            _state: PhantomData::<Approved>,
         };
 
         // Before issued_at: not yet valid
@@ -4133,6 +4146,7 @@ mod tests {
             }),
             zone_id: ZoneId::work(),
             signature: None,
+            _state: PhantomData::<Approved>,
         };
 
         // At issuance time: expires_at == issued_at, so is_expired(1000) = (1000 >= 1000) = true
@@ -5418,6 +5432,7 @@ mod tests {
             }),
             zone_id: ZoneId::work(),
             signature: None,
+            _state: PhantomData::<Approved>,
         };
         let json = serde_json::to_string(&at).unwrap();
         let back: ApprovalToken = serde_json::from_str(&json).unwrap();
@@ -5443,6 +5458,7 @@ mod tests {
             }),
             zone_id: ZoneId::owner(),
             signature: Some(vec![0u8; 64]),
+            _state: PhantomData::<Approved>,
         };
         let cloned = Clone::clone(&at);
         assert_eq!(cloned.token_id, "at-2");

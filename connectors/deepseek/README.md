@@ -36,6 +36,7 @@ Important runtime truths the contract preserves:
 - Non-streaming chat returns `reasoning_content` separately from `content` when the provider includes it.
 - SSE chat streaming assembles `reasoning_content` and final `content` separately and records only delta byte counts in chunk metadata.
 - FCP subscribe is not implemented; streaming is a bounded invoke operation.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 

@@ -3,11 +3,11 @@ error[E0308]: mismatched types
   |
 8 |     let _ = fcp_core::declassify(
   |             -------------------- arguments to this function are incorrect
-9 |         pending,
-  |         ^^^^^^^ expected `ApprovalToken`, found `ApprovalToken<Pending>`
+9 |         &pending,
+  |         ^^^^^^^^ expected `&ApprovalToken`, found `&ApprovalToken<Pending>`
   |
-  = note: expected struct `ApprovalToken<fcp_core::Approved>`
-             found struct `ApprovalToken<fcp_core::Pending>`
+  = note: expected reference `&ApprovalToken<fcp_core::Approved>`
+             found reference `&ApprovalToken<fcp_core::Pending>`
 note: function defined here
  --> src/provenance.rs
   |

@@ -50,13 +50,13 @@ Important runtime truths the contract preserves:
 This README documents the runtime truth and keeps current drift visible:
 
 - Manifest connector ID is `fcp.google_docs`, while runtime `BaseConnector` ID is `google-docs`.
-- Runtime handshake returns placeholder manifest hash `sha256:google-docs-connector-v1`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Manifest `interface_hash` is `blake3-256:fcp.interface.v2:google_docs_v1`, which is a named placeholder-style string rather than a concrete digest.
 - Runtime `handle_shutdown` shuts down the client runtime and sets `client = None`, but it leaves verifier, session, and other lifecycle state in place.
 - `doctor()` and `self_check()` report configured/local readiness only, not provider reachability or credential validity.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should align connector ID spelling, replace placeholder manifest/interface proofs, add provider-backed readiness when desired, reset lifecycle state consistently on shutdown, and decide whether Docs-specific Drive export, placement, permission, comment, or suggestion surfaces belong in this connector.
+A follow-up parity bead should align connector ID spelling, replace placeholder interface proof, add provider-backed readiness when desired, reset lifecycle state consistently on shutdown, and decide whether Docs-specific Drive export, placement, permission, comment, or suggestion surfaces belong in this connector.
 
 ## First-Slice Scope
 

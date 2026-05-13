@@ -11,6 +11,7 @@ use fcp_prelude::{
 };
 use reqwest::Url;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 fn is_local_test_host(host: &str) -> bool {
@@ -161,6 +162,8 @@ use crate::{
     types::{DoctorCheck, DoctorReport},
 };
 
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
 /// FCP Google Drive Connector.
 pub struct DriveConnector {
     base: Arc<BaseConnector>,
@@ -178,6 +181,13 @@ impl DriveConnector {
             verifier: None,
             session_id: None,
         }
+    }
+
+    #[must_use]
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
     #[instrument(skip(self, params))]
@@ -270,7 +280,7 @@ impl DriveConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:google-drive-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -1015,6 +1025,19 @@ mod tests {
             }))
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(DriveConnector::manifest_hash(), expected);
+        assert_ne!(
+            DriveConnector::manifest_hash(),
+            "sha256:google-drive-connector-v1"
+        );
     }
 
     #[test]

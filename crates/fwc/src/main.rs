@@ -1547,6 +1547,10 @@ struct HealthArgs {
 
 #[derive(Args, Debug, Serialize)]
 struct DoctorArgs {
+    /// Local doctor check to run without a live host.
+    #[arg(value_enum, value_name = "CHECK")]
+    check: Option<DoctorLocalCheck>,
+
     /// Zone to diagnose.
     #[arg(long, short = 'z')]
     zone: Option<String>,
@@ -1588,6 +1592,13 @@ struct DoctorSelfTestArgs {
         default_value = "crates/fwc/fixtures/healthy_env"
     )]
     fixture: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+enum DoctorLocalCheck {
+    /// Verify the Lean formal-proof gate and local proof artifacts.
+    Lean,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -11720,6 +11731,10 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
 }
 
 fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+    if matches!(args.check, Some(DoctorLocalCheck::Lean)) {
+        return doctor_lean_dispatch();
+    }
+
     if let Some(command) = &args.command {
         return doctor_subcommand_dispatch(command);
     }
@@ -11731,12 +11746,13 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
                 "command": "doctor",
                 "error": {
                     "type": "missing-zone",
-                    "message": "`fwc doctor` requires `--zone` unless a doctor subcommand such as `self-test` is used.",
+                    "message": "`fwc doctor` requires `--zone` unless a local check or doctor subcommand such as `self-test` is used.",
                     "recoverable": true,
                 },
                 "details": serde_json::to_value(args)?,
                 "next_actions": [
                     "fwc doctor --zone z:work --host <endpoint>",
+                    "fwc doctor lean",
                     "fwc doctor self-test --fixture crates/fwc/fixtures/healthy_env",
                 ],
             }),
@@ -11936,6 +11952,34 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
+    })
+}
+
+fn doctor_lean_dispatch() -> Result<DispatchOutcome> {
+    let root = readiness::workspace_root();
+    let report = doctor::lean_doctor_report(&root, true, true);
+    let status = if report.healthy { "ok" } else { "degraded" };
+    let exit_code = if report.healthy {
+        CliExitCode::Success
+    } else {
+        CliExitCode::Validation
+    };
+
+    Ok(DispatchOutcome {
+        payload: json!({
+            "status": status,
+            "command": "doctor",
+            "check": "lean",
+            "source": "local-workspace",
+            "message": if report.healthy {
+                "Lean formal-proof gate is healthy."
+            } else {
+                "Lean formal-proof gate has missing or failing evidence."
+            },
+            "workspace_root": root.display().to_string(),
+            "report": report,
+        }),
+        exit_code,
     })
 }
 
@@ -27928,18 +27972,18 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
-        ApprovalMode, Cli, CliExitCode, Commands, ConnectorManifest, HostConnectorCatalog,
-        LiveAuthArgs, LiveTruthKnowledgeState, LiveTruthResolverBranch, MetadataField,
-        PACKAGE_OUTPUT_FILENAME, PackageBuildMetadata, PackageOutput, PrepareCliError,
-        ResolvedHostConfig, ResolvedHostOperation, catalog, execute, host_discovered_connector,
-        host_discovered_operation, host_mcp_tool_definitions, host_tool_summary_entry,
-        host_tool_when_to_use, live_pipeline_operation_metadata, mcp_tool_invoke_args,
-        normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
+        ApprovalMode, Cli, CliExitCode, Commands, ConnectorManifest, DoctorLocalCheck,
+        HostConnectorCatalog, LiveAuthArgs, LiveTruthKnowledgeState, LiveTruthResolverBranch,
+        MetadataField, PACKAGE_OUTPUT_FILENAME, PackageBuildMetadata, PackageOutput,
+        PrepareCliError, ResolvedHostConfig, ResolvedHostOperation, catalog, execute,
+        host_discovered_connector, host_discovered_operation, host_mcp_tool_definitions,
+        host_tool_summary_entry, host_tool_when_to_use, live_pipeline_operation_metadata,
+        mcp_tool_invoke_args, normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
         resolve_install_activation_truth, resolve_mesh_live_truth, serve_mcp,
         try_host_mcp_tool_definitions, try_host_tool_operation_info, validate_registry_binary_name,
     };
     use chrono::{Duration as ChronoDuration, Utc};
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
     use fcp_crypto::Ed25519SigningKey;
     use fcp_host::{
         BudgetReportResponse as HostBudgetReportResponse,
@@ -32436,6 +32480,18 @@ deny_ptrace = true
         assert_live_host_admin_contract(&payload, "zone-diagnostics", false, "doctor-report");
         assert_eq!(payload["report"]["zone_id"], "z:work");
         assert_eq!(payload["summary"]["overall_status"], "OK");
+    }
+
+    #[test]
+    fn doctor_lean_parses_without_live_zone() {
+        let cli = Cli::try_parse_from(["fwc", "--json", "doctor", "lean"])
+            .expect("doctor lean should parse without --zone");
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(matches!(args.check, Some(DoctorLocalCheck::Lean)));
+        assert!(args.zone.is_none());
     }
 
     #[test]

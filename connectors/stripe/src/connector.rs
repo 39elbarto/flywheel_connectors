@@ -16,7 +16,7 @@ use hmac::{Hmac, Mac};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tracing::{info, instrument};
 
@@ -29,6 +29,7 @@ use crate::{
 
 const DEFAULT_WEBHOOK_TOLERANCE_SECONDS: i64 = 300;
 const STRIPE_API_HOST: &str = "api.stripe.com";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -292,6 +293,12 @@ impl StripeConnector {
         }
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure method.
     ///
     /// Accepts either `secret_key` (direct) or `credential_id` (secretless via
@@ -486,7 +493,7 @@ impl StripeConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:stripe-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -3349,6 +3356,19 @@ mod tests {
             .compute_interface_hash()
             .expect("compute interface hash");
         assert_eq!(computed, computed2);
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut expected = Sha256::new();
+        expected.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(expected.finalize()));
+
+        assert_eq!(StripeConnector::manifest_hash(), expected);
+        assert_ne!(
+            StripeConnector::manifest_hash(),
+            "sha256:stripe-connector-v1"
+        );
     }
 
     // --- sanitize_idempotency_component tests ---

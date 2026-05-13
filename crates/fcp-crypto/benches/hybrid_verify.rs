@@ -20,6 +20,7 @@ use std::{
 use fcp_bench::stats::StatPack;
 use fcp_crypto::{
     Ed25519SigningKey, HybridSignedObjectKind, MlDsa65SigningKey, PqSigningPolicy, SignedEnvelope,
+    signing_bytes_for_payload,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -121,34 +122,42 @@ fn run_benchmark(config: &Config) -> Result<Value, Box<dyn Error>> {
         body: vec![0xA5; 512],
         seq: 42,
     };
+    let signing_bytes =
+        signing_bytes_for_payload(HybridSignedObjectKind::CapabilityToken, &payload)?;
     let hybrid_envelope = SignedEnvelope::sign(
-        HybridSignedObjectKind::CapabilityToken,
+        HybridSignedObjectKind::CapabilityToken.as_str(),
         payload.clone(),
+        &signing_bytes,
         &classical_key,
         &pq_key,
     )?;
-    let baseline_envelope = SignedEnvelope::sign_classical_only(
-        HybridSignedObjectKind::CapabilityToken,
+    let baseline_envelope = SignedEnvelope::sign_with_policy(
+        HybridSignedObjectKind::CapabilityToken.as_str(),
         payload,
-        &classical_key,
+        &signing_bytes,
+        PqSigningPolicy::ClassicalOnly,
+        Some(&classical_key),
+        None,
     )?;
 
     warm_up(
         &hybrid_envelope,
         &baseline_envelope,
+        &signing_bytes,
         &classical_verifying_key,
         pq_verifying_key,
     )?;
 
     let hybrid_samples = collect_samples(config.samples, || {
-        sample_hybrid_verify(&hybrid_envelope, &classical_verifying_key, pq_verifying_key)
-    })?;
-    let baseline_samples = collect_samples(config.samples, || {
-        sample_classical_verify(
-            &baseline_envelope,
+        sample_hybrid_verify(
+            &hybrid_envelope,
+            &signing_bytes,
             &classical_verifying_key,
             pq_verifying_key,
         )
+    })?;
+    let baseline_samples = collect_samples(config.samples, || {
+        sample_classical_verify(&baseline_envelope, &signing_bytes, &classical_verifying_key)
     })?;
 
     let mut baseline_pack = StatPack::with_resamples(&baseline_samples, DEFAULT_RESAMPLES);
@@ -213,19 +222,21 @@ fn finite_welch_p(value: f64, welch_t: f64) -> f64 {
 fn warm_up(
     hybrid_envelope: &SignedEnvelope<BenchPayload>,
     baseline_envelope: &SignedEnvelope<BenchPayload>,
+    signing_bytes: &[u8],
     classical_verifying_key: &fcp_crypto::Ed25519VerifyingKey,
     pq_verifying_key: &fcp_crypto::MlDsa65VerifyingKey,
 ) -> Result<(), Box<dyn Error>> {
     for _ in 0..128 {
         black_box(hybrid_envelope.verify(
+            signing_bytes,
             classical_verifying_key,
             pq_verifying_key,
-            PqSigningPolicy::BothRequired,
         )?);
-        black_box(baseline_envelope.verify(
-            classical_verifying_key,
-            pq_verifying_key,
+        black_box(baseline_envelope.verify_with_policy(
+            signing_bytes,
             PqSigningPolicy::ClassicalOnly,
+            Some(classical_verifying_key),
+            None,
         )?);
     }
     Ok(())
@@ -244,28 +255,30 @@ fn collect_samples<E>(
 
 fn sample_hybrid_verify(
     envelope: &SignedEnvelope<BenchPayload>,
+    signing_bytes: &[u8],
     classical_verifying_key: &fcp_crypto::Ed25519VerifyingKey,
     pq_verifying_key: &fcp_crypto::MlDsa65VerifyingKey,
 ) -> Result<f64, fcp_crypto::CryptoError> {
     let start = Instant::now();
     black_box(envelope.verify(
+        black_box(signing_bytes),
         black_box(classical_verifying_key),
         black_box(pq_verifying_key),
-        black_box(PqSigningPolicy::BothRequired),
     )?);
     Ok(elapsed_ms(start))
 }
 
 fn sample_classical_verify(
     envelope: &SignedEnvelope<BenchPayload>,
+    signing_bytes: &[u8],
     classical_verifying_key: &fcp_crypto::Ed25519VerifyingKey,
-    pq_verifying_key: &fcp_crypto::MlDsa65VerifyingKey,
 ) -> Result<f64, fcp_crypto::CryptoError> {
     let start = Instant::now();
-    black_box(envelope.verify(
-        black_box(classical_verifying_key),
-        black_box(pq_verifying_key),
+    black_box(envelope.verify_with_policy(
+        black_box(signing_bytes),
         black_box(PqSigningPolicy::ClassicalOnly),
+        Some(black_box(classical_verifying_key)),
+        None,
     )?);
     Ok(elapsed_ms(start))
 }

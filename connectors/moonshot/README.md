@@ -41,6 +41,7 @@ Important runtime truths the contract preserves:
 - `moonshot.models.list` uses `GET /v1/models` and supports `{"refresh": true}` to invalidate the in-memory cache.
 - FCP subscribe is not implemented; streaming is exposed as the bounded invoke operation `moonshot.chat.completions_stream`.
 - `moonshot.embeddings.create` fails locally before provider dispatch.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 

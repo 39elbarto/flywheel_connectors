@@ -10,6 +10,7 @@ use fcp_prelude::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::client::{DEFAULT_BASE_URL, FigmaAuth, FigmaClient};
@@ -18,6 +19,8 @@ use crate::types::{
     AuditSeverity, AuditSummary, BundledComponent, ComponentBundle, DesignAuditFinding,
     DesignAuditResult, DesignToken, TokenValue,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 fn webhook_example_passcode() -> String {
     ['h', 'o', 'o', 'k'].into_iter().collect()
@@ -111,6 +114,12 @@ impl FigmaConnector {
         }
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure method.
     ///
     /// # Errors
@@ -181,7 +190,7 @@ impl FigmaConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:figma-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -2536,6 +2545,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(result["status"], "accepted");
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(FigmaConnector::manifest_hash(), expected);
+        assert_ne!(FigmaConnector::manifest_hash(), "sha256:figma-connector-v1");
     }
 
     #[fcp_async_core::runtime::test]

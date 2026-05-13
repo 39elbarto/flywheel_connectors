@@ -59,7 +59,7 @@ Important runtime truths the contract preserves:
 This README documents the runtime truth and keeps current drift visible:
 
 - Manifest connector ID is `fcp.google_drive`, while runtime `BaseConnector` ID is `google-drive`.
-- Runtime handshake returns placeholder manifest hash `sha256:google-drive-connector-v1`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Manifest `interface_hash` is all zeroes.
 - Manifest optional capabilities include `media.download` and `media.upload`, but runtime introspection and capability verification use only `drive.read` and `drive.write`.
 - Runtime `drive.download_file` can return a JSON string in `content_base64` if the executor gives the client a JSON response body.
@@ -69,7 +69,7 @@ This README documents the runtime truth and keeps current drift visible:
 - `self_check()` reports `DEFAULT_BASE_URL` in details even when a loopback or custom base URL was configured.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should align connector ID spelling, replace placeholder manifest/interface proofs, reconcile media capabilities, fix upload/download response semantics, clamp or reject out-of-range pagination input, reset lifecycle state consistently on shutdown, and report the active base URL in self-check.
+A follow-up parity bead should align connector ID spelling, replace placeholder interface proof, reconcile media capabilities, fix upload/download response semantics, clamp or reject out-of-range pagination input, reset lifecycle state consistently on shutdown, and report the active base URL in self-check.
 
 ## First-Slice Scope
 

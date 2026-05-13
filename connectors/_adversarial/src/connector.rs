@@ -440,3 +440,82 @@ fn log_structured_adversarial_response(
         );
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scenario_ids_round_trip() {
+        for scenario in scenarios() {
+            assert_eq!(
+                AdversarialScenario::from_id(scenario.as_str()),
+                Some(*scenario)
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_scenario_ids_are_rejected() {
+        assert_eq!(AdversarialScenario::from_id(""), None);
+        assert_eq!(
+            AdversarialScenario::from_id("null_byte_in_response_field"),
+            None
+        );
+        assert_eq!(AdversarialScenario::from_id("oversized-payload"), None);
+    }
+
+    #[test]
+    fn production_deploy_mode_is_refused_case_insensitively() {
+        assert!(matches!(
+            AdversarialConnector::try_new_for_deploy_mode("production"),
+            Err(AdversarialConnectorError::ConnectorTrustError)
+        ));
+        assert!(matches!(
+            AdversarialConnector::try_new_for_deploy_mode("PrOdUcTiOn"),
+            Err(AdversarialConnectorError::ConnectorTrustError)
+        ));
+    }
+
+    #[test]
+    fn non_production_deploy_modes_are_allowed() {
+        assert!(AdversarialConnector::try_new_for_deploy_mode("test").is_ok());
+        assert!(AdversarialConnector::try_new_for_deploy_mode("staging").is_ok());
+    }
+
+    #[test]
+    fn operation_metadata_advertises_adversarial_constraints() {
+        let operations = operations_info();
+        assert_eq!(operations.len(), 1);
+
+        let operation = &operations[0];
+        assert_eq!(operation.id.as_str(), OP_ADVERSARIAL_EMIT);
+        assert_eq!(operation.capability.as_str(), CAP_ADVERSARIAL_EMIT);
+        assert_eq!(operation.risk_level, RiskLevel::High);
+        assert_eq!(operation.safety_tier, SafetyTier::Safe);
+        assert_eq!(operation.idempotency, IdempotencyClass::Strict);
+        assert_eq!(operation.requires_approval, Some(ApprovalMode::Interactive));
+
+        let scenario_values = operation.input_schema["properties"]["scenario"]["enum"]
+            .as_array()
+            .expect("scenario enum should be present");
+        assert_eq!(scenario_values.len(), scenarios().len());
+        assert!(scenario_values.contains(&json!(AdversarialScenario::CrlfInjection.as_str())));
+    }
+
+    #[test]
+    fn oversized_payload_error_uses_sentinel_without_allocating_payload() {
+        let response = AdversarialConnector::new().emit_scenario(
+            AdversarialScenario::OversizedPayload,
+            RequestId::new("pure-unit-oversized-payload"),
+        );
+
+        assert_eq!(response.status, InvokeStatus::Error);
+        match response.error.expect("scenario should return an error") {
+            FcpError::ResourceExhausted { resource } => {
+                assert_eq!(resource, "provider_payload>1073741825B");
+            }
+            other => panic!("expected oversized payload exhaustion, got {other:?}"),
+        }
+    }
+}

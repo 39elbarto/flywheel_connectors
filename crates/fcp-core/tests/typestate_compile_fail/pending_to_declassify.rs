@@ -6,7 +6,7 @@ fn main() {
     let object_id = ObjectId::from_unscoped_bytes(b"secret-object");
 
     let _ = fcp_core::declassify(
-        pending,
+        &pending,
         &mut provenance,
         object_id,
         ConfidentialityLevel::Work,

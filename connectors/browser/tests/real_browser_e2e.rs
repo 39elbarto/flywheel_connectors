@@ -2218,21 +2218,21 @@ fn generate_valid_grant(
 
 fn generate_execution_approval(operation: &str) -> fcp_core::ApprovalToken {
     let now_ms = u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0);
-    fcp_core::ApprovalToken {
-        token_id: format!("browser-e2e-approval-{operation}-{now_ms}"),
-        issued_at_ms: now_ms.saturating_sub(1_000),
-        expires_at_ms: now_ms + 300_000,
-        issuer: "owner:browser-e2e".into(),
-        scope: fcp_core::ApprovalScope::Execution(fcp_core::ExecutionScope {
+    fcp_core::ApprovalToken::approved(
+        format!("browser-e2e-approval-{operation}-{now_ms}"),
+        now_ms.saturating_sub(1_000),
+        now_ms + 300_000,
+        "owner:browser-e2e",
+        fcp_core::ApprovalScope::Execution(fcp_core::ExecutionScope {
             connector_id: CONNECTOR_ID.into(),
             method_pattern: operation.into(),
             request_object_id: None,
             input_hash: None,
             input_constraints: vec![],
         }),
-        zone_id: fcp_core::ZoneId::work(),
-        signature: None,
-    }
+        fcp_core::ZoneId::work(),
+        None,
+    )
 }
 
 const fn requires_execution_approval(operation: &str) -> bool {

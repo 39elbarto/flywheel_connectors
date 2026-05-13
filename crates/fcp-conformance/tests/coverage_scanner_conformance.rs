@@ -147,7 +147,10 @@ fn connectors_dir() -> PathBuf {
 }
 
 fn scanner_path() -> PathBuf {
-    repo_root().join("scripts").join("ci").join("coverage_scanner.sh")
+    repo_root()
+        .join("scripts")
+        .join("ci")
+        .join("coverage_scanner.sh")
 }
 
 #[derive(Debug, Clone)]
@@ -170,9 +173,12 @@ fn parse_scanner_output(stdout: &str) -> Vec<ScannerRow> {
             // specific field + offending line so the failure points at the
             // scanner, not at a generic unwrap site in this test.
             let field_str = |field: &str| -> String {
-                value[field].as_str().unwrap_or_else(|| {
-                    panic!("scanner row missing string field `{field}` in line `{line}`")
-                }).to_string()
+                value[field]
+                    .as_str()
+                    .unwrap_or_else(|| {
+                        panic!("scanner row missing string field `{field}` in line `{line}`")
+                    })
+                    .to_string()
             };
             let field_bool = |field: &str| -> bool {
                 value[field].as_bool().unwrap_or_else(|| {
@@ -223,8 +229,7 @@ fn enumerate_connectors() -> BTreeSet<String> {
 #[test]
 fn test_scanner_enumerates_every_connector() {
     let (_, rows) = run_scanner();
-    let scanner_connectors: BTreeSet<String> =
-        rows.iter().map(|r| r.connector.clone()).collect();
+    let scanner_connectors: BTreeSet<String> = rows.iter().map(|r| r.connector.clone()).collect();
     let filesystem_connectors = enumerate_connectors();
     let missing_from_scanner: Vec<&String> = filesystem_connectors
         .difference(&scanner_connectors)
@@ -247,7 +252,10 @@ fn test_scanner_classifies_correctly() {
     let (_, rows) = run_scanner();
     for row in &rows {
         let connector_dir = connectors_dir().join(&row.connector);
-        let actual_local = connector_dir.join("tests").join("local_non_mock.rs").exists();
+        let actual_local = connector_dir
+            .join("tests")
+            .join("local_non_mock.rs")
+            .exists();
         let actual_live = connector_dir
             .join("tests")
             .join("live_verification.rs")

@@ -1,7 +1,7 @@
 use fcp_crypto::{
     CryptoError, CryptoResult, EVENT_PQ_POLICY_DOWNGRADE, Ed25519SigningKey, HybridSignable,
     HybridSignedObjectKind, MlDsa65SigningKey, PqPolicyDowngradeAuthorizer, PqSigningPolicy,
-    SignedEnvelope, downgrade_policy_to_either_ok, signing_bytes_for_payload,
+    SignedEnvelope, downgrade_policy_to_either_ok, signing_bytes_for_payload, verify_signable,
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,16 +37,8 @@ impl PqPolicyDowngradeAuthorizer for MockHardwareToken {
         self.fingerprint
     }
 
-    fn authorize_pq_policy_downgrade(
-        &self,
-        from: PqSigningPolicy,
-        to: PqSigningPolicy,
-        reason: &str,
-    ) -> CryptoResult<()> {
-        if from == PqSigningPolicy::BothRequired
-            && to == PqSigningPolicy::EitherOk
-            && !reason.is_empty()
-        {
+    fn authorize_pq_policy_downgrade(&self, reason: &str) -> CryptoResult<()> {
+        if !reason.is_empty() {
             Ok(())
         } else {
             Err(CryptoError::TokenValidationError(
@@ -72,92 +64,147 @@ fn keys() -> (Ed25519SigningKey, MlDsa65SigningKey) {
 }
 
 fn assert_classical_only_roundtrip(kind: HybridSignedObjectKind, payload: FixturePayload) {
-    let (classical_key, pq_key) = keys();
+    let (classical_key, _pq_key) = keys();
     let expected = payload.clone();
-    let envelope = SignedEnvelope::sign_classical_only(kind, payload, &classical_key).unwrap();
+    let signing_bytes = signing_bytes_for_payload(kind, &payload).unwrap();
+    let envelope = SignedEnvelope::sign_with_policy(
+        kind.as_str(),
+        payload,
+        &signing_bytes,
+        PqSigningPolicy::ClassicalOnly,
+        Some(&classical_key),
+        None,
+    )
+    .unwrap();
 
+    let classical_verifying_key = classical_key.verifying_key();
     let receipt = envelope
-        .verify(
-            &classical_key.verifying_key(),
-            pq_key.verifying_key(),
+        .verify_with_policy(
+            &signing_bytes,
             PqSigningPolicy::ClassicalOnly,
+            Some(&classical_verifying_key),
+            None,
         )
         .expect("classical-only envelope verifies");
 
-    assert_eq!(envelope.payload(), &expected);
-    assert_eq!(receipt.object_type, kind);
-    assert_eq!(receipt.sig_kinds_verified, vec!["ed25519"]);
+    assert_eq!(&envelope.payload, &expected);
+    assert_eq!(envelope.object_type, kind.as_str());
+    assert!(receipt.signatures_verified.classical);
+    assert!(!receipt.signatures_verified.pq);
 }
 
 fn assert_pq_only_roundtrip(kind: HybridSignedObjectKind, payload: FixturePayload) {
-    let (classical_key, pq_key) = keys();
+    let (_classical_key, pq_key) = keys();
     let expected = payload.clone();
-    let envelope = SignedEnvelope::sign_pq_only(kind, payload, &pq_key).unwrap();
+    let signing_bytes = signing_bytes_for_payload(kind, &payload).unwrap();
+    let envelope = SignedEnvelope::sign_with_policy(
+        kind.as_str(),
+        payload,
+        &signing_bytes,
+        PqSigningPolicy::PqOnly,
+        None,
+        Some(&pq_key),
+    )
+    .unwrap();
 
+    let pq_verifying_key = pq_key.verifying_key();
     let receipt = envelope
-        .verify(
-            &classical_key.verifying_key(),
-            pq_key.verifying_key(),
+        .verify_with_policy(
+            &signing_bytes,
             PqSigningPolicy::PqOnly,
+            None,
+            Some(&pq_verifying_key),
         )
         .expect("pq-only envelope verifies");
 
-    assert_eq!(envelope.payload(), &expected);
-    assert_eq!(receipt.object_type, kind);
-    assert_eq!(receipt.sig_kinds_verified, vec!["ml-dsa-65"]);
+    assert_eq!(&envelope.payload, &expected);
+    assert_eq!(envelope.object_type, kind.as_str());
+    assert!(!receipt.signatures_verified.classical);
+    assert!(receipt.signatures_verified.pq);
 }
 
 fn assert_both_sigs_roundtrip(kind: HybridSignedObjectKind, payload: FixturePayload) {
     let (classical_key, pq_key) = keys();
     let expected = payload.clone();
-    let envelope = SignedEnvelope::sign(kind, payload, &classical_key, &pq_key).unwrap();
+    let signing_bytes = signing_bytes_for_payload(kind, &payload).unwrap();
+    let envelope = SignedEnvelope::sign(
+        kind.as_str(),
+        payload,
+        &signing_bytes,
+        &classical_key,
+        &pq_key,
+    )
+    .unwrap();
 
+    let classical_verifying_key = classical_key.verifying_key();
+    let pq_verifying_key = pq_key.verifying_key();
     let receipt = envelope
-        .verify(
-            &classical_key.verifying_key(),
-            pq_key.verifying_key(),
-            PqSigningPolicy::BothRequired,
-        )
+        .verify(&signing_bytes, &classical_verifying_key, &pq_verifying_key)
         .expect("both-required envelope verifies");
 
-    assert_eq!(envelope.payload(), &expected);
-    assert_eq!(receipt.object_type, kind);
-    assert_eq!(receipt.sig_kinds_verified, vec!["ed25519", "ml-dsa-65"]);
+    assert_eq!(&envelope.payload, &expected);
+    assert_eq!(envelope.object_type, kind.as_str());
+    assert!(receipt.signatures_verified.classical);
+    assert!(receipt.signatures_verified.pq);
 }
 
 fn assert_either_ok_policy_accepts_one(kind: HybridSignedObjectKind, payload: FixturePayload) {
-    let (classical_key, pq_key) = keys();
+    let (classical_key, _pq_key) = keys();
     let expected = payload.clone();
-    let envelope = SignedEnvelope::sign_classical_only(kind, payload, &classical_key).unwrap();
+    let signing_bytes = signing_bytes_for_payload(kind, &payload).unwrap();
+    let envelope = SignedEnvelope::sign_with_policy(
+        kind.as_str(),
+        payload,
+        &signing_bytes,
+        PqSigningPolicy::ClassicalOnly,
+        Some(&classical_key),
+        None,
+    )
+    .unwrap();
 
+    let classical_verifying_key = classical_key.verifying_key();
     let receipt = envelope
-        .verify(
-            &classical_key.verifying_key(),
-            pq_key.verifying_key(),
+        .verify_with_policy(
+            &signing_bytes,
             PqSigningPolicy::EitherOk,
+            Some(&classical_verifying_key),
+            None,
         )
         .expect("either-ok accepts one valid signature");
 
-    assert_eq!(envelope.payload(), &expected);
-    assert_eq!(receipt.object_type, kind);
-    assert_eq!(receipt.sig_kinds_verified, vec!["ed25519"]);
+    assert_eq!(&envelope.payload, &expected);
+    assert_eq!(envelope.object_type, kind.as_str());
+    assert!(receipt.signatures_verified.classical);
+    assert!(!receipt.signatures_verified.pq);
 }
 
 fn assert_both_required_policy_rejects_one(kind: HybridSignedObjectKind, payload: FixturePayload) {
     let (classical_key, pq_key) = keys();
     let expected = payload.clone();
-    let envelope = SignedEnvelope::sign_classical_only(kind, payload, &classical_key).unwrap();
+    let signing_bytes = signing_bytes_for_payload(kind, &payload).unwrap();
+    let envelope = SignedEnvelope::sign_with_policy(
+        kind.as_str(),
+        payload,
+        &signing_bytes,
+        PqSigningPolicy::ClassicalOnly,
+        Some(&classical_key),
+        None,
+    )
+    .unwrap();
 
+    let classical_verifying_key = classical_key.verifying_key();
+    let pq_verifying_key = pq_key.verifying_key();
     let err = envelope
-        .verify(
-            &classical_key.verifying_key(),
-            pq_key.verifying_key(),
+        .verify_with_policy(
+            &signing_bytes,
             PqSigningPolicy::BothRequired,
+            Some(&classical_verifying_key),
+            Some(&pq_verifying_key),
         )
         .expect_err("both-required rejects missing PQ signature");
 
-    assert_eq!(envelope.payload(), &expected);
-    assert!(matches!(err, CryptoError::PqSignatureMissing));
+    assert_eq!(&envelope.payload, &expected);
+    assert!(matches!(err, CryptoError::MissingPqSignature { .. }));
 }
 
 #[test]
@@ -414,24 +461,17 @@ fn migrated_signable_payload_normalizes_legacy_signature_field() {
         legacy_signature: vec![0xAA; 64],
     };
     let mut envelope = payload.sign_hybrid(&classical_key, &pq_key).unwrap();
+    let classical_verifying_key = classical_key.verifying_key();
+    let pq_verifying_key = pq_key.verifying_key();
 
     envelope.payload.legacy_signature = vec![0xBB; 64];
-    let receipt = envelope
-        .verify_signable(
-            &classical_key.verifying_key(),
-            pq_key.verifying_key(),
-            PqSigningPolicy::BothRequired,
-        )
+    let receipt = verify_signable(&envelope, &classical_verifying_key, &pq_verifying_key)
         .expect("legacy signature bytes are normalized out of hybrid transcript");
-    assert_eq!(receipt.sig_kinds_verified, vec!["ed25519", "ml-dsa-65"]);
+    assert!(receipt.signatures_verified.classical);
+    assert!(receipt.signatures_verified.pq);
 
     envelope.payload.body.push_str(" tampered");
-    let err = envelope
-        .verify_signable(
-            &classical_key.verifying_key(),
-            pq_key.verifying_key(),
-            PqSigningPolicy::BothRequired,
-        )
+    let err = verify_signable(&envelope, &classical_verifying_key, &pq_verifying_key)
         .expect_err("payload body remains signed");
     assert!(matches!(err, CryptoError::SignatureVerificationFailed));
 }
@@ -442,16 +482,17 @@ fn test_policy_downgrade_emits_audit() {
         fingerprint: "hw:sha256:0123456789abcdef",
     };
 
-    let audit = downgrade_policy_to_either_ok(
+    let (policy, audit) = downgrade_policy_to_either_ok(
         PqSigningPolicy::BothRequired,
-        &token,
         "temporary ML-DSA verifier outage",
+        &token,
     )
     .expect("mock hardware token authorizes downgrade");
 
+    assert_eq!(policy, PqSigningPolicy::EitherOk);
     assert_eq!(audit.event_type, EVENT_PQ_POLICY_DOWNGRADE);
-    assert_eq!(audit.previous_policy, PqSigningPolicy::BothRequired);
-    assert_eq!(audit.new_policy, PqSigningPolicy::EitherOk);
+    assert_eq!(audit.from_policy, PqSigningPolicy::BothRequired);
+    assert_eq!(audit.to_policy, PqSigningPolicy::EitherOk);
     assert_eq!(audit.operator_fingerprint, token.fingerprint);
     assert_eq!(audit.reason, "temporary ML-DSA verifier outage");
 }

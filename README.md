@@ -48,7 +48,7 @@ Status legend: `PROVEN` = backed by direct proof in the current repo, `IMPLEMENT
 |---------|--------|--------------|----------|
 | **Host-First Control Plane** | `PROVEN` | **Current transitional operator path.** `fwc` + `fcp-host` is the proven provisioning boundary. Operators use this path today while mesh-backed truth converges to steady state. | `fcp-host/src/{supervisor,enforcement,health}.rs`, `crates/fcp-conformance/tests/host_invoke_loop_conformance.rs`, `crates/fcp-e2e/tests/capability_enforcement_concurrent_e2e.rs` |
 | **Truthful Runtime Resolution** | `PROVEN` | `fwc` resolves runtime mode explicitly and classifies answers as mesh-backed, host-backed, node-local, or offline instead of fabricating a single "live" answer. | `fwc/src/{truth,catalog}.rs`, `fwc/tests/{cual_integration,readme_status_pinning}.rs` |
-| **Zone Isolation** | `LIMITED` | Core cryptographic namespaces are proven; the Lean zone-flow lattice proof is complete; host-side connector zone binding is enforced when operators configure `allowed_zones`. | `fcp-core/src/{zone_keys,pcs,policy}.rs`, `lean/Fcp/Zone/Lattice.lean`, `docs/formal/zone_lattice.md`, `fcp-host/src/bin/fcp-host.rs` (420+ tests, E2E enforcement) |
+| **Zone Isolation** | `LIMITED` | Core cryptographic namespaces are proven; the Lean zone-flow lattice proof is complete; host-side connector zone binding now requires explicit `allowed_zones` before connector RPC. | `fcp-core/src/{zone_keys,pcs,policy}.rs`, `lean/Fcp/Zone/Lattice.lean`, `docs/formal/zone_lattice.md`, `fcp-host/src/bin/fcp-host.rs` (420+ tests, E2E enforcement) |
 | **Capability Tokens (CWT/COSE)** | `PROVEN` | COSE/CWT signing, canonical CBOR, constraints, typestate enforcement, and bound instance semantics are covered by core, host-runtime, and conformance tests. | `fcp-crypto/src/cose.rs`, `fcp-core/src/capability.rs`, `crates/fcp-core/tests/capability_verifier_predicate_matrix.rs`, `crates/fcp-host/tests/capability_token_typestate_runtime.rs`, `crates/fcp-conformance/tests/capability_*.rs` |
 | **Tamper-Evident Audit** | `PROVEN` | Hash-linked audit chain with monotonic sequence numbers and quorum-signed checkpoints. | `fcp-audit/`, `fcp-core/src/audit.rs` (473+ tests, golden vectors) |
 | **Revocation** | `PROVEN` | First-class revocation objects and O(1)-style freshness checks exist in the current evidence/core surfaces. | `fcp-core/src/revocation.rs`, `crates/fcp-e2e/tests/{revocation_cascade,capability_enforcement_concurrent}_e2e.rs` |
@@ -63,7 +63,7 @@ Status legend: `PROVEN` = backed by direct proof in the current repo, `IMPLEMENT
 | **Mesh-Native Architecture** | `STEADY-STATE TARGET (NOT YET OPERATIONAL)` | Gossip, IBLT, XOR filters, and LiveTruthResolver are built and tested as building blocks, but the production `fwc → fcp-host → connector subprocess` invoke path remains host-first (see [Operational Model Versions](#operational-model-versions) — V1, the only operational model today). The mesh-native cutover is the target steady state and has zero production evidence. Pinned by `crates/fwc/tests/readme_status_pinning.rs` (br-lvz4t). | `fcp-mesh/src/` (259+ tests, gossip/IBLT/XOR), `fwc/src/truth.rs` (78 tests) |
 | **Computation Migration** | `PROVEN` | Reference migrate-and-resume proof exists for a connector operation, including CRIU-format checkpoint handoff, lease transfer, replay, and byte-equivalent completion; automatic optimal-device execution is still hardening. | `fcp-kernel/src/computation_migration.rs`, `crates/fcp-e2e/tests/computation_migration_reference.rs` |
 
-_Audit note:_ In the current host-backed path, `allowed_zones` is opt-in. An empty set preserves a back-compat permissive branch in `crates/fcp-host/src/bin/fcp-host.rs` (`allowed_zones()` and `verify_live_request()`).
+_Audit note:_ In the current host-backed path, connector RPC requires explicit `allowed_zones`; an empty zone set fails closed before invoke, introspection, or health probes reach connector code.
 
 > **Audit status**: All 16 feature status labels were reconciled 2026-05-03. A 2026-05-05 follow-up resolved the Capability Tokens instance-binding finding (`flywheel_connectors-01yaq`) and restored that row to `PROVEN`. A 2026-05-10 follow-up landed the Secretless Connectors graduation (`flywheel_connectors-e99o6.1.6`) with `SecretFetchHook` production trait evidence and three connector-family E2Es. The other rows remain from the 2026-05-03 pass. See [docs/quarterly/2026-Q2-claims-vs-reality.md](docs/quarterly/2026-Q2-claims-vs-reality.md).
 
@@ -212,7 +212,7 @@ Every node has a **NodeKeyAttestation** signed by the owner, binding the Tailsca
 
 These are the protocol invariants FCP is built to enforce mechanically. The
 feature-status table above is the current proof ledger: today, zone isolation is
-`LIMITED` in the host-backed path because `allowed_zones` is opt-in.
+`LIMITED` in the host-backed path while the remaining V2 mesh-backed truth surfaces converge; host connector RPC now requires explicit `allowed_zones`.
 
 1. **Single-Zone Binding**: A connector instance MUST bind to exactly one zone for its lifetime
 2. **Default Deny**: If a capability is not explicitly granted to a zone, it MUST be impossible to invoke

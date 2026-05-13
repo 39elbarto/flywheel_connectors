@@ -37,6 +37,7 @@ Important runtime truths the contract preserves:
 - The client parses Cerebras request and token rate-limit headers and honors `retry-after` when the configured wait policy permits it.
 - `cerebras.models.list` uses a shared in-memory model cache and supports `{"refresh": true}` to invalidate it.
 - FCP subscribe is not implemented; streaming is exposed as the bounded invoke operation `cerebras.chat.completions_stream`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 

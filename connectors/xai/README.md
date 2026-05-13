@@ -34,6 +34,7 @@ Important runtime truths the contract preserves:
 - Responses API web search requires either `web_search` shorthand or a raw `type = "web_search"` tool.
 - Responses output includes `output_text`, byte counts, structured citations, citation hosts, usage, server-side tool usage, and the raw provider response for authorized invoke callers.
 - SSE chat streaming returns redaction-safe chunk metadata and assembled text from a bounded invoke call; FCP subscribe is not implemented.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 

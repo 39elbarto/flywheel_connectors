@@ -101,6 +101,7 @@ impl MlDsa65SigningKey {
         Ok(Self::from_seed_inner(seed))
     }
 
+    #[allow(clippy::large_stack_frames)] // upstream ML-DSA key expansion builds FIPS polynomial buffers internally
     fn from_seed_inner(seed: Zeroizing<[u8; ML_DSA_65_SEED_SIZE]>) -> Self {
         let xi = B32::try_from(seed.as_slice())
             .expect("ML_DSA_65_SEED_SIZE is 32 bytes by construction");

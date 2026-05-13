@@ -49,6 +49,7 @@ Important runtime truths the contract preserves:
 - `comfyui.workflow.cancel` posts queue deletion and optionally calls `/interrupt` for active work.
 - `comfyui.workflow.wait_until_complete` polls history until complete or timeout, then returns result metadata.
 - `comfyui.health` probes `GET /system_stats`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 
 ## First-Slice Scope
 

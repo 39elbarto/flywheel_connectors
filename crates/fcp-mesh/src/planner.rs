@@ -812,6 +812,22 @@ impl ResourcePoolDecisionSummary {
     }
 }
 
+/// Connector dry-run resource availability reported through admin simulation APIs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimulateResourceAvailability {
+    /// Whether the upstream resource is available.
+    pub available: bool,
+    /// Remaining rate limit quota, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_remaining: Option<u32>,
+    /// Unix timestamp when the rate limit resets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_reset_at: Option<u64>,
+    /// Connector-specific availability details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
+}
+
 struct ResourcePoolLookup<'a> {
     by_node_class: HashMap<(NodeId, ResourcePoolClass), Vec<&'a ResourcePoolStatus>>,
 }

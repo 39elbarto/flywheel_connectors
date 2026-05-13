@@ -44,6 +44,7 @@ Important runtime truths the contract preserves:
 - `sheets.append_values` writes with `valueInputOption=USER_ENTERED` and `insertDataOption=INSERT_ROWS`.
 - `sheets.update_values` and `sheets.append_values` require a two-dimensional `values` array.
 - Runtime handshake installs a `CapabilityVerifier`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Runtime `invoke` requires `capability_token`, computes `google-sheets:spreadsheet:{spreadsheet_id}`, and verifies a bound token before provider execution.
 - `health()`, `doctor()`, and `self_check()` are local configuration checks only. They do not probe Google Sheets.
 
@@ -52,13 +53,12 @@ Important runtime truths the contract preserves:
 This README documents the runtime truth and keeps current drift visible:
 
 - Manifest connector ID is `fcp.google_sheets`, while runtime `BaseConnector` ID is `google-sheets`.
-- Runtime handshake returns placeholder manifest hash `sha256:google-sheets-connector-v1` even though the manifest carries a concrete `interface_hash`.
 - Runtime `handle_simulate` is permissive. It returns `would_execute = true` for any supplied operation string and does not validate operation inventory, configured state, handshake state, input, capability, or capability token.
 - `SheetsClient` stores an `HttpRetryConfig`, but the current HTTP helpers call `reqwest` directly and do not execute the shared retry loop.
 - Runtime `handle_shutdown` shuts down the client runtime and sets `client = None`, but it does not clear verifier, session, configured flag, or handshaken flag.
 - There is no dedicated tracked verification shell script for this connector.
 
-A follow-up parity bead should make `simulate` enforce the same operation/input/capability rules as `invoke`, wire the stored retry config or remove it, replace the placeholder handshake hash, and reset lifecycle state consistently on shutdown.
+A follow-up parity bead should make `simulate` enforce the same operation/input/capability rules as `invoke`, wire the stored retry config or remove it, and reset lifecycle state consistently on shutdown.
 
 ## First-Slice Scope
 

@@ -124,8 +124,8 @@ impl TokenBucket {
     /// When the bucket is already full, refresh the refill anchor so idle time does not
     /// accrue extra burst credit past capacity.
     fn refill(&self) {
-        let current = self.tokens.load(Ordering::Acquire);
         let mut last_refill = self.last_refill.lock();
+        let current = self.tokens.load(Ordering::Acquire);
         let now = Instant::now();
 
         if current >= self.capacity {

@@ -94,9 +94,16 @@ impl LeakyBucket {
         let leaked = elapsed.as_secs_f64() * self.leak_rate;
 
         if leaked > 0.0 {
-            *level = (*level - leaked).max(0.0);
-            drop(level);
-            *last_leak = now;
+            let new_level = (*level - leaked).max(0.0);
+            
+            // Only update the anchor if the level actually changed, or if the bucket 
+            // is fully empty. This prevents tiny time increments from being absorbed
+            // by f64 truncation without actually leaking any capacity.
+            if new_level != *level || *level == 0.0 {
+                *level = new_level;
+                drop(level);
+                *last_leak = now;
+            }
         }
     }
 

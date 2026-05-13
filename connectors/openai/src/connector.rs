@@ -16,6 +16,7 @@ use fcp_prelude::{
 use fcp_streaming::{StreamError, WsClient, WsConfig, WsMessage};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::{
@@ -27,6 +28,8 @@ use crate::{
         VideoSize, WhisperModel,
     },
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 #[derive(Debug, Clone)]
 struct OpenAIConfig {
@@ -2168,6 +2171,12 @@ impl OpenAIConnector {
         self.base.instance_id.as_str()
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Get total requests made.
     #[must_use]
     pub fn total_requests(&self) -> u64 {
@@ -2360,7 +2369,7 @@ impl OpenAIConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:openai-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: true,
@@ -7327,6 +7336,18 @@ mod tests {
         assert!(connector.client.is_none());
         assert_eq!(connector.total_requests(), 0);
         assert_eq!(connector.total_errors(), 0);
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        let actual = OpenAIConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "sha256:openai-connector-v1");
     }
 
     #[fcp_async_core::runtime::test]

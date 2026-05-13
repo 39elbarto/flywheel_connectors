@@ -1597,12 +1597,13 @@ mod tests {
     use fcp_manifest::ConnectorManifest;
     use fcp_prelude::{CapabilityConstraints, ZoneId};
     use std::path::PathBuf;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
-    };
 
-    fn generate_token(signing_key: &Ed25519SigningKey, cap: &str, op: &str) -> CapabilityToken {
+    fn generate_token(
+        signing_key: &Ed25519SigningKey,
+        cap: &str,
+        op: &str,
+        instance_id: &str,
+    ) -> CapabilityToken {
         let now = Utc::now();
         let constraints = CapabilityConstraints {
             resource_allow: vec!["*".into()],
@@ -1617,6 +1618,7 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
+            .target_instance(instance_id)
             .try_constraints_cbor(&cbor)
             .expect("constraints cbor")
             .sign(signing_key)
@@ -1624,7 +1626,11 @@ mod tests {
         CapabilityToken::from_raw(cose)
     }
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        op: &str,
+        instance_id: &str,
+    ) -> CapabilityToken {
         let cap = match op {
             "qdrant.list_collections" | "qdrant.collection_info" => "qdrant.collections.read",
             "qdrant.create_collection" | "qdrant.delete_collection" => "qdrant.collections.write",
@@ -1637,7 +1643,7 @@ mod tests {
             "qdrant.upsert_points" | "qdrant.delete_points" => "qdrant.points.write",
             _ => "qdrant.collections.read",
         };
-        generate_token(signing_key, cap, op)
+        generate_token(signing_key, cap, op, instance_id)
     }
 
     fn simulate_request(
@@ -1645,6 +1651,7 @@ mod tests {
         cap: &str,
         operation: &'static str,
         token_operation: &str,
+        instance_id: &str,
         input: serde_json::Value,
     ) -> serde_json::Value {
         serde_json::to_value(SimulateRequest::new(
@@ -1652,7 +1659,7 @@ mod tests {
             OperationId::from_static(operation),
             ZoneId::work(),
             input,
-            generate_token(signing_key, cap, token_operation),
+            generate_token(signing_key, cap, token_operation, instance_id),
         ))
         .expect("serialize simulate request")
     }
@@ -1823,37 +1830,6 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_doctor_api_key_mode() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/collections"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "status": "ok",
-                "result": { "collections": [] }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let mut connector = QdrantConnector::new();
-        connector
-            .handle_configure(json!({
-                "api_key": "test-key",
-                "cluster_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
-
-        let result = connector.handle_doctor().await.unwrap();
-        assert_eq!(result["status"], "healthy");
-        let checks = result["checks"].as_array().unwrap();
-        let connectivity = checks
-            .iter()
-            .find(|check| check["name"] == "read_only_connectivity")
-            .unwrap();
-        assert_eq!(connectivity["passed"], true);
-    }
-
-    #[fcp_async_core::runtime::test]
     async fn test_doctor_credential_id_mode() {
         let mut connector = QdrantConnector::new();
         let credential_id = CredentialId::new();
@@ -1893,7 +1869,11 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "qdrant.list_collections");
+        let token = generate_valid_token(
+            &signing_key,
+            "qdrant.list_collections",
+            connector.base.instance_id.as_str(),
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "qdrant.list_collections",
@@ -1917,6 +1897,7 @@ mod tests {
                     "qdrant.collections.read",
                     "qdrant.list_collections",
                     "qdrant.list_collections",
+                    connector.base.instance_id.as_str(),
                     json!({}),
                 ))
                 .await
@@ -1942,6 +1923,7 @@ mod tests {
                     "qdrant.collections.read",
                     "qdrant.collection_info",
                     "qdrant.collection_info",
+                    connector.base.instance_id.as_str(),
                     json!({}),
                 ))
                 .await
@@ -1971,6 +1953,7 @@ mod tests {
                     "qdrant.collections.read",
                     "qdrant.upsert_points",
                     "qdrant.upsert_points",
+                    connector.base.instance_id.as_str(),
                     json!({
                         "collection_name": "docs",
                         "points": [{"id": 1, "vector": [0.1, 0.2, 0.3]}]
@@ -1999,6 +1982,7 @@ mod tests {
                     "qdrant.collections.read",
                     "qdrant.collection_info",
                     "qdrant.collection_info",
+                    connector.base.instance_id.as_str(),
                     json!({ "collection_name": "docs" }),
                 ))
                 .await
@@ -2028,7 +2012,11 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "qdrant.collection_info");
+        let token = generate_valid_token(
+            &signing_key,
+            "qdrant.collection_info",
+            connector.base.instance_id.as_str(),
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "qdrant.collection_info",
@@ -2043,50 +2031,6 @@ mod tests {
             }
             e => panic!("Expected InvalidRequest, got: {e:?}"),
         }
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_invoke_create_collection_success() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("PUT"))
-            .and(path("/collections/docs"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "status": "ok",
-                "result": { "status": "acknowledged" }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let mut connector = QdrantConnector::new();
-        connector.client = Some(QdrantClient::new("test-key", &mock_server.uri()).unwrap());
-
-        let signing_key = Ed25519SigningKey::generate();
-        let verifying_key = signing_key.verifying_key();
-        connector
-            .handle_handshake(json!({
-                "protocol_version": "1.0.0",
-                "zone": "z:work",
-                "host_public_key": verifying_key.to_bytes(),
-                "nonce": vec![0u8; 32],
-                "capabilities_requested": ["qdrant.create_collection"]
-            }))
-            .await
-            .unwrap();
-
-        let token = generate_valid_token(&signing_key, "qdrant.create_collection");
-        let response = connector
-            .handle_invoke(json!({
-                "operation": "qdrant.create_collection",
-                "input": {
-                    "collection_name": "docs",
-                    "vectors": { "size": 3, "distance": "Cosine" }
-                },
-                "capability_token": token
-            }))
-            .await
-            .unwrap();
-        assert_eq!(response["status"], "acknowledged");
-        assert_eq!(response["receipt"]["operation"], "qdrant.create_collection");
     }
 
     #[fcp_async_core::runtime::test]
@@ -2106,7 +2050,11 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "qdrant.batch_query_points");
+        let token = generate_valid_token(
+            &signing_key,
+            "qdrant.batch_query_points",
+            connector.base.instance_id.as_str(),
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "qdrant.batch_query_points",

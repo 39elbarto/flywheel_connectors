@@ -16,6 +16,7 @@ use fcp_kernel::{
     ConnectorHealth, ConnectorId, LifecycleError, LifecycleManager, LifecycleRecord,
     LifecycleState, LifecycleStatus, TransitionReason,
 };
+pub use fcp_mesh::planner::SimulateResourceAvailability;
 use fcp_prelude::{
     ApprovalToken, CapabilityConstraints, CapabilityGrant, CapabilityId, CapabilityToken,
     CredentialId, ObjectPlacementPolicy, OperationId,
@@ -601,22 +602,6 @@ pub enum SimulateCostConfidence {
     Medium,
     /// Connector queried upstream API for exact cost.
     High,
-}
-
-/// Resource availability reported by a connector simulation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SimulateResourceAvailability {
-    /// Whether the upstream resource is available.
-    pub available: bool,
-    /// Remaining rate limit quota, if known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rate_limit_remaining: Option<u32>,
-    /// Unix timestamp when the rate limit resets.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rate_limit_reset_at: Option<u64>,
-    /// Connector-specific availability details.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<String>,
 }
 
 /// Bounded simulation receipt for audit and deduplication.

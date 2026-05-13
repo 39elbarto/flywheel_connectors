@@ -15,11 +15,11 @@ closed work. This file is the current delta ledger: a nonzero `pending` count
 means detail beads have been filed, not that all type moves are already
 complete.
 
-<!-- forbidden-overlap-summary: baseline_pairs=3 current_pairs=3 pending=2 resolved=1 -->
+<!-- forbidden-overlap-summary: baseline_pairs=3 current_pairs=3 pending=1 resolved=2 -->
 
 | ID | Type surface | From crate | Canonical owner | Canonical path | Status | Direct dependency | Detail bead |
 |----|--------------|------------|-----------------|----------------|--------|-------------------|-------------|
-| I2-HOST-MESH | SimulateResourceAvailability / mesh placement availability summary | fcp-host | fcp-mesh | `fcp-mesh::planner::ResourcePoolDecisionSummary` | pending | fcp-host->fcp-mesh | flywheel_connectors-angoc.3.3 |
+| I2-HOST-MESH | SimulateResourceAvailability / mesh placement availability summary | fcp-host | fcp-mesh | `fcp-mesh::planner::ResourcePoolDecisionSummary` | resolved | fcp-host->fcp-mesh | flywheel_connectors-angoc.3.3 |
 | I2-STORE-RAPTORQ | ObjectTransmissionInfo / RaptorQ transmission metadata | fcp-store | fcp-raptorq | `fcp-raptorq::ObjectTransmissionInformation` | pending | fcp-store->fcp-raptorq | flywheel_connectors-angoc.3.4 |
 | I2-PROTOCOL-CRYPTO | SignedEnvelope / hybrid signed-object envelope | fcp-protocol | fcp-crypto | `fcp-crypto::SignedEnvelope` | resolved | fcp-protocol->fcp-crypto | flywheel_connectors-angoc.3.5 |
 
@@ -32,6 +32,12 @@ out of `crates/fcp-host/src/admin_state.rs` into `fcp-mesh`, initially adjacent
 to `fcp_mesh::planner::ResourcePoolDecisionSummary` unless implementation proves
 a narrower mesh module. `fcp-host` imports the mesh-owned type and remains an
 admin/API projection layer only.
+
+Resolved 2026-05-13: `SimulateResourceAvailability` is defined in
+`fcp_mesh::planner` next to `ResourcePoolDecisionSummary`. `fcp-host` re-exports
+the mesh-owned type for admin response compatibility without keeping a
+host-local definition, and
+`crates/fcp-mesh/tests/placement_conformance.rs` pins the JSON shape.
 
 ### I2-STORE-RAPTORQ
 
@@ -57,6 +63,6 @@ not the generic hybrid envelope owner.
 
 ## Machine-Readable Rows
 
-<!-- forbidden-overlap-row: id=I2-HOST-MESH from=fcp-host to=fcp-mesh canonical=fcp-mesh::planner::ResourcePoolDecisionSummary status=pending relation=fcp-host->fcp-mesh from_exists=true to_exists=true audit_pair_mentioned=true detail_bead=flywheel_connectors-angoc.3.3 -->
+<!-- forbidden-overlap-row: id=I2-HOST-MESH from=fcp-host to=fcp-mesh canonical=fcp-mesh::planner::ResourcePoolDecisionSummary status=resolved relation=fcp-host->fcp-mesh from_exists=true to_exists=true audit_pair_mentioned=true detail_bead=flywheel_connectors-angoc.3.3 -->
 <!-- forbidden-overlap-row: id=I2-STORE-RAPTORQ from=fcp-store to=fcp-raptorq canonical=fcp-raptorq::ObjectTransmissionInformation status=pending relation=fcp-store->fcp-raptorq from_exists=true to_exists=true audit_pair_mentioned=true detail_bead=flywheel_connectors-angoc.3.4 -->
 <!-- forbidden-overlap-row: id=I2-PROTOCOL-CRYPTO from=fcp-protocol to=fcp-crypto canonical=fcp-crypto::SignedEnvelope status=resolved relation=fcp-protocol->fcp-crypto from_exists=true to_exists=true audit_pair_mentioned=false detail_bead=flywheel_connectors-angoc.3.5 -->

@@ -90,6 +90,10 @@ pub enum FixtureScenarioArg {
     AgentMailUnavailable,
     /// rch has no healthy workers, blocking proof and push.
     RchUnavailable,
+    /// rch admission is refused by active same-project work.
+    RchActiveProjectExclusion,
+    /// rch fell back or would fall back to local execution.
+    RchLocalFallbackDetected,
     /// The remote branch mirror does not match the primary branch.
     BranchMirrorMismatch,
     /// The shared checkout has unrelated dirty files.
@@ -102,6 +106,8 @@ impl From<FixtureScenarioArg> for NoNetworkProbeScenario {
             FixtureScenarioArg::Healthy => Self::Healthy,
             FixtureScenarioArg::AgentMailUnavailable => Self::AgentMailUnavailable,
             FixtureScenarioArg::RchUnavailable => Self::RchUnavailable,
+            FixtureScenarioArg::RchActiveProjectExclusion => Self::RchActiveProjectExclusion,
+            FixtureScenarioArg::RchLocalFallbackDetected => Self::RchLocalFallbackDetected,
             FixtureScenarioArg::BranchMirrorMismatch => Self::BranchMirrorMismatch,
             FixtureScenarioArg::DirtySharedTree => Self::DirtySharedTree,
         }
@@ -1384,6 +1390,81 @@ mod tests {
             gate.as_str()
                 .is_some_and(|gate| gate.starts_with("worker_fleet_repair:"))
         }));
+    }
+
+    #[test]
+    fn fixture_command_preserves_rch_admission_taxonomy() {
+        let tmp = TempDir::new().expect("tempdir");
+        let result = run(&fixture_args_for_scenario(
+            tmp.path().to_path_buf(),
+            FixtureScenarioArg::RchActiveProjectExclusion,
+        ))
+        .expect("fixture run");
+
+        assert!(result.success);
+        assert_eq!(
+            result.payload["handoff"]["decision"]["mode"],
+            "proof_blocked"
+        );
+        assert_eq!(
+            result.payload["handoff"]["decision"]["primary_reason_code"],
+            "proof-blocked-rch-active-project-exclusion"
+        );
+        assert_eq!(
+            result.payload["report"]["jsonl_event_count"],
+            Value::from(18)
+        );
+
+        let report_text =
+            fs::read_to_string(tmp.path().join(REPORT_FILENAME)).expect("report json");
+        let report: Value = serde_json::from_str(&report_text).expect("report parses");
+        assert_eq!(
+            report["probes"]["rch"]["admission_decision"],
+            "wait_for_project_slot"
+        );
+        assert_eq!(
+            report["probes"]["rch"]["admission_reason_code"],
+            "active_project_exclusion"
+        );
+    }
+
+    #[test]
+    fn fixture_command_refuses_rch_local_fallback() {
+        let tmp = TempDir::new().expect("tempdir");
+        let result = run(&fixture_args_for_scenario(
+            tmp.path().to_path_buf(),
+            FixtureScenarioArg::RchLocalFallbackDetected,
+        ))
+        .expect("fixture run");
+
+        assert!(result.success);
+        assert_eq!(
+            result.payload["handoff"]["decision"]["mode"],
+            "proof_blocked"
+        );
+        assert_eq!(
+            result.payload["handoff"]["decision"]["primary_reason_code"],
+            "proof-blocked-rch-local-fallback-refused"
+        );
+        let refused_next_actions = result.payload["handoff"]["refused_next_actions"]
+            .as_array()
+            .expect("refused actions are an array");
+        assert!(refused_next_actions.iter().any(|action| {
+            action.as_str()
+                == Some("cargo_proof: do not treat local Cargo or sync chatter as proof")
+        }));
+
+        let report_text =
+            fs::read_to_string(tmp.path().join(REPORT_FILENAME)).expect("report json");
+        let report: Value = serde_json::from_str(&report_text).expect("report parses");
+        assert_eq!(
+            report["probes"]["rch"]["admission_decision"],
+            "refuse_local_fallback"
+        );
+        assert_eq!(
+            report["probes"]["rch"]["admission_reason_code"],
+            "local_fallback_detected"
+        );
     }
 
     #[test]

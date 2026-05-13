@@ -15,9 +15,9 @@ use crate::agent_readiness::{
     AGENT_READINESS_REPORT_SCHEMA, AgentMailReadiness, AgentReadinessError,
     AgentReadinessPolicyMapping, AgentReadinessProbes, AgentReadinessReport, BeadsReadiness,
     DiskMountState, DiskReadiness, GitReadiness, LockState, PathKind, PathRedactionScope,
-    ProbeResult, RchReadiness, ReadinessDecision, ReadinessRedactionContract, ReadinessStatus,
-    ReadinessSubsystem, RedactedPath, TelemetryState, WorktreeReadiness, validate_key_fragment,
-    validate_safe_text,
+    ProbeResult, RchAdmissionDecision, RchAdmissionReasonCode, RchReadiness, ReadinessDecision,
+    ReadinessRedactionContract, ReadinessStatus, ReadinessSubsystem, RedactedPath, TelemetryState,
+    WorktreeReadiness, validate_key_fragment, validate_safe_text,
 };
 
 /// Stable schema for the startup probe plan.
@@ -27,7 +27,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 const AGENT_MAIL_MAX_ATTEMPTS: u8 = 2;
 const FAKE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 
-const REQUIRED_PROBE_LABELS: [&str; 15] = [
+const REQUIRED_PROBE_LABELS: [&str; 18] = [
     "agent-mail.health",
     "agent-mail.register",
     "agent-mail.list-agents",
@@ -40,6 +40,9 @@ const REQUIRED_PROBE_LABELS: [&str; 15] = [
     "git.index-write-smoke",
     "git.push-readiness",
     "rch.status",
+    "rch.diagnose",
+    "rch.queue",
+    "rch.proof-summary",
     "disk.capacity",
     "worktree.status",
     "decision.summary",
@@ -478,6 +481,30 @@ fn local_probe_commands() -> Vec<ProbeCommandPlan> {
             ProbeRetryPolicy::once(),
         ),
         ProbeCommandPlan::new(
+            "rch.diagnose",
+            ReadinessSubsystem::Rch,
+            &["rch", "diagnose", "--dry-run", "cargo-proof-command-digest"],
+            ProbeNetworkPolicy::None,
+            ProbeMutationScope::None,
+            ProbeRetryPolicy::once(),
+        ),
+        ProbeCommandPlan::new(
+            "rch.queue",
+            ReadinessSubsystem::Rch,
+            &["rch", "queue"],
+            ProbeNetworkPolicy::None,
+            ProbeMutationScope::None,
+            ProbeRetryPolicy::once(),
+        ),
+        ProbeCommandPlan::new(
+            "rch.proof-summary",
+            ReadinessSubsystem::Rch,
+            &["rch", "proof-summary", "redacted-last-run"],
+            ProbeNetworkPolicy::None,
+            ProbeMutationScope::None,
+            ProbeRetryPolicy::once(),
+        ),
+        ProbeCommandPlan::new(
             "disk.capacity",
             ReadinessSubsystem::Disk,
             &["df", "capacity", "redacted-mount"],
@@ -514,6 +541,10 @@ pub enum NoNetworkProbeScenario {
     AgentMailUnavailable,
     /// rch has no healthy workers, so Cargo proof must be refused.
     RchUnavailable,
+    /// rch refuses admission because another same-project command is active.
+    RchActiveProjectExclusion,
+    /// rch fell back or would fall back to local execution, which must be refused.
+    RchLocalFallbackDetected,
     /// Remote `main` and `master` do not match, so push must be refused.
     BranchMirrorMismatch,
     /// Worktree contains unrelated dirty files.
@@ -593,6 +624,8 @@ impl NoNetworkProbeFixture {
 struct FixtureScenarioState {
     agent_mail_blocked: bool,
     rch_blocked: bool,
+    rch_active_project_exclusion: bool,
+    rch_local_fallback_detected: bool,
     mirror_blocked: bool,
     dirty_tree: bool,
 }
@@ -601,7 +634,16 @@ impl From<NoNetworkProbeScenario> for FixtureScenarioState {
     fn from(scenario: NoNetworkProbeScenario) -> Self {
         Self {
             agent_mail_blocked: scenario == NoNetworkProbeScenario::AgentMailUnavailable,
-            rch_blocked: scenario == NoNetworkProbeScenario::RchUnavailable,
+            rch_blocked: matches!(
+                scenario,
+                NoNetworkProbeScenario::RchUnavailable
+                    | NoNetworkProbeScenario::RchActiveProjectExclusion
+                    | NoNetworkProbeScenario::RchLocalFallbackDetected
+            ),
+            rch_active_project_exclusion: scenario
+                == NoNetworkProbeScenario::RchActiveProjectExclusion,
+            rch_local_fallback_detected: scenario
+                == NoNetworkProbeScenario::RchLocalFallbackDetected,
             mirror_blocked: scenario == NoNetworkProbeScenario::BranchMirrorMismatch,
             dirty_tree: scenario == NoNetworkProbeScenario::DirtySharedTree,
         }
@@ -776,32 +818,122 @@ fn fixture_rch(
     observed_at_unix_ms: u64,
 ) -> Result<RchReadiness, AgentReadinessError> {
     let blocked = scenario.rch_blocked;
+    let admission = fixture_rch_admission(scenario);
     Ok(RchReadiness {
         check_result: fixture_probe_by_label(
             plan,
             "rch.status",
             fixture_status(blocked, ReadinessStatus::Blocked),
-            blocked.then_some("rch-workers-unavailable"),
-            blocked.then_some("do not run local Cargo fallback"),
+            blocked.then_some(admission.blocked_reason),
+            blocked.then_some(admission.blocked_remediation),
             observed_at_unix_ms,
         )?,
-        daemon_running: !blocked,
+        diagnose_result: Some(fixture_probe_by_label(
+            plan,
+            "rch.diagnose",
+            fixture_status(blocked, ReadinessStatus::Blocked),
+            blocked.then_some(admission.blocked_reason),
+            blocked.then_some(admission.blocked_remediation),
+            observed_at_unix_ms,
+        )?),
+        queue_result: Some(fixture_probe_by_label(
+            plan,
+            "rch.queue",
+            if scenario.rch_active_project_exclusion {
+                ReadinessStatus::Warn
+            } else {
+                fixture_status(blocked, ReadinessStatus::Blocked)
+            },
+            blocked.then_some(admission.blocked_reason),
+            blocked.then_some(admission.blocked_remediation),
+            observed_at_unix_ms,
+        )?),
+        proof_summary_result: Some(fixture_probe_by_label(
+            plan,
+            "rch.proof-summary",
+            if scenario.rch_local_fallback_detected {
+                ReadinessStatus::Blocked
+            } else {
+                ReadinessStatus::Skipped
+            },
+            if scenario.rch_local_fallback_detected {
+                Some(admission.blocked_reason)
+            } else {
+                Some("proof-not-run")
+            },
+            if scenario.rch_local_fallback_detected {
+                Some(admission.blocked_remediation)
+            } else {
+                Some("no proof summary is available before execution")
+            },
+            observed_at_unix_ms,
+        )?),
+        daemon_running: !blocked
+            || scenario.rch_active_project_exclusion
+            || scenario.rch_local_fallback_detected,
         hook_installed: true,
         workers_total: 8,
-        workers_healthy: if blocked { 0 } else { 8 },
-        unreachable_workers: if blocked {
+        workers_healthy: if blocked && !scenario.rch_active_project_exclusion {
+            0
+        } else {
+            8
+        },
+        unreachable_workers: if blocked && !scenario.rch_active_project_exclusion {
             BTreeSet::from(["worker-unavailable".to_owned()])
         } else {
             BTreeSet::new()
         },
-        pressure_telemetry_state: if blocked {
+        pressure_telemetry_state: if blocked && !scenario.rch_active_project_exclusion {
             TelemetryState::Unavailable
         } else {
             TelemetryState::Current
         },
+        admission_decision: admission.decision,
+        admission_reason_code: Some(admission.reason_code),
         cargo_offload_allowed: !blocked,
         local_cargo_allowed: false,
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RchFixtureAdmission {
+    decision: RchAdmissionDecision,
+    reason_code: RchAdmissionReasonCode,
+    blocked_reason: &'static str,
+    blocked_remediation: &'static str,
+}
+
+const fn fixture_rch_admission(scenario: FixtureScenarioState) -> RchFixtureAdmission {
+    if scenario.rch_active_project_exclusion {
+        return RchFixtureAdmission {
+            decision: RchAdmissionDecision::WaitForProjectSlot,
+            reason_code: RchAdmissionReasonCode::ActiveProjectExclusion,
+            blocked_reason: "rch-active-project-exclusion",
+            blocked_remediation: "wait for active same-project rch command; do not run local Cargo fallback",
+        };
+    }
+    if scenario.rch_local_fallback_detected {
+        return RchFixtureAdmission {
+            decision: RchAdmissionDecision::RefuseLocalFallback,
+            reason_code: RchAdmissionReasonCode::LocalFallbackDetected,
+            blocked_reason: "rch-local-fallback-detected",
+            blocked_remediation: "refuse local fallback and retry only when remote rch admission is available",
+        };
+    }
+    if scenario.rch_blocked {
+        return RchFixtureAdmission {
+            decision: RchAdmissionDecision::RchInfraFailure,
+            reason_code: RchAdmissionReasonCode::WorkersUnavailable,
+            blocked_reason: "rch-workers-unavailable",
+            blocked_remediation: "do not run local Cargo fallback",
+        };
+    }
+    RchFixtureAdmission {
+        decision: RchAdmissionDecision::RunRemoteNow,
+        reason_code: RchAdmissionReasonCode::Healthy,
+        blocked_reason: "rch-healthy",
+        blocked_remediation: "remote rch proof may run now",
+    }
 }
 
 fn fixture_disk(
@@ -1045,7 +1177,7 @@ mod tests {
             .expect("jsonl lines");
 
         assert_eq!(first, second);
-        assert_eq!(first.len(), 15);
+        assert_eq!(first.len(), 18);
         let joined = first.join("\n");
         assert!(!joined.contains("://"));
         assert!(!joined.contains("/Users/"));
@@ -1096,6 +1228,54 @@ mod tests {
                 .refused_actions
                 .contains(&ReadinessAction::CargoProof)
         );
+    }
+
+    #[test]
+    fn rch_active_project_exclusion_fixture_reports_wait_decision() {
+        let fixture = NoNetworkProbeFixture {
+            scenario: NoNetworkProbeScenario::RchActiveProjectExclusion,
+            ..NoNetworkProbeFixture::default()
+        };
+        let report = fixture.build_report().expect("fixture report validates");
+
+        assert_eq!(
+            report.probes.rch.admission_decision,
+            RchAdmissionDecision::WaitForProjectSlot
+        );
+        assert_eq!(
+            report.probes.rch.admission_reason_code,
+            Some(RchAdmissionReasonCode::ActiveProjectExclusion)
+        );
+        assert_eq!(
+            report.decision.primary_reason_code.as_deref(),
+            Some("proof-blocked-rch-active-project-exclusion")
+        );
+        assert!(!report.decision.can_run_cargo_proof);
+        assert!(!report.decision.can_push);
+    }
+
+    #[test]
+    fn rch_local_fallback_fixture_is_refused_not_greenwashed() {
+        let fixture = NoNetworkProbeFixture {
+            scenario: NoNetworkProbeScenario::RchLocalFallbackDetected,
+            ..NoNetworkProbeFixture::default()
+        };
+        let report = fixture.build_report().expect("fixture report validates");
+
+        assert_eq!(
+            report.probes.rch.admission_decision,
+            RchAdmissionDecision::RefuseLocalFallback
+        );
+        assert_eq!(
+            report.probes.rch.admission_reason_code,
+            Some(RchAdmissionReasonCode::LocalFallbackDetected)
+        );
+        assert_eq!(
+            report.decision.primary_reason_code.as_deref(),
+            Some("proof-blocked-rch-local-fallback-refused")
+        );
+        assert!(!report.probes.rch.local_cargo_allowed);
+        assert!(!report.decision.can_run_cargo_proof);
     }
 
     #[test]

@@ -675,6 +675,15 @@ impl Default for GitReadiness {
 pub struct RchReadiness {
     /// `rch check --json` result.
     pub check_result: ProbeResult,
+    /// Optional `rch diagnose --dry-run ...` admission result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnose_result: Option<ProbeResult>,
+    /// Optional `rch queue` result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_result: Option<ProbeResult>,
+    /// Optional final proof summary result parsed from an actual `rch exec`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof_summary_result: Option<ProbeResult>,
     /// Whether the daemon was observed running.
     pub daemon_running: bool,
     /// Whether the repository hook was installed.
@@ -688,6 +697,12 @@ pub struct RchReadiness {
     pub unreachable_workers: BTreeSet<String>,
     /// Worker pressure telemetry status.
     pub pressure_telemetry_state: TelemetryState,
+    /// Admission decision derived from `rch diagnose`, queue state, and proof summary.
+    #[serde(default)]
+    pub admission_decision: RchAdmissionDecision,
+    /// Stable reason code explaining [`Self::admission_decision`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_reason_code: Option<RchAdmissionReasonCode>,
     /// Whether Cargo proof may be offloaded now.
     pub cargo_offload_allowed: bool,
     /// Whether local Cargo is allowed by repo policy.
@@ -697,6 +712,15 @@ pub struct RchReadiness {
 impl RchReadiness {
     fn validate(&self) -> Result<(), AgentReadinessError> {
         self.check_result.validate()?;
+        if let Some(probe) = &self.diagnose_result {
+            probe.validate()?;
+        }
+        if let Some(probe) = &self.queue_result {
+            probe.validate()?;
+        }
+        if let Some(probe) = &self.proof_summary_result {
+            probe.validate()?;
+        }
         if self.workers_healthy > self.workers_total {
             return Err(AgentReadinessError::PolicyContradiction {
                 field: "rch.workers_healthy",
@@ -706,6 +730,22 @@ impl RchReadiness {
         for worker in &self.unreachable_workers {
             validate_key_fragment("rch.unreachable_workers", worker)?;
         }
+        if self.admission_decision == RchAdmissionDecision::RunRemoteNow
+            && (!self.cargo_offload_allowed || self.workers_healthy == 0)
+        {
+            return Err(AgentReadinessError::PolicyContradiction {
+                field: "rch.admission_decision",
+                reason: "run_remote_now requires available remote Cargo offload",
+            });
+        }
+        if self.admission_decision == RchAdmissionDecision::RefuseLocalFallback
+            && self.local_cargo_allowed
+        {
+            return Err(AgentReadinessError::PolicyContradiction {
+                field: "rch.local_cargo_allowed",
+                reason: "local fallback must be refused in this repository",
+            });
+        }
         Ok(())
     }
 
@@ -714,6 +754,15 @@ impl RchReadiness {
         probes: &mut Vec<(ReadinessSubsystem, &'a ProbeResult)>,
     ) {
         probes.push((ReadinessSubsystem::Rch, &self.check_result));
+        if let Some(probe) = &self.diagnose_result {
+            probes.push((ReadinessSubsystem::Rch, probe));
+        }
+        if let Some(probe) = &self.queue_result {
+            probes.push((ReadinessSubsystem::Rch, probe));
+        }
+        if let Some(probe) = &self.proof_summary_result {
+            probes.push((ReadinessSubsystem::Rch, probe));
+        }
     }
 }
 
@@ -721,16 +770,68 @@ impl Default for RchReadiness {
     fn default() -> Self {
         Self {
             check_result: default_probe(ReadinessSubsystem::Rch, "rch.check"),
+            diagnose_result: None,
+            queue_result: None,
+            proof_summary_result: None,
             daemon_running: false,
             hook_installed: false,
             workers_total: 0,
             workers_healthy: 0,
             unreachable_workers: BTreeSet::new(),
             pressure_telemetry_state: TelemetryState::Unknown,
+            admission_decision: RchAdmissionDecision::Unknown,
+            admission_reason_code: None,
             cargo_offload_allowed: false,
             local_cargo_allowed: false,
         }
     }
+}
+
+/// RCH admission decision for proof commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RchAdmissionDecision {
+    /// Remote offload can run now.
+    RunRemoteNow,
+    /// Same-project active build or slot pressure requires waiting.
+    WaitForProjectSlot,
+    /// Source inspection/planning is useful, but proof should not run yet.
+    SourceOnlyWork,
+    /// `rch` attempted or advertised local fallback, which must be refused.
+    RefuseLocalFallback,
+    /// RCH infrastructure failed before a build/test result existed.
+    RchInfraFailure,
+    /// Remote Cargo/Lean execution ran and failed for real code or tests.
+    RealBuildFailure,
+    /// Admission state was not observed.
+    #[default]
+    Unknown,
+}
+
+/// Stable RCH admission reason code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RchAdmissionReasonCode {
+    /// No blocking admission condition was observed.
+    Healthy,
+    /// Another active command for this project prevented admission.
+    ActiveProjectExclusion,
+    /// Worker or project slot pressure prevented immediate offload.
+    SlotPressure,
+    /// No reachable or healthy worker was available.
+    WorkersUnavailable,
+    /// Stale cancellation or cleanup residue prevented admission.
+    StaleCancellationResidue,
+    /// The command fell back or would fall back to local execution.
+    LocalFallbackDetected,
+    /// Remote execution completed and failed as a real build/test failure.
+    RemoteBuildFailed,
+    /// Pressure telemetry was stale or unavailable.
+    PressureTelemetryStale,
+    /// A GitHub/CI proof artifact is queued, missing, or stale.
+    CiArtifactUnavailable,
+    /// The reason is not classified yet.
+    Unknown,
 }
 
 /// Worker telemetry state.
@@ -1117,10 +1218,7 @@ impl DecisionBuilder {
             );
         } else if rch_unavailable || disk_blocked {
             let (reason, remediation) = if rch_unavailable {
-                (
-                    "proof-blocked-rch-unavailable",
-                    "defer Cargo proof and push until rch has healthy workers",
-                )
+                rch_blocked_reason(&probes.rch)
             } else {
                 (
                     "proof-blocked-disk-pressure",
@@ -1262,7 +1360,72 @@ const fn beads_unavailable(beads: &BeadsReadiness) -> bool {
 }
 
 const fn rch_unavailable(rch: &RchReadiness) -> bool {
-    probe_blocks(&rch.check_result) || !rch.cargo_offload_allowed || rch.workers_healthy == 0
+    probe_blocks(&rch.check_result)
+        || !rch.cargo_offload_allowed
+        || rch.workers_healthy == 0
+        || !matches!(
+            rch.admission_decision,
+            RchAdmissionDecision::RunRemoteNow | RchAdmissionDecision::Unknown
+        )
+}
+
+const fn rch_blocked_reason(rch: &RchReadiness) -> (&'static str, &'static str) {
+    match (rch.admission_decision, rch.admission_reason_code) {
+        (
+            RchAdmissionDecision::WaitForProjectSlot,
+            Some(RchAdmissionReasonCode::ActiveProjectExclusion),
+        ) => (
+            "proof-blocked-rch-active-project-exclusion",
+            "wait for the active same-project rch command to finish; do not run local Cargo fallback",
+        ),
+        (RchAdmissionDecision::WaitForProjectSlot, Some(RchAdmissionReasonCode::SlotPressure)) => (
+            "proof-blocked-rch-slot-pressure",
+            "wait for a remote rch slot; do not run local Cargo fallback",
+        ),
+        (
+            RchAdmissionDecision::RefuseLocalFallback,
+            Some(RchAdmissionReasonCode::LocalFallbackDetected),
+        ) => (
+            "proof-blocked-rch-local-fallback-refused",
+            "treat rch local fallback as refusal, not proof",
+        ),
+        (
+            RchAdmissionDecision::RchInfraFailure,
+            Some(RchAdmissionReasonCode::StaleCancellationResidue),
+        ) => (
+            "proof-blocked-rch-stale-cancellation",
+            "wait for rch cleanup or operator action; do not repair workers from readiness handling",
+        ),
+        (
+            RchAdmissionDecision::RchInfraFailure,
+            Some(RchAdmissionReasonCode::PressureTelemetryStale),
+        ) => (
+            "proof-blocked-rch-pressure-telemetry-stale",
+            "refresh rch telemetry through read-only status before admitting proof",
+        ),
+        (
+            RchAdmissionDecision::RchInfraFailure,
+            Some(RchAdmissionReasonCode::WorkersUnavailable),
+        ) => (
+            "proof-blocked-rch-workers-unavailable",
+            "defer Cargo proof and push until rch has healthy workers",
+        ),
+        (
+            RchAdmissionDecision::RealBuildFailure,
+            Some(RchAdmissionReasonCode::RemoteBuildFailed),
+        ) => (
+            "proof-failed-remote-build",
+            "fix the reported remote build or test failure before pushing",
+        ),
+        (RchAdmissionDecision::SourceOnlyWork, _) => (
+            "proof-blocked-rch-source-only",
+            "continue source inspection only until rch proof admission recovers",
+        ),
+        _ => (
+            "proof-blocked-rch-unavailable",
+            "defer Cargo proof and push until rch has healthy workers",
+        ),
+    }
 }
 
 fn disk_blocks_proof(disk: &DiskReadiness) -> bool {
@@ -1795,12 +1958,23 @@ mod tests {
                 },
                 rch: RchReadiness {
                     check_result: ok_probe(ReadinessSubsystem::Rch, "rch check --json"),
+                    diagnose_result: Some(ok_probe(
+                        ReadinessSubsystem::Rch,
+                        "rch diagnose --dry-run",
+                    )),
+                    queue_result: Some(ok_probe(ReadinessSubsystem::Rch, "rch queue")),
+                    proof_summary_result: Some(ok_probe(
+                        ReadinessSubsystem::Rch,
+                        "rch proof-summary",
+                    )),
                     daemon_running: true,
                     hook_installed: true,
                     workers_total: 8,
                     workers_healthy: 8,
                     unreachable_workers: BTreeSet::new(),
                     pressure_telemetry_state: TelemetryState::Current,
+                    admission_decision: RchAdmissionDecision::RunRemoteNow,
+                    admission_reason_code: Some(RchAdmissionReasonCode::Healthy),
                     cargo_offload_allowed: true,
                     local_cargo_allowed: false,
                 },
@@ -1853,7 +2027,7 @@ mod tests {
         assert_eq!(events[0].event_sequence, 1);
         assert_eq!(events[0].event_kind, ReadinessEventKind::ReportSummary);
         assert_eq!(events[0].status, ReadinessStatus::Ok);
-        assert_eq!(events.len(), 15);
+        assert_eq!(events.len(), 18);
 
         let line = serde_json::to_string(&events[0]).expect("event serializes");
         assert!(line.contains("\"schema\":\"fcp.agent-readiness-event.v1\""));
@@ -1900,6 +2074,8 @@ mod tests {
         report.probes.rch.workers_healthy = 0;
         report.probes.rch.unreachable_workers = BTreeSet::from(["vmi1149989".to_owned()]);
         report.probes.rch.pressure_telemetry_state = TelemetryState::Unavailable;
+        report.probes.rch.admission_decision = RchAdmissionDecision::RchInfraFailure;
+        report.probes.rch.admission_reason_code = Some(RchAdmissionReasonCode::WorkersUnavailable);
         report.probes.rch.cargo_offload_allowed = false;
         report.decision.mode = ReadinessOperatingMode::ProofBlocked;
         report.decision.status = ReadinessStatus::Blocked;
@@ -1934,6 +2110,8 @@ mod tests {
         let mut report = healthy_report();
         report.probes.rch.workers_healthy = 0;
         report.probes.rch.cargo_offload_allowed = false;
+        report.probes.rch.admission_decision = RchAdmissionDecision::RchInfraFailure;
+        report.probes.rch.admission_reason_code = Some(RchAdmissionReasonCode::WorkersUnavailable);
 
         let err = report.validate().expect_err("cargo proof must be refused");
         assert!(matches!(
@@ -2103,7 +2281,7 @@ mod tests {
                 RchUnavailable,
                 ProofBlocked,
                 ReadinessStatus::Blocked,
-                Some("proof-blocked-rch-unavailable"),
+                Some("proof-blocked-rch-workers-unavailable"),
                 PROOF_REFUSALS,
                 &["flywheel_connectors-rfbrc"],
             ),
@@ -2220,6 +2398,9 @@ mod tests {
                 );
                 report.probes.rch.workers_healthy = 0;
                 report.probes.rch.cargo_offload_allowed = false;
+                report.probes.rch.admission_decision = RchAdmissionDecision::RchInfraFailure;
+                report.probes.rch.admission_reason_code =
+                    Some(RchAdmissionReasonCode::WorkersUnavailable);
             }
             DegradedDecisionCase::DiskPressure => {
                 report.probes.disk.check_result =

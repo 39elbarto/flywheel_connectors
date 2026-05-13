@@ -34,7 +34,7 @@ fn test_declassify_approved_compiles() {
     let mut provenance = ProvenanceRecord::new(ZoneId::private());
 
     let event = declassify(
-        approval,
+        &approval,
         &mut provenance,
         object_id,
         ConfidentialityLevel::Work,
@@ -57,7 +57,7 @@ fn test_invalid_approver_emits_audit_with_reject_marker() {
     let mut provenance = ProvenanceRecord::new(ZoneId::private());
 
     let error = declassify(
-        approval,
+        &approval,
         &mut provenance,
         object_id,
         ConfidentialityLevel::Work,

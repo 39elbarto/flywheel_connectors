@@ -80,7 +80,6 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 futures-util = { workspace = true }
 url.workspace = true
 criterion.workspace = true
-proptest.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
 

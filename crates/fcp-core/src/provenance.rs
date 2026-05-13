@@ -972,7 +972,7 @@ impl DeclassificationError {
 /// Declassify provenance using an approved token.
 ///
 /// A pending approval cannot be passed to this function: the compiler requires
-/// `ApprovalToken<Approved>`, and trybuild fixtures pin that boundary.
+/// `&ApprovalToken<Approved>`, and trybuild fixtures pin that boundary.
 ///
 /// # Errors
 ///
@@ -980,7 +980,7 @@ impl DeclassificationError {
 /// requested flow. Every error variant carries the redaction-safe audit event
 /// that must be appended by the caller.
 pub fn declassify(
-    approval: ApprovalToken<Approved>,
+    approval: &ApprovalToken<Approved>,
     provenance: &mut ProvenanceRecord,
     object_id: ObjectId,
     target_confidentiality: ConfidentialityLevel,
@@ -997,7 +997,7 @@ pub fn declassify(
     };
 
     if !approval.is_valid(now_ms) || approval.signature.is_none() {
-        event.reason_code = "InvalidApprover".to_owned();
+        "InvalidApprover".clone_into(&mut event.reason_code);
         tracing::info!(
             target: "fcp.zone.declassify",
             capability_id = %event.capability_id,
@@ -1015,7 +1015,7 @@ pub fn declassify(
     }
 
     let ApprovalScope::Declassification(scope) = &approval.scope else {
-        event.reason_code = "ScopeMismatch".to_owned();
+        "ScopeMismatch".clone_into(&mut event.reason_code);
         tracing::info!(
             target: "fcp.zone.declassify",
             capability_id = %event.capability_id,
@@ -1036,7 +1036,7 @@ pub fn declassify(
         || scope.target_confidentiality != target_confidentiality
         || !scope.object_ids.contains(&object_id)
     {
-        event.reason_code = "ScopeMismatch".to_owned();
+        "ScopeMismatch".clone_into(&mut event.reason_code);
         tracing::info!(
             target: "fcp.zone.declassify",
             capability_id = %event.capability_id,
@@ -1053,11 +1053,11 @@ pub fn declassify(
         });
     }
 
-    let approval_token_id = approval_token_event_object_id(&approval);
+    let approval_token_id = approval_token_event_object_id(approval);
     if let Err(source) =
         provenance.apply_declassification(target_confidentiality, approval_token_id, now_ms)
     {
-        event.reason_code = "InvalidDeclassification".to_owned();
+        "InvalidDeclassification".clone_into(&mut event.reason_code);
         tracing::info!(
             target: "fcp.zone.declassify",
             capability_id = %event.capability_id,
@@ -1076,7 +1076,7 @@ pub fn declassify(
     }
 
     event.accepted = true;
-    event.reason_code = "Accepted".to_owned();
+    "Accepted".clone_into(&mut event.reason_code);
     tracing::info!(
         target: "fcp.zone.declassify",
         capability_id = %event.capability_id,

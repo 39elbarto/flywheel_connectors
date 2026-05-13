@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/typestate_compile_fail/pending_to_declassify.rs:9:9
+  |
+8 |     let _ = fcp_core::declassify(
+  |             -------------------- arguments to this function are incorrect
+9 |         pending,
+  |         ^^^^^^^ expected `ApprovalToken`, found `ApprovalToken<Pending>`
+  |
+  = note: expected struct `ApprovalToken<fcp_core::Approved>`
+             found struct `ApprovalToken<fcp_core::Pending>`
+note: function defined here
+ --> src/provenance.rs
+  |
+  | pub fn declassify(
+  |        ^^^^^^^^^^

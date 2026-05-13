@@ -28,9 +28,11 @@ fcp-voice-call = { path = "../../crates/fcp-voice-call" }
 
 base64.workspace = true
 chrono.workspace = true
+hex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

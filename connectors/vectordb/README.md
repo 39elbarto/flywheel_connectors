@@ -34,7 +34,7 @@ Important runtime truths the contract preserves:
 - Runtime `BaseConnector` ID is `vectordb`.
 - Manifest connector ID is `fcp.vectordb`.
 - Manifest interface hash is `blake3-256:fcp.interface.v2:58a82020b8b361edebf04f34ce0aa970dc1d6f9945bc4daeb210f6e9420c2f62`.
-- Runtime handshake returns `manifest_hash = "sha256:vectordb-connector-v1"`, not the manifest interface hash.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Configuration is deserialized as `VectorDbConfig` and requires `provider`, `endpoint`, and `credential_id`.
 - Supported providers are `pinecone` and `qdrant`.
 - `endpoint` must be nonempty and must not include `http://` or `https://`.

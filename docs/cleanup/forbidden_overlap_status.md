@@ -15,12 +15,12 @@ closed work. This file is the current delta ledger: a nonzero `pending` count
 means detail beads have been filed, not that all type moves are already
 complete.
 
-<!-- forbidden-overlap-summary: baseline_pairs=3 current_pairs=3 pending=1 resolved=2 -->
+<!-- forbidden-overlap-summary: baseline_pairs=3 current_pairs=3 pending=0 resolved=3 -->
 
 | ID | Type surface | From crate | Canonical owner | Canonical path | Status | Direct dependency | Detail bead |
 |----|--------------|------------|-----------------|----------------|--------|-------------------|-------------|
 | I2-HOST-MESH | SimulateResourceAvailability / mesh placement availability summary | fcp-host | fcp-mesh | `fcp-mesh::planner::ResourcePoolDecisionSummary` | resolved | fcp-host->fcp-mesh | flywheel_connectors-angoc.3.3 |
-| I2-STORE-RAPTORQ | ObjectTransmissionInfo / RaptorQ transmission metadata | fcp-store | fcp-raptorq | `fcp-raptorq::ObjectTransmissionInformation` | pending | fcp-store->fcp-raptorq | flywheel_connectors-angoc.3.4 |
+| I2-STORE-RAPTORQ | ObjectTransmissionInfo / RaptorQ transmission metadata | fcp-store | fcp-raptorq | `fcp-raptorq::ObjectTransmissionInformation` | resolved | fcp-store->fcp-raptorq | flywheel_connectors-angoc.3.4 |
 | I2-PROTOCOL-CRYPTO | SignedEnvelope / hybrid signed-object envelope | fcp-protocol | fcp-crypto | `fcp-crypto::SignedEnvelope` | resolved | fcp-protocol->fcp-crypto | flywheel_connectors-angoc.3.5 |
 
 ## Boundary Statements
@@ -47,6 +47,11 @@ move from `crates/fcp-store/src/symbol_store.rs` to the RaptorQ owner surface.
 or an explicitly named `fcp_raptorq` serde wrapper; it owns persistence
 behavior, not RaptorQ metadata semantics.
 
+Resolved 2026-05-13: `ObjectTransmissionInfo` is now a public re-export of
+`fcp_raptorq::ObjectTransmissionInformation`. The canonical RaptorQ type owns
+the serde fields and legacy `from_oti` / `to_oti` identity helpers, while
+`fcp-store` owns only symbol persistence metadata that references the type.
+
 ### I2-PROTOCOL-CRYPTO
 
 Cryptographic signed-envelope semantics stay in `fcp-crypto` as
@@ -64,5 +69,5 @@ not the generic hybrid envelope owner.
 ## Machine-Readable Rows
 
 <!-- forbidden-overlap-row: id=I2-HOST-MESH from=fcp-host to=fcp-mesh canonical=fcp-mesh::planner::ResourcePoolDecisionSummary status=resolved relation=fcp-host->fcp-mesh from_exists=true to_exists=true audit_pair_mentioned=true detail_bead=flywheel_connectors-angoc.3.3 -->
-<!-- forbidden-overlap-row: id=I2-STORE-RAPTORQ from=fcp-store to=fcp-raptorq canonical=fcp-raptorq::ObjectTransmissionInformation status=pending relation=fcp-store->fcp-raptorq from_exists=true to_exists=true audit_pair_mentioned=true detail_bead=flywheel_connectors-angoc.3.4 -->
+<!-- forbidden-overlap-row: id=I2-STORE-RAPTORQ from=fcp-store to=fcp-raptorq canonical=fcp-raptorq::ObjectTransmissionInformation status=resolved relation=fcp-store->fcp-raptorq from_exists=true to_exists=true audit_pair_mentioned=true detail_bead=flywheel_connectors-angoc.3.4 -->
 <!-- forbidden-overlap-row: id=I2-PROTOCOL-CRYPTO from=fcp-protocol to=fcp-crypto canonical=fcp-crypto::SignedEnvelope status=resolved relation=fcp-protocol->fcp-crypto from_exists=true to_exists=true audit_pair_mentioned=false detail_bead=flywheel_connectors-angoc.3.5 -->

@@ -40,9 +40,12 @@ use fcp_prelude::{
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument, warn};
 
 use crate::config::{DoctorCheck, DoctorResult, VectorDbConfig, VectorDbProvider};
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 /// FCP Vector Database Connector.
 pub struct VectorDbConnector {
@@ -88,6 +91,12 @@ impl VectorDbConnector {
     #[must_use]
     pub fn provider(&self) -> Option<VectorDbProvider> {
         self.config.as_ref().map(|c| c.provider)
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
     /// Handle configure method.
@@ -165,7 +174,7 @@ impl VectorDbConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:vectordb-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -1277,6 +1286,17 @@ mod tests {
     };
     use fcp_testkit::LogCapture;
     use std::time::Instant;
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+        let actual = VectorDbConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "sha256:vectordb-connector-v1");
+    }
 
     struct TestLog {
         test_name: &'static str,

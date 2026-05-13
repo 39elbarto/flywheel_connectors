@@ -1532,6 +1532,7 @@ mod tests {
             trace_context: None,
             connector_id: entry.connector_id.clone(),
             operation_id: entry.operation_id.clone(),
+            confidence: Some(fcp_audit::ConformalScore::from_value(0.9, 12, 1, 0, None)),
             issuer_kid: None,
             signature: None,
         }
@@ -1601,6 +1602,11 @@ mod tests {
             explanation
                 .render_human()
                 .contains("revocation cascade did not trigger")
+        );
+        assert!(
+            explanation
+                .render_human()
+                .contains("confidence 0.900 (n=12, nonconforming=1)")
         );
     }
 

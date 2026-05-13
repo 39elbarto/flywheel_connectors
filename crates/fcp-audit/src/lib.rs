@@ -29,7 +29,10 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
+pub mod conformal;
 pub mod explain;
+
+pub use conformal::{ConformalScore, ConformalScoreEstimator};
 
 const AUDIT_ENTRY_ID_DOMAIN: &[u8] = b"FCP2-AUDIT-ENTRY-V1";
 const CAPABILITY_CONSTRAINT_DESCRIPTOR_HASH_DOMAIN: &[u8] =
@@ -1105,6 +1108,10 @@ pub struct DecisionReceipt {
     /// Connector operation associated with the decision.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
+    /// Calibrated confidence derived from recent receipt history for this
+    /// connector operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<ConformalScore>,
     /// Ed25519 key ID of the receipt's signer, when the emitting host
     /// has a configured audit signing key. Present iff [`Self::signature`]
     /// is present. Bead `flywheel_connectors-17l4c`.
@@ -1138,6 +1145,7 @@ struct DecisionReceiptIdMaterial<'a> {
     trace_context: Option<&'a TraceContext>,
     connector_id: Option<&'a str>,
     operation_id: Option<&'a str>,
+    confidence: Option<&'a ConformalScore>,
 }
 
 impl DecisionReceipt {
@@ -1191,6 +1199,7 @@ impl DecisionReceipt {
             trace_context: self.trace_context.as_ref(),
             connector_id: self.connector_id.as_deref(),
             operation_id: self.operation_id.as_deref(),
+            confidence: self.confidence.as_ref(),
         };
 
         let canonical = fcp_cbor::to_canonical_cbor(&material).map_err(|err| {
@@ -2485,6 +2494,7 @@ mod tests {
             trace_context: None,
             connector_id: None,
             operation_id: None,
+            confidence: None,
             issuer_kid: None,
             signature: None,
         }
@@ -5423,6 +5433,7 @@ mod tests {
             trace_context: None,
             connector_id: None,
             operation_id: None,
+            confidence: None,
             issuer_kid: None,
             signature: None,
         };
@@ -5452,6 +5463,7 @@ mod tests {
             trace_context: Some(TraceContext::new("trace-2", "span-2").with_flags(0x01)),
             connector_id: Some("stripe".to_string()),
             operation_id: Some("charges.create".to_string()),
+            confidence: Some(ConformalScore::from_value(0.875, 32, 3, 90, None)),
             issuer_kid: None,
             signature: None,
         };
@@ -5461,8 +5473,10 @@ mod tests {
         assert!(json.contains("\"correlation_id\":\"corr-2\""));
         assert!(json.contains("\"connector_id\":\"stripe\""));
         assert!(json.contains("\"operation_id\":\"charges.create\""));
+        assert!(json.contains("\"confidence\""));
 
         let parsed: DecisionReceipt = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.confidence.as_ref().unwrap().display_value(), "0.875");
         assert_eq!(parsed, receipt);
     }
 
@@ -6945,6 +6959,7 @@ mod tests {
             trace_context: entry.trace_context.clone(),
             connector_id: entry.connector_id.clone(),
             operation_id: entry.operation_id,
+            confidence: None,
             issuer_kid: None,
             signature: None,
         };

@@ -35,6 +35,7 @@ mod encode;
 mod envelope;
 mod error;
 mod golden;
+mod k_selector;
 mod oti;
 
 pub use chunk::{ChunkedObjectManifest, RawChunk};
@@ -43,4 +44,5 @@ pub use decode::{DecodeAdmissionController, DecodePermit, RaptorQDecoder};
 pub use encode::{EncodingDecision, RaptorQEncoder};
 pub use envelope::{RaptorQSymbolFrame, SymbolEnvelope, SymbolEnvelopeError};
 pub use error::{ChunkError, DecodeError, EncodeError};
+pub use k_selector::{ArmRegistry, BetaPosterior, CodeFamily, KSelectorArm, KSelectorObservation};
 pub use oti::ObjectTransmissionInformation;

@@ -51,6 +51,7 @@ mod zone_keys;
 mod audit;
 mod checkpoint;
 mod object;
+pub mod quotient_filter;
 mod revocation;
 mod supply_chain;
 
@@ -82,6 +83,7 @@ pub use protocol::*;
 pub use provenance::*;
 pub use provisioning::*;
 pub use quorum::*;
+pub use quotient_filter::*;
 pub use ratelimit::*;
 pub use release::*;
 pub use revocation::*;

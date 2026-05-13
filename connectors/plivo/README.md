@@ -33,6 +33,8 @@ fallback and accepts Plivo's comma-separated multi-signature header form.
 `plivo.call.gather` returns Plivo GetDigits XML instead of pretending that
 Plivo has a Telnyx-style REST gather action.
 
+Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
+
 ## Verification
 
 Default tests use loopback fixtures only and require no live Plivo credentials.

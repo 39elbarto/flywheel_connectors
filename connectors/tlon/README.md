@@ -31,6 +31,7 @@ Important runtime truths:
 - `configure` rejects userinfo, query strings, fragments, unsupported schemes, public `http`, and private or loopback targets unless `allow_private_network = true`.
 - `handshake` requires prior configuration and returns `surface_status = "implemented"`.
 - `handshake` advertises active `tlon.dm` and `tlon.channel` capabilities.
+- Bound runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - `health` reports `healthy` after successful configure and handshake.
 - `self_check` reports `ok` for session-cookie auth and `degraded` with `credential_injection_required` for credential-id mode.
 - `introspect` advertises all three operations with `implemented = true`.

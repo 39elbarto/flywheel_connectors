@@ -37,7 +37,7 @@ This is the bridge plan to close every conceivable gap. The plan now has **21 ph
 
 - ConnectorStateRoot becomes a content-addressed mesh object (not a local file); local file flips to CACHE classification.
 - **δ-state CRDT formulation (Almeida, Shoker, Baquero 2018, "Delta state replicated data types", JPDC 2018)**: ConnectorStateRoot is a δ-state CRDT rather than a state-based CRDT. Only deltas gossip; full state is fetched on demand via vector-commitment opening (A.1.bis below). Replay size is bounded by Almeida et al.'s theorem: a peer that has consumed deltas `{δ_1, ..., δ_k}` needs only `O(k)` bytes to catch up, **not** `O(|state|)`. Implementation: `crates/fcp-store/src/connector_state/delta_crdt.rs::DeltaStateRoot` with a `delta_buffer: VecDeque<Delta>` ring buffer and a compaction threshold = 1024 entries.
-- **CRDT JOIN-semilattice formalism**: `ConnectorStateRoot` is a `LwwLatticeRoot` parameterized by `(node_id, hybrid_logical_clock, monotonic_seq)`. The carrier is a join-semilattice `(S, ⊔)` where `⊔` is idempotent, commutative, associative. Concurrent writes from two leaseholders during a partition heal via `merge(a, b) = a ⊔ b` satisfying `merge(a,b) ⊒ a ∧ merge(a,b) ⊒ b`. The merge function is encoded in `crates/fcp-store/src/connector_state/crdt.rs::ConnectorStateMerge`. **Acceptance**: property test `crates/fcp-store/tests/connector_state_merge_properties.rs` verifies idempotence (`a ⊔ a = a`), commutativity (`a ⊔ b = b ⊔ a`), and associativity (`(a ⊔ b) ⊔ c = a ⊔ (b ⊔ c)`) via proptest with 10,000 iterations + shrinking. Cross-references Phase O Lean proof `lean/FCP/Mesh/CrdtMerge.lean`.
+- **CRDT JOIN-semilattice formalism**: `ConnectorStateRoot` is a `LwwLatticeRoot` parameterized by `(node_id, hybrid_logical_clock, monotonic_seq)`. The carrier is a join-semilattice `(S, ⊔)` where `⊔` is idempotent, commutative, associative. Concurrent writes from two leaseholders during a partition heal via `merge(a, b) = a ⊔ b` satisfying `merge(a,b) ⊒ a ∧ merge(a,b) ⊒ b`. The merge function is encoded in `crates/fcp-store/src/connector_state/crdt.rs::ConnectorStateMerge`. **Acceptance**: property test `crates/fcp-store/tests/connector_state_merge_properties.rs` verifies idempotence (`a ⊔ a = a`), commutativity (`a ⊔ b = b ⊔ a`), and associativity (`(a ⊔ b) ⊔ c = a ⊔ (b ⊔ c)`) via proptest with 10,000 iterations + shrinking. Cross-references Phase O Lean proof `lean/Fcp/Mesh/CrdtMerge.lean`.
 - **Single-writer fallback**: when `singleton_writer = true` in manifest, CRDT merge is rejected at write time; conflict reports a `WriterFencingViolation` audit event with both fencing tokens. Connectors that opt into multi-writer CRDT explicitly declare `state_strategy = "lww_lattice"` or `"or_set"` in `manifest.toml`.
 - Eviction policy: LRU + replica-count threshold; cache invalidation on mesh root rotation via subscription to `RootRotationGossip`.
 - Tests: `crates/fcp-e2e/tests/fcp_store_connector_state_externalization_e2e.rs`, snapshot golden vector `tests/snapshots/connector_state_root_v1.cbor.bin`, latency matrix `docs/perf/connector_state_externalization_evidence.md` (target p99 < 5ms for cached read, < 50ms for mesh fetch on LAN).
@@ -317,9 +317,8 @@ This is the bridge plan to close every conceivable gap. The plan now has **21 ph
 
 ### C.1 Force `allowed_zones` non-empty
 
-- Remove the empty-set permissive backcompat branch in `crates/fcp-host/src/bin/fcp-host.rs` `allowed_zones()` and `verify_live_request()`.
-- Replace with explicit refusal: `HostError::ZoneEnvelopeRequired` if `allowed_zones` not configured.
-- Migration: add a one-time bootstrap flow that writes the default zone set if missing (gated on confirmation).
+- Status: source now fails closed with `HostError::ZoneEnvelopeRequired` when a host-backed connector has no explicit `allowed_zones`, and invoke, health, and introspection paths have coverage in `crates/fcp-host/src/bin/fcp-host.rs`, `crates/fcp-host/tests/allowed_zones_required.rs`, and `crates/fcp-conformance/tests/no_permissive_empty_zone_branch.rs`.
+- Remaining: current green RCH evidence still needs to be recorded before closing the bead, and any operator bootstrap/default-zone flow must stay hardware-token/audit gated instead of silently restoring permissive defaults.
 
 ### C.2 Information Flow Control (IFC) formalism
 
@@ -334,7 +333,7 @@ This is the bridge plan to close every conceivable gap. The plan now has **21 ph
 
 ### C.3 Connect to Lean formal proofs
 
-- The `lean/` corpus contains an in-flight proof of zone-flow soundness under `kyopb.1.3.1.1.6.2.1`. Land the proof: `lean/FCP/Zone/Lattice.lean` proves `theorem zone_flow_soundness : ∀ (op : Operation), zone_check(op) = Pass → ¬ ∃ (leak : Leak), reachable(op, leak)`.
+- The `lean/` corpus contains the zone-flow soundness proof source at `lean/Fcp/Zone/Lattice.lean`, including `theorem zone_flow_soundness : ∀ (flow : ZoneFlow), FlowAllowed flow → FlowSound flow` and `theorem zone_lattice_sound`.
 - Gate the README "Zone Isolation PROVEN" status flip on `make lean-verify` succeeding (cross-references Phase O).
 
 ### C.4 Cross-zone capability delegation with ApprovalToken typestate
@@ -379,11 +378,12 @@ This is the bridge plan to close every conceivable gap. The plan now has **21 ph
 
 ### C.7 Cross-zone leak E2E
 
-- `crates/fcp-e2e/tests/zone_isolation_full_e2e.rs` — drive 5-zone workload, assert no `z:public → z:private` capability invocation succeeds, no `z:work → z:owner` data flow without `ApprovalToken`.
+- Status: `crates/fcp-e2e/tests/zone_isolation_full_e2e.rs` exists with the five-zone workload, structured zone-check JSONL, declassification approval path, proptest rejection logging, and audit-chain continuity checks.
+- Remaining: record current green RCH evidence for this E2E before treating C.7 as closed.
 
 ### C.8 README status update
 
-- Move Zone Isolation row from LIMITED to PROVEN with `crates/fcp-e2e/tests/zone_isolation_full_e2e.rs` + `lean/FCP/Zone/Lattice.lean` as evidence pointers.
+- Move Zone Isolation row from LIMITED to PROVEN only after current green evidence exists for `crates/fcp-e2e/tests/zone_isolation_full_e2e.rs` and `lean/Fcp/Zone/Lattice.lean`.
 
 ### Sub-bead inventory (round 2)
 
@@ -857,11 +857,11 @@ Every graduation goes through:
 
 Existing in-flight proofs to land:
 
-- `lean/FCP/Zone/Lattice.lean` — zone-flow soundness (Phase C.3 dependency).
-- `lean/FCP/Capability/Typestate.lean` — capability typestate soundness (Unverified → UnboundVerified → BoundVerified → ConstraintsEnforced cannot be skipped).
-- `lean/FCP/Audit/HashChain.lean` — hash-chain tamper-evidence (∀ tampering m, verify_chain(m(chain)) = Err).
-- `lean/FCP/Crypto/HybridSignature.lean` — hybrid signature soundness (∀ adversary A with classical OR PQ break, A cannot forge a hybrid signature).
-- `lean/FCP/Mesh/CrdtMerge.lean` — ConnectorStateRoot CRDT merge satisfies lattice laws (Phase A.1).
+- `lean/Fcp/Zone/Lattice.lean` — zone-flow soundness (Phase C.3 dependency).
+- `lean/Fcp/Capability/Typestate.lean` — capability typestate soundness (Unverified → UnboundVerified → BoundVerified → ConstraintsEnforced cannot be skipped).
+- `lean/Fcp/Audit/HashChain.lean` — hash-chain tamper-evidence (∀ tampering m, verify_chain(m(chain)) = Err).
+- `lean/Fcp/Crypto/HybridSignature.lean` — hybrid signature soundness (∀ adversary A with classical OR PQ break, A cannot forge a hybrid signature).
+- `lean/Fcp/Mesh/CrdtMerge.lean` — ConnectorStateRoot CRDT merge satisfies lattice laws (Phase A.1).
 
 ### O.3 CI gate
 
@@ -871,7 +871,7 @@ Existing in-flight proofs to land:
 
 ### O.4 Acceptance
 
-- README's "Zone Isolation PROVEN" row is **only** allowed to be `PROVEN` if `lean/FCP/Zone/Lattice.lean` compiles green in the most recent CI run. Enforced by `crates/fcp-conformance/tests/readme_lean_proven_gate.rs` which reads the latest CI artifact and asserts the proof's compile-status.
+- README's "Zone Isolation PROVEN" row is **only** allowed to be `PROVEN` if `lean/Fcp/Zone/Lattice.lean` compiles green in the most recent lean-verify artifact. Enforced by `crates/fcp-conformance/tests/readme_lean_proven_gate.rs`, which scans `artifacts/lean/` for the latest uploaded CI artifact when the README row is `PROVEN`.
 
 ### O.5 Tests
 

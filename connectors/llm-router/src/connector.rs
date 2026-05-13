@@ -10,6 +10,7 @@ use fcp_prelude::{
     Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 use url::{Host, Url};
 
@@ -21,6 +22,8 @@ use crate::types::{
     ProviderReadiness, ProviderStatus, ProviderUsage, RoutingDecision, RoutingStrategy,
     built_in_gateway_provider_descriptors, gateway_provider_descriptor, llm_router_host_is_allowed,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 /// Router configuration parsed from `configure` params.
 #[derive(Debug, Clone)]
@@ -58,6 +61,12 @@ impl LlmRouterConnector {
 
     fn total_cost(&self) -> f64 {
         self.total_cost.load(Ordering::Relaxed) as f64 / 1_000_000_000.0
+    }
+
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
     fn track_cost(&self, cost: f64) {
@@ -341,7 +350,7 @@ impl LlmRouterConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "blake3-256:fcp.interface.v2:pending".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: None,
             auth_caps: None,
@@ -2004,6 +2013,17 @@ mod tests {
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_prelude::{CapabilityConstraints, InstanceId};
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+        let actual = LlmRouterConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "blake3-256:fcp.interface.v2:pending");
+    }
 
     fn test_config_params() -> serde_json::Value {
         json!({

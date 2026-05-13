@@ -18,6 +18,7 @@ use fcp_prelude::{
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::{
@@ -26,6 +27,8 @@ use crate::{
     },
     error::AdminReportsError,
 };
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 struct AdminReportsConfig {
     auth: GoogleMaterializedAuth,
@@ -306,6 +309,12 @@ impl AdminReportsConnector {
         }
     }
 
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     #[instrument(skip(self, params))]
     pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
         let config = AdminReportsConfig::from_params(&params).await?;
@@ -377,7 +386,7 @@ impl AdminReportsConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:google-admin-reports-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -1193,6 +1202,17 @@ mod tests {
     const AUDIT_CAPABILITY: &str = "admin.reports.audit.read";
     const USAGE_CAPABILITY: &str = "admin.reports.usage.read";
     const LIST_ACTIVITIES: &str = "admin.list_activities";
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+        let actual = AdminReportsConnector::manifest_hash();
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, "sha256:google-admin-reports-v1");
+    }
 
     fn config_with_test_bearer(extra: &[(&str, Value)]) -> Value {
         let mut params = serde_json::Map::new();

@@ -183,7 +183,7 @@ pub enum BootstrapError {
     HardwareTokenEnrollmentNotImplemented {
         /// Human-readable token locator selected for provisioning.
         token_display: String,
-        /// Selected key material type (e.g. "Ed25519", "EcP256").
+        /// Selected key material type (e.g. `Ed25519`, `EcP256`).
         key_material: String,
     },
 

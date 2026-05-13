@@ -45,7 +45,7 @@ use fcp_async_core::time;
 use fcp_auth_schema::claims::CURRENT_SCHEMA_VERSION;
 use fcp_crypto::ed25519::Ed25519VerifyingKey;
 use fcp_crypto::{
-    CryptoError, CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope,
+    CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope,
     signing_bytes_for_canonical_payload,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -521,8 +521,8 @@ impl ZoneId {
         let suffix = raw
             .strip_prefix("z:project:")
             .map_or_else(
-                || raw.strip_prefix("z:").unwrap_or(raw).replace('_', "-"),
-                |project| format!("proj-{}", project.replace('_', "-")),
+                || raw.strip_prefix("z:").unwrap_or(raw).to_owned(),
+                |project| format!("proj-{project}"),
             )
             .replace(':', "-");
         format!("tag:fcp-{suffix}")
@@ -583,8 +583,7 @@ impl ZoneId {
         }
 
         for (index, ch) in zone_id.char_indices() {
-            let ok =
-                ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, ':' | '_' | '-');
+            let ok = ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, ':' | '-');
             if !ok {
                 return Err(ZoneIdError::InvalidChar { ch, index });
             }
@@ -1686,24 +1685,6 @@ impl<S> CapabilityToken<S> {
     #[must_use]
     pub fn into_raw(self) -> CoseToken {
         self.raw
-    }
-}
-
-impl<S> HybridSignable for CapabilityToken<S>
-where
-    Self: Serialize,
-{
-    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::CapabilityToken;
-
-    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
-        let payload_cbor = self
-            .raw()
-            .to_cbor()
-            .map_err(|err| CryptoError::SerializationError(err.to_string()))?;
-        Ok(signing_bytes_for_canonical_payload(
-            Self::OBJECT_KIND,
-            &payload_cbor,
-        ))
     }
 }
 

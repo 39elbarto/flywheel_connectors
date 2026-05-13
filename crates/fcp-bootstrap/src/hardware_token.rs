@@ -586,7 +586,7 @@ struct EnumerationSession {
 }
 
 impl EnumerationSession {
-    fn session(&self) -> &Session {
+    const fn session(&self) -> &Session {
         self.session
             .as_ref()
             .expect("enumeration session is still open")
@@ -1351,8 +1351,7 @@ impl<'a> CertificateSelectionIndex<'a> {
         };
 
         let selection_reason = format!(
-            "Ed25519 signing certificate with verified issuer chain selected among {} compatible pair(s)",
-            candidates_considered
+            "Ed25519 signing certificate with verified issuer chain selected among {candidates_considered} compatible pair(s)"
         );
 
         Ok(CertificateSelection {
@@ -1620,6 +1619,10 @@ fn acquire_provider_context_with_stage(
     Ok(pkcs11)
 }
 
+#[allow(
+    clippy::significant_drop_tightening,
+    reason = "the provider registry lock intentionally spans finalize to serialize PKCS#11 teardown"
+)]
 fn finalize_pkcs11_context(provider: &Path, pkcs11: Pkcs11) -> Result<(), TokenError> {
     // br-idk2k: hold the registry lock across the actual pkcs11.finalize()
     // call so no concurrent acquire_provider_context can observe the

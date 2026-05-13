@@ -823,6 +823,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
 
 [[package]]
+name = "br-tools"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2386,9 +2397,10 @@ name = "fcp-adversarial"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "blake3",
  "fcp-async-core",
  "fcp-core",
- "fcp-manifest",
  "fcp-prelude",
  "serde",
  "serde_json",
@@ -3086,6 +3098,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-chaos"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "thiserror 2.0.18",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+]
+
+[[package]]
 name = "fcp-circleci"
 version = "0.1.0"
 dependencies = [
@@ -3223,6 +3246,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-audit",
  "fcp-auth-schema",
+ "fcp-bench",
  "fcp-cbor",
  "fcp-core",
  "fcp-crypto",
@@ -3337,6 +3361,7 @@ dependencies = [
  "ed25519-dalek",
  "fcp-async-core",
  "fcp-auth-schema",
+ "fcp-bench",
  "fcp-cbor",
  "frost-ed25519",
  "getrandom 0.3.4",
@@ -3365,6 +3390,16 @@ dependencies = [
  "x25519-dalek 2.0.1",
  "x25519-dalek 3.0.0-pre.6",
  "zeroize",
+]
+
+[[package]]
+name = "fcp-crypto-hw"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -4075,6 +4110,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
+ "fcp-e2e",
  "fcp-prelude",
  "fcp-sdk",
  "fcp-testkit",
@@ -10845,17 +10881,17 @@ dependencies = [
 
 [[package]]
 name = "ml-dsa"
-version = "0.1.0-rc.9"
+version = "0.1.0-rc.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3a596bd65985e2b343c3fd6cc4ade15cdd76da66b15936cfbce72ea661cdbb2"
+checksum = "163f15320f3fba11760c373af52d7f69d638482c2c350d877fb06513b1c3137c"
 dependencies = [
+ "crypto-common 0.2.1",
  "ctutils",
  "hybrid-array",
  "module-lattice",
  "pkcs8 0.11.0",
- "rand_core 0.10.1",
  "sha3",
- "signature 3.0.0-rc.10",
+ "signature 3.0.0",
  "zeroize",
 ]
 
@@ -10875,9 +10911,9 @@ dependencies = [
 
 [[package]]
 name = "module-lattice"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc7c90d33a0dac244570c26461d761ffaeadb3bfc2b17cc625ae2185cafdffae"
+checksum = "0c61b87c9683ab7cb1c6871d261ad5479b6b10ceb52c4352aaca3b5d35a8febe"
 dependencies = [
  "ctutils",
  "hybrid-array",
@@ -13665,9 +13701,9 @@ dependencies = [
 
 [[package]]
 name = "signature"
-version = "3.0.0-rc.10"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f1880df446116126965eeec169136b2e0251dba37c6223bcc819569550edea3"
+checksum = "28d567dcbaf0049cb8ac2608a76cd95ff9e4412e1899d389ee400918ca7537f5"
 dependencies = [
  "digest 0.11.2",
  "rand_core 0.10.1",

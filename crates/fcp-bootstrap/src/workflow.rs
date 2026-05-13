@@ -465,7 +465,7 @@ impl BootstrapWorkflow {
     /// operator; the previous implementation logged only
     /// `"Recovery phrase generated. Store it securely!"` without the
     /// actual words, and the sibling `save_recovery_phrase` was a
-    /// tracing::debug no-op — a successful bootstrap left the
+    /// `tracing::debug` no-op — a successful bootstrap left the
     /// operator with no recovery phrase in-hand and no persisted
     /// copy, so total loss of the device = total loss of owner
     /// identity with no recovery path.
@@ -477,7 +477,7 @@ impl BootstrapWorkflow {
     /// (e.g., "Type the first and last word back to confirm") before
     /// proceeding. The `RecoveryPhrase` in the returned outcome is
     /// the single in-memory copy; when the CLI drops it after
-    /// displaying, ZeroizeOnDrop wipes the bytes. If the CLI never
+    /// displaying, `ZeroizeOnDrop` wipes the bytes. If the CLI never
     /// reads the phrase out of `BootstrapOutcome`, it still gets
     /// zeroized on drop — safe default, bad UX (no recovery path),
     /// which the regression test at
@@ -667,7 +667,7 @@ impl BootstrapWorkflow {
         // match on the specific "not implemented" signal instead of
         // substring-matching the legacy HardwareToken message.
         Err(BootstrapError::HardwareTokenEnrollmentNotImplemented {
-            token_display: token_display.to_string(),
+            token_display,
             key_material: provisioning_material.pair.key.key_type.to_string(),
         })
     }
@@ -767,7 +767,7 @@ fn ensure_secure_data_dir(path: &Path) -> std::io::Result<()> {
         builder.recursive(true).mode(0o700);
         builder.create(path)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(unix))]
     {

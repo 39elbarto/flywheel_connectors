@@ -27,19 +27,15 @@
 //! operations after losing the lease.
 
 use fcp_crypto::{
-    CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope, signing_bytes_for_payload,
+    CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope,
+    signing_bytes_for_canonical_payload,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use fcp_crypto::{
-    CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope,
-    signing_bytes_for_canonical_payload,
-};
-
 use crate::{
-    CapabilityId, IdempotencyClass, InstanceId, NodeId, NodeSignature, ObjectHeader, ObjectId,
-    PrincipalId, RequestId, TailscaleNodeId, UsageMetric, ZoneId,
+    CapabilityId, IdempotencyClass, InstanceId, NodeSignature, ObjectHeader, ObjectId, PrincipalId,
+    RequestId, TailscaleNodeId, UsageMetric, ZoneId,
 };
 
 /// Tracing span name for canonical operation execution.
@@ -348,7 +344,6 @@ impl HybridSignable for OperationReceipt {
         ))
     }
 }
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Operation Status (public operation lifecycle)

@@ -3,6 +3,8 @@
 //! Diagnoses common connector issues (auth failure, rate limiting, high latency,
 //! config errors) and suggests specific fix-it commands or automatic repairs.
 
+pub mod self_test;
+
 use serde::Serialize;
 use serde_json::Value;
 use std::fmt::Write as _;
@@ -25,6 +27,7 @@ pub enum Severity {
 
 impl Severity {
     /// Human-readable label.
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Info => "info",
@@ -67,6 +70,7 @@ pub enum DiagnosisCategory {
 
 impl DiagnosisCategory {
     /// Human-readable display name.
+    #[must_use]
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::Auth => "Authentication",
@@ -168,6 +172,7 @@ pub enum HealthStatus {
 }
 
 impl HealthStatus {
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Healthy => "healthy",
@@ -205,11 +210,13 @@ impl DiagnosticReport {
     }
 
     /// Whether this report has any issues.
+    #[must_use]
     pub fn has_issues(&self) -> bool {
         !self.diagnoses.is_empty()
     }
 
     /// Count of auto-safe fixes available.
+    #[must_use]
     pub fn auto_fixable_count(&self) -> usize {
         self.diagnoses
             .iter()
@@ -219,6 +226,7 @@ impl DiagnosticReport {
     }
 
     /// All fix commands across all diagnoses.
+    #[must_use]
     pub fn all_fix_commands(&self) -> Vec<&str> {
         self.diagnoses
             .iter()
@@ -228,6 +236,7 @@ impl DiagnosticReport {
     }
 
     /// Render as TOON-style summary.
+    #[must_use]
     pub fn summary_line(&self) -> String {
         if self.diagnoses.is_empty() {
             format!("{}  {}", self.connector_id, self.status)
@@ -249,6 +258,7 @@ impl DiagnosticReport {
     }
 
     /// Render as structured JSON value.
+    #[must_use]
     pub fn to_json(&self) -> Value {
         serde_json::to_value(self).unwrap_or(Value::Null)
     }
@@ -288,6 +298,7 @@ pub struct Symptoms {
 }
 
 /// Diagnose symptoms for a connector.
+#[must_use]
 pub fn diagnose(connector_id: &str, symptoms: &Symptoms) -> DiagnosticReport {
     let mut diagnoses = Vec::new();
 
@@ -544,6 +555,7 @@ fn diagnose_rate_limit(connector_id: &str, percent: u8) -> Option<Diagnosis> {
 // ── TOON formatting ───────────────────────────────────────────────
 
 /// Format a single diagnostic report as TOON text.
+#[must_use]
 pub fn format_report_toon(report: &DiagnosticReport) -> String {
     let mut out = String::new();
     let indicator = match report.status {
@@ -620,6 +632,7 @@ pub fn format_fleet_toon(reports: &[DiagnosticReport]) -> String {
 }
 
 /// Collect all auto-safe fix commands from a set of reports.
+#[must_use]
 pub fn collect_auto_fixes(reports: &[DiagnosticReport]) -> Vec<AutoFix> {
     reports
         .iter()

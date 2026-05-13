@@ -1,0 +1,42 @@
+[fixture]
+name = "broken_env"
+
+[[checks]]
+name = "agent_mail_api"
+subsystem = "agent-mail"
+verdict = "fail"
+latency_ms = 5000
+message = "Agent Mail fixture API is unreachable."
+remediation = "agent-mail: retry once, then continue degraded; do not restart the shared service."
+auto_repair = false
+score_penalty = 220
+
+[[checks]]
+name = "beads_wal"
+subsystem = "beads-wal"
+verdict = "fail"
+latency_ms = 30
+message = "Beads fixture WAL is deliberately inconsistent."
+remediation = "br doctor --repair (operator-gated)"
+auto_repair = false
+score_penalty = 180
+
+[[checks]]
+name = "operator_pubkey"
+subsystem = "pubkey"
+verdict = "fail"
+latency_ms = 1
+message = "Operator public key fixture is missing."
+remediation = "pubkey: restore the operator public key fixture before trusting doctor output."
+auto_repair = false
+score_penalty = 150
+
+[[checks]]
+name = "otlp_config"
+subsystem = "otlp"
+verdict = "warn"
+latency_ms = 2
+message = "OTLP fixture endpoint is syntactically valid but marked unavailable."
+remediation = "otlp: verify collector endpoint and auth headers; keep export disabled until validated."
+auto_repair = false
+score_penalty = 60

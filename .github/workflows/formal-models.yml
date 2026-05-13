@@ -11,6 +11,7 @@ on:
       - "crates/fcp-core/src/capability.rs"
       - "crates/fcp-e2e/tests/cutover_tla_model_alignment_e2e.rs"
       - "crates/fcp-e2e/tests/capability_lifecycle_tla_alignment_e2e.rs"
+      - "crates/fcp-audit/src/lib.rs"
   push:
     branches:
       - main
@@ -23,6 +24,7 @@ on:
       - "crates/fcp-core/src/capability.rs"
       - "crates/fcp-e2e/tests/cutover_tla_model_alignment_e2e.rs"
       - "crates/fcp-e2e/tests/capability_lifecycle_tla_alignment_e2e.rs"
+      - "crates/fcp-audit/src/lib.rs"
   workflow_dispatch:
 
 permissions:
@@ -85,6 +87,14 @@ jobs:
       - name: Run capability lifecycle broken-spec TLC smoke
         shell: bash
         run: make tla-check-capability-lifecycle-broken TLA2TOOLS_JAR="${TLA2TOOLS_JAR}"
+
+      - name: Run audit liveness TLC gate
+        shell: bash
+        run: make tla-check-audit-liveness TLA2TOOLS_JAR="${TLA2TOOLS_JAR}"
+
+      - name: Run audit liveness broken-spec TLC smoke
+        shell: bash
+        run: make tla-check-audit-liveness-broken TLA2TOOLS_JAR="${TLA2TOOLS_JAR}"
 
       - name: Run Rust alignment E2E
         shell: bash

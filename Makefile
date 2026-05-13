@@ -12,10 +12,13 @@ TLA_CUTOVER_BROKEN_SPEC := specs/tla/_fixtures/cutover_broken.tla
 TLA_CAPABILITY_LIFECYCLE_SPEC := specs/tla/capability_lifecycle.tla
 TLA_CAPABILITY_LIFECYCLE_CFG := specs/tla/capability_lifecycle.cfg
 TLA_CAPABILITY_LIFECYCLE_BROKEN_SPEC := specs/tla/_fixtures/capability_lifecycle_broken.tla
+TLA_AUDIT_LIVENESS_SPEC := specs/tla/audit_liveness.tla
+TLA_AUDIT_LIVENESS_CFG := specs/tla/audit_liveness.cfg
+TLA_AUDIT_LIVENESS_BROKEN_SPEC := specs/tla/_fixtures/audit_liveness_broken.tla
 TLA_ARTIFACT_DIR := artifacts/formal/tla
 TLA_STATE_DIR := $(TLA_ARTIFACT_DIR)/states
 
-.PHONY: lean-verify lean-verify-verbose tla-check tla-check-broken tla-check-capability-lifecycle tla-check-capability-lifecycle-broken
+.PHONY: lean-verify lean-verify-verbose tla-check tla-check-broken tla-check-capability-lifecycle tla-check-capability-lifecycle-broken tla-check-audit-liveness tla-check-audit-liveness-broken
 
 lean-verify:
 	@set -eu; \
@@ -119,5 +122,48 @@ tla-check-capability-lifecycle-broken:
 		cat "$(TLA_ARTIFACT_DIR)/capability_lifecycle_broken.log"; \
 		duration=$$(( $$(date +%s) - start )); \
 		printf 'ERROR {"span":"fcp.formal.tla_check","spec":"%s","depth":20,"verdict":"red_without_revoke_before_use_invariant","duration_s":%s}\n' "$(TLA_CAPABILITY_LIFECYCLE_BROKEN_SPEC)" "$$duration"; \
+		exit 1; \
+	fi
+
+tla-check-audit-liveness:
+	@set -eu; \
+	mkdir -p "$(TLA_ARTIFACT_DIR)" "$(TLA_STATE_DIR)/audit_liveness"; \
+	if [ ! -f "$(TLA2TOOLS_JAR)" ]; then \
+		printf 'ERROR {"span":"fcp.formal.tla_check","spec":"%s","verdict":"toolchain_missing","message":"set TLA2TOOLS_JAR to tla2tools.jar"}\n' "$(TLA_AUDIT_LIVENESS_SPEC)"; \
+		exit 127; \
+	fi; \
+	start=$$(date +%s); \
+	if java -cp "$(TLA2TOOLS_JAR)" tlc2.TLC -deadlock -metadir "$(TLA_STATE_DIR)/audit_liveness" -config "$(TLA_AUDIT_LIVENESS_CFG)" "$(TLA_AUDIT_LIVENESS_SPEC)" | tee "$(TLA_ARTIFACT_DIR)/audit_liveness.log"; then \
+		duration=$$(( $$(date +%s) - start )); \
+		states=$$(sed -n 's/^\([0-9][0-9]*\) states generated.*/\1/p' "$(TLA_ARTIFACT_DIR)/audit_liveness.log" | tail -n 1); \
+		states=$${states:-unknown}; \
+		printf 'INFO {"span":"fcp.formal.tla_check","spec":"%s","depth":20,"states_explored":"%s","invariants_checked":["Safety","Liveness","Recoverability"],"verdict":"green","duration_s":%s}\n' "$(TLA_AUDIT_LIVENESS_SPEC)" "$$states" "$$duration"; \
+	else \
+		duration=$$(( $$(date +%s) - start )); \
+		printf 'ERROR {"span":"fcp.formal.tla_check","spec":"%s","depth":20,"states_explored":"unknown","invariants_checked":["Safety","Liveness","Recoverability"],"verdict":"red","duration_s":%s}\n' "$(TLA_AUDIT_LIVENESS_SPEC)" "$$duration"; \
+		exit 1; \
+	fi
+
+tla-check-audit-liveness-broken:
+	@set -eu; \
+	mkdir -p "$(TLA_ARTIFACT_DIR)" "$(TLA_STATE_DIR)/audit_liveness_broken"; \
+	if [ ! -f "$(TLA2TOOLS_JAR)" ]; then \
+		printf 'ERROR {"span":"fcp.formal.tla_check","spec":"%s","verdict":"toolchain_missing","message":"set TLA2TOOLS_JAR to tla2tools.jar"}\n' "$(TLA_AUDIT_LIVENESS_BROKEN_SPEC)"; \
+		exit 127; \
+	fi; \
+	start=$$(date +%s); \
+	if java -cp "$(TLA2TOOLS_JAR)" tlc2.TLC -deadlock -metadir "$(TLA_STATE_DIR)/audit_liveness_broken" -config "$(TLA_AUDIT_LIVENESS_CFG)" "$(TLA_AUDIT_LIVENESS_BROKEN_SPEC)" > "$(TLA_ARTIFACT_DIR)/audit_liveness_broken.log" 2>&1; then \
+		cat "$(TLA_ARTIFACT_DIR)/audit_liveness_broken.log"; \
+		duration=$$(( $$(date +%s) - start )); \
+		printf 'ERROR {"span":"fcp.formal.tla_check","spec":"%s","depth":20,"verdict":"unexpected_green","duration_s":%s}\n' "$(TLA_AUDIT_LIVENESS_BROKEN_SPEC)" "$$duration"; \
+		exit 1; \
+	fi; \
+	if grep -qi "liveness\|temporal" "$(TLA_ARTIFACT_DIR)/audit_liveness_broken.log"; then \
+		duration=$$(( $$(date +%s) - start )); \
+		printf 'INFO {"span":"fcp.formal.tla_check","spec":"%s","depth":20,"invariants_checked":["Liveness"],"verdict":"expected_red","duration_s":%s}\n' "$(TLA_AUDIT_LIVENESS_BROKEN_SPEC)" "$$duration"; \
+	else \
+		cat "$(TLA_ARTIFACT_DIR)/audit_liveness_broken.log"; \
+		duration=$$(( $$(date +%s) - start )); \
+		printf 'ERROR {"span":"fcp.formal.tla_check","spec":"%s","depth":20,"verdict":"red_without_liveness_violation","duration_s":%s}\n' "$(TLA_AUDIT_LIVENESS_BROKEN_SPEC)" "$$duration"; \
 		exit 1; \
 	fi

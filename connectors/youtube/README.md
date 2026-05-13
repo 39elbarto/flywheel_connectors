@@ -51,7 +51,7 @@ Important runtime truths the contract preserves:
 - Runtime reqwest timeout is `30 seconds`.
 - Runtime request context timeout is `30 seconds`.
 - Runtime retry policy uses `max_retries = 2`.
-- Runtime handshake returns placeholder manifest hash `sha256:youtube-connector-v1`.
+- Runtime handshake returns a SHA-256 hash of the bundled `manifest.toml`.
 - Runtime handshake advertises no streaming and no replay.
 - Runtime verifies a bound capability token before provider dispatch.
 - Runtime `invoke` uses `operation`, not `operation_id`.
@@ -66,12 +66,11 @@ This README documents runtime truth and keeps current drift visible:
 - Manifest allows `upload.googleapis.com` for `youtube.upload_video`, but runtime builds uploads from the configured `base_url` and the current implementation sends a JSON-shaped body for the deterministic/mock path rather than the live resumable upload protocol.
 - Manifest allows `youtubeanalytics.googleapis.com` for `youtube.get_analytics`, but runtime currently aggregates channel/video statistics from Data API calls instead of using the full YouTube Analytics API.
 - `youtube.post_comment`, `youtube.upload_caption`, and `youtube.upload_video` require user-authorized OAuth in real YouTube operation; the runtime configuration still permits direct API-key mode and relies on the provider to reject insufficient credentials.
-- Runtime handshake uses a placeholder manifest hash.
 - Runtime approval metadata marks write operations as dangerous/interactive in the manifest and introspection, but connector-local invoke enforcement is capability-token based rather than an approval workflow.
 - There is no tracked connector verification shell script yet.
 - `youtube.get_transcript` uses official caption list/download paths and SRT normalization. It does not scrape watch pages, use unofficial transcript endpoints, or bypass YouTube Data API auth/quota behavior.
 
-A follow-up parity bead should add a tracked verification bundle, replace the placeholder manifest hash, reconcile upload host/protocol behavior with live `videos.insert` expectations, decide whether `youtube.get_analytics` should integrate the Analytics API or remain a Data API summary, and make approval enforcement responsibilities explicit.
+A follow-up parity bead should add a tracked verification bundle, reconcile upload host/protocol behavior with live `videos.insert` expectations, decide whether `youtube.get_analytics` should integrate the Analytics API or remain a Data API summary, and make approval enforcement responsibilities explicit.
 
 ## First-Slice Scope
 
@@ -82,7 +81,7 @@ The current YouTube README slice documents the existing runtime surface:
 - Data API search, video, channel, playlist, comments, captions, transcript, summary analytics, caption upload, comment post, and video upload operations
 - bound capability-token verification and resource URI derivation during `invoke` and `simulate`
 - doctor, health, self-check, simulate, introspect, shutdown, redaction posture, and deterministic tests
-- drift around OAuth-only mutations, quota cost, upload protocol, placeholder manifest hash, and the analytics summary facade
+- drift around OAuth-only mutations, quota cost, upload protocol, and the analytics summary facade
 
 ## Auth And Zone Boundary
 

@@ -11,6 +11,7 @@ use fcp_prelude::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 use crate::{
@@ -25,6 +26,7 @@ const DEFAULT_TRANSCRIPT_MAX_BYTES: usize = 262_144;
 const HARD_TRANSCRIPT_MAX_BYTES: usize = 10 * 1024 * 1024;
 const DEFAULT_TRANSCRIPT_MAX_SEGMENTS: usize = 1_000;
 const HARD_TRANSCRIPT_MAX_SEGMENTS: usize = 10_000;
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 /// Parsed and validated YouTube connector configuration.
 #[derive(Debug, Clone)]
@@ -205,6 +207,13 @@ impl YouTubeConnector {
         self.base.instance_id.as_str()
     }
 
+    #[must_use]
+    fn manifest_hash() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
     /// Handle configure method.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
@@ -265,7 +274,7 @@ impl YouTubeConnector {
             status: "accepted".into(),
             capabilities_granted,
             session_id,
-            manifest_hash: "sha256:youtube-connector-v1".into(),
+            manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
@@ -2189,6 +2198,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(result["status"], "accepted");
+    }
+
+    #[test]
+    fn handshake_manifest_hash_tracks_bundled_manifest() {
+        let mut hasher = Sha256::new();
+        hasher.update(MANIFEST_TOML.as_bytes());
+        let expected = format!("sha256:{}", hex::encode(hasher.finalize()));
+
+        assert_eq!(YouTubeConnector::manifest_hash(), expected);
+        assert_ne!(
+            YouTubeConnector::manifest_hash(),
+            "sha256:youtube-connector-v1"
+        );
     }
 
     #[fcp_async_core::runtime::test]

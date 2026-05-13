@@ -101,6 +101,7 @@ rand_chacha = "0.3"
 proptest.workspace = true
 tracing-subscriber.workspace = true
 criterion.workspace = true
+fcp-bench.workspace = true
 # Async runtime for AsyncSecretFetchHook tests
 fcp-async-core.workspace = true
 # Self-audit metamorphic harness (6po63.1)
@@ -117,4 +118,8 @@ harness = false
 
 [[bench]]
 name = "canonicalize_map_throughput"
+harness = false
+
+[[bench]]
+name = "hybrid_verify"
 harness = false

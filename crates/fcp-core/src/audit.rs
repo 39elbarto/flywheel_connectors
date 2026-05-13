@@ -3,9 +3,6 @@
 //! This module implements audit chain primitives and explainability receipts as
 //! described in `FCP_Specification_V3.md` §6.3 (Audit Chain).
 
-use fcp_crypto::{
-    CryptoResult, HybridSignable, HybridSignedObjectKind, SignedEnvelope, signing_bytes_for_payload,
-};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

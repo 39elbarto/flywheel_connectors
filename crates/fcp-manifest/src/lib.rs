@@ -424,19 +424,6 @@ impl ConnectorManifest {
     }
 }
 
-impl HybridSignable for ConnectorManifest {
-    const OBJECT_KIND: HybridSignedObjectKind = HybridSignedObjectKind::Manifest;
-
-    fn hybrid_signing_bytes(&self) -> CryptoResult<Vec<u8>> {
-        let mut unsigned = self.clone();
-        unsigned.signatures = None;
-        signing_bytes_for_payload(Self::OBJECT_KIND, &unsigned)
-    }
-}
-
-/// Hybrid signed connector-manifest envelope.
-pub type HybridSignedConnectorManifest = SignedEnvelope<ConnectorManifest>;
-
 /// Errors returned by manifest parsing/validation.
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {

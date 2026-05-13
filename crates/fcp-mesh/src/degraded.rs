@@ -667,10 +667,9 @@ impl DegradedModeDecoder {
             }
         };
 
-        if !matches!(
-            signed_frame.object_type,
-            fcp_crypto::HybridSignedObjectKind::GossipFrame
-        ) {
+        if signed_frame.object_type.as_str()
+            != fcp_crypto::HybridSignedObjectKind::GossipFrame.as_str()
+        {
             warn!(
                 source_id = ?signed_frame.payload.source_id,
                 "degraded_mode: hybrid envelope carried non-gossip object type"

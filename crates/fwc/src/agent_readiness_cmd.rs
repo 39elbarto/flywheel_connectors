@@ -5,26 +5,31 @@
 //! stored report/JSONL artifacts, and plan mode renders the non-destructive
 //! probe plan an operator can audit before wiring live collection.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand, ValueEnum};
 use fcp_evidence::{
     AgentReadinessJsonlEvent, AgentReadinessReport, AgentStartupProbePlan, NoNetworkProbeFixture,
     NoNetworkProbeScenario, ReadinessAction,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const AGENT_READINESS_HANDOFF_SCHEMA: &str = "fcp.agent-readiness-handoff.v1";
+const STALLED_BEADS_REPORT_SCHEMA: &str = "fcp.stalled-bead-recovery-report.v1";
 const REPORT_FILENAME: &str = "report.json";
 const EVENTS_FILENAME: &str = "events.jsonl";
 const HANDOFF_FILENAME: &str = "handoff.json";
 const HANDOFF_MARKDOWN_FILENAME: &str = "handoff.md";
+const DEFAULT_STALE_AFTER_DAYS: u64 = 3;
+const DAY_MS: u64 = 86_400_000;
 const OPERATOR_APPROVAL_GATES: [&str; 6] = [
     "agent_mail_repair: do not repair, reconstruct, restart, or kill Agent Mail without explicit user approval",
     "disk_cleanup: do not delete files or prune artifacts to relieve disk pressure without explicit user approval",
@@ -50,6 +55,9 @@ pub enum AgentReadinessCommand {
     Fixture(AgentReadinessFixtureArgs),
     /// Replay and validate a stored readiness report plus optional JSONL events.
     Replay(AgentReadinessReplayArgs),
+    /// Report stale in-progress Beads plus safe non-mutating recovery commands.
+    #[command(name = "stalled-beads")]
+    StalledBeads(AgentReadinessStalledBeadsArgs),
 }
 
 /// Probe plan flavor to render.
@@ -144,6 +152,38 @@ pub struct AgentReadinessReplayArgs {
     pub out_dir: Option<PathBuf>,
 }
 
+/// Arguments for `fwc agent-readiness stalled-beads`.
+#[derive(Args, Debug, Clone, Serialize)]
+pub struct AgentReadinessStalledBeadsArgs {
+    /// Beads JSONL export to inspect.
+    #[arg(
+        long = "issues-jsonl",
+        value_name = "PATH",
+        default_value = ".beads/issues.jsonl"
+    )]
+    pub issues_jsonl: PathBuf,
+
+    /// Age threshold for stale in-progress beads.
+    #[arg(long = "stale-after-days", default_value_t = DEFAULT_STALE_AFTER_DAYS)]
+    pub stale_after_days: u64,
+
+    /// Stable observation time for tests, in Unix milliseconds.
+    #[arg(long = "observed-at-unix-ms")]
+    pub observed_at_unix_ms: Option<u64>,
+
+    /// Process snapshot text to use instead of live `ps` output.
+    #[arg(long = "process-snapshot", value_name = "PATH")]
+    pub process_snapshot: Option<PathBuf>,
+
+    /// Disable the read-only live process scan when no snapshot is supplied.
+    #[arg(long = "no-process-scan", default_value_t = false)]
+    pub no_process_scan: bool,
+
+    /// Beads lock paths to inspect. Defaults to .write.lock and .sync.lock next to issues-jsonl.
+    #[arg(long = "lock-path", value_name = "PATH")]
+    pub lock_paths: Vec<PathBuf>,
+}
+
 /// Structured result returned to the main dispatcher.
 #[derive(Debug)]
 pub(crate) struct AgentReadinessCommandResult {
@@ -204,6 +244,7 @@ pub fn run(args: &AgentReadinessArgs) -> Result<AgentReadinessCommandResult> {
         AgentReadinessCommand::Plan(args) => plan(args),
         AgentReadinessCommand::Fixture(args) => fixture(args),
         AgentReadinessCommand::Replay(args) => replay(args),
+        AgentReadinessCommand::StalledBeads(args) => stalled_beads(args),
     }
 }
 
@@ -649,6 +690,578 @@ fn insert_toon(payload: &mut Value, toon: String) {
     }
 }
 
+fn stalled_beads(args: &AgentReadinessStalledBeadsArgs) -> Result<AgentReadinessCommandResult> {
+    if args.stale_after_days == 0 {
+        bail!("--stale-after-days must be greater than zero");
+    }
+
+    let observed_at_unix_ms = args.observed_at_unix_ms.unwrap_or_else(now_unix_ms);
+    let stale_after_ms = args.stale_after_days.saturating_mul(DAY_MS);
+    let (issues, jsonl_warnings) = load_in_progress_beads(&args.issues_jsonl)?;
+    let lock_paths = if args.lock_paths.is_empty() {
+        default_beads_lock_paths(&args.issues_jsonl)
+    } else {
+        args.lock_paths.clone()
+    };
+    let lock_evidence = observe_beads_locks(&lock_paths);
+    let lock_blocking = lock_evidence.iter().any(|lock| lock.present);
+    let process_snapshot = load_process_snapshot(args);
+
+    let mut items = issues
+        .iter()
+        .map(|issue| {
+            evaluate_stalled_bead(
+                issue,
+                observed_at_unix_ms,
+                stale_after_ms,
+                lock_blocking,
+                &process_snapshot,
+            )
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        left.recommended_action
+            .cmp(&right.recommended_action)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let safe_commands = items
+        .iter()
+        .filter_map(|item| item.safe_command.clone())
+        .collect::<Vec<_>>();
+    let summary = summarize_stalled_beads(&items, lock_blocking, safe_commands.len());
+    let report = StalledBeadsReport {
+        status: "ok",
+        command: "agent-readiness",
+        subcommand: "stalled-beads",
+        schema: STALLED_BEADS_REPORT_SCHEMA,
+        issues_jsonl: args.issues_jsonl.display().to_string(),
+        observed_at_unix_ms,
+        stale_after_days: args.stale_after_days,
+        process_scan: process_snapshot.report,
+        lock_evidence,
+        jsonl_warnings,
+        summary,
+        safe_commands,
+        items,
+        safety: StalledBeadsSafetyContract::default(),
+        message: "Generated a read-only stalled in-progress Beads recovery report.",
+    };
+    let mut payload = serde_json::to_value(&report)?;
+    insert_toon(&mut payload, format_stalled_beads_toon(&report));
+    Ok(AgentReadinessCommandResult {
+        payload,
+        success: true,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StalledBeadsReport {
+    status: &'static str,
+    command: &'static str,
+    subcommand: &'static str,
+    schema: &'static str,
+    issues_jsonl: String,
+    observed_at_unix_ms: u64,
+    stale_after_days: u64,
+    process_scan: ProcessScanReport,
+    lock_evidence: Vec<BeadsLockEvidence>,
+    jsonl_warnings: Vec<JsonlWarning>,
+    summary: StalledBeadsSummary,
+    safe_commands: Vec<String>,
+    items: Vec<StalledBeadItem>,
+    safety: StalledBeadsSafetyContract,
+    message: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StalledBeadsSummary {
+    total_in_progress: usize,
+    stale_candidates: usize,
+    action_counts: BTreeMap<String, usize>,
+    lock_blocking: bool,
+    safe_reopen_command_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StalledBeadItem {
+    id: String,
+    title: String,
+    assignee: Option<String>,
+    updated_at: String,
+    activity: StalledBeadActivity,
+    process_evidence: Vec<ProcessEvidence>,
+    lock_blocking: bool,
+    recommended_action: StalledBeadRecommendedAction,
+    reasons: Vec<String>,
+    safe_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StalledBeadActivity {
+    last_activity_unix_ms: u64,
+    age_days: u64,
+    stale: bool,
+    latest_comment: Option<CommentActivity>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CommentActivity {
+    author: String,
+    created_at: String,
+    created_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProcessEvidence {
+    matched_field: &'static str,
+    matched_value: String,
+    match_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProcessScanReport {
+    status: ProcessScanStatus,
+    source: Option<String>,
+    line_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ProcessSnapshot {
+    report: ProcessScanReport,
+    lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ProcessScanStatus {
+    Fixture,
+    LiveReadOnly,
+    Disabled,
+    Unavailable,
+}
+
+impl ProcessScanStatus {
+    const fn observed(self) -> bool {
+        matches!(self, Self::Fixture | Self::LiveReadOnly)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BeadsLockEvidence {
+    path: String,
+    present: bool,
+    blocking: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonlWarning {
+    line: usize,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StalledBeadsSafetyContract {
+    read_only: bool,
+    edits_beads_jsonl_directly: bool,
+    removes_lock_files: bool,
+    kills_processes: bool,
+    emitted_commands_mutate_only_when_operator_runs_them: bool,
+}
+
+impl Default for StalledBeadsSafetyContract {
+    fn default() -> Self {
+        Self {
+            read_only: true,
+            edits_beads_jsonl_directly: false,
+            removes_lock_files: false,
+            kills_processes: false,
+            emitted_commands_mutate_only_when_operator_runs_them: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StalledBeadRecommendedAction {
+    Reopen,
+    BlockedByLock,
+    Investigate,
+    LeaveClaimed,
+}
+
+impl StalledBeadRecommendedAction {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reopen => "reopen",
+            Self::BlockedByLock => "blocked_by_lock",
+            Self::Investigate => "investigate",
+            Self::LeaveClaimed => "leave_claimed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawBeadIssue {
+    id: String,
+    title: String,
+    #[serde(default)]
+    assignee: Option<String>,
+    updated_at: String,
+    #[serde(default)]
+    comments: Option<Vec<RawBeadComment>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RawBeadComment {
+    author: String,
+    created_at: String,
+}
+
+fn load_in_progress_beads(path: &Path) -> Result<(Vec<RawBeadIssue>, Vec<JsonlWarning>)> {
+    let file = File::open(path).with_context(|| format!("open Beads JSONL {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut issues = Vec::new();
+    let mut warnings = Vec::new();
+    for (idx, line) in reader.lines().enumerate() {
+        let line_no = idx + 1;
+        let line = line
+            .with_context(|| format!("read Beads JSONL line {line_no} from {}", path.display()))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value = match serde_json::from_str::<Value>(&line) {
+            Ok(value) => value,
+            Err(error) => {
+                warnings.push(JsonlWarning {
+                    line: line_no,
+                    reason: format!("invalid JSON: {error}"),
+                });
+                continue;
+            }
+        };
+        if value.get("status").and_then(Value::as_str) != Some("in_progress") {
+            continue;
+        }
+        match serde_json::from_value::<RawBeadIssue>(value) {
+            Ok(issue) => issues.push(issue),
+            Err(error) => warnings.push(JsonlWarning {
+                line: line_no,
+                reason: format!("invalid in-progress issue record: {error}"),
+            }),
+        }
+    }
+    Ok((issues, warnings))
+}
+
+fn evaluate_stalled_bead(
+    issue: &RawBeadIssue,
+    observed_at_unix_ms: u64,
+    stale_after_ms: u64,
+    lock_blocking: bool,
+    process_snapshot: &ProcessSnapshot,
+) -> StalledBeadItem {
+    let updated_at_unix_ms = parse_rfc3339_unix_ms(&issue.updated_at).unwrap_or(0);
+    let latest_comment = latest_comment_activity(issue);
+    let latest_comment_unix_ms = latest_comment
+        .as_ref()
+        .map_or(0, |comment| comment.created_at_unix_ms);
+    let last_activity_unix_ms = updated_at_unix_ms.max(latest_comment_unix_ms);
+    let age_ms = observed_at_unix_ms.saturating_sub(last_activity_unix_ms);
+    let stale = age_ms > stale_after_ms;
+    let activity = StalledBeadActivity {
+        last_activity_unix_ms,
+        age_days: age_ms / DAY_MS,
+        stale,
+        latest_comment,
+    };
+    let assignee = normalized_assignee(issue.assignee.as_deref());
+    let process_evidence =
+        process_evidence_for_issue(&issue.id, assignee.as_deref(), process_snapshot);
+    let has_active_process = !process_evidence.is_empty();
+    let (recommended_action, reasons) = recommend_stalled_bead_action(
+        stale,
+        lock_blocking,
+        assignee.is_some(),
+        has_active_process,
+        process_snapshot.report.status.observed(),
+        updated_at_unix_ms != 0,
+    );
+    let safe_command = (recommended_action == StalledBeadRecommendedAction::Reopen)
+        .then(|| format!("br update {} --status open", issue.id));
+
+    StalledBeadItem {
+        id: issue.id.clone(),
+        title: issue.title.clone(),
+        assignee,
+        updated_at: issue.updated_at.clone(),
+        activity,
+        process_evidence,
+        lock_blocking,
+        recommended_action,
+        reasons,
+        safe_command,
+    }
+}
+
+fn recommend_stalled_bead_action(
+    stale: bool,
+    lock_blocking: bool,
+    has_assignee: bool,
+    has_active_process: bool,
+    process_scan_observed: bool,
+    updated_at_parsed: bool,
+) -> (StalledBeadRecommendedAction, Vec<String>) {
+    let mut reasons = Vec::new();
+    if !updated_at_parsed {
+        reasons.push("updated_at_unparseable".to_owned());
+    }
+    if !stale {
+        reasons.push("recent_activity_within_threshold".to_owned());
+        return (StalledBeadRecommendedAction::LeaveClaimed, reasons);
+    }
+    reasons.push("stale_in_progress".to_owned());
+    if has_active_process {
+        reasons.push("active_matching_process_evidence".to_owned());
+        return (StalledBeadRecommendedAction::LeaveClaimed, reasons);
+    }
+    if lock_blocking {
+        reasons.push("beads_lock_present".to_owned());
+        return (StalledBeadRecommendedAction::BlockedByLock, reasons);
+    }
+    if !process_scan_observed {
+        reasons.push("process_scan_unavailable".to_owned());
+        return (StalledBeadRecommendedAction::Investigate, reasons);
+    }
+    if has_assignee {
+        reasons.push("assigned_agent_not_observed".to_owned());
+        return (StalledBeadRecommendedAction::Investigate, reasons);
+    }
+    reasons.push("missing_assignee".to_owned());
+    reasons.push("no_recent_comment".to_owned());
+    (StalledBeadRecommendedAction::Reopen, reasons)
+}
+
+fn latest_comment_activity(issue: &RawBeadIssue) -> Option<CommentActivity> {
+    issue
+        .comments
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|comment| {
+            parse_rfc3339_unix_ms(&comment.created_at).map(|created_at_unix_ms| CommentActivity {
+                author: comment.author.clone(),
+                created_at: comment.created_at.clone(),
+                created_at_unix_ms,
+            })
+        })
+        .max_by_key(|comment| comment.created_at_unix_ms)
+}
+
+fn process_evidence_for_issue(
+    issue_id: &str,
+    assignee: Option<&str>,
+    process_snapshot: &ProcessSnapshot,
+) -> Vec<ProcessEvidence> {
+    let mut evidence = Vec::new();
+    push_process_match(&mut evidence, "issue_id", issue_id, &process_snapshot.lines);
+    if let Some(assignee) = assignee {
+        push_process_match(&mut evidence, "assignee", assignee, &process_snapshot.lines);
+    }
+    evidence
+}
+
+fn push_process_match(
+    evidence: &mut Vec<ProcessEvidence>,
+    matched_field: &'static str,
+    matched_value: &str,
+    lines: &[String],
+) {
+    let needle = matched_value.to_ascii_lowercase();
+    if needle.is_empty() {
+        return;
+    }
+    let match_count = lines
+        .iter()
+        .filter(|line| line.to_ascii_lowercase().contains(&needle))
+        .count();
+    if match_count > 0 {
+        evidence.push(ProcessEvidence {
+            matched_field,
+            matched_value: matched_value.to_owned(),
+            match_count,
+        });
+    }
+}
+
+fn normalized_assignee(assignee: Option<&str>) -> Option<String> {
+    assignee
+        .map(str::trim)
+        .filter(|assignee| !assignee.is_empty())
+        .map(str::to_owned)
+}
+
+fn parse_rfc3339_unix_ms(value: &str) -> Option<u64> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .and_then(|timestamp| u64::try_from(timestamp.with_timezone(&Utc).timestamp_millis()).ok())
+}
+
+fn load_process_snapshot(args: &AgentReadinessStalledBeadsArgs) -> ProcessSnapshot {
+    if let Some(path) = &args.process_snapshot {
+        return match fs::read_to_string(path) {
+            Ok(raw) => process_snapshot_from_lines(
+                ProcessScanStatus::Fixture,
+                Some(path.display().to_string()),
+                raw.lines(),
+            ),
+            Err(error) => ProcessSnapshot {
+                report: ProcessScanReport {
+                    status: ProcessScanStatus::Unavailable,
+                    source: Some(path.display().to_string()),
+                    line_count: 0,
+                },
+                lines: vec![format!("process snapshot unavailable: {error}")],
+            },
+        };
+    }
+    if args.no_process_scan {
+        return ProcessSnapshot {
+            report: ProcessScanReport {
+                status: ProcessScanStatus::Disabled,
+                source: None,
+                line_count: 0,
+            },
+            lines: Vec::new(),
+        };
+    }
+    match Command::new("ps")
+        .args(["-axo", "pid=,ppid=,command="])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let raw = String::from_utf8_lossy(&output.stdout);
+            process_snapshot_from_lines(
+                ProcessScanStatus::LiveReadOnly,
+                Some("ps".to_owned()),
+                raw.lines(),
+            )
+        }
+        Ok(output) => ProcessSnapshot {
+            report: ProcessScanReport {
+                status: ProcessScanStatus::Unavailable,
+                source: Some(format!("ps exited with {}", output.status)),
+                line_count: 0,
+            },
+            lines: Vec::new(),
+        },
+        Err(error) => ProcessSnapshot {
+            report: ProcessScanReport {
+                status: ProcessScanStatus::Unavailable,
+                source: Some(format!("ps failed: {error}")),
+                line_count: 0,
+            },
+            lines: Vec::new(),
+        },
+    }
+}
+
+fn process_snapshot_from_lines<'a>(
+    status: ProcessScanStatus,
+    source: Option<String>,
+    lines: impl Iterator<Item = &'a str>,
+) -> ProcessSnapshot {
+    let lines = lines.map(str::to_owned).collect::<Vec<_>>();
+    ProcessSnapshot {
+        report: ProcessScanReport {
+            status,
+            source,
+            line_count: lines.len(),
+        },
+        lines,
+    }
+}
+
+fn default_beads_lock_paths(issues_jsonl: &Path) -> Vec<PathBuf> {
+    let beads_dir = issues_jsonl.parent().unwrap_or_else(|| Path::new("."));
+    vec![beads_dir.join(".write.lock"), beads_dir.join(".sync.lock")]
+}
+
+fn observe_beads_locks(paths: &[PathBuf]) -> Vec<BeadsLockEvidence> {
+    paths
+        .iter()
+        .map(|path| {
+            let present = path.exists();
+            BeadsLockEvidence {
+                path: path.display().to_string(),
+                present,
+                blocking: present,
+            }
+        })
+        .collect()
+}
+
+fn summarize_stalled_beads(
+    items: &[StalledBeadItem],
+    lock_blocking: bool,
+    safe_reopen_command_count: usize,
+) -> StalledBeadsSummary {
+    let mut action_counts = BTreeMap::new();
+    for item in items {
+        *action_counts
+            .entry(item.recommended_action.as_str().to_owned())
+            .or_insert(0) += 1;
+    }
+    StalledBeadsSummary {
+        total_in_progress: items.len(),
+        stale_candidates: items.iter().filter(|item| item.activity.stale).count(),
+        action_counts,
+        lock_blocking,
+        safe_reopen_command_count,
+    }
+}
+
+fn format_stalled_beads_toon(report: &StalledBeadsReport) -> String {
+    let mut out = format!(
+        "\
+stalled beads recovery report
+schema: {schema}
+issues_jsonl: {issues_jsonl}
+observed_at_unix_ms: {observed_at}
+stale_after_days: {stale_after_days}
+in_progress: {total}
+stale_candidates: {stale}
+safe_reopen_commands: {commands}
+lock_blocking: {lock_blocking}
+process_scan: {process_status}
+",
+        schema = report.schema,
+        issues_jsonl = report.issues_jsonl,
+        observed_at = report.observed_at_unix_ms,
+        stale_after_days = report.stale_after_days,
+        total = report.summary.total_in_progress,
+        stale = report.summary.stale_candidates,
+        commands = report.summary.safe_reopen_command_count,
+        lock_blocking = report.summary.lock_blocking,
+        process_status =
+            serde_tag(&report.process_scan.status).unwrap_or_else(|_| "unknown".to_owned()),
+    );
+    out.push_str("items:\n");
+    out.push_str("id | action | assignee | age_days | reasons | safe_command\n");
+    for item in &report.items {
+        out.push_str(&format!(
+            "{} | {} | {} | {} | {} | {}\n",
+            item.id,
+            item.recommended_action.as_str(),
+            item.assignee.as_deref().unwrap_or(""),
+            item.activity.age_days,
+            item.reasons.join("+"),
+            item.safe_command.as_deref().unwrap_or("")
+        ));
+    }
+    out
+}
+
 fn default_run_id() -> String {
     format!("agent-readiness-{}", now_unix_ms())
 }
@@ -818,5 +1431,208 @@ mod tests {
                 .unwrap()
                 .contains("commands:")
         );
+    }
+
+    fn stalled_args(
+        issues_jsonl: PathBuf,
+        process_snapshot: PathBuf,
+        lock_paths: Vec<PathBuf>,
+    ) -> AgentReadinessArgs {
+        AgentReadinessArgs {
+            command: AgentReadinessCommand::StalledBeads(AgentReadinessStalledBeadsArgs {
+                issues_jsonl,
+                stale_after_days: DEFAULT_STALE_AFTER_DAYS,
+                observed_at_unix_ms: Some(
+                    parse_rfc3339_unix_ms("2026-05-13T00:00:00Z").expect("observed timestamp"),
+                ),
+                process_snapshot: Some(process_snapshot),
+                no_process_scan: false,
+                lock_paths,
+            }),
+        }
+    }
+
+    fn write_issues(path: &Path, records: &[Value]) {
+        let mut jsonl = records
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        jsonl.push('\n');
+        fs::write(path, jsonl).expect("write issues jsonl");
+    }
+
+    fn stalled_item<'a>(payload: &'a Value, id: &str) -> &'a Value {
+        payload["items"]
+            .as_array()
+            .expect("items array")
+            .iter()
+            .find(|item| item["id"] == id)
+            .expect("stalled item")
+    }
+
+    #[test]
+    fn stalled_beads_report_recommends_reopen_only_for_unassigned_stale_idle_beads() {
+        let tmp = TempDir::new().expect("tempdir");
+        let issues = tmp.path().join("issues.jsonl");
+        let process_snapshot = tmp.path().join("ps.txt");
+        fs::write(
+            &process_snapshot,
+            "123 1 codex worker flywheel_connectors-active\n",
+        )
+        .expect("write process snapshot");
+        write_issues(
+            &issues,
+            &[
+                json!({
+                    "id": "flywheel_connectors-stale",
+                    "title": "stale unassigned parent",
+                    "status": "in_progress",
+                    "assignee": null,
+                    "updated_at": "2026-05-07T00:00:00Z",
+                    "comments": []
+                }),
+                json!({
+                    "id": "flywheel_connectors-recent",
+                    "title": "recently touched parent",
+                    "status": "in_progress",
+                    "assignee": null,
+                    "updated_at": "2026-05-12T00:00:00Z",
+                    "comments": []
+                }),
+                json!({
+                    "id": "flywheel_connectors-assigned",
+                    "title": "assigned but no process evidence",
+                    "status": "in_progress",
+                    "assignee": "BlueLake",
+                    "updated_at": "2026-05-07T00:00:00Z",
+                    "comments": []
+                }),
+                json!({
+                    "id": "flywheel_connectors-active",
+                    "title": "active process still mentions issue",
+                    "status": "in_progress",
+                    "assignee": null,
+                    "updated_at": "2026-05-07T00:00:00Z",
+                    "comments": []
+                }),
+                json!({
+                    "id": "flywheel_connectors-open",
+                    "title": "open issue ignored",
+                    "status": "open",
+                    "assignee": null,
+                    "updated_at": "2026-05-07T00:00:00Z",
+                    "comments": []
+                }),
+            ],
+        );
+
+        let result = run(&stalled_args(
+            issues,
+            process_snapshot,
+            vec![tmp.path().join("missing.write.lock")],
+        ))
+        .expect("stalled-beads run");
+
+        assert!(result.success);
+        assert_eq!(result.payload["schema"], STALLED_BEADS_REPORT_SCHEMA);
+        assert_eq!(result.payload["summary"]["total_in_progress"], 4);
+        assert_eq!(
+            stalled_item(&result.payload, "flywheel_connectors-stale")["recommended_action"],
+            "reopen"
+        );
+        assert_eq!(
+            stalled_item(&result.payload, "flywheel_connectors-stale")["safe_command"],
+            "br update flywheel_connectors-stale --status open"
+        );
+        assert_eq!(
+            stalled_item(&result.payload, "flywheel_connectors-recent")["recommended_action"],
+            "leave_claimed"
+        );
+        assert_eq!(
+            stalled_item(&result.payload, "flywheel_connectors-assigned")["recommended_action"],
+            "investigate"
+        );
+        assert_eq!(
+            stalled_item(&result.payload, "flywheel_connectors-active")["recommended_action"],
+            "leave_claimed"
+        );
+        assert!(
+            result.payload["toon"]
+                .as_str()
+                .expect("toon")
+                .contains("br update flywheel_connectors-stale --status open")
+        );
+    }
+
+    #[test]
+    fn stalled_beads_report_blocks_reopen_commands_when_beads_lock_exists() {
+        let tmp = TempDir::new().expect("tempdir");
+        let issues = tmp.path().join("issues.jsonl");
+        let process_snapshot = tmp.path().join("ps.txt");
+        let lock = tmp.path().join(".write.lock");
+        fs::write(&process_snapshot, "").expect("write process snapshot");
+        fs::write(&lock, "").expect("write lock fixture");
+        write_issues(
+            &issues,
+            &[json!({
+                "id": "flywheel_connectors-locked",
+                "title": "stale but lock held",
+                "status": "in_progress",
+                "assignee": null,
+                "updated_at": "2026-05-07T00:00:00Z",
+                "comments": []
+            })],
+        );
+
+        let result =
+            run(&stalled_args(issues, process_snapshot, vec![lock])).expect("stalled-beads run");
+
+        assert!(result.success);
+        assert_eq!(
+            stalled_item(&result.payload, "flywheel_connectors-locked")["recommended_action"],
+            "blocked_by_lock"
+        );
+        assert!(
+            stalled_item(&result.payload, "flywheel_connectors-locked")["safe_command"].is_null()
+        );
+        assert_eq!(result.payload["summary"]["safe_reopen_command_count"], 0);
+        assert_eq!(result.payload["safety"]["removes_lock_files"], false);
+        assert_eq!(result.payload["safety"]["kills_processes"], false);
+    }
+
+    #[test]
+    fn stalled_beads_report_treats_recent_comments_as_activity() {
+        let tmp = TempDir::new().expect("tempdir");
+        let issues = tmp.path().join("issues.jsonl");
+        let process_snapshot = tmp.path().join("ps.txt");
+        fs::write(&process_snapshot, "").expect("write process snapshot");
+        write_issues(
+            &issues,
+            &[json!({
+                "id": "flywheel_connectors-commented",
+                "title": "recent comment keeps parent active",
+                "status": "in_progress",
+                "assignee": null,
+                "updated_at": "2026-05-07T00:00:00Z",
+                "comments": [{
+                    "author": "jemanuel",
+                    "text": "still active",
+                    "created_at": "2026-05-12T00:00:00Z"
+                }]
+            })],
+        );
+
+        let result = run(&stalled_args(
+            issues,
+            process_snapshot,
+            vec![tmp.path().join("missing.write.lock")],
+        ))
+        .expect("stalled-beads run");
+
+        let item = stalled_item(&result.payload, "flywheel_connectors-commented");
+        assert_eq!(item["recommended_action"], "leave_claimed");
+        assert_eq!(item["activity"]["stale"], false);
+        assert_eq!(item["activity"]["latest_comment"]["author"], "jemanuel");
     }
 }

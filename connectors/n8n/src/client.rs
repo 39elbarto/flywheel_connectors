@@ -185,11 +185,13 @@ impl N8nClient {
 
     /// Get a specific workflow by ID.
     pub async fn get_workflow(&self, id: &str) -> N8nResult<serde_json::Value> {
+        let id = sanitize_path_segment(id, "workflow id")?;
         self.get(&format!("/workflows/{id}")).await
     }
 
     /// Activate or deactivate a workflow.
     pub async fn activate_workflow(&self, id: &str, active: bool) -> N8nResult<serde_json::Value> {
+        let id = sanitize_path_segment(id, "workflow id")?;
         let body = serde_json::json!({ "active": active });
         self.patch(&format!("/workflows/{id}"), &body).await
     }
@@ -203,8 +205,37 @@ impl N8nClient {
 
     /// Get a specific execution by ID.
     pub async fn get_execution(&self, id: &str) -> N8nResult<serde_json::Value> {
+        let id = sanitize_path_segment(id, "execution id")?;
         self.get(&format!("/executions/{id}")).await
     }
+}
+
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> N8nResult<&'a str> {
+    if value.trim().is_empty() || value != value.trim() {
+        return Err(N8nError::InvalidInput(format!(
+            "{field} must be a non-empty single path segment"
+        )));
+    }
+
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || value.contains('?')
+        || value.contains('#')
+        || value.contains('&')
+        || value.contains('=')
+        || value.contains('%')
+        || value.chars().any(char::is_control)
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(N8nError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
+    }
+
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -306,6 +337,28 @@ mod tests {
         .unwrap();
         // trim_end_matches removes all trailing slashes
         assert!(!client.base_url.ends_with('/'));
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_plain_ids() {
+        assert_eq!(
+            sanitize_path_segment("1001", "workflow id").unwrap(),
+            "1001"
+        );
+        assert_eq!(
+            sanitize_path_segment("exec_abc-123", "execution id").unwrap(),
+            "exec_abc-123"
+        );
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal_markers() {
+        let err = sanitize_path_segment("../admin", "workflow id")
+            .expect_err("path traversal should be rejected");
+        assert!(matches!(err, N8nError::InvalidInput(message) if message.contains("workflow id")));
+        sanitize_path_segment("id/../admin", "workflow id").expect_err("slash rejected");
+        sanitize_path_segment("id%2Fadmin", "workflow id").expect_err("encoded slash rejected");
+        sanitize_path_segment(" id", "workflow id").expect_err("leading space rejected");
     }
 
     #[test]

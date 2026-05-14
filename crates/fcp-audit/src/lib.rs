@@ -31,6 +31,7 @@ use thiserror::Error;
 
 pub mod conformal;
 pub mod explain;
+pub mod replay;
 
 pub use conformal::{ConformalScore, ConformalScoreEstimator};
 
@@ -3502,7 +3503,7 @@ mod tests {
             .occurred_at(1_700_000_007)
             .prev("prev-entry")
             .correlation_id("corr-7")
-            .trace_context(trace_context.clone())
+            .trace_context(trace_context)
             .connector_id("github")
             .operation_id("list_repos")
             .meta("operation", serde_json::json!("list_repos"))
@@ -5100,7 +5101,7 @@ mod tests {
     fn severity_partial_ord_consistent_with_eq() {
         let a = Severity::Warning;
         let b = Severity::Warning;
-        assert!(a.partial_cmp(&b) == Some(std::cmp::Ordering::Equal));
+        assert_eq!(a.partial_cmp(&b), Some(std::cmp::Ordering::Equal));
     }
 
     // ── NEW: TraceContext edge cases ────────────────────────────────────

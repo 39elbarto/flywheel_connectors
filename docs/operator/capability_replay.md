@@ -106,8 +106,8 @@ referencing `token_hash` is found OR (b) the 7-day cap is reached.
 
 ## Cross-references
 
-- `crates/fwc/src/commands/capability_replay.rs` — Rust dispatch (deferred to `angoc.7.3.1`)
-- `crates/fcp-audit/src/replay.rs` — backing `reconstruct_predicate_trace` (deferred)
+- `crates/fwc/src/capability_replay.rs` — reusable Rust dispatch and artifact-loading logic
+- `crates/fcp-audit/src/replay.rs` — backing `reconstruct_predicate_trace`
 - `crates/fwc/schemas/capability_replay.schema.json` — JSON schema for the output above
 - `crates/fwc/tests/fixtures/capability_replay/golden_accepted.json` — golden vector
 - `fwc audit explain --seq <n>` (Phase M.1) — cross-references each `witness_chain_indices` entry
@@ -116,11 +116,10 @@ referencing `token_hash` is found OR (b) the 7-day cap is reached.
   provenance is naturally enumerable; the output schema above stays
   stable so existing operator tooling continues to work.
 
-## Deferred Rust implementation
+## Implementation status
 
-Filed as `angoc.7.3.1`. The runtime work is non-trivial: the
-audit-chain walker has to skip checkpoint bundles and stitch multi-
-chain replays when a token traverses zones. The spec doc + schema +
-golden fixture committed here give the runtime team a concrete
-contract; the e2e tests in the bead body translate directly into
-fixture cases once the dispatch lands.
+`angoc.7.3.1` wires the command against captured audit-chain artifacts
+and the reusable `fcp-audit` predicate-trace reconstructor. A default
+durable audit-chain source is still future work; until that lands,
+operators pass `--audit-chain <path>` or set `FWC_AUDIT_CHAIN` to a
+JSON bundle, JSON array, or JSONL capture.

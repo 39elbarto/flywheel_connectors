@@ -1,6 +1,6 @@
 //! Frozen-byte golden tests for fcp-audit canonical CBOR encoding.
 //!
-//! AmberLark, 2026-05-02 — testing-golden-artifacts alpha-domain sweep.
+//! `AmberLark`, 2026-05-02 — testing-golden-artifacts alpha-domain sweep.
 //!
 //! Companion to `golden_receipts.rs` (which pins JSON snapshots of
 //! `AuditEntry` / `ChainHead` / `DecisionReceipt`). This file pins
@@ -56,7 +56,7 @@ fn dump(label: &str, bytes: &[u8]) -> String {
     out
 }
 
-/// Build a deterministic AuditEntry shell. Mutate severity per-test
+/// Build a deterministic `AuditEntry` shell. Mutate severity per-test
 /// to exercise the variant matrix without re-stating every field.
 fn fixture_audit_entry_with_severity(severity: Severity, id_suffix: &str) -> AuditEntry {
     let mut metadata = BTreeMap::new();
@@ -128,7 +128,7 @@ fn audit_entry_canonical_cbor_severity_critical() {
     ));
 }
 
-/// Pin the signing-transcript bytes for a fully-populated AuditEntry.
+/// Pin the signing-transcript bytes for a fully-populated `AuditEntry`.
 /// `signing_bytes()` is what gets fed to `Ed25519::sign` — a refactor
 /// that reordered fields here would invalidate every existing audit
 /// signature in the workspace without breaking any round-trip serde

@@ -45,7 +45,10 @@ use fcp_prelude::{
     ObjectHeader, ObjectId, Signature, ZoneId,
 };
 #[cfg(feature = "cursor-store-object-store")]
-use fcp_prelude::{ObjectIdKey, RetentionClass, StorageMeta, StoredObject};
+use fcp_prelude::{
+    ConnectorStateAppendOutcome, ConnectorStateStore, ConnectorStateWriteAuthorization,
+    ObjectIdKey, RetentionClass, StorageMeta, StoredObject,
+};
 
 /// Produce a pseudo-random jitter factor in [0.0, 1.0) using stdlib hashing.
 ///
@@ -907,7 +910,9 @@ pub struct ObjectStoreCursorBackend {
     object_id_key: ObjectIdKey,
     connector_id: ConnectorId,
     zone_id: ZoneId,
+    instance_id: Option<InstanceId>,
     retention: RetentionClass,
+    write_authorization: Option<ConnectorStateWriteAuthorization>,
 }
 
 #[cfg(feature = "cursor-store-object-store")]
@@ -925,8 +930,17 @@ impl ObjectStoreCursorBackend {
             object_id_key,
             connector_id,
             zone_id,
+            instance_id: None,
             retention: RetentionClass::Pinned,
+            write_authorization: None,
         }
+    }
+
+    /// Scope canonical reads and writes to one connector instance.
+    #[must_use]
+    pub fn with_instance_id(mut self, instance_id: InstanceId) -> Self {
+        self.instance_id = Some(instance_id);
+        self
     }
 
     /// Override retention class for stored state objects.
@@ -934,6 +948,37 @@ impl ObjectStoreCursorBackend {
     pub const fn with_retention(mut self, retention: RetentionClass) -> Self {
         self.retention = retention;
         self
+    }
+
+    /// Route writes through canonical connector-state storage.
+    ///
+    /// Without an authorization witness this backend preserves the legacy raw
+    /// object-store behavior for tests and local development. Supplying a
+    /// verified witness makes commits advance the `ConnectorStateRoot` that host
+    /// and mesh explain paths read from `fcp-store`.
+    #[must_use]
+    pub fn with_write_authorization(
+        mut self,
+        authorization: ConnectorStateWriteAuthorization,
+    ) -> Self {
+        self.write_authorization = Some(authorization);
+        self
+    }
+
+    fn connector_state_store(&self) -> fcp_store::FcpStoreConnectorStateStore {
+        let store = fcp_store::FcpStoreConnectorStateStore::new(
+            Arc::clone(&self.object_store),
+            self.object_id_key,
+            self.connector_id.clone(),
+            self.zone_id.clone(),
+        )
+        .with_retention(self.retention);
+
+        if let Some(instance_id) = &self.instance_id {
+            store.with_instance_id(instance_id.clone())
+        } else {
+            store
+        }
     }
 
     #[allow(clippy::missing_const_for_fn)]
@@ -948,6 +993,17 @@ impl ObjectStoreCursorBackend {
     fn block_on_store<T>(
         fut: impl std::future::Future<Output = Result<T, fcp_store::ObjectStoreError>>,
     ) -> Result<T, CursorStoreError> {
+        fcp_async_core::runtime::block_on_sync(fut)
+            .map_err(|err| CursorStoreError::Storage(err.to_string()))
+            .and_then(|result| result.map_err(|err| CursorStoreError::Storage(err.to_string())))
+    }
+
+    fn block_on_connector_state<T, E>(
+        fut: impl std::future::Future<Output = Result<T, E>>,
+    ) -> Result<T, CursorStoreError>
+    where
+        E: std::fmt::Display,
+    {
         fcp_async_core::runtime::block_on_sync(fut)
             .map_err(|err| CursorStoreError::Storage(err.to_string()))
             .and_then(|result| result.map_err(|err| CursorStoreError::Storage(err.to_string())))
@@ -1001,11 +1057,37 @@ impl ObjectStoreCursorBackend {
 
         Ok(())
     }
-}
 
-#[cfg(feature = "cursor-store-object-store")]
-impl CursorStoreBackend for ObjectStoreCursorBackend {
-    fn load_head(&self) -> Result<Option<(ObjectId, ConnectorStateObject)>, CursorStoreError> {
+    fn load_canonical_head(
+        &self,
+    ) -> Result<Option<(ObjectId, ConnectorStateObject)>, CursorStoreError> {
+        let state_store = self.connector_state_store();
+        let Some((_root_id, root)) = Self::block_on_connector_state(state_store.read_root())?
+        else {
+            return Ok(None);
+        };
+        let Some(head_id) = root.head else {
+            return Ok(None);
+        };
+
+        let stored = Self::block_on_store(self.object_store.get(&head_id))?;
+        if stored.header.schema != Self::schema_id() {
+            return Err(CursorStoreError::Storage(
+                "canonical connector state root points at a non-state object".into(),
+            ));
+        }
+        let state = Self::decode_state_object(&stored)?;
+        self.validate_loaded_state_object(head_id, &stored, &state)?;
+        if state.connector_id != self.connector_id || state.zone_id != self.zone_id {
+            return Err(CursorStoreError::Storage(
+                "canonical connector state root points at a foreign state object".into(),
+            ));
+        }
+
+        Ok(Some((head_id, state)))
+    }
+
+    fn load_raw_head(&self) -> Result<Option<(ObjectId, ConnectorStateObject)>, CursorStoreError> {
         let object_ids =
             Self::block_on_store(async { Ok(self.object_store.list_zone(&self.zone_id).await) })?;
 
@@ -1057,7 +1139,7 @@ impl CursorStoreBackend for ObjectStoreCursorBackend {
         Ok(best)
     }
 
-    fn store_state_object(
+    fn store_raw_state_object(
         &self,
         state_obj: ConnectorStateObject,
     ) -> Result<ObjectId, CursorStoreError> {
@@ -1090,6 +1172,54 @@ impl CursorStoreBackend for ObjectStoreCursorBackend {
 
         Self::block_on_store(self.object_store.put(stored))?;
         Ok(object_id)
+    }
+
+    fn store_canonical_state_object(
+        &self,
+        authorization: &ConnectorStateWriteAuthorization,
+        state_obj: ConnectorStateObject,
+    ) -> Result<ObjectId, CursorStoreError> {
+        let state_store = self.connector_state_store();
+        let outcome = Self::block_on_connector_state(ConnectorStateStore::append_object(
+            &state_store,
+            &self.connector_id,
+            authorization,
+            state_obj,
+        ))?;
+
+        match outcome {
+            ConnectorStateAppendOutcome::Committed { object_id, .. } => Ok(object_id),
+            ConnectorStateAppendOutcome::Conflict {
+                canonical_head,
+                canonical_seq,
+            } => Err(CursorStoreError::Storage(format!(
+                "canonical connector state append conflict: head {}, seq {}",
+                canonical_head.map_or_else(|| "<none>".to_string(), |head| head.to_string()),
+                canonical_seq.map_or_else(|| "<none>".to_string(), |seq| seq.to_string())
+            ))),
+        }
+    }
+}
+
+#[cfg(feature = "cursor-store-object-store")]
+impl CursorStoreBackend for ObjectStoreCursorBackend {
+    fn load_head(&self) -> Result<Option<(ObjectId, ConnectorStateObject)>, CursorStoreError> {
+        if let Some(head) = self.load_canonical_head()? {
+            return Ok(Some(head));
+        }
+
+        self.load_raw_head()
+    }
+
+    fn store_state_object(
+        &self,
+        state_obj: ConnectorStateObject,
+    ) -> Result<ObjectId, CursorStoreError> {
+        if let Some(authorization) = &self.write_authorization {
+            self.store_canonical_state_object(authorization, state_obj)
+        } else {
+            self.store_raw_state_object(state_obj)
+        }
     }
 }
 

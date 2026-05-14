@@ -213,24 +213,147 @@ fn status(checks: &[SelfTestCheck]) -> SelfTestStatus {
 
 fn reject_forbidden_agent_mail_remediation(remediation: &str) -> Result<()> {
     let normalized = remediation.to_ascii_lowercase();
-    let mentions_agent_mail = normalized.contains("agent mail")
-        || normalized.contains("agent-mail")
-        || normalized.contains("am service")
-        || normalized.contains("mcp-agent-mail");
-    if mentions_agent_mail {
-        for operation in ["restart", "repair", "reconstruct", "kill"] {
-            if normalized.contains(operation)
-                && !explicitly_forbids_agent_mail_operation(&normalized, operation)
-            {
-                bail!("doctor self-test fixture contains forbidden Agent Mail remediation text");
-            }
+    const FORBIDDEN_COMMAND_SUBSTRINGS: &[&str] = &[
+        "am service restart",
+        "am service stop",
+        "am doctor fix",
+        "am doctor repair",
+        "am doctor reconstruct",
+    ];
+    for forbidden in FORBIDDEN_COMMAND_SUBSTRINGS {
+        if let Some(idx) = normalized.find(forbidden)
+            && !preceded_by_negator(&normalized, idx)
+        {
+            bail!(
+                "doctor self-test fixture remediation suggests forbidden Agent Mail command: {forbidden}"
+            );
         }
+    }
+    if mentions_killing_agent_mail(&normalized) {
+        bail!(
+            "doctor self-test fixture remediation suggests killing an Agent Mail process; forbidden by AGENTS.md"
+        );
     }
     Ok(())
 }
 
-fn explicitly_forbids_agent_mail_operation(normalized: &str, operation: &str) -> bool {
-    normalized.contains(&format!("do not {operation}"))
-        || normalized.contains(&format!("never {operation}"))
-        || normalized.contains(&format!("must not {operation}"))
+const NEGATORS: &[&str] = &["do not", "don't", "never", "must not", "mustn't", "forbidden"];
+
+fn preceded_by_negator(normalized: &str, idx: usize) -> bool {
+    let mut window_start = idx.saturating_sub(60);
+    while window_start < idx && !normalized.is_char_boundary(window_start) {
+        window_start += 1;
+    }
+    let window = &normalized[window_start..idx];
+    NEGATORS.iter().any(|n| window.contains(n))
+}
+
+fn mentions_killing_agent_mail(normalized: &str) -> bool {
+    const KILL_VERBS: &[&str] = &["kill ", "pkill ", "killall "];
+    const AM_TARGETS: &[&str] = &[
+        "am service",
+        "am serve-http",
+        "mcp-agent-mail",
+        "agent-mail",
+        "agent mail",
+    ];
+    let mut cursor = 0;
+    while let Some(rel) = normalized[cursor..].find(|c: char| matches!(c, 'k' | 'p')) {
+        let pos = cursor + rel;
+        let Some(verb) = KILL_VERBS.iter().find(|v| normalized[pos..].starts_with(*v)) else {
+            cursor = pos + 1;
+            continue;
+        };
+        cursor = pos + verb.len();
+        if preceded_by_negator(normalized, pos) {
+            continue;
+        }
+        let mut scan_end = (cursor + 80).min(normalized.len());
+        while scan_end < normalized.len() && !normalized.is_char_boundary(scan_end) {
+            scan_end += 1;
+        }
+        let mut window = &normalized[cursor..scan_end];
+        // Stop at the first clause/sentence delimiter — a `kill` verb only binds
+        // to its direct object in the same clause, not to a downstream mention.
+        if let Some(stop) = window.find(|c: char| matches!(c, ';' | '.' | '\n' | '!')) {
+            window = &window[..stop];
+        }
+        if AM_TARGETS.iter().any(|t| window.contains(t)) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod reject_remediation_tests {
+    use super::reject_forbidden_agent_mail_remediation;
+
+    #[test]
+    fn allows_remediation_that_negates_restart_of_shared_service() {
+        // Verbatim from broken_env/self_test.toml.
+        let r = "agent-mail: retry once, then continue degraded; do not restart the shared service.";
+        reject_forbidden_agent_mail_remediation(r).expect("must allow negated remediation");
+    }
+
+    #[test]
+    fn allows_remediation_targeting_a_different_subsystem() {
+        // Earlier heuristic falsely rejected any "agent-mail" + "restart" combo
+        // even when the restart applied to a different subsystem.
+        let r = "agent-mail reported a degraded host; restart fcp-host (NOT the am service).";
+        reject_forbidden_agent_mail_remediation(r).expect("restart applies to fcp-host, not am");
+    }
+
+    #[test]
+    fn allows_remediation_with_contraction_negator() {
+        let r = "If agent-mail flakes, don't run am service restart; wait for self-heal.";
+        reject_forbidden_agent_mail_remediation(r).expect("contraction negator must be honored");
+    }
+
+    #[test]
+    fn rejects_unnegated_am_service_restart() {
+        let r = "If agent-mail is down, run am service restart.";
+        assert!(reject_forbidden_agent_mail_remediation(r).is_err());
+    }
+
+    #[test]
+    fn rejects_each_forbidden_am_doctor_command() {
+        for forbidden in [
+            "run am doctor fix",
+            "execute am doctor repair if degraded",
+            "operator: am doctor reconstruct",
+            "perform am service stop and restart",
+        ] {
+            assert!(
+                reject_forbidden_agent_mail_remediation(forbidden).is_err(),
+                "expected rejection for: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_killing_agent_mail_process() {
+        let r = "find the pid and kill the mcp-agent-mail process";
+        assert!(reject_forbidden_agent_mail_remediation(r).is_err());
+    }
+
+    #[test]
+    fn allows_negated_kill_phrasing() {
+        let r = "Never kill the mcp-agent-mail process; restart fcp-host instead.";
+        reject_forbidden_agent_mail_remediation(r).expect("negated kill must be allowed");
+    }
+
+    #[test]
+    fn ignores_kill_unrelated_to_agent_mail() {
+        let r = "kill -9 any stuck fcp-host child; agent-mail is unaffected.";
+        reject_forbidden_agent_mail_remediation(r).expect("unrelated kill must be allowed");
+    }
+
+    #[test]
+    fn does_not_panic_on_multibyte_input_near_window() {
+        // Non-ASCII near the forbidden substring exercises char-boundary safety
+        // in the negator window. Must not panic regardless of verdict.
+        let r = "café ☕ — operators must not run am service restart on the mesh.";
+        reject_forbidden_agent_mail_remediation(r).expect("negated by 'must not'");
+    }
 }

@@ -292,6 +292,7 @@ impl FcpStoreConnectorStateStore {
             Ok(None) => "miss",
             Err(_) => "error",
         };
+        self.record_read_cache_telemetry("read", telemetry_result);
         self.record_operation_telemetry(
             CONNECTOR_STATE_READ_EVENT,
             "read",
@@ -521,6 +522,7 @@ impl FcpStoreConnectorStateStore {
             Ok(_) => "hit",
             Err(_) => "error",
         };
+        self.record_read_cache_telemetry("read", telemetry_result);
         self.record_operation_telemetry(
             CONNECTOR_STATE_READ_EVENT,
             "read",
@@ -1224,6 +1226,38 @@ impl FcpStoreConnectorStateStore {
         );
     }
 
+    fn record_read_cache_telemetry(&self, operation: &'static str, result: &'static str) {
+        let Some(metric_name) = Self::read_cache_metric_for_result(result) else {
+            return;
+        };
+        fcp_telemetry::metrics::increment_counter(
+            metric_name,
+            &[("operation", operation), ("result", result)],
+        );
+        if metric_name == CONNECTOR_STATE_FALL_THROUGH_TOTAL_METRIC {
+            tracing::info!(
+                target: CONNECTOR_STATE_TRACING_TARGET,
+                event_type = CONNECTOR_STATE_FALL_THROUGH_EVENT,
+                connector_id = %self.connector_id,
+                zone_id = %self.zone_id,
+                operation,
+                cache_result = result,
+                canonical_storage = "mesh",
+                result = "fcp-store-read",
+                metric_name,
+                "connector-state cache miss fell through to canonical fcp-store"
+            );
+        }
+    }
+
+    const fn read_cache_metric_for_result(result: &str) -> Option<&'static str> {
+        match result.as_bytes() {
+            b"hit" => Some(CONNECTOR_STATE_CACHE_HITS_TOTAL_METRIC),
+            b"miss" => Some(CONNECTOR_STATE_FALL_THROUGH_TOTAL_METRIC),
+            _ => None,
+        }
+    }
+
     fn record_write_retry(
         &self,
         operation: &'static str,
@@ -1827,6 +1861,30 @@ mod tests {
             CONNECTOR_STATE_LATENCY_SECONDS_METRIC,
             "fcp_connector_state_latency_seconds"
         );
+    }
+
+    #[test]
+    fn read_cache_metric_selection_matches_hit_miss_contract() {
+        assert_eq!(
+            FcpStoreConnectorStateStore::read_cache_metric_for_result("hit"),
+            Some(CONNECTOR_STATE_CACHE_HITS_TOTAL_METRIC)
+        );
+        assert_eq!(
+            FcpStoreConnectorStateStore::read_cache_metric_for_result("miss"),
+            Some(CONNECTOR_STATE_FALL_THROUGH_TOTAL_METRIC)
+        );
+        assert_eq!(
+            FcpStoreConnectorStateStore::read_cache_metric_for_result("error"),
+            None
+        );
+    }
+
+    #[test]
+    fn read_cache_telemetry_records_hit_and_fall_through_without_panic() {
+        let state_store = test_store(store());
+        state_store.record_read_cache_telemetry("read", "hit");
+        state_store.record_read_cache_telemetry("read", "miss");
+        state_store.record_read_cache_telemetry("read", "error");
     }
 
     #[test]

@@ -173,7 +173,7 @@ impl SegmentClient {
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
-            debug!(attempt, method = http_method, url = %redact_url(&url), "segment request");
+            debug!(attempt, method = http_method, url = %redact_url(url), "segment request");
 
             let req = match http_method {
                 "GET" => self.client.get(url),

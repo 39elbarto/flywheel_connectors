@@ -16,14 +16,14 @@ use std::sync::Arc;
 use fcp_crypto::{CwtClaims, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_prelude::{
     CapabilityVerifier, ConnectorStateChange, FcpError, InvokeRequest, InvokeValidationError,
-    ObjectId, OperationIntent, OperationReceipt, RevocationRegistry, TailscaleNodeId, ZoneId,
-    ZoneKey, ZoneKeyAlgorithm, ZoneTransportPolicy,
+    ObjectId, OperationIntent, OperationReceipt, RevocationRegistry, StoredObject, TailscaleNodeId,
+    ZoneId, ZoneKey, ZoneKeyAlgorithm, ZoneTransportPolicy,
 };
 use fcp_protocol::{DecodeStatus, SymbolAck, SymbolRequest};
 use fcp_raptorq::RaptorQConfig;
 use fcp_store::{
-    ConnectorStateStoreError, FcpStoreConnectorStateStore, ObjectStore, QuarantineStore,
-    SymbolStore,
+    ConnectorStateStoreError, FcpStoreConnectorStateStore, ObjectStore, ObjectSymbolMeta,
+    QuarantineStore, StoredSymbol, SymbolStore,
 };
 use fcp_tailscale::NodeId;
 use fcp_telemetry::TraceContext;
@@ -385,6 +385,34 @@ pub struct GossipFetchPlan {
     pub object_ids: Vec<ObjectId>,
     /// Missing symbols this node should fetch from `peer`.
     pub symbols: Vec<(ObjectId, u32)>,
+}
+
+/// Symbol bytes fetched from a peer, paired with the object-level symbol metadata
+/// needed to admit them into the local symbol store.
+#[derive(Debug, Clone)]
+pub struct GossipFetchedSymbol {
+    /// Metadata for the object this symbol helps reconstruct.
+    pub object_meta: ObjectSymbolMeta,
+    /// Fetched symbol bytes.
+    pub symbol: StoredSymbol,
+}
+
+/// Result of applying fetched gossip bytes to the local stores.
+#[must_use]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GossipFetchApplyOutcome {
+    /// Object payloads accepted into the local object store and announced.
+    pub objects_applied: Vec<ObjectId>,
+    /// Symbol payloads accepted into the local symbol store and announced.
+    pub symbols_applied: Vec<(ObjectId, u32)>,
+}
+
+impl GossipFetchApplyOutcome {
+    /// Whether the fetched payload changed no local availability state.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.objects_applied.is_empty() && self.symbols_applied.is_empty()
+    }
 }
 
 /// Structured result of dispatching an inbound gossip message.
@@ -2195,6 +2223,168 @@ impl MeshNode {
         }))
     }
 
+    /// Apply object and symbol bytes fetched for a verified gossip fetch plan.
+    ///
+    /// The transport layer owns the actual peer I/O. This method owns the
+    /// safety boundary after bytes arrive: it re-checks peer zone membership,
+    /// rejects unsolicited payloads, validates zone/object/ESI bindings, stores
+    /// accepted bytes locally, and announces the resulting local availability.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the peer is no longer enrolled for the zone, if any
+    /// payload does not match the fetch plan, or if the local stores reject the
+    /// fetched bytes.
+    pub async fn apply_gossip_fetch_payload(
+        &mut self,
+        plan: &GossipFetchPlan,
+        objects: Vec<StoredObject>,
+        symbols: Vec<GossipFetchedSymbol>,
+        now_ms: u64,
+    ) -> Result<GossipFetchApplyOutcome, MeshNodeError> {
+        let peer = self.verify_gossip_fetch_plan_peer(plan)?;
+        let requested_objects: BTreeSet<_> = plan.object_ids.iter().copied().collect();
+        let requested_symbols: BTreeSet<_> = plan.symbols.iter().copied().collect();
+        let mut outcome = GossipFetchApplyOutcome::default();
+
+        for object in objects {
+            Self::validate_fetched_object(plan, &requested_objects, &object)?;
+            let object_id = object.object_id;
+            match self.object_store.put(object).await {
+                Ok(()) | Err(fcp_store::ObjectStoreError::AlreadyExists(_)) => {}
+                Err(err) => return Err(MeshNodeError::ObjectStore(err)),
+            }
+            self.announce_object(
+                &plan.zone_id,
+                &object_id,
+                ObjectAdmissionClass::Admitted,
+                now_ms,
+            );
+            outcome.objects_applied.push(object_id);
+        }
+
+        for fetched in symbols {
+            let (object_id, esi) =
+                Self::validate_fetched_symbol(plan, &requested_symbols, &fetched)?;
+            self.symbol_store
+                .put_object_meta(fetched.object_meta)
+                .await?;
+            self.symbol_store.put_symbol(fetched.symbol).await?;
+            self.announce_symbol(
+                &plan.zone_id,
+                &object_id,
+                esi,
+                ObjectAdmissionClass::Admitted,
+                now_ms,
+            );
+            outcome.symbols_applied.push((object_id, esi));
+        }
+
+        debug!(
+            peer = %peer.as_str(),
+            zone_id = %plan.zone_id,
+            objects = outcome.objects_applied.len(),
+            symbols = outcome.symbols_applied.len(),
+            "applied gossip fetch payload"
+        );
+
+        Ok(outcome)
+    }
+
+    fn verify_gossip_fetch_plan_peer(
+        &self,
+        plan: &GossipFetchPlan,
+    ) -> Result<NodeId, MeshNodeError> {
+        let peer = NodeId::new(plan.peer.as_str());
+        let peer_state = self
+            .peers
+            .get(&peer)
+            .ok_or_else(|| MeshNodeError::UnknownPeer {
+                peer: peer.as_str().to_string(),
+                message_kind: "gossip fetch payload",
+            })?;
+        if !peer_state.zones.contains(&plan.zone_id) {
+            return Err(MeshNodeError::UnauthorizedZone {
+                peer: peer.as_str().to_string(),
+                zone_id: plan.zone_id.to_string(),
+            });
+        }
+        Ok(peer)
+    }
+
+    fn validate_fetched_object(
+        plan: &GossipFetchPlan,
+        requested_objects: &BTreeSet<ObjectId>,
+        object: &StoredObject,
+    ) -> Result<(), MeshNodeError> {
+        if !requested_objects.contains(&object.object_id) {
+            return Err(MeshNodeError::GossipDecode(format!(
+                "fetched object {} from {} was not requested for zone {}",
+                object.object_id,
+                plan.peer.as_str(),
+                plan.zone_id
+            )));
+        }
+        if object.header.zone_id != plan.zone_id {
+            return Err(MeshNodeError::GossipDecode(format!(
+                "fetched object {} from {} has zone {}, expected {}",
+                object.object_id,
+                plan.peer.as_str(),
+                object.header.zone_id,
+                plan.zone_id
+            )));
+        }
+        object.validate_structure().map_err(|err| {
+            MeshNodeError::GossipDecode(format!(
+                "fetched object {} from {} failed structural validation: {}",
+                object.object_id,
+                plan.peer.as_str(),
+                err
+            ))
+        })
+    }
+
+    fn validate_fetched_symbol(
+        plan: &GossipFetchPlan,
+        requested_symbols: &BTreeSet<(ObjectId, u32)>,
+        fetched: &GossipFetchedSymbol,
+    ) -> Result<(ObjectId, u32), MeshNodeError> {
+        let object_id = fetched.symbol.meta.object_id;
+        let esi = fetched.symbol.meta.esi;
+        if !requested_symbols.contains(&(object_id, esi)) {
+            return Err(MeshNodeError::GossipDecode(format!(
+                "fetched symbol {}:{} from {} was not requested for zone {}",
+                object_id,
+                esi,
+                plan.peer.as_str(),
+                plan.zone_id
+            )));
+        }
+        if fetched.object_meta.object_id != object_id {
+            return Err(MeshNodeError::GossipDecode(format!(
+                "fetched symbol {}:{} from {} carries object metadata for {}",
+                object_id,
+                esi,
+                plan.peer.as_str(),
+                fetched.object_meta.object_id
+            )));
+        }
+        if fetched.object_meta.zone_id != plan.zone_id
+            || fetched.symbol.meta.zone_id != plan.zone_id
+        {
+            return Err(MeshNodeError::GossipDecode(format!(
+                "fetched symbol {}:{} from {} has zone metadata {}/{}, expected {}",
+                object_id,
+                esi,
+                plan.peer.as_str(),
+                fetched.object_meta.zone_id,
+                fetched.symbol.meta.zone_id,
+                plan.zone_id
+            )));
+        }
+        Ok((object_id, esi))
+    }
+
     /// Verify and answer a bounded IBLT reconcile request.
     ///
     /// # Errors
@@ -2909,6 +3099,63 @@ mod tests {
     fn test_object_id(name: &str) -> ObjectId {
         let hash = blake3::hash(name.as_bytes());
         ObjectId::from_bytes(*hash.as_bytes())
+    }
+
+    fn test_stored_object(zone_id: &ZoneId, name: &str, body: &[u8]) -> StoredObject {
+        let schema =
+            fcp_cbor::SchemaId::new("fcp.test", "FetchedObject", semver::Version::new(1, 0, 0));
+        let header = ObjectHeader {
+            schema: schema.clone(),
+            zone_id: zone_id.clone(),
+            created_at: 1,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let mut keyed_body = name.as_bytes().to_vec();
+        keyed_body.extend_from_slice(body);
+        let object_id =
+            StoredObject::derive_id(&header, &keyed_body, &ObjectIdKey::from_bytes([0x99; 32]))
+                .expect("derive object id");
+        StoredObject {
+            object_id,
+            header,
+            body: keyed_body,
+            storage: StorageMeta {
+                retention: EvictionPolicy::Pinned,
+            },
+        }
+    }
+
+    fn test_object_symbol_meta(object_id: ObjectId, zone_id: &ZoneId) -> ObjectSymbolMeta {
+        let oti = ObjectTransmissionInformation::new(256, 64, 1, 1, 1);
+        ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 2,
+            first_symbol_at: 0,
+        }
+    }
+
+    fn test_stored_symbol(
+        object_id: ObjectId,
+        zone_id: &ZoneId,
+        esi: u32,
+        fill: u8,
+    ) -> StoredSymbol {
+        StoredSymbol {
+            meta: SymbolMeta {
+                object_id,
+                esi,
+                zone_id: zone_id.clone(),
+                source_node: Some(1),
+                stored_at: 0,
+            },
+            data: Bytes::from(vec![fill; 64]),
+        }
     }
 
     #[test]
@@ -4829,6 +5076,122 @@ mod tests {
         assert_eq!(fetch_plan.zone_id, zone_id);
         assert_eq!(fetch_plan.object_ids, vec![missing_object]);
         assert_eq!(fetch_plan.symbols, vec![(missing_symbol_object, 3)]);
+    }
+
+    #[test]
+    fn apply_gossip_fetch_payload_persists_peer_bytes_and_announces_availability() {
+        let mut node = test_node("node-1");
+        let peer_node = test_node("peer-1");
+        let peer = NodeId::new("peer-1");
+        let requester = NodeId::new("requester-1");
+        let zone_id = ZoneId::work();
+
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(zone_id.clone()));
+        node.update_peer_state(
+            requester.clone(),
+            test_device_profile("requester-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&requester, zone_set(zone_id.clone()));
+
+        let fetched_object = test_stored_object(&zone_id, "object-fetch", b"peer-object-bytes");
+        let fetched_object_id = fetched_object.object_id;
+        let symbol_object_id = test_object_id("symbol-fetch-object");
+        let symbol_meta = test_object_symbol_meta(symbol_object_id, &zone_id);
+        let fetched_symbol = test_stored_symbol(symbol_object_id, &zone_id, 7, 0xA7);
+
+        fcp_async_core::runtime::block_on_sync(async {
+            peer_node
+                .object_store
+                .put(fetched_object.clone())
+                .await
+                .expect("peer stores object bytes");
+            peer_node
+                .symbol_store
+                .put_object_meta(symbol_meta.clone())
+                .await
+                .expect("peer stores symbol metadata");
+            peer_node
+                .symbol_store
+                .put_symbol(fetched_symbol.clone())
+                .await
+                .expect("peer stores symbol bytes");
+
+            let response = GossipResponse {
+                from: TailscaleNodeId::new("peer-1"),
+                to: TailscaleNodeId::new("node-1"),
+                zone_id: zone_id.clone(),
+                have_objects: vec![fetched_object_id],
+                have_symbols: vec![(symbol_object_id, 7)],
+                timestamp: 1_000,
+            };
+            let plan = node
+                .handle_gossip_response(response, 1_000)
+                .expect("verified response")
+                .expect("fetch plan");
+
+            let object_bytes = peer_node
+                .object_store
+                .get(&fetched_object_id)
+                .await
+                .expect("transport fetched object bytes");
+            let symbol_bytes = GossipFetchedSymbol {
+                object_meta: peer_node
+                    .symbol_store
+                    .get_object_meta(&symbol_object_id)
+                    .await
+                    .expect("transport fetched symbol metadata"),
+                symbol: peer_node
+                    .symbol_store
+                    .get_symbol(&symbol_object_id, 7)
+                    .await
+                    .expect("transport fetched symbol bytes"),
+            };
+
+            let outcome = node
+                .apply_gossip_fetch_payload(&plan, vec![object_bytes], vec![symbol_bytes], 1_000)
+                .await
+                .expect("apply fetched bytes");
+            assert_eq!(outcome.objects_applied, vec![fetched_object_id]);
+            assert_eq!(outcome.symbols_applied, vec![(symbol_object_id, 7)]);
+
+            let local_object = node
+                .object_store
+                .get(&fetched_object_id)
+                .await
+                .expect("local object bytes stored");
+            assert_eq!(local_object.body, fetched_object.body);
+            let local_symbol = node
+                .symbol_store
+                .get_symbol(&symbol_object_id, 7)
+                .await
+                .expect("local symbol bytes stored");
+            assert_eq!(local_symbol.data, fetched_symbol.data);
+        })
+        .expect("runtime");
+
+        let request = GossipRequest {
+            from: TailscaleNodeId::new("requester-1"),
+            zone_id: zone_id.clone(),
+            object_ids: vec![fetched_object_id],
+            symbols: vec![(symbol_object_id, 7)],
+            timestamp: 1_000,
+            signature: None,
+        };
+        let response = node
+            .handle_gossip_request(request, 1_000)
+            .expect("local node advertises applied bytes");
+        assert_eq!(response.have_objects, vec![fetched_object_id]);
+        assert_eq!(response.have_symbols, vec![(symbol_object_id, 7)]);
     }
 
     #[test]

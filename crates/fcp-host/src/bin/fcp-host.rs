@@ -2323,6 +2323,16 @@ fn host_connector_state_explain_payload(
     host_connector_state_explain_payload_with_canonical_status(connector_id, zone, state_root, None)
 }
 
+async fn connector_state_root_for_registered_connector(
+    state: &AppState,
+    connector_id: &ConnectorId,
+) -> PathBuf {
+    let inventory = state.registry.inventory().await;
+    find_connector_inventory_entry(&inventory, connector_id)
+        .and_then(configured_connector_state_root)
+        .unwrap_or_else(connector_state_root_dir)
+}
+
 #[must_use]
 fn host_connector_state_explain_payload_with_canonical_status(
     connector_id: &ConnectorId,
@@ -7726,7 +7736,7 @@ async fn connector_state_explain_handler(
         zone_id = zone.as_ref().map(ZoneId::as_str),
         "processing connector state explain request"
     );
-    let state_root = connector_state_root_dir();
+    let state_root = connector_state_root_for_registered_connector(&state, &connector_id).await;
     let payload = host_connector_state_explain_payload(&connector_id, zone.as_ref(), &state_root);
     tracing::debug!(
         event = "connector_state_explain_response",
@@ -23736,6 +23746,66 @@ done"#;
         .await?;
 
         assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_state_explain_admin_route_uses_managed_connector_state_root()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let state_root = tempdir.path().join("managed-state");
+        let connector_id = "fcp.test.state:utility:1.0.0";
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id = ZoneId::work();
+        prepare_connector_zone_state_dir(&state_root, &connector_key, &zone_id)
+            .expect("managed connector state root should be prepared");
+
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(1);
+        let runner_task = task::spawn(async move { while runner_rx.recv().await.is_some() {} });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let mut config = dispatcher_test_config(connector_id);
+        config.env.insert(
+            CONNECTOR_STATE_DIR_ENV.to_string(),
+            state_root.display().to_string(),
+        );
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = dispatcher_app_state(registry, lifecycle, None, HashMap::new());
+        let state = Arc::new(AppState {
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            ..(*state).clone()
+        });
+        let app = connector_state_explain_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/connectors/fcp.test.state:utility:1.0.0/state/explain?zone=z%3Awork",
+            serde_json::json!({}),
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(payload["source"], "host-cache-markers");
+        assert_eq!(
+            payload["state_root"]["path"],
+            state_root.display().to_string()
+        );
+        assert_eq!(payload["canonical_storage"], "mesh");
+        assert_eq!(payload["local_cache_marker_present"], true);
+        assert_eq!(payload["zone"]["local_cache_marker_present"], true);
+        let state_root_text = state_root.display().to_string();
+        assert!(
+            payload["local_cache_path"]
+                .as_str()
+                .is_some_and(|path| path.starts_with(state_root_text.as_str())),
+            "local_cache_path should use managed state root: {payload}"
+        );
         Ok(())
     }
 

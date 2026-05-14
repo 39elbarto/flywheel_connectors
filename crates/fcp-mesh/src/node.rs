@@ -45,8 +45,9 @@ use crate::degraded::{
 };
 use crate::device::DeviceProfile;
 use crate::gossip::{
-    GossipConfig, GossipMessage, GossipRequest, GossipResponse, GossipSummary, MeshGossip,
-    PeerCapabilityAdvertisement, PeerProtocolCapabilities, RevocationPushMessage,
+    GossipConfig, GossipMessage, GossipRequest, GossipResponse, GossipSummary, IbltPlaceholder,
+    MeshGossip, PeerCapabilityAdvertisement, PeerProtocolCapabilities, ReconcileRequest,
+    ReconcileResponse, RevocationPushMessage,
 };
 use crate::planner::{
     CandidateNode, ExecutionPlanner, HeldLease, LeasePurpose, NodeInfo, PlannerContext,
@@ -372,6 +373,8 @@ pub struct GossipDispatchOutcome {
     pub revocation_push: Option<VerifiedRevocationPush>,
     /// Immediate response the transport should return to the requester.
     pub response: Option<GossipResponse>,
+    /// Immediate reconcile response the transport should return to the requester.
+    pub reconcile_response: Option<ReconcileResponse>,
 }
 
 impl GossipDispatchOutcome {
@@ -379,6 +382,7 @@ impl GossipDispatchOutcome {
         Self {
             revocation_push: Some(revocation_push),
             response: None,
+            reconcile_response: None,
         }
     }
 
@@ -386,6 +390,15 @@ impl GossipDispatchOutcome {
         Self {
             revocation_push: None,
             response: Some(response),
+            reconcile_response: None,
+        }
+    }
+
+    fn with_reconcile_response(reconcile_response: ReconcileResponse) -> Self {
+        Self {
+            revocation_push: None,
+            response: None,
+            reconcile_response: Some(reconcile_response),
         }
     }
 }
@@ -1775,6 +1788,41 @@ impl MeshNode {
         Ok(peer)
     }
 
+    fn verify_reconcile_request(
+        &self,
+        request: &ReconcileRequest,
+        now_secs: u64,
+    ) -> Result<NodeId, MeshNodeError> {
+        let peer = NodeId::new(request.from.as_str());
+
+        let state = self
+            .peers
+            .get(&peer)
+            .ok_or_else(|| MeshNodeError::UnknownPeer {
+                peer: peer.as_str().to_string(),
+                message_kind: "reconcile request",
+            })?;
+        if !state.zones.contains(&request.zone_id) {
+            return Err(MeshNodeError::UnauthorizedZone {
+                peer: peer.as_str().to_string(),
+                zone_id: request.zone_id.to_string(),
+            });
+        }
+        if crate::gossip::is_outside_freshness_window(
+            request.timestamp,
+            now_secs,
+            self.gossip.summary_ttl_secs(),
+            self.gossip.max_future_skew_secs(),
+        ) {
+            return Err(MeshNodeError::StaleGossipMessage {
+                peer: peer.as_str().to_string(),
+                message_kind: "reconcile request",
+            });
+        }
+
+        Ok(peer)
+    }
+
     async fn load_symbol_meta(
         &self,
         request: &SymbolRequest,
@@ -1943,6 +1991,42 @@ impl MeshNode {
         Ok(self.gossip.handle_request(&request))
     }
 
+    /// Verify and answer a bounded IBLT reconcile request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the requester is unknown, not authorized for the
+    /// claimed zone, stale, or sends an invalid/oversized IBLT payload.
+    #[allow(clippy::needless_pass_by_value)] // by-value API mirrors handle_gossip_request
+    pub fn handle_reconcile_request(
+        &mut self,
+        request: ReconcileRequest,
+        now_secs: u64,
+    ) -> Result<Option<ReconcileResponse>, MeshNodeError> {
+        self.verify_reconcile_request(&request, now_secs)?;
+        let peer_iblt = IbltPlaceholder::decode_with_limits(
+            &request.iblt,
+            self.gossip.reconciliation_batch_size(),
+            self.gossip.max_iblt_bytes(),
+        )
+        .map_err(|err| {
+            MeshNodeError::GossipDecode(format!(
+                "reconcile request IBLT from {} for zone {} rejected: {}",
+                request.from.as_str(),
+                request.zone_id,
+                err.reason_code()
+            ))
+        })?;
+
+        Ok(self.gossip.reconcile_zone_iblt(
+            &request.zone_id,
+            &request.from,
+            peer_iblt.as_iblt(),
+            self.gossip.reconciliation_batch_size(),
+            now_secs,
+        ))
+    }
+
     /// Dispatch a gossip control-plane message through the verified node entrypoint.
     ///
     /// Returns any verified revocation push plus an immediate gossip
@@ -1980,14 +2064,14 @@ impl MeshNode {
                 );
                 Ok(GossipDispatchOutcome::default())
             }
-            GossipMessage::ReconcileRequest(request) => {
-                debug!(
-                    peer_id = %request.from.as_str(),
-                    zone_id = %request.zone_id,
-                    "reconcile request is deferred until the stateful reconcile dispatch path lands"
-                );
-                Ok(GossipDispatchOutcome::default())
-            }
+            GossipMessage::ReconcileRequest(request) => self
+                .handle_reconcile_request(request, now_secs)
+                .map(|response| {
+                    response.map_or_else(
+                        GossipDispatchOutcome::default,
+                        GossipDispatchOutcome::with_reconcile_response,
+                    )
+                }),
             GossipMessage::ReconcileResponse(response) => {
                 debug!(
                     peer_id = %response.from.as_str(),
@@ -4447,6 +4531,60 @@ mod tests {
         assert_eq!(response.zone_id, ZoneId::work());
         assert_eq!(response.have_objects, vec![known_object]);
         assert!(response.have_symbols.is_empty());
+    }
+
+    #[test]
+    fn dispatch_gossip_payload_routes_reconcile_request_to_response() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
+
+        let zone_id = ZoneId::work();
+        let shared = ObjectId::from_bytes([0x41; 32]);
+        let local_only = ObjectId::from_bytes([0x42; 32]);
+        let peer_only = ObjectId::from_bytes([0x43; 32]);
+        assert!(node.announce_object(&zone_id, &shared, ObjectAdmissionClass::Admitted, 1_000,));
+        assert!(
+            node.announce_object(&zone_id, &local_only, ObjectAdmissionClass::Admitted, 1_000,)
+        );
+
+        let mut peer_sketch =
+            IbltPlaceholder::with_max_changes(node.gossip.reconciliation_batch_size());
+        peer_sketch.note_local_change(&shared, None);
+        peer_sketch.note_local_change(&peer_only, None);
+        let request = ReconcileRequest {
+            from: TailscaleNodeId::new("peer-1"),
+            zone_id: zone_id.clone(),
+            iblt: peer_sketch.encode(),
+            object_filter_digest: [0; 32],
+            symbol_filter_digest: [0; 32],
+            timestamp: 1_000,
+        };
+        let payload =
+            serde_json::to_vec(&GossipMessage::ReconcileRequest(request)).expect("JSON encode");
+
+        let outcome = node
+            .dispatch_gossip_payload(&payload, 1_000)
+            .expect("dispatch should succeed");
+        assert!(outcome.revocation_push.is_none());
+        assert!(outcome.response.is_none());
+        let response = outcome
+            .reconcile_response
+            .expect("reconcile dispatch must surface an immediate response");
+        assert_eq!(response.from, TailscaleNodeId::new("node-1"));
+        assert_eq!(response.zone_id, zone_id);
+        assert_eq!(response.timestamp, 1_000);
+        assert_eq!(response.peer_missing_objects.len(), 1);
+        assert!(response.peer_missing_objects.contains(&local_only));
+        assert_eq!(response.we_missing_objects.len(), 1);
+        assert!(response.we_missing_objects.contains(&peer_only));
     }
 
     #[test]

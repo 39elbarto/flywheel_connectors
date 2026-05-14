@@ -2039,6 +2039,18 @@ impl MeshGossip {
         self.config.max_wire_payload_bytes()
     }
 
+    /// Expected-difference budget used for IBLT reconciliation.
+    #[must_use]
+    pub const fn reconciliation_batch_size(&self) -> usize {
+        self.config.reconciliation_batch_size
+    }
+
+    /// Maximum encoded IBLT bytes accepted by gossip reconciliation paths.
+    #[must_use]
+    pub const fn max_iblt_bytes(&self) -> usize {
+        self.config.max_iblt_bytes()
+    }
+
     /// Plan a direct revocation-push fanout at the transport boundary.
     ///
     /// Enforces the configured interval backoff for repeated direct pushes in

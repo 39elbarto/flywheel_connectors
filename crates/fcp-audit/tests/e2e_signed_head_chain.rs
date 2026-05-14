@@ -124,7 +124,7 @@ fn e2e_signed_head_append_verifies_and_detects_tamper() {
         );
         let _entered = span.enter();
         phases.push("tamper_detection");
-        let mut tampered = head.clone();
+        let mut tampered = head;
         tampered.coverage = 0.25;
         let resolver = |kid: &KeyId| -> Option<Ed25519VerifyingKey> {
             if kid.as_slice() == trusted_kid.as_slice() {

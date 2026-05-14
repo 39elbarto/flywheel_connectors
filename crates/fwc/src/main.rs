@@ -123,6 +123,7 @@ mod bench_cmd;
 #[cfg(test)]
 mod bench_helpers;
 mod bootstrap_migrate_owner_key;
+mod capability_replay;
 #[allow(dead_code)]
 mod catalog;
 #[allow(dead_code)] // Event checkpoint and replay from sequence/time.
@@ -605,6 +606,9 @@ enum Commands {
 
     /// Report and recommend capability usage from real execution history.
     Capabilities(CapabilitiesArgs),
+
+    /// Reconstruct capability-token predicate traces from audit-chain evidence.
+    Capability(CapabilityArgs),
 
     /// Install a connector package.
     Install(InstallArgs),
@@ -1680,6 +1684,59 @@ struct TelemetryOtlpReadinessArgs {
 struct CapabilitiesArgs {
     #[command(subcommand)]
     command: CapabilitiesCommand,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct CapabilityArgs {
+    #[command(subcommand)]
+    command: CapabilityCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum CapabilityCommand {
+    /// Reconstruct the predicate-evaluation trace for one capability token.
+    Replay(CapabilityReplayArgs),
+}
+
+#[derive(Args, Debug, Serialize)]
+struct CapabilityReplayArgs {
+    /// Capability token id or raw token value to hash before lookup.
+    token: String,
+
+    /// Audit-chain lookback duration (e.g. 30s, 5m, 2h, 7d).
+    #[arg(long, default_value = "7d")]
+    since: String,
+
+    /// Confirm replay windows wider than the default 7-day cap.
+    #[arg(long, default_value_t = false)]
+    confirm: bool,
+
+    /// Render the trace as canonical JSON, JSONL steps, or a human narrative.
+    #[arg(long, value_enum, default_value_t = CapabilityReplayOutputArg::Json)]
+    output: CapabilityReplayOutputArg,
+
+    /// Audit-chain artifact to replay (JSON bundle, JSON array, JSONL, or `-` for stdin).
+    #[arg(long = "audit-chain", env = capability_replay::AUDIT_CHAIN_ENV, value_name = "PATH")]
+    audit_chain: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+enum CapabilityReplayOutputArg {
+    Json,
+    Jsonl,
+    Human,
+}
+
+impl From<CapabilityReplayOutputArg> for capability_replay::ReplayOutput {
+    fn from(value: CapabilityReplayOutputArg) -> Self {
+        match value {
+            CapabilityReplayOutputArg::Json => Self::Json,
+            CapabilityReplayOutputArg::Jsonl => Self::Jsonl,
+            CapabilityReplayOutputArg::Human => Self::Human,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug, Serialize)]
@@ -3756,6 +3813,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Budget(args) => budget_dispatch(args, cli.host.as_deref())?,
         Commands::Telemetry(args) => telemetry_dispatch(args),
         Commands::Capabilities(args) => capabilities_dispatch(args, cli.host.as_deref())?,
+        Commands::Capability(args) => capability_dispatch(args)?,
         Commands::Install(args) => install_dispatch(args, cli.host.as_deref())?,
         Commands::Update(args) => update_dispatch(args, cli.host.as_deref())?,
         Commands::Pin(args) => pin_dispatch(args, cli.host.as_deref())?,
@@ -22846,6 +22904,116 @@ fn approvals_dispatch(args: &ApprovalsArgs) -> Result<DispatchOutcome> {
     })
 }
 
+fn capability_dispatch(args: &CapabilityArgs) -> Result<DispatchOutcome> {
+    match &args.command {
+        CapabilityCommand::Replay(args) => capability_replay_dispatch(args),
+    }
+}
+
+fn capability_replay_dispatch(args: &CapabilityReplayArgs) -> Result<DispatchOutcome> {
+    let result = capability_replay::build_replay_payload(
+        &args.token,
+        &args.since,
+        args.confirm,
+        args.audit_chain.as_deref(),
+        args.output.into(),
+        capability_replay::current_unix_seconds(),
+    );
+
+    match result {
+        Ok(mut payload) => {
+            let envelope =
+                CommandEnvelope::new(CommandAvailability::OfflineArtifact, "capability replay");
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
+                exit_code: CliExitCode::Success,
+            })
+        }
+        Err(error) => {
+            let mut payload = json!({
+                "status": "error",
+                "command": "capability",
+                "subcommand": "replay",
+                "error": {
+                    "type": error.error_type(),
+                    "message": error.to_string(),
+                    "recoverable": error.recoverable(),
+                    "token_hash": error.token_hash(),
+                },
+                "details": {
+                    "since": args.since,
+                    "confirm": args.confirm,
+                    "output": args.output,
+                    "default_window_seconds": fcp_audit::replay::DEFAULT_REPLAY_WINDOW_SECS,
+                },
+                "next_actions": capability_replay_next_actions(&error),
+            });
+            let envelope =
+                CommandEnvelope::new(CommandAvailability::OfflineArtifact, "capability replay");
+            envelope.inject_into(&mut payload);
+            Ok(DispatchOutcome {
+                payload,
+                exit_code: capability_replay_exit_code(&error),
+            })
+        }
+    }
+}
+
+fn capability_replay_exit_code(error: &capability_replay::CapabilityReplayError) -> CliExitCode {
+    match error {
+        capability_replay::CapabilityReplayError::InvalidSince(_)
+        | capability_replay::CapabilityReplayError::Replay(
+            fcp_audit::replay::ReplayError::WideWindowRequiresConfirm { .. },
+        ) => CliExitCode::Parse,
+        capability_replay::CapabilityReplayError::Replay(
+            fcp_audit::replay::ReplayError::TokenNotFoundInAuditChain { .. },
+        ) => CliExitCode::UnknownCommand,
+        capability_replay::CapabilityReplayError::ReadAuditChain { .. }
+        | capability_replay::CapabilityReplayError::ParseAuditChain(_)
+        | capability_replay::CapabilityReplayError::Serialize(_)
+        | capability_replay::CapabilityReplayError::Replay(
+            fcp_audit::replay::ReplayError::AuditChainUnavailable(_)
+            | fcp_audit::replay::ReplayError::AuditChainCorrupted(_),
+        ) => CliExitCode::AmbiguousCorrection,
+    }
+}
+
+fn capability_replay_next_actions(error: &capability_replay::CapabilityReplayError) -> Vec<String> {
+    match error {
+        capability_replay::CapabilityReplayError::InvalidSince(_) => vec![
+            "Use a duration like `30s`, `5m`, `2h`, or `7d`.".to_owned(),
+            "Retry with `fwc capability replay <token> --since 7d`.".to_owned(),
+        ],
+        capability_replay::CapabilityReplayError::Replay(
+            fcp_audit::replay::ReplayError::WideWindowRequiresConfirm { .. },
+        ) => vec![
+            "Retry with `--confirm` if you intentionally need a wider audit-chain scan."
+                .to_owned(),
+            "Use the smallest useful `--since` window to keep replay bounded.".to_owned(),
+        ],
+        capability_replay::CapabilityReplayError::Replay(
+            fcp_audit::replay::ReplayError::TokenNotFoundInAuditChain { .. },
+        ) => vec![
+            "Check that the audit-chain artifact contains entries for this token hash.".to_owned(),
+            "Retry with a wider `--since` window and `--confirm` if the token is older than seven days."
+                .to_owned(),
+        ],
+        capability_replay::CapabilityReplayError::ReadAuditChain { .. }
+        | capability_replay::CapabilityReplayError::ParseAuditChain(_)
+        | capability_replay::CapabilityReplayError::Serialize(_)
+        | capability_replay::CapabilityReplayError::Replay(
+            fcp_audit::replay::ReplayError::AuditChainUnavailable(_)
+            | fcp_audit::replay::ReplayError::AuditChainCorrupted(_),
+        ) => vec![
+            "Inspect the audit-chain artifact and rerun with `--format json` for structured error details."
+                .to_owned(),
+            "Run `fwc doctor --probe audit_chain` when the live audit chain should be available."
+                .to_owned(),
+        ],
+    }
+}
+
 #[derive(Clone, Debug)]
 struct CapabilityOperationMetadata {
     connector_slug: String,
@@ -27960,11 +28128,16 @@ fn redact_sensitive_args(args: &[String]) -> Vec<String> {
                 .position(|arg| arg == "add")
                 .map(|relative| auth_index + 1 + relative)
         });
+    let capability_replay_token_index = capability_replay_positional_token_index(args);
     let mut redacted = Vec::with_capacity(args.len());
     let mut redact_next_value = false;
     let mut redact_next_field = false;
 
     for (index, arg) in args.iter().enumerate() {
+        if capability_replay_token_index == Some(index) {
+            redacted.push("<redacted>".to_owned());
+            continue;
+        }
         if redact_next_value {
             redacted.push("<redacted>".to_owned());
             redact_next_value = false;
@@ -28018,6 +28191,52 @@ fn redact_sensitive_args(args: &[String]) -> Vec<String> {
     }
 
     redacted
+}
+
+fn capability_replay_positional_token_index(args: &[String]) -> Option<usize> {
+    let capability_index = args.iter().position(|arg| arg == "capability")?;
+    let replay_index = args
+        .iter()
+        .enumerate()
+        .skip(capability_index + 1)
+        .find_map(|(index, arg)| (arg == "replay").then_some(index))?;
+
+    let mut skip_next_value = false;
+    for (index, arg) in args.iter().enumerate().skip(replay_index + 1) {
+        if skip_next_value {
+            skip_next_value = false;
+            continue;
+        }
+        if capability_replay_flag_takes_value(arg) {
+            skip_next_value = !arg.contains('=');
+            continue;
+        }
+        if arg == "--confirm" || arg.starts_with("--output=") || arg.starts_with("--since=") {
+            continue;
+        }
+        if !arg.starts_with('-') {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn capability_replay_flag_takes_value(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--since"
+            | "--output"
+            | "--audit-chain"
+            | "--format"
+            | "--template"
+            | "--template-file"
+            | "--extract"
+            | "--jq"
+            | "--columns"
+            | "--sort-by"
+            | "--limit"
+            | "--host"
+    )
 }
 
 fn redact_assignment_value(raw: &str) -> String {
@@ -34567,8 +34786,19 @@ deny_ptrace = true
                         "source": "host-cache-markers",
                         "connector_id": "fcp.github:enterprise:v1",
                         "canonical_storage": "mesh",
-                        "last_canonical_seq": Value::Null,
-                        "mesh_replica_count": Value::Null,
+                        "last_canonical_seq": 17,
+                        "mesh_replica_count": 2,
+                        "canonical_state": {
+                            "root_present": true,
+                            "connector_id": "fcp.github:enterprise:v1",
+                            "zone_id": "z:work",
+                            "instance_id": Value::Null,
+                            "model": "singleton_writer",
+                            "root_object_id": "sha256:connector-state-root",
+                            "head_object_id": "sha256:connector-state-head",
+                            "state_schema_version": 1,
+                            "status_source": "fcp-store",
+                        },
                         "local_cache_present": true,
                         "local_cache_marker_present": true,
                         "live_host": {
@@ -34610,10 +34840,33 @@ deny_ptrace = true
         assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["host_payload_source"], "host-cache-markers");
         assert_eq!(
+            payload["message"],
+            "Explained connector state storage for `github` from live fcp-host evidence."
+        );
+        assert_eq!(
             payload["connector"]["canonical_id"],
             "fcp.github:enterprise:v1"
         );
         assert_eq!(payload["canonical_storage"], "mesh");
+        assert_eq!(payload["last_canonical_seq"], 17);
+        assert_eq!(payload["mesh_replica_count"], 2);
+        assert_eq!(payload["canonical_state"]["root_present"], true);
+        assert_eq!(
+            payload["canonical_state"]["connector_id"],
+            "fcp.github:enterprise:v1"
+        );
+        assert_eq!(payload["canonical_state"]["zone_id"], "z:work");
+        assert_eq!(payload["canonical_state"]["model"], "singleton_writer");
+        assert_eq!(
+            payload["canonical_state"]["root_object_id"],
+            "sha256:connector-state-root"
+        );
+        assert_eq!(
+            payload["canonical_state"]["head_object_id"],
+            "sha256:connector-state-head"
+        );
+        assert_eq!(payload["canonical_state"]["state_schema_version"], 1);
+        assert_eq!(payload["canonical_state"]["status_source"], "fcp-store");
         assert_eq!(payload["live_host"]["route_available"], true);
         assert!(
             payload["live_host"]["endpoint_hash"]

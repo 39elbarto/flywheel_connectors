@@ -247,23 +247,71 @@ async fn configured_connector(base_url: &str) -> WorkspaceEventsConnector {
     let mut connector = WorkspaceEventsConnector::new();
     connector
         .handle_configure(json!({
-            "access_token": LOOPBACK_AUTH_VALUE,
-            "events_base_url": base_url,
-            "pubsub_base_url": base_url,
+            "access_token": ACCESS_TOKEN,
+            "required_scopes": ["https://www.googleapis.com/auth/chat.messages.readonly"],
+            "events_base_url": format!("{base_url}/v1"),
+            "pubsub_base_url": format!("{base_url}/v1"),
         }))
         .await
-        .expect("configure connector with loopback base URLs");
+        .expect("connector should configure against loopback base URLs");
     connector
 }
 
 #[fcp_async_core::runtime::test]
-async fn local_non_mock_list_subscriptions_uses_workspace_events_request_boundary() {
-    let fixture = LoopbackFixture::start("200 OK", LIST_SUBSCRIPTIONS_RESPONSE);
-    let mut connector = configured_connector(fixture.base_url()).await;
+async fn local_non_mock_subscription_and_pubsub_delivery_flow_uses_loopback_http() {
+    let event_payload = STANDARD.encode(br#"{"event":"chat_message_created","seq":7}"#);
+    let pull_body = format!(
+        r#"{{
+            "receivedMessages": [
+                {{
+                    "ackId": "ack-local-1",
+                    "deliveryAttempt": 2,
+                    "message": {{
+                        "data": "{event_payload}",
+                        "messageId": "msg-local-1",
+                        "publishTime": "2026-05-14T00:00:00Z",
+                        "attributes": {{"eventType": "google.workspace.chat.message.v1.created"}}
+                    }}
+                }}
+            ]
+        }}"#
+    );
+    let server = LoopbackServer::start(vec![
+        HttpResponse {
+            status: "200 OK",
+            body: r#"{
+                "subscriptions": [
+                    {
+                        "name": "subscriptions/local-1",
+                        "state": "ACTIVE",
+                        "targetResource": "//chat.googleapis.com/spaces/AAAA",
+                        "notificationEndpoint": {
+                            "pubsubTopic": "projects/demo/topics/workspace-events"
+                        }
+                    }
+                ],
+                "nextPageToken": "token-2"
+            }"#
+            .to_string(),
+        },
+        HttpResponse {
+            status: "200 OK",
+            body: r#"{"name": "operations/create-local-1", "done": false}"#.to_string(),
+        },
+        HttpResponse {
+            status: "200 OK",
+            body: pull_body,
+        },
+        HttpResponse {
+            status: "200 OK",
+            body: r"{}".to_string(),
+        },
+    ]);
+    let mut connector = configured_connector(&server.base_url).await;
 
-    let result = connector
+    let listed = connector
         .handle_invoke(json!({
-            "operation": OP_LIST_SUBSCRIPTIONS,
+            "operation": "workspace_events.list_subscriptions",
             "input": {
                 "page_size": 2,
                 "page_token": "token-1"

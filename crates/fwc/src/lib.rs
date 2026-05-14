@@ -6,6 +6,7 @@
 
 pub mod access_cmd;
 pub mod agent_bootstrap;
+pub mod capability_replay;
 pub mod connector_state;
 pub mod doctor;
 pub mod mesh_cmd;

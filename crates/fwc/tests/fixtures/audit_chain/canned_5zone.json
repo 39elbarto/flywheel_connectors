@@ -1,0 +1,150 @@
+{
+  "audit_entries": [
+    {
+      "id": "entry-public-cutoff",
+      "event_type": "capability.invoke",
+      "severity": "info",
+      "actor": "agent:codex",
+      "zone_id": "z:public",
+      "seq": 1,
+      "occurred_at": 1700000000,
+      "prev": null,
+      "correlation_id": "corr-public",
+      "trace_context": null,
+      "connector_id": "fcp.web:base:v1",
+      "operation_id": "fetch",
+      "metadata": {},
+      "issuer_kid": null,
+      "signature": null
+    },
+    {
+      "id": "entry-work-old",
+      "event_type": "capability.invoke",
+      "severity": "info",
+      "actor": "agent:codex",
+      "zone_id": "z:work",
+      "seq": 2,
+      "occurred_at": 1699999999,
+      "prev": "entry-public-cutoff",
+      "correlation_id": "corr-work-old",
+      "trace_context": null,
+      "connector_id": "fcp.slack:base:v1",
+      "operation_id": "messages.send",
+      "metadata": {},
+      "issuer_kid": null,
+      "signature": null
+    },
+    {
+      "id": "entry-private-recent",
+      "event_type": "capability.invoke",
+      "severity": "info",
+      "actor": "agent:codex",
+      "zone_id": "z:private",
+      "seq": 3,
+      "occurred_at": 1700080000,
+      "prev": "entry-work-old",
+      "correlation_id": "corr-private",
+      "trace_context": null,
+      "connector_id": "fcp.gmail:base:v1",
+      "operation_id": "messages.read",
+      "metadata": {},
+      "issuer_kid": null,
+      "signature": null
+    },
+    {
+      "id": "entry-work-admission",
+      "event_type": "capability.admission",
+      "severity": "info",
+      "actor": "agent:codex",
+      "zone_id": "z:work",
+      "seq": 4,
+      "occurred_at": 1700082000,
+      "prev": "entry-private-recent",
+      "correlation_id": "corr-work",
+      "trace_context": null,
+      "connector_id": "fcp.slack:base:v1",
+      "operation_id": "messages.send",
+      "metadata": {
+        "decision": "allow",
+        "datalog_derivation": "allow if zone=z:work and cap=messages.send",
+        "quorum_height": 7,
+        "signers": [
+          "node-a",
+          "node-b",
+          "node-c"
+        ]
+      },
+      "issuer_kid": null,
+      "signature": null
+    },
+    {
+      "id": "entry-work-invoke",
+      "event_type": "capability.invoke",
+      "severity": "info",
+      "actor": "agent:codex",
+      "zone_id": "z:work",
+      "seq": 5,
+      "occurred_at": 1700083000,
+      "prev": "entry-work-admission",
+      "correlation_id": "corr-work",
+      "trace_context": null,
+      "connector_id": "fcp.slack:base:v1",
+      "operation_id": "messages.send",
+      "metadata": {
+        "tombstoned": true
+      },
+      "issuer_kid": null,
+      "signature": null
+    },
+    {
+      "id": "entry-community-latest",
+      "event_type": "capability.invoke",
+      "severity": "info",
+      "actor": "agent:codex",
+      "zone_id": "z:community",
+      "seq": 6,
+      "occurred_at": 1700086400,
+      "prev": "entry-work-invoke",
+      "correlation_id": "corr-community",
+      "trace_context": null,
+      "connector_id": "fcp.discord:base:v1",
+      "operation_id": "messages.read",
+      "metadata": {},
+      "issuer_kid": null,
+      "signature": null
+    }
+  ],
+  "capability_tokens": [
+    {
+      "id": "tok-work-1",
+      "capability_id": "messages.send",
+      "connector_id": "fcp.slack:base:v1",
+      "operation_id": "messages.send",
+      "correlation_id": "corr-work",
+      "issuer_kid": "kid-work"
+    }
+  ],
+  "receipts": [
+    {
+      "id": "receipt-work-1",
+      "request_id": "request-work-1",
+      "decision": "allow",
+      "reason_code": "policy.allow.zone_work",
+      "evidence": [
+        "entry-work-admission",
+        "entry-work-invoke"
+      ],
+      "audit_entry_id": "entry-work-invoke",
+      "explanation": "work zone policy allowed messages.send",
+      "decided_at": 1700083000,
+      "zone_id": "z:work",
+      "correlation_id": "corr-work",
+      "trace_context": null,
+      "connector_id": "fcp.slack:base:v1",
+      "operation_id": "messages.send",
+      "confidence": null,
+      "issuer_kid": null,
+      "signature": null
+    }
+  ]
+}

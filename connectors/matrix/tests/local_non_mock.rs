@@ -19,6 +19,7 @@ use std::time::Duration;
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_matrix::MatrixConnector;
+use fcp_prelude::OperationId;
 use fcp_sdk::prelude::*;
 use serde_json::{Value, json};
 

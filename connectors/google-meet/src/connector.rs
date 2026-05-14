@@ -853,6 +853,12 @@ impl GoogleMeetConnector {
         }
     }
 
+    /// Runtime instance identifier used for host-minted capability binding.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
     #[must_use]
     fn manifest_hash() -> String {
         let mut hasher = Sha256::new();

@@ -128,6 +128,13 @@ fn connector_state_authorization_for(
     connector_id: &ConnectorId,
     zone_id: &ZoneId,
 ) -> ConnectorStateWriteAuthorization {
+    connector_state_authorization_for_with_key(connector_id, zone_id).0
+}
+
+fn connector_state_authorization_for_with_key(
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+) -> (ConnectorStateWriteAuthorization, Ed25519SigningKey) {
     let signing_key = Ed25519SigningKey::generate();
     let instance_id = InstanceId::new();
     let constraints = CapabilityConstraints {
@@ -157,8 +164,14 @@ fn connector_state_authorization_for(
         instance_id,
     );
 
-    ConnectorStateWriteAuthorization::verify_append_token(&verifier, token, connector_id, zone_id)
-        .expect("connector-state write token should authorize append")
+    let authorization = ConnectorStateWriteAuthorization::verify_append_token(
+        &verifier,
+        token,
+        connector_id,
+        zone_id,
+    )
+    .expect("connector-state write token should authorize append");
+    (authorization, signing_key)
 }
 
 fn connector_state_authorization() -> ConnectorStateWriteAuthorization {
@@ -209,12 +222,24 @@ fn state(seq: u64, prev: Option<ObjectId>, lease: ObjectId) -> ConnectorStateObj
     }
 }
 
+fn sign_state(
+    mut state: ConnectorStateObject,
+    signing_key: &Ed25519SigningKey,
+) -> ConnectorStateObject {
+    state
+        .sign_with(signing_key)
+        .expect("test connector state should sign");
+    state
+}
+
 fn append_committed(
     store: &FcpStoreConnectorStateStore,
     state_obj: ConnectorStateObject,
 ) -> Result<(ObjectId, ObjectId, u64), ConnectorStateError> {
     let connector_id = connector_id();
-    let authorization = connector_state_authorization();
+    let (authorization, signing_key) =
+        connector_state_authorization_for_with_key(&connector_id, &zone_id());
+    let state_obj = sign_state(state_obj, &signing_key);
     match block_on(ConnectorStateStore::append_object(
         store,
         &connector_id,
@@ -358,7 +383,8 @@ fn connector_state_externalization_latency_budget_matrix() -> TestResult {
         Ok::<(), ConnectorStateError>(())
     })?;
 
-    let fail_closed_authorization = connector_state_authorization();
+    let (fail_closed_authorization, fail_closed_signing_key) =
+        connector_state_authorization_for_with_key(&connector_id(), &zone_id());
     let fail_closed_p50 = measure_p50_latency(ITERATIONS, || {
         let unavailable = host_state_store(memory_object_store_with_quota(1));
         let connector_id = connector_id();
@@ -366,7 +392,7 @@ fn connector_state_externalization_latency_budget_matrix() -> TestResult {
             &unavailable,
             &connector_id,
             &fail_closed_authorization,
-            state(0, None, lease_id(9)),
+            sign_state(state(0, None, lease_id(9)), &fail_closed_signing_key),
         ));
         match result {
             Err(ConnectorStateError::StorageUnavailable {
@@ -411,12 +437,13 @@ fn connector_state_externalization_conflicts_on_stale_prev_pointer() -> TestResu
     let (head_1, _root_1, _seq_1) = append_committed(&host_a, state(1, Some(head_0), lease_id(2)))?;
 
     let connector_id = connector_id();
-    let authorization = connector_state_authorization();
+    let (authorization, signing_key) =
+        connector_state_authorization_for_with_key(&connector_id, &zone_id());
     let stale_outcome = block_on(ConnectorStateStore::append_object(
         &host_b,
         &connector_id,
         &authorization,
-        state(1, Some(head_0), lease_id(3)),
+        sign_state(state(1, Some(head_0), lease_id(3)), &signing_key),
     ))?;
     match stale_outcome {
         ConnectorStateAppendOutcome::Conflict {
@@ -465,6 +492,38 @@ fn connector_state_externalization_rejects_authorization_for_other_connector() -
             assert!(reason.contains("authorization connector"));
         }
         other => panic!("expected authorization denial, got {other:?}"),
+    }
+    assert!(block_on(ConnectorStateStore::read_root(&host, &connector_id))?.is_none());
+
+    Ok(())
+}
+
+#[test]
+fn connector_state_externalization_rejects_invalid_state_signature() -> TestResult {
+    let object_store = memory_object_store();
+    let host = host_state_store(object_store);
+    let connector_id = connector_id();
+    let authorization = connector_state_authorization();
+
+    let result = block_on(ConnectorStateStore::append_object(
+        &host,
+        &connector_id,
+        &authorization,
+        state(0, None, lease_id(1)),
+    ));
+
+    match result {
+        Err(ConnectorStateError::MalformedState {
+            connector_id: failed_connector_id,
+            reason,
+        }) => {
+            assert_eq!(failed_connector_id, connector_id);
+            assert!(
+                reason.contains("signature"),
+                "malformed-state reason should mention signature, got `{reason}`"
+            );
+        }
+        other => panic!("expected malformed-state rejection for invalid signature, got {other:?}"),
     }
     assert!(block_on(ConnectorStateStore::read_root(&host, &connector_id))?.is_none());
 
@@ -529,13 +588,14 @@ fn connector_state_externalization_retries_cleanly_after_root_write_failure() ->
         Arc::new(FailNthPutObjectStore::new(Arc::clone(&inner), 2));
     let host = host_state_store(object_store);
     let connector_id = connector_id();
-    let authorization = connector_state_authorization();
+    let (authorization, signing_key) =
+        connector_state_authorization_for_with_key(&connector_id, &zone_id());
 
     let first_attempt = block_on(ConnectorStateStore::append_object(
         &host,
         &connector_id,
         &authorization,
-        state(0, None, lease_id(1)),
+        sign_state(state(0, None, lease_id(1)), &signing_key),
     ));
     match first_attempt {
         Err(ConnectorStateError::StorageUnavailable {
@@ -596,14 +656,15 @@ fn connector_state_externalization_fails_closed_when_store_is_unavailable() {
     let object_store = memory_object_store_with_quota(1);
     let host = host_state_store(object_store);
     let connector_id = connector_id();
-    let authorization = connector_state_authorization();
+    let (authorization, signing_key) =
+        connector_state_authorization_for_with_key(&connector_id, &zone_id());
 
     let started = Instant::now();
     let append_result = block_on(ConnectorStateStore::append_object(
         &host,
         &connector_id,
         &authorization,
-        state(0, None, lease_id(1)),
+        sign_state(state(0, None, lease_id(1)), &signing_key),
     ));
     let elapsed = started.elapsed();
 

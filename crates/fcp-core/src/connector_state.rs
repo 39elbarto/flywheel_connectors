@@ -22,6 +22,9 @@
 //! - Snapshots enable compaction of older state objects
 
 use fcp_cbor::{SerializationError, to_canonical_cbor};
+use fcp_crypto::{
+    Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, canonical_signing_bytes,
+};
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 use std::{fmt, pin::Pin};
@@ -64,6 +67,13 @@ pub const CONNECTOR_STATE_WRITE_CAPABILITY_ID: &str = "fcp.connector-state.write
 /// Operation required to append canonical connector-state objects.
 pub const CONNECTOR_STATE_APPEND_OPERATION_ID: &str = "fcp.connector-state.append";
 
+/// Domain-separated schema identifier for `ConnectorStateObject` signatures.
+///
+/// The signed payload intentionally excludes the `signature` field so the
+/// signature is not self-referential.
+pub const CONNECTOR_STATE_OBJECT_SIGNING_SCHEMA_ID: &str =
+    "fcp.connector-state.state-object-signing.v1";
+
 /// Canonical connector-state write capability identifier.
 #[must_use]
 pub fn connector_state_write_capability_id() -> CapabilityId {
@@ -92,6 +102,7 @@ pub fn connector_state_resource_uri(connector_id: &ConnectorId) -> String {
 pub struct ConnectorStateWriteAuthorization {
     connector_id: ConnectorId,
     zone_id: ZoneId,
+    writer_public_key: [u8; 32],
 }
 
 impl ConnectorStateWriteAuthorization {
@@ -124,7 +135,7 @@ impl ConnectorStateWriteAuthorization {
                 )
             })?;
 
-        Self::from_bound_append_token(&bound, connector_id, zone_id)
+        Self::from_bound_append_token(&bound, connector_id, zone_id, verifier.host_public_key)
     }
 
     /// Connector authorized by this witness.
@@ -139,10 +150,20 @@ impl ConnectorStateWriteAuthorization {
         &self.zone_id
     }
 
+    /// Public key that verified the append capability token.
+    ///
+    /// The connector-state append boundary uses this key as the writer key for
+    /// `ConnectorStateObject` signature verification.
+    #[must_use]
+    pub const fn writer_public_key(&self) -> [u8; 32] {
+        self.writer_public_key
+    }
+
     fn from_bound_append_token(
         token: &CapabilityToken<BoundVerified>,
         connector_id: &ConnectorId,
         zone_id: &ZoneId,
+        writer_public_key: [u8; 32],
     ) -> Result<Self, ConnectorStateError> {
         let claims = token.claims();
         let token_zone = claims.get_zone_id().ok_or_else(|| {
@@ -207,6 +228,7 @@ impl ConnectorStateWriteAuthorization {
         Ok(Self {
             connector_id: connector_id.clone(),
             zone_id: zone_id.clone(),
+            writer_public_key,
         })
     }
 }
@@ -583,11 +605,91 @@ pub struct ConnectorStateObject {
     pub signature: Signature,
 }
 
+#[derive(Serialize)]
+struct ConnectorStateObjectSigningPayload<'a> {
+    header: &'a ObjectHeader,
+    connector_id: &'a ConnectorId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instance_id: &'a Option<InstanceId>,
+    zone_id: &'a ZoneId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prev: &'a Option<ObjectId>,
+    seq: u64,
+    state_cbor: &'a [u8],
+    updated_at: u64,
+    lease_seq: u64,
+    lease_object_id: &'a ObjectId,
+}
+
+/// Error returned while signing or verifying connector state objects.
+#[derive(Debug, Error)]
+pub enum ConnectorStateSignatureError {
+    /// Canonical signing transcript construction failed.
+    #[error("connector state signing transcript error: {0}")]
+    Serialization(#[from] SerializationError),
+
+    /// Ed25519 signature verification failed.
+    #[error("connector state signature verification failed: {0}")]
+    Crypto(#[from] fcp_crypto::CryptoError),
+}
+
 impl ConnectorStateObject {
     /// Check if this is a genesis state object.
     #[must_use]
     pub const fn is_genesis(&self) -> bool {
         self.prev.is_none()
+    }
+
+    /// Build the domain-separated signing bytes for this state object.
+    ///
+    /// The signed payload includes every state-object field except
+    /// [`Self::signature`], which avoids a self-referential signature.
+    ///
+    /// # Errors
+    /// Returns a [`SerializationError`] if canonical CBOR encoding fails.
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, SerializationError> {
+        let payload = ConnectorStateObjectSigningPayload {
+            header: &self.header,
+            connector_id: &self.connector_id,
+            instance_id: &self.instance_id,
+            zone_id: &self.zone_id,
+            prev: &self.prev,
+            seq: self.seq,
+            state_cbor: &self.state_cbor,
+            updated_at: self.updated_at,
+            lease_seq: self.lease_seq,
+            lease_object_id: &self.lease_object_id,
+        };
+        let cbor = to_canonical_cbor(&payload)?;
+        Ok(canonical_signing_bytes(
+            CONNECTOR_STATE_OBJECT_SIGNING_SCHEMA_ID,
+            &cbor,
+        ))
+    }
+
+    /// Sign this state object with the supplied Ed25519 key.
+    ///
+    /// # Errors
+    /// Returns a [`SerializationError`] if canonical signing bytes cannot be
+    /// constructed.
+    pub fn sign_with(&mut self, signing_key: &Ed25519SigningKey) -> Result<(), SerializationError> {
+        let signature = signing_key.sign(&self.signing_bytes()?);
+        self.signature = Signature::from_bytes(signature.to_bytes());
+        Ok(())
+    }
+
+    /// Verify this state object signature with the supplied Ed25519 key.
+    ///
+    /// # Errors
+    /// Returns [`ConnectorStateSignatureError`] when transcript construction
+    /// fails or the signature does not verify.
+    pub fn verify_signature_with(
+        &self,
+        verifying_key: &Ed25519VerifyingKey,
+    ) -> Result<(), ConnectorStateSignatureError> {
+        let signature = Ed25519Signature::from_bytes(self.signature.as_bytes());
+        verifying_key.verify(&self.signing_bytes()?, &signature)?;
+        Ok(())
     }
 }
 
@@ -3529,6 +3631,41 @@ mod tests {
         let display = sig.to_string();
         assert!(display.contains("abababab"));
         assert!(display.ends_with("..."));
+    }
+
+    #[test]
+    fn connector_state_object_signature_uses_unsigned_payload() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let wrong_key = Ed25519SigningKey::generate().verifying_key();
+        let lease_object_id = test_object_id("lease");
+        let mut header = test_header();
+        header.refs.push(lease_object_id);
+        let mut state_obj = ConnectorStateObject {
+            header,
+            connector_id: test_connector_id(),
+            instance_id: None,
+            zone_id: ZoneId::work(),
+            prev: None,
+            seq: 0,
+            state_cbor: vec![0xa1, 0x61, b'n', 0x00],
+            updated_at: 1_700_000_000,
+            lease_seq: 1,
+            lease_object_id,
+            signature: Signature::zero(),
+        };
+
+        let unsigned_signing_bytes = state_obj.signing_bytes().unwrap();
+        state_obj.sign_with(&signing_key).unwrap();
+
+        assert_ne!(state_obj.signature, Signature::zero());
+        assert_eq!(state_obj.signing_bytes().unwrap(), unsigned_signing_bytes);
+        state_obj.verify_signature_with(&verifying_key).unwrap();
+        assert!(state_obj.verify_signature_with(&wrong_key).is_err());
+
+        let mut tampered = state_obj.clone();
+        tampered.seq += 1;
+        assert!(tampered.verify_signature_with(&verifying_key).is_err());
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -47,7 +47,8 @@ fn zone_id() -> ZoneId {
     ZoneId::work()
 }
 
-fn connector_state_authorization() -> ConnectorStateWriteAuthorization {
+fn connector_state_authorization_with_key() -> (ConnectorStateWriteAuthorization, Ed25519SigningKey)
+{
     let connector_id = connector_id();
     let zone_id = zone_id();
     let signing_key = Ed25519SigningKey::generate();
@@ -79,8 +80,14 @@ fn connector_state_authorization() -> ConnectorStateWriteAuthorization {
         instance_id,
     );
 
-    ConnectorStateWriteAuthorization::verify_append_token(&verifier, token, &connector_id, &zone_id)
-        .expect("connector-state write token should authorize append")
+    let authorization = ConnectorStateWriteAuthorization::verify_append_token(
+        &verifier,
+        token,
+        &connector_id,
+        &zone_id,
+    )
+    .expect("connector-state write token should authorize append");
+    (authorization, signing_key)
 }
 
 fn lease_id(seed: u8) -> ObjectId {
@@ -147,12 +154,23 @@ fn state(seq: u64, prev: Option<ObjectId>, lease: ObjectId) -> ConnectorStateObj
     }
 }
 
+fn sign_state(
+    mut state: ConnectorStateObject,
+    signing_key: &Ed25519SigningKey,
+) -> ConnectorStateObject {
+    state
+        .sign_with(signing_key)
+        .expect("test connector state should sign");
+    state
+}
+
 fn append_committed(
     store: &FcpStoreConnectorStateStore,
     state_obj: ConnectorStateObject,
 ) -> Result<(ObjectId, ObjectId, u64), ConnectorStateError> {
     let connector_id = connector_id();
-    let authorization = connector_state_authorization();
+    let (authorization, signing_key) = connector_state_authorization_with_key();
+    let state_obj = sign_state(state_obj, &signing_key);
     match block_on(ConnectorStateStore::append_object(
         store,
         &connector_id,

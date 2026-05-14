@@ -23910,10 +23910,13 @@ done"#;
         .status()
     }
 
-    fn connector_state_write_authorization_for_test(
+    fn connector_state_write_authorization_for_test_with_key(
         connector_id: &ConnectorId,
         zone_id: &ZoneId,
-    ) -> fcp_core::ConnectorStateWriteAuthorization {
+    ) -> (
+        fcp_core::ConnectorStateWriteAuthorization,
+        fcp_crypto::ed25519::Ed25519SigningKey,
+    ) {
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
         let instance_id = InstanceId::new();
         let constraints = CapabilityConstraints {
@@ -23944,13 +23947,14 @@ done"#;
             instance_id,
         );
 
-        fcp_core::ConnectorStateWriteAuthorization::verify_append_token(
+        let authorization = fcp_core::ConnectorStateWriteAuthorization::verify_append_token(
             &verifier,
             token,
             connector_id,
             zone_id,
         )
-        .expect("test connector-state write token should authorize append")
+        .expect("test connector-state write token should authorize append");
+        (authorization, signing_key)
     }
 
     fn durable_connector_state_object_for_test(
@@ -23983,6 +23987,16 @@ done"#;
             lease_object_id,
             signature: fcp_core::Signature::zero(),
         }
+    }
+
+    fn sign_durable_connector_state_object_for_test(
+        mut state: fcp_core::ConnectorStateObject,
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+    ) -> fcp_core::ConnectorStateObject {
+        state
+            .sign_with(signing_key)
+            .expect("test connector state should sign");
+        state
     }
 
     #[fcp_async_core::runtime::test]
@@ -24142,17 +24156,21 @@ done"#;
         )
         .with_snapshot_every_entries(0)
         .with_snapshot_every_secs(0);
-        let authorization = connector_state_write_authorization_for_test(&connector_key, &zone_id);
+        let (authorization, signing_key) =
+            connector_state_write_authorization_for_test_with_key(&connector_key, &zone_id);
         let append = fcp_core::ConnectorStateStore::append_object(
             &state_store,
             &connector_key,
             &authorization,
-            durable_connector_state_object_for_test(
-                &connector_key,
-                &zone_id,
-                0,
-                None,
-                ObjectId::from_bytes([0x71; 32]),
+            sign_durable_connector_state_object_for_test(
+                durable_connector_state_object_for_test(
+                    &connector_key,
+                    &zone_id,
+                    0,
+                    None,
+                    ObjectId::from_bytes([0x71; 32]),
+                ),
+                &signing_key,
             ),
         )
         .await

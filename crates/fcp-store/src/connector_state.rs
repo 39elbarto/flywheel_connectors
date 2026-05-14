@@ -15,6 +15,7 @@ use fcp_cbor::{
     CanonicalSerializer, MAX_CANONICALIZATION_DEPTH, MAX_DESERIALIZATION_RECURSION_LIMIT, SchemaId,
     SerializationError,
 };
+use fcp_crypto::Ed25519VerifyingKey;
 use fcp_prelude::{
     BackoffPolicy, ConnectorId, ConnectorStateAppendOutcome, ConnectorStateCanonicalStatus,
     ConnectorStateChange, ConnectorStateChangeKind, ConnectorStateChangeStream,
@@ -121,6 +122,10 @@ pub enum ConnectorStateStoreError {
     /// A state object carries malformed or non-canonical CBOR state bytes.
     #[error("connector state object has invalid state_cbor: {0}")]
     InvalidStateCbor(SerializationError),
+
+    /// A state object signature does not verify against the authorized writer.
+    #[error("connector state object signature verification failed: {0}")]
+    InvalidStateSignature(String),
 
     /// A state object used a sequence number that does not follow the head.
     #[error("connector state sequence mismatch: expected {expected}, got {got}")]
@@ -983,6 +988,21 @@ impl FcpStoreConnectorStateStore {
         Ok(())
     }
 
+    fn verify_authorized_state_signature(
+        state: &ConnectorStateObject,
+        authorization: &ConnectorStateWriteAuthorization,
+    ) -> Result<()> {
+        let verifying_key = Ed25519VerifyingKey::from_bytes(&authorization.writer_public_key())
+            .map_err(|err| {
+                ConnectorStateStoreError::InvalidStateSignature(format!(
+                    "authorized writer key rejected: {err}"
+                ))
+            })?;
+        state
+            .verify_signature_with(&verifying_key)
+            .map_err(|err| ConnectorStateStoreError::InvalidStateSignature(err.to_string()))
+    }
+
     fn validate_state_cbor(state_cbor: &[u8]) -> Result<()> {
         if state_cbor.len() > MAX_CONNECTOR_STATE_CBOR_BYTES {
             return Err(ConnectorStateStoreError::InvalidStateCbor(
@@ -1329,6 +1349,7 @@ impl FcpStoreConnectorStateStore {
             | ConnectorStateStoreError::MissingLeaseReference(_)
             | ConnectorStateStoreError::EmptyStateCbor
             | ConnectorStateStoreError::InvalidStateCbor(_)
+            | ConnectorStateStoreError::InvalidStateSignature(_)
             | ConnectorStateStoreError::SequenceMismatch { .. }
             | ConnectorStateStoreError::SequenceOverflow(_)
             | ConnectorStateStoreError::ChainCycle(_)
@@ -1360,6 +1381,10 @@ impl ConnectorStateStore for FcpStoreConnectorStateStore {
         object: ConnectorStateObject,
     ) -> std::result::Result<ConnectorStateAppendOutcome, ConnectorStateError> {
         self.ensure_write_authorized(connector_id, authorization)?;
+        self.validate_incoming_state_object(&object)
+            .map_err(|err| self.to_connector_state_error(err))?;
+        Self::verify_authorized_state_signature(&object, authorization)
+            .map_err(|err| self.to_connector_state_error(err))?;
         Self::append_object(self, object)
             .await
             .map_err(|err| self.to_connector_state_error(err))
@@ -1663,7 +1688,7 @@ mod tests {
         cbor
     }
 
-    fn write_authorization() -> ConnectorStateWriteAuthorization {
+    fn write_authorization_with_key() -> (ConnectorStateWriteAuthorization, Ed25519SigningKey) {
         let connector_id = connector_id();
         let zone_id = zone_id();
         let instance_id = InstanceId::new();
@@ -1690,13 +1715,18 @@ mod tests {
             zone_id.clone(),
             instance_id,
         );
-        ConnectorStateWriteAuthorization::verify_append_token(
+        let authorization = ConnectorStateWriteAuthorization::verify_append_token(
             &verifier,
             token,
             &connector_id,
             &zone_id,
         )
-        .unwrap()
+        .unwrap();
+        (authorization, signing_key)
+    }
+
+    fn write_authorization() -> ConnectorStateWriteAuthorization {
+        write_authorization_with_key().0
     }
 
     fn header(schema: SchemaId, created_at: u64, lease: Option<ObjectId>) -> ObjectHeader {
@@ -1730,6 +1760,19 @@ mod tests {
             lease_object_id: lease,
             signature: Signature::zero(),
         }
+    }
+
+    fn signed_state(
+        seq: u64,
+        prev: Option<ObjectId>,
+        lease: ObjectId,
+        signing_key: &Ed25519SigningKey,
+    ) -> ConnectorStateObject {
+        let mut state = state(seq, prev, lease);
+        state
+            .sign_with(signing_key)
+            .expect("test connector state should sign");
+        state
     }
 
     fn root_with_head(head: Option<ObjectId>, created_at: u64) -> ConnectorStateRoot {
@@ -2278,18 +2321,38 @@ mod tests {
     }
 
     #[test]
-    fn trait_append_maps_quota_failure_to_storage_unavailable() {
-        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig {
-            max_bytes: 1,
-        }));
-        let state_store = test_store(object_store);
+    fn trait_append_rejects_invalid_state_signature() {
+        let state_store = test_store(store());
+        let authorization = write_authorization();
 
         let err = run_async(
             <FcpStoreConnectorStateStore as ConnectorStateStore>::append_object(
                 &state_store,
                 &connector_id(),
-                &write_authorization(),
+                &authorization,
                 state(0, None, lease_id(1)),
+            ),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ConnectorStateError::MalformedState { .. }));
+        assert!(run_async(state_store.read_root()).unwrap().is_none());
+    }
+
+    #[test]
+    fn trait_append_maps_quota_failure_to_storage_unavailable() {
+        let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig {
+            max_bytes: 1,
+        }));
+        let state_store = test_store(object_store);
+        let (authorization, signing_key) = write_authorization_with_key();
+
+        let err = run_async(
+            <FcpStoreConnectorStateStore as ConnectorStateStore>::append_object(
+                &state_store,
+                &connector_id(),
+                &authorization,
+                signed_state(0, None, lease_id(1), &signing_key),
             ),
         )
         .unwrap_err();

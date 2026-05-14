@@ -195,10 +195,10 @@ fn capability_constraints_cbor(resource_allow: Vec<String>) -> Vec<u8> {
 }
 
 #[cfg(feature = "cursor-store-object-store")]
-fn connector_state_write_authorization(
+fn connector_state_write_authorization_with_key(
     connector_id: &ConnectorId,
     zone_id: &ZoneId,
-) -> ConnectorStateWriteAuthorization {
+) -> (ConnectorStateWriteAuthorization, Ed25519SigningKey) {
     let instance_id = InstanceId::new();
     let signing_key = Ed25519SigningKey::generate();
     let now = Utc::now();
@@ -223,8 +223,46 @@ fn connector_state_write_authorization(
         zone_id.clone(),
         instance_id,
     );
-    ConnectorStateWriteAuthorization::verify_append_token(&verifier, token, connector_id, zone_id)
-        .expect("connector-state append token should authorize")
+    let authorization = ConnectorStateWriteAuthorization::verify_append_token(
+        &verifier,
+        token,
+        connector_id,
+        zone_id,
+    )
+    .expect("connector-state append token should authorize");
+    (authorization, signing_key)
+}
+
+#[cfg(feature = "cursor-store-object-store")]
+fn signature_for_object_store_cursor_commit(
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+    mut header: ObjectHeader,
+    lease: CursorLease,
+    cursor: &CursorState,
+    signing_key: &Ed25519SigningKey,
+) -> Signature {
+    if !header.refs.contains(&lease.lease_object_id) {
+        header.refs.push(lease.lease_object_id);
+    }
+    let state_cbor = cursor.to_cbor().expect("cursor state should encode");
+    let mut state = ConnectorStateObject {
+        updated_at: header.created_at,
+        header,
+        connector_id: connector_id.clone(),
+        instance_id: None,
+        zone_id: zone_id.clone(),
+        prev: None,
+        seq: 0,
+        state_cbor,
+        lease_seq: lease.lease_seq,
+        lease_object_id: lease.lease_object_id,
+        signature: Signature::zero(),
+    };
+    state
+        .sign_with(signing_key)
+        .expect("connector state should sign");
+    state.signature
 }
 
 #[test]
@@ -317,6 +355,8 @@ fn cursor_store_object_store_authorized_commit_advances_canonical_root() {
     let object_id_key = ObjectIdKey::from_bytes([0xA7; 32]);
     let connector_id = ConnectorId::from_static("test:operational:1.0");
     let zone_id = ZoneId::work();
+    let (authorization, signing_key) =
+        connector_state_write_authorization_with_key(&connector_id, &zone_id);
 
     let backend = ObjectStoreCursorBackend::new(
         Arc::clone(&object_store),
@@ -324,7 +364,7 @@ fn cursor_store_object_store_authorized_commit_advances_canonical_root() {
         connector_id.clone(),
         zone_id.clone(),
     )
-    .with_write_authorization(connector_state_write_authorization(&connector_id, &zone_id));
+    .with_write_authorization(authorization);
     let mut store = CursorStore::new(backend, connector_id.clone(), zone_id.clone());
 
     let cursor = CursorState {
@@ -336,14 +376,18 @@ fn cursor_store_object_store_authorized_commit_advances_canonical_root() {
         lease_seq: 1,
         lease_object_id: ObjectId::from_bytes([0x12; 32]),
     };
+    let header = object_store_header(1_700_150_000, zone_id.clone());
+    let signature = signature_for_object_store_cursor_commit(
+        &connector_id,
+        &zone_id,
+        header.clone(),
+        lease,
+        &cursor,
+        &signing_key,
+    );
 
     let object_id = store
-        .commit_cursor(
-            cursor.clone(),
-            object_store_header(1_700_150_000, zone_id.clone()),
-            lease,
-            Signature::zero(),
-        )
+        .commit_cursor(cursor.clone(), header, lease, signature)
         .expect("authorized commit should succeed");
 
     let canonical_store = fcp_store::FcpStoreConnectorStateStore::new(

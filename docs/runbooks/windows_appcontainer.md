@@ -1,6 +1,6 @@
 # Windows AppContainer Runbook
 
-**Bead:** `flywheel_connectors-r4qcg.1.2`
+**Bead:** `flywheel_connectors-r4qcg.1.1`
 **Audience:** Operators and agents validating the Windows sandbox path.
 
 Windows remains `ProcessLimit` unless a connector process is launched through
@@ -16,17 +16,19 @@ profile SID, capability decision, launch mechanism, and Job Object attachment.
 artifacts/e2e/windows_appcontainer/<run-id>/
 ```
 
-3. Inspect `windows_appcontainer_evidence.jsonl`.
+3. Inspect `process-launch/windows_appcontainer_process_launch.jsonl`.
 4. Treat the lane as a skip unless at least one record shows:
 
 ```json
 {
   "schema_version": "1.0.0",
-  "event_type": "fcp.host.windows.appcontainer.process_launched",
+  "record_type": "windows_appcontainer_process_launch_e2e",
+  "bead_id": "flywheel_connectors-r4qcg.1.1",
   "launch_mechanism": "startupinfoex_security_capabilities",
   "sid_present": true,
   "job_object_attached": true,
-  "redaction_scope": "public"
+  "redaction_scope": "public",
+  "action_result": "launched"
 }
 ```
 
@@ -75,19 +77,19 @@ Do not promote Windows readiness to `ProfileLevel` after a failed launch.
 Successful launch:
 
 ```json
-{"schema_version":"1.0.0","event_type":"fcp.host.windows.appcontainer.process_launched","bead_id":"flywheel_connectors-r4qcg.1.2","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","profile_name_hash":"8d7c...","sid_present":true,"launch_mechanism":"startupinfoex_security_capabilities","job_object_attached":true,"final_filter_strength":"process_limit"}
+{"schema_version":"1.0.0","record_type":"windows_appcontainer_process_launch_e2e","bead_id":"flywheel_connectors-r4qcg.1.1","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","profile_name_hash":"8d7c...","sid_present":true,"launch_mechanism":"startupinfoex_security_capabilities","job_object_attached":true,"action_result":"launched","final_readiness_layer":"process_limit"}
 ```
 
 Skipped lane:
 
 ```json
-{"schema_version":"1.0.0","event_type":"fcp.host.windows.appcontainer.skip","bead_id":"flywheel_connectors-r4qcg.1.2","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","skip_reason":"live_e2e_not_requested","final_filter_strength":"process_limit"}
+{"schema_version":"1.0.0","record_type":"windows_appcontainer_process_launch_e2e","bead_id":"flywheel_connectors-r4qcg.1.1","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","skip_reason":"windows_appcontainer_env_opt_in_missing","action_result":"structured_skip","final_readiness_layer":"process_limit"}
 ```
 
 Denied capability:
 
 ```json
-{"schema_version":"1.0.0","event_type":"fcp.host.windows.appcontainer.capability_denied","bead_id":"flywheel_connectors-r4qcg.1.2","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","capability_decision":"denied","error_class":"capability_unsupported"}
+{"schema_version":"1.0.0","event_type":"fcp.host.windows.appcontainer.capability_denied","bead_id":"flywheel_connectors-r4qcg.1.1","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","capability_decision":"denied","error_class":"capability_unsupported"}
 ```
 
 ## Manual Profile Cleanup

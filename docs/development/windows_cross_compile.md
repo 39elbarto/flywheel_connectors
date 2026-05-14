@@ -1,6 +1,6 @@
 # Windows Cross-Compile Notes
 
-**Bead:** `flywheel_connectors-r4qcg.1.2`
+**Bead:** `flywheel_connectors-r4qcg.1.1`
 
 Most development for Windows AppContainer support happens from macOS or Linux,
 but the final proof must run on a Windows runner because the AppContainer APIs
@@ -32,7 +32,14 @@ rch exec -- cargo check -p fcp-sandbox --target x86_64-pc-windows-gnu --features
 On a Windows runner, use:
 
 ```bash
-cargo test -p fcp-sandbox --target x86_64-pc-windows-msvc --features windows-appcontainer windows_appcontainer -- --nocapture
+RCH_BIN=direct \
+RUN_ID="${GITHUB_RUN_ID:-manual}" \
+OUT_ROOT="artifacts/e2e/windows_appcontainer/${GITHUB_RUN_ID:-manual}/process-launch" \
+WINDOWS_APPCONTAINER_CARGO_TARGET=x86_64-pc-windows-msvc \
+WINDOWS_APPCONTAINER_CARGO_FEATURES=windows-appcontainer \
+FCP_SANDBOX_WINDOWS_APPCONTAINER=1 \
+FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E=1 \
+bash scripts/e2e/windows_appcontainer_process_launch_verification.sh
 ```
 
 ## Linux Host Prerequisites
@@ -57,8 +64,9 @@ check for Windows. It does not prove:
 - Job Object limits are attached to the launched child.
 - A denied filesystem or network action fails at the OS boundary.
 
-Those claims require the Windows-gated workflow and its JSONL evidence under
-`artifacts/e2e/windows_appcontainer/<run-id>/`.
+Those claims require the Windows-gated workflow and its process-launch JSONL
+evidence under
+`artifacts/e2e/windows_appcontainer/<run-id>/process-launch/`.
 
 ## Troubleshooting
 
@@ -74,4 +82,6 @@ Those claims require the Windows-gated workflow and its JSONL evidence under
 The canonical CI lane is `.github/workflows/windows_appcontainer_e2e.yml`.
 It runs on `windows-latest`, compiles `fcp-sandbox` for
 `x86_64-pc-windows-msvc`, runs the Windows AppContainer tests, and uploads
-redaction-safe evidence or skip artifacts.
+redaction-safe process-launch evidence or skip artifacts. The workflow sets
+`RCH_BIN=direct` only inside GitHub Actions because local agents must continue
+to use the script's default `rch` runner.

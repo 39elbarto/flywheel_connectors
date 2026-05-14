@@ -273,6 +273,10 @@ pub enum MeshNodeError {
     /// Gossip payload exceeded the pre-deserialize raw byte budget.
     #[error("gossip payload too large: {len} bytes exceeds max {max}")]
     GossipPayloadTooLarge { len: usize, max: usize },
+
+    /// Connector-state root observation failed.
+    #[error("connector-state store error: {0}")]
+    ConnectorStateStore(#[from] ConnectorStateStoreError),
 }
 
 /// Enforcement errors for control-plane requests.
@@ -422,6 +426,24 @@ impl GossipFetchApplyOutcome {
         self.objects_applied.is_empty()
             && self.connector_state_root_candidates.is_empty()
             && self.symbols_applied.is_empty()
+    }
+}
+
+/// Result of applying fetched gossip bytes and observing connector-state roots.
+#[must_use]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GossipFetchApplyObserveOutcome {
+    /// Store-application result for fetched object and symbol bytes.
+    pub apply: GossipFetchApplyOutcome,
+    /// Connector-state changes validated from fetched root candidates.
+    pub connector_state_changes: Vec<ConnectorStateChange>,
+}
+
+impl GossipFetchApplyObserveOutcome {
+    /// Whether the fetched payload changed no local availability or state-root state.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.apply.is_empty() && self.connector_state_changes.is_empty()
     }
 }
 
@@ -2304,6 +2326,67 @@ impl MeshNode {
         );
 
         Ok(outcome)
+    }
+
+    /// Apply fetched gossip bytes and observe any connector-state root candidates.
+    ///
+    /// Use this from host/transport adapters that already know the appropriate
+    /// connector-state store. It keeps the byte-admission and cache-invalidation
+    /// handoff in one call: fetched objects/symbols are admitted first, then any
+    /// fetched connector-state roots are validated by `fcp-store` and announced.
+    ///
+    /// # Errors
+    ///
+    /// Returns byte-application errors from [`Self::apply_gossip_fetch_payload`]
+    /// or connector-state validation errors from `FcpStoreConnectorStateStore`.
+    pub async fn apply_gossip_fetch_payload_and_observe_connector_state_roots(
+        &mut self,
+        state_store: &FcpStoreConnectorStateStore,
+        plan: &GossipFetchPlan,
+        objects: Vec<StoredObject>,
+        symbols: Vec<GossipFetchedSymbol>,
+        now_ms: u64,
+    ) -> Result<GossipFetchApplyObserveOutcome, MeshNodeError> {
+        let apply = self
+            .apply_gossip_fetch_payload(plan, objects, symbols, now_ms)
+            .await?;
+        let connector_state_changes = self
+            .observe_connector_state_root_candidates(
+                state_store,
+                &apply.connector_state_root_candidates,
+                now_ms,
+            )
+            .await?;
+
+        Ok(GossipFetchApplyObserveOutcome {
+            apply,
+            connector_state_changes,
+        })
+    }
+
+    /// Observe already-admitted connector-state root candidates.
+    ///
+    /// `apply_gossip_fetch_payload` can only identify schema-level candidates.
+    /// This helper performs the connector/zone/key-aware validation step and
+    /// returns concrete cache-invalidation changes for every accepted root.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first connector-state store validation error.
+    pub async fn observe_connector_state_root_candidates(
+        &mut self,
+        state_store: &FcpStoreConnectorStateStore,
+        root_object_ids: &[ObjectId],
+        now_ms: u64,
+    ) -> Result<Vec<ConnectorStateChange>, ConnectorStateStoreError> {
+        let mut changes = Vec::with_capacity(root_object_ids.len());
+        for root_object_id in root_object_ids {
+            changes.push(
+                self.observe_connector_state_root(state_store, *root_object_id, now_ms)
+                    .await?,
+            );
+        }
+        Ok(changes)
     }
 
     fn verify_gossip_fetch_plan_peer(
@@ -5295,17 +5378,6 @@ mod tests {
                 .await
                 .expect("transport fetched connector-state root bytes");
 
-            let outcome = node
-                .apply_gossip_fetch_payload(&plan, vec![object_bytes], vec![], 1_000)
-                .await
-                .expect("apply fetched connector-state root bytes");
-            assert_eq!(outcome.objects_applied, vec![fetched_root_id]);
-            assert_eq!(
-                outcome.connector_state_root_candidates,
-                vec![fetched_root_id]
-            );
-            assert!(outcome.symbols_applied.is_empty());
-
             let object_store = Arc::clone(node.object_store());
             let state_store = FcpStoreConnectorStateStore::new(
                 object_store,
@@ -5313,14 +5385,25 @@ mod tests {
                 connector_id,
                 zone_id.clone(),
             );
-            let change = node
-                .observe_connector_state_root(
+            let outcome = node
+                .apply_gossip_fetch_payload_and_observe_connector_state_roots(
                     &state_store,
-                    outcome.connector_state_root_candidates[0],
+                    &plan,
+                    vec![object_bytes],
+                    vec![],
                     1_001,
                 )
                 .await
-                .expect("state root candidate should validate and announce");
+                .expect("apply fetched connector-state root and observe candidate");
+            assert_eq!(outcome.apply.objects_applied, vec![fetched_root_id]);
+            assert_eq!(
+                outcome.apply.connector_state_root_candidates,
+                vec![fetched_root_id]
+            );
+            assert!(outcome.apply.symbols_applied.is_empty());
+            assert_eq!(outcome.connector_state_changes.len(), 1);
+
+            let change = &outcome.connector_state_changes[0];
             assert_eq!(change.kind, ConnectorStateChangeKind::RootUpdated);
             assert_eq!(change.object_id, Some(fetched_root_id));
             assert_eq!(change.zone_id, zone_id);

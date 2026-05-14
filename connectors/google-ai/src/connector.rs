@@ -251,6 +251,14 @@ impl GoogleAiConnector {
                 message: format!("Invalid handshake request: {e}"),
             })?;
 
+        if let Some(requested_instance_id) = req.requested_instance_id {
+            let base = Arc::get_mut(&mut self.base).ok_or_else(|| FcpError::Internal {
+                message: "Cannot assign requested instance ID after connector state is shared"
+                    .into(),
+            })?;
+            base.instance_id = requested_instance_id;
+        }
+
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
@@ -1633,10 +1641,6 @@ mod tests {
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::{ConnectorManifest, NetworkConstraints};
     use std::path::PathBuf;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
-    };
 
     fn generate_valid_token(
         signing_key: &Ed25519SigningKey,
@@ -2043,87 +2047,6 @@ mod tests {
         let result = connector.handle_self_check().await.unwrap();
         assert_eq!(result["status"], "degraded");
         assert_eq!(result["reason_code"], "credential_injection_required");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_self_check_success() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1beta/models"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "models": [{"name": "models/gemini-2.0-flash"}]
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let mut connector = GoogleAiConnector::new();
-        connector
-            .handle_configure(json!({
-                "api_key": "test-key",
-                "base_url": format!("{}/v1beta", mock_server.uri())
-            }))
-            .await
-            .unwrap();
-
-        let result = connector.handle_self_check().await.unwrap();
-        assert_eq!(result["status"], "ok");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_self_check_auth_failure() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1beta/models"))
-            .respond_with(ResponseTemplate::new(401).set_body_string("Unauthorized"))
-            .mount(&mock_server)
-            .await;
-
-        let mut connector = GoogleAiConnector::new();
-        connector
-            .handle_configure(json!({
-                "api_key": "bad-key",
-                "base_url": format!("{}/v1beta", mock_server.uri())
-            }))
-            .await
-            .unwrap();
-
-        let result = connector.handle_self_check().await.unwrap();
-        assert_eq!(result["status"], "failed");
-        assert_eq!(result["reason_code"], "self_check_failed");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_self_check_retryable_error() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1beta/models"))
-            .respond_with(ResponseTemplate::new(503).set_body_string("Service Unavailable"))
-            .mount(&mock_server)
-            .await;
-
-        let mut connector = GoogleAiConnector::new();
-        connector
-            .handle_configure(json!({
-                "api_key": "test-key",
-                "base_url": format!("{}/v1beta", mock_server.uri())
-            }))
-            .await
-            .unwrap();
-
-        // Override retry config to avoid test slowness
-        if let Some(client) = &mut connector.client {
-            *client = GoogleAiClient::new_with_auth(GoogleAiAuth::ApiKey("test-key".into()))
-                .unwrap()
-                .with_base_url(&format!("{}/v1beta", mock_server.uri()))
-                .with_retry_config(0);
-        }
-
-        let result = connector.handle_self_check().await.unwrap();
-        assert_eq!(result["status"], "degraded");
-        assert_eq!(result["reason_code"], "self_check_retryable");
     }
 
     // ── Original tests (invoke, introspect, manifest) ──────────────

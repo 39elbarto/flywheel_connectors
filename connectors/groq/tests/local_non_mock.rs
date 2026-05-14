@@ -1,0 +1,565 @@
+#![allow(clippy::missing_panics_doc, clippy::too_many_lines)]
+
+use std::fmt::Write as FmtWrite;
+use std::io::{Read, Write as IoWrite};
+use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc::{self, Receiver};
+use std::thread::{self, JoinHandle};
+use std::time::Duration as StdDuration;
+
+use chrono::{Duration as ChronoDuration, Utc};
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_groq::GroqConnector;
+use fcp_groq::connector::test_handshake_request;
+use fcp_prelude::{CapabilityConstraints, CapabilityId, FcpConnector, FcpError, InstanceId};
+use serde_json::{Value, json};
+
+const CONNECTOR: &str = "groq";
+const PACKAGE: &str = "fcp-groq";
+const BEAD_ID: &str = "flywheel_connectors-bky21.3.6.13";
+const ACCEPTANCE_SUITE_CLASS: &str = "local_non_mock";
+const API_KEY: &str = "groq-local-acceptance-key";
+const OP_CHAT: &str = "groq.chat.completions";
+const OP_MODELS: &str = "groq.models.list";
+const OP_LEGACY: &str = "groq.completions.legacy";
+const CAP_CHAT: &str = "groq.chat";
+const CAP_MODELS: &str = "groq.models.read";
+
+#[derive(Debug)]
+struct CapturedRequest {
+    head: String,
+    body: Option<Value>,
+}
+
+struct LoopbackServer {
+    base_url: String,
+    received: Receiver<CapturedRequest>,
+    join: JoinHandle<()>,
+}
+
+impl LoopbackServer {
+    fn start(responses: Vec<HttpResponse>) -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .expect("loopback listener should bind to an ephemeral port");
+        let base_url = format!(
+            "http://{}",
+            listener
+                .local_addr()
+                .expect("loopback listener should expose its address")
+        );
+        let (request_tx, received) = mpsc::channel();
+
+        let join = thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener
+                    .accept()
+                    .expect("loopback listener should accept expected request");
+                stream
+                    .set_read_timeout(Some(StdDuration::from_secs(5)))
+                    .expect("loopback stream should set read timeout");
+
+                let request = read_complete_request(&mut stream);
+                request_tx
+                    .send(request)
+                    .expect("captured request should be delivered to test");
+
+                let mut raw_response = format!("HTTP/1.1 {}\r\n", response.status);
+                raw_response.push_str("content-type: application/json\r\n");
+                write!(
+                    &mut raw_response,
+                    "content-length: {}\r\n",
+                    response.body.len()
+                )
+                .expect("content-length should format");
+                raw_response.push_str("connection: close\r\n");
+                for (name, value) in response.headers {
+                    raw_response.push_str(name);
+                    raw_response.push_str(": ");
+                    raw_response.push_str(value);
+                    raw_response.push_str("\r\n");
+                }
+                raw_response.push_str("\r\n");
+                raw_response.push_str(response.body);
+
+                stream
+                    .write_all(raw_response.as_bytes())
+                    .expect("loopback response should be writable");
+            }
+        });
+
+        Self {
+            base_url,
+            received,
+            join,
+        }
+    }
+
+    fn provider_base_url(&self) -> String {
+        format!("{}/openai/v1", self.base_url)
+    }
+
+    fn take(&self) -> CapturedRequest {
+        self.received
+            .recv_timeout(StdDuration::from_secs(5))
+            .expect("loopback request should arrive")
+    }
+
+    fn join(self) {
+        self.join
+            .join()
+            .expect("loopback server thread should finish");
+    }
+}
+
+struct HttpResponse {
+    status: &'static str,
+    headers: Vec<(&'static str, &'static str)>,
+    body: &'static str,
+}
+
+impl HttpResponse {
+    const fn json(status: &'static str, body: &'static str) -> Self {
+        Self {
+            status,
+            headers: Vec::new(),
+            body,
+        }
+    }
+
+    fn with_header(mut self, name: &'static str, value: &'static str) -> Self {
+        self.headers.push((name, value));
+        self
+    }
+}
+
+fn read_complete_request(stream: &mut TcpStream) -> CapturedRequest {
+    let mut bytes = Vec::new();
+    let mut buffer = [0; 1024];
+    let mut header_end = None;
+    let mut content_length = 0usize;
+
+    loop {
+        let read = stream
+            .read(&mut buffer)
+            .expect("loopback request should be readable");
+        assert!(read > 0, "connector request should not close early");
+        bytes.extend_from_slice(&buffer[..read]);
+
+        if header_end.is_none() {
+            header_end = bytes.windows(4).position(|window| window == b"\r\n\r\n");
+            if let Some(end) = header_end {
+                let head = String::from_utf8_lossy(&bytes[..end]).to_string();
+                content_length = parse_content_length(&head);
+            }
+        }
+
+        if let Some(end) = header_end {
+            let body_start = end + 4;
+            if bytes.len() >= body_start + content_length {
+                let head = String::from_utf8(bytes[..end].to_vec())
+                    .expect("request headers should be UTF-8");
+                let body_slice = &bytes[body_start..body_start + content_length];
+                let body = if body_slice.is_empty() {
+                    None
+                } else {
+                    Some(
+                        serde_json::from_slice(body_slice)
+                            .expect("request body should be JSON when present"),
+                    )
+                };
+                return CapturedRequest { head, body };
+            }
+        }
+
+        assert!(bytes.len() < 65_536, "loopback request should stay bounded");
+    }
+}
+
+fn parse_content_length(head: &str) -> usize {
+    head.lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())
+                .flatten()
+        })
+        .unwrap_or(0)
+}
+
+fn assert_request(captured: &CapturedRequest, method: &str, target: &str) {
+    let request_line = captured
+        .head
+        .lines()
+        .next()
+        .expect("captured request should include request line");
+    assert_eq!(request_line, format!("{method} {target} HTTP/1.1"));
+    assert!(
+        captured
+            .head
+            .to_ascii_lowercase()
+            .contains(&format!("authorization: bearer {API_KEY}")),
+        "request should carry configured Groq bearer token; head={}",
+        captured.head
+    );
+}
+
+fn valid_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
+    capability: &str,
+    operation: &str,
+) -> fcp_prelude::CapabilityToken {
+    let now = Utc::now();
+    let constraints = CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut cbor).expect("serialize capability constraints");
+    let cose = CapabilityTokenBuilder::new()
+        .capability_id(capability)
+        .zone_id("z:work")
+        .principal("user:local-non-mock")
+        .operations(&[operation])
+        .issuer("node:local-non-mock")
+        .target_instance(instance_id.as_str())
+        .validity(now, now + ChronoDuration::hours(1))
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
+        .sign(signing_key)
+        .expect("capability token should sign");
+    fcp_prelude::CapabilityToken::from_raw(cose)
+}
+
+async fn setup_connector(
+    base_url: &str,
+    capabilities: &[&'static str],
+) -> (GroqConnector, Ed25519SigningKey) {
+    let mut connector = GroqConnector::new();
+    connector
+        .handle_configure(json!({
+            "api_key": API_KEY,
+            "base_url": base_url,
+            "default_model": "llama-3.1-8b-instant",
+            "request_timeout_ms": 5_000
+        }))
+        .await
+        .expect("Groq connector should configure against loopback");
+
+    let signing_key = Ed25519SigningKey::generate();
+    let verifying_key = signing_key.verifying_key();
+    let requested = capabilities
+        .iter()
+        .map(|capability| CapabilityId::from_static(capability))
+        .collect::<Vec<_>>();
+    connector
+        .handshake(test_handshake_request(requested, verifying_key.to_bytes()))
+        .await
+        .expect("Groq connector should handshake");
+
+    (connector, signing_key)
+}
+
+async fn invoke(
+    connector: &GroqConnector,
+    signing_key: &Ed25519SigningKey,
+    operation: &'static str,
+    capability: &'static str,
+    input: Value,
+) -> Result<Value, FcpError> {
+    let capability_token = valid_token(signing_key, connector.instance_id(), capability, operation);
+    connector
+        .handle_invoke(json!({
+            "operation_id": operation,
+            "input": input,
+            "capability_token": capability_token
+        }))
+        .await
+}
+
+fn print_artifact(case_name: &str, boundary: &Value) {
+    let artifact = json!({
+        "connector": CONNECTOR,
+        "package": PACKAGE,
+        "suite_class": ACCEPTANCE_SUITE_CLASS,
+        "acceptance_suite_class": ACCEPTANCE_SUITE_CLASS,
+        "bead_id": BEAD_ID,
+        "case": case_name,
+        "command": "cargo test -p fcp-groq --test local_non_mock -- --nocapture",
+        "git_revision": option_env!("GIT_REVISION").unwrap_or("worktree"),
+        "fixture_mode": "loopback_http",
+        "provider_class": "local_sufficient",
+        "request_response_boundary": boundary,
+        "auth_gate": {
+            "mode": "bearer_api_key",
+            "credentials_used": true,
+            "secret_material_logged": false
+        },
+        "cleanup": "fixture_thread_joined",
+        "result": "passed"
+    });
+    println!("{artifact}");
+}
+
+#[fcp_async_core::runtime::test]
+async fn local_non_mock_chat_completions_posts_body_and_maps_output() {
+    let server = LoopbackServer::start(vec![HttpResponse::json(
+        "200 OK",
+        r#"{
+            "id": "chatcmpl-groq-local",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "llama-3.1-8b-instant",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "loopback Groq response"},
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}
+        }"#,
+    )]);
+    let (connector, signing_key) = setup_connector(&server.provider_base_url(), &[CAP_CHAT]).await;
+
+    let result = invoke(
+        &connector,
+        &signing_key,
+        OP_CHAT,
+        CAP_CHAT,
+        json!({
+            "messages": [{"role": "user", "content": "Say ok through loopback"}],
+            "max_tokens": 32,
+            "temperature": 0.2
+        }),
+    )
+    .await
+    .expect("chat completions should invoke through loopback");
+
+    let captured = server.take();
+    assert_request(&captured, "POST", "/openai/v1/chat/completions");
+    let body = captured.body.expect("chat request should send JSON");
+    assert_eq!(body["model"], "llama-3.1-8b-instant");
+    assert_eq!(body["messages"][0]["role"], "user");
+    assert_eq!(body["messages"][0]["content"], "Say ok through loopback");
+    assert_eq!(body["stream"], false);
+    assert_eq!(body["max_tokens"], 32);
+    assert_eq!(body["temperature"], 0.2);
+    server.join();
+
+    assert_eq!(result["id"], "chatcmpl-groq-local");
+    assert_eq!(result["content"], "loopback Groq response");
+    assert_eq!(result["finish_reason"], "stop");
+    assert_eq!(result["usage"]["total_tokens"], 8);
+    assert!(
+        !result.to_string().contains(API_KEY),
+        "mapped output must not leak API key"
+    );
+
+    print_artifact(
+        "chat_completions",
+        &json!({
+            "method": "POST",
+            "path": "/openai/v1/chat/completions",
+            "request_fields": ["model", "messages", "stream", "max_tokens", "temperature"],
+            "response_fields": ["id", "model", "content", "finish_reason", "usage", "raw"]
+        }),
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn local_non_mock_models_list_uses_get_without_body() {
+    let server = LoopbackServer::start(vec![HttpResponse::json(
+        "200 OK",
+        r#"{
+            "object": "list",
+            "data": [
+                {"id": "llama-3.1-8b-instant", "object": "model", "owned_by": "Meta"},
+                {"id": "mixtral-8x7b-32768", "object": "model", "owned_by": "Mistral"}
+            ]
+        }"#,
+    )]);
+    let (connector, signing_key) =
+        setup_connector(&server.provider_base_url(), &[CAP_MODELS]).await;
+
+    let result = invoke(&connector, &signing_key, OP_MODELS, CAP_MODELS, json!({}))
+        .await
+        .expect("models list should invoke through loopback");
+
+    let captured = server.take();
+    assert_request(&captured, "GET", "/openai/v1/models");
+    assert!(
+        captured.body.is_none(),
+        "models list should not send a JSON body"
+    );
+    server.join();
+
+    assert_eq!(ACCEPTANCE_SUITE_CLASS, "local_non_mock");
+    assert_eq!(result["object"], "list");
+    assert_eq!(result["data"][0]["id"], "llama-3.1-8b-instant");
+    assert_eq!(result["cache"], "shared_in_memory");
+
+    print_artifact(
+        "models_list",
+        &json!({
+            "method": "GET",
+            "path": "/openai/v1/models",
+            "request_fields": [],
+            "response_fields": ["object", "data", "cache"]
+        }),
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn local_non_mock_legacy_completions_posts_prompt_and_maps_raw_output() {
+    let server = LoopbackServer::start(vec![HttpResponse::json(
+        "200 OK",
+        r#"{
+            "id": "cmpl-groq-local",
+            "object": "text_completion",
+            "created": 1,
+            "model": "llama-3.1-8b-instant",
+            "choices": [
+                {"index": 0, "text": " legacy loopback", "finish_reason": "stop"}
+            ],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}
+        }"#,
+    )]);
+    let (connector, signing_key) = setup_connector(&server.provider_base_url(), &[CAP_CHAT]).await;
+
+    let result = invoke(
+        &connector,
+        &signing_key,
+        OP_LEGACY,
+        CAP_CHAT,
+        json!({
+            "prompt": "Complete legacy prompt",
+            "max_tokens": 12,
+            "temperature": 0.1
+        }),
+    )
+    .await
+    .expect("legacy completions should invoke through loopback");
+
+    let captured = server.take();
+    assert_request(&captured, "POST", "/openai/v1/completions");
+    let body = captured.body.expect("legacy request should send JSON");
+    assert_eq!(body["model"], "llama-3.1-8b-instant");
+    assert_eq!(body["prompt"], "Complete legacy prompt");
+    assert_eq!(body["max_tokens"], 12);
+    assert_eq!(body["temperature"], 0.1);
+    server.join();
+
+    assert_eq!(result["raw"]["id"], "cmpl-groq-local");
+    assert_eq!(result["raw"]["choices"][0]["text"], " legacy loopback");
+    assert_eq!(result["raw"]["usage"]["total_tokens"], 6);
+
+    print_artifact(
+        "legacy_completions",
+        &json!({
+            "method": "POST",
+            "path": "/openai/v1/completions",
+            "request_fields": ["model", "prompt", "max_tokens", "temperature"],
+            "response_fields": ["raw"]
+        }),
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn local_non_mock_auth_error_maps_without_leaking_secret_material() {
+    let server = LoopbackServer::start(vec![HttpResponse::json(
+        "401 Unauthorized",
+        r#"{
+            "error": {
+                "type": "authentication_error",
+                "message": "bad Bearer groq-local-acceptance-key",
+                "prompt": "private prompt"
+            }
+        }"#,
+    )]);
+    let (connector, signing_key) = setup_connector(&server.provider_base_url(), &[CAP_CHAT]).await;
+
+    let error = invoke(
+        &connector,
+        &signing_key,
+        OP_CHAT,
+        CAP_CHAT,
+        json!({"messages": [{"role": "user", "content": "private prompt"}]}),
+    )
+    .await
+    .expect_err("provider auth failure should map to FcpError::Unauthorized");
+
+    let captured = server.take();
+    assert_request(&captured, "POST", "/openai/v1/chat/completions");
+    server.join();
+
+    assert!(matches!(error, FcpError::Unauthorized { .. }));
+    let display = error.to_string();
+    assert!(
+        !display.contains(API_KEY),
+        "display must not leak bearer token"
+    );
+    assert!(
+        !display.contains("private prompt"),
+        "display must not leak prompt text"
+    );
+
+    print_artifact(
+        "auth_error_redaction",
+        &json!({
+            "method": "POST",
+            "path": "/openai/v1/chat/completions",
+            "provider_status": 401,
+            "mapped_error": "Unauthorized",
+            "secret_material_logged": false
+        }),
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn local_non_mock_rate_limit_maps_retry_after_seconds() {
+    let server = LoopbackServer::start(vec![
+        HttpResponse::json(
+            "429 Too Many Requests",
+            r#"{"error":{"type":"rate_limit_error","message":"too fast"}}"#,
+        )
+        .with_header("retry-after", "3"),
+    ]);
+    let (connector, signing_key) = setup_connector(&server.provider_base_url(), &[CAP_CHAT]).await;
+
+    let error = invoke(
+        &connector,
+        &signing_key,
+        OP_CHAT,
+        CAP_CHAT,
+        json!({"messages": [{"role": "user", "content": "retry later"}]}),
+    )
+    .await
+    .expect_err("provider rate limit should map to FcpError::RateLimited");
+
+    let captured = server.take();
+    assert_request(&captured, "POST", "/openai/v1/chat/completions");
+    server.join();
+
+    match error {
+        FcpError::RateLimited {
+            retry_after_ms,
+            violation,
+        } => {
+            assert_eq!(retry_after_ms, 3_000);
+            assert!(violation.is_none());
+        }
+        other => panic!("expected rate-limited error, got {other:?}"),
+    }
+
+    print_artifact(
+        "rate_limit_retry_after",
+        &json!({
+            "method": "POST",
+            "path": "/openai/v1/chat/completions",
+            "provider_status": 429,
+            "retry_after_ms": 3000,
+            "mapped_error": "RateLimited"
+        }),
+    );
+}

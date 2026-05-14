@@ -24,9 +24,9 @@ pub fn openai_error_to_fcp(error: &OpenAiError) -> FcpError {
             code: 1003,
             message: safe_provider_message(message),
         },
-        OpenAiError::Authentication { message } => FcpError::Unauthorized {
+        OpenAiError::Authentication { .. } => FcpError::Unauthorized {
             code: 2001,
-            message: safe_provider_message(message),
+            message: "Groq authentication failed".into(),
         },
         OpenAiError::PermissionDenied { message } => FcpError::CapabilityDenied {
             capability: "groq".into(),
@@ -108,4 +108,26 @@ fn duration_millis(duration: Option<Duration>) -> u64 {
     duration.map_or(0, |duration| {
         u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_errors_do_not_echo_provider_message() {
+        let mapped = openai_error_to_fcp(&OpenAiError::Authentication {
+            message: "bad Bearer groq-local-acceptance-key for private prompt".into(),
+        });
+
+        match mapped {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert_eq!(message, "Groq authentication failed");
+                assert!(!message.contains("groq-local-acceptance-key"));
+                assert!(!message.contains("private prompt"));
+            }
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
 }

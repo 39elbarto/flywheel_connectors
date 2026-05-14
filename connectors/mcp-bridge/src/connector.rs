@@ -4,10 +4,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_prelude::{
-    log_redaction::redact_url,
     AgentHint, ApprovalMode, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult,
     IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
     ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
+    log_redaction::redact_url,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};

@@ -189,20 +189,40 @@ impl MakeClient {
 
     /// Trigger a scenario run.
     pub async fn run_scenario(&self, scenario_id: &str) -> MakeResult<serde_json::Value> {
-        self.post(
-            &format!("/scenarios/{scenario_id}/run"),
-            &serde_json::json!({}),
-        )
-        .await
+        let safe_id = sanitize_path_segment(scenario_id, "scenario_id")?;
+        self.post(&format!("/scenarios/{safe_id}/run"), &serde_json::json!({}))
+            .await
     }
 
     // -- Executions --
 
     /// List recent executions for a scenario.
     pub async fn list_executions(&self, scenario_id: &str) -> MakeResult<serde_json::Value> {
-        self.get(&format!("/scenarios/{scenario_id}/executions"))
-            .await
+        let safe_id = sanitize_path_segment(scenario_id, "scenario_id")?;
+        self.get(&format!("/scenarios/{safe_id}/executions")).await
     }
+}
+
+/// Reject empty, slash-containing, and traversal-like path segments before egress.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> MakeResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(MakeError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(MakeError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
+    }
+    Ok(trimmed)
 }
 
 #[cfg(test)]

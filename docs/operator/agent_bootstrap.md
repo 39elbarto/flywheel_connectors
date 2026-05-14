@@ -11,9 +11,7 @@ agent converges to the same state without duplicating identities or
 reservations.
 
 This is the operator-facing surface of `angoc.6.2` (Phase L.2). The
-Rust dispatch + integration tests are filed as `angoc.6.2.1`
-(deferred — requires fwc + agent-mail + beads-DB integration that
-currently conflicts with the PQ-hardening track).
+Rust dispatch + integration tests live under `angoc.6.2.1`.
 
 ## Usage
 
@@ -163,6 +161,26 @@ export AGENT_NAME=SunnyMoose
 fwc agent-bootstrap SunnyMoose
 ```
 
+## AGENTS.md flow coverage
+
+`fwc agent-bootstrap` is not a replacement for doing the work, closing
+the bead, or sending the final completion message. It is the startup
+macro that makes every AGENTS.md coordination step explicit before the
+agent starts editing. The BootstrapReport and `next_actions` map the
+canonical flow as follows:
+
+| AGENTS.md flow item | Bootstrap coverage |
+|---|---|
+| Same Repository Workflow: Register identity | Step 1 `ensure_agent_identity(name)` |
+| Same Repository Workflow: Reserve files before editing | Step 2 reservation with `scope`, `ttl_seconds`, and `reason` |
+| Same Repository Workflow: Communicate with threads | CLI `next_actions` include the start-message template keyed by bead id |
+| Same Repository Workflow: Quick reads | Step 3 ready-bead listing keeps the agent on tracker-backed work |
+| Typical Agent Flow: Pick ready work | Step 3 `ready_beads` in the BootstrapReport |
+| Typical Agent Flow: Reserve edit surface | Step 2 reservation report |
+| Typical Agent Flow: Announce start | CLI `next_actions` remind the agent to send `[bead] Start` when Agent Mail is reachable |
+| Typical Agent Flow: Work and update | CLI `next_actions` keep progress replies in the bead thread |
+| Typical Agent Flow: Complete and release | CLI `next_actions` include the `br close` / `br sync --flush-only` closeout path |
+
 ## Conformance test coverage
 
 `crates/fwc/tests/agent_bootstrap_idempotency.rs`:
@@ -208,8 +226,8 @@ Nested spans per step under `fwc.agent_bootstrap.<step_name>`.
 
 ## Cross-references
 
-- `crates/fwc/src/agent_bootstrap.rs` — Rust dispatch (deferred to
-  `angoc.6.2.1`)
+- `crates/fwc/src/agent_bootstrap.rs` — idempotent bootstrap state
+  machine for `angoc.6.2.1`
 - `crates/fwc/schemas/agent_bootstrap_report.schema.json` — JSON
   schema for BootstrapReport (this commit)
 - `crates/fwc/tests/fixtures/agent_bootstrap/golden_fresh.json` —
@@ -221,15 +239,13 @@ Nested spans per step under `fwc.agent_bootstrap.<step_name>`.
 - AGENTS.md "AGENT MAIL (am) PROCESS PROTECTION" — the no-restart
   rule this macro respects
 
-## Deferred Rust implementation
+## Rust implementation
 
-Filed as `angoc.6.2.1`. The dispatch needs:
+Filed as `angoc.6.2.1`. The dispatch is implemented as:
 
 1. `crates/fwc/src/agent_bootstrap.rs` with the 6-step macro
-2. `crates/fwc/src/commands/agent_bootstrap.rs` CLI arg parser
+2. `crates/fwc/src/main.rs` CLI arg parser and dispatch wiring
 3. `crates/fwc/tests/agent_bootstrap_idempotency.rs` (2 tests)
 4. `crates/fwc/tests/agent_bootstrap_e2e.rs` (2 tests)
 5. `crates/fcp-conformance/tests/agent_bootstrap_macro_completeness.rs`
    (1 test)
-
-Estimated 6-8h once fwc compile chain is unblocked.

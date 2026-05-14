@@ -11,20 +11,21 @@ use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_google_calendar::{
     client::GoogleCalendarClient, connector::GoogleCalendarConnector, error::GoogleCalendarError,
 };
-use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
+use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError, InstanceId};
 use serde_json::json;
 use wiremock::matchers::{bearer_token, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
+    op: &str,
+) -> CapabilityToken {
     let cap = match op {
-        "gcal.list_calendars" => "gcal.calendars.read",
-        "gcal.get_event" | "gcal.list_events" => "gcal.events.read",
-        "gcal.create_event" | "gcal.update_event" | "gcal.delete_event" | "gcal.quick_add" => {
-            "gcal.events.write"
-        }
+        "gcal.create_event" | "gcal.update_event" | "gcal.quick_add" => "gcal.write",
+        "gcal.delete_event" => "gcal.delete",
         _ => "gcal.read",
     };
     let now = Utc::now();
@@ -38,11 +39,13 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
+        .target_instance(instance_id.as_str())
         .principal("user:test")
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + chrono::Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .unwrap()
         .sign(signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)
@@ -52,18 +55,21 @@ async fn setup_handshake(
     connector: &mut GoogleCalendarConnector,
     signing_key: &Ed25519SigningKey,
     capabilities: &[&str],
-) {
+) -> InstanceId {
     let verifying_key = signing_key.verifying_key();
+    let instance_id = InstanceId::new();
     connector
         .handle_handshake(json!({
             "protocol_version": "1.0.0",
             "zone": "z:work",
             "host_public_key": verifying_key.to_bytes(),
             "nonce": vec![0u8; 32],
-            "capabilities_requested": capabilities
+            "capabilities_requested": capabilities,
+            "requested_instance_id": instance_id.as_str()
         }))
         .await
         .unwrap();
+    instance_id
 }
 
 async fn setup_configure(connector: &mut GoogleCalendarConnector, api_url: &str) {
@@ -404,10 +410,10 @@ async fn invoke_list_calendars_through_connector() {
     let mut connector = GoogleCalendarConnector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["gcal.list_calendars"]).await;
+    let instance_id = setup_handshake(&mut connector, &signing_key, &["gcal.list_calendars"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "gcal.list_calendars");
+    let token = generate_valid_token(&signing_key, &instance_id, "gcal.list_calendars");
     let result = connector
         .handle_invoke(json!({
             "operation": "gcal.list_calendars",
@@ -432,10 +438,10 @@ async fn invoke_get_event_through_connector() {
     let mut connector = GoogleCalendarConnector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["gcal.get_event"]).await;
+    let instance_id = setup_handshake(&mut connector, &signing_key, &["gcal.get_event"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "gcal.get_event");
+    let token = generate_valid_token(&signing_key, &instance_id, "gcal.get_event");
     let result = connector
         .handle_invoke(json!({
             "operation": "gcal.get_event",
@@ -463,10 +469,10 @@ async fn invoke_delete_event_through_connector() {
     let mut connector = GoogleCalendarConnector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["gcal.delete_event"]).await;
+    let instance_id = setup_handshake(&mut connector, &signing_key, &["gcal.delete_event"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "gcal.delete_event");
+    let token = generate_valid_token(&signing_key, &instance_id, "gcal.delete_event");
     let result = connector
         .handle_invoke(json!({
             "operation": "gcal.delete_event",
@@ -487,10 +493,10 @@ async fn invoke_wrong_capability_rejected() {
     let mut connector = GoogleCalendarConnector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["gcal.read"]).await;
+    let instance_id = setup_handshake(&mut connector, &signing_key, &["gcal.read"]).await;
     setup_configure(&mut connector, "http://localhost:1").await;
 
-    let token = generate_valid_token(&signing_key, "gcal.read");
+    let token = generate_valid_token(&signing_key, &instance_id, "gcal.read");
     let result = connector
         .handle_invoke(json!({
             "operation": "gcal.create_event",
@@ -510,10 +516,10 @@ async fn invoke_unknown_operation_rejected() {
     let mut connector = GoogleCalendarConnector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["gcal.nonexistent"]).await;
+    let instance_id = setup_handshake(&mut connector, &signing_key, &["gcal.nonexistent"]).await;
     setup_configure(&mut connector, "http://localhost:1").await;
 
-    let token = generate_valid_token(&signing_key, "gcal.nonexistent");
+    let token = generate_valid_token(&signing_key, &instance_id, "gcal.nonexistent");
     let result = connector
         .handle_invoke(json!({
             "operation": "gcal.nonexistent",
@@ -536,10 +542,10 @@ async fn invoke_missing_required_field_rejected() {
     let mut connector = GoogleCalendarConnector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["gcal.get_event"]).await;
+    let instance_id = setup_handshake(&mut connector, &signing_key, &["gcal.get_event"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "gcal.get_event");
+    let token = generate_valid_token(&signing_key, &instance_id, "gcal.get_event");
     // Missing event_id
     let result = connector
         .handle_invoke(json!({
@@ -617,10 +623,10 @@ async fn invoke_freebusy_through_connector() {
     let mut connector = GoogleCalendarConnector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["gcal.freebusy"]).await;
+    let instance_id = setup_handshake(&mut connector, &signing_key, &["gcal.freebusy"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "gcal.freebusy");
+    let token = generate_valid_token(&signing_key, &instance_id, "gcal.freebusy");
     let result = connector
         .handle_invoke(json!({
             "operation": "gcal.freebusy",
@@ -644,10 +650,10 @@ async fn invoke_freebusy_missing_fields() {
     let mut connector = GoogleCalendarConnector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["gcal.freebusy"]).await;
+    let instance_id = setup_handshake(&mut connector, &signing_key, &["gcal.freebusy"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "gcal.freebusy");
+    let token = generate_valid_token(&signing_key, &instance_id, "gcal.freebusy");
     let result = connector
         .handle_invoke(json!({
             "operation": "gcal.freebusy",
@@ -710,10 +716,11 @@ async fn invoke_list_event_instances_through_connector() {
     let mut connector = GoogleCalendarConnector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["gcal.list_event_instances"]).await;
+    let instance_id =
+        setup_handshake(&mut connector, &signing_key, &["gcal.list_event_instances"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "gcal.list_event_instances");
+    let token = generate_valid_token(&signing_key, &instance_id, "gcal.list_event_instances");
     let result = connector
         .handle_invoke(json!({
             "operation": "gcal.list_event_instances",
@@ -795,10 +802,10 @@ async fn invoke_get_calendar_through_connector() {
     let mut connector = GoogleCalendarConnector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["gcal.get_calendar"]).await;
+    let instance_id = setup_handshake(&mut connector, &signing_key, &["gcal.get_calendar"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "gcal.get_calendar");
+    let token = generate_valid_token(&signing_key, &instance_id, "gcal.get_calendar");
     let result = connector
         .handle_invoke(json!({
             "operation": "gcal.get_calendar",
@@ -819,10 +826,10 @@ async fn invoke_get_calendar_missing_field() {
     let mut connector = GoogleCalendarConnector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["gcal.get_calendar"]).await;
+    let instance_id = setup_handshake(&mut connector, &signing_key, &["gcal.get_calendar"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "gcal.get_calendar");
+    let token = generate_valid_token(&signing_key, &instance_id, "gcal.get_calendar");
     let result = connector
         .handle_invoke(json!({
             "operation": "gcal.get_calendar",
@@ -856,10 +863,10 @@ async fn invoke_quick_add_through_connector() {
     let mut connector = GoogleCalendarConnector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["gcal.quick_add"]).await;
+    let instance_id = setup_handshake(&mut connector, &signing_key, &["gcal.quick_add"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "gcal.quick_add");
+    let token = generate_valid_token(&signing_key, &instance_id, "gcal.quick_add");
     let result = connector
         .handle_invoke(json!({
             "operation": "gcal.quick_add",
@@ -1002,10 +1009,10 @@ async fn invoke_sync_events_initial_through_connector() {
     let mut connector = GoogleCalendarConnector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["gcal.sync_events"]).await;
+    let instance_id = setup_handshake(&mut connector, &signing_key, &["gcal.sync_events"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "gcal.sync_events");
+    let token = generate_valid_token(&signing_key, &instance_id, "gcal.sync_events");
     let result = connector
         .handle_invoke(json!({
             "operation": "gcal.sync_events",
@@ -1034,10 +1041,10 @@ async fn invoke_sync_events_incremental_through_connector() {
     let mut connector = GoogleCalendarConnector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["gcal.sync_events"]).await;
+    let instance_id = setup_handshake(&mut connector, &signing_key, &["gcal.sync_events"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "gcal.sync_events");
+    let token = generate_valid_token(&signing_key, &instance_id, "gcal.sync_events");
     let result = connector
         .handle_invoke(json!({
             "operation": "gcal.sync_events",
@@ -1061,10 +1068,10 @@ async fn invoke_sync_events_missing_calendar_id() {
     let mut connector = GoogleCalendarConnector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["gcal.sync_events"]).await;
+    let instance_id = setup_handshake(&mut connector, &signing_key, &["gcal.sync_events"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "gcal.sync_events");
+    let token = generate_valid_token(&signing_key, &instance_id, "gcal.sync_events");
     let result = connector
         .handle_invoke(json!({
             "operation": "gcal.sync_events",

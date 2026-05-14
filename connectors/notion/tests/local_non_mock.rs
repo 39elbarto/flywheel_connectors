@@ -295,12 +295,8 @@ async fn local_non_mock_search_posts_body_headers_and_redacts_output() {
         }"#,
     ));
     let (connector, signing_key) = setup_connector(&server.notion_api_url(), &[CAP_SEARCH]).await;
-    let grant = valid_capability_grant(
-        &signing_key,
-        connector.instance_id(),
-        CAP_SEARCH,
-        OP_SEARCH,
-    );
+    let grant =
+        valid_capability_grant(&signing_key, connector.instance_id(), CAP_SEARCH, OP_SEARCH);
 
     let result = connector
         .handle_invoke(json!({
@@ -391,8 +387,7 @@ async fn local_non_mock_search_posts_body_headers_and_redacts_output() {
 #[fcp_async_core::runtime::test]
 async fn local_non_mock_search_rejects_wrong_capability_token() {
     let (connector, signing_key) = setup_connector("http://127.0.0.1:1/v1", &[CAP_SEARCH]).await;
-    let grant =
-        valid_capability_grant(&signing_key, connector.instance_id(), CAP_READ, OP_SEARCH);
+    let grant = valid_capability_grant(&signing_key, connector.instance_id(), CAP_READ, OP_SEARCH);
 
     let err = connector
         .handle_invoke(json!({

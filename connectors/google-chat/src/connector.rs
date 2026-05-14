@@ -9,8 +9,8 @@ use std::{
 use base64::{Engine as _, engine::general_purpose};
 use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
-    EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
+    ConnectorId, EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SimulateRequest, SimulateResponse, ZoneId,
 };
@@ -1049,6 +1049,7 @@ impl ChatConnector {
             })?;
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
+        self.verify_invoke_capability_if_handshaken(&params, operation)?;
 
         match operation {
             OP_INGEST_WEBHOOK => {
@@ -1253,6 +1254,37 @@ impl ChatConnector {
                 message: format!("Unknown operation: {operation}"),
             }),
         }
+    }
+
+    fn verify_invoke_capability_if_handshaken(
+        &self,
+        params: &serde_json::Value,
+        operation: &str,
+    ) -> FcpResult<()> {
+        let Some(verifier) = self.verifier.as_ref() else {
+            return Ok(());
+        };
+
+        let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1002,
+            message: format!("Invalid operation ID: {operation}"),
+        })?;
+        let cap_id = required_capability_for_operation(operation)?;
+        let capability_value = params
+            .get("capability_token")
+            .ok_or(FcpError::InvalidRequest {
+                code: 1001,
+                message: "Missing 'capability_token' field".into(),
+            })?;
+        let capability = serde_json::from_value::<CapabilityToken>(capability_value.clone())
+            .map_err(|error| FcpError::InvalidRequest {
+                code: 1001,
+                message: format!("Invalid capability_token format: {error}"),
+            })?;
+
+        verifier
+            .verify_bound(capability, &cap_id, &op_id, &[])
+            .map(|_| ())
     }
 
     fn chat_coordination_context(&self) -> (ZoneId, AgentId) {
@@ -2821,12 +2853,14 @@ fn op_info(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::future::Future;
-    use wiremock::matchers::{
-        body_partial_json, body_string_contains, header, header_regex, method, path_regex,
-        query_param,
+    use crate::test_http_fixture::{
+        HttpServer, Mock, ResponseTemplate,
+        matchers::{
+            body_partial_json, body_string_contains, header, header_regex, method, path_regex,
+            query_param,
+        },
     };
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use std::future::Future;
 
     fn run_async_test<F>(future: F) -> F::Output
     where
@@ -3250,7 +3284,7 @@ mod tests {
     #[test]
     fn list_spaces_via_mock() {
         run_async_test(async {
-            let server = MockServer::start().await;
+            let server = HttpServer::start().await;
             Mock::given(method("GET"))
                 .and(path_regex(r"/v1/spaces$"))
                 .and(header("Authorization", "Bearer test-token"))
@@ -3285,7 +3319,7 @@ mod tests {
     #[test]
     fn send_message_via_mock() {
         run_async_test(async {
-            let server = MockServer::start().await;
+            let server = HttpServer::start().await;
             Mock::given(method("POST"))
                 .and(path_regex(r"/v1/spaces/.+/messages"))
                 .and(header("Authorization", "Bearer test-token"))
@@ -3328,7 +3362,7 @@ mod tests {
     #[test]
     fn reply_message_via_mock() {
         run_async_test(async {
-            let server = MockServer::start().await;
+            let server = HttpServer::start().await;
             Mock::given(method("POST"))
                 .and(path_regex(r"/v1/spaces/.+/messages$"))
                 .and(query_param("messageReplyOption", "REPLY_MESSAGE_OR_FAIL"))
@@ -3384,7 +3418,7 @@ mod tests {
     #[test]
     fn reply_message_denies_duplicate_owner_before_http_send() {
         run_async_test(async {
-            let server = MockServer::start().await;
+            let server = HttpServer::start().await;
             Mock::given(method("POST"))
                 .and(path_regex(r"/v1/spaces/.+/messages$"))
                 .and(query_param("messageReplyOption", "REPLY_MESSAGE_OR_FAIL"))
@@ -3445,7 +3479,7 @@ mod tests {
     #[test]
     fn add_reaction_via_mock() {
         run_async_test(async {
-            let server = MockServer::start().await;
+            let server = HttpServer::start().await;
             Mock::given(method("POST"))
                 .and(path_regex(r"/v1/spaces/.+/messages/.+/reactions$"))
                 .and(header("Authorization", "Bearer test-token"))
@@ -3539,7 +3573,7 @@ mod tests {
     #[test]
     fn send_media_message_uploads_then_sends_without_exposing_upload_token() {
         run_async_test(async {
-            let server = MockServer::start().await;
+            let server = HttpServer::start().await;
             Mock::given(method("POST"))
                 .and(path_regex(r"/upload/v1/spaces/AAAA/attachments:upload$"))
                 .and(query_param("uploadType", "multipart"))
@@ -3636,7 +3670,7 @@ mod tests {
     #[test]
     fn send_media_message_denies_duplicate_owner_before_upload() {
         run_async_test(async {
-            let server = MockServer::start().await;
+            let server = HttpServer::start().await;
             Mock::given(method("POST"))
                 .and(path_regex(r"/v1/spaces/.+/messages$"))
                 .and(query_param("messageReplyOption", "REPLY_MESSAGE_OR_FAIL"))
@@ -3699,7 +3733,7 @@ mod tests {
     #[test]
     fn send_media_message_maps_upload_rate_limit_without_sending_message() {
         run_async_test(async {
-            let server = MockServer::start().await;
+            let server = HttpServer::start().await;
             Mock::given(method("POST"))
                 .and(path_regex(r"/upload/v1/spaces/AAAA/attachments:upload$"))
                 .and(query_param("uploadType", "multipart"))
@@ -3742,7 +3776,7 @@ mod tests {
     #[test]
     fn media_loopback_jsonl_covers_reply_media_reaction_and_shutdown() {
         run_async_test(async {
-            let server = MockServer::start().await;
+            let server = HttpServer::start().await;
             Mock::given(method("POST"))
                 .and(path_regex(r"/v1/spaces/AAAA/messages$"))
                 .and(query_param("messageReplyOption", "REPLY_MESSAGE_OR_FAIL"))

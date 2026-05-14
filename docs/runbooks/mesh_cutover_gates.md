@@ -43,6 +43,26 @@ default until every gate is green from live telemetry.
    `fwc policy distribution --json` and confirm peer distribution plus owner
    signature verification.
 
+## Three-Node Proof Harness
+
+Use `scripts/e2e/cutover_gates_3node.sh` for the bead-level 3-node cutover
+gate proof. The harness is intentionally strict: it only passes when exactly
+three configured host-admin endpoints each return `overall_status = "green"`
+from `fwc --host <endpoint> mesh cutover-gates --json`, and each payload
+contains the four stable gate records with `status = "green"`.
+
+```bash
+FCP_CUTOVER_GATE_HOSTS="http://node-a:8790,http://node-b:8790,http://node-c:8790" \
+  scripts/e2e/cutover_gates_3node.sh
+```
+
+The harness writes `summary.json`, `steps.jsonl`, per-host payloads, stderr
+logs, and `replay.sh` under
+`artifacts/e2e/mesh_cutover_gates_3node/<run-id>/`. Host endpoints are hashed
+in the structured logs. If no endpoints are configured, the harness exits
+successfully with a `skipped` summary; that skip artifact is evidence that no
+live 3-node proof was attempted, not evidence that the cutover gates are green.
+
 ## Common Failures
 
 | Symptom | Likely cause | Fix |

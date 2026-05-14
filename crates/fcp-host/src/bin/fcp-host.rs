@@ -2561,6 +2561,28 @@ fn host_connector_state_explain_payload_with_canonical_status_and_warnings(
             .to_string(),
         );
     }
+    if canonical_root_present && !connector_marker.present() {
+        warnings.push(format!(
+            "Canonical fcp-store state is present, but connector cache marker '{}' is missing at '{}'; keep local state files read-only until the host rewrites cache-only markers.",
+            fcp_store::CONNECTOR_STATE_CACHE_MARKER,
+            connector_cache_dir.display()
+        ));
+    }
+    if let (true, Some(zone), Some(zone_cache_dir), Some(zone_marker)) = (
+        canonical_root_present,
+        zone,
+        zone_cache_dir.as_ref(),
+        zone_marker,
+    ) {
+        if !zone_marker.present() {
+            warnings.push(format!(
+                "Canonical fcp-store state is present for zone '{}', but zone cache marker '{}' is missing at '{}'; keep that zone cache read-only until marker creation succeeds.",
+                zone.as_str(),
+                fcp_store::CONNECTOR_STATE_CACHE_MARKER,
+                zone_cache_dir.display()
+            ));
+        }
+    }
     match canonical_status {
         Some(status) if status.root_present => {
             if status.mesh_replica_count.is_none() {
@@ -14183,6 +14205,18 @@ deny_ptrace = true
         let warnings = payload["warnings"]
             .as_array()
             .expect("warnings should be an array");
+        assert!(
+            warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("connector cache marker"))),
+            "canonical status should warn when the connector cache-only marker is missing: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("zone cache marker"))),
+            "canonical status should warn when the zone cache-only marker is missing: {warnings:?}"
+        );
         assert!(
             warnings.iter().all(|warning| !warning
                 .as_str()

@@ -12,8 +12,8 @@ use ciborium::de::from_reader_with_recursion_limit;
 use ciborium::value::Value as CborValue;
 use fcp_async_core::channel::broadcast;
 use fcp_cbor::{
-    CanonicalSerializer, MAX_CANONICAL_OBJECT_BYTES, MAX_CANONICALIZATION_DEPTH,
-    MAX_DESERIALIZATION_RECURSION_LIMIT, SchemaId, SerializationError,
+    CanonicalSerializer, MAX_CANONICALIZATION_DEPTH, MAX_DESERIALIZATION_RECURSION_LIMIT, SchemaId,
+    SerializationError,
 };
 use fcp_prelude::{
     BackoffPolicy, ConnectorId, ConnectorStateAppendOutcome, ConnectorStateCanonicalStatus,
@@ -62,6 +62,7 @@ pub const CONNECTOR_STATE_FALL_THROUGH_TOTAL_METRIC: &str =
 pub const CONNECTOR_STATE_LATENCY_SECONDS_METRIC: &str = "fcp_connector_state_latency_seconds";
 const CONNECTOR_STATE_CHANGE_BUFFER_CAPACITY: usize = 1_024;
 const DEFAULT_SNAPSHOT_EVERY_SECS: u64 = 24 * 60 * 60;
+const MAX_CONNECTOR_STATE_CBOR_BYTES: usize = 1024 * 1024;
 
 /// Errors returned by [`FcpStoreConnectorStateStore`].
 #[derive(Debug, Error)]
@@ -869,11 +870,11 @@ impl FcpStoreConnectorStateStore {
     }
 
     fn validate_state_cbor(state_cbor: &[u8]) -> Result<()> {
-        if state_cbor.len() > MAX_CANONICAL_OBJECT_BYTES {
+        if state_cbor.len() > MAX_CONNECTOR_STATE_CBOR_BYTES {
             return Err(ConnectorStateStoreError::InvalidStateCbor(
                 SerializationError::PayloadTooLarge {
                     len: state_cbor.len(),
-                    max: MAX_CANONICAL_OBJECT_BYTES,
+                    max: MAX_CONNECTOR_STATE_CBOR_BYTES,
                 },
             ));
         }
@@ -1909,6 +1910,33 @@ mod tests {
         assert!(matches!(
             err,
             ConnectorStateStoreError::InvalidStateCbor(SerializationError::NonCanonicalEncoding)
+        ));
+    }
+
+    #[test]
+    fn append_state_cbor_at_size_cap_reaches_parse_gate() {
+        let state_store = test_store(store());
+        let mut incoming = state(0, None, lease_id(1));
+        incoming.state_cbor = vec![0xff; MAX_CONNECTOR_STATE_CBOR_BYTES];
+        let err = run_async(state_store.append_object(incoming)).unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorStateStoreError::InvalidStateCbor(SerializationError::CborDeserialize(_))
+        ));
+    }
+
+    #[test]
+    fn append_rejects_state_cbor_above_size_cap() {
+        let state_store = test_store(store());
+        let mut incoming = state(0, None, lease_id(1));
+        incoming.state_cbor = vec![0xff; MAX_CONNECTOR_STATE_CBOR_BYTES + 1];
+        let err = run_async(state_store.append_object(incoming)).unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorStateStoreError::InvalidStateCbor(SerializationError::PayloadTooLarge {
+                len,
+                max: MAX_CONNECTOR_STATE_CBOR_BYTES,
+            }) if len == MAX_CONNECTOR_STATE_CBOR_BYTES + 1
         ));
     }
 

@@ -598,10 +598,8 @@ impl PlaybackCommandValidator {
                     return Err(PlaybackValidationError::EmptyContextUri);
                 }
             }
-            PlaybackCommand::TransferPlayback { device_id, .. } => {
-                if device_id.is_empty() {
-                    return Err(PlaybackValidationError::NoDeviceSpecified);
-                }
+            PlaybackCommand::TransferPlayback { device_id, .. } if device_id.is_empty() => {
+                return Err(PlaybackValidationError::NoDeviceSpecified);
             }
             _ => {}
         }

@@ -27,16 +27,20 @@ pub mod types;
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use clap::{ArgAction, Args, Subcommand};
+use fcp_audit::AuditEntry;
+use fcp_audit::explain::{CausalExplanation, ReplayBundle};
 use fcp_cbor::to_canonical_cbor;
 use fcp_crypto::{Ed25519VerifyingKey, KeyId, ed25519::PUBLIC_KEY_SIZE};
 use fcp_kernel::{AuditEvent, AuditHead, ObjectId, ZoneId};
 use hex::encode as hex_encode;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+use crate::capability_replay::parse_since_seconds;
 use types::{AuditEventOutput, AuditFilter, AuditTailError};
 
 /// Arguments for the `fcp audit` command.
@@ -149,8 +153,16 @@ pub struct VerifyArgs {
 /// Arguments for the `fcp audit explain` command.
 #[derive(Args, Debug, Clone)]
 pub struct ExplainArgs {
-    /// Replay bundle path. May be a JSON file or a directory of bundle artifacts.
+    /// Replay bundle path. May be a JSON/CBOR file or a directory of bundle artifacts.
     pub bundle: PathBuf,
+
+    /// Restrict the explanation to a single zone.
+    #[arg(long, short = 'z')]
+    pub zone: Option<String>,
+
+    /// Restrict audit entries to this duration before the newest bundled entry.
+    #[arg(long)]
+    pub since: Option<String>,
 
     /// Output JSON instead of human-readable narrative.
     #[arg(long, default_value_t = false)]
@@ -395,15 +407,15 @@ fn run_verify(args: &VerifyArgs) -> Result<()> {
 
 fn run_explain(args: &ExplainArgs) -> Result<()> {
     let bundle = load_explain_bundle(&args.bundle)?;
-    let explanation = fcp_audit::explain::explain_bundle(&bundle)?;
+    let report = build_explain_report(bundle, args.zone.as_deref(), args.since.as_deref())?;
     if args.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&explanation)
+            serde_json::to_string_pretty(&report)
                 .context("failed to serialize audit explanation")?
         );
     } else {
-        println!("{}", explanation.render_human());
+        println!("{}", report.render_human());
     }
     Ok(())
 }
@@ -452,9 +464,354 @@ fn read_input(path: &Path) -> Result<String> {
     fs::read_to_string(path).with_context(|| format!("failed to read input {}", path.display()))
 }
 
-fn load_explain_bundle(path: &Path) -> Result<fcp_audit::explain::ReplayBundle> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditExplainReport {
+    status: String,
+    command: String,
+    subcommand: String,
+    filters: AuditExplainFilters,
+    source: AuditExplainSource,
+    entries_returned: usize,
+    audit_chain_range: Option<AuditExplainChainRange>,
+    entries: Vec<AuditExplainEntry>,
+    explanation: Option<CausalExplanation>,
+    warnings: Vec<String>,
+}
+
+impl AuditExplainReport {
+    fn render_human(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "audit explain: {} entries from {}",
+            self.entries_returned, self.source.kind
+        );
+        if let Some(ref zone) = self.filters.zone_id {
+            let _ = writeln!(out, "zone: {zone}");
+        }
+        if let Some(ref since) = self.filters.since {
+            let _ = writeln!(out, "since: {since}");
+        }
+        if let Some(ref range) = self.audit_chain_range {
+            let _ = writeln!(out, "audit chain: {}..{}", range.start_seq, range.end_seq);
+        }
+        for entry in &self.entries {
+            let _ = write!(
+                out,
+                "{} seq={} zone={} event={}",
+                entry.id, entry.seq, entry.zone_id, entry.event_type
+            );
+            if entry.tombstoned {
+                let _ = write!(out, " tombstoned=true");
+            }
+            if let Some(height) = entry.quorum_height {
+                let _ = write!(out, " quorum_height={height}");
+            }
+            if !entry.quorum_signers.is_empty() {
+                let _ = write!(out, " signers={}", entry.quorum_signers.join(","));
+            }
+            if let Some(ref rationale) = entry.decision_rationale {
+                let _ = write!(out, " rationale={rationale}");
+            }
+            let _ = writeln!(out);
+        }
+        if let Some(ref explanation) = self.explanation {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "{}", explanation.render_human());
+        }
+        if !self.warnings.is_empty() {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "Warnings:");
+            for warning in &self.warnings {
+                let _ = writeln!(out, "- {warning}");
+            }
+        }
+        out.trim_end().to_string()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditExplainFilters {
+    zone_id: Option<String>,
+    since: Option<String>,
+    since_seconds: Option<u64>,
+    reference_time_unix: Option<u64>,
+    cutoff_unix: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditExplainSource {
+    kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditExplainChainRange {
+    start_seq: u64,
+    end_seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AuditExplainEntry {
+    id: String,
+    event_type: String,
+    severity: fcp_audit::Severity,
+    seq: u64,
+    occurred_at: u64,
+    zone_id: String,
+    actor: String,
+    connector_id: Option<String>,
+    operation_id: Option<String>,
+    correlation_id: String,
+    tombstoned: bool,
+    quorum_height: Option<u64>,
+    quorum_signers: Vec<String>,
+    decision_rationale: Option<String>,
+    reason_code: Option<String>,
+    datalog_derivation: Option<String>,
+}
+
+fn build_explain_report(
+    bundle: ReplayBundle,
+    zone_filter: Option<&str>,
+    since_filter: Option<&str>,
+) -> Result<AuditExplainReport> {
+    let since_seconds = since_filter
+        .map(parse_since_seconds)
+        .transpose()
+        .map_err(|error| anyhow::anyhow!("invalid --since value: {error}"))?;
+    let reference_time = bundle
+        .audit_entries
+        .iter()
+        .map(|entry| entry.occurred_at)
+        .max();
+    let cutoff = since_seconds
+        .zip(reference_time)
+        .map(|(since_seconds, reference_time)| reference_time.saturating_sub(since_seconds));
+
+    let mut audit_entries: Vec<AuditEntry> = bundle
+        .audit_entries
+        .into_iter()
+        .filter(|entry| zone_filter.is_none_or(|zone| entry.zone_id == zone))
+        .filter(|entry| cutoff.is_none_or(|cutoff| entry.occurred_at >= cutoff))
+        .collect();
+    audit_entries.sort_by(|left, right| {
+        left.seq
+            .cmp(&right.seq)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let receipts: Vec<fcp_audit::DecisionReceipt> = bundle
+        .receipts
+        .into_iter()
+        .filter(|receipt| zone_filter.is_none_or(|zone| receipt.zone_id == zone))
+        .filter(|receipt| cutoff.is_none_or(|cutoff| receipt.decided_at >= cutoff))
+        .collect();
+
+    let filtered_bundle = ReplayBundle {
+        audit_entries: audit_entries.clone(),
+        capability_tokens: bundle.capability_tokens,
+        receipts: receipts.clone(),
+    };
+
+    let mut warnings = Vec::new();
+    let explanation = match fcp_audit::explain::explain_bundle(&filtered_bundle) {
+        Ok(explanation) => Some(explanation),
+        Err(fcp_audit::explain::ExplainError::EmptyBundle) => {
+            warnings.push("filtered replay bundle contains no explainable evidence".to_string());
+            None
+        }
+        Err(fcp_audit::explain::ExplainError::NoInvocation) => {
+            warnings.push("filtered replay bundle contains no invocation audit entry".to_string());
+            None
+        }
+        Err(error) => return Err(error).context("failed to explain replay bundle"),
+    };
+
+    let entries: Vec<AuditExplainEntry> = audit_entries
+        .iter()
+        .map(|entry| explain_entry(entry, &receipts))
+        .collect();
+    let audit_chain_range =
+        entries
+            .first()
+            .zip(entries.last())
+            .map(|(first, last)| AuditExplainChainRange {
+                start_seq: first.seq,
+                end_seq: last.seq,
+            });
+
+    Ok(AuditExplainReport {
+        status: "ok".to_string(),
+        command: "audit".to_string(),
+        subcommand: "explain".to_string(),
+        filters: AuditExplainFilters {
+            zone_id: zone_filter.map(ToOwned::to_owned),
+            since: since_filter.map(ToOwned::to_owned),
+            since_seconds,
+            reference_time_unix: reference_time,
+            cutoff_unix: cutoff,
+        },
+        source: AuditExplainSource {
+            kind: "audit-chain-artifact".to_string(),
+        },
+        entries_returned: entries.len(),
+        audit_chain_range,
+        entries,
+        explanation,
+        warnings,
+    })
+}
+
+fn explain_entry(entry: &AuditEntry, receipts: &[fcp_audit::DecisionReceipt]) -> AuditExplainEntry {
+    let receipt = receipt_for_entry(entry, receipts);
+    let reason_code = receipt
+        .map(|receipt| receipt.reason_code.clone())
+        .or_else(|| metadata_string(entry, &["reason_code"]));
+    let decision_rationale = receipt
+        .and_then(|receipt| receipt.explanation.clone())
+        .or_else(|| metadata_string(entry, &["decision_rationale", "rationale", "explanation"]))
+        .or_else(|| reason_code.clone());
+
+    AuditExplainEntry {
+        id: entry.id.clone(),
+        event_type: entry.event_type.clone(),
+        severity: entry.severity,
+        seq: entry.seq,
+        occurred_at: entry.occurred_at,
+        zone_id: entry.zone_id.clone(),
+        actor: entry.actor.clone(),
+        connector_id: entry.connector_id.clone(),
+        operation_id: entry.operation_id.clone(),
+        correlation_id: entry.correlation_id.clone(),
+        tombstoned: is_tombstoned(entry),
+        quorum_height: metadata_u64(entry, &["quorum_height", "quorum.height"]),
+        quorum_signers: quorum_signers(entry),
+        decision_rationale,
+        reason_code,
+        datalog_derivation: metadata_string(entry, &["datalog_derivation", "derivation_summary"]),
+    }
+}
+
+fn receipt_for_entry<'a>(
+    entry: &AuditEntry,
+    receipts: &'a [fcp_audit::DecisionReceipt],
+) -> Option<&'a fcp_audit::DecisionReceipt> {
+    receipts
+        .iter()
+        .find(|receipt| receipt.audit_entry_id.as_deref() == Some(entry.id.as_str()))
+        .or_else(|| {
+            if entry.event_type != fcp_audit::event_types::CAPABILITY_INVOKE {
+                return None;
+            }
+            receipts.iter().find(|receipt| {
+                optional_match(
+                    receipt.connector_id.as_deref(),
+                    entry.connector_id.as_deref(),
+                ) && optional_match(
+                    receipt.operation_id.as_deref(),
+                    entry.operation_id.as_deref(),
+                ) && optional_match(
+                    receipt.correlation_id.as_deref(),
+                    Some(entry.correlation_id.as_str()),
+                )
+            })
+        })
+}
+
+fn optional_match(actual: Option<&str>, expected: Option<&str>) -> bool {
+    expected.is_none_or(|expected| actual.is_none_or(|actual| actual == expected))
+}
+
+fn is_tombstoned(entry: &AuditEntry) -> bool {
+    entry.event_type.contains("tombstone")
+        || metadata_bool(entry, &["tombstoned", "tombstone", "tombstone_marker"])
+}
+
+fn quorum_signers(entry: &AuditEntry) -> Vec<String> {
+    let mut signers =
+        metadata_string_array(entry, &["quorum_signers", "signers", "quorum.signers"]);
+    if signers.is_empty() {
+        if let Some(ref issuer_kid) = entry.issuer_kid {
+            signers.push(issuer_kid.to_string());
+        }
+    }
+    signers
+}
+
+fn metadata_string(entry: &AuditEntry, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|key| metadata_value(entry, key))
+        .find_map(value_as_string)
+}
+
+fn metadata_u64(entry: &AuditEntry, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .filter_map(|key| metadata_value(entry, key))
+        .find_map(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|string| string.parse::<u64>().ok()))
+        })
+}
+
+fn metadata_bool(entry: &AuditEntry, keys: &[&str]) -> bool {
+    keys.iter()
+        .filter_map(|key| metadata_value(entry, key))
+        .any(|value| {
+            value.as_bool().unwrap_or_else(|| {
+                value
+                    .as_str()
+                    .is_some_and(|string| matches!(string, "true" | "yes" | "1"))
+            })
+        })
+}
+
+fn metadata_string_array(entry: &AuditEntry, keys: &[&str]) -> Vec<String> {
+    keys.iter()
+        .filter_map(|key| metadata_value(entry, key))
+        .find_map(|value| {
+            value.as_array().map(|array| {
+                array
+                    .iter()
+                    .filter_map(value_as_string)
+                    .collect::<Vec<String>>()
+            })
+        })
+        .unwrap_or_default()
+}
+
+fn metadata_value<'a>(entry: &'a AuditEntry, key: &str) -> Option<&'a serde_json::Value> {
+    if let Some(value) = entry.metadata.get(key) {
+        return Some(value);
+    }
+
+    let mut path = key.split('.');
+    let first = path.next()?;
+    let mut current = entry.metadata.get(first)?;
+    for segment in path {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
+fn value_as_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(string) if !string.is_empty() => Some(string.clone()),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        serde_json::Value::Bool(boolean) => Some(boolean.to_string()),
+        _ => None,
+    }
+}
+
+fn load_explain_bundle(path: &Path) -> Result<ReplayBundle> {
     if path.is_dir() {
         return load_explain_bundle_dir(path);
+    }
+
+    if is_cbor_path(path) {
+        let input = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+        return parse_explain_bundle_cbor(&input)
+            .with_context(|| format!("failed to parse CBOR replay bundle {}", path.display()));
     }
 
     let input = read_input(path)?;
@@ -462,7 +819,13 @@ fn load_explain_bundle(path: &Path) -> Result<fcp_audit::explain::ReplayBundle> 
         .with_context(|| format!("failed to parse replay bundle {}", path.display()))
 }
 
-fn load_explain_bundle_dir(dir: &Path) -> Result<fcp_audit::explain::ReplayBundle> {
+fn load_explain_bundle_dir(dir: &Path) -> Result<ReplayBundle> {
+    if let Some(input) = read_optional_binary_artifact(dir, &["replay_bundle.cbor", "bundle.cbor"])?
+    {
+        return parse_explain_bundle_cbor(&input)
+            .with_context(|| format!("failed to parse CBOR replay bundle in {}", dir.display()));
+    }
+
     if let Some(input) = read_optional_artifact(dir, &["replay_bundle.json", "bundle.json"])? {
         return fcp_audit::explain::parse_replay_bundle(&input)
             .with_context(|| format!("failed to parse replay bundle in {}", dir.display()));
@@ -520,10 +883,37 @@ fn load_explain_bundle_dir(dir: &Path) -> Result<fcp_audit::explain::ReplayBundl
     .with_context(|| format!("failed to parse decision receipts in {}", dir.display()))?
     .unwrap_or_default();
 
-    Ok(fcp_audit::explain::ReplayBundle {
+    Ok(ReplayBundle {
         audit_entries,
         capability_tokens,
         receipts,
+    })
+}
+
+fn is_cbor_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("cbor"))
+}
+
+fn parse_explain_bundle_cbor(input: &[u8]) -> Result<ReplayBundle> {
+    let mut reader = input;
+    match ciborium::de::from_reader::<ReplayBundle, _>(&mut reader) {
+        Ok(bundle) if reader.is_empty() => return Ok(bundle),
+        Ok(_) => anyhow::bail!("CBOR replay bundle has trailing bytes"),
+        Err(_) => {}
+    }
+
+    let mut reader = input;
+    let entries = ciborium::de::from_reader::<Vec<AuditEntry>, _>(&mut reader)
+        .context("CBOR input is neither a replay bundle nor an audit-entry array")?;
+    if !reader.is_empty() {
+        anyhow::bail!("CBOR audit-entry array has trailing bytes");
+    }
+    Ok(ReplayBundle {
+        audit_entries: entries,
+        capability_tokens: Vec::new(),
+        receipts: Vec::new(),
     })
 }
 
@@ -532,6 +922,18 @@ fn read_optional_artifact(dir: &Path, names: &[&str]) -> Result<Option<String>> 
         let path = dir.join(name);
         if path.is_file() {
             return fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))
+                .map(Some);
+        }
+    }
+    Ok(None)
+}
+
+fn read_optional_binary_artifact(dir: &Path, names: &[&str]) -> Result<Option<Vec<u8>>> {
+    for name in names {
+        let path = dir.join(name);
+        if path.is_file() {
+            return fs::read(&path)
                 .with_context(|| format!("failed to read {}", path.display()))
                 .map(Some);
         }

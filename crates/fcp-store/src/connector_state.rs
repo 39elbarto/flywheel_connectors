@@ -448,7 +448,9 @@ impl FcpStoreConnectorStateStore {
             .await?;
         let root = self.root_for_head(&state_obj, object_id);
         let root_object_id = self.store_root_with_retry(root).await?;
-        let snapshot_object_id = self.maybe_emit_snapshot(object_id, &state_obj).await?;
+        let snapshot_object_id = self
+            .maybe_emit_snapshot_after_root_commit(object_id, &state_obj)
+            .await;
 
         self.publish_change(
             ConnectorStateChangeKind::ObjectAppended,
@@ -758,6 +760,30 @@ impl FcpStoreConnectorStateStore {
             return Ok(None);
         }
         self.emit_snapshot(object_id, state_obj).await.map(Some)
+    }
+
+    async fn maybe_emit_snapshot_after_root_commit(
+        &self,
+        object_id: ObjectId,
+        state_obj: &ConnectorStateObject,
+    ) -> Option<ObjectId> {
+        match self.maybe_emit_snapshot(object_id, state_obj).await {
+            Ok(snapshot_object_id) => snapshot_object_id,
+            Err(err) => {
+                tracing::warn!(
+                    target: CONNECTOR_STATE_TRACING_TARGET,
+                    event_type = CONNECTOR_STATE_SNAPSHOT_EVENT,
+                    connector_id = %self.connector_id,
+                    zone_id = %self.zone_id,
+                    operation = "snapshot_after_root_commit",
+                    result = "skipped_after_error",
+                    seq = state_obj.seq,
+                    error = %err,
+                    "connector-state append already committed root; skipping failed snapshot emission"
+                );
+                None
+            }
+        }
     }
 
     async fn elapsed_snapshot_due(&self, state_obj: &ConnectorStateObject) -> Result<bool> {
@@ -1512,7 +1538,7 @@ mod tests {
             let put_number = self.puts.fetch_add(1, Ordering::SeqCst) + 1;
             if put_number == self.fail_on_put {
                 return Err(ObjectStoreError::Io(
-                    "simulated connector state object write outage".to_string(),
+                    "simulated connector state put outage".to_string(),
                 ));
             }
             self.inner.put(object).await
@@ -1886,6 +1912,42 @@ mod tests {
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].1.seq, 0);
         assert_eq!(chain[0].1.lease_object_id, lease_id(1));
+    }
+
+    #[test]
+    fn append_commits_when_post_root_snapshot_write_fails() {
+        let inner: Arc<dyn ObjectStore> = store();
+        let object_store: Arc<dyn ObjectStore> = Arc::new(FailNthPutObjectStore::new(inner, 3));
+        let state_store = test_store(object_store).with_snapshot_every_entries(1);
+
+        let outcome = run_async(state_store.append_object(state(0, None, lease_id(1)))).unwrap();
+        let ConnectorStateAppendOutcome::Committed {
+            object_id,
+            root_object_id,
+            seq,
+            snapshot_object_id,
+        } = outcome
+        else {
+            panic!("post-root snapshot failure must not report a conflict");
+        };
+
+        assert_eq!(seq, 0);
+        assert!(snapshot_object_id.is_none());
+        let root = run_async(state_store.read_root()).unwrap().unwrap().1;
+        assert_eq!(root.head, Some(object_id));
+        assert!(root.header.refs.contains(&object_id));
+
+        let stored_root = run_async(state_store.object_store.get(&root_object_id)).unwrap();
+        assert_eq!(
+            stored_root.header.schema,
+            FcpStoreConnectorStateStore::root_schema_id()
+        );
+
+        let chain = run_async(state_store.read_chain(None, 10)).unwrap();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].0, object_id);
+        assert_eq!(chain[0].1.seq, 0);
+        assert!(run_async(state_store.latest_snapshot()).unwrap().is_none());
     }
 
     #[test]

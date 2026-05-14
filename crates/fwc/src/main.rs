@@ -90,6 +90,7 @@
 
 #[allow(dead_code)] // Access-planning command family.
 mod access_cmd;
+mod agent_bootstrap;
 #[allow(dead_code)] // Multi-agent coordination wired when Agent Mail integration lands.
 mod agent_coord;
 #[allow(dead_code)] // Agent Mail multi-agent coordination.
@@ -505,6 +506,10 @@ enum Commands {
 
     /// Coordinate local multi-agent work through the fwc agent-mail hub.
     Agent(AgentArgs),
+
+    /// Bootstrap an agent session with identity, reservation, ready beads, and doctor checks.
+    #[command(name = "agent-bootstrap")]
+    AgentBootstrap(AgentBootstrapArgs),
 
     /// Build and replay redaction-safe agent readiness handoff bundles.
     #[command(name = "agent-readiness", visible_alias = "readiness-handoff")]
@@ -1334,6 +1339,28 @@ struct AgentInboxArgs {
     /// Drain the inbox instead of peeking non-destructively.
     #[arg(long, default_value_t = false)]
     drain: bool,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AgentBootstrapArgs {
+    /// Agent persona name, for example `SunnyMoose`.
+    name: String,
+
+    /// File scope to reserve; use `none` to skip reservation.
+    #[arg(long, default_value = "src/**")]
+    scope: String,
+
+    /// Reservation TTL in seconds.
+    #[arg(long, default_value_t = 3600)]
+    ttl_seconds: u64,
+
+    /// Bead id or reason recorded with the reservation.
+    #[arg(long)]
+    reason: Option<String>,
+
+    /// Print the plan without changing bootstrap state.
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -3699,6 +3726,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Task(args) => task_dispatch(args)?,
         Commands::Session(args) => session_dispatch(args)?,
         Commands::Agent(args) => agent_dispatch(args)?,
+        Commands::AgentBootstrap(args) => agent_bootstrap_dispatch(args)?,
         Commands::AgentReadiness(args) => agent_readiness_dispatch(args)?,
         Commands::Plan(args) => intent_plan_dispatch(&args.request(intent::IntentMode::Plan))?,
         Commands::Explain(args) => {
@@ -10853,6 +10881,111 @@ fn agent_dispatch(args: &AgentArgs) -> Result<DispatchOutcome> {
                 exit_code: CliExitCode::Success,
             })
         }
+    }
+}
+
+fn agent_bootstrap_dispatch(args: &AgentBootstrapArgs) -> Result<DispatchOutcome> {
+    let scope = if args.scope == "none" {
+        None
+    } else {
+        Some(args.scope.clone())
+    };
+    let ready_beads = agent_bootstrap::ready_beads_from_jsonl(Path::new(".beads/issues.jsonl"), 5)
+        .unwrap_or_default();
+    let opts = agent_bootstrap::BootstrapOpts {
+        scope,
+        ttl_seconds: args.ttl_seconds,
+        reason: args
+            .reason
+            .clone()
+            .or_else(|| Some("flywheel_connectors-angoc.6.2.1".to_owned())),
+        owner_email: std::env::var("FWC_OPERATOR_EMAIL").ok(),
+        dry_run: args.dry_run,
+        agent_mail_reachable: std::env::var("FWC_AGENT_BOOTSTRAP_AGENT_MAIL")
+            .map_or(true, |value| value != "unreachable"),
+        agent_name_prefix: std::env::var("AGENT_NAME").ok(),
+        ready_beads,
+        now: Utc::now(),
+        state_path: std::env::var("FWC_AGENT_BOOTSTRAP_STATE")
+            .ok()
+            .filter(|path| !path.trim().is_empty())
+            .map(PathBuf::from),
+    };
+
+    match agent_bootstrap::run(&args.name, &opts) {
+        Ok(report) => {
+            let exit_code = match report.exit_code {
+                0 => CliExitCode::Success,
+                4 => CliExitCode::AmbiguousCorrection,
+                5 => CliExitCode::Validation,
+                _ => CliExitCode::Validation,
+            };
+            let mut payload = serde_json::to_value(&report)?;
+            payload["command"] = json!("agent-bootstrap");
+            payload["subcommand"] = json!("run");
+            payload["next_actions"] = json!([
+                format!(
+                    "AGENT_NAME={} git commit --only <owned-paths> -m '<bead-id>: <summary>'",
+                    args.name
+                ),
+                "After selecting a bead, send a start message with thread_id=<bead-id> when Agent Mail is reachable.",
+                "On closeout, run `br close <id> --reason <reason>` and `br sync --flush-only` when the Beads write path is available.",
+            ]);
+            Ok(DispatchOutcome { payload, exit_code })
+        }
+        Err(agent_bootstrap::AgentBootstrapError::IdentityConflict {
+            name,
+            existing_owner,
+            requested_owner,
+        }) => Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "agent-bootstrap",
+                "subcommand": "run",
+                "error": {
+                    "type": "identity-conflict",
+                    "message": format!(
+                        "Agent `{name}` is already registered by `{existing_owner}`, not `{requested_owner}`."
+                    ),
+                    "recoverable": false,
+                },
+                "agent_name": name,
+                "existing_owner": existing_owner,
+                "requested_owner": requested_owner,
+            }),
+            exit_code: CliExitCode::UnknownCommand,
+        }),
+        Err(agent_bootstrap::AgentBootstrapError::InvalidAgentName { name }) => {
+            Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "agent-bootstrap",
+                    "subcommand": "run",
+                    "error": {
+                        "type": "invalid-agent-name",
+                        "message": format!("Invalid agent name `{name}`; expected PascalCase."),
+                        "recoverable": true,
+                    },
+                    "next_actions": [
+                        "Use a PascalCase two-word agent persona such as `GreenLake`.",
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            })
+        }
+        Err(error) => Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "agent-bootstrap",
+                "subcommand": "run",
+                "error": {
+                    "type": "bootstrap-state-error",
+                    "message": error.to_string(),
+                    "recoverable": true,
+                },
+            }),
+            exit_code: CliExitCode::Internal,
+        }),
     }
 }
 

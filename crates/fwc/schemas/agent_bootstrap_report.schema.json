@@ -57,7 +57,8 @@
                 },
                 "ttl_seconds": {
                     "type": "integer",
-                    "minimum": 1
+                    "minimum": 0,
+                    "description": "Reservation TTL in seconds; zero means no reservation was created, as in degraded mode or --scope none."
                 },
                 "extended": {
                     "type": "boolean",

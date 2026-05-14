@@ -188,7 +188,7 @@ fn assert_request(captured: &CapturedRequest) {
         header_seen(
             &captured.head,
             "authorization",
-            &format!("Bearer {LOOPBACK_BEARER_VALUE}"),
+            &format!("Bearer {LOOPBACK_BEARER_VALUE}")
         ),
         "request should carry configured Notion bearer token; head={}",
         captured.head

@@ -211,15 +211,16 @@ fn status(checks: &[SelfTestCheck]) -> SelfTestStatus {
     }
 }
 
+const FORBIDDEN_COMMAND_SUBSTRINGS: &[&str] = &[
+    "am service restart",
+    "am service stop",
+    "am doctor fix",
+    "am doctor repair",
+    "am doctor reconstruct",
+];
+
 fn reject_forbidden_agent_mail_remediation(remediation: &str) -> Result<()> {
     let normalized = remediation.to_ascii_lowercase();
-    const FORBIDDEN_COMMAND_SUBSTRINGS: &[&str] = &[
-        "am service restart",
-        "am service stop",
-        "am doctor fix",
-        "am doctor repair",
-        "am doctor reconstruct",
-    ];
     for forbidden in FORBIDDEN_COMMAND_SUBSTRINGS {
         if let Some(idx) = normalized.find(forbidden)
             && !preceded_by_negator(&normalized, idx)
@@ -237,7 +238,14 @@ fn reject_forbidden_agent_mail_remediation(remediation: &str) -> Result<()> {
     Ok(())
 }
 
-const NEGATORS: &[&str] = &["do not", "don't", "never", "must not", "mustn't", "forbidden"];
+const NEGATORS: &[&str] = &[
+    "do not",
+    "don't",
+    "never",
+    "must not",
+    "mustn't",
+    "forbidden",
+];
 
 fn preceded_by_negator(normalized: &str, idx: usize) -> bool {
     let mut window_start = idx.saturating_sub(60);
@@ -258,9 +266,12 @@ fn mentions_killing_agent_mail(normalized: &str) -> bool {
         "agent mail",
     ];
     let mut cursor = 0;
-    while let Some(rel) = normalized[cursor..].find(|c: char| matches!(c, 'k' | 'p')) {
+    while let Some(rel) = normalized[cursor..].find(['k', 'p']) {
         let pos = cursor + rel;
-        let Some(verb) = KILL_VERBS.iter().find(|v| normalized[pos..].starts_with(*v)) else {
+        let Some(verb) = KILL_VERBS
+            .iter()
+            .find(|v| normalized[pos..].starts_with(*v))
+        else {
             cursor = pos + 1;
             continue;
         };
@@ -275,7 +286,7 @@ fn mentions_killing_agent_mail(normalized: &str) -> bool {
         let mut window = &normalized[cursor..scan_end];
         // Stop at the first clause/sentence delimiter — a `kill` verb only binds
         // to its direct object in the same clause, not to a downstream mention.
-        if let Some(stop) = window.find(|c: char| matches!(c, ';' | '.' | '\n' | '!')) {
+        if let Some(stop) = window.find([';', '.', '\n', '!']) {
             window = &window[..stop];
         }
         if AM_TARGETS.iter().any(|t| window.contains(t)) {
@@ -292,7 +303,8 @@ mod reject_remediation_tests {
     #[test]
     fn allows_remediation_that_negates_restart_of_shared_service() {
         // Verbatim from broken_env/self_test.toml.
-        let r = "agent-mail: retry once, then continue degraded; do not restart the shared service.";
+        let r =
+            "agent-mail: retry once, then continue degraded; do not restart the shared service.";
         reject_forbidden_agent_mail_remediation(r).expect("must allow negated remediation");
     }
 

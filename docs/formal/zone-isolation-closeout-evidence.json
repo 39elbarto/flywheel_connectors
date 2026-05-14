@@ -1,0 +1,178 @@
+{
+  "schema_version": "fcp.zone-isolation-closeout-evidence.v1",
+  "source_sha": "2ca69d751c465bfc06ea4e375b3f97a5b4328b57",
+  "bead_ids": [
+    "flywheel_connectors-hvxcd",
+    "flywheel_connectors-8aqs4",
+    "flywheel_connectors-am4aq",
+    "flywheel_connectors-angoc.2.1",
+    "flywheel_connectors-angoc.2.2",
+    "flywheel_connectors-angoc.9"
+  ],
+  "proof_commands": [
+    {
+      "id": "c1-host-empty-allowed-zones",
+      "runner": "rch",
+      "command": "rch exec -- cargo test -p fcp-host --test allowed_zones_required -- --nocapture",
+      "required_status": "green",
+      "covers": [
+        "invoke",
+        "health",
+        "introspect",
+        "one-zone-allowed-path"
+      ]
+    },
+    {
+      "id": "c1-conformance-no-permissive-branch",
+      "runner": "rch",
+      "command": "rch exec -- cargo test -p fcp-conformance --test no_permissive_empty_zone_branch -- --nocapture",
+      "required_status": "green",
+      "covers": [
+        "compiled-binary-check-when-available",
+        "source-tree-stale-marker-check",
+        "ZoneEnvelopeRequired"
+      ]
+    },
+    {
+      "id": "c7-zone-isolation-full-e2e",
+      "runner": "rch",
+      "command": "rch exec -- cargo test -p fcp-e2e --test zone_isolation_full_e2e -- --nocapture",
+      "required_status": "green",
+      "covers": [
+        "five-zone-policy-workload",
+        "structured-zone-check-jsonl",
+        "rejection-audit-continuity"
+      ]
+    },
+    {
+      "id": "o-lean-verify",
+      "runner": "ci",
+      "command": "make lean-verify",
+      "required_status": "green",
+      "covers": [
+        "all-five-formal-proof-files",
+        "zone-lattice-proof",
+        "no-sorry-no-admit"
+      ]
+    }
+  ],
+  "rch_summary": {
+    "cpu_intensive_operations_must_use_rch": true,
+    "remote_required_for_cargo": true,
+    "required_visibility": "summary",
+    "known_wrapper_risk": "A proof is usable only when the remote command reaches Cargo or Lean and exits green; transfer chatter or queued CI is not proof."
+  },
+  "required_tests": [
+    {
+      "id": "host-allowed-zones-required",
+      "path": "crates/fcp-host/tests/allowed_zones_required.rs",
+      "required_functions": [
+        "test_empty_zone_set_rejects_invoke",
+        "test_empty_zone_set_rejects_health_check",
+        "test_empty_zone_set_rejects_introspect",
+        "test_one_zone_works"
+      ]
+    },
+    {
+      "id": "conformance-no-permissive-empty-zone-branch",
+      "path": "crates/fcp-conformance/tests/no_permissive_empty_zone_branch.rs",
+      "required_functions": [
+        "test_compiled_binary_lacks_permissive_symbol",
+        "test_source_tree_lacks_pattern"
+      ]
+    },
+    {
+      "id": "e2e-zone-isolation-full",
+      "path": "crates/fcp-e2e/tests/zone_isolation_full_e2e.rs",
+      "required_functions": [
+        "test_public_to_private_invoke_rejected",
+        "test_work_to_private_data_flow_blocked",
+        "test_project_alpha_scoped_capability_works_within",
+        "test_community_to_work_requires_declassification",
+        "test_all_rejections_emit_structured_log",
+        "test_audit_chain_continuity_under_rejection"
+      ],
+      "required_event_count": 100,
+      "required_jsonl_fields": [
+        "suite",
+        "scenario_id",
+        "source_zone",
+        "target_zone",
+        "decision",
+        "reason_code",
+        "audit_event",
+        "hlc"
+      ]
+    }
+  ],
+  "required_ci_artifacts": [
+    {
+      "id": "lean-verify-zone-lattice",
+      "kind": "lean_verify",
+      "artifact_hint": "artifacts/lean/${GITHUB_SHA}.txt",
+      "producer": ".github/workflows/lean-verify.yml",
+      "required_status": "green",
+      "current_status": "missing",
+      "max_age_hours": 24,
+      "require_current_sha": true,
+      "must_contain": [
+        "lean/Fcp/Zone/Lattice.lean",
+        "lean/Fcp/Capability/Typestate.lean",
+        "lean/Fcp/Audit/HashChain.lean",
+        "lean/Fcp/Crypto/HybridSignature.lean",
+        "lean/Fcp/Mesh/CrdtMerge.lean",
+        "\"verdict\":\"green\"",
+        "\"sorries_remaining\":0"
+      ]
+    },
+    {
+      "id": "zone-isolation-full-e2e",
+      "kind": "rch_e2e_jsonl",
+      "artifact_hint": "artifacts/e2e/zone_isolation_full_e2e/${GITHUB_SHA}.jsonl",
+      "producer": "crates/fcp-e2e/tests/zone_isolation_full_e2e.rs",
+      "required_status": "green",
+      "current_status": "missing",
+      "max_age_hours": 24,
+      "require_current_sha": true,
+      "must_contain": [
+        "\"suite\":\"zone_isolation_full_e2e\"",
+        "\"status\":\"green\"",
+        "\"leaked_pairs_count\":0",
+        "\"rejection_audit_events\":100"
+      ]
+    }
+  ],
+  "readme_gate": {
+    "feature": "Zone Isolation",
+    "current_status": "LIMITED",
+    "promotion_status": "PROVEN",
+    "gate_manifest": "docs/formal/readme-proof-obligations.json",
+    "rule": "Do not change the README row to PROVEN until every required CI artifact is green, fresh, redaction-safe, and pinned to the claimed source SHA."
+  },
+  "known_blockers": [
+    {
+      "id": "lean-artifact-missing",
+      "status": "blocking",
+      "details": "Source proof files are present, but a current green artifacts/lean/${GITHUB_SHA}.txt artifact is still required."
+    },
+    {
+      "id": "e2e-artifact-missing",
+      "status": "blocking",
+      "details": "The E2E test exists and has prior RCH green notes, but a current archived JSONL artifact pinned to the claimed SHA is still required."
+    },
+    {
+      "id": "doctor-probe-gap",
+      "status": "watch",
+      "details": "Closeout must cite fwc doctor/readiness output; this pack records the required checks but does not claim doctor green evidence."
+    },
+    {
+      "id": "beads-closeout-blocked",
+      "status": "watch",
+      "details": "Beads closeout must be performed with br when the local write lock and database path are usable."
+    }
+  ],
+  "closeout_status": {
+    "status": "blocked",
+    "reason": "Zone Isolation remains LIMITED until current green Lean and E2E artifacts exist for the claimed source SHA."
+  }
+}

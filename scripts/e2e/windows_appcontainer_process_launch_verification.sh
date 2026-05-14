@@ -10,8 +10,12 @@ LOG_JSONL="${LOG_JSONL:-${OUT_ROOT}/windows_appcontainer_process_launch.jsonl}"
 SUMMARY_JSON="${OUT_ROOT}/summary.json"
 RAW_LOG="${OUT_ROOT}/logs/fcp_sandbox_windows_appcontainer_tests.log"
 TARGET_DIR="${WINDOWS_APPCONTAINER_CARGO_TARGET_DIR:-/tmp/fcp-windows-appcontainer-e2e-target}"
+CARGO_TARGET="${WINDOWS_APPCONTAINER_CARGO_TARGET:-}"
+CARGO_FEATURES="${WINDOWS_APPCONTAINER_CARGO_FEATURES:-windows-appcontainer}"
+CARGO_TEST_FILTER="${WINDOWS_APPCONTAINER_CARGO_TEST_FILTER:-windows_appcontainer}"
 COMMAND_LINE="${COMMAND_LINE:-bash ${SCRIPT_PATH}}"
 RCH_BIN="${RCH_BIN:-rch}"
+BEAD_ID="${WINDOWS_APPCONTAINER_BEAD_ID:-flywheel_connectors-r4qcg.1.1}"
 
 mkdir -p "${OUT_ROOT}/logs"
 : >"${LOG_JSONL}"
@@ -22,13 +26,49 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 hash16() {
-  printf '%s' "$1" | shasum -a 256 | awk '{print substr($1, 1, 16)}'
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print substr($1, 1, 16)}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print substr($1, 1, 16)}'
+  else
+    echo "shasum or sha256sum is required for ${SCRIPT_PATH}" >&2
+    exit 2
+  fi
+}
+
+run_windows_appcontainer_tests() {
+  local cargo_args
+  cargo_args=(test -p fcp-sandbox)
+  if [[ -n "${CARGO_TARGET}" ]]; then
+    cargo_args+=(--target "${CARGO_TARGET}")
+  fi
+  if [[ -n "${CARGO_FEATURES}" ]]; then
+    cargo_args+=(--features "${CARGO_FEATURES}")
+  fi
+  cargo_args+=("${CARGO_TEST_FILTER}" -- --nocapture)
+
+  cd "${REPO_ROOT}"
+  if [[ "${RCH_BIN}" == "direct" ]]; then
+    env \
+      "CARGO_TARGET_DIR=${TARGET_DIR}" \
+      "FCP_SANDBOX_WINDOWS_APPCONTAINER=${FCP_SANDBOX_WINDOWS_APPCONTAINER:-}" \
+      "FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E=${FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E:-}" \
+      cargo "${cargo_args[@]}"
+  else
+    "${RCH_BIN}" exec -- env \
+      "CARGO_TARGET_DIR=${TARGET_DIR}" \
+      "FCP_SANDBOX_WINDOWS_APPCONTAINER=${FCP_SANDBOX_WINDOWS_APPCONTAINER:-}" \
+      "FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E=${FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E:-}" \
+      cargo "${cargo_args[@]}"
+  fi
 }
 
 GIT_REVISION="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 HOST_OS="$(uname -s 2>/dev/null || echo unknown)"
 HOST_RELEASE="$(uname -r 2>/dev/null || echo unknown)"
 OS_BUILD="${HOST_OS} ${HOST_RELEASE}"
+TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+CORRELATION_ID="windows-appcontainer-${RUN_ID}"
 CONNECTOR_ID="fcp.windows-appcontainer.e2e"
 PROFILE_NAME="fcp-windows-appcontainer-e2e-$(hash16 "${CONNECTOR_ID}")"
 CONNECTOR_ID_HASH="$(hash16 "${CONNECTOR_ID}")"
@@ -41,12 +81,7 @@ TARGET_DIR_HASH="$(hash16 "${TARGET_DIR}")"
 
 echo "[windows-appcontainer-e2e] cargo test -p fcp-sandbox windows_appcontainer"
 (
-  cd "${REPO_ROOT}"
-  "${RCH_BIN}" exec -- env \
-    "CARGO_TARGET_DIR=${TARGET_DIR}" \
-    "FCP_SANDBOX_WINDOWS_APPCONTAINER=${FCP_SANDBOX_WINDOWS_APPCONTAINER:-}" \
-    "FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E=${FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E:-}" \
-    cargo test -p fcp-sandbox windows_appcontainer -- --nocapture
+  run_windows_appcontainer_tests
 ) >"${RAW_LOG}" 2>&1
 
 skip_reason=""
@@ -79,9 +114,18 @@ if [[ "${real_launch}" == "true" ]]; then
 fi
 
 jq -cn \
+  --arg schema_version "1.0.0" \
+  --arg bead_id "${BEAD_ID}" \
+  --arg actor "host" \
+  --arg redaction_scope "public" \
+  --arg correlation_id "${CORRELATION_ID}" \
+  --arg timestamp "${TIMESTAMP}" \
   --arg command_line "${COMMAND_LINE}" \
   --arg git_revision "${GIT_REVISION}" \
   --arg os_build "${OS_BUILD}" \
+  --arg cargo_runner "${RCH_BIN}" \
+  --arg cargo_target "${CARGO_TARGET}" \
+  --arg cargo_features "${CARGO_FEATURES}" \
   --arg connector_id_hash "${CONNECTOR_ID_HASH}" \
   --arg profile_name_hash "${PROFILE_NAME_HASH}" \
   --arg job_object_id_hash "${JOB_OBJECT_ID_HASH}" \
@@ -93,11 +137,20 @@ jq -cn \
   --arg real_launch "${real_launch}" \
   --arg process_id_hash "${process_id_hash}" \
   '{
+    schema_version: $schema_version,
     record_type: "windows_appcontainer_process_launch_e2e",
     schema: "fcp.windows_appcontainer_process_launch.script.v1",
+    bead_id: $bead_id,
+    actor: $actor,
+    redaction_scope: $redaction_scope,
+    correlation_id: $correlation_id,
+    timestamp: $timestamp,
     command_line: $command_line,
     git_revision: $git_revision,
     os_build: $os_build,
+    cargo_runner: $cargo_runner,
+    cargo_target: (if $cargo_target == "" then null else $cargo_target end),
+    cargo_features: (if $cargo_features == "" then null else $cargo_features end),
     connector_id_hash: $connector_id_hash,
     profile_name_hash: $profile_name_hash,
     capability_decision: "mapped",
@@ -122,9 +175,16 @@ jq -cn \
 jq -e '
   select(.record_type == "windows_appcontainer_process_launch_e2e") as $record
   | [
+      $record.schema_version,
+      $record.bead_id,
+      $record.actor,
+      $record.redaction_scope,
+      $record.correlation_id,
+      $record.timestamp,
       $record.command_line,
       $record.git_revision,
       $record.os_build,
+      $record.cargo_runner,
       $record.connector_id_hash,
       $record.profile_name_hash,
       $record.capability_decision,
@@ -168,6 +228,7 @@ fi
 jq -cn \
   --arg run_id "${RUN_ID}" \
   --arg git_revision "${GIT_REVISION}" \
+  --arg bead_id "${BEAD_ID}" \
   --arg result "${result}" \
   --arg log_jsonl "${LOG_JSONL_ARTIFACT}" \
   --arg raw_log "${RAW_LOG_ARTIFACT}" \
@@ -177,6 +238,7 @@ jq -cn \
   '{
     run_id: $run_id,
     git_revision: $git_revision,
+    bead_id: $bead_id,
     result: $result,
     real_launch: ($real_launch == "true"),
     log_jsonl: $log_jsonl,

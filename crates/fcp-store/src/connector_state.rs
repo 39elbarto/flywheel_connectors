@@ -5,6 +5,7 @@
 //! that host and SDK code can share as the mesh-native path lands.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -24,6 +25,7 @@ use fcp_prelude::{
     ObjectHeader, ObjectId, ObjectIdKey, RetentionClass, StorageMeta, StoredObject, ZoneId,
 };
 use futures_util::stream;
+use parking_lot::RwLock;
 use semver::Version;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -151,6 +153,13 @@ pub enum ConnectorStateStoreError {
 
 type Result<T> = std::result::Result<T, ConnectorStateStoreError>;
 
+#[derive(Debug, Clone)]
+struct CachedConnectorStateRoot {
+    generation: u64,
+    object_id: ObjectId,
+    root: ConnectorStateRoot,
+}
+
 /// Connector-state store backed by an [`ObjectStore`].
 #[derive(Clone)]
 pub struct FcpStoreConnectorStateStore {
@@ -166,6 +175,7 @@ pub struct FcpStoreConnectorStateStore {
     state_object_write_retry_policy: BackoffPolicy,
     root_write_retry_policy: BackoffPolicy,
     change_bus: Arc<ConnectorStateChangeBus>,
+    root_cache: Arc<RwLock<Option<CachedConnectorStateRoot>>>,
 }
 
 impl FcpStoreConnectorStateStore {
@@ -196,6 +206,7 @@ impl FcpStoreConnectorStateStore {
             ),
             root_write_retry_policy: BackoffPolicy::new(0, Duration::ZERO, Duration::ZERO, 1.0),
             change_bus,
+            root_cache: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -335,6 +346,10 @@ impl FcpStoreConnectorStateStore {
     }
 
     async fn read_root_inner(&self) -> Result<Option<(ObjectId, ConnectorStateRoot)>> {
+        if let Some((object_id, root)) = self.cached_root() {
+            return Ok(Some((object_id, root)));
+        }
+
         let mut best: Option<(ObjectId, ConnectorStateRoot, Option<u64>)> = None;
 
         for object_id in self.object_store.list_zone(&self.zone_id).await {
@@ -365,7 +380,28 @@ impl FcpStoreConnectorStateStore {
             }
         }
 
-        Ok(best.map(|(object_id, root, _head_seq)| (object_id, root)))
+        let root = best.map(|(object_id, root, _head_seq)| (object_id, root));
+        if let Some((object_id, root)) = &root {
+            self.cache_root(*object_id, root.clone());
+        }
+        Ok(root)
+    }
+
+    fn cached_root(&self) -> Option<(ObjectId, ConnectorStateRoot)> {
+        let generation = self.change_bus.generation();
+        self.root_cache
+            .read()
+            .as_ref()
+            .filter(|cached| cached.generation == generation)
+            .map(|cached| (cached.object_id, cached.root.clone()))
+    }
+
+    fn cache_root(&self, object_id: ObjectId, root: ConnectorStateRoot) {
+        *self.root_cache.write() = Some(CachedConnectorStateRoot {
+            generation: self.change_bus.generation(),
+            object_id,
+            root,
+        });
     }
 
     async fn root_head_seq(&self, root: &ConnectorStateRoot) -> Result<Option<u64>> {
@@ -1321,6 +1357,9 @@ impl FcpStoreConnectorStateStore {
         object_id: Option<ObjectId>,
         seq: Option<u64>,
     ) -> ConnectorStateChange {
+        if matches!(kind, ConnectorStateChangeKind::RootUpdated) {
+            self.change_bus.mark_root_updated();
+        }
         let change = ConnectorStateChange {
             connector_id: self.connector_id.clone(),
             instance_id: self.instance_id.clone(),
@@ -1500,12 +1539,24 @@ impl ConnectorStateStore for FcpStoreConnectorStateStore {
 #[derive(Debug)]
 struct ConnectorStateChangeBus {
     sender: broadcast::Sender<ConnectorStateChange>,
+    root_generation: AtomicU64,
 }
 
 impl ConnectorStateChangeBus {
     fn new() -> Self {
         let (sender, _receiver) = broadcast::channel(CONNECTOR_STATE_CHANGE_BUFFER_CAPACITY);
-        Self { sender }
+        Self {
+            sender,
+            root_generation: AtomicU64::new(0),
+        }
+    }
+
+    fn generation(&self) -> u64 {
+        self.root_generation.load(Ordering::Acquire)
+    }
+
+    fn mark_root_updated(&self) {
+        self.root_generation.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -2488,6 +2539,9 @@ mod tests {
         assert!(run_async(scoped.read_root()).unwrap().is_none());
         let mut scoped_state = state(0, None, lease_id(2));
         scoped_state.instance_id = Some(instance);
+        scoped_state
+            .sign_with(&test_state_signing_key())
+            .expect("instance-scoped test state should sign");
         append_ok(&scoped, scoped_state);
         assert!(run_async(scoped.read_root()).unwrap().is_some());
     }

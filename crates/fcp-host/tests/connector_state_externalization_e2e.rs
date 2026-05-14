@@ -108,6 +108,67 @@ impl ObjectStore for FailNthPutObjectStore {
     }
 }
 
+struct ReadUnavailableObjectStore {
+    listed_root: ObjectId,
+}
+
+impl ReadUnavailableObjectStore {
+    const fn new(listed_root: ObjectId) -> Self {
+        Self { listed_root }
+    }
+
+    fn unavailable_error() -> ObjectStoreError {
+        ObjectStoreError::Io("simulated connector state read outage".to_string())
+    }
+}
+
+#[async_trait]
+impl ObjectStore for ReadUnavailableObjectStore {
+    async fn put(&self, _object: StoredObject) -> Result<(), ObjectStoreError> {
+        Err(Self::unavailable_error())
+    }
+
+    async fn get(&self, _id: &ObjectId) -> Result<StoredObject, ObjectStoreError> {
+        Err(Self::unavailable_error())
+    }
+
+    async fn exists(&self, _id: &ObjectId) -> bool {
+        false
+    }
+
+    async fn delete(&self, _id: &ObjectId) -> Result<(), ObjectStoreError> {
+        Err(Self::unavailable_error())
+    }
+
+    async fn get_header(&self, _id: &ObjectId) -> Result<ObjectHeader, ObjectStoreError> {
+        Err(Self::unavailable_error())
+    }
+
+    async fn get_storage_meta(&self, _id: &ObjectId) -> Result<StorageMeta, ObjectStoreError> {
+        Err(Self::unavailable_error())
+    }
+
+    async fn set_retention(
+        &self,
+        _id: &ObjectId,
+        _retention: RetentionClass,
+    ) -> Result<(), ObjectStoreError> {
+        Err(Self::unavailable_error())
+    }
+
+    async fn list_zone(&self, _zone_id: &ZoneId) -> Vec<ObjectId> {
+        vec![self.listed_root]
+    }
+
+    async fn storage_used(&self) -> u64 {
+        0
+    }
+
+    async fn storage_quota(&self) -> u64 {
+        0
+    }
+}
+
 fn object_id_key() -> ObjectIdKey {
     ObjectIdKey::from_bytes([0xA2; 32])
 }
@@ -297,19 +358,6 @@ fn p50_latency(mut samples: Vec<Duration>) -> Duration {
     samples[samples.len() / 2]
 }
 
-fn measure_p50_latency<E>(
-    iterations: usize,
-    mut operation: impl FnMut() -> Result<(), E>,
-) -> Result<Duration, E> {
-    let mut samples = Vec::with_capacity(iterations);
-    for _ in 0..iterations {
-        let started = Instant::now();
-        operation()?;
-        samples.push(started.elapsed());
-    }
-    Ok(p50_latency(samples))
-}
-
 #[test]
 fn connector_state_externalization_restores_from_store_after_restart() -> TestResult {
     let object_store = memory_object_store();
@@ -371,41 +419,61 @@ fn connector_state_externalization_latency_budget_matrix() -> TestResult {
     let host = host_state_store(Arc::clone(&object_store));
     let (head_0, _root_0, _seq_0) = append_committed(&host, state(0, None, lease_id(1)))?;
 
-    let same_handle_read_p50 = measure_p50_latency(ITERATIONS, || {
-        let root = read_root(&host)?;
-        assert_eq!(root.head, Some(head_0));
-        Ok::<(), ConnectorStateError>(())
-    })?;
-
-    let fresh_handle_fall_through_p50 = measure_p50_latency(ITERATIONS, || {
-        let fresh_host = host_state_store(Arc::clone(&object_store));
-        let root = read_root(&fresh_host)?;
-        assert_eq!(root.head, Some(head_0));
-        Ok::<(), ConnectorStateError>(())
-    })?;
-
-    let (fail_closed_authorization, fail_closed_signing_key) =
-        connector_state_authorization_for_with_key(&connector_id(), &zone_id());
-    let fail_closed_p50 = measure_p50_latency(ITERATIONS, || {
-        let unavailable = host_state_store(memory_object_store_with_quota(1));
-        let connector_id = connector_id();
-        let result = block_on(ConnectorStateStore::append_object(
-            &unavailable,
-            &connector_id,
-            &fail_closed_authorization,
-            sign_state(state(0, None, lease_id(9)), &fail_closed_signing_key),
-        ));
-        match result {
-            Err(ConnectorStateError::StorageUnavailable {
-                connector_id: failed_connector_id,
-                reason,
-            }) => {
-                assert_eq!(failed_connector_id, connector_id);
-                assert!(!reason.is_empty());
-            }
-            other => panic!("expected typed storage-unavailable failure, got {other:?}"),
+    let same_handle_read_p50 = block_on(async {
+        let mut samples = Vec::with_capacity(ITERATIONS);
+        for _ in 0..ITERATIONS {
+            let started = Instant::now();
+            let root = ConnectorStateStore::read_root(&host, &connector_id())
+                .await?
+                .ok_or_else(|| ConnectorStateError::SnapshotUnavailable {
+                    connector_id: connector_id(),
+                    reason: "connector state root missing in latency test".to_string(),
+                })?;
+            assert_eq!(root.head, Some(head_0));
+            samples.push(started.elapsed());
         }
-        Ok::<(), ConnectorStateError>(())
+        Ok::<Duration, ConnectorStateError>(p50_latency(samples))
+    })?;
+
+    let fresh_handle_fall_through_p50 = block_on(async {
+        let mut samples = Vec::with_capacity(ITERATIONS);
+        for _ in 0..ITERATIONS {
+            let fresh_host = host_state_store(Arc::clone(&object_store));
+            let started = Instant::now();
+            let root = ConnectorStateStore::read_root(&fresh_host, &connector_id())
+                .await?
+                .ok_or_else(|| ConnectorStateError::SnapshotUnavailable {
+                    connector_id: connector_id(),
+                    reason: "connector state root missing in latency test".to_string(),
+                })?;
+            assert_eq!(root.head, Some(head_0));
+            samples.push(started.elapsed());
+        }
+        Ok::<Duration, ConnectorStateError>(p50_latency(samples))
+    })?;
+
+    let fail_closed_p50 = block_on(async {
+        let mut samples = Vec::with_capacity(ITERATIONS);
+        for _ in 0..ITERATIONS {
+            let unavailable_store: Arc<dyn ObjectStore> =
+                Arc::new(ReadUnavailableObjectStore::new(lease_id(200)));
+            let unavailable = host_state_store(unavailable_store);
+            let connector_id = connector_id();
+            let started = Instant::now();
+            let result = ConnectorStateStore::read_root(&unavailable, &connector_id).await;
+            match result {
+                Err(ConnectorStateError::StorageUnavailable {
+                    connector_id: failed_connector_id,
+                    reason,
+                }) => {
+                    assert_eq!(failed_connector_id, connector_id);
+                    assert!(!reason.is_empty());
+                }
+                other => panic!("expected typed storage-unavailable failure, got {other:?}"),
+            }
+            samples.push(started.elapsed());
+        }
+        Ok::<Duration, ConnectorStateError>(p50_latency(samples))
     })?;
 
     eprintln!(

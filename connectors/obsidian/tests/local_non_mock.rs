@@ -127,7 +127,7 @@ async fn setup_connector() -> (TempDir, ObsidianConnector, Ed25519SigningKey, In
 
     let mut connector = ObsidianConnector::new();
     let signing_key = Ed25519SigningKey::generate();
-    let instance_id = connector.instance_id().clone();
+    let instance_id = InstanceId::new();
     connector
         .configure(json!({
             "vault_path": dir.path().to_str().expect("vault path utf8"),

@@ -301,6 +301,33 @@ impl FcpStoreConnectorStateStore {
         result
     }
 
+    /// Observe a root object announcement from an external propagation layer.
+    ///
+    /// `FcpStoreConnectorStateStore` intentionally has no direct dependency on
+    /// `fcp-mesh`, but mesh or host adapters can call this after a replicated
+    /// `ConnectorStateRoot` object arrives locally. The root is loaded from the
+    /// object store and validated before a cache-invalidation change is emitted.
+    ///
+    /// # Errors
+    /// Returns an error if the root object is missing, malformed, foreign to
+    /// this connector+zone store, or references a missing head object.
+    pub async fn observe_replicated_root(
+        &self,
+        root_object_id: ObjectId,
+    ) -> Result<ConnectorStateChange> {
+        let stored = self.object_store.get(&root_object_id).await?;
+        let root: ConnectorStateRoot =
+            self.decode_stored(&stored, &Self::root_schema_id(), "connector state root")?;
+        self.validate_root(&root)?;
+        let seq = self.root_head_seq(&root).await?;
+
+        Ok(self.publish_change(
+            ConnectorStateChangeKind::RootUpdated,
+            Some(root_object_id),
+            seq,
+        ))
+    }
+
     async fn read_root_inner(&self) -> Result<Option<(ObjectId, ConnectorStateRoot)>> {
         let mut best: Option<(ObjectId, ConnectorStateRoot, Option<u64>)> = None;
 
@@ -1229,7 +1256,7 @@ impl FcpStoreConnectorStateStore {
         kind: ConnectorStateChangeKind,
         object_id: Option<ObjectId>,
         seq: Option<u64>,
-    ) {
+    ) -> ConnectorStateChange {
         let change = ConnectorStateChange {
             connector_id: self.connector_id.clone(),
             instance_id: self.instance_id.clone(),
@@ -1239,7 +1266,8 @@ impl FcpStoreConnectorStateStore {
             seq,
             observed_at: Self::now_unix_seconds(),
         };
-        let _ = self.change_bus.sender.send(change);
+        let _ = self.change_bus.sender.send(change.clone());
+        change
     }
 
     fn now_unix_seconds() -> u64 {
@@ -2387,6 +2415,46 @@ mod tests {
         assert_eq!(root.kind, ConnectorStateChangeKind::RootUpdated);
         assert_eq!(root.object_id, Some(root_object_id));
         assert_eq!(root.seq, Some(0));
+
+        let reader_root = run_async(reader.read_root()).unwrap().expect("root");
+        assert_eq!(reader_root.1.head, Some(object_id));
+    }
+
+    #[test]
+    fn observed_replicated_root_invalidates_independent_change_bus() {
+        let inner: Arc<dyn ObjectStore> = store();
+        let writer_object_store: Arc<dyn ObjectStore> =
+            Arc::new(FailNthPutObjectStore::new(Arc::clone(&inner), usize::MAX));
+        let reader_object_store: Arc<dyn ObjectStore> =
+            Arc::new(FailNthPutObjectStore::new(inner, usize::MAX));
+        let writer = test_store(writer_object_store)
+            .with_snapshot_every_entries(0)
+            .with_snapshot_every_secs(0);
+        let reader = test_store(reader_object_store)
+            .with_snapshot_every_entries(0)
+            .with_snapshot_every_secs(0);
+        let mut changes = run_async(reader.subscribe_changes(&connector_id())).unwrap();
+
+        let outcome = run_async(writer.append_object(state(0, None, lease_id(1)))).unwrap();
+        let ConnectorStateAppendOutcome::Committed {
+            object_id,
+            root_object_id,
+            seq,
+            snapshot_object_id,
+        } = outcome
+        else {
+            panic!("unexpected conflict");
+        };
+        assert_eq!(seq, 0);
+        assert_eq!(snapshot_object_id, None);
+
+        let observed = run_async(reader.observe_replicated_root(root_object_id)).unwrap();
+        assert_eq!(observed.kind, ConnectorStateChangeKind::RootUpdated);
+        assert_eq!(observed.object_id, Some(root_object_id));
+        assert_eq!(observed.seq, Some(0));
+
+        let delivered = run_async(changes.next()).unwrap().unwrap();
+        assert_eq!(delivered, observed);
 
         let reader_root = run_async(reader.read_root()).unwrap().expect("root");
         assert_eq!(reader_root.1.head, Some(object_id));

@@ -992,10 +992,19 @@ impl FcpStoreConnectorStateStore {
         state: &ConnectorStateObject,
         authorization: &ConnectorStateWriteAuthorization,
     ) -> Result<()> {
-        let verifying_key = Ed25519VerifyingKey::from_bytes(&authorization.writer_public_key())
-            .map_err(|err| {
+        if state.writer_public_key != authorization.writer_public_key() {
+            return Err(ConnectorStateStoreError::InvalidStateSignature(
+                "state writer key does not match append authorization".to_string(),
+            ));
+        }
+        Self::verify_state_signature(state)
+    }
+
+    fn verify_state_signature(state: &ConnectorStateObject) -> Result<()> {
+        let verifying_key =
+            Ed25519VerifyingKey::from_bytes(&state.writer_public_key).map_err(|err| {
                 ConnectorStateStoreError::InvalidStateSignature(format!(
-                    "authorized writer key rejected: {err}"
+                    "state writer key rejected: {err}"
                 ))
             })?;
         state
@@ -1066,6 +1075,7 @@ impl FcpStoreConnectorStateStore {
                 computed,
             });
         }
+        Self::verify_state_signature(state)?;
         Ok(())
     }
 
@@ -1742,8 +1752,12 @@ mod tests {
         }
     }
 
+    fn test_state_signing_key() -> Ed25519SigningKey {
+        Ed25519SigningKey::from_bytes(&[0x5a; 32]).expect("fixed test signing key should parse")
+    }
+
     fn state(seq: u64, prev: Option<ObjectId>, lease: ObjectId) -> ConnectorStateObject {
-        ConnectorStateObject {
+        let mut state = ConnectorStateObject {
             header: header(
                 FcpStoreConnectorStateStore::state_object_schema_id(),
                 1_700_000_000 + seq,
@@ -1758,8 +1772,13 @@ mod tests {
             updated_at: 1_700_000_000 + seq,
             lease_seq: seq + 10,
             lease_object_id: lease,
+            writer_public_key: [0u8; 32],
             signature: Signature::zero(),
-        }
+        };
+        state
+            .sign_with(&test_state_signing_key())
+            .expect("test connector state should sign");
+        state
     }
 
     fn signed_state(
@@ -2014,6 +2033,26 @@ mod tests {
         assert_eq!(chain[0].0, head);
         assert_eq!(chain[0].1.seq, 0);
         assert_ne!(chain[0].1.lease_object_id, lease_id(7));
+    }
+
+    #[test]
+    fn read_root_rejects_stored_state_with_invalid_signature() {
+        let object_store = store();
+        let state_store = test_store(object_store.clone());
+        let mut bad_state = state(0, None, lease_id(1));
+        bad_state.signature = Signature::zero();
+        let stored = state_store
+            .stored_object(&bad_state.header, &bad_state, RetentionClass::Pinned)
+            .unwrap();
+        let bad_head = stored.object_id;
+        run_async(object_store.put(stored)).unwrap();
+        run_async(state_store.store_root(root_with_head(Some(bad_head), 1_700_000_100))).unwrap();
+
+        let err = run_async(state_store.read_root()).unwrap_err();
+        assert!(matches!(
+            err,
+            ConnectorStateStoreError::InvalidStateSignature(_)
+        ));
     }
 
     #[test]
@@ -2321,7 +2360,7 @@ mod tests {
     }
 
     #[test]
-    fn trait_append_rejects_invalid_state_signature() {
+    fn trait_append_rejects_state_writer_key_mismatch() {
         let state_store = test_store(store());
         let authorization = write_authorization();
 
@@ -2331,6 +2370,27 @@ mod tests {
                 &connector_id(),
                 &authorization,
                 state(0, None, lease_id(1)),
+            ),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ConnectorStateError::MalformedState { .. }));
+        assert!(run_async(state_store.read_root()).unwrap().is_none());
+    }
+
+    #[test]
+    fn trait_append_rejects_invalid_state_signature() {
+        let state_store = test_store(store());
+        let (authorization, signing_key) = write_authorization_with_key();
+        let mut incoming = signed_state(0, None, lease_id(1), &signing_key);
+        incoming.signature = Signature::zero();
+
+        let err = run_async(
+            <FcpStoreConnectorStateStore as ConnectorStateStore>::append_object(
+                &state_store,
+                &connector_id(),
+                &authorization,
+                incoming,
             ),
         )
         .unwrap_err();

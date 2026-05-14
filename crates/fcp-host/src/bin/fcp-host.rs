@@ -23985,6 +23985,7 @@ done"#;
             updated_at: 1_800_200_000 + seq,
             lease_seq: seq + 10,
             lease_object_id,
+            writer_public_key: [0u8; 32],
             signature: fcp_core::Signature::zero(),
         }
     }

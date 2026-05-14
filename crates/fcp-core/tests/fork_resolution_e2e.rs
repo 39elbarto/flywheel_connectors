@@ -210,6 +210,7 @@ fn create_state_object(
         updated_at: 1_700_000_000 + seq,
         lease_seq,
         lease_object_id: test_object_id(&format!("lease-{lease_seq}")),
+        writer_public_key: [0u8; 32],
         signature: Signature::zero(),
     }
 }

@@ -667,6 +667,7 @@ pub struct CursorStore<B: CursorStoreBackend> {
     connector_id: ConnectorId,
     zone_id: ZoneId,
     instance_id: Option<InstanceId>,
+    writer_public_key: [u8; 32],
     head: Option<ObjectId>,
     seq: u64,
     last_cursor: Option<CursorState>,
@@ -681,6 +682,7 @@ impl<B: CursorStoreBackend> CursorStore<B> {
             connector_id,
             zone_id,
             instance_id: None,
+            writer_public_key: [0u8; 32],
             head: None,
             seq: 0,
             last_cursor: None,
@@ -692,6 +694,13 @@ impl<B: CursorStoreBackend> CursorStore<B> {
     #[must_use]
     pub fn with_instance_id(mut self, instance_id: InstanceId) -> Self {
         self.instance_id = Some(instance_id);
+        self
+    }
+
+    /// Attach the Ed25519 writer key whose signature is stored on state objects.
+    #[must_use]
+    pub const fn with_writer_public_key(mut self, writer_public_key: [u8; 32]) -> Self {
+        self.writer_public_key = writer_public_key;
         self
     }
 
@@ -765,6 +774,7 @@ impl<B: CursorStoreBackend> CursorStore<B> {
             updated_at,
             lease_seq: lease.lease_seq,
             lease_object_id: lease.lease_object_id,
+            writer_public_key: self.writer_public_key,
             signature,
         };
 
@@ -3944,6 +3954,7 @@ mod tests {
             updated_at: 1_000_000,
             lease_seq: 1,
             lease_object_id: ObjectId::from_bytes([99; 32]),
+            writer_public_key: [0u8; 32],
             signature: Signature::from_bytes([0u8; 64]),
         };
 

@@ -257,6 +257,7 @@ fn signature_for_object_store_cursor_commit(
         state_cbor,
         lease_seq: lease.lease_seq,
         lease_object_id: lease.lease_object_id,
+        writer_public_key: [0u8; 32],
         signature: Signature::zero(),
     };
     state
@@ -365,7 +366,8 @@ fn cursor_store_object_store_authorized_commit_advances_canonical_root() {
         zone_id.clone(),
     )
     .with_write_authorization(authorization);
-    let mut store = CursorStore::new(backend, connector_id.clone(), zone_id.clone());
+    let mut store = CursorStore::new(backend, connector_id.clone(), zone_id.clone())
+        .with_writer_public_key(signing_key.verifying_key().to_bytes());
 
     let cursor = CursorState {
         offset: Some(64),
@@ -449,6 +451,7 @@ fn cursor_store_object_store_rejects_tampered_recovery_state() {
         updated_at: header.created_at,
         lease_seq: 1,
         lease_object_id,
+        writer_public_key: [0u8; 32],
         signature: Signature::zero(),
     };
     let clean_body =

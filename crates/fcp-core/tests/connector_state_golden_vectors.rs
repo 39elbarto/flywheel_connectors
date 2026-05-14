@@ -106,6 +106,7 @@ fn create_test_state_object(
         updated_at: 1000_u64.saturating_add(seq.saturating_mul(100)),
         lease_seq,
         lease_object_id,
+        writer_public_key: [0u8; 32],
         signature: test_signature(),
     }
 }
@@ -186,6 +187,7 @@ mod cbor_golden_vectors {
         assert_eq!(obj.state_cbor, restored.state_cbor);
         assert_eq!(obj.lease_seq, restored.lease_seq);
         assert_eq!(obj.lease_object_id, restored.lease_object_id);
+        assert_eq!(obj.writer_public_key, restored.writer_public_key);
     }
 
     #[test]
@@ -585,6 +587,7 @@ mod fencing_tests {
             updated_at: 1000,
             lease_seq: 42,
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: test_signature(),
         };
 
@@ -611,6 +614,7 @@ mod fencing_tests {
             updated_at: 1000,
             lease_seq: 42,
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: test_signature(),
         };
 
@@ -644,6 +648,7 @@ mod fencing_tests {
             updated_at: 1000,
             lease_seq: 42, // State object has old lease_seq
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: test_signature(),
         };
 
@@ -677,6 +682,7 @@ mod fencing_tests {
             updated_at: 1000,
             lease_seq: 42,
             lease_object_id: lease_id, // References lease_id but it's not in refs
+            writer_public_key: [0u8; 32],
             signature: test_signature(),
         };
 
@@ -709,6 +715,7 @@ mod fencing_tests {
             updated_at: 1000,
             lease_seq: 100,
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: test_signature(),
         };
 
@@ -735,6 +742,7 @@ mod fencing_tests {
             updated_at: 1000,
             lease_seq: 200, // Higher than current_known_seq
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: test_signature(),
         };
 
@@ -790,6 +798,7 @@ mod fencing_tests {
             updated_at: 1000,
             lease_seq: 50, // Old lease
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: test_signature(),
         };
 
@@ -1234,7 +1243,8 @@ mod adversarial_tests {
             updated_at: 1000,
             lease_seq: 999,                 // Claims high lease_seq
             lease_object_id: fake_lease_id, // But lease not in refs
-            signature: Signature::zero(),   // Invalid signature
+            writer_public_key: [0u8; 32],
+            signature: Signature::zero(), // Invalid signature
         };
 
         // Fencing check fails: lease not in refs
@@ -1310,6 +1320,7 @@ mod adversarial_tests {
             updated_at: 1999, // Just before expiry
             lease_seq: 42,
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: test_signature(),
         };
 

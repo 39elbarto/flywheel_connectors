@@ -150,6 +150,7 @@ fn state(seq: u64, prev: Option<ObjectId>, lease: ObjectId) -> ConnectorStateObj
         updated_at: 1_800_100_000 + seq,
         lease_seq: seq + 10,
         lease_object_id: lease,
+        writer_public_key: [0u8; 32],
         signature: Signature::zero(),
     }
 }

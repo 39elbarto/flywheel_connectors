@@ -601,6 +601,14 @@ pub struct ConnectorStateObject {
     /// This MUST be included in `header.refs` for reference tracking.
     pub lease_object_id: ObjectId,
 
+    /// Ed25519 public key of the writer that signed this state object.
+    ///
+    /// Append authorization verifies this key against the capability-token
+    /// verifier key. Read paths use the embedded key to verify persisted state
+    /// objects without needing the original append witness in memory.
+    #[serde(with = "crate::util::hex_or_bytes")]
+    pub writer_public_key: [u8; 32],
+
     /// Ed25519 signature over the canonical state object.
     pub signature: Signature,
 }
@@ -619,6 +627,8 @@ struct ConnectorStateObjectSigningPayload<'a> {
     updated_at: u64,
     lease_seq: u64,
     lease_object_id: &'a ObjectId,
+    #[serde(with = "crate::util::hex_or_bytes")]
+    writer_public_key: &'a [u8; 32],
 }
 
 /// Error returned while signing or verifying connector state objects.
@@ -659,6 +669,7 @@ impl ConnectorStateObject {
             updated_at: self.updated_at,
             lease_seq: self.lease_seq,
             lease_object_id: &self.lease_object_id,
+            writer_public_key: &self.writer_public_key,
         };
         let cbor = to_canonical_cbor(&payload)?;
         Ok(canonical_signing_bytes(
@@ -673,9 +684,21 @@ impl ConnectorStateObject {
     /// Returns a [`SerializationError`] if canonical signing bytes cannot be
     /// constructed.
     pub fn sign_with(&mut self, signing_key: &Ed25519SigningKey) -> Result<(), SerializationError> {
+        self.writer_public_key = signing_key.verifying_key().to_bytes();
         let signature = signing_key.sign(&self.signing_bytes()?);
         self.signature = Signature::from_bytes(signature.to_bytes());
         Ok(())
+    }
+
+    /// Verify this state object's signature with its embedded writer key.
+    ///
+    /// # Errors
+    /// Returns [`ConnectorStateSignatureError`] when the embedded writer key is
+    /// malformed, the signing transcript cannot be constructed, or the
+    /// signature does not verify.
+    pub fn verify_signature(&self) -> Result<(), ConnectorStateSignatureError> {
+        let verifying_key = Ed25519VerifyingKey::from_bytes(&self.writer_public_key)?;
+        self.verify_signature_with(&verifying_key)
     }
 
     /// Verify this state object signature with the supplied Ed25519 key.
@@ -3429,6 +3452,7 @@ mod tests {
             updated_at: 1_700_000_000,
             lease_seq: 1,
             lease_object_id: test_object_id("lease"),
+            writer_public_key: [0u8; 32],
             signature: Signature::zero(),
         };
 
@@ -3652,6 +3676,7 @@ mod tests {
             updated_at: 1_700_000_000,
             lease_seq: 1,
             lease_object_id,
+            writer_public_key: verifying_key.to_bytes(),
             signature: Signature::zero(),
         };
 
@@ -3660,6 +3685,7 @@ mod tests {
 
         assert_ne!(state_obj.signature, Signature::zero());
         assert_eq!(state_obj.signing_bytes().unwrap(), unsigned_signing_bytes);
+        state_obj.verify_signature().unwrap();
         state_obj.verify_signature_with(&verifying_key).unwrap();
         assert!(state_obj.verify_signature_with(&wrong_key).is_err());
 
@@ -4354,6 +4380,7 @@ mod tests {
             updated_at: 1_700_000_000,
             lease_seq: 1,
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: Signature::zero(),
         };
         assert!(genesis.is_genesis());
@@ -4626,6 +4653,7 @@ mod tests {
             updated_at: 1_700_000_000,
             lease_seq: 42,
             lease_object_id: test_object_id("lease-1"),
+            writer_public_key: [0u8; 32],
             signature: Signature::zero(),
         };
         let cloned = Clone::clone(&obj);
@@ -4646,6 +4674,7 @@ mod tests {
             updated_at: 1_700_000_000,
             lease_seq: 10,
             lease_object_id: test_object_id("lease-2"),
+            writer_public_key: [0u8; 32],
             signature: Signature::zero(),
         };
         let json = serde_json::to_string(&obj).unwrap();
@@ -5300,6 +5329,7 @@ mod tests {
             updated_at: 1_000,
             lease_seq: 10,
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: Signature::zero(),
         };
         assert!(validate_singleton_writer_fencing(&obj, 10, 500, 1000).is_ok());
@@ -5321,6 +5351,7 @@ mod tests {
             updated_at: 1_000,
             lease_seq: 10,
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: Signature::zero(),
         };
         let err = validate_singleton_writer_fencing(&obj, 10, 2000, 1000).unwrap_err();
@@ -5343,6 +5374,7 @@ mod tests {
             updated_at: 1_000,
             lease_seq: 5,
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: Signature::zero(),
         };
         let err = validate_singleton_writer_fencing(&obj, 10, 500, 1000).unwrap_err();
@@ -5364,6 +5396,7 @@ mod tests {
             updated_at: 1_000,
             lease_seq: 10,
             lease_object_id: lease_id,
+            writer_public_key: [0u8; 32],
             signature: Signature::zero(),
         };
         let err = validate_singleton_writer_fencing(&obj, 10, 500, 1000).unwrap_err();

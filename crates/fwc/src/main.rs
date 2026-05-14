@@ -8051,6 +8051,11 @@ fn connector_state_explain_dispatch(
             .get("source")
             .cloned()
             .unwrap_or_else(|| Value::String("host-admin-api".to_owned()));
+        let host_evidence_description = match host_payload_source.as_str() {
+            Some("host-canonical-state") => "live fcp-host canonical fcp-store state",
+            Some("host-cache-markers") => "live fcp-host cache-marker evidence",
+            _ => "live fcp-host admin API evidence",
+        };
         if let Some(object) = payload.as_object_mut() {
             object.insert("command".to_owned(), Value::String("connector".to_owned()));
             object.insert(
@@ -8065,8 +8070,8 @@ fn connector_state_explain_dispatch(
             object.insert(
                 "message".to_owned(),
                 Value::String(format!(
-                    "Explained connector state storage for `{}` from live fcp-host cache-marker evidence.",
-                    connector.slug
+                    "Explained connector state storage for `{}` from {host_evidence_description}.",
+                    connector.slug,
                 )),
             );
             object.insert(
@@ -34483,6 +34488,83 @@ deny_ptrace = true
                 .is_some_and(|hash| hash.starts_with("sha256:"))
         );
         assert_eq!(payload["zone"]["requested"], "z:work");
+    }
+
+    #[test]
+    fn execute_connector_state_explain_with_host_preserves_canonical_state_evidence() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/admin/connectors/fcp.github:enterprise:v1/state/explain?zone=z%3Awork"
+                        .to_owned(),
+                    json!({
+                        "status": "ok",
+                        "command": "fcp-host",
+                        "subcommand": "connector state explain",
+                        "schema_version": "1.0.0",
+                        "source": "host-canonical-state",
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "canonical_storage": "mesh",
+                        "last_canonical_seq": 7,
+                        "mesh_replica_count": 3,
+                        "canonical_state": {
+                            "root_present": true,
+                            "connector_id": "fcp.github:enterprise:v1",
+                            "zone_id": "z:work",
+                            "root_object_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                            "head_object_id": "2222222222222222222222222222222222222222222222222222222222222222",
+                            "state_schema_version": 1,
+                            "status_source": "fcp-store",
+                        },
+                        "local_cache_present": true,
+                        "local_cache_marker_present": true,
+                        "live_host": {
+                            "requested": true,
+                            "state": "queried",
+                            "route_available": true,
+                            "route": "/rpc/admin/connectors/{connector_id}/state/explain",
+                        },
+                        "zone": {
+                            "requested": "z:work",
+                            "local_cache_marker_present": true,
+                            "cache_marker_status": "present",
+                        },
+                        "warnings": [],
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "connector",
+            "state",
+            "explain",
+            "--connector",
+            "github",
+            "--zone",
+            "z:work",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["host_payload_source"], "host-canonical-state");
+        assert_eq!(payload["last_canonical_seq"], 7);
+        assert_eq!(payload["mesh_replica_count"], 3);
+        assert_eq!(payload["canonical_state"]["root_present"], true);
+        assert_eq!(
+            payload["message"],
+            "Explained connector state storage for `github` from live fcp-host canonical fcp-store state."
+        );
     }
 
     #[test]

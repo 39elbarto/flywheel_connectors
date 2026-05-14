@@ -2490,6 +2490,22 @@ impl MeshGossip {
             .is_some_and(|s| s.has_symbol(object_id, esi))
     }
 
+    /// Maximum object IDs accepted in one bounded gossip request/response.
+    #[must_use]
+    pub fn max_objects_per_request(&self) -> usize {
+        self.config
+            .max_objects_per_request
+            .min(MAX_OBJECT_IDS_PER_REQUEST)
+    }
+
+    /// Maximum symbol IDs accepted in one bounded gossip request/response.
+    #[must_use]
+    pub fn max_symbols_per_request(&self) -> usize {
+        self.config
+            .max_symbols_per_request
+            .min(MAX_OBJECT_IDS_PER_REQUEST)
+    }
+
     /// Create a bounded request for objects we're missing.
     #[must_use]
     pub fn create_request(
@@ -2498,10 +2514,7 @@ impl MeshGossip {
         object_ids: Vec<ObjectId>,
         now: u64,
     ) -> GossipRequest {
-        let max_objects = self
-            .config
-            .max_objects_per_request
-            .min(MAX_OBJECT_IDS_PER_REQUEST);
+        let max_objects = self.max_objects_per_request();
         let bounded: Vec<_> = object_ids.into_iter().take(max_objects).collect();
         debug!(
             component = "mesh.gossip",
@@ -2517,14 +2530,8 @@ impl MeshGossip {
     /// Handle a request from a peer.
     #[must_use]
     pub fn handle_request(&self, request: &GossipRequest) -> GossipResponse {
-        let max_objects = self
-            .config
-            .max_objects_per_request
-            .min(MAX_OBJECT_IDS_PER_REQUEST);
-        let max_symbols = self
-            .config
-            .max_symbols_per_request
-            .min(MAX_OBJECT_IDS_PER_REQUEST);
+        let max_objects = self.max_objects_per_request();
+        let max_symbols = self.max_symbols_per_request();
         let objects_requested = request.object_ids.len();
         let symbols_requested = request.symbols.len();
         let request_size = objects_requested + symbols_requested;

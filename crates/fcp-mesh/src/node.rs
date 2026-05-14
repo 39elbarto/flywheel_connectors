@@ -374,6 +374,19 @@ pub struct GossipFollowupRequest {
     pub request: GossipRequest,
 }
 
+/// Verified peer availability that should be fetched by the transport layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GossipFetchPlan {
+    /// Peer that advertised the available objects/symbols.
+    pub peer: TailscaleNodeId,
+    /// Zone the advertised objects/symbols belong to.
+    pub zone_id: ZoneId,
+    /// Missing objects this node should fetch from `peer`.
+    pub object_ids: Vec<ObjectId>,
+    /// Missing symbols this node should fetch from `peer`.
+    pub symbols: Vec<(ObjectId, u32)>,
+}
+
 /// Structured result of dispatching an inbound gossip message.
 #[must_use]
 #[derive(Debug, Clone, Default)]
@@ -386,6 +399,8 @@ pub struct GossipDispatchOutcome {
     pub reconcile_response: Option<ReconcileResponse>,
     /// Follow-up request the transport should send to the selected peer.
     pub followup_request: Option<GossipFollowupRequest>,
+    /// Verified availability that the transport should fetch from a peer.
+    pub fetch_plan: Option<GossipFetchPlan>,
 }
 
 impl GossipDispatchOutcome {
@@ -395,6 +410,7 @@ impl GossipDispatchOutcome {
             response: None,
             reconcile_response: None,
             followup_request: None,
+            fetch_plan: None,
         }
     }
 
@@ -404,6 +420,7 @@ impl GossipDispatchOutcome {
             response: Some(response),
             reconcile_response: None,
             followup_request: None,
+            fetch_plan: None,
         }
     }
 
@@ -413,6 +430,7 @@ impl GossipDispatchOutcome {
             response: None,
             reconcile_response: Some(reconcile_response),
             followup_request: None,
+            fetch_plan: None,
         }
     }
 
@@ -422,6 +440,17 @@ impl GossipDispatchOutcome {
             response: None,
             reconcile_response: None,
             followup_request: Some(followup_request),
+            fetch_plan: None,
+        }
+    }
+
+    fn with_fetch_plan(fetch_plan: GossipFetchPlan) -> Self {
+        Self {
+            revocation_push: None,
+            response: None,
+            reconcile_response: None,
+            followup_request: None,
+            fetch_plan: Some(fetch_plan),
         }
     }
 }
@@ -1811,6 +1840,63 @@ impl MeshNode {
         Ok(peer)
     }
 
+    fn verify_gossip_response(
+        &self,
+        response: &GossipResponse,
+        now_secs: u64,
+    ) -> Result<NodeId, MeshNodeError> {
+        if response.to != self.local_node_ts {
+            return Err(MeshNodeError::RecipientMismatch {
+                message_kind: "gossip response",
+                expected: self.local_node_ts.as_str().to_string(),
+                actual: response.to.as_str().to_string(),
+            });
+        }
+
+        let peer = NodeId::new(response.from.as_str());
+        let state = self
+            .peers
+            .get(&peer)
+            .ok_or_else(|| MeshNodeError::UnknownPeer {
+                peer: peer.as_str().to_string(),
+                message_kind: "gossip response",
+            })?;
+        if !state.zones.contains(&response.zone_id) {
+            return Err(MeshNodeError::UnauthorizedZone {
+                peer: peer.as_str().to_string(),
+                zone_id: response.zone_id.to_string(),
+            });
+        }
+
+        let max_objects = self.gossip.max_objects_per_request();
+        let max_symbols = self.gossip.max_symbols_per_request();
+        if response.have_objects.len() > max_objects || response.have_symbols.len() > max_symbols {
+            return Err(MeshNodeError::GossipDecode(format!(
+                "gossip response from {} for zone {} exceeded availability budget: have_objects={}, have_symbols={}, max_objects={}, max_symbols={}",
+                response.from.as_str(),
+                response.zone_id,
+                response.have_objects.len(),
+                response.have_symbols.len(),
+                max_objects,
+                max_symbols
+            )));
+        }
+
+        if crate::gossip::is_outside_freshness_window(
+            response.timestamp,
+            now_secs,
+            self.gossip.summary_ttl_secs(),
+            self.gossip.max_future_skew_secs(),
+        ) {
+            return Err(MeshNodeError::StaleGossipMessage {
+                peer: peer.as_str().to_string(),
+                message_kind: "gossip response",
+            });
+        }
+
+        Ok(peer)
+    }
+
     fn verify_reconcile_request(
         &self,
         request: &ReconcileRequest,
@@ -2061,6 +2147,54 @@ impl MeshNode {
         Ok(self.gossip.handle_request(&request))
     }
 
+    /// Verify a bounded gossip response and surface missing fetch candidates.
+    ///
+    /// The response only advertises availability; the caller still owns the
+    /// transport/storage fetch that moves object or symbol bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the response is for another recipient, the peer
+    /// is unknown, the peer is not authorized for the zone, the timestamp is
+    /// stale, or the advertised availability exceeds configured budgets.
+    #[allow(clippy::needless_pass_by_value)] // by-value API mirrors handle_gossip_request
+    pub fn handle_gossip_response(
+        &mut self,
+        response: GossipResponse,
+        now_secs: u64,
+    ) -> Result<Option<GossipFetchPlan>, MeshNodeError> {
+        self.verify_gossip_response(&response, now_secs)?;
+
+        let GossipResponse {
+            from,
+            to: _,
+            zone_id,
+            have_objects,
+            have_symbols,
+            timestamp: _,
+        } = response;
+
+        let object_ids: Vec<_> = have_objects
+            .into_iter()
+            .filter(|object_id| !self.gossip.has_object(&zone_id, object_id))
+            .collect();
+        let symbols: Vec<_> = have_symbols
+            .into_iter()
+            .filter(|(object_id, esi)| !self.gossip.has_symbol(&zone_id, object_id, *esi))
+            .collect();
+
+        if object_ids.is_empty() && symbols.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(GossipFetchPlan {
+            peer: from,
+            zone_id,
+            object_ids,
+            symbols,
+        }))
+    }
+
     /// Verify and answer a bounded IBLT reconcile request.
     ///
     /// # Errors
@@ -2162,14 +2296,14 @@ impl MeshNode {
             GossipMessage::Request(request) => self
                 .handle_gossip_request(request, now_secs)
                 .map(GossipDispatchOutcome::with_response),
-            GossipMessage::Response(response) => {
-                debug!(
-                    peer_id = %response.from.as_str(),
-                    zone_id = %response.zone_id,
-                    "gossip response is caller-managed; MeshNode has no inbound response state machine yet"
-                );
-                Ok(GossipDispatchOutcome::default())
-            }
+            GossipMessage::Response(response) => self
+                .handle_gossip_response(response, now_secs)
+                .map(|fetch_plan| {
+                    fetch_plan.map_or_else(
+                        GossipDispatchOutcome::default,
+                        GossipDispatchOutcome::with_fetch_plan,
+                    )
+                }),
             GossipMessage::ReconcileRequest(request) => self
                 .handle_reconcile_request(request, now_secs)
                 .map(|response| {
@@ -4637,6 +4771,99 @@ mod tests {
         assert_eq!(response.zone_id, ZoneId::work());
         assert_eq!(response.have_objects, vec![known_object]);
         assert!(response.have_symbols.is_empty());
+    }
+
+    #[test]
+    fn dispatch_gossip_payload_routes_response_to_fetch_plan() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
+
+        let zone_id = ZoneId::work();
+        let known_object = ObjectId::from_bytes([0x61; 32]);
+        let missing_object = ObjectId::from_bytes([0x62; 32]);
+        let known_symbol_object = ObjectId::from_bytes([0x63; 32]);
+        let missing_symbol_object = ObjectId::from_bytes([0x64; 32]);
+        assert!(node.announce_object(
+            &zone_id,
+            &known_object,
+            ObjectAdmissionClass::Admitted,
+            1_000,
+        ));
+        assert!(node.announce_symbol(
+            &zone_id,
+            &known_symbol_object,
+            7,
+            ObjectAdmissionClass::Admitted,
+            1_000,
+        ));
+
+        let response = GossipResponse {
+            from: TailscaleNodeId::new("peer-1"),
+            to: TailscaleNodeId::new("node-1"),
+            zone_id: zone_id.clone(),
+            have_objects: vec![known_object, missing_object],
+            have_symbols: vec![(known_symbol_object, 7), (missing_symbol_object, 3)],
+            timestamp: 1_000,
+        };
+        let payload = serde_json::to_vec(&GossipMessage::Response(response)).expect("JSON encode");
+
+        let outcome = node
+            .dispatch_gossip_payload(&payload, 1_000)
+            .expect("dispatch should succeed");
+        assert!(outcome.revocation_push.is_none());
+        assert!(outcome.response.is_none());
+        assert!(outcome.reconcile_response.is_none());
+        assert!(outcome.followup_request.is_none());
+        let fetch_plan = outcome
+            .fetch_plan
+            .expect("response dispatch must surface missing fetch candidates");
+        assert_eq!(fetch_plan.peer, TailscaleNodeId::new("peer-1"));
+        assert_eq!(fetch_plan.zone_id, zone_id);
+        assert_eq!(fetch_plan.object_ids, vec![missing_object]);
+        assert_eq!(fetch_plan.symbols, vec![(missing_symbol_object, 3)]);
+    }
+
+    #[test]
+    fn dispatch_gossip_payload_rejects_response_for_different_recipient() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
+
+        let response = GossipResponse {
+            from: TailscaleNodeId::new("peer-1"),
+            to: TailscaleNodeId::new("node-2"),
+            zone_id: ZoneId::work(),
+            have_objects: vec![ObjectId::from_bytes([0x65; 32])],
+            have_symbols: Vec::new(),
+            timestamp: 1_000,
+        };
+        let payload = serde_json::to_vec(&GossipMessage::Response(response)).expect("JSON encode");
+
+        let err = node
+            .dispatch_gossip_payload(&payload, 1_000)
+            .expect_err("response for another recipient must be rejected");
+        assert!(matches!(
+            err,
+            MeshNodeError::RecipientMismatch {
+                message_kind: "gossip response",
+                ..
+            }
+        ));
     }
 
     #[test]

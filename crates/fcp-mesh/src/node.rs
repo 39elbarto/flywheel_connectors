@@ -46,8 +46,8 @@ use crate::degraded::{
 use crate::device::DeviceProfile;
 use crate::gossip::{
     GossipConfig, GossipMessage, GossipRequest, GossipResponse, GossipSummary, IbltPlaceholder,
-    MeshGossip, PeerCapabilityAdvertisement, PeerProtocolCapabilities, ReconcileRequest,
-    ReconcileResponse, RevocationPushMessage,
+    MAX_OBJECT_IDS_PER_REQUEST, MeshGossip, PeerCapabilityAdvertisement, PeerProtocolCapabilities,
+    ReconcileRequest, ReconcileResponse, RevocationPushMessage,
 };
 use crate::planner::{
     CandidateNode, ExecutionPlanner, HeldLease, LeasePurpose, NodeInfo, PlannerContext,
@@ -365,6 +365,15 @@ pub struct VerifiedRevocationPush {
     pub timestamp: u64,
 }
 
+/// Outbound gossip request produced while handling an inbound control-plane message.
+#[derive(Debug, Clone)]
+pub struct GossipFollowupRequest {
+    /// Peer the transport should send this request to.
+    pub peer: TailscaleNodeId,
+    /// Bounded request body to send.
+    pub request: GossipRequest,
+}
+
 /// Structured result of dispatching an inbound gossip message.
 #[must_use]
 #[derive(Debug, Clone, Default)]
@@ -375,6 +384,8 @@ pub struct GossipDispatchOutcome {
     pub response: Option<GossipResponse>,
     /// Immediate reconcile response the transport should return to the requester.
     pub reconcile_response: Option<ReconcileResponse>,
+    /// Follow-up request the transport should send to the selected peer.
+    pub followup_request: Option<GossipFollowupRequest>,
 }
 
 impl GossipDispatchOutcome {
@@ -383,6 +394,7 @@ impl GossipDispatchOutcome {
             revocation_push: Some(revocation_push),
             response: None,
             reconcile_response: None,
+            followup_request: None,
         }
     }
 
@@ -391,6 +403,7 @@ impl GossipDispatchOutcome {
             revocation_push: None,
             response: Some(response),
             reconcile_response: None,
+            followup_request: None,
         }
     }
 
@@ -399,6 +412,16 @@ impl GossipDispatchOutcome {
             revocation_push: None,
             response: None,
             reconcile_response: Some(reconcile_response),
+            followup_request: None,
+        }
+    }
+
+    fn with_followup_request(followup_request: GossipFollowupRequest) -> Self {
+        Self {
+            revocation_push: None,
+            response: None,
+            reconcile_response: None,
+            followup_request: Some(followup_request),
         }
     }
 }
@@ -1823,6 +1846,53 @@ impl MeshNode {
         Ok(peer)
     }
 
+    fn verify_reconcile_response(
+        &self,
+        response: &ReconcileResponse,
+        now_secs: u64,
+    ) -> Result<NodeId, MeshNodeError> {
+        let peer = NodeId::new(response.from.as_str());
+
+        let state = self
+            .peers
+            .get(&peer)
+            .ok_or_else(|| MeshNodeError::UnknownPeer {
+                peer: peer.as_str().to_string(),
+                message_kind: "reconcile response",
+            })?;
+        if !state.zones.contains(&response.zone_id) {
+            return Err(MeshNodeError::UnauthorizedZone {
+                peer: peer.as_str().to_string(),
+                zone_id: response.zone_id.to_string(),
+            });
+        }
+        if response.peer_missing_objects.len() > MAX_OBJECT_IDS_PER_REQUEST
+            || response.we_missing_objects.len() > MAX_OBJECT_IDS_PER_REQUEST
+        {
+            return Err(MeshNodeError::GossipDecode(format!(
+                "reconcile response from {} for zone {} exceeded object budget: peer_missing={}, we_missing={}, max={}",
+                response.from.as_str(),
+                response.zone_id,
+                response.peer_missing_objects.len(),
+                response.we_missing_objects.len(),
+                MAX_OBJECT_IDS_PER_REQUEST
+            )));
+        }
+        if crate::gossip::is_outside_freshness_window(
+            response.timestamp,
+            now_secs,
+            self.gossip.summary_ttl_secs(),
+            self.gossip.max_future_skew_secs(),
+        ) {
+            return Err(MeshNodeError::StaleGossipMessage {
+                peer: peer.as_str().to_string(),
+                message_kind: "reconcile response",
+            });
+        }
+
+        Ok(peer)
+    }
+
     async fn load_symbol_meta(
         &self,
         request: &SymbolRequest,
@@ -2027,10 +2097,46 @@ impl MeshNode {
         ))
     }
 
+    /// Verify a reconcile response and produce the next bounded object request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the responder is unknown, not authorized for the
+    /// claimed zone, stale, or sends over-budget object lists.
+    #[allow(clippy::needless_pass_by_value)] // by-value API mirrors handle_reconcile_request
+    pub fn handle_reconcile_response(
+        &mut self,
+        response: ReconcileResponse,
+        now_secs: u64,
+    ) -> Result<Option<GossipFollowupRequest>, MeshNodeError> {
+        self.verify_reconcile_response(&response, now_secs)?;
+
+        let target_peer = response.from.clone();
+        let zone_id = response.zone_id.clone();
+        let missing_objects: Vec<_> = response
+            .we_missing_objects
+            .into_iter()
+            .filter(|object_id| !self.gossip.has_object(&zone_id, object_id))
+            .collect();
+
+        if missing_objects.is_empty() {
+            return Ok(None);
+        }
+
+        let request = self
+            .gossip
+            .create_request(&zone_id, missing_objects, now_secs);
+        Ok(Some(GossipFollowupRequest {
+            peer: target_peer,
+            request,
+        }))
+    }
+
     /// Dispatch a gossip control-plane message through the verified node entrypoint.
     ///
     /// Returns any verified revocation push plus an immediate gossip
-    /// response that the transport should return to the requester.
+    /// response that the transport should return to the requester, or a
+    /// bounded follow-up request the transport should send to a peer.
     ///
     /// # Errors
     ///
@@ -2072,14 +2178,14 @@ impl MeshNode {
                         GossipDispatchOutcome::with_reconcile_response,
                     )
                 }),
-            GossipMessage::ReconcileResponse(response) => {
-                debug!(
-                    peer_id = %response.from.as_str(),
-                    zone_id = %response.zone_id,
-                    "reconcile response is deferred until the stateful reconcile dispatch path lands"
-                );
-                Ok(GossipDispatchOutcome::default())
-            }
+            GossipMessage::ReconcileResponse(response) => self
+                .handle_reconcile_response(response, now_secs)
+                .map(|followup| {
+                    followup.map_or_else(
+                        GossipDispatchOutcome::default,
+                        GossipDispatchOutcome::with_followup_request,
+                    )
+                }),
         }
     }
 
@@ -4585,6 +4691,57 @@ mod tests {
         assert!(response.peer_missing_objects.contains(&local_only));
         assert_eq!(response.we_missing_objects.len(), 1);
         assert!(response.we_missing_objects.contains(&peer_only));
+    }
+
+    #[test]
+    fn dispatch_gossip_payload_routes_reconcile_response_to_followup_request() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
+
+        let zone_id = ZoneId::work();
+        let already_known = ObjectId::from_bytes([0x51; 32]);
+        let missing = ObjectId::from_bytes([0x52; 32]);
+        let peer_missing = ObjectId::from_bytes([0x53; 32]);
+        assert!(node.announce_object(
+            &zone_id,
+            &already_known,
+            ObjectAdmissionClass::Admitted,
+            1_000,
+        ));
+
+        let response = ReconcileResponse {
+            from: TailscaleNodeId::new("peer-1"),
+            zone_id: zone_id.clone(),
+            peer_missing_objects: vec![peer_missing],
+            we_missing_objects: vec![already_known, missing],
+            timestamp: 1_000,
+        };
+        let payload =
+            serde_json::to_vec(&GossipMessage::ReconcileResponse(response)).expect("JSON encode");
+
+        let outcome = node
+            .dispatch_gossip_payload(&payload, 1_000)
+            .expect("dispatch should succeed");
+        assert!(outcome.revocation_push.is_none());
+        assert!(outcome.response.is_none());
+        assert!(outcome.reconcile_response.is_none());
+        let followup = outcome
+            .followup_request
+            .expect("reconcile response must surface a follow-up request");
+        assert_eq!(followup.peer, TailscaleNodeId::new("peer-1"));
+        assert_eq!(followup.request.from, TailscaleNodeId::new("node-1"));
+        assert_eq!(followup.request.zone_id, zone_id);
+        assert_eq!(followup.request.object_ids, vec![missing]);
+        assert!(followup.request.symbols.is_empty());
+        assert_eq!(followup.request.timestamp, 1_000);
     }
 
     #[test]

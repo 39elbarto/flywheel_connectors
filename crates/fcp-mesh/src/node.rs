@@ -15,13 +15,16 @@ use std::sync::Arc;
 
 use fcp_crypto::{CwtClaims, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_prelude::{
-    CapabilityVerifier, FcpError, InvokeRequest, InvokeValidationError, ObjectId, OperationIntent,
-    OperationReceipt, RevocationRegistry, TailscaleNodeId, ZoneId, ZoneKey, ZoneKeyAlgorithm,
-    ZoneTransportPolicy,
+    CapabilityVerifier, ConnectorStateChange, FcpError, InvokeRequest, InvokeValidationError,
+    ObjectId, OperationIntent, OperationReceipt, RevocationRegistry, TailscaleNodeId, ZoneId,
+    ZoneKey, ZoneKeyAlgorithm, ZoneTransportPolicy,
 };
 use fcp_protocol::{DecodeStatus, SymbolAck, SymbolRequest};
 use fcp_raptorq::RaptorQConfig;
-use fcp_store::{ObjectStore, QuarantineStore, SymbolStore};
+use fcp_store::{
+    ConnectorStateStoreError, FcpStoreConnectorStateStore, ObjectStore, QuarantineStore,
+    SymbolStore,
+};
 use fcp_tailscale::NodeId;
 use fcp_telemetry::TraceContext;
 use fcp_telemetry::trace_capture::{
@@ -1185,6 +1188,33 @@ impl MeshNode {
             }
         }
         added
+    }
+
+    /// Observe a replicated connector-state root and announce it through gossip.
+    ///
+    /// `fcp-store` owns root validation and cache invalidation; `fcp-mesh`
+    /// owns object availability gossip. This bridge keeps that dependency
+    /// direction acyclic while making a validated root visible to peers after
+    /// the object has arrived locally.
+    ///
+    /// # Errors
+    /// Returns an error if the state store rejects the root object as missing,
+    /// malformed, foreign to the connector+zone store, or referencing a missing
+    /// head object.
+    pub async fn observe_connector_state_root(
+        &mut self,
+        state_store: &FcpStoreConnectorStateStore,
+        root_object_id: ObjectId,
+        now_ms: u64,
+    ) -> Result<ConnectorStateChange, ConnectorStateStoreError> {
+        let change = state_store.observe_replicated_root(root_object_id).await?;
+        self.announce_object(
+            &change.zone_id,
+            &root_object_id,
+            ObjectAdmissionClass::Admitted,
+            now_ms,
+        );
+        Ok(change)
     }
 
     /// Announce a symbol for gossip (admitted objects only).
@@ -2441,8 +2471,13 @@ mod tests {
     use crate::device::DeviceProfileBuilder;
     use crate::planner::{LeasePurpose, PlannerContext};
     use bytes::Bytes;
+    use fcp_cbor::CanonicalSerializer;
     use fcp_crypto::Ed25519SigningKey;
-    use fcp_prelude::{EpochId, ObjectId, TailscaleNodeId, ZoneId, ZoneKeyId};
+    use fcp_prelude::{
+        ConnectorId, ConnectorStateChangeKind, ConnectorStateModel, ConnectorStateRoot, EpochId,
+        EvictionPolicy, ObjectHeader, ObjectId, ObjectIdKey, Provenance, StorageMeta, StoredObject,
+        TailscaleNodeId, ZoneId, ZoneKeyId,
+    };
     use fcp_protocol::session::{
         MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, TransportLimits,
     };
@@ -3279,6 +3314,87 @@ mod tests {
         let added =
             node.announce_object(&zone_id, &object_id, ObjectAdmissionClass::Admitted, 1000);
         assert!(added);
+        assert_eq!(node.metrics().gossip_announcements, 1);
+    }
+
+    #[test]
+    fn observe_connector_state_root_announces_validated_root_for_gossip() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let connector_id = ConnectorId::from_static("fcp:test:1.0.0");
+        let object_id_key = ObjectIdKey::from_bytes([0x42; 32]);
+        let state_store = FcpStoreConnectorStateStore::new(
+            Arc::clone(node.object_store()),
+            object_id_key,
+            connector_id.clone(),
+            zone_id.clone(),
+        );
+
+        let schema = FcpStoreConnectorStateStore::root_schema_id();
+        let header = ObjectHeader {
+            schema: schema.clone(),
+            zone_id: zone_id.clone(),
+            created_at: 42,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: Vec::new(),
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        };
+        let root = ConnectorStateRoot {
+            header: header.clone(),
+            connector_id,
+            instance_id: None,
+            zone_id: zone_id.clone(),
+            model: ConnectorStateModel::SingletonWriter,
+            head: None,
+            state_schema_version: 1,
+        };
+        let body = CanonicalSerializer::serialize(&root, &schema).expect("serialize root");
+        let root_object_id =
+            StoredObject::derive_id(&header, &body, &object_id_key).expect("derive root id");
+        let stored = StoredObject {
+            object_id: root_object_id,
+            header,
+            body,
+            storage: StorageMeta {
+                retention: EvictionPolicy::Pinned,
+            },
+        };
+
+        fcp_async_core::runtime::block_on_sync(async {
+            node.object_store().put(stored).await.expect("put root");
+            let change = node
+                .observe_connector_state_root(&state_store, root_object_id, 42_000)
+                .await
+                .expect("observe root");
+            assert_eq!(change.kind, ConnectorStateChangeKind::RootUpdated);
+            assert_eq!(change.object_id, Some(root_object_id));
+            assert_eq!(change.zone_id, zone_id);
+            assert_eq!(change.seq, None);
+        })
+        .expect("runtime");
+
+        let peer = NodeId::new("peer-1");
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            Vec::new(),
+            42_000,
+        );
+        node.update_peer_zones(&peer, zone_set(zone_id.clone()));
+
+        let request = GossipRequest::for_objects(
+            TailscaleNodeId::new("peer-1"),
+            zone_id,
+            vec![root_object_id],
+            42,
+        );
+        let response = node
+            .handle_gossip_request(request, 42)
+            .expect("gossip request");
+        assert_eq!(response.have_objects, vec![root_object_id]);
         assert_eq!(node.metrics().gossip_announcements, 1);
     }
 

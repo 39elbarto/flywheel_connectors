@@ -155,7 +155,7 @@ impl FcpConnector for GoogleSheetsAdapter {
     }
 }
 
-fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
+fn handshake_request(host_public_key: [u8; 32], instance_id: &InstanceId) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0".to_string(),
         zone: ZoneId::work(),
@@ -165,11 +165,11 @@ fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
         capabilities_requested: vec![CapabilityId::from_static(CAP_READ)],
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        requested_instance_id: Some(instance_id.clone()),
     }
 }
 
-fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+fn build_token(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec![format!("google-sheets:spreadsheet:{SPREADSHEET_ID}")],
@@ -181,6 +181,7 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
     let raw = CapabilityTokenBuilder::new()
         .capability_id(CAP_READ)
         .zone_id("z:work")
+        .target_instance(instance_id.as_str())
         .principal("user:test")
         .operations(&[OP_GET_VALUES])
         .issuer("node:test")
@@ -194,7 +195,11 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
     CapabilityToken::from_raw(raw)
 }
 
-fn get_values_invoke(signing_key: &Ed25519SigningKey, id: &'static str) -> InvokeRequest {
+fn get_values_invoke(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
+    id: &'static str,
+) -> InvokeRequest {
     InvokeRequest {
         r#type: "invoke".to_string(),
         id: RequestId::new(id),
@@ -205,7 +210,7 @@ fn get_values_invoke(signing_key: &Ed25519SigningKey, id: &'static str) -> Invok
             "spreadsheet_id": SPREADSHEET_ID,
             "range": RANGE
         }),
-        capability_token: build_token(signing_key),
+        capability_token: build_token(signing_key, instance_id),
         holder_proof: None,
         context: None,
         idempotency_key: None,
@@ -236,7 +241,8 @@ async fn connector_suite_happy_path_reads_values() {
         .await;
 
     let signing_key = Ed25519SigningKey::generate();
-    let invoke = get_values_invoke(&signing_key, "google-sheets-connector-suite");
+    let instance_id = InstanceId::new();
+    let invoke = get_values_invoke(&signing_key, &instance_id, "google-sheets-connector-suite");
 
     let suite = ConnectorSuite {
         test_name: "google_sheets_get_values_happy_path".to_string(),
@@ -244,7 +250,7 @@ async fn connector_suite_happy_path_reads_values() {
             "access_token": "ya29_test_sheets",
             "base_url": format!("{}/v4", server.uri()),
         }),
-        handshake: handshake_request(signing_key.verifying_key().to_bytes()),
+        handshake: handshake_request(signing_key.verifying_key().to_bytes(), &instance_id),
         invoke: Some(invoke),
         invoke_expectations: InvokeExpectations::default(),
     };
@@ -295,7 +301,12 @@ async fn connector_suite_error_path_reports_unauthorized_get_values() {
         .await;
 
     let signing_key = Ed25519SigningKey::generate();
-    let invoke = get_values_invoke(&signing_key, "google-sheets-connector-suite-unauthorized");
+    let instance_id = InstanceId::new();
+    let invoke = get_values_invoke(
+        &signing_key,
+        &instance_id,
+        "google-sheets-connector-suite-unauthorized",
+    );
 
     let suite = ConnectorSuite {
         test_name: "google_sheets_get_values_unauthorized".to_string(),
@@ -303,7 +314,7 @@ async fn connector_suite_error_path_reports_unauthorized_get_values() {
             "access_token": "ya29_test_sheets",
             "base_url": format!("{}/v4", server.uri()),
         }),
-        handshake: handshake_request(signing_key.verifying_key().to_bytes()),
+        handshake: handshake_request(signing_key.verifying_key().to_bytes(), &instance_id),
         invoke: Some(invoke),
         invoke_expectations: InvokeExpectations {
             expect_error: true,

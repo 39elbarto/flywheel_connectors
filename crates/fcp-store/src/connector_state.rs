@@ -314,9 +314,13 @@ impl FcpStoreConnectorStateStore {
 
     /// Store a state root and return its content-addressed object id.
     ///
+    /// This is intentionally not part of the public store API. Canonical
+    /// connector-state mutation must enter through [`ConnectorStateStore`],
+    /// which requires a [`ConnectorStateWriteAuthorization`] witness.
+    ///
     /// # Errors
     /// Returns an error when the root identity or schema does not match this store.
-    pub async fn store_root(&self, root: ConnectorStateRoot) -> Result<ObjectId> {
+    async fn store_root(&self, root: ConnectorStateRoot) -> Result<ObjectId> {
         self.validate_root(&root)?;
         let stored = self.stored_object(&root.header, &root, self.retention)?;
         let object_id = stored.object_id;
@@ -348,9 +352,12 @@ impl FcpStoreConnectorStateStore {
 
     /// Append a state object if its prev pointer matches the canonical head.
     ///
+    /// This is the internal append primitive used after the public trait
+    /// boundary verifies [`ConnectorStateWriteAuthorization`].
+    ///
     /// # Errors
     /// Returns an error when the incoming object is malformed or storage fails.
-    pub async fn append_object(
+    async fn append_object(
         &self,
         state_obj: ConnectorStateObject,
     ) -> Result<ConnectorStateAppendOutcome> {
@@ -2271,7 +2278,9 @@ mod tests {
         stored.header.created_at += 1;
         stored.object_id =
             StoredObject::derive_id(&stored.header, &stored.body, &object_id_key()).unwrap();
+        let tampered_state_id = stored.object_id;
         run_async(object_store.put(stored)).unwrap();
+        run_async(state_store.store_root(root_with_head(Some(tampered_state_id), 11))).unwrap();
         let err = run_async(state_store.read_chain(None, 1)).unwrap_err();
         assert!(matches!(err, ConnectorStateStoreError::HeaderBodyMismatch));
     }

@@ -8151,7 +8151,7 @@ fn connector_state_explain_dispatch(
             object.insert(
                 "message".to_owned(),
                 Value::String(format!(
-                    "Explained connector state storage for `{}` from live fcp-host cache-marker evidence.",
+                    "Explained connector state storage for `{}` from live fcp-host evidence.",
                     connector.slug
                 )),
             );
@@ -34781,8 +34781,19 @@ deny_ptrace = true
                         "source": "host-cache-markers",
                         "connector_id": "fcp.github:enterprise:v1",
                         "canonical_storage": "mesh",
-                        "last_canonical_seq": Value::Null,
-                        "mesh_replica_count": Value::Null,
+                        "last_canonical_seq": 17,
+                        "mesh_replica_count": 2,
+                        "canonical_state": {
+                            "root_present": true,
+                            "connector_id": "fcp.github:enterprise:v1",
+                            "zone_id": "z:work",
+                            "instance_id": Value::Null,
+                            "model": "singleton_writer",
+                            "root_object_id": "sha256:connector-state-root",
+                            "head_object_id": "sha256:connector-state-head",
+                            "state_schema_version": 1,
+                            "status_source": "fcp-store",
+                        },
                         "local_cache_present": true,
                         "local_cache_marker_present": true,
                         "live_host": {
@@ -34824,10 +34835,33 @@ deny_ptrace = true
         assert_eq!(payload["source"], "host-admin-api");
         assert_eq!(payload["host_payload_source"], "host-cache-markers");
         assert_eq!(
+            payload["message"],
+            "Explained connector state storage for `github` from live fcp-host evidence."
+        );
+        assert_eq!(
             payload["connector"]["canonical_id"],
             "fcp.github:enterprise:v1"
         );
         assert_eq!(payload["canonical_storage"], "mesh");
+        assert_eq!(payload["last_canonical_seq"], 17);
+        assert_eq!(payload["mesh_replica_count"], 2);
+        assert_eq!(payload["canonical_state"]["root_present"], true);
+        assert_eq!(
+            payload["canonical_state"]["connector_id"],
+            "fcp.github:enterprise:v1"
+        );
+        assert_eq!(payload["canonical_state"]["zone_id"], "z:work");
+        assert_eq!(payload["canonical_state"]["model"], "singleton_writer");
+        assert_eq!(
+            payload["canonical_state"]["root_object_id"],
+            "sha256:connector-state-root"
+        );
+        assert_eq!(
+            payload["canonical_state"]["head_object_id"],
+            "sha256:connector-state-head"
+        );
+        assert_eq!(payload["canonical_state"]["state_schema_version"], 1);
+        assert_eq!(payload["canonical_state"]["status_source"], "fcp-store");
         assert_eq!(payload["live_host"]["route_available"], true);
         assert!(
             payload["live_host"]["endpoint_hash"]

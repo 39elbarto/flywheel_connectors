@@ -378,6 +378,14 @@ impl GoogleCalendarConnector {
                 message: format!("Invalid handshake request: {e}"),
             })?;
 
+        if let Some(requested_instance_id) = req.requested_instance_id.clone() {
+            Arc::get_mut(&mut self.base)
+                .ok_or_else(|| FcpError::Internal {
+                    message: "Google Calendar base connector was shared before handshake".into(),
+                })?
+                .instance_id = requested_instance_id;
+        }
+
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),

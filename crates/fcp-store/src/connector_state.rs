@@ -283,7 +283,7 @@ impl FcpStoreConnectorStateStore {
     }
 
     async fn read_root_inner(&self) -> Result<Option<(ObjectId, ConnectorStateRoot)>> {
-        let mut best: Option<(ObjectId, ConnectorStateRoot)> = None;
+        let mut best: Option<(ObjectId, ConnectorStateRoot, Option<u64>)> = None;
 
         for object_id in self.object_store.list_zone(&self.zone_id).await {
             let stored = self.object_store.get(&object_id).await?;
@@ -297,20 +297,33 @@ impl FcpStoreConnectorStateStore {
                 continue;
             }
             self.validate_root(&root)?;
+            let head_seq = self.root_head_seq(&root).await?;
 
-            let replace = best.as_ref().is_none_or(|(best_id, best_root)| {
-                root.header
-                    .created_at
-                    .cmp(&best_root.header.created_at)
-                    .then(object_id.cmp(best_id))
-                    .is_gt()
-            });
+            let replace = best
+                .as_ref()
+                .is_none_or(|(best_id, best_root, best_head_seq)| {
+                    head_seq
+                        .cmp(best_head_seq)
+                        .then(root.header.created_at.cmp(&best_root.header.created_at))
+                        .then(object_id.cmp(best_id))
+                        .is_gt()
+                });
             if replace {
-                best = Some((object_id, root));
+                best = Some((object_id, root, head_seq));
             }
         }
 
-        Ok(best)
+        Ok(best.map(|(object_id, root, _head_seq)| (object_id, root)))
+    }
+
+    async fn root_head_seq(&self, root: &ConnectorStateRoot) -> Result<Option<u64>> {
+        match root.head {
+            Some(head_id) => self
+                .load_state_object(&head_id)
+                .await
+                .map(|(_object_id, state)| Some(state.seq)),
+            None => Ok(None),
+        }
     }
 
     /// Store a state root and return its content-addressed object id.
@@ -1732,6 +1745,22 @@ mod tests {
         let (head1, _) = append_ok(&state_store, state(1, Some(head0), lease_id(2)));
         let root = run_async(state_store.read_root()).unwrap().unwrap().1;
         assert_eq!(root.head, Some(head1));
+    }
+
+    #[test]
+    fn read_root_prefers_highest_head_sequence_over_newer_stale_root() {
+        let state_store = test_store(store());
+        let (head0, _) = append_ok(&state_store, state(0, None, lease_id(1)));
+        let (head1, _) = append_ok(&state_store, state(1, Some(head0), lease_id(2)));
+        run_async(state_store.store_root(root_with_head(Some(head0), 9_999_999_999))).unwrap();
+
+        let root = run_async(state_store.read_root()).unwrap().unwrap().1;
+        assert_eq!(root.head, Some(head1));
+
+        let chain = run_async(state_store.read_chain(None, 10)).unwrap();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0].1.seq, 0);
+        assert_eq!(chain[1].1.seq, 1);
     }
 
     #[test]

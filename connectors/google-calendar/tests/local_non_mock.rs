@@ -197,50 +197,127 @@ fn content_length(headers: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn header_seen(headers: &str, expected_name: &str, expected_value: &str) -> bool {
-    headers.lines().any(|line| {
-        let Some((name, value)) = line.split_once(':') else {
-            return false;
-        };
-        name.eq_ignore_ascii_case(expected_name) && value.trim() == expected_value
-    })
+fn assert_request(captured: &CapturedRequest, method: &str, target: &str) {
+    let request_line = captured
+        .head
+        .lines()
+        .next()
+        .expect("captured request should include a request line");
+    let mut request_parts = request_line.split_whitespace();
+    let actual_method = request_parts
+        .next()
+        .expect("captured request line should include method");
+    let actual_target = request_parts
+        .next()
+        .expect("captured request line should include target");
+    let actual_version = request_parts
+        .next()
+        .expect("captured request line should include HTTP version");
+
+    assert_eq!(actual_method, method, "unexpected request method");
+    assert_eq!(actual_version, "HTTP/1.1", "unexpected HTTP version");
+
+    let (expected_path, expected_query) = split_target(target);
+    let (actual_path, actual_query) = split_target(actual_target);
+    assert_eq!(
+        decoded_path(actual_path),
+        decoded_path(expected_path),
+        "unexpected request path in line {request_line:?}"
+    );
+
+    match expected_query {
+        Some(expected) => assert_eq!(
+            sorted_query_pairs(actual_query.unwrap_or_default()),
+            sorted_query_pairs(expected),
+            "unexpected query parameters in line {request_line:?}"
+        ),
+        None => assert!(
+            actual_query.is_none_or(str::is_empty),
+            "unexpected query string in line {request_line:?}"
+        ),
+    }
+
+    let lower_head = captured.head.to_ascii_lowercase();
+    assert!(
+        lower_head.contains(&format!("authorization: bearer {ACCESS_TOKEN}")),
+        "request should carry redaction-safe bearer auth; head={}",
+        captured.head
+    );
 }
 
-fn header_value_contains(headers: &str, expected_name: &str, expected_value: &str) -> bool {
-    headers.lines().any(|line| {
-        let Some((name, value)) = line.split_once(':') else {
-            return false;
-        };
-        name.eq_ignore_ascii_case(expected_name)
-            && value
-                .to_ascii_lowercase()
-                .contains(&expected_value.to_ascii_lowercase())
-    })
+fn split_target(target: &str) -> (&str, Option<&str>) {
+    target
+        .split_once('?')
+        .map_or((target, None), |(path, query)| (path, Some(query)))
 }
 
-fn handshake_req(host_public_key: [u8; 32], instance_id: &InstanceId) -> HandshakeRequest {
-    HandshakeRequest {
-        protocol_version: "1.0.0".into(),
-        zone: ZoneId::work(),
-        zone_dir: None,
-        host_public_key,
-        nonce: [31_u8; 32],
-        capabilities_requested: vec![
-            CapabilityId::from_static(READ_CAPABILITY),
-            CapabilityId::from_static(WRITE_CAPABILITY),
-        ],
-        host: None,
-        transport_caps: None,
-        requested_instance_id: Some(instance_id.clone()),
+fn decoded_path(path: &str) -> String {
+    percent_decode_str(path)
+        .decode_utf8()
+        .expect("loopback path should be valid percent-encoded UTF-8")
+        .into_owned()
+}
+
+fn sorted_query_pairs(query: &str) -> Vec<(&str, &str)> {
+    let mut pairs = query
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .map(|part| part.split_once('=').unwrap_or((part, "")))
+        .collect::<Vec<_>>();
+    pairs.sort_unstable();
+    pairs
+}
+
+async fn configured_connector(
+    base_url: &str,
+    signing_key: &Ed25519SigningKey,
+) -> (GoogleCalendarConnector, InstanceId) {
+    let mut connector = GoogleCalendarConnector::new();
+    connector
+        .handle_configure(json!({
+            "access_token": ACCESS_TOKEN,
+            "required_scopes": ["https://www.googleapis.com/auth/calendar"],
+            "base_url": base_url
+        }))
+        .await
+        .expect("connector should configure against loopback base URL");
+    let instance_id = setup_handshake(&mut connector, signing_key).await;
+    (connector, instance_id)
+}
+
+async fn setup_handshake(
+    connector: &mut GoogleCalendarConnector,
+    signing_key: &Ed25519SigningKey,
+) -> InstanceId {
+    let instance_id = InstanceId::new();
+    connector
+        .handle_handshake(json!({
+            "protocol_version": "1.0.0",
+            "zone": "z:work",
+            "host_public_key": signing_key.verifying_key().to_bytes(),
+            "nonce": vec![0_u8; 32],
+            "capabilities_requested": ["gcal.read", "gcal.write", "gcal.delete"],
+            "requested_instance_id": instance_id.as_str()
+        }))
+        .await
+        .expect("Google Calendar handshake should complete");
+    instance_id
+}
+
+fn capability_for(operation: &str) -> &'static str {
+    match operation {
+        "gcal.create_event" | "gcal.update_event" | "gcal.quick_add" => "gcal.write",
+        "gcal.delete_event" => "gcal.delete",
+        _ => "gcal.read",
     }
 }
 
-fn capability_token(
+fn generate_valid_token(
     signing_key: &Ed25519SigningKey,
     instance_id: &InstanceId,
-    capability: &str,
     operation: &str,
 ) -> CapabilityToken {
+    let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec!["*".into()],
         ..Default::default()

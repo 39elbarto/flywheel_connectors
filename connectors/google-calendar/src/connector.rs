@@ -380,8 +380,7 @@ impl GoogleCalendarConnector {
 
         if let Some(requested_instance_id) = req.requested_instance_id {
             let base = Arc::get_mut(&mut self.base).ok_or_else(|| FcpError::Internal {
-                message: "Cannot assign requested instance ID after connector state is shared"
-                    .into(),
+                message: "Google Calendar base connector was shared before handshake".into(),
             })?;
             base.instance_id = requested_instance_id;
         }

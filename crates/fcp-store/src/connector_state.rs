@@ -158,6 +158,7 @@ pub struct FcpStoreConnectorStateStore {
     retention: RetentionClass,
     snapshot_every_entries: u64,
     snapshot_every_secs: u64,
+    state_object_write_retry_policy: BackoffPolicy,
     root_write_retry_policy: BackoffPolicy,
     change_bus: Arc<ConnectorStateChangeBus>,
 }
@@ -182,6 +183,12 @@ impl FcpStoreConnectorStateStore {
             retention: RetentionClass::Pinned,
             snapshot_every_entries: 1_000,
             snapshot_every_secs: DEFAULT_SNAPSHOT_EVERY_SECS,
+            state_object_write_retry_policy: BackoffPolicy::new(
+                0,
+                Duration::ZERO,
+                Duration::ZERO,
+                1.0,
+            ),
             root_write_retry_policy: BackoffPolicy::new(0, Duration::ZERO, Duration::ZERO, 1.0),
             change_bus,
         }
@@ -223,6 +230,18 @@ impl FcpStoreConnectorStateStore {
     #[must_use]
     pub const fn with_snapshot_every_secs(mut self, snapshot_every_secs: u64) -> Self {
         self.snapshot_every_secs = snapshot_every_secs;
+        self
+    }
+
+    /// Configure retries for transient canonical state-object writes.
+    ///
+    /// The default policy has zero retries so fail-closed storage errors stay
+    /// bounded for hot-path callers. Hosts that can tolerate a short bounded
+    /// retry window can opt in when the backing mesh/object store may recover
+    /// quickly after a transient I/O outage before the root is written.
+    #[must_use]
+    pub const fn with_state_object_write_retry_policy(mut self, policy: BackoffPolicy) -> Self {
+        self.state_object_write_retry_policy = policy;
         self
     }
 
@@ -349,11 +368,11 @@ impl FcpStoreConnectorStateStore {
         loop {
             match self.store_root(root.clone()).await {
                 Ok(root_id) => return Ok(root_id),
-                Err(err) if Self::is_retryable_root_write_error(&err) => {
+                Err(err) if Self::is_retryable_write_error(&err) => {
                     let Some(delay) = delays.next() else {
                         return Err(err);
                     };
-                    self.record_root_write_retry(retry_index, delay, &err);
+                    self.record_write_retry("write_root", retry_index, delay, &err);
                     retry_index = retry_index.saturating_add(1);
                     if !delay.is_zero() {
                         fcp_async_core::time::sleep(delay).await;
@@ -424,7 +443,9 @@ impl FcpStoreConnectorStateStore {
             });
         }
 
-        let object_id = self.store_state_object(state_obj.clone()).await?;
+        let object_id = self
+            .store_state_object_with_retry(state_obj.clone())
+            .await?;
         let root = self.root_for_head(&state_obj, object_id);
         let root_object_id = self.store_root_with_retry(root).await?;
         let snapshot_object_id = self.maybe_emit_snapshot(object_id, &state_obj).await?;
@@ -696,6 +717,31 @@ impl FcpStoreConnectorStateStore {
         let object_id = stored.object_id;
         self.put_idempotent(stored).await?;
         Ok(object_id)
+    }
+
+    async fn store_state_object_with_retry(
+        &self,
+        state_obj: ConnectorStateObject,
+    ) -> Result<ObjectId> {
+        let mut delays = self.state_object_write_retry_policy.retry_delays();
+        let mut retry_index = 0_u32;
+
+        loop {
+            match self.store_state_object(state_obj.clone()).await {
+                Ok(object_id) => return Ok(object_id),
+                Err(err) if Self::is_retryable_write_error(&err) => {
+                    let Some(delay) = delays.next() else {
+                        return Err(err);
+                    };
+                    self.record_write_retry("write_state_object", retry_index, delay, &err);
+                    retry_index = retry_index.saturating_add(1);
+                    if !delay.is_zero() {
+                        fcp_async_core::time::sleep(delay).await;
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
     }
 
     async fn maybe_emit_snapshot(
@@ -1125,8 +1171,9 @@ impl FcpStoreConnectorStateStore {
         );
     }
 
-    fn record_root_write_retry(
+    fn record_write_retry(
         &self,
+        operation: &'static str,
         retry_index: u32,
         delay: Duration,
         err: &ConnectorStateStoreError,
@@ -1136,7 +1183,7 @@ impl FcpStoreConnectorStateStore {
             event_type = CONNECTOR_STATE_WRITE_RETRY_EVENT,
             connector_id = %self.connector_id,
             zone_id = %self.zone_id,
-            operation = "write_root",
+            operation,
             result = "retry",
             retry_index,
             retry_delay_ms = delay.as_millis(),
@@ -1144,7 +1191,7 @@ impl FcpStoreConnectorStateStore {
         );
     }
 
-    const fn is_retryable_root_write_error(err: &ConnectorStateStoreError) -> bool {
+    const fn is_retryable_write_error(err: &ConnectorStateStoreError) -> bool {
         matches!(
             err,
             ConnectorStateStoreError::ObjectStore(ObjectStoreError::Io(_))
@@ -1382,6 +1429,7 @@ fn headers_match(left: &ObjectHeader, right: &ObjectHeader) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use std::panic::{self, AssertUnwindSafe};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use bytes::Bytes;
     use chrono::Duration;
@@ -1440,6 +1488,81 @@ mod tests {
 
     fn test_store(object_store: Arc<dyn ObjectStore>) -> FcpStoreConnectorStateStore {
         FcpStoreConnectorStateStore::new(object_store, object_id_key(), connector_id(), zone_id())
+    }
+
+    struct FailNthPutObjectStore {
+        inner: Arc<dyn ObjectStore>,
+        fail_on_put: usize,
+        puts: AtomicUsize,
+    }
+
+    impl FailNthPutObjectStore {
+        fn new(inner: Arc<dyn ObjectStore>, fail_on_put: usize) -> Self {
+            Self {
+                inner,
+                fail_on_put,
+                puts: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for FailNthPutObjectStore {
+        async fn put(&self, object: StoredObject) -> std::result::Result<(), ObjectStoreError> {
+            let put_number = self.puts.fetch_add(1, Ordering::SeqCst) + 1;
+            if put_number == self.fail_on_put {
+                return Err(ObjectStoreError::Io(
+                    "simulated connector state object write outage".to_string(),
+                ));
+            }
+            self.inner.put(object).await
+        }
+
+        async fn get(&self, id: &ObjectId) -> std::result::Result<StoredObject, ObjectStoreError> {
+            self.inner.get(id).await
+        }
+
+        async fn exists(&self, id: &ObjectId) -> bool {
+            self.inner.exists(id).await
+        }
+
+        async fn delete(&self, id: &ObjectId) -> std::result::Result<(), ObjectStoreError> {
+            self.inner.delete(id).await
+        }
+
+        async fn get_header(
+            &self,
+            id: &ObjectId,
+        ) -> std::result::Result<ObjectHeader, ObjectStoreError> {
+            self.inner.get_header(id).await
+        }
+
+        async fn get_storage_meta(
+            &self,
+            id: &ObjectId,
+        ) -> std::result::Result<StorageMeta, ObjectStoreError> {
+            self.inner.get_storage_meta(id).await
+        }
+
+        async fn set_retention(
+            &self,
+            id: &ObjectId,
+            retention: RetentionClass,
+        ) -> std::result::Result<(), ObjectStoreError> {
+            self.inner.set_retention(id, retention).await
+        }
+
+        async fn list_zone(&self, zone_id: &ZoneId) -> Vec<ObjectId> {
+            self.inner.list_zone(zone_id).await
+        }
+
+        async fn storage_used(&self) -> u64 {
+            self.inner.storage_used().await
+        }
+
+        async fn storage_quota(&self) -> u64 {
+            self.inner.storage_quota().await
+        }
     }
 
     fn capability_constraints_cbor(resource_allow: Vec<String>) -> Vec<u8> {
@@ -1745,6 +1868,24 @@ mod tests {
         let (head1, _) = append_ok(&state_store, state(1, Some(head0), lease_id(2)));
         let root = run_async(state_store.read_root()).unwrap().unwrap().1;
         assert_eq!(root.head, Some(head1));
+    }
+
+    #[test]
+    fn append_retries_transient_state_object_write_with_policy() {
+        let inner: Arc<dyn ObjectStore> = store();
+        let object_store: Arc<dyn ObjectStore> = Arc::new(FailNthPutObjectStore::new(inner, 1));
+        let state_store = test_store(object_store).with_state_object_write_retry_policy(
+            BackoffPolicy::new(1, std::time::Duration::ZERO, std::time::Duration::ZERO, 1.0),
+        );
+
+        let (head, _) = append_ok(&state_store, state(0, None, lease_id(1)));
+
+        let root = run_async(state_store.read_root()).unwrap().unwrap().1;
+        assert_eq!(root.head, Some(head));
+        let chain = run_async(state_store.read_chain(None, 10)).unwrap();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].1.seq, 0);
+        assert_eq!(chain[0].1.lease_object_id, lease_id(1));
     }
 
     #[test]

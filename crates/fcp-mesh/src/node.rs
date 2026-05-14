@@ -401,6 +401,34 @@ pub struct GossipFetchedSymbol {
     pub symbol: StoredSymbol,
 }
 
+/// Object and symbol bytes materialized for a verified gossip request.
+#[must_use]
+#[derive(Debug, Clone, Default)]
+pub struct GossipFetchPayload {
+    /// Object payloads available to transfer to the requester.
+    pub objects: Vec<StoredObject>,
+    /// Symbol payloads available to transfer to the requester.
+    pub symbols: Vec<GossipFetchedSymbol>,
+}
+
+impl GossipFetchPayload {
+    /// Whether the responder has no bytes to transfer.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.objects.is_empty() && self.symbols.is_empty()
+    }
+}
+
+/// Availability response plus the matching bytes for transport handoff.
+#[must_use]
+#[derive(Debug, Clone)]
+pub struct GossipFetchReply {
+    /// Bounded availability response to return to the requester.
+    pub response: GossipResponse,
+    /// Stored bytes that match the advertised availability.
+    pub payload: GossipFetchPayload,
+}
+
 /// Result of applying fetched gossip bytes to the local stores.
 #[must_use]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -2205,6 +2233,70 @@ impl MeshNode {
     ) -> Result<GossipResponse, MeshNodeError> {
         self.verify_gossip_request(&request, now_secs)?;
         Ok(self.gossip.handle_request(&request))
+    }
+
+    /// Verify a gossip request and materialize the advertised bytes.
+    ///
+    /// This is the transport-agnostic responder side of the fetch path: it
+    /// reuses the same bounded availability response as
+    /// [`Self::handle_gossip_request`], then loads matching object and symbol
+    /// bytes from the local stores. The requester can feed `response` through
+    /// [`Self::handle_gossip_response`] and pass `payload` into
+    /// [`Self::apply_gossip_fetch_payload`].
+    ///
+    /// # Errors
+    ///
+    /// Returns request verification errors from [`Self::handle_gossip_request`]
+    /// or store/validation errors if advertised bytes cannot be materialized.
+    #[allow(clippy::needless_pass_by_value)] // by-value API mirrors handle_gossip_request
+    pub async fn prepare_gossip_fetch_reply(
+        &mut self,
+        request: GossipRequest,
+        now_secs: u64,
+    ) -> Result<GossipFetchReply, MeshNodeError> {
+        let response = self.handle_gossip_request(request, now_secs)?;
+        let payload = self.gossip_fetch_payload_for_response(&response).await?;
+        Ok(GossipFetchReply { response, payload })
+    }
+
+    async fn gossip_fetch_payload_for_response(
+        &self,
+        response: &GossipResponse,
+    ) -> Result<GossipFetchPayload, MeshNodeError> {
+        if response.from != self.local_node_ts {
+            return Err(MeshNodeError::RecipientMismatch {
+                message_kind: "gossip fetch payload",
+                expected: self.local_node_ts.as_str().to_string(),
+                actual: response.from.as_str().to_string(),
+            });
+        }
+
+        let plan = GossipFetchPlan {
+            peer: response.from.clone(),
+            zone_id: response.zone_id.clone(),
+            object_ids: response.have_objects.clone(),
+            symbols: response.have_symbols.clone(),
+        };
+        let requested_objects: BTreeSet<_> = plan.object_ids.iter().copied().collect();
+        let requested_symbols: BTreeSet<_> = plan.symbols.iter().copied().collect();
+        let mut payload = GossipFetchPayload::default();
+
+        for object_id in &response.have_objects {
+            let object = self.object_store.get(object_id).await?;
+            Self::validate_fetched_object(&plan, &requested_objects, &object)?;
+            payload.objects.push(object);
+        }
+
+        for (object_id, esi) in &response.have_symbols {
+            let fetched = GossipFetchedSymbol {
+                object_meta: self.symbol_store.get_object_meta(object_id).await?,
+                symbol: self.symbol_store.get_symbol(object_id, *esi).await?,
+            };
+            Self::validate_fetched_symbol(&plan, &requested_symbols, &fetched)?;
+            payload.symbols.push(fetched);
+        }
+
+        Ok(payload)
     }
 
     /// Verify a bounded gossip response and surface missing fetch candidates.
@@ -5408,6 +5500,128 @@ mod tests {
             assert_eq!(change.object_id, Some(fetched_root_id));
             assert_eq!(change.zone_id, zone_id);
             assert_eq!(change.seq, None);
+        })
+        .expect("runtime");
+    }
+
+    #[test]
+    fn prepare_gossip_fetch_reply_materializes_bytes_for_apply_and_observe() {
+        let mut requester = test_node("node-1");
+        let mut responder = test_node("peer-1");
+        let requester_peer = NodeId::new("node-1");
+        let responder_peer = NodeId::new("peer-1");
+        let zone_id = ZoneId::work();
+        let connector_id = ConnectorId::from_static("slack:chat:v1");
+        let object_id_key = ObjectIdKey::from_bytes([0xB6; 32]);
+
+        requester.update_peer_state(
+            responder_peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        requester.update_peer_zones(&responder_peer, zone_set(zone_id.clone()));
+        responder.update_peer_state(
+            requester_peer.clone(),
+            test_device_profile("node-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        responder.update_peer_zones(&requester_peer, zone_set(zone_id.clone()));
+
+        let fetched_root =
+            test_connector_state_root_object(&zone_id, connector_id.clone(), object_id_key);
+        let fetched_root_id = fetched_root.object_id;
+        let symbol_object_id = test_object_id("inline-fetch-symbol-object");
+        let symbol_meta = test_object_symbol_meta(symbol_object_id, &zone_id);
+        let fetched_symbol = test_stored_symbol(symbol_object_id, &zone_id, 11, 0xBC);
+
+        assert!(responder.announce_object(
+            &zone_id,
+            &fetched_root_id,
+            ObjectAdmissionClass::Admitted,
+            1_000,
+        ));
+        assert!(responder.announce_symbol(
+            &zone_id,
+            &symbol_object_id,
+            11,
+            ObjectAdmissionClass::Admitted,
+            1_000,
+        ));
+
+        fcp_async_core::runtime::block_on_sync(async {
+            responder
+                .object_store
+                .put(fetched_root)
+                .await
+                .expect("responder stores connector-state root bytes");
+            responder
+                .symbol_store
+                .put_object_meta(symbol_meta)
+                .await
+                .expect("responder stores symbol metadata");
+            responder
+                .symbol_store
+                .put_symbol(fetched_symbol)
+                .await
+                .expect("responder stores symbol bytes");
+
+            let request = GossipRequest {
+                from: TailscaleNodeId::new("node-1"),
+                zone_id: zone_id.clone(),
+                object_ids: vec![fetched_root_id],
+                symbols: vec![(symbol_object_id, 11)],
+                timestamp: 1_000,
+                signature: None,
+            };
+            let reply = responder
+                .prepare_gossip_fetch_reply(request, 1_000)
+                .await
+                .expect("responder materializes fetch reply");
+            assert_eq!(reply.response.have_objects, vec![fetched_root_id]);
+            assert_eq!(reply.response.have_symbols, vec![(symbol_object_id, 11)]);
+            assert_eq!(reply.payload.objects.len(), 1);
+            assert_eq!(reply.payload.symbols.len(), 1);
+
+            let plan = requester
+                .handle_gossip_response(reply.response, 1_000)
+                .expect("requester verifies availability response")
+                .expect("requester produces fetch plan");
+            let state_store = FcpStoreConnectorStateStore::new(
+                Arc::clone(requester.object_store()),
+                object_id_key,
+                connector_id,
+                zone_id.clone(),
+            );
+            let outcome = requester
+                .apply_gossip_fetch_payload_and_observe_connector_state_roots(
+                    &state_store,
+                    &plan,
+                    reply.payload.objects,
+                    reply.payload.symbols,
+                    1_001,
+                )
+                .await
+                .expect("requester applies bytes and observes state root");
+
+            assert_eq!(outcome.apply.objects_applied, vec![fetched_root_id]);
+            assert_eq!(
+                outcome.apply.connector_state_root_candidates,
+                vec![fetched_root_id]
+            );
+            assert_eq!(outcome.apply.symbols_applied, vec![(symbol_object_id, 11)]);
+            assert_eq!(outcome.connector_state_changes.len(), 1);
+            assert_eq!(
+                outcome.connector_state_changes[0].kind,
+                ConnectorStateChangeKind::RootUpdated
+            );
+            assert_eq!(
+                outcome.connector_state_changes[0].object_id,
+                Some(fetched_root_id)
+            );
         })
         .expect("runtime");
     }

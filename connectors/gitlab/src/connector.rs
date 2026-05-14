@@ -260,6 +260,7 @@ impl GitLabConnector {
             "protocol_version": "2.0",
             "connector_id": "fcp.gitlab",
             "connector_version": "0.1.0",
+            "instance_id": self.base.instance_id.as_str(),
             "session_id": session_id,
             "capabilities": ["gitlab.projects.read", "gitlab.issues.read", "gitlab.issues.write", "gitlab.merge_requests.read", "gitlab.pipelines.read"]
         }))

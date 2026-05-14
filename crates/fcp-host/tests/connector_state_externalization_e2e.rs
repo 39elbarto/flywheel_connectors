@@ -472,6 +472,57 @@ fn connector_state_externalization_rejects_authorization_for_other_connector() -
 }
 
 #[test]
+fn connector_state_externalization_rejects_malformed_payload_boundaries() -> TestResult {
+    let object_store = memory_object_store();
+    let host = host_state_store(object_store);
+    let connector_id = connector_id();
+    let authorization = connector_state_authorization();
+
+    let cases: [(&str, Vec<u8>, &str); 4] = [
+        ("empty", Vec::new(), "empty state_cbor"),
+        ("invalid", vec![0xff], "invalid state_cbor"),
+        ("noncanonical", vec![0x18, 0x17], "non-canonical"),
+        (
+            "too_large",
+            vec![0xff; 1024 * 1024 + 1],
+            "payload too large",
+        ),
+    ];
+
+    for (case, state_cbor, expected_reason) in cases {
+        let mut incoming = state(0, None, lease_id(1));
+        incoming.state_cbor = state_cbor;
+
+        let result = block_on(ConnectorStateStore::append_object(
+            &host,
+            &connector_id,
+            &authorization,
+            incoming,
+        ));
+
+        match result {
+            Err(ConnectorStateError::MalformedState {
+                connector_id: failed_connector_id,
+                reason,
+            }) => {
+                assert_eq!(failed_connector_id, connector_id, "{case}");
+                assert!(
+                    reason.contains(expected_reason),
+                    "{case} reason should include `{expected_reason}`, got `{reason}`"
+                );
+            }
+            other => panic!("expected malformed-state rejection for {case}, got {other:?}"),
+        }
+        assert!(
+            block_on(ConnectorStateStore::read_root(&host, &connector_id))?.is_none(),
+            "{case} append must not create a canonical root"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn connector_state_externalization_retries_cleanly_after_root_write_failure() -> TestResult {
     let inner = memory_object_store();
     let object_store: Arc<dyn ObjectStore> =

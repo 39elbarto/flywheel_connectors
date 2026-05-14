@@ -369,6 +369,12 @@ impl MastodonConnector {
         }
     }
 
+    /// Stable connector instance identity used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
+    }
+
     fn manifest_hash() -> String {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());

@@ -19,7 +19,7 @@ use std::{
 };
 
 use fcp_asana::connector::AsanaConnector;
-use serde_json::{Value, json};
+use serde_json::json;
 
 const EXPECTED_PATH_WITH_QUERY: &str = "/workspaces/ws_123/tasks/search?text=login%20bug";
 const RESPONSE_BODY: &str = r#"{

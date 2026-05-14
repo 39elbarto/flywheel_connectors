@@ -127,14 +127,10 @@ fn test_evidence_jsonl_lines_parse_when_present() {
     // timestamp}. Missing files are acceptable (fixture ratchet state);
     // present-but-malformed files are NOT acceptable.
     let mut violations: Vec<String> = Vec::new();
-    let perf_results_dir = repo_root()
-        .join("perf-results")
-        .join("runtime_targets");
+    let perf_results_dir = repo_root().join("perf-results").join("runtime_targets");
     for class in MACHINE_CLASSES {
         for target in TARGETS {
-            let path = perf_results_dir
-                .join(class)
-                .join(format!("{target}.jsonl"));
+            let path = perf_results_dir.join(class).join(format!("{target}.jsonl"));
             if !path.exists() {
                 continue;
             }
@@ -161,7 +157,14 @@ fn test_evidence_jsonl_lines_parse_when_present() {
                         continue;
                     }
                 };
-                for field in &["target", "machine_class", "p99", "samples", "commit_sha", "timestamp"] {
+                for field in &[
+                    "target",
+                    "machine_class",
+                    "p99",
+                    "samples",
+                    "commit_sha",
+                    "timestamp",
+                ] {
                     if value.get(field).is_none() {
                         violations.push(format!(
                             "{}:{}: missing required field `{field}`",

@@ -543,6 +543,32 @@ impl GossipDispatchOutcome {
     }
 }
 
+/// Dispatch result for transports that want verified request bytes inline.
+#[must_use]
+#[derive(Debug, Clone, Default)]
+pub struct GossipDispatchFetchOutcome {
+    /// Standard dispatch result retained for existing transport behavior.
+    pub dispatch: GossipDispatchOutcome,
+    /// Materialized bytes for an inbound gossip request, when applicable.
+    pub fetch_reply: Option<GossipFetchReply>,
+}
+
+impl GossipDispatchFetchOutcome {
+    fn from_dispatch(dispatch: GossipDispatchOutcome) -> Self {
+        Self {
+            dispatch,
+            fetch_reply: None,
+        }
+    }
+
+    fn with_fetch_reply(fetch_reply: GossipFetchReply) -> Self {
+        Self {
+            dispatch: GossipDispatchOutcome::with_response(fetch_reply.response.clone()),
+            fetch_reply: Some(fetch_reply),
+        }
+    }
+}
+
 /// MeshNode orchestration entrypoint.
 pub struct MeshNode {
     local_node: NodeId,
@@ -2703,6 +2729,35 @@ impl MeshNode {
         }
     }
 
+    /// Dispatch a parsed gossip message and materialize request bytes when needed.
+    ///
+    /// Existing callers that only need control-plane actions should continue to
+    /// use [`Self::handle_gossip_message`]. Transport adapters that can carry
+    /// requested bytes inline can use this method to receive the same
+    /// [`GossipDispatchOutcome`] plus a [`GossipFetchReply`] for inbound
+    /// `GossipMessage::Request` payloads.
+    ///
+    /// # Errors
+    ///
+    /// Propagates verification errors from the underlying gossip handlers and
+    /// store/validation errors from [`Self::prepare_gossip_fetch_reply`] when
+    /// request bytes cannot be materialized.
+    pub async fn handle_gossip_message_with_fetch_reply(
+        &mut self,
+        message: GossipMessage,
+        now_secs: u64,
+    ) -> Result<GossipDispatchFetchOutcome, MeshNodeError> {
+        match message {
+            GossipMessage::Request(request) => self
+                .prepare_gossip_fetch_reply(request, now_secs)
+                .await
+                .map(GossipDispatchFetchOutcome::with_fetch_reply),
+            other => self
+                .handle_gossip_message(other, now_secs)
+                .map(GossipDispatchFetchOutcome::from_dispatch),
+        }
+    }
+
     /// Decode a JSON-encoded `GossipMessage` received from the mesh
     /// transport layer and dispatch it through [`Self::handle_gossip_message`].
     ///
@@ -2744,6 +2799,36 @@ impl MeshNode {
         let message: GossipMessage = serde_json::from_slice(payload)
             .map_err(|e| MeshNodeError::GossipDecode(e.to_string()))?;
         self.handle_gossip_message(message, now_secs)
+    }
+
+    /// Decode and dispatch a raw gossip payload, materializing request bytes.
+    ///
+    /// This is the async counterpart to [`Self::dispatch_gossip_payload`] for
+    /// transports that want a single verified request path that returns both
+    /// the availability response and the bytes matching that availability.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same decode and verification errors as
+    /// [`Self::dispatch_gossip_payload`], plus store/validation errors if an
+    /// inbound request advertises bytes that cannot be loaded safely.
+    pub async fn dispatch_gossip_payload_with_fetch_reply(
+        &mut self,
+        payload: &[u8],
+        now_secs: u64,
+    ) -> Result<GossipDispatchFetchOutcome, MeshNodeError> {
+        let max_payload = self.gossip.max_wire_payload_bytes();
+        if payload.len() > max_payload {
+            return Err(MeshNodeError::GossipPayloadTooLarge {
+                len: payload.len(),
+                max: max_payload,
+            });
+        }
+
+        let message: GossipMessage = serde_json::from_slice(payload)
+            .map_err(|e| MeshNodeError::GossipDecode(e.to_string()))?;
+        self.handle_gossip_message_with_fetch_reply(message, now_secs)
+            .await
     }
 
     /// Dispatch an already-parsed `GossipMessage` that was delivered
@@ -5246,6 +5331,129 @@ mod tests {
         assert_eq!(response.zone_id, ZoneId::work());
         assert_eq!(response.have_objects, vec![known_object]);
         assert!(response.have_symbols.is_empty());
+    }
+
+    #[test]
+    fn dispatch_gossip_payload_with_fetch_reply_materializes_request_bytes() {
+        let mut responder = test_node("node-1");
+        let mut requester = test_node("peer-1");
+        let responder_peer = NodeId::new("node-1");
+        let requester_peer = NodeId::new("peer-1");
+        let zone_id = ZoneId::work();
+
+        responder.update_peer_state(
+            requester_peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        responder.update_peer_zones(&requester_peer, zone_set(zone_id.clone()));
+        requester.update_peer_state(
+            responder_peer.clone(),
+            test_device_profile("node-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        requester.update_peer_zones(&responder_peer, zone_set(zone_id.clone()));
+
+        let stored_object = test_stored_object(&zone_id, "dispatch-fetch-object", b"fetch-body");
+        let object_id = stored_object.object_id;
+        let symbol_object_id = test_object_id("dispatch-fetch-symbol-object");
+        let symbol_meta = test_object_symbol_meta(symbol_object_id, &zone_id);
+        let stored_symbol = test_stored_symbol(symbol_object_id, &zone_id, 5, 0xD5);
+
+        assert!(responder.announce_object(
+            &zone_id,
+            &object_id,
+            ObjectAdmissionClass::Admitted,
+            1_000,
+        ));
+        assert!(responder.announce_symbol(
+            &zone_id,
+            &symbol_object_id,
+            5,
+            ObjectAdmissionClass::Admitted,
+            1_000,
+        ));
+
+        fcp_async_core::runtime::block_on_sync(async {
+            responder
+                .object_store
+                .put(stored_object.clone())
+                .await
+                .expect("responder stores object bytes");
+            responder
+                .symbol_store
+                .put_object_meta(symbol_meta)
+                .await
+                .expect("responder stores symbol metadata");
+            responder
+                .symbol_store
+                .put_symbol(stored_symbol.clone())
+                .await
+                .expect("responder stores symbol bytes");
+
+            let request = GossipRequest {
+                from: TailscaleNodeId::new("peer-1"),
+                zone_id: zone_id.clone(),
+                object_ids: vec![object_id],
+                symbols: vec![(symbol_object_id, 5)],
+                timestamp: 1_000,
+                signature: None,
+            };
+            let payload =
+                serde_json::to_vec(&GossipMessage::Request(request)).expect("JSON encode");
+
+            let outcome = responder
+                .dispatch_gossip_payload_with_fetch_reply(&payload, 1_000)
+                .await
+                .expect("dispatch should materialize fetch reply");
+            let response = outcome
+                .dispatch
+                .response
+                .expect("standard dispatch still carries availability response");
+            assert_eq!(response.have_objects, vec![object_id]);
+            assert_eq!(response.have_symbols, vec![(symbol_object_id, 5)]);
+            let fetch_reply = outcome
+                .fetch_reply
+                .expect("request dispatch carries materialized bytes");
+            assert_eq!(fetch_reply.response.have_objects, vec![object_id]);
+            assert_eq!(fetch_reply.payload.objects.len(), 1);
+            assert_eq!(fetch_reply.payload.symbols.len(), 1);
+
+            let plan = requester
+                .handle_gossip_response(fetch_reply.response, 1_000)
+                .expect("requester verifies response")
+                .expect("requester produces fetch plan");
+            let apply = requester
+                .apply_gossip_fetch_payload(
+                    &plan,
+                    fetch_reply.payload.objects,
+                    fetch_reply.payload.symbols,
+                    1_001,
+                )
+                .await
+                .expect("requester applies materialized bytes");
+            assert_eq!(apply.objects_applied, vec![object_id]);
+            assert_eq!(apply.symbols_applied, vec![(symbol_object_id, 5)]);
+            assert!(apply.connector_state_root_candidates.is_empty());
+
+            let local_object = requester
+                .object_store
+                .get(&object_id)
+                .await
+                .expect("requester stores fetched object");
+            assert_eq!(local_object.body, stored_object.body);
+            let local_symbol = requester
+                .symbol_store
+                .get_symbol(&symbol_object_id, 5)
+                .await
+                .expect("requester stores fetched symbol");
+            assert_eq!(local_symbol.data, stored_symbol.data);
+        })
+        .expect("runtime");
     }
 
     #[test]

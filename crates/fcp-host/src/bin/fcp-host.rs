@@ -110,9 +110,9 @@ use fcp_policy::{
 use fcp_prelude::{
     ApprovalToken, CapabilityConstraints, CapabilityVerifier, ConnectorStateCanonicalStatus,
     CorrelationId, CostEstimateConfidence, CredentialId, Decision, InstanceId,
-    LeasePurpose as CoreLeasePurpose, ObjectId, PolicySimulationInput, ResourceAvailability,
-    RolloutPolicy, SafetyTier, TailscaleNodeId, TransportMode, UsageMetric, UsageMetricKind,
-    ZoneId, ZonePolicyObject, simulate_policy_decision,
+    LeasePurpose as CoreLeasePurpose, ObjectId, ObjectIdKey, PolicySimulationInput,
+    ResourceAvailability, RolloutPolicy, SafetyTier, TailscaleNodeId, TransportMode, UsageMetric,
+    UsageMetricKind, ZoneId, ZonePolicyObject, simulate_policy_decision,
 };
 #[cfg(test)]
 use fcp_prelude::{
@@ -148,7 +148,12 @@ use tower::ServiceExt;
 type ConnectorConfig = ManagedConnectorConfig;
 
 const CONNECTOR_STATE_DIR_ENV: &str = "FCP_CONNECTOR_STATE";
+const CONNECTOR_STATE_OBJECT_ID_KEY_ENV: &str = "FCP_CONNECTOR_STATE_OBJECT_ID_KEY";
+const FCP_HOST_CONNECTOR_STATE_OBJECT_ID_KEY_ENV: &str = "FCP_HOST_CONNECTOR_STATE_OBJECT_ID_KEY";
 const FCP_CONFIG_DIR_ENV: &str = "FCP_CONFIG_DIR";
+const CONNECTOR_STATE_CANONICAL_STORE_DIR: &str = "store";
+const CONNECTOR_STATE_CANONICAL_OBJECTS_DIR: &str = "objects";
+const CONNECTOR_STATE_CANONICAL_SYMBOLS_DIR: &str = "symbols";
 const HYBRID_OWNER_EVIDENCE_TAG: &str = "fcp.hybrid_owner.evidence_cbor";
 const HYBRID_OWNER_CONTEXT_FILE_ENV: &str = "FCP_HOST_HYBRID_OWNER_CONTEXT_FILE";
 const BLUEBUBBLES_INGRESS_ROUTE: &str = "/bluebubbles-webhook";
@@ -2131,6 +2136,43 @@ fn configured_connector_state_root(config: &ConnectorConfig) -> Option<PathBuf> 
         .map(PathBuf::from)
 }
 
+fn configured_connector_state_object_id_key(
+    config: &ConnectorConfig,
+) -> Result<Option<ObjectIdKey>, String> {
+    for env_key in [
+        FCP_HOST_CONNECTOR_STATE_OBJECT_ID_KEY_ENV,
+        CONNECTOR_STATE_OBJECT_ID_KEY_ENV,
+    ] {
+        let Some(raw) = config.env.get(env_key).map(String::as_str).map(str::trim) else {
+            continue;
+        };
+        if raw.is_empty() {
+            continue;
+        }
+        return parse_connector_state_object_id_key(raw).map(Some);
+    }
+    Ok(None)
+}
+
+fn parse_connector_state_object_id_key(raw: &str) -> Result<ObjectIdKey, String> {
+    let encoded = raw
+        .trim()
+        .strip_prefix("hex:")
+        .or_else(|| raw.trim().strip_prefix("0x"))
+        .unwrap_or_else(|| raw.trim());
+    let bytes = hex::decode(encoded)
+        .map_err(|_| "connector state object-id key must be 32 bytes of hex".to_string())?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "connector state object-id key must decode to 32 bytes, got {}",
+            bytes.len()
+        ));
+    }
+    let mut key = [0_u8; 32];
+    key.copy_from_slice(&bytes);
+    Ok(ObjectIdKey::from_bytes(key))
+}
+
 fn connector_state_root_dir() -> PathBuf {
     if let Some(path) = non_empty_os_env(CONNECTOR_STATE_DIR_ENV) {
         return PathBuf::from(path);
@@ -2151,6 +2193,27 @@ fn non_empty_os_env(key: &str) -> Option<OsString> {
 fn connector_state_cache_dir(root: &StdPath, connector_id: &ConnectorId) -> PathBuf {
     root.join(sanitize_state_path_segment(connector_id.as_str()))
         .join("cache")
+}
+
+fn connector_state_canonical_store_dir(root: &StdPath, connector_id: &ConnectorId) -> PathBuf {
+    root.join(sanitize_state_path_segment(connector_id.as_str()))
+        .join(CONNECTOR_STATE_CANONICAL_STORE_DIR)
+}
+
+fn connector_state_canonical_object_store_dir(
+    root: &StdPath,
+    connector_id: &ConnectorId,
+) -> PathBuf {
+    connector_state_canonical_store_dir(root, connector_id)
+        .join(CONNECTOR_STATE_CANONICAL_OBJECTS_DIR)
+}
+
+fn connector_state_canonical_symbol_store_dir(
+    root: &StdPath,
+    connector_id: &ConnectorId,
+) -> PathBuf {
+    connector_state_canonical_store_dir(root, connector_id)
+        .join(CONNECTOR_STATE_CANONICAL_SYMBOLS_DIR)
 }
 
 fn connector_zone_state_dir(root: &StdPath, connector_id: &ConnectorId, zone: &ZoneId) -> PathBuf {
@@ -2314,6 +2377,7 @@ fn inspect_connector_state_cache_marker(
     }
 }
 
+#[cfg(test)]
 #[must_use]
 fn host_connector_state_explain_payload(
     connector_id: &ConnectorId,
@@ -2323,16 +2387,119 @@ fn host_connector_state_explain_payload(
     host_connector_state_explain_payload_with_canonical_status(connector_id, zone, state_root, None)
 }
 
-async fn connector_state_root_for_registered_connector(
-    state: &AppState,
-    connector_id: &ConnectorId,
-) -> PathBuf {
-    let inventory = state.registry.inventory().await;
-    find_connector_inventory_entry(&inventory, connector_id)
-        .and_then(configured_connector_state_root)
-        .unwrap_or_else(connector_state_root_dir)
+struct HostConnectorStateExplainContext {
+    state_root: PathBuf,
+    canonical_status: Option<ConnectorStateCanonicalStatus>,
+    warnings: Vec<String>,
 }
 
+async fn connector_state_explain_context_for_registered_connector(
+    state: &AppState,
+    connector_id: &ConnectorId,
+    zone: Option<&ZoneId>,
+) -> HostConnectorStateExplainContext {
+    let inventory = state.registry.inventory().await;
+    let config = find_connector_inventory_entry(&inventory, connector_id);
+    let state_root = config
+        .and_then(configured_connector_state_root)
+        .unwrap_or_else(connector_state_root_dir);
+    let mut warnings = Vec::new();
+    let canonical_status = match config {
+        Some(config) => match connector_state_canonical_status_from_config(
+            config,
+            connector_id,
+            zone,
+            &state_root,
+        )
+        .await
+        {
+            Ok(status) => status,
+            Err(warning) => {
+                warnings.push(warning);
+                None
+            }
+        },
+        None => None,
+    };
+    HostConnectorStateExplainContext {
+        state_root,
+        canonical_status,
+        warnings,
+    }
+}
+
+async fn connector_state_canonical_status_from_config(
+    config: &ConnectorConfig,
+    connector_id: &ConnectorId,
+    zone: Option<&ZoneId>,
+    state_root: &StdPath,
+) -> Result<Option<ConnectorStateCanonicalStatus>, String> {
+    let Some(zone) = zone else {
+        return Ok(None);
+    };
+    let object_store_dir = connector_state_canonical_object_store_dir(state_root, connector_id);
+    if !object_store_dir.exists() {
+        return Ok(None);
+    }
+    let object_id_key = configured_connector_state_object_id_key(config)?.ok_or_else(|| {
+        format!(
+            "Canonical fcp-store object store exists at `{}`, but neither `{}` nor `{}` is configured; host explain cannot verify connector-state object IDs.",
+            object_store_dir.display(),
+            FCP_HOST_CONNECTOR_STATE_OBJECT_ID_KEY_ENV,
+            CONNECTOR_STATE_OBJECT_ID_KEY_ENV
+        )
+    })?;
+    let object_store = fcp_store::DurableObjectStore::open(
+        fcp_store::DurableObjectStoreConfig::new(&object_store_dir),
+    )
+    .map_err(|error| {
+        format!(
+            "Canonical fcp-store object store at `{}` could not be opened: {error}",
+            object_store_dir.display()
+        )
+    })?;
+    let object_store: Arc<dyn fcp_store::ObjectStore> = Arc::new(object_store);
+    let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+        object_store,
+        object_id_key,
+        connector_id.clone(),
+        zone.clone(),
+    );
+    let symbol_store_dir = connector_state_canonical_symbol_store_dir(state_root, connector_id);
+    if symbol_store_dir.exists() {
+        let symbol_store = fcp_store::DurableSymbolStore::open(
+            fcp_store::DurableSymbolStoreConfig::new(&symbol_store_dir),
+        )
+        .map_err(|error| {
+            format!(
+                "Canonical fcp-store symbol store at `{}` could not be opened: {error}",
+                symbol_store_dir.display()
+            )
+        })?;
+        return state_store
+            .canonical_status(Some(&symbol_store))
+            .await
+            .map(Some)
+            .map_err(|error| {
+                format!(
+                    "Canonical fcp-store status at `{}` could not be read: {error}",
+                    object_store_dir.display()
+                )
+            });
+    }
+    state_store
+        .canonical_status(None)
+        .await
+        .map(Some)
+        .map_err(|error| {
+            format!(
+                "Canonical fcp-store status at `{}` could not be read: {error}",
+                object_store_dir.display()
+            )
+        })
+}
+
+#[cfg(test)]
 #[must_use]
 fn host_connector_state_explain_payload_with_canonical_status(
     connector_id: &ConnectorId,
@@ -2340,7 +2507,24 @@ fn host_connector_state_explain_payload_with_canonical_status(
     state_root: &StdPath,
     canonical_status: Option<&ConnectorStateCanonicalStatus>,
 ) -> Value {
-    let mut warnings = Vec::new();
+    host_connector_state_explain_payload_with_canonical_status_and_warnings(
+        connector_id,
+        zone,
+        state_root,
+        canonical_status,
+        Vec::new(),
+    )
+}
+
+#[must_use]
+fn host_connector_state_explain_payload_with_canonical_status_and_warnings(
+    connector_id: &ConnectorId,
+    zone: Option<&ZoneId>,
+    state_root: &StdPath,
+    canonical_status: Option<&ConnectorStateCanonicalStatus>,
+    extra_warnings: Vec<String>,
+) -> Value {
+    let mut warnings = extra_warnings;
     let connector_cache_dir = connector_state_cache_dir(state_root, connector_id);
     let zone_cache_dir = zone.map(|zone| connector_zone_state_dir(state_root, connector_id, zone));
     let connector_marker =
@@ -7736,8 +7920,23 @@ async fn connector_state_explain_handler(
         zone_id = zone.as_ref().map(ZoneId::as_str),
         "processing connector state explain request"
     );
-    let state_root = connector_state_root_for_registered_connector(&state, &connector_id).await;
-    let payload = host_connector_state_explain_payload(&connector_id, zone.as_ref(), &state_root);
+    let HostConnectorStateExplainContext {
+        state_root,
+        canonical_status,
+        warnings,
+    } = connector_state_explain_context_for_registered_connector(
+        &state,
+        &connector_id,
+        zone.as_ref(),
+    )
+    .await;
+    let payload = host_connector_state_explain_payload_with_canonical_status_and_warnings(
+        &connector_id,
+        zone.as_ref(),
+        &state_root,
+        canonical_status.as_ref(),
+        warnings,
+    );
     tracing::debug!(
         event = "connector_state_explain_response",
         connector_id = %connector_id,
@@ -23677,6 +23876,81 @@ done"#;
         .status()
     }
 
+    fn connector_state_write_authorization_for_test(
+        connector_id: &ConnectorId,
+        zone_id: &ZoneId,
+    ) -> fcp_core::ConnectorStateWriteAuthorization {
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let instance_id = InstanceId::new();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec![fcp_core::connector_state_resource_uri(connector_id)],
+            ..Default::default()
+        };
+        let mut constraints_cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut constraints_cbor)
+            .expect("test connector-state constraints should serialize");
+        let now = Utc::now();
+        let token = fcp_core::CapabilityToken::from_raw(
+            fcp_crypto::cose::CapabilityTokenBuilder::new()
+                .capability_id(fcp_core::CONNECTOR_STATE_WRITE_CAPABILITY_ID)
+                .zone_id(zone_id.as_str())
+                .target_instance(instance_id.as_str())
+                .principal("principal:test")
+                .operations(&[fcp_core::CONNECTOR_STATE_APPEND_OPERATION_ID])
+                .issuer("node:test")
+                .validity(now, now + chrono::Duration::hours(1))
+                .try_constraints_cbor(&constraints_cbor)
+                .expect("test connector-state constraints should be accepted")
+                .sign(&signing_key)
+                .expect("test connector-state token should sign"),
+        );
+        let verifier = CapabilityVerifier::new(
+            signing_key.verifying_key().to_bytes(),
+            zone_id.clone(),
+            instance_id,
+        );
+
+        fcp_core::ConnectorStateWriteAuthorization::verify_append_token(
+            &verifier,
+            token,
+            connector_id,
+            zone_id,
+        )
+        .expect("test connector-state write token should authorize append")
+    }
+
+    fn durable_connector_state_object_for_test(
+        connector_id: &ConnectorId,
+        zone_id: &ZoneId,
+        seq: u64,
+        prev: Option<ObjectId>,
+        lease_object_id: ObjectId,
+    ) -> fcp_core::ConnectorStateObject {
+        let seq_byte = u8::try_from(seq).expect("test sequence should fit in CBOR byte");
+        fcp_core::ConnectorStateObject {
+            header: ObjectHeader {
+                schema: fcp_store::FcpStoreConnectorStateStore::state_object_schema_id(),
+                zone_id: zone_id.clone(),
+                created_at: 1_800_200_000 + seq,
+                provenance: Provenance::new(zone_id.clone()),
+                refs: vec![lease_object_id],
+                foreign_refs: Vec::new(),
+                ttl_secs: None,
+                placement: None,
+            },
+            connector_id: connector_id.clone(),
+            instance_id: None,
+            zone_id: zone_id.clone(),
+            prev,
+            seq,
+            state_cbor: vec![0xa1, 0x61, b'n', seq_byte],
+            updated_at: 1_800_200_000 + seq,
+            lease_seq: seq + 10,
+            lease_object_id,
+            signature: fcp_core::Signature::zero(),
+        }
+    }
+
     #[fcp_async_core::runtime::test]
     async fn rpc_budget_report_rejects_unauthenticated_request() {
         let state = cancel_route_test_state();
@@ -23805,6 +24079,130 @@ done"#;
                 .as_str()
                 .is_some_and(|path| path.starts_with(state_root_text.as_str())),
             "local_cache_path should use managed state root: {payload}"
+        );
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_state_explain_admin_route_reads_durable_fcp_store_status()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let state_root = tempdir.path().join("managed-state");
+        let connector_id = "fcp.test.state:utility:1.0.0";
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id = ZoneId::work();
+        let object_id_key = ObjectIdKey::from_bytes([0xC7; 32]);
+        let object_store_dir =
+            connector_state_canonical_object_store_dir(&state_root, &connector_key);
+        let object_store: Arc<dyn fcp_store::ObjectStore> = Arc::new(
+            fcp_store::DurableObjectStore::open(fcp_store::DurableObjectStoreConfig::new(
+                &object_store_dir,
+            ))
+            .expect("durable connector-state object store should open"),
+        );
+        let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+            Arc::clone(&object_store),
+            object_id_key,
+            connector_key.clone(),
+            zone_id.clone(),
+        )
+        .with_snapshot_every_entries(0)
+        .with_snapshot_every_secs(0);
+        let authorization = connector_state_write_authorization_for_test(&connector_key, &zone_id);
+        let append = fcp_core::ConnectorStateStore::append_object(
+            &state_store,
+            &connector_key,
+            &authorization,
+            durable_connector_state_object_for_test(
+                &connector_key,
+                &zone_id,
+                0,
+                None,
+                ObjectId::from_bytes([0x71; 32]),
+            ),
+        )
+        .await
+        .expect("durable connector-state append should commit");
+        let (head_object_id, root_object_id) = match append {
+            fcp_core::ConnectorStateAppendOutcome::Committed {
+                object_id,
+                root_object_id,
+                seq,
+                snapshot_object_id,
+            } => {
+                assert_eq!(seq, 0);
+                assert_eq!(snapshot_object_id, None);
+                (object_id, root_object_id)
+            }
+            fcp_core::ConnectorStateAppendOutcome::Conflict { .. } => {
+                panic!("initial durable connector-state append should not conflict")
+            }
+        };
+        drop(state_store);
+        drop(object_store);
+
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(1);
+        let runner_task = task::spawn(async move { while runner_rx.recv().await.is_some() {} });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let mut config = dispatcher_test_config(connector_id);
+        config.env.insert(
+            CONNECTOR_STATE_DIR_ENV.to_string(),
+            state_root.display().to_string(),
+        );
+        config.env.insert(
+            CONNECTOR_STATE_OBJECT_ID_KEY_ENV.to_string(),
+            hex::encode(object_id_key.as_bytes()),
+        );
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = dispatcher_app_state(registry, lifecycle, None, HashMap::new());
+        let state = Arc::new(AppState {
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            ..(*state).clone()
+        });
+        let app = connector_state_explain_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/connectors/fcp.test.state:utility:1.0.0/state/explain?zone=z%3Awork",
+            serde_json::json!({}),
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(payload["source"], "host-canonical-state");
+        assert_eq!(payload["canonical_storage"], "mesh");
+        assert_eq!(payload["last_canonical_seq"], 0);
+        assert_eq!(payload["mesh_replica_count"], Value::Null);
+        assert_eq!(payload["canonical_state"]["root_present"], true);
+        assert_eq!(
+            payload["canonical_state"]["connector_id"],
+            connector_key.to_string()
+        );
+        assert_eq!(payload["canonical_state"]["zone_id"], zone_id.as_str());
+        assert_eq!(payload["canonical_state"]["model"], "singleton_writer");
+        assert_eq!(
+            payload["canonical_state"]["root_object_id"],
+            root_object_id.to_string()
+        );
+        assert_eq!(
+            payload["canonical_state"]["head_object_id"],
+            head_object_id.to_string()
+        );
+        assert_eq!(payload["canonical_state"]["status_source"], "fcp-store");
+        assert!(
+            payload["warnings"]
+                .as_array()
+                .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("mesh replica count is not proven")))),
+            "payload should explain missing symbol-distribution evidence: {payload}"
         );
         Ok(())
     }

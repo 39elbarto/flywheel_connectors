@@ -209,6 +209,12 @@ struct SseParser {
     data_bytes_len: usize,
     /// Maximum `data:` payload bytes retained for an in-progress event.
     max_data_bytes: usize,
+    /// The previous `parse()` call consumed a CR as its final terminator.
+    /// Per WHATWG SSE, a CR followed by LF is a single CRLF terminator —
+    /// when CR and LF straddle a chunk boundary the leading LF of the
+    /// next chunk must be swallowed rather than treated as a new empty
+    /// line (which would dispatch a spurious event between the CR and LF).
+    pending_cr_swallows_lf: bool,
 }
 
 impl SseParser {
@@ -230,22 +236,44 @@ impl SseParser {
             last_event_id: None,
             data_bytes_len: 0,
             max_data_bytes,
+            pending_cr_swallows_lf: false,
         }
     }
 
     /// Parse incoming data and return complete events.
     fn parse(&mut self, data: &Bytes) -> Vec<SseEvent> {
-        self.buffer.extend_from_slice(data);
+        // If the previous chunk's final terminator was a lone CR, a leading
+        // LF in this chunk is the second half of a CRLF, not a new line
+        // terminator. Swallow it before appending to the buffer.
+        let data_slice: &[u8] = data;
+        let effective = if self.pending_cr_swallows_lf {
+            self.pending_cr_swallows_lf = false;
+            if data_slice.first() == Some(&b'\n') {
+                &data_slice[1..]
+            } else {
+                data_slice
+            }
+        } else {
+            data_slice
+        };
+        self.buffer.extend_from_slice(effective);
         let mut events = Vec::new();
 
         // Process complete lines
         while let Some(line_end) = self.find_line_end() {
             let line = self.buffer.split_to(line_end);
-            // Skip the line ending
+            // Skip the line ending. If we consume a CR with no following
+            // byte in the buffer, remember it so a CRLF straddling a chunk
+            // boundary is collapsed back to a single terminator next time.
+            let mut consumed_lone_trailing_cr = false;
             if self.buffer.starts_with(b"\r\n") {
                 self.buffer.advance(2);
-            } else if self.buffer.starts_with(b"\n") || self.buffer.starts_with(b"\r") {
+            } else if self.buffer.starts_with(b"\n") {
                 self.buffer.advance(1);
+            } else if self.buffer.starts_with(b"\r") {
+                let is_trailing = self.buffer.len() == 1;
+                self.buffer.advance(1);
+                consumed_lone_trailing_cr = is_trailing;
             }
             self.parse_cursor = 0;
 
@@ -260,6 +288,10 @@ impl SseParser {
                 // Comment, ignore
             } else {
                 self.process_field(&line_str);
+            }
+
+            if consumed_lone_trailing_cr {
+                self.pending_cr_swallows_lf = true;
             }
         }
 
@@ -1499,6 +1531,51 @@ mod tests {
         // Mix of \n, \r\n, and \r
         let data = Bytes::from("data: a\ndata: b\r\n\r\n");
         let events = parser.parse(&data);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "a\nb");
+    }
+
+    /// WHATWG SSE: CRLF is a single line terminator even when the CR and
+    /// LF arrive in separate network chunks. A naive parser that consumes
+    /// the CR before seeing the LF would re-interpret the trailing LF as
+    /// an empty-line dispatch trigger, producing a spurious event split.
+    #[test]
+    fn test_parse_crlf_split_across_chunks_is_single_terminator() {
+        let mut parser = SseParser::new();
+        let first = parser.parse(&Bytes::from("data: hello\r"));
+        let second = parser.parse(&Bytes::from("\ndata: foo\n\n"));
+        let events: Vec<_> = first.into_iter().chain(second).collect();
+        assert_eq!(
+            events.len(),
+            1,
+            "split CRLF must not dispatch an event between the CR and LF"
+        );
+        assert_eq!(events[0].data, "hello\nfoo");
+    }
+
+    /// Same hazard with a one-byte LF chunk landing immediately after the
+    /// CR chunk and no further data lines before the blank-line dispatch.
+    #[test]
+    fn test_parse_crlf_split_across_chunks_dispatches_once() {
+        let mut parser = SseParser::new();
+        let first = parser.parse(&Bytes::from("data: hello\r"));
+        let second = parser.parse(&Bytes::from("\n\n"));
+        let events: Vec<_> = first.into_iter().chain(second).collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "hello");
+    }
+
+    /// When a chunk-ending CR is followed by a non-LF byte in the next
+    /// chunk, the spec says the CR was a standalone terminator. The LF-
+    /// swallow only triggers on a leading LF, not on arbitrary bytes.
+    #[test]
+    fn test_parse_trailing_cr_followed_by_non_lf_keeps_separate_terminators() {
+        let mut parser = SseParser::new();
+        let first = parser.parse(&Bytes::from("data: a\r"));
+        let second = parser.parse(&Bytes::from("data: b\n\n"));
+        let events: Vec<_> = first.into_iter().chain(second).collect();
+        // The CR ends the "data: a" line; the "\n\n" closes the event with
+        // data lines ["a", "b"].
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "a\nb");
     }

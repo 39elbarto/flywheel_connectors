@@ -2563,25 +2563,25 @@ fn host_connector_state_explain_payload_with_canonical_status_and_warnings(
     }
     if canonical_root_present && !connector_marker.present() {
         warnings.push(format!(
-            "Canonical fcp-store state is present, but connector cache marker '{}' is missing at '{}'; keep local state files read-only until the host rewrites cache-only markers.",
+            "Canonical fcp-store state is present, but connector cache marker `{}` is missing at `{}`; keep local state files read-only until the host rewrites cache-only markers.",
             fcp_store::CONNECTOR_STATE_CACHE_MARKER,
-            connector_cache_dir.display()
+            connector_cache_dir
+                .join(fcp_store::CONNECTOR_STATE_CACHE_MARKER)
+                .display()
         ));
     }
-    if let (true, Some(zone), Some(zone_cache_dir), Some(zone_marker)) = (
-        canonical_root_present,
-        zone,
-        zone_cache_dir.as_ref(),
-        zone_marker,
-    ) {
-        if !zone_marker.present() {
-            warnings.push(format!(
-                "Canonical fcp-store state is present for zone '{}', but zone cache marker '{}' is missing at '{}'; keep that zone cache read-only until marker creation succeeds.",
-                zone.as_str(),
-                fcp_store::CONNECTOR_STATE_CACHE_MARKER,
-                zone_cache_dir.display()
-            ));
-        }
+    if canonical_root_present
+        && let Some(zone) = zone
+        && !zone_marker.is_some_and(ConnectorStateCacheMarkerObservation::present)
+    {
+        let zone_marker_path = connector_zone_state_dir(state_root, connector_id, zone)
+            .join(fcp_store::CONNECTOR_STATE_CACHE_MARKER);
+        warnings.push(format!(
+            "Canonical fcp-store state is present for zone `{}`, but zone cache marker `{}` is missing at `{}`; keep that zone cache read-only until marker creation succeeds.",
+            zone.as_str(),
+            fcp_store::CONNECTOR_STATE_CACHE_MARKER,
+            zone_marker_path.display()
+        ));
     }
     match canonical_status {
         Some(status) if status.root_present => {
@@ -14222,6 +14222,18 @@ deny_ptrace = true
                 .as_str()
                 .is_some_and(|warning| warning.contains("not proven by cache markers"))),
             "canonical status should suppress cache-marker-only proof warning: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("connector cache marker"))),
+            "canonical status without cache markers should warn about connector cache marker absence: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("zone cache marker"))),
+            "canonical status without zone cache marker should warn about zone cache marker absence: {warnings:?}"
         );
     }
 

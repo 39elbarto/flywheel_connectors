@@ -394,7 +394,7 @@ async fn local_non_mock_rate_limit_maps_retry_after_metadata() {
             retry_after_ms,
             violation,
         } => {
-            assert_eq!(violation, None);
+            assert!(violation.is_none());
             retry_after_ms
         }
         other => panic!("expected rate limit, got {other:?}"),

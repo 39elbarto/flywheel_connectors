@@ -109,6 +109,7 @@ impl LoopbackServer {
     }
 }
 
+#[derive(Clone, Copy)]
 struct HttpResponse {
     status: &'static str,
     body: &'static str,
@@ -184,7 +185,11 @@ fn assert_request(captured: &CapturedRequest) {
         .expect("captured request should include request line");
     assert_eq!(request_line, format!("POST {EXPECTED_PATH} HTTP/1.1"));
     assert!(
-        header_seen(&captured.head, "authorization", &format!("Bearer {TOKEN}")),
+        header_seen(
+            &captured.head,
+            "authorization",
+            &format!("Bearer {LOOPBACK_BEARER_VALUE}"),
+        ),
         "request should carry configured Notion bearer token; head={}",
         captured.head
     );

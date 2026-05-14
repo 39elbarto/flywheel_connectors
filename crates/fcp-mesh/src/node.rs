@@ -403,6 +403,14 @@ pub struct GossipFetchedSymbol {
 pub struct GossipFetchApplyOutcome {
     /// Object payloads accepted into the local object store and announced.
     pub objects_applied: Vec<ObjectId>,
+    /// Accepted object payloads that look like connector-state roots.
+    ///
+    /// The transport byte-application layer cannot validate connector/zone
+    /// ownership because it does not know the caller's `ObjectIdKey` or
+    /// connector id. Host/mesh adapters should pass these candidates to
+    /// `observe_connector_state_root` with the appropriate
+    /// `FcpStoreConnectorStateStore`.
+    pub connector_state_root_candidates: Vec<ObjectId>,
     /// Symbol payloads accepted into the local symbol store and announced.
     pub symbols_applied: Vec<(ObjectId, u32)>,
 }
@@ -411,7 +419,9 @@ impl GossipFetchApplyOutcome {
     /// Whether the fetched payload changed no local availability state.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.objects_applied.is_empty() && self.symbols_applied.is_empty()
+        self.objects_applied.is_empty()
+            && self.connector_state_root_candidates.is_empty()
+            && self.symbols_applied.is_empty()
     }
 }
 
@@ -2250,6 +2260,8 @@ impl MeshNode {
         for object in objects {
             Self::validate_fetched_object(plan, &requested_objects, &object)?;
             let object_id = object.object_id;
+            let is_connector_state_root =
+                object.header.schema == fcp_store::FcpStoreConnectorStateStore::root_schema_id();
             match self.object_store.put(object).await {
                 Ok(()) | Err(fcp_store::ObjectStoreError::AlreadyExists(_)) => {}
                 Err(err) => return Err(MeshNodeError::ObjectStore(err)),
@@ -2261,6 +2273,9 @@ impl MeshNode {
                 now_ms,
             );
             outcome.objects_applied.push(object_id);
+            if is_connector_state_root {
+                outcome.connector_state_root_candidates.push(object_id);
+            }
         }
 
         for fetched in symbols {
@@ -3001,9 +3016,9 @@ mod tests {
     };
     use fcp_raptorq::ObjectTransmissionInformation;
     use fcp_store::{
-        MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
-        ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo, QuarantineStore,
-        QuarantinedObject, StoredSymbol, SymbolMeta,
+        FcpStoreConnectorStateStore, MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore,
+        MemorySymbolStoreConfig, ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo,
+        QuarantineStore, QuarantinedObject, StoredSymbol, SymbolMeta,
     };
 
     fn test_node(name: &str) -> MeshNode {
@@ -3123,6 +3138,44 @@ mod tests {
             object_id,
             header,
             body: keyed_body,
+            storage: StorageMeta {
+                retention: EvictionPolicy::Pinned,
+            },
+        }
+    }
+
+    fn test_connector_state_root_object(
+        zone_id: &ZoneId,
+        connector_id: ConnectorId,
+        object_id_key: ObjectIdKey,
+    ) -> StoredObject {
+        let schema = FcpStoreConnectorStateStore::root_schema_id();
+        let header = ObjectHeader {
+            schema: schema.clone(),
+            zone_id: zone_id.clone(),
+            created_at: 1,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let root = ConnectorStateRoot {
+            header: header.clone(),
+            connector_id,
+            instance_id: None,
+            zone_id: zone_id.clone(),
+            model: ConnectorStateModel::SingletonWriter,
+            head: None,
+            state_schema_version: 1,
+        };
+        let body = CanonicalSerializer::serialize(&root, &schema).expect("serialize root");
+        let object_id =
+            StoredObject::derive_id(&header, &body, &object_id_key).expect("derive root id");
+        StoredObject {
+            object_id,
+            header,
+            body,
             storage: StorageMeta {
                 retention: EvictionPolicy::Pinned,
             },
@@ -5162,6 +5215,7 @@ mod tests {
                 .await
                 .expect("apply fetched bytes");
             assert_eq!(outcome.objects_applied, vec![fetched_object_id]);
+            assert!(outcome.connector_state_root_candidates.is_empty());
             assert_eq!(outcome.symbols_applied, vec![(symbol_object_id, 7)]);
 
             let local_object = node
@@ -5192,6 +5246,87 @@ mod tests {
             .expect("local node advertises applied bytes");
         assert_eq!(response.have_objects, vec![fetched_object_id]);
         assert_eq!(response.have_symbols, vec![(symbol_object_id, 7)]);
+    }
+
+    #[test]
+    fn apply_gossip_fetch_payload_surfaces_connector_state_roots_for_observation() {
+        let mut node = test_node("node-1");
+        let peer_node = test_node("peer-1");
+        let peer = NodeId::new("peer-1");
+        let zone_id = ZoneId::work();
+        let connector_id = ConnectorId::from_static("slack:chat:v1");
+        let object_id_key = ObjectIdKey::from_bytes([0xB5; 32]);
+
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(zone_id.clone()));
+
+        let fetched_root =
+            test_connector_state_root_object(&zone_id, connector_id.clone(), object_id_key);
+        let fetched_root_id = fetched_root.object_id;
+
+        fcp_async_core::runtime::block_on_sync(async {
+            peer_node
+                .object_store
+                .put(fetched_root)
+                .await
+                .expect("peer stores connector-state root bytes");
+
+            let response = GossipResponse {
+                from: TailscaleNodeId::new("peer-1"),
+                to: TailscaleNodeId::new("node-1"),
+                zone_id: zone_id.clone(),
+                have_objects: vec![fetched_root_id],
+                have_symbols: vec![],
+                timestamp: 1_000,
+            };
+            let plan = node
+                .handle_gossip_response(response, 1_000)
+                .expect("verified response")
+                .expect("fetch plan");
+            let object_bytes = peer_node
+                .object_store
+                .get(&fetched_root_id)
+                .await
+                .expect("transport fetched connector-state root bytes");
+
+            let outcome = node
+                .apply_gossip_fetch_payload(&plan, vec![object_bytes], vec![], 1_000)
+                .await
+                .expect("apply fetched connector-state root bytes");
+            assert_eq!(outcome.objects_applied, vec![fetched_root_id]);
+            assert_eq!(
+                outcome.connector_state_root_candidates,
+                vec![fetched_root_id]
+            );
+            assert!(outcome.symbols_applied.is_empty());
+
+            let object_store = Arc::clone(node.object_store());
+            let state_store = FcpStoreConnectorStateStore::new(
+                object_store,
+                object_id_key,
+                connector_id,
+                zone_id.clone(),
+            );
+            let change = node
+                .observe_connector_state_root(
+                    &state_store,
+                    outcome.connector_state_root_candidates[0],
+                    1_001,
+                )
+                .await
+                .expect("state root candidate should validate and announce");
+            assert_eq!(change.kind, ConnectorStateChangeKind::RootUpdated);
+            assert_eq!(change.object_id, Some(fetched_root_id));
+            assert_eq!(change.zone_id, zone_id);
+            assert_eq!(change.seq, None);
+        })
+        .expect("runtime");
     }
 
     #[test]

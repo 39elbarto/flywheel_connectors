@@ -374,6 +374,14 @@ impl GooglePeopleConnector {
                 message: format!("Invalid handshake request: {error}"),
             })?;
 
+        if let Some(requested_instance_id) = req.requested_instance_id {
+            let base = Arc::get_mut(&mut self.base).ok_or_else(|| FcpError::Internal {
+                message: "Cannot assign requested instance ID after connector state is shared"
+                    .into(),
+            })?;
+            base.instance_id = requested_instance_id;
+        }
+
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),

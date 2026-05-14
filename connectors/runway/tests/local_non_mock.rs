@@ -265,7 +265,7 @@ async fn configured_connector(base_url: &str, request_timeout_ms: u64) -> Runway
     connector
 }
 
-fn invoke(operation: &str, input: Value) -> Value {
+fn invoke(operation: &str, input: &Value) -> Value {
     json!({
         "operation": operation,
         "input": input
@@ -283,7 +283,7 @@ async fn local_non_mock_submit_and_status_cross_loopback_boundary() {
     let submit = connector
         .handle_invoke(invoke(
             OP_TEXT_TO_VIDEO,
-            json!({
+            &json!({
                 "model": "gen4.5",
                 "promptText": "local acceptance scene",
                 "duration": 5
@@ -298,7 +298,7 @@ async fn local_non_mock_submit_and_status_cross_loopback_boundary() {
     assert_eq!(submit["binary_proxying"], false);
 
     let status = connector
-        .handle_invoke(invoke(OP_STATUS, json!({"task_id": "task-done"})))
+        .handle_invoke(invoke(OP_STATUS, &json!({"task_id": "task-done"})))
         .await
         .expect("status should succeed");
     assert_eq!(status["provider"], "runway");
@@ -384,7 +384,7 @@ async fn local_non_mock_rate_limit_maps_retry_after_metadata() {
     let connector = configured_connector(fixture.base_url(), 5_000).await;
 
     let limited = connector
-        .handle_invoke(invoke(OP_STATUS, json!({"task_id": "rate"})))
+        .handle_invoke(invoke(OP_STATUS, &json!({"task_id": "rate"})))
         .await
         .expect_err("rate limit should fail");
     let limited_debug = format!("{limited:?}");

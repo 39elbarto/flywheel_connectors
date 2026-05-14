@@ -49,6 +49,7 @@ pub struct SearchScrapeOptions {
 }
 
 impl SearchScrapeOptions {
+    #[must_use]
     pub fn markdown() -> Self {
         Self {
             formats: vec!["markdown".into()],

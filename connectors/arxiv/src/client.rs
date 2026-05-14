@@ -113,7 +113,7 @@ impl ArxivClient {
 
     #[instrument(skip(self), fields(url))]
     async fn arxiv_get_bytes(&self, url: &str) -> ArxivResult<Vec<u8>> {
-        debug!(url = %redact_url(&url), "arXiv GET bytes request");
+        debug!(url = %redact_url(url), "arXiv GET bytes request");
         let resp = self.client.get(url).send().await?;
         let status = resp.status();
         if status.is_success() {

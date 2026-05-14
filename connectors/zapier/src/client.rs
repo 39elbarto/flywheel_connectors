@@ -228,14 +228,14 @@ impl ZapierClient {
     }
 }
 
-/// Maximum byte length for a Zapier action_id. Zapier's NLA action
+/// Maximum byte length for a Zapier `action_id`. Zapier's NLA action
 /// ids in practice are short (UUIDs or 12-32 char slugs); a 128-byte
 /// cap is well above any legitimate value and bounds the worst case
 /// for path-injection payloads.
 const MAX_ACTION_ID_LEN: usize = 128;
 
-/// Validate that an action_id is safe to interpolate into the
-/// /exposed/{action_id}/execute/ URL path.
+/// Validate that an `action_id` is safe to interpolate into the
+/// `/exposed/{action_id}/execute/` URL path.
 ///
 /// Allowed: ASCII alphanumeric + `-` + `_`. Disallowed: any path
 /// separator, query / fragment delimiter, percent-encoded byte,

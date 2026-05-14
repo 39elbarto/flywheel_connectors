@@ -1,0 +1,38 @@
+{
+  "schema": "fcp.readme.proof_obligations.v1",
+  "features": [
+    {
+      "feature": "Zone Isolation",
+      "gate_status": "PROVEN",
+      "accepted_shas": [],
+      "required_artifacts": [
+        {
+          "id": "lean-verify-zone-lattice",
+          "kind": "lean_verify",
+          "artifact_hint": "artifacts/lean/${GITHUB_SHA}.txt",
+          "operator_url_hint": ".github/workflows/lean-verify.yml",
+          "max_age_hours": 24,
+          "require_current_sha": true,
+          "green_markers": [
+            "lean/Fcp/Zone/Lattice.lean",
+            "\"verdict\":\"green\"",
+            "\"sorries_remaining\":0"
+          ]
+        },
+        {
+          "id": "zone-isolation-full-e2e",
+          "kind": "rch_e2e",
+          "artifact_hint": "artifacts/e2e/zone_isolation_full_e2e/${GITHUB_SHA}.jsonl",
+          "operator_url_hint": "crates/fcp-e2e/tests/zone_isolation_full_e2e.rs",
+          "max_age_hours": 24,
+          "require_current_sha": true,
+          "green_markers": [
+            "\"suite\":\"zone_isolation_full_e2e\"",
+            "\"status\":\"green\"",
+            "\"leaked_pairs_count\":0"
+          ]
+        }
+      ]
+    }
+  ]
+}

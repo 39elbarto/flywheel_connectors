@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:059c1c1fc95d1bf4849e5fbba0c14064fdef8fcc5f4891dd589242e628ae3754"
+interface_hash = "blake3-256:fcp.interface.v2:e2f79f161ec9b688c1f5619f6764a1f76ac8777a7299722ceb33f92e634a9496"
 
 [connector]
 id = "fcp.posthog"
@@ -18,7 +18,7 @@ format = "wasi"
 [connector.state]
 model = "singleton_writer"
 state_schema_version = "1"
-migration_hint = "Stores personal API key and project ID."
+migration_hint = "Stores personal API key, optional project API key, project ID, and endpoint roots."
 
 [zones]
 home = "z:work"
@@ -42,6 +42,7 @@ required = [
 ]
 optional = [
     "posthog.events.read",
+    "posthog.events.write",
     "posthog.feature_flags.read",
     "posthog.insights.read",
 ]
@@ -102,8 +103,74 @@ when_to_use = "Query PostHog events using HogQL."
 common_mistakes = ["Writing standard SQL instead of HogQL — use PostHog-specific table names like 'events' and 'persons', and HogQL functions for property access."]
 examples = ['{"query": "SELECT event, count() FROM events GROUP BY event ORDER BY count() DESC LIMIT 10"}']
 related = [
+    "posthog.events.capture",
     "posthog.insights.list",
     "posthog.feature_flags.list",
+]
+
+[provides.operations."posthog.events.capture"]
+description = "Capture a sandbox-scoped event"
+capability = "posthog.events.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."posthog.events.capture".input_schema]
+required = ["event", "distinct_id"]
+type = "object"
+
+[provides.operations."posthog.events.capture".input_schema.properties.event]
+description = "Namespaced event name"
+type = "string"
+
+[provides.operations."posthog.events.capture".input_schema.properties.distinct_id]
+description = "Sandbox distinct id"
+type = "string"
+
+[provides.operations."posthog.events.capture".input_schema.properties.properties]
+description = "Redaction-safe event properties"
+type = "object"
+
+[provides.operations."posthog.events.capture".output_schema]
+required = ["captured"]
+type = "object"
+
+[provides.operations."posthog.events.capture".output_schema.properties.captured]
+type = "boolean"
+
+[provides.operations."posthog.events.capture".output_schema.properties.response]
+type = "object"
+
+[provides.operations."posthog.events.capture".network_constraints]
+host_allow = [
+    "us.i.posthog.com",
+    "eu.i.posthog.com",
+    "*.posthog.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."posthog.events.capture".ai_hints]
+when_to_use = "Capture one namespaced event in a disposable PostHog sandbox project."
+common_mistakes = ["Using a production project API key or customer distinct_id; event capture creates analytics artifacts."]
+examples = ['{"event": "fcp_sandbox_verification", "distinct_id": "fcp-sandbox-run", "properties": {"$process_person_profile": false}}']
+related = [
+    "posthog.events.query",
+    "posthog.insights.list",
 ]
 
 [provides.operations."posthog.feature_flags.list"]
@@ -153,6 +220,7 @@ common_mistakes = ["Assuming all returned flags are active — check the 'active
 examples = ["{}"]
 related = [
     "posthog.events.query",
+    "posthog.events.capture",
     "posthog.insights.list",
 ]
 
@@ -203,6 +271,7 @@ common_mistakes = ["Expecting full result data in the list response — this ret
 examples = ["{}"]
 related = [
     "posthog.events.query",
+    "posthog.events.capture",
     "posthog.feature_flags.list",
 ]
 
@@ -227,6 +296,13 @@ burst = 10
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "posthog.events.write"
+requests = 20
+window_ms = 60000
+burst = 2
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "posthog.insights.read"
 requests = 200
 window_ms = 60000
@@ -241,6 +317,7 @@ burst = 20
 scope = "instance"
 
 [rate_limits.operation_pools]
+"posthog.events.capture" = ["posthog.events.write"]
 "posthog.events.query" = ["posthog.events.read"]
 "posthog.feature_flags.list" = ["posthog.feature_flags.read"]
 "posthog.insights.list" = ["posthog.insights.read"]

@@ -392,6 +392,12 @@ impl AwsConnector {
         }
     }
 
+    /// Return this connector instance identifier for host-scoped capability binding.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
     fn manifest_hash() -> String {
         let mut h = Sha256::new();
         h.update(MANIFEST_TOML.as_bytes());

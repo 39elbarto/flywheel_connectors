@@ -1,6 +1,6 @@
 # AWS Connector V3 Contract
 
-> **Status**: runtime contract documented; live parser gaps documented
+> **Status**: runtime contract documented; live S3 object lifecycle proof documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: `scripts/e2e/aws_connector_verification.sh`
@@ -64,13 +64,14 @@ The runtime, manifest, and live AWS protocol state are not fully aligned in this
 
 - `manifest.toml` still says deterministic verification relies on endpoint overrides "until SigV4 signing is implemented"; current client code does implement SigV4.
 - `operator_guidance()` has one stale prerequisite string with the same "before SigV4 signing exists" wording; the doctor check correctly reports SigV4 as active.
-- The connector signs real AWS request shapes, but most response parsers expect connector-normalized JSON fixture payloads:
-  - S3 bucket/object list and mutation helpers call REST endpoints but deserialize JSON fixtures.
+- The connector signs real AWS request shapes, but several non-S3 response parsers still expect connector-normalized JSON fixture payloads:
+  - S3 object list parses native S3 XML, and S3 object put/delete accept native empty success responses plus AWS headers.
+  - S3 bucket listing still calls REST endpoints but deserializes JSON fixtures.
   - EC2 and STS use AWS Query API request shapes but deserialize JSON fixtures instead of native XML responses.
   - Lambda list/invoke use Lambda API paths but deserialize the connector's simplified JSON response types.
-- Routine deterministic tests therefore prove signed dispatch, capability enforcement, risky-operation metadata, error mapping, and lifecycle behavior against WireMock fixtures, not full native AWS response-envelope parity.
+- Routine deterministic tests therefore prove signed dispatch, S3 object lifecycle parser parity, capability enforcement, risky-operation metadata, error mapping, and lifecycle behavior against WireMock fixtures, not full native AWS response-envelope parity.
 
-A follow-up parser parity bead should reconcile S3 XML, EC2 Query XML, STS Query XML, and Lambda native response envelopes before this connector is described as live AWS complete.
+A follow-up parser parity bead should reconcile S3 bucket-list XML, EC2 Query XML, STS Query XML, and Lambda native response envelopes before this connector is described as live AWS complete.
 
 ## First-Slice Scope
 
@@ -106,6 +107,24 @@ The first AWS README slice documents the existing runtime surface:
   - `aws.iam.read` gates STS identity and AWS health.
 - The connector does not persist credentials, account IDs, ARNs, bucket names, object bodies, instance IDs, Lambda names, or provider responses beyond process memory.
 - The manifest required capability list covers network primitives; operation entries and runtime introspection carry the operation-specific `aws.*` capability IDs.
+
+## Tier B Live Sandbox Verification
+
+The connector's gated sandbox proof is `rch exec -- cargo test -p fcp-aws --test live_verification -- --nocapture`. It is skipped unless `FCP_LIVE_SANDBOX=1` and the AWS sandbox environment is complete.
+
+Required live inputs:
+
+- `AWS_SANDBOX_ACCESS_KEY_ID`
+- `AWS_SANDBOX_SECRET_ACCESS_KEY`
+- `AWS_SANDBOX_ACCOUNT_ID`
+- `AWS_SANDBOX_BUCKET`
+- `FCP_SANDBOX_RUN_NAMESPACE`
+
+`AWS_SANDBOX_REGION` defaults to `us-east-1`; set it when the sandbox bucket lives in another region. `AWS_SANDBOX_SESSION_TOKEN` is optional for temporary credentials.
+
+Use a dedicated AWS sandbox account and a dedicated S3 bucket. The credentials must be scoped to put, list, get, and delete only synthetic objects under the verification prefix. The proof performs an invalid-signature list request as the auth-denial path, then performs a reversible `put_object` -> `list_objects` -> `delete_object` -> post-delete `get_object` lifecycle.
+
+The live test emits `AWS_LIVE_SANDBOX_JSONL` evidence with the command, git revision when provided through `FCP_LIVE_GIT_REVISION`, sandbox class, call ceiling, cleanup result, hashed account/bucket/object identifiers, and skip/failure reason. It never logs access keys, session tokens, account IDs, bucket names, object keys, object bodies, provider resource IDs, or raw provider error bodies.
 
 ## Network And Runtime Invariants
 

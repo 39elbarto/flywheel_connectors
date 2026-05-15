@@ -196,6 +196,8 @@ These are excluded on purpose:
 - operator guidance, manifest hash, verification script, artifact root, and rerun commands
 - operation metadata, schemas, capability IDs, risk levels, safety tiers, idempotency, and approval modes
 - self-check proof through `/user/tokens/verify` when credential material is configured
+- gated live sandbox DNS lifecycle proof through `cloudflare.health`, `cloudflare.dns.create_record`, `cloudflare.dns.list_records`, `cloudflare.dns.delete_record`, and post-delete list verification
+- gated live auth-denial proof with an intentionally invalid API token
 - simulation allow behavior, currently without operation/capability validation
 
 The deterministic integration evidence is anchored on connector-local tests covering:
@@ -227,6 +229,7 @@ The verification surface captures:
 - manifest validation through `fwc`
 - runtime operation contract tests
 - deterministic WireMock Cloudflare API coverage
+- gated Cloudflare sandbox DNS mutation proof when `FCP_LIVE_SANDBOX=1` and sandbox credentials are configured
 - auth, base URL, input validation, capability-token, provider error, lifecycle, introspection, and self-check tests
 - formatting, check, and clippy proof through `rch`
 - UBS on changed files before commit
@@ -239,10 +242,12 @@ The verification surface captures:
 - Use a non-production zone, Pages project, Workers script name, and KV namespace for mutation tests.
 - Prefer a scoped API token with only the permissions needed for the operations under test.
 - Avoid legacy global API-key mode unless a specific compatibility test requires it.
+- To run the gated live DNS suite, set `FCP_LIVE_SANDBOX=1`, `CLOUDFLARE_SANDBOX_API_TOKEN`, `CLOUDFLARE_SANDBOX_ACCOUNT_ID`, `CLOUDFLARE_SANDBOX_ZONE_ID`, and `FCP_SANDBOX_RUN_NAMESPACE`. `CLOUDFLARE_SANDBOX_BASE_URL` defaults to `https://api.cloudflare.com/client/v4`.
 
 **Dedicated environment**:
 
 - Keep DNS mutations confined to a disposable zone.
+- The gated live suite creates one synthetic TXT record, verifies it appears in the DNS record list, deletes it, and verifies the record ID is absent from a second DNS list. Do not point it at a production zone.
 - Keep Workers deploy/delete confined to a disposable script name with no production routes.
 - Keep Pages deployments confined to a disposable project and branch.
 - Keep KV writes/deletes confined to a disposable namespace.

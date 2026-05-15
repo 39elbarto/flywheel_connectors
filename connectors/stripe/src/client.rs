@@ -713,106 +713,249 @@ impl StripeClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path},
-    };
+    use std::collections::HashMap;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: Option<serde_json::Value>,
+        expected_headers: Vec<(&'static str, &'static str)>,
+        absent_headers: Vec<&'static str>,
+    }
+
+    impl TestHttpResponse {
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: Some(body),
+                expected_headers: Vec::new(),
+                absent_headers: Vec::new(),
+            }
+        }
+
+        fn empty(method: &'static str, path: &'static str, status: u16) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: None,
+                expected_headers: Vec::new(),
+                absent_headers: Vec::new(),
+            }
+        }
+
+        fn with_header(mut self, name: &'static str, value: &'static str) -> Self {
+            self.expected_headers.push((name, value));
+            self
+        }
+
+        fn without_header(mut self, name: &'static str) -> Self {
+            self.absent_headers.push(name);
+            self
+        }
+    }
+
+    struct TestApiServer {
+        uri: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestApiServer {
+        fn start(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let handle = thread::spawn(move || {
+                for response in responses {
+                    let (stream, _) = listener.accept().unwrap();
+                    serve_response(stream, response);
+                }
+            });
+            Self {
+                uri: format!("http://{addr}"),
+                handle: Some(handle),
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.uri
+        }
+
+        fn finish(mut self) {
+            if let Some(handle) = self.handle.take() {
+                handle.join().expect("test API server thread finished");
+            }
+        }
+    }
+
+    fn serve_response(mut stream: TcpStream, response: TestHttpResponse) {
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().unwrap_or_default();
+        let target = parts.next().unwrap_or_default();
+        assert_eq!(method, response.method);
+        assert_eq!(target.split('?').next().unwrap_or(target), response.path);
+
+        let mut headers = HashMap::new();
+        let mut content_length = 0usize;
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header).unwrap();
+            let trimmed = header.trim_end();
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':') {
+                let normalized = name.to_ascii_lowercase();
+                let value = value.trim().to_string();
+                if normalized == "content-length" {
+                    content_length = value.parse().unwrap();
+                }
+                headers.insert(normalized, value);
+            }
+        }
+        if content_length > 0 {
+            let mut body = vec![0u8; content_length];
+            reader.read_exact(&mut body).unwrap();
+        }
+
+        for (name, value) in response.expected_headers {
+            let normalized = name.to_ascii_lowercase();
+            assert_eq!(headers.get(&normalized).map(String::as_str), Some(value));
+        }
+        for name in response.absent_headers {
+            let normalized = name.to_ascii_lowercase();
+            assert!(!headers.contains_key(&normalized));
+        }
+
+        let body = response
+            .body
+            .map(|body| body.to_string())
+            .unwrap_or_default();
+        let reason = match response.status {
+            200 => "OK",
+            401 => "Unauthorized",
+            404 => "Not Found",
+            429 => "Too Many Requests",
+            _ => "Test Status",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            response.status,
+            reason,
+            body.len(),
+            body
+        )
+        .unwrap();
+    }
 
     #[fcp_async_core::runtime::test]
     async fn test_get_customer() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/customers/cus_123"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "GET",
+            "/v1/customers/cus_123",
+            200,
+            serde_json::json!({
                 "id": "cus_123",
                 "object": "customer",
                 "email": "test@example.com",
                 "name": "Test User"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let customer = client.get_customer("cus_123").await.unwrap();
         assert_eq!(customer.id, "cus_123");
         assert_eq!(customer.email.as_deref(), Some("test@example.com"));
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_create_customer() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/customers"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "POST",
+            "/v1/customers",
+            200,
+            serde_json::json!({
                 "id": "cus_new",
                 "object": "customer",
                 "email": "new@example.com",
                 "name": "New User"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let customer = client
             .create_customer("new@example.com", Some("New User"))
             .await
             .unwrap();
         assert_eq!(customer.id, "cus_new");
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_list_customers() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/customers"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "GET",
+            "/v1/customers",
+            200,
+            serde_json::json!({
                 "object": "list",
                 "data": [
                     { "id": "cus_1", "object": "customer" },
                     { "id": "cus_2", "object": "customer" }
                 ],
                 "has_more": false
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let result = client.list_customers(Some(10), None).await.unwrap();
         assert_eq!(result.data.len(), 2);
         assert!(!result.has_more);
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_create_payment_intent() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/payment_intents"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "POST",
+            "/v1/payment_intents",
+            200,
+            serde_json::json!({
                 "id": "pi_123",
                 "object": "payment_intent",
                 "amount": 2000,
                 "currency": "usd",
                 "status": "requires_payment_method"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let pi = client
             .create_payment_intent(2000, "usd", None)
@@ -820,85 +963,79 @@ mod tests {
             .unwrap();
         assert_eq!(pi.id, "pi_123");
         assert_eq!(pi.amount, 2000);
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_get_balance() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/balance"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "GET",
+            "/v1/balance",
+            200,
+            serde_json::json!({
                 "object": "balance",
                 "available": [{ "amount": 50000, "currency": "usd" }],
                 "pending": [{ "amount": 10000, "currency": "usd" }]
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let balance = client.get_balance().await.unwrap();
         assert_eq!(balance.available[0].amount, 50000);
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_unauthorized() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/customers/cus_123"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&mock_server)
-            .await;
+        let server = TestApiServer::start(vec![TestHttpResponse::empty(
+            "GET",
+            "/v1/customers/cus_123",
+            401,
+        )]);
 
         let client = StripeClient::new("bad_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()))
+            .with_api_url(&format!("{}/v1", server.uri()))
             .with_retry_config(0);
 
         let result = client.get_customer("cus_123").await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), StripeError::Unauthorized));
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_not_found() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/customers/missing"))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "GET",
+            "/v1/customers/missing",
+            404,
+            serde_json::json!({
                 "error": { "type": "invalid_request_error", "message": "No such customer" }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()))
+            .with_api_url(&format!("{}/v1", server.uri()))
             .with_retry_config(0);
 
         let result = client.get_customer("missing").await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), StripeError::NotFound { .. }));
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_rate_limited() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/balance"))
-            .respond_with(ResponseTemplate::new(429))
-            .mount(&mock_server)
-            .await;
+        let server = TestApiServer::start(vec![TestHttpResponse::empty("GET", "/v1/balance", 429)]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()))
+            .with_api_url(&format!("{}/v1", server.uri()))
             .with_retry_config(0);
 
         let result = client.get_balance().await;
@@ -907,6 +1044,7 @@ mod tests {
             result.unwrap_err(),
             StripeError::RateLimited { .. }
         ));
+        server.finish();
     }
 
     #[test]
@@ -931,23 +1069,22 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_confirm_payment_intent() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/payment_intents/pi_123/confirm"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "POST",
+            "/v1/payment_intents/pi_123/confirm",
+            200,
+            serde_json::json!({
                 "id": "pi_123",
                 "object": "payment_intent",
                 "amount": 2000,
                 "currency": "usd",
                 "status": "succeeded"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let pi = client
             .confirm_payment_intent("pi_123", Some("pm_card_visa"), None)
@@ -955,27 +1092,27 @@ mod tests {
             .unwrap();
         assert_eq!(pi.id, "pi_123");
         assert_eq!(pi.status, "succeeded");
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_capture_payment_intent() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/payment_intents/pi_456/capture"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "POST",
+            "/v1/payment_intents/pi_456/capture",
+            200,
+            serde_json::json!({
                 "id": "pi_456",
                 "object": "payment_intent",
                 "amount": 5000,
                 "currency": "usd",
                 "status": "succeeded"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let pi = client
             .capture_payment_intent("pi_456", Some(3000), None)
@@ -983,27 +1120,27 @@ mod tests {
             .unwrap();
         assert_eq!(pi.id, "pi_456");
         assert_eq!(pi.amount, 5000);
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_cancel_payment_intent() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/payment_intents/pi_789/cancel"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "POST",
+            "/v1/payment_intents/pi_789/cancel",
+            200,
+            serde_json::json!({
                 "id": "pi_789",
                 "object": "payment_intent",
                 "amount": 1000,
                 "currency": "usd",
                 "status": "canceled"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let pi = client
             .cancel_payment_intent("pi_789", Some("requested_by_customer"), None)
@@ -1011,115 +1148,122 @@ mod tests {
             .unwrap();
         assert_eq!(pi.id, "pi_789");
         assert_eq!(pi.status, "canceled");
+        server.finish();
     }
 
     // ── Idempotency key tests ─────────────────────────────────────
 
     #[fcp_async_core::runtime::test]
     async fn test_create_payment_intent_with_idempotency_key() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/payment_intents"))
-            .and(header("Idempotency-Key", "idem-pi-create-001"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1/payment_intents",
+                200,
+                serde_json::json!({
                 "id": "pi_idem",
                 "object": "payment_intent",
                 "amount": 2500,
                 "currency": "eur",
                 "status": "requires_payment_method"
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+            .with_header("Idempotency-Key", "idem-pi-create-001"),
+        ]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let pi = client
             .create_payment_intent_with_idempotency(2500, "eur", None, Some("idem-pi-create-001"))
             .await
             .unwrap();
         assert_eq!(pi.id, "pi_idem");
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_confirm_with_idempotency_key() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/payment_intents/pi_100/confirm"))
-            .and(header("Idempotency-Key", "idem-confirm-100"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1/payment_intents/pi_100/confirm",
+                200,
+                serde_json::json!({
                 "id": "pi_100",
                 "object": "payment_intent",
                 "amount": 3000,
                 "currency": "usd",
                 "status": "succeeded"
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+            .with_header("Idempotency-Key", "idem-confirm-100"),
+        ]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let pi = client
             .confirm_payment_intent("pi_100", None, Some("idem-confirm-100"))
             .await
             .unwrap();
         assert_eq!(pi.id, "pi_100");
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_refund_with_idempotency_key() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/refunds"))
-            .and(header("Idempotency-Key", "idem-refund-001"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1/refunds",
+                200,
+                serde_json::json!({
                 "id": "re_idem",
                 "object": "refund",
                 "amount": 1000,
                 "currency": "usd",
                 "status": "succeeded"
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+            .with_header("Idempotency-Key", "idem-refund-001"),
+        ]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         let refund = client
             .create_refund_with_idempotency("pi_pay", Some(1000), Some("idem-refund-001"))
             .await
             .unwrap();
         assert_eq!(refund.id, "re_idem");
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_no_idempotency_header_when_none() {
-        let mock_server = MockServer::start().await;
-
-        // This mock requires NO Idempotency-Key header. If the header were sent,
-        // a separate mock with the header matcher would match instead.
-        Mock::given(method("POST"))
-            .and(path("/v1/payment_intents"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1/payment_intents",
+                200,
+                serde_json::json!({
                 "id": "pi_no_idem",
                 "object": "payment_intent",
                 "amount": 500,
                 "currency": "usd",
                 "status": "requires_payment_method"
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+            .without_header("Idempotency-Key"),
+        ]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         // Calling without idempotency key should still work
         let pi = client
@@ -1127,6 +1271,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(pi.id, "pi_no_idem");
+        server.finish();
     }
 
     // --- StripeAuth tests ---
@@ -1322,21 +1467,20 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_customers_email_with_special_chars() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/customers"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "GET",
+            "/v1/customers",
+            200,
+            serde_json::json!({
                 "object": "list",
                 "data": [],
                 "has_more": false
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         // Should not panic or produce malformed URL with special chars in email
         let result = client
@@ -1344,25 +1488,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data.len(), 0);
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_list_subscriptions_status_encoded() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/subscriptions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "GET",
+            "/v1/subscriptions",
+            200,
+            serde_json::json!({
                 "object": "list",
                 "data": [],
                 "has_more": false
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = StripeClient::new("sk_test_key")
             .unwrap()
-            .with_api_url(&format!("{}/v1", mock_server.uri()));
+            .with_api_url(&format!("{}/v1", server.uri()));
 
         // Malicious status value should be safely encoded
         let result = client
@@ -1370,5 +1514,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.data.len(), 0);
+        server.finish();
     }
 }

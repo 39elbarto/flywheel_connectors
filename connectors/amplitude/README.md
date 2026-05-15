@@ -72,3 +72,11 @@ The readiness contract should surface these operator truths:
 - whether both Basic-auth secrets are present
 - whether a live `amplitude.cohorts.list` probe succeeds
 - that the connector is intentionally limited to read-only analytics metadata and export flows
+
+The gated sandbox live suite uses `FCP_LIVE_SANDBOX=1` plus `AMPLITUDE_SANDBOX_API_KEY`, `AMPLITUDE_SANDBOX_SECRET_KEY`, `AMPLITUDE_SANDBOX_PROJECT_ID`, and `FCP_SANDBOX_RUN_NAMESPACE`. `AMPLITUDE_SANDBOX_BASE_URL` defaults to `https://amplitude.com/api/2`.
+
+Focused live-suite rerun:
+
+```bash
+rch exec -- cargo test -p fcp-amplitude --test live_verification -- --nocapture
+```

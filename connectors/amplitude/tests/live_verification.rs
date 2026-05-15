@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 const LIVE_GATE_ENV: &str = "FCP_LIVE_SANDBOX";
 const API_KEY_ENV: &str = "AMPLITUDE_SANDBOX_API_KEY";
 const SECRET_KEY_ENV: &str = "AMPLITUDE_SANDBOX_SECRET_KEY";
+const PROJECT_ID_ENV: &str = "AMPLITUDE_SANDBOX_PROJECT_ID";
 const BASE_URL_ENV: &str = "AMPLITUDE_SANDBOX_BASE_URL";
 const NAMESPACE_ENV: &str = "FCP_SANDBOX_RUN_NAMESPACE";
 const OP_COHORTS_LIST: &str = "amplitude.cohorts.list";
@@ -29,6 +30,10 @@ fn manifest() -> EnvironmentManifest {
             "secret_key",
             SECRET_KEY_ENV,
             "Amplitude secret key paired with the sandbox API key",
+        )
+        .with_env_var(
+            PROJECT_ID_ENV,
+            "Amplitude sandbox project id recorded for evidence scoping",
         )
         .with_env_var(
             NAMESPACE_ENV,
@@ -56,7 +61,7 @@ fn emit_live_jsonl(status: &str, reason: &str, observed_count: usize, evidence: 
             "suite_class": "sandbox_required",
             "gate_env_var": LIVE_GATE_ENV,
             "required_secret_env": [API_KEY_ENV, SECRET_KEY_ENV],
-            "required_env": [NAMESPACE_ENV],
+            "required_env": [PROJECT_ID_ENV, NAMESPACE_ENV],
             "defaulted_env": BASE_URL_ENV,
             "operation": OP_COHORTS_LIST,
             "status": status,
@@ -70,6 +75,7 @@ fn emit_live_jsonl(status: &str, reason: &str, observed_count: usize, evidence: 
             "cleanup_strategy": "prefix_delete",
             "provider_resource_ids_logged": false,
             "secret_values_logged": false,
+            "project_id_logged": false,
             "skip_reason": if status == "skipped" { Some(reason) } else { None },
             "fcp_error_mapping": if status == "failed" { Some(reason) } else { None },
             "evidence": evidence,

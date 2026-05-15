@@ -7,7 +7,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// br-uh9e9: bearer-token auth-header value used by the test fixture.
 ///
-/// Every Mock::given chain that hits a `configured_connector(...)` route MUST
+/// Every `Mock::given` chain that hits a `configured_connector(...)` route MUST
 /// assert this Authorization header. Otherwise a regression that dropped the
 /// `bearer_auth(token)` call in `connectors/grafana/src/client.rs` would still
 /// pass every integration test.

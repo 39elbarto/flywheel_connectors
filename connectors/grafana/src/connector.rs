@@ -1957,8 +1957,8 @@ mod tests {
 
     // ── br-1ju3i: base_url policy enforcement ───────────────────────
 
-    /// Default URL (https://grafana.com/api) must be policy-conforming.
-    /// Regression guard — if DEFAULT_BASE_URL ever drifts to a host
+    /// Default URL (<https://grafana.com/api>) must be policy-conforming.
+    /// Regression guard — if `DEFAULT_BASE_URL` ever drifts to a host
     /// outside the allow-list, this fails fast.
     #[test]
     fn from_params_accepts_default_url() {
@@ -1983,7 +1983,7 @@ mod tests {
 
     /// br-1ju3i (the bead's named exploit): userinfo must be rejected
     /// — the pre-fix code would have routed Authorization: Bearer
-    /// <auth_token> to `grafana.evil.example` AND logged
+    /// `<auth_token>` to `grafana.evil.example` AND logged
     /// `attacker:pw` in every downstream HTTP server access log.
     #[test]
     fn from_params_rejects_userinfo() {
@@ -2006,7 +2006,7 @@ mod tests {
 
     /// br-1ju3i: an entirely off-policy host (e.g. grafana lookalike
     /// like grafana.io / grafana.evil.example) must be rejected
-    /// even with https + clean shape, because the auth_token is
+    /// even with https + clean shape, because the `auth_token` is
     /// only safe to send to known Grafana Cloud / Labs hosts (or
     /// localhost test hosts).
     #[test]
@@ -2054,7 +2054,7 @@ mod tests {
     }
 
     /// br-1ju3i: query/fragment must be rejected even for an
-    /// allow-listed host — the auth_token would otherwise be sent
+    /// allow-listed host — the `auth_token` would otherwise be sent
     /// with attacker-controlled query parameters or fragments.
     #[test]
     fn from_params_rejects_query_and_fragment() {
@@ -2074,7 +2074,7 @@ mod tests {
     }
 
     /// br-1ju3i: http (non-https) on an allow-listed host is also
-    /// a downgrade attempt — auth_token should never travel in
+    /// a downgrade attempt — `auth_token` should never travel in
     /// cleartext. Only localhost gets the http allowance.
     #[test]
     fn from_params_rejects_http_non_local() {
@@ -2088,7 +2088,7 @@ mod tests {
 
     /// br-1ju3i: localhost / 127.0.0.1 stay allowed for tests.
     /// Existing test fixtures (and the pre-existing
-    /// config_local_base_url test at line ~1099) rely on this.
+    /// `config_local_base_url` test at line ~1099) rely on this.
     #[test]
     fn from_params_accepts_localhost_for_tests() {
         for url in [

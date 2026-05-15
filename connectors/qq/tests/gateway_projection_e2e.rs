@@ -396,6 +396,64 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(disabled["runtime"]["accepted_events"], 0);
     log_projection_step(&mut logs, "gateway_disabled_drop", "ok", &disabled);
 
+    let binding_instance_id = InstanceId::new();
+    let mut binding_connector = QqConnector::new();
+    binding_connector
+        .configure(json!({
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999",
+            "app_id": "qq-app",
+            "client_secret": "test-secret",
+            "gateway": {
+                "enabled": true,
+                "policy": {
+                    "group_policy": "open",
+                    "group_require_mention": false
+                }
+            }
+        }))
+        .await
+        .expect("configure binding QQ connector");
+    binding_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            binding_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake binding QQ connector");
+    let missing_binding = invoke_projection(
+        &binding_connector,
+        &signing_key,
+        &binding_instance_id,
+        "qq-gateway-missing-binding",
+        json!({
+            "op": 0,
+            "s": 1,
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": "evt-missing-binding",
+            "d": {
+                "id": "msg-missing-binding",
+                "content": "event missing sender binding",
+                "group_openid": "group-binding"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(missing_binding["accepted"], false);
+    assert_eq!(missing_binding["reason_code"], "group_sender_missing");
+    assert_eq!(
+        missing_binding["policy"]["reason_code"],
+        "group_sender_missing"
+    );
+    assert_eq!(missing_binding["runtime"]["accepted_events"], 0);
+    assert_eq!(missing_binding["runtime"]["queue_depth"], 0);
+    log_projection_step(
+        &mut logs,
+        "missing_route_binding_drop",
+        "ok",
+        &missing_binding,
+    );
+
     let hello = invoke_projection(
         &connector,
         &signing_key,
@@ -665,20 +723,24 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-reply-media",
         "evt-oversized-media",
         "evt-disabled",
+        "evt-missing-binding",
         "msg-accepted",
         "msg-untyped-message-id",
         "msg-structured-mention",
         "msg-reply-media",
         "msg-oversized-media",
         "msg-disabled",
+        "msg-missing-binding",
         "msg-root",
         "bot-openid",
         "group-allowed",
         "group-disabled",
+        "group-binding",
         "member-1",
         "member-disabled",
         "Alice",
         "gateway disabled should not authorize",
+        "event missing sender binding",
         "deploy status",
         "plain message",
         "not a mention segment",

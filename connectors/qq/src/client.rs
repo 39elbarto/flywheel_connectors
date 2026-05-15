@@ -505,6 +505,17 @@ pub fn evaluate_inbound_policy(
     event: &NormalizedQqEvent,
     policy: &QqInboundPolicyConfig,
 ) -> QqInboundPolicyDecision {
+    if let Some(reason_code) = missing_route_binding_reason(event) {
+        return QqInboundPolicyDecision {
+            allowed: false,
+            reason_code,
+            routing: event.routing,
+            sender_id: event.sender_id.clone(),
+            target_id: route_target_id(event),
+            mentioned_bot: false,
+        };
+    }
+
     let mut decision = match event.routing {
         QqRouting::C2c => evaluate_c2c_policy(event, policy),
         QqRouting::Group => evaluate_group_policy(event, policy),
@@ -517,6 +528,48 @@ pub fn evaluate_inbound_policy(
         decision.reason_code = reason_code;
     }
     decision
+}
+
+fn missing_route_binding_reason(event: &NormalizedQqEvent) -> Option<&'static str> {
+    match event.routing {
+        QqRouting::Channel => {
+            if is_blank(event.channel_id.as_deref()) {
+                Some("channel_target_missing")
+            } else if is_blank(event.sender_id.as_deref()) {
+                Some("channel_sender_missing")
+            } else {
+                None
+            }
+        }
+        QqRouting::Group => {
+            if is_blank(event.group_id.as_deref()) {
+                Some("group_target_missing")
+            } else if is_blank(event.sender_id.as_deref()) {
+                Some("group_sender_missing")
+            } else {
+                None
+            }
+        }
+        QqRouting::C2c => {
+            if is_blank(event.sender_id.as_deref()) {
+                Some("c2c_sender_missing")
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn route_target_id(event: &NormalizedQqEvent) -> Option<String> {
+    match event.routing {
+        QqRouting::Channel => event.channel_id.clone(),
+        QqRouting::Group => event.group_id.clone(),
+        QqRouting::C2c => event.sender_id.clone(),
+    }
+}
+
+fn is_blank(value: Option<&str>) -> bool {
+    value.is_none_or(|value| value.trim().is_empty())
 }
 
 fn evaluate_c2c_policy(
@@ -2248,6 +2301,73 @@ mod tests {
         assert_eq!(dispatch.runtime.last_sequence, 0);
         assert_eq!(dispatch.runtime.accepted_events, 0);
         assert_eq!(dispatch.runtime.queue_depth, 0);
+    }
+
+    #[test]
+    fn gateway_runtime_rejects_messages_missing_route_bindings() {
+        let mut config = QqGatewayRuntimeConfig {
+            enabled: true,
+            max_queue_depth: 8,
+            ..QqGatewayRuntimeConfig::default()
+        };
+        config.policy.group_require_mention = false;
+        let mut runtime = QqGatewayRuntime::new(config);
+
+        let channel_missing_target = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some("MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-channel-no-target",
+                    "content": "channel without channel id",
+                    "author": {"id": "user-1"}
+                })),
+                id: Some("evt-channel-no-target".into()),
+            })
+            .unwrap();
+        assert!(!channel_missing_target.accepted);
+        assert_eq!(channel_missing_target.reason_code, "channel_target_missing");
+        assert_eq!(
+            channel_missing_target
+                .policy
+                .as_ref()
+                .map(|policy| policy.reason_code),
+            Some("channel_target_missing")
+        );
+
+        let group_missing_sender = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(2),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-group-no-sender",
+                    "content": "group without sender",
+                    "group_openid": "group-1"
+                })),
+                id: Some("evt-group-no-sender".into()),
+            })
+            .unwrap();
+        assert!(!group_missing_sender.accepted);
+        assert_eq!(group_missing_sender.reason_code, "group_sender_missing");
+
+        let c2c_missing_sender = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(3),
+                t: Some("C2C_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-c2c-no-sender",
+                    "content": "c2c without sender"
+                })),
+                id: Some("evt-c2c-no-sender".into()),
+            })
+            .unwrap();
+        assert!(!c2c_missing_sender.accepted);
+        assert_eq!(c2c_missing_sender.reason_code, "c2c_sender_missing");
+        assert_eq!(c2c_missing_sender.runtime.accepted_events, 0);
+        assert_eq!(c2c_missing_sender.runtime.queue_depth, 0);
     }
 
     #[test]

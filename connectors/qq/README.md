@@ -127,6 +127,7 @@ The projection operation does not log `client_secret`, access tokens, or raw tra
 When `policy.group_require_mention` is enabled, gateway projection treats `GROUP_AT_MESSAGE_CREATE` as an explicit bot mention and also recognizes the configured `bot_user_id` in message text or structured raw mention arrays such as `mentions`, `message`, `message_segments`, `segments`, and `content_segments`.
 When `policy.max_attachment_bytes` is set, gateway projection denies message events whose declared attachment byte total exceeds the cap or whose attachment size metadata is missing.
 When `gateway.enabled` is false, `qq.gateway.project_event` fails closed with `gateway_disabled` and does not update session, sequence, heartbeat, policy, or queue state.
+Gateway projection also fails closed before authorization when the normalized event is missing the route binding required for its QQ delivery mode: `channel_id` and sender for channel events, `group_openid` and sender for group events, and sender for C2C events.
 
 ## Chat Coordination Configuration
 

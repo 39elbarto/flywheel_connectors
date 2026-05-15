@@ -23,6 +23,11 @@
 
 use std::cmp::Ordering;
 
+use fcp_core::{
+    Lease as CoreLease, LeaseParams as CoreLeaseParams, LeasePurpose as CoreLeasePurpose,
+    LeaseValidationError as CoreLeaseValidationError, ObjectHeader,
+    validate_lease as validate_core_lease,
+};
 use fcp_prelude::{ObjectId, TailscaleNodeId, ZoneId, select_coordinator};
 use serde::{Deserialize, Serialize};
 
@@ -130,6 +135,45 @@ pub enum ReleaseOutcome {
     Released,
     /// Release failed (not the holder or already expired).
     NotHeld { reason: String },
+}
+
+/// Request to issue a durable, quorum-signed core lease through the mesh coordinator.
+#[derive(Debug, Clone)]
+pub struct SignedLeaseIssueRequest {
+    /// Core lease parameters supplied by the caller. The coordinator replaces
+    /// `lease_seq` with the next admitted fencing token and clamps `ttl_secs`
+    /// according to [`LeaseCoordinatorConfig`].
+    pub params: CoreLeaseParams,
+    /// Lease observations currently visible to the issuing node.
+    pub existing_leases: Vec<ObservedLeaseAuthority>,
+    /// Nodes eligible to coordinate this subject.
+    pub eligible_nodes: Vec<TailscaleNodeId>,
+    /// Logical clock time for the admission decision.
+    pub now_secs: u64,
+}
+
+/// Outcome of issuing a durable core lease object.
+#[must_use]
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub enum SignedLeaseIssueOutcome {
+    /// Lease granted and materialized as a core lease object.
+    Granted { lease: Box<CoreLease> },
+    /// Lease rejected before holder comparison.
+    Rejected { reason: String },
+    /// Lease denied because another node currently holds authority.
+    Denied {
+        current_holder: TailscaleNodeId,
+        current_fencing_token: u64,
+        expires_at: u64,
+        reason: String,
+    },
+    /// Multiple active holders were observed for the same subject/purpose.
+    Conflict {
+        holders: Vec<TailscaleNodeId>,
+        fencing_tokens: Vec<u64>,
+        reason: String,
+    },
 }
 
 /// Conflict severity for escalation decisions.
@@ -430,6 +474,107 @@ impl LeaseCoordinator {
                 reason: format!("Active lease held by {}", current.holder.as_str()),
             },
             timeline,
+        )
+    }
+
+    /// Select the HRW coordinator for a subject using the normative core hash.
+    #[must_use]
+    pub fn select_coordinator(
+        &self,
+        zone_id: &ZoneId,
+        subject_id: &ObjectId,
+        eligible_nodes: &[TailscaleNodeId],
+    ) -> Option<TailscaleNodeId> {
+        fcp_prelude::select_coordinator(zone_id, subject_id, eligible_nodes)
+    }
+
+    /// Issue a durable [`CoreLease`] after the local admission check grants authority.
+    ///
+    /// The returned lease carries the caller-supplied quorum signatures and uses the
+    /// admitted fencing token. Persistence and gossip distribution remain caller-owned.
+    pub fn issue_signed_lease(
+        &mut self,
+        request: SignedLeaseIssueRequest,
+    ) -> (SignedLeaseIssueOutcome, Vec<AuthorityTimelineEvent>) {
+        let SignedLeaseIssueRequest {
+            mut params,
+            existing_leases,
+            eligible_nodes,
+            now_secs,
+        } = request;
+        let planner_purpose = planner_purpose_for_core(params.purpose);
+        let (outcome, timeline) = self.acquire(
+            &params.holder,
+            &params.zone_id,
+            &params.subject_object_id,
+            &planner_purpose,
+            &existing_leases,
+            &eligible_nodes,
+            now_secs,
+            Some(params.ttl_secs),
+        );
+
+        let issue_outcome = match outcome {
+            AcquireOutcome::Granted {
+                fencing_token,
+                expires_at,
+            } => {
+                params.lease_seq = fencing_token;
+                params.ttl_secs =
+                    u32::try_from(expires_at.saturating_sub(now_secs)).unwrap_or(u32::MAX);
+                SignedLeaseIssueOutcome::Granted {
+                    lease: Box::new(core_lease_from_params(params, now_secs, expires_at)),
+                }
+            }
+            AcquireOutcome::Rejected { reason } => SignedLeaseIssueOutcome::Rejected { reason },
+            AcquireOutcome::Denied {
+                current_holder,
+                current_fencing_token,
+                expires_at,
+                reason,
+            } => SignedLeaseIssueOutcome::Denied {
+                current_holder,
+                current_fencing_token,
+                expires_at,
+                reason,
+            },
+            AcquireOutcome::Conflict {
+                holders,
+                fencing_tokens,
+                reason,
+            } => SignedLeaseIssueOutcome::Conflict {
+                holders,
+                fencing_tokens,
+                reason,
+            },
+        };
+        (issue_outcome, timeline)
+    }
+
+    /// Validate a durable core lease against expected authority context.
+    ///
+    /// # Errors
+    /// Returns [`CoreLeaseValidationError`] when the lease is expired, mismatched,
+    /// superseded, or lacks the required quorum signature count.
+    #[allow(clippy::too_many_arguments)] // Mirrors the core lease validation contract.
+    pub fn validate_signed_lease(
+        &self,
+        lease: &CoreLease,
+        expected_subject: &ObjectId,
+        expected_zone: &ZoneId,
+        expected_purpose: CoreLeasePurpose,
+        current_known_seq: u64,
+        now_secs: u64,
+        required_signatures: usize,
+    ) -> Result<(), CoreLeaseValidationError> {
+        validate_core_lease(
+            lease,
+            expected_subject,
+            expected_zone,
+            expected_purpose,
+            current_known_seq,
+            now_secs,
+            required_signatures,
         )
     }
 
@@ -739,6 +884,49 @@ impl LeaseCoordinator {
     }
 }
 
+fn planner_purpose_for_core(purpose: CoreLeasePurpose) -> LeasePurpose {
+    match purpose {
+        CoreLeasePurpose::ConnectorStateWrite => LeasePurpose::SingletonWriter,
+        CoreLeasePurpose::OperationExecution => LeasePurpose::OperationExecution,
+        CoreLeasePurpose::CoordinatorElection => LeasePurpose::CoordinatorElection,
+        CoreLeasePurpose::ComputationMigration
+        | CoreLeasePurpose::Migration
+        | CoreLeasePurpose::ResourceAccess => LeasePurpose::Other,
+    }
+}
+
+/// Convert a durable core lease into the compact planner observation format.
+#[must_use]
+pub fn held_lease_from_signed(lease: &CoreLease) -> HeldLease {
+    HeldLease {
+        subject_id: lease.subject_object_id,
+        purpose: planner_purpose_for_core(lease.purpose),
+        expires_at: lease.exp,
+        fencing_token: lease.lease_seq,
+    }
+}
+
+fn core_lease_from_params(params: CoreLeaseParams, created_at: u64, expires_at: u64) -> CoreLease {
+    CoreLease {
+        header: ObjectHeader {
+            schema: params.schema,
+            zone_id: params.zone_id,
+            created_at,
+            provenance: params.provenance,
+            refs: vec![params.subject_object_id],
+            foreign_refs: Vec::new(),
+            ttl_secs: Some(expires_at.saturating_sub(created_at)),
+            placement: None,
+        },
+        holder: params.holder,
+        lease_seq: params.lease_seq,
+        exp: expires_at,
+        subject_object_id: params.subject_object_id,
+        purpose: params.purpose,
+        quorum_signatures: params.quorum_signatures,
+    }
+}
+
 fn compare_conflicting_leases(
     left: &ObservedLeaseAuthority,
     right: &ObservedLeaseAuthority,
@@ -843,6 +1031,38 @@ mod tests {
         )
     }
 
+    fn signatures(signers: &[&str]) -> fcp_core::SignatureSet {
+        let mut set = fcp_core::SignatureSet::new();
+        for (idx, signer) in signers.iter().enumerate() {
+            let signature_byte = u8::try_from(idx).unwrap_or(u8::MAX);
+            set.add(fcp_core::NodeSignature::new(
+                fcp_core::NodeId::new(*signer),
+                [signature_byte; 64],
+                1_000 + u64::try_from(idx).unwrap_or(u64::MAX),
+            ));
+        }
+        set
+    }
+
+    fn core_lease_params(
+        holder: &str,
+        ttl_secs: u32,
+        purpose: CoreLeasePurpose,
+        quorum_signatures: fcp_core::SignatureSet,
+    ) -> CoreLeaseParams {
+        CoreLeaseParams {
+            schema: fcp_cbor::SchemaId::new("fcp.lease", "lease", semver::Version::new(1, 0, 0)),
+            zone_id: zone(),
+            holder: node(holder),
+            lease_seq: 0,
+            ttl_secs,
+            subject_object_id: subject(),
+            provenance: fcp_core::Provenance::new(zone()),
+            purpose,
+            quorum_signatures,
+        }
+    }
+
     // ── Acquire ──────────────────────────────────────────────────
 
     #[test]
@@ -872,6 +1092,165 @@ mod tests {
         }
         assert_eq!(timeline.len(), 1);
         assert_eq!(timeline[0].operation, "lease.acquired");
+    }
+
+    #[test]
+    fn select_coordinator_matches_normative_hrw_selection() {
+        let coord = LeaseCoordinator::with_defaults();
+        let eligible = vec![node("node-a"), node("node-b"), node("node-c")];
+
+        assert_eq!(
+            coord.select_coordinator(&zone(), &subject(), &eligible),
+            fcp_prelude::select_coordinator(&zone(), &subject(), &eligible)
+        );
+    }
+
+    #[test]
+    fn issue_signed_lease_materializes_core_lease_with_quorum_signatures() {
+        let mut coord = LeaseCoordinator::with_defaults();
+        let eligible = vec![node("node-a"), node("node-b"), node("node-c")];
+        let request = SignedLeaseIssueRequest {
+            params: core_lease_params(
+                "node-a",
+                300,
+                CoreLeasePurpose::ConnectorStateWrite,
+                signatures(&["node-a", "node-b"]),
+            ),
+            existing_leases: Vec::new(),
+            eligible_nodes: eligible,
+            now_secs: 1_000,
+        };
+
+        let (outcome, timeline) = coord.issue_signed_lease(request);
+        let SignedLeaseIssueOutcome::Granted { lease } = outcome else {
+            panic!("expected signed lease grant");
+        };
+
+        assert_eq!(lease.holder, node("node-a"));
+        assert_eq!(lease.subject_object_id, subject());
+        assert_eq!(lease.purpose, CoreLeasePurpose::ConnectorStateWrite);
+        assert_eq!(lease.lease_seq, 1);
+        assert_eq!(lease.exp, 1_300);
+        assert_eq!(lease.header.created_at, 1_000);
+        assert_eq!(lease.header.ttl_secs, Some(300));
+        assert_eq!(lease.header.refs, vec![subject()]);
+        assert_eq!(lease.quorum_signatures.len(), 2);
+        assert_eq!(
+            held_lease_from_signed(&lease),
+            HeldLease {
+                subject_id: subject(),
+                purpose: LeasePurpose::SingletonWriter,
+                expires_at: 1_300,
+                fencing_token: 1,
+            }
+        );
+        assert!(
+            timeline
+                .iter()
+                .any(|event| event.operation == "lease.acquired")
+        );
+    }
+
+    #[test]
+    fn issue_signed_lease_rebases_fencing_token_from_expired_observation() {
+        let mut coord = LeaseCoordinator::with_defaults();
+        let request = SignedLeaseIssueRequest {
+            params: core_lease_params(
+                "node-b",
+                300,
+                CoreLeasePurpose::ConnectorStateWrite,
+                signatures(&["node-b", "node-c"]),
+            ),
+            existing_leases: vec![held_lease("node-a", 7, 100)],
+            eligible_nodes: vec![node("node-a"), node("node-b"), node("node-c")],
+            now_secs: 1_000,
+        };
+
+        let (outcome, _timeline) = coord.issue_signed_lease(request);
+        let SignedLeaseIssueOutcome::Granted { lease } = outcome else {
+            panic!("expired observation should not block grant");
+        };
+
+        assert_eq!(lease.lease_seq, 8);
+        assert_eq!(lease.exp, 1_300);
+    }
+
+    #[test]
+    fn issue_signed_lease_denies_when_active_holder_differs() {
+        let mut coord = LeaseCoordinator::with_defaults();
+        let request = SignedLeaseIssueRequest {
+            params: core_lease_params(
+                "node-b",
+                300,
+                CoreLeasePurpose::ConnectorStateWrite,
+                signatures(&["node-b", "node-c"]),
+            ),
+            existing_leases: vec![held_lease("node-a", 5, 2_000)],
+            eligible_nodes: vec![node("node-a"), node("node-b"), node("node-c")],
+            now_secs: 1_000,
+        };
+
+        let (outcome, _timeline) = coord.issue_signed_lease(request);
+
+        assert!(matches!(
+            outcome,
+            SignedLeaseIssueOutcome::Denied {
+                current_holder,
+                current_fencing_token: 5,
+                ..
+            } if current_holder == node("node-a")
+        ));
+    }
+
+    #[test]
+    fn validate_signed_lease_enforces_quorum_signature_count() {
+        let mut coord = LeaseCoordinator::with_defaults();
+        let request = SignedLeaseIssueRequest {
+            params: core_lease_params(
+                "node-a",
+                300,
+                CoreLeasePurpose::ConnectorStateWrite,
+                signatures(&["node-a"]),
+            ),
+            existing_leases: Vec::new(),
+            eligible_nodes: vec![node("node-a"), node("node-b"), node("node-c")],
+            now_secs: 1_000,
+        };
+        let (outcome, _timeline) = coord.issue_signed_lease(request);
+        let SignedLeaseIssueOutcome::Granted { lease } = outcome else {
+            panic!("expected grant");
+        };
+
+        let err = coord
+            .validate_signed_lease(
+                &lease,
+                &subject(),
+                &zone(),
+                CoreLeasePurpose::ConnectorStateWrite,
+                lease.lease_seq,
+                1_001,
+                2,
+            )
+            .expect_err("one signature must not satisfy a two-signature quorum");
+        assert!(matches!(
+            err,
+            CoreLeaseValidationError::InsufficientQuorum {
+                required: 2,
+                got: 1,
+            }
+        ));
+
+        coord
+            .validate_signed_lease(
+                &lease,
+                &subject(),
+                &zone(),
+                CoreLeasePurpose::ConnectorStateWrite,
+                lease.lease_seq,
+                1_001,
+                1,
+            )
+            .expect("one signature satisfies a one-signature quorum");
     }
 
     #[test]

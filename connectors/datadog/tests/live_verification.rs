@@ -9,37 +9,64 @@
 )]
 
 use chrono::{Duration as ChronoDuration, Utc};
-use fcp_datadog::connector::DatadogConnector;
+use fcp_datadog::{client::DatadogRegion, connector::DatadogConnector};
+use fcp_testkit::live_suite::{CleanupStrategy, EnvironmentManifest, LiveEnvironment, LiveGate};
 use serde_json::{Value, json};
 
 const LIVE_GATE_ENV: &str = "FCP_LIVE_SANDBOX";
-const API_KEY_ENV: &str = "DATADOG_API_KEY";
-const APP_KEY_ENV: &str = "DATADOG_APP_KEY";
-const BASE_URL_ENV: &str = "DATADOG_BASE_URL";
-const VERIFY_LOGS_ENV: &str = "DATADOG_VERIFY_LOGS";
-const LOG_QUERY_ENV: &str = "DATADOG_LOG_QUERY";
+const SITE_ENV: &str = "DATADOG_SANDBOX_SITE";
+const API_KEY_ENV: &str = "DATADOG_SANDBOX_API_KEY";
+const APP_KEY_ENV: &str = "DATADOG_SANDBOX_APP_KEY";
+const NAMESPACE_ENV: &str = "FCP_SANDBOX_RUN_NAMESPACE";
 const OP_EVENTS_LIST: &str = "datadog.events.list";
-const OP_LOGS_SEARCH: &str = "datadog.logs.search";
+const OP_EVENTS_CREATE: &str = "datadog.events.create";
+
+fn manifest() -> EnvironmentManifest {
+    EnvironmentManifest::sandbox("datadog", "Datadog sandbox")
+        .with_env_secret(
+            "api_key",
+            API_KEY_ENV,
+            "Datadog API key scoped to the sandbox organization",
+        )
+        .with_env_secret(
+            "app_key",
+            APP_KEY_ENV,
+            "Datadog application key scoped to the sandbox organization",
+        )
+        .with_env_var(
+            SITE_ENV,
+            "Datadog sandbox site, region alias, or API base URL",
+        )
+        .with_env_var(
+            NAMESPACE_ENV,
+            "Shared namespace recorded in Datadog event tags and evidence",
+        )
+        .with_account_setup(
+            "Use a dedicated Datadog sandbox organization; this suite creates one namespaced event.",
+        )
+        .with_budget(0.01)
+        .with_cleanup(CleanupStrategy::PrefixDelete)
+        .with_rate_limits(0.5, true)
+        .with_metadata("request_categories", json!(["events.list", "events.create"]))
+        .with_metadata("provider_ingestion_ceiling", json!("one low-priority event"))
+}
 
 #[fcp_async_core::runtime::test]
 async fn live_verification_lists_events_when_enabled() {
-    if !live_gate_enabled() {
-        emit_live_jsonl("skipped", &format!("{LIVE_GATE_ENV} is not set to 1"), 0);
+    let gate = LiveGate::sandbox();
+    let env = LiveEnvironment::from_manifest(manifest());
+    if !gate.is_enabled() || !env.is_ready() {
+        emit_live_jsonl(
+            "skipped",
+            &skip_reason(&gate, &env),
+            0,
+            false,
+            &env.evidence_summary(),
+        );
         return;
     }
 
-    let Some(api_key) = env_nonempty(API_KEY_ENV) else {
-        emit_live_jsonl("skipped", &format!("{API_KEY_ENV} is not set"), 0);
-        return;
-    };
-    let Some(app_key) = env_nonempty(APP_KEY_ENV) else {
-        emit_live_jsonl("skipped", &format!("{APP_KEY_ENV} is not set"), 0);
-        return;
-    };
-    let base_url =
-        env_nonempty(BASE_URL_ENV).unwrap_or_else(|| "https://api.datadoghq.com/api/v1".into());
-
-    let connector = configured_connector(&base_url, &api_key, &app_key).await;
+    let connector = configured_connector(&env).await;
     let now = Utc::now();
     let events = invoke(
         &connector,
@@ -50,50 +77,69 @@ async fn live_verification_lists_events_when_enabled() {
         }),
     )
     .await
+    .inspect_err(|error| {
+        emit_live_jsonl(
+            "failed",
+            &error.to_string(),
+            0,
+            false,
+            &env.evidence_summary(),
+        );
+    })
     .expect("list live Datadog events");
-    let mut observed_count = events["events"].as_array().map_or(0, Vec::len);
-
-    let reason = if std::env::var(VERIFY_LOGS_ENV).ok().as_deref() == Some("1") {
-        let Some(query) = env_nonempty(LOG_QUERY_ENV) else {
-            emit_live_jsonl(
-                "skipped",
-                &format!("{LOG_QUERY_ENV} is not set"),
-                observed_count,
-            );
-            return;
-        };
-        let logs = invoke(
-            &connector,
-            OP_LOGS_SEARCH,
-            json!({
-                "query": query,
-                "from_ts": "now-1h",
-                "to_ts": "now",
-                "limit": 1
+    let observed_count = events["events"].as_array().map_or(0, Vec::len);
+    let namespace = env
+        .env_vars
+        .get(NAMESPACE_ENV)
+        .expect("namespace env is ready");
+    let event = invoke(
+        &connector,
+        OP_EVENTS_CREATE,
+        json!({
+            "title": format!("FCP sandbox verification {namespace}"),
+            "text": "FCP Datadog live verification sandbox event. No production data.",
+            "priority": "low",
+            "alert_type": "info",
+            "source_type_name": "fcp",
+            "tags": [
+                "fcp_connector:datadog",
+                "fcp_live_verification:true",
+                format!("fcp_namespace:{namespace}")
+            ]
+        }),
+    )
+    .await;
+    match event {
+        Ok(_) => emit_live_jsonl(
+            "passed",
+            "events.list and events.create completed",
+            observed_count,
+            true,
+            &json!({
+                "environment": env.evidence_summary(),
+                "operation_result": "datadog.events.list and datadog.events.create completed",
             }),
-        )
-        .await
-        .expect("search live Datadog logs");
-        observed_count = logs["logs"].as_array().map_or(observed_count, Vec::len);
-        "events.list and logs.search completed"
-    } else {
-        "events.list completed"
-    };
-
-    emit_live_jsonl("passed", reason, observed_count);
+        ),
+        Err(error) => {
+            emit_live_jsonl(
+                "failed",
+                &error.to_string(),
+                observed_count,
+                true,
+                &env.evidence_summary(),
+            );
+            panic!("create live Datadog sandbox event failed: {error}");
+        }
+    }
 }
 
-async fn configured_connector(
-    base_url: &str,
-    datadog_api_key: &str,
-    datadog_app_key: &str,
-) -> DatadogConnector {
+async fn configured_connector(env: &LiveEnvironment) -> DatadogConnector {
     let mut connector = DatadogConnector::new();
     connector
         .handle_configure(json!({
-            "api_key": datadog_api_key,
-            "app_key": datadog_app_key,
-            "base_url": base_url
+            "api_key": env.secrets.require("api_key"),
+            "app_key": env.secrets.require("app_key"),
+            "base_url": base_url_from_site(env.env_vars.get(SITE_ENV).expect("site env is ready"))
         }))
         .await
         .expect("configure live connector");
@@ -117,32 +163,102 @@ async fn invoke(
         .await
 }
 
-fn live_gate_enabled() -> bool {
-    std::env::var(LIVE_GATE_ENV).ok().as_deref() == Some("1")
+fn skip_reason(gate: &LiveGate, env: &LiveEnvironment) -> String {
+    if gate.is_enabled() {
+        env.problems().join("; ")
+    } else {
+        gate.skip_reason()
+    }
 }
 
-fn env_nonempty(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn emit_live_jsonl(status: &str, reason: &str, observed_count: usize) {
+fn emit_live_jsonl(
+    status: &str,
+    reason: &str,
+    observed_count: usize,
+    event_attempted: bool,
+    evidence: &Value,
+) {
     eprintln!(
         "DATADOG_LIVE_SANDBOX_JSONL {}",
         json!({
             "connector": "datadog",
-            "suite_class": "live",
+            "fixture_mode": "live",
+            "suite_class": "sandbox_required",
             "gate_env_var": LIVE_GATE_ENV,
-            "credential_env_vars": [API_KEY_ENV, APP_KEY_ENV],
-            "optional_env_vars": [BASE_URL_ENV, VERIFY_LOGS_ENV, LOG_QUERY_ENV],
+            "required_secret_env": [API_KEY_ENV, APP_KEY_ENV],
+            "required_env": [SITE_ENV, NAMESPACE_ENV],
+            "operation": [OP_EVENTS_LIST, OP_EVENTS_CREATE],
             "status": status,
-            "reason": reason,
+            "provider": "Datadog sandbox",
+            "environment": "sandbox",
+            "resource_class": "event_inventory_and_sandbox_event",
             "observed_count": observed_count,
+            "call_ceiling": 2,
+            "rate_limit_guidance": "Performs one bounded event list and one low-priority namespaced event create.",
+            "mutation_expected": true,
+            "cleanup_strategy": "immutable_event_artifact_recorded",
+            "cleanup_result": if event_attempted { Some("datadog_events_are_immutable; namespaced artifact recorded") } else { None },
+            "provider_project_class": "dedicated_sandbox",
+            "request_category": ["events.list", "events.create"],
+            "event_attempted": event_attempted,
+            "dropped_or_budgeted_count": 0,
             "credential_material_logged": false,
-            "base_url_logged": false,
-            "query_logged": false
+            "site_logged": false,
+            "event_id_logged": false,
+            "skip_reason": if status == "skipped" { Some(reason) } else { None },
+            "fcp_error_mapping": if status == "failed" { Some(reason) } else { None },
+            "evidence": evidence,
         })
     );
+}
+
+fn base_url_from_site(site: &str) -> String {
+    let raw = site.trim().trim_end_matches('/');
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        return if raw.ends_with("/api/v1") {
+            raw.to_string()
+        } else {
+            format!("{raw}/api/v1")
+        };
+    }
+
+    let normalized = raw.strip_prefix("api.").unwrap_or(raw);
+    if let Some(region) = DatadogRegion::parse_region(normalized) {
+        return region.api_base_url().to_string();
+    }
+
+    match normalized {
+        "datadoghq.com" => DatadogRegion::Us1.api_base_url().to_string(),
+        "us3.datadoghq.com" => DatadogRegion::Us3.api_base_url().to_string(),
+        "us5.datadoghq.com" => DatadogRegion::Us5.api_base_url().to_string(),
+        "datadoghq.eu" => DatadogRegion::Eu1.api_base_url().to_string(),
+        "ap1.datadoghq.com" => DatadogRegion::Ap1.api_base_url().to_string(),
+        _ => format!("https://api.{normalized}/api/v1"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_url_from_site_accepts_region_alias() {
+        assert_eq!(base_url_from_site("eu1"), "https://api.datadoghq.eu/api/v1");
+    }
+
+    #[test]
+    fn base_url_from_site_accepts_site_domain() {
+        assert_eq!(
+            base_url_from_site("us3.datadoghq.com"),
+            "https://api.us3.datadoghq.com/api/v1"
+        );
+    }
+
+    #[test]
+    fn base_url_from_site_accepts_full_api_url() {
+        assert_eq!(
+            base_url_from_site("https://api.datadoghq.com/api/v1"),
+            "https://api.datadoghq.com/api/v1"
+        );
+    }
 }

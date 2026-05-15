@@ -2828,6 +2828,11 @@ struct ConnectorStateExplainQuery {
     zone: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct ConnectorLeaseStatusQuery {
+    zone: Option<String>,
+}
+
 fn sanitize_state_path_segment(value: &str) -> String {
     let segment = value
         .chars()
@@ -4546,6 +4551,107 @@ fn singleton_writer_connector_lease_subject_id(
     ObjectId::from_bytes(*hasher.finalize().as_bytes())
 }
 
+fn lease_node_id_hash(node: &TailscaleNodeId) -> String {
+    format!(
+        "blake3:{}",
+        hex::encode(blake3::hash(node.as_str().as_bytes()).as_bytes())
+    )
+}
+
+fn connector_lease_status_payload(
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+    routing: Option<&HrwLeaseRoutingConfig>,
+) -> Value {
+    const SCHEMA_VERSION: &str = "1.0.0";
+
+    let subject_id = singleton_writer_connector_lease_subject_id(connector_id, zone_id);
+    let mut warnings = Vec::new();
+    let mut ranked_holders = Vec::new();
+    let mut holder_node_id_hash = Value::Null;
+    let mut local_node_id_hash = Value::Null;
+    let mut local_is_holder = Value::Null;
+    let fencing_token = routing.and_then(|routing| routing.current_lease_seq);
+
+    if let Some(routing) = routing {
+        let ranked = fcp_mesh::planner::rank_lease_holders_by_hrw(
+            zone_id,
+            &subject_id,
+            &routing.eligible_nodes,
+        );
+        for (index, node) in ranked.iter().enumerate() {
+            ranked_holders.push(json!({
+                "rank": index + 1,
+                "node_id_hash": lease_node_id_hash(node),
+                "is_local_node": node == &routing.local_node,
+            }));
+        }
+        if let Some(holder) = ranked.first() {
+            holder_node_id_hash = json!(lease_node_id_hash(holder));
+            local_node_id_hash = json!(lease_node_id_hash(&routing.local_node));
+            local_is_holder = json!(holder == &routing.local_node);
+        } else {
+            warnings.push(
+                "HRW lease routing is configured, but no eligible lease holder was available."
+                    .to_owned(),
+            );
+        }
+        if routing.current_lease_seq.is_none() {
+            warnings.push(
+                "No current fencing token floor is configured; stale lease_seq values cannot be fenced by this status snapshot."
+                    .to_owned(),
+            );
+        }
+    } else {
+        warnings.push(
+            "Singleton-writer HRW lease routing is not configured for this host process."
+                .to_owned(),
+        );
+    }
+
+    warnings.push(
+        "This route reports the host HRW routing/fencing view; durable signed lease expiry and quorum signatures are not yet exposed through fcp-host."
+            .to_owned(),
+    );
+
+    json!({
+        "status": "ok",
+        "command": "fcp-host",
+        "subcommand": "connector lease status",
+        "schema_version": SCHEMA_VERSION,
+        "source": if routing.is_some() { "host-hrw-routing" } else { "host-unconfigured-hrw-routing" },
+        "connector_id": connector_id.to_string(),
+        "zone_id": zone_id.as_str(),
+        "subject_id": subject_id.to_string(),
+        "purpose": CoreLeasePurpose::ConnectorStateWrite,
+        "holder_node_id_hash": holder_node_id_hash,
+        "fencing_token": fencing_token,
+        "expiry": Value::Null,
+        "quorum_signers_count": 0_u64,
+        "local_node_id_hash": local_node_id_hash,
+        "local_is_holder": local_is_holder,
+        "ranked_holders": ranked_holders,
+        "live_host": {
+            "requested": true,
+            "state": "queried",
+            "route_available": true,
+            "route": "/rpc/admin/connectors/{connector_id}/lease/status",
+        },
+        "telemetry": {
+            "event_names": [
+                "fcp.lease.issued",
+                "fcp.lease.renewed",
+                "fcp.lease.handed_off",
+                "fcp.lease.fenced",
+                "fcp.lease.revoked",
+                "fcp.lease.flushed_on_yield"
+            ],
+            "redaction_scope": "public"
+        },
+        "warnings": warnings,
+    })
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "code")]
 enum HrwLeaseRouteRefusal<'a> {
@@ -6078,6 +6184,10 @@ async fn async_main(telemetry_config: TelemetryConfig) -> HostResult<()> {
         .route(
             "/rpc/admin/connectors/{connector_id}/state/explain",
             get(connector_state_explain_handler),
+        )
+        .route(
+            "/rpc/admin/connectors/{connector_id}/lease/status",
+            get(connector_lease_status_handler),
         )
         .route(
             "/rpc/connectors/{connector_id}/config/diff",
@@ -8107,6 +8217,54 @@ async fn connector_state_explain_handler(
         zone_id = zone.as_ref().map(ZoneId::as_str),
         duration_ms = started_at.elapsed().as_millis() as u64,
         "connector state explain request complete"
+    );
+    Ok(Json(payload))
+}
+
+async fn connector_lease_status_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+    Query(query): Query<ConnectorLeaseStatusQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    if state.registry.get(&connector_id).await.is_none() {
+        return Err(map_host_error(HostError::ConnectorNotFound(
+            connector_id.to_string(),
+        )));
+    }
+    let zone = match query
+        .zone
+        .as_deref()
+        .map(str::trim)
+        .filter(|zone| !zone.is_empty())
+    {
+        Some(zone) => zone.parse::<ZoneId>().map_err(|error| {
+            map_host_error(HostError::InvalidFilter(format!(
+                "invalid connector lease status zone `{zone}`: {error}"
+            )))
+        })?,
+        None => ZoneId::work(),
+    };
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_lease_status_request",
+        connector_id = %connector_id,
+        zone_id = %zone,
+        "processing connector lease status request"
+    );
+    let routing = current_hrw_lease_routing_config().map_err(map_host_error)?;
+    let payload = connector_lease_status_payload(&connector_id, &zone, routing.as_ref());
+    let holder_node_id_hash = payload
+        .get("holder_node_id_hash")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    tracing::debug!(
+        event = "connector_lease_status_response",
+        connector_id = %connector_id,
+        zone_id = %zone,
+        holder_node_id_hash = ?holder_node_id_hash,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "connector lease status request complete"
     );
     Ok(Json(payload))
 }
@@ -23888,6 +24046,21 @@ done"#;
             .with_state(Arc::clone(&state))
     }
 
+    fn connector_lease_status_test_app(state: Arc<AppState>) -> axum::Router {
+        let protected = axum::Router::new()
+            .route(
+                "/rpc/admin/connectors/{connector_id}/lease/status",
+                get(connector_lease_status_handler),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                admin_auth_middleware,
+            ));
+        axum::Router::new()
+            .merge(protected)
+            .with_state(Arc::clone(&state))
+    }
+
     fn host_telemetry_test_state(telemetry_config: TelemetryConfig) -> Arc<AppState> {
         let base = cancel_route_test_state();
         Arc::new(AppState {
@@ -24575,6 +24748,79 @@ done"#;
                     .is_some_and(|text| text.contains("mesh replica count is not proven")))),
             "payload should explain missing symbol-distribution evidence: {payload}"
         );
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_lease_status_admin_route_reports_hrw_holder_and_fencing()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let connector_id = "fcp.test.lease-status:utility:1.0.0";
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id = ZoneId::work();
+        let subject_id = singleton_writer_connector_lease_subject_id(&connector_key, &zone_id);
+        let eligible_nodes = vec![
+            TailscaleNodeId::new("node-alpha"),
+            TailscaleNodeId::new("node-beta"),
+            TailscaleNodeId::new("node-gamma"),
+        ];
+        let holder = fcp_mesh::planner::select_lease_holder(&zone_id, &subject_id, &eligible_nodes)
+            .expect("HRW holder should be selected");
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: holder.clone(),
+            eligible_nodes: eligible_nodes.clone(),
+            current_lease_seq: Some(42),
+        }));
+
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(1);
+        let runner_task = task::spawn(async move { while runner_rx.recv().await.is_some() {} });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let registry = dispatcher_registry_with_connector(
+            connector_id,
+            connector,
+            dispatcher_test_config(connector_id),
+        );
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = dispatcher_app_state(registry, lifecycle, None, HashMap::new());
+        let state = Arc::new(AppState {
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            ..(*state).clone()
+        });
+        let app = connector_lease_status_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/connectors/fcp.test.lease-status:utility:1.0.0/lease/status?zone=z%3Awork",
+            serde_json::json!({}),
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["source"], "host-hrw-routing");
+        assert_eq!(
+            payload["subject_id"],
+            singleton_writer_connector_lease_subject_id(&connector_key, &zone_id).to_string()
+        );
+        assert_eq!(payload["fencing_token"], 42);
+        assert_eq!(payload["expiry"], Value::Null);
+        assert_eq!(payload["quorum_signers_count"], 0);
+        assert_eq!(payload["local_is_holder"], true);
+        assert!(
+            payload["holder_node_id_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("blake3:"))
+        );
+        assert_eq!(
+            payload["ranked_holders"].as_array().map(std::vec::Vec::len),
+            Some(eligible_nodes.len())
+        );
+        assert_eq!(payload["telemetry"]["event_names"][3], "fcp.lease.fenced");
         Ok(())
     }
 

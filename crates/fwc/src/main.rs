@@ -330,7 +330,9 @@ use fcp_kernel::{
     SupplyChainAttestation,
 };
 use fcp_manifest::ConnectorManifest;
-use fcp_prelude::{ApprovalToken, CapabilityToken, ConnectorTarget, ZoneId};
+use fcp_prelude::{
+    ApprovalToken, CapabilityToken, ConnectorTarget, LeasePurpose as CoreLeasePurpose, ZoneId,
+};
 use fcp_registry::{
     AttestationEvidence as RegistryAttestationEvidence, ConnectorBundle,
     MANIFEST_SIGNATURE_CONTEXT, ManifestSignatureArtifact, RegistryTrustPolicy, RegistryVerifier,
@@ -891,6 +893,9 @@ enum MeshCommand {
     /// Evaluate mesh-native cutover gates and report fail-closed status.
     #[command(name = "cutover-gates")]
     CutoverGates(MeshCutoverGatesArgs),
+
+    /// Inspect deterministic singleton-writer lease ladders.
+    Lease(MeshLeaseArgs),
 }
 
 #[derive(Args, Debug, Default, Serialize)]
@@ -968,6 +973,30 @@ struct MeshCutoverGatesArgs {
 }
 
 #[derive(Args, Debug, Serialize)]
+struct MeshLeaseArgs {
+    #[command(subcommand)]
+    command: MeshLeaseCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum MeshLeaseCommand {
+    /// Show per-connector HRW lease holder order from persisted mesh context.
+    Ladder(MeshLeaseLadderArgs),
+}
+
+#[derive(Args, Debug, Default, Serialize)]
+struct MeshLeaseLadderArgs {
+    /// Optional connector id/alias to restrict the ladder.
+    #[arg(long)]
+    connector: Option<String>,
+
+    /// Optional zone override for the HRW subject.
+    #[arg(long)]
+    zone: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
 struct ConnectorArgs {
     #[command(subcommand)]
     command: ConnectorCommand,
@@ -978,6 +1007,9 @@ struct ConnectorArgs {
 enum ConnectorCommand {
     /// Inspect connector state storage and local cache evidence.
     State(ConnectorStateArgs),
+
+    /// Inspect singleton-writer lease routing and fencing state.
+    Lease(ConnectorLeaseArgs),
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -1006,6 +1038,30 @@ struct ConnectorStateExplainArgs {
     /// Override the connector state root used for local cache inspection.
     #[arg(long, value_name = "PATH")]
     state_root: Option<PathBuf>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct ConnectorLeaseArgs {
+    #[command(subcommand)]
+    command: ConnectorLeaseCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum ConnectorLeaseCommand {
+    /// Show current holder hash, fencing token, expiry, and quorum signature count.
+    Status(ConnectorLeaseStatusArgs),
+}
+
+#[derive(Args, Debug, Serialize)]
+struct ConnectorLeaseStatusArgs {
+    /// Connector id, alias, or family name.
+    #[arg(long)]
+    connector: String,
+
+    /// Optional zone override for the lease subject.
+    #[arg(long)]
+    zone: Option<String>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -4774,6 +4830,18 @@ impl HostAdminClient {
         self.get_json(&path)
     }
 
+    fn connector_lease_status(&self, connector_id: &str, zone: Option<&str>) -> Result<Value> {
+        let mut path = format!("/rpc/admin/connectors/{connector_id}/lease/status");
+        if let Some(zone) = zone.map(str::trim).filter(|zone| !zone.is_empty()) {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("zone", zone)
+                .finish();
+            path.push('?');
+            path.push_str(&query);
+        }
+        self.get_json(&path)
+    }
+
     fn config_snapshot(&self, connector_id: &str) -> Result<ConnectorConfigSnapshot> {
         self.get_json(&format!("/rpc/connectors/{connector_id}/config"))
     }
@@ -8091,6 +8159,7 @@ fn mesh_dispatch(args: &MeshArgs, explicit_host: Option<&str>) -> Result<Dispatc
             mesh_availability_dispatch(args, explicit_host, false, true)
         }
         MeshCommand::CutoverGates(args) => mesh_cutover_gates_dispatch(args, explicit_host),
+        MeshCommand::Lease(args) => mesh_lease_dispatch(args, explicit_host),
     }
 }
 
@@ -8100,6 +8169,7 @@ fn connector_dispatch(
 ) -> Result<DispatchOutcome> {
     match &args.command {
         ConnectorCommand::State(args) => connector_state_dispatch(args, explicit_host),
+        ConnectorCommand::Lease(args) => connector_lease_dispatch(args, explicit_host),
     }
 }
 
@@ -8201,6 +8271,391 @@ fn connector_state_explain_dispatch(
         explicit_host,
     };
     let payload = connector_state::connector_state_explain_payload(connector, &request);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn connector_lease_dispatch(
+    args: &ConnectorLeaseArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    match &args.command {
+        ConnectorLeaseCommand::Status(args) => connector_lease_status_dispatch(args, explicit_host),
+    }
+}
+
+fn connector_lease_status_dispatch(
+    args: &ConnectorLeaseStatusArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    if let Some(host) = explicit_host.map(str::trim).filter(|host| !host.is_empty()) {
+        let client = HostAdminClient::new(host)?;
+        let (catalog, discovery) = client.catalog(None)?;
+        let connector = match catalog.resolve_connector(&args.connector) {
+            Ok(connector) => connector,
+            Err(error) => {
+                return Ok(connector_lease_resolution_dispatch(
+                    "connector lease status",
+                    &args.connector,
+                    &error,
+                ));
+            }
+        };
+        let zone = args.zone.as_deref().unwrap_or("z:work");
+        let mut payload =
+            client.connector_lease_status(connector.summary.id.as_str(), Some(zone))?;
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("command".to_owned(), Value::String("connector".to_owned()));
+            object.insert(
+                "subcommand".to_owned(),
+                Value::String("lease status".to_owned()),
+            );
+            object.insert(
+                "source".to_owned(),
+                Value::String("host-admin-api".to_owned()),
+            );
+            object.insert(
+                "host_payload_source".to_owned(),
+                Value::String("host-admin-api".to_owned()),
+            );
+            object.insert(
+                "message".to_owned(),
+                Value::String(format!(
+                    "Loaded singleton-writer lease status for `{}` from live fcp-host evidence.",
+                    connector.slug,
+                )),
+            );
+            object.insert(
+                "connector".to_owned(),
+                json!({
+                    "requested_selector": &args.connector,
+                    "slug": &connector.slug,
+                    "canonical_id": connector.summary.id.as_str(),
+                    "name": &connector.summary.name,
+                    "version": connector.summary.version.to_string(),
+                }),
+            );
+            object.insert(
+                "host_registry_version".to_owned(),
+                json!(discovery.registry_version),
+            );
+            object
+                .entry("live_host".to_owned())
+                .or_insert_with(|| json!({}));
+            if let Some(live_host) = object.get_mut("live_host").and_then(Value::as_object_mut) {
+                live_host.insert(
+                    "endpoint_hash".to_owned(),
+                    Value::String(sha256_prefixed(host.as_bytes())),
+                );
+            }
+        }
+        let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "connector");
+        envelope.inject_into(&mut payload);
+        return Ok(DispatchOutcome {
+            payload,
+            exit_code: CliExitCode::Success,
+        });
+    }
+
+    let catalog = DiscoveryCatalog::load_for_connector_filter(Some(args.connector.as_str()))?;
+    let connector = match catalog.resolve_connector(&args.connector) {
+        Ok(connector) => connector,
+        Err(error) => {
+            return Ok(connector_lease_resolution_dispatch(
+                "connector lease status",
+                &args.connector,
+                &error,
+            ));
+        }
+    };
+    let (path, config) = load_context_config()?;
+    let (context_name, context) = active_context_entry(&config)?;
+    let zone = args
+        .zone
+        .clone()
+        .or_else(|| context.default_zone.clone())
+        .unwrap_or_else(|| ZoneId::work().to_string());
+    let payload = offline_connector_lease_status_payload(
+        &path,
+        &context_name,
+        context,
+        connector,
+        &args.connector,
+        &zone,
+    )?;
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn connector_lease_resolution_dispatch(
+    command_name: &str,
+    selector: &str,
+    error: &SelectorError,
+) -> DispatchOutcome {
+    let error_type = match error.kind {
+        SelectorErrorKind::NotFound => "connector-not-found",
+        SelectorErrorKind::Ambiguous => "ambiguous-connector",
+    };
+    let message = match error.kind {
+        SelectorErrorKind::NotFound => {
+            format!("`{selector}` did not match any connector in the workspace catalog.")
+        }
+        SelectorErrorKind::Ambiguous => {
+            format!("`{selector}` matches multiple connectors; choose one explicit slug.")
+        }
+    };
+    let examples = if error.suggestions.is_empty() {
+        vec!["fwc list".to_owned()]
+    } else {
+        error
+            .suggestions
+            .iter()
+            .map(|suggestion| format!("fwc {command_name} --connector {suggestion} --json"))
+            .collect()
+    };
+
+    discovery_error(
+        "connector",
+        error_type,
+        message,
+        selector,
+        &error.suggestions,
+        &examples,
+    )
+}
+
+fn lease_node_id_hash_from_str(node: &str) -> String {
+    format!(
+        "blake3:{}",
+        hex::encode(blake3::hash(node.as_bytes()).as_bytes())
+    )
+}
+
+fn update_lease_hash_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn fwc_singleton_writer_connector_lease_subject_id(
+    connector_id: &str,
+    zone_id: &str,
+) -> fcp_core::ObjectId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"FCP-HOST-SINGLETON-WRITER-HRW-LEASE-V2");
+    update_lease_hash_len_prefixed(&mut hasher, connector_id.as_bytes());
+    update_lease_hash_len_prefixed(&mut hasher, zone_id.as_bytes());
+    fcp_core::ObjectId::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn lease_ladder_snapshot(
+    connector_id: &str,
+    zone_id: &str,
+    eligible_nodes: &[MeshKnownNode],
+) -> Result<(fcp_core::ObjectId, Vec<Value>, Value)> {
+    let zone = zone_id.parse::<ZoneId>().with_context(|| {
+        format!("invalid connector lease status zone `{zone_id}` for connector `{connector_id}`")
+    })?;
+    let subject_id = fwc_singleton_writer_connector_lease_subject_id(connector_id, zone.as_str());
+    let eligible = eligible_nodes
+        .iter()
+        .map(|node| fcp_core::TailscaleNodeId::new(node.node.clone()))
+        .collect::<Vec<_>>();
+    let ranked = fcp_mesh::planner::rank_lease_holders_by_hrw(&zone, &subject_id, &eligible);
+    let holder = ranked
+        .first()
+        .map(|node| json!(lease_node_id_hash_from_str(node.as_str())))
+        .unwrap_or(Value::Null);
+    let ranked_holders = ranked
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            json!({
+                "rank": index + 1,
+                "node": node.as_str(),
+                "node_id_hash": lease_node_id_hash_from_str(node.as_str()),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok((subject_id, ranked_holders, holder))
+}
+
+fn offline_connector_lease_status_payload(
+    config_path: &std::path::Path,
+    context_name: &str,
+    context: &MeshContextFile,
+    connector: &DiscoveredConnector,
+    requested_selector: &str,
+    zone: &str,
+) -> Result<Value> {
+    let known_nodes = mesh_known_nodes(&context.mesh_targets, context.default_zone.as_deref());
+    let connector_id = connector.detail.summary.id.as_str();
+    let (subject_id, ranked_holders, holder_node_id_hash) =
+        lease_ladder_snapshot(connector_id, zone, &known_nodes)?;
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "connector");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "connector",
+        "subcommand": "lease status",
+        "schema_version": "1.0.0",
+        "source": "offline-mesh-context",
+        "message": format!("Computed offline singleton-writer lease ladder for `{}` from persisted mesh context.", connector.slug),
+        "connector": {
+            "requested_selector": requested_selector,
+            "slug": &connector.slug,
+            "canonical_id": connector_id,
+            "name": &connector.detail.summary.name,
+            "version": connector.detail.summary.version.to_string(),
+        },
+        "config_path": config_path.display().to_string(),
+        "current_context": context_name,
+        "context": mesh_context_summary_value(context_name, context),
+        "zone_id": zone,
+        "subject_id": subject_id.to_string(),
+        "purpose": CoreLeasePurpose::ConnectorStateWrite,
+        "holder_node_id_hash": holder_node_id_hash,
+        "fencing_token": Value::Null,
+        "expiry": Value::Null,
+        "quorum_signers_count": 0_u64,
+        "ranked_holders": ranked_holders,
+        "effective_target": mesh_effective_target_value(&context.mesh_targets, &connector.slug),
+        "live_host": {
+            "requested": false,
+            "route_available": false,
+            "state": "offline",
+        },
+        "warnings": [
+            "Offline lease status is derived from persisted mesh target context only; it is not proof of a live durable lease object.".to_owned(),
+            "Durable signed lease expiry and quorum signatures require a live fcp-host lease status route.".to_owned(),
+        ],
+        "next_actions": [
+            format!("fwc --host <endpoint> connector lease status --connector {} --zone {zone} --json", connector.slug),
+            "fwc mesh lease ladder --json".to_owned(),
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    Ok(payload)
+}
+
+fn mesh_lease_dispatch(
+    args: &MeshLeaseArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    match &args.command {
+        MeshLeaseCommand::Ladder(args) => mesh_lease_ladder_dispatch(args, explicit_host),
+    }
+}
+
+fn mesh_lease_ladder_dispatch(
+    args: &MeshLeaseLadderArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    let (path, config) = load_context_config()?;
+    let (context_name, context) = active_context_entry(&config)?;
+    let catalog = DiscoveryCatalog::load_for_connector_filter(args.connector.as_deref())?;
+    let known_nodes = mesh_known_nodes(&context.mesh_targets, context.default_zone.as_deref());
+    let connector_selectors = if let Some(connector) = args.connector.as_ref() {
+        vec![connector.clone()]
+    } else {
+        context
+            .mesh_targets
+            .connector_targets
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let mut warnings = Vec::new();
+    let mut ladders = Vec::new();
+
+    if connector_selectors.is_empty() {
+        warnings.push(
+            "No connector-specific mesh targets are persisted in the current context, so there is no per-connector lease ladder to report."
+                .to_owned(),
+        );
+    }
+
+    for selector in connector_selectors {
+        let connector = match catalog.resolve_connector(&selector) {
+            Ok(connector) => connector,
+            Err(error) => {
+                warnings.push(format!(
+                    "Skipping `{selector}` because it could not be resolved for lease-ladder reporting: {error:?}"
+                ));
+                continue;
+            }
+        };
+        let zone = args
+            .zone
+            .clone()
+            .or_else(|| {
+                context
+                    .mesh_targets
+                    .connector_targets
+                    .get(&selector)
+                    .and_then(|target| target.zone.clone())
+            })
+            .or_else(|| context.default_zone.clone())
+            .unwrap_or_else(|| ZoneId::work().to_string());
+        let connector_id = connector.detail.summary.id.as_str();
+        let (subject_id, ranked_holders, holder_node_id_hash) =
+            lease_ladder_snapshot(connector_id, &zone, &known_nodes)?;
+        ladders.push(json!({
+            "connector": {
+                "requested_selector": selector,
+                "slug": &connector.slug,
+                "canonical_id": connector_id,
+            },
+            "zone_id": zone,
+            "schema_version": "1.0.0",
+            "subject_id": subject_id.to_string(),
+            "purpose": CoreLeasePurpose::ConnectorStateWrite,
+            "holder_node_id_hash": holder_node_id_hash,
+            "fencing_token": Value::Null,
+            "expiry": Value::Null,
+            "quorum_signers_count": 0_u64,
+            "ranked_holders": ranked_holders,
+            "effective_target": mesh_effective_target_value(&context.mesh_targets, &connector.slug),
+        }));
+    }
+
+    if explicit_host.is_some() {
+        warnings.push(
+            "`fwc mesh lease ladder` is an offline context command; use `fwc connector lease status --host <endpoint>` for live host fencing state."
+                .to_owned(),
+        );
+    }
+    warnings.push(
+        "Lease ladders are deterministic HRW placement views; durable lease expiry and quorum signatures are only available from live lease status."
+            .to_owned(),
+    );
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "mesh");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "mesh",
+        "subcommand": "lease ladder",
+        "schema_version": "1.0.0",
+        "source": "offline-mesh-context",
+        "message": "Computed per-connector singleton-writer lease ladders from persisted mesh context.",
+        "config_path": path.display().to_string(),
+        "current_context": &context_name,
+        "context": mesh_context_summary_value(&context_name, context),
+        "connector_filter": &args.connector,
+        "zone_override": &args.zone,
+        "eligible_node_count": known_nodes.len(),
+        "eligible_nodes": known_nodes,
+        "connector_count": ladders.len(),
+        "connectors": ladders,
+        "warnings": warnings,
+        "next_actions": [
+            "fwc connector lease status --connector <connector> --json".to_owned(),
+            "fwc --host <endpoint> connector lease status --connector <connector> --json".to_owned(),
+        ],
+    });
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -27213,7 +27668,7 @@ fn normalize_args(
                 args.get(command_index).map(String::as_str),
                 args.get(command_index + 1).map(String::as_str),
             ),
-            (Some("connector"), Some("state"))
+            (Some("connector"), Some("state" | "lease"))
         )
     {
         if let Some(next) = args.get(command_index + 1) {
@@ -34679,8 +35134,62 @@ deny_ptrace = true
                         assert!(args.state_root.is_none());
                     }
                 },
+                command => panic!("expected connector state command, got {command:?}"),
             },
             command => panic!("expected connector command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_cli_parses_connector_lease_status_command() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "connector".to_owned(),
+            "lease".to_owned(),
+            "status".to_owned(),
+            "--connector".to_owned(),
+            "github".to_owned(),
+            "--zone".to_owned(),
+            "z:work".to_owned(),
+        ])
+        .expect("connector lease status command should parse");
+
+        match prepared.cli.command {
+            Commands::Connector(args) => match args.command {
+                super::ConnectorCommand::Lease(args) => match args.command {
+                    super::ConnectorLeaseCommand::Status(args) => {
+                        assert_eq!(args.connector, "github");
+                        assert_eq!(args.zone.as_deref(), Some("z:work"));
+                    }
+                },
+                command => panic!("expected connector lease command, got {command:?}"),
+            },
+            command => panic!("expected connector command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_cli_parses_mesh_lease_ladder_command() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "mesh".to_owned(),
+            "lease".to_owned(),
+            "ladder".to_owned(),
+            "--connector".to_owned(),
+            "github".to_owned(),
+        ])
+        .expect("mesh lease ladder command should parse");
+
+        match prepared.cli.command {
+            Commands::Mesh(args) => match args.command {
+                super::MeshCommand::Lease(args) => match args.command {
+                    super::MeshLeaseCommand::Ladder(args) => {
+                        assert_eq!(args.connector.as_deref(), Some("github"));
+                    }
+                },
+                command => panic!("expected mesh lease command, got {command:?}"),
+            },
+            command => panic!("expected mesh command, got {command:?}"),
         }
     }
 
@@ -34950,6 +35459,181 @@ deny_ptrace = true
         assert_eq!(
             payload["message"],
             "Explained connector state storage for `github` from live fcp-host canonical fcp-store state."
+        );
+    }
+
+    #[test]
+    fn execute_connector_lease_status_offline_reports_hrw_ladder_shape() {
+        let (_tempdir, path, _guard) = temp_context_config();
+        let mut config = super::default_context_config();
+        let mesh_targets = &mut config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets;
+        mesh_targets.active_node = Some("node-alpha".to_owned());
+        mesh_targets.connector_targets.insert(
+            "github".to_owned(),
+            super::MeshConnectorTarget {
+                node: "node-beta".to_owned(),
+                zone: Some("z:work".to_owned()),
+                persisted_at: "2026-03-12T00:00:00Z".to_owned(),
+            },
+        );
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "connector",
+            "lease",
+            "status",
+            "--connector",
+            "github",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "connector");
+        assert_eq!(payload["subcommand"], "lease status");
+        assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["source"], "offline-mesh-context");
+        assert_eq!(payload["connector"]["slug"], "github");
+        assert_eq!(payload["zone_id"], "z:work");
+        assert!(
+            payload["holder_node_id_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("blake3:"))
+        );
+        assert!(payload["fencing_token"].is_null());
+        assert!(payload["expiry"].is_null());
+        assert_eq!(payload["quorum_signers_count"], 0);
+        assert!(
+            payload["ranked_holders"]
+                .as_array()
+                .is_some_and(|holders| holders.len() == 2)
+        );
+    }
+
+    #[test]
+    fn execute_connector_lease_status_with_host_queries_admin_route() {
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/admin/connectors/fcp.github:enterprise:v1/lease/status?zone=z%3Awork"
+                        .to_owned(),
+                    json!({
+                        "status": "ok",
+                        "command": "fcp-host",
+                        "subcommand": "connector lease status",
+                        "schema_version": "1.0.0",
+                        "source": "host-hrw-routing",
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "zone_id": "z:work",
+                        "subject_id": "1111111111111111111111111111111111111111111111111111111111111111",
+                        "purpose": "connector_state_write",
+                        "holder_node_id_hash": "blake3:holder",
+                        "fencing_token": 9,
+                        "expiry": Value::Null,
+                        "quorum_signers_count": 2,
+                        "ranked_holders": [],
+                        "live_host": {
+                            "requested": true,
+                            "route_available": true,
+                            "route": "/rpc/admin/connectors/{connector_id}/lease/status",
+                        },
+                        "warnings": [],
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "connector",
+            "lease",
+            "status",
+            "--connector",
+            "github",
+            "--zone",
+            "z:work",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "connector");
+        assert_eq!(payload["subcommand"], "lease status");
+        assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["host_payload_source"], "host-admin-api");
+        assert_eq!(
+            payload["connector"]["canonical_id"],
+            "fcp.github:enterprise:v1"
+        );
+        assert_eq!(payload["fencing_token"], 9);
+        assert_eq!(payload["quorum_signers_count"], 2);
+        assert!(
+            payload["live_host"]["endpoint_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("sha256:"))
+        );
+    }
+
+    #[test]
+    fn execute_mesh_lease_ladder_reports_per_connector_ladders() {
+        let (_tempdir, path, _guard) = temp_context_config();
+        let mut config = super::default_context_config();
+        let mesh_targets = &mut config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets;
+        mesh_targets.active_node = Some("node-alpha".to_owned());
+        mesh_targets.connector_targets.insert(
+            "github".to_owned(),
+            super::MeshConnectorTarget {
+                node: "node-beta".to_owned(),
+                zone: Some("z:work".to_owned()),
+                persisted_at: "2026-03-12T00:00:00Z".to_owned(),
+            },
+        );
+        mesh_targets.connector_targets.insert(
+            "slack".to_owned(),
+            super::MeshConnectorTarget {
+                node: "node-gamma".to_owned(),
+                zone: Some("z:community".to_owned()),
+                persisted_at: "2026-03-12T00:00:01Z".to_owned(),
+            },
+        );
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "mesh", "lease", "ladder"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "mesh");
+        assert_eq!(payload["subcommand"], "lease ladder");
+        assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["source"], "offline-mesh-context");
+        assert_eq!(payload["connector_count"], 2);
+        assert_eq!(payload["eligible_node_count"], 3);
+        assert!(
+            payload["connectors"]
+                .as_array()
+                .is_some_and(|connectors| connectors.iter().any(|connector| {
+                    connector["connector"]["slug"] == "github"
+                        && connector["holder_node_id_hash"]
+                            .as_str()
+                            .is_some_and(|hash| hash.starts_with("blake3:"))
+                        && connector["ranked_holders"]
+                            .as_array()
+                            .is_some_and(|holders| holders.len() == 3)
+                }))
         );
     }
 

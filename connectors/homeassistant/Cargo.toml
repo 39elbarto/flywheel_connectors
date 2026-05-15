@@ -37,4 +37,5 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 asupersync = { version = "0.3.1", default-features = false, features = ["tls", "tls-native-roots"] }
+fcp-testkit = { path = "../../crates/fcp-testkit" }
 wiremock.workspace = true

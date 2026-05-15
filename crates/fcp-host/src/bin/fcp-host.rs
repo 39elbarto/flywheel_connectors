@@ -4817,9 +4817,16 @@ fn connector_lease_status_payload(
     let mut holder_node_id_hash = Value::Null;
     let mut local_node_id_hash = Value::Null;
     let mut local_is_holder = Value::Null;
-    let fencing_token = routing
-        .and_then(|routing| routing.current_lease_seq)
-        .or(durable.lease_seq);
+    let routing_lease_seq = routing.and_then(|routing| routing.current_lease_seq);
+    let durable_lease_seq = durable.lease_seq;
+    let fencing_token = routing_lease_seq.or(durable_lease_seq);
+    if let (Some(routing_seq), Some(durable_seq)) = (routing_lease_seq, durable_lease_seq)
+        && routing_seq != durable_seq
+    {
+        warnings.push(format!(
+            "Host HRW routing fencing token {routing_seq} differs from durable fcp-store lease_seq {durable_seq}; host enforcement follows routing while durable evidence follows the stored lease object."
+        ));
+    }
     let expiry = durable
         .expiry_unix_secs
         .and_then(lease_expiry_rfc3339)
@@ -4876,6 +4883,7 @@ fn connector_lease_status_payload(
         "purpose": CoreLeasePurpose::ConnectorStateWrite,
         "holder_node_id_hash": holder_node_id_hash,
         "fencing_token": fencing_token,
+        "durable_lease_seq": durable_lease_seq,
         "expiry": expiry,
         "expiry_unix_secs": expiry_unix_secs,
         "quorum_signers_count": quorum_signers_count,
@@ -25540,6 +25548,46 @@ done"#;
                 },
             },
         }
+    }
+
+    #[test]
+    fn connector_lease_status_payload_reports_routing_durable_sequence_mismatch() {
+        let connector_id =
+            ConnectorId::from_static("fcp.test.lease-sequence-mismatch:utility:1.0.0");
+        let zone_id = ZoneId::work();
+        let routing = HrwLeaseRoutingConfig {
+            local_node: TailscaleNodeId::new("node-a"),
+            eligible_nodes: vec![
+                TailscaleNodeId::new("node-a"),
+                TailscaleNodeId::new("node-b"),
+                TailscaleNodeId::new("node-c"),
+            ],
+            current_lease_seq: Some(9),
+        };
+        let durable = ConnectorLeaseDurableEvidence {
+            lease_object_id: Some(ObjectId::from_bytes([0x44; 32])),
+            lease_seq: Some(10),
+            expiry_unix_secs: Some(1_800_200_300),
+            quorum_signers_count: Some(2),
+            source: Some("canonical-fcp-store-lease-object"),
+            warnings: Vec::new(),
+        };
+
+        let payload =
+            connector_lease_status_payload(&connector_id, &zone_id, Some(&routing), &durable);
+
+        assert_eq!(payload["fencing_token"], 9);
+        assert_eq!(payload["durable_lease_seq"], 10);
+        assert_eq!(payload["quorum_signers_count"], 2);
+        let warnings = payload["warnings"]
+            .as_array()
+            .expect("warnings should be an array");
+        assert!(
+            warnings.iter().any(|warning| warning.as_str().is_some_and(
+                |warning| warning.contains("differs from durable fcp-store lease_seq 10")
+            )),
+            "sequence mismatch should be explicit in operator status: {payload}"
+        );
     }
 
     #[fcp_async_core::runtime::test]

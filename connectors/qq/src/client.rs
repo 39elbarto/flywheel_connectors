@@ -937,10 +937,10 @@ fn retry_after_ms(headers: &HeaderMap) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::types::DEFAULT_TIMEOUT_MS;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{body_partial_json, header, method, path},
-    };
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
 
     fn localhost_config() -> QqConfig {
         QqConfig {
@@ -961,6 +961,221 @@ mod tests {
             client_secret: "secret".into(),
             request_timeout_ms: 30_000,
             gateway: QqGatewayRuntimeConfig::default(),
+        }
+    }
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: Option<Value>,
+        body_text: Option<&'static str>,
+        headers: Vec<(&'static str, &'static str)>,
+        required_header: Option<(&'static str, &'static str)>,
+        required_body: Option<Value>,
+    }
+
+    struct TestHttpServer {
+        url: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestHttpResponse {
+        #[must_use]
+        fn json(method: &'static str, path: &'static str, status: u16, body: Value) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: Some(body),
+                body_text: None,
+                headers: Vec::new(),
+                required_header: None,
+                required_body: None,
+            }
+        }
+
+        #[must_use]
+        fn text(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body_text: &'static str,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: None,
+                body_text: Some(body_text),
+                headers: Vec::new(),
+                required_header: None,
+                required_body: None,
+            }
+        }
+
+        #[must_use]
+        fn with_required_header(mut self, name: &'static str, value: &'static str) -> Self {
+            self.required_header = Some((name, value));
+            self
+        }
+
+        #[must_use]
+        fn with_required_body(mut self, body: Value) -> Self {
+            self.required_body = Some(body);
+            self
+        }
+
+        #[must_use]
+        fn with_header(mut self, name: &'static str, value: &'static str) -> Self {
+            self.headers.push((name, value));
+            self
+        }
+    }
+
+    impl TestHttpServer {
+        #[must_use]
+        fn respond(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let handle = thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                for response in responses {
+                    let stream = accept_test_connection(&listener);
+                    handle_test_request(stream, response);
+                }
+            });
+            Self {
+                url,
+                handle: Some(handle),
+            }
+        }
+
+        #[must_use]
+        fn uri(&self) -> &str {
+            &self.url
+        }
+    }
+
+    impl Drop for TestHttpServer {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                if std::thread::panicking() {
+                    let _ = handle.join();
+                } else {
+                    handle.join().unwrap();
+                }
+            }
+        }
+    }
+
+    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    return stream;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "test server did not receive expected request"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("test listener failed: {err}"),
+            }
+        }
+    }
+
+    fn handle_test_request(stream: TcpStream, response: TestHttpResponse) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        assert_eq!(request_parts.next(), Some(response.method));
+        let actual_path = request_parts
+            .next()
+            .and_then(|path| path.split('?').next())
+            .unwrap_or_default();
+        assert_eq!(actual_path, response.path);
+
+        let mut content_length = 0usize;
+        let mut saw_required_header = response.required_header.is_none();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse().unwrap();
+                }
+                if let Some((required_name, required_value)) = response.required_header
+                    && name.eq_ignore_ascii_case(required_name)
+                    && value.trim() == required_value
+                {
+                    saw_required_header = true;
+                }
+            }
+        }
+        assert!(saw_required_header, "required header was not sent");
+
+        let mut request_body = vec![0u8; content_length];
+        if content_length > 0 {
+            reader.read_exact(&mut request_body).unwrap();
+        }
+        if let Some(required_body) = response.required_body {
+            let actual: Value = serde_json::from_slice(&request_body).unwrap();
+            assert_json_contains(&actual, &required_body);
+        }
+
+        let mut stream = reader.into_inner();
+        let is_json_body = response.body.is_some();
+        let body = response
+            .body
+            .map(|body| body.to_string())
+            .or_else(|| response.body_text.map(str::to_string))
+            .unwrap_or_default();
+        let reason = match response.status {
+            200 => "OK",
+            401 => "Unauthorized",
+            429 => "Too Many Requests",
+            500 => "Internal Server Error",
+            _ => "OK",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-length: {}\r\nconnection: close\r\n",
+            response.status,
+            reason,
+            body.len()
+        )
+        .unwrap();
+        if is_json_body {
+            write!(stream, "content-type: application/json\r\n").unwrap();
+        }
+        for (name, value) in response.headers {
+            write!(stream, "{name}: {value}\r\n").unwrap();
+        }
+        write!(stream, "\r\n{body}").unwrap();
+        stream.flush().unwrap();
+    }
+
+    fn assert_json_contains(actual: &Value, expected: &Value) {
+        match (actual, expected) {
+            (Value::Object(actual), Value::Object(expected)) => {
+                for (key, expected_value) in expected {
+                    assert_json_contains(actual.get(key).unwrap_or(&Value::Null), expected_value);
+                }
+            }
+            _ => assert_eq!(actual, expected),
         }
     }
 
@@ -1160,30 +1375,30 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn send_channel_posts_expected_payload() {
-        let api_server = MockServer::start().await;
-        let token_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/app/getAppAccessToken"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        let api_server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/channels/channel-1/messages",
+                200,
+                json!({
+                    "id": "msg-1",
+                    "timestamp": "123456"
+                }),
+            )
+            .with_required_header("authorization", "QQBot token-123")
+            .with_required_body(json!({
+                "content": "hello qq"
+            })),
+        ]);
+        let token_server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/app/getAppAccessToken",
+            200,
+            json!({
                 "access_token": "token-123",
                 "expires_in": 7200
-            })))
-            .mount(&token_server)
-            .await;
-
-        Mock::given(method("POST"))
-            .and(path("/channels/channel-1/messages"))
-            .and(header("authorization", "QQBot token-123"))
-            .and(body_partial_json(json!({
-                "content": "hello qq"
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "id": "msg-1",
-                "timestamp": "123456"
-            })))
-            .mount(&api_server)
-            .await;
+            }),
+        )]);
 
         let client = QqClient::new(test_config(&api_server.uri(), &token_server.uri())).unwrap();
         let output = client
@@ -1200,26 +1415,26 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn gateway_request_uses_bearer_token() {
-        let api_server = MockServer::start().await;
-        let token_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/app/getAppAccessToken"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        let api_server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "GET",
+                "/gateway",
+                200,
+                json!({
+                    "url": "wss://gateway.qq.example/ws"
+                }),
+            )
+            .with_required_header("authorization", "QQBot token-123"),
+        ]);
+        let token_server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/app/getAppAccessToken",
+            200,
+            json!({
                 "access_token": "token-123",
                 "expires_in": 7200
-            })))
-            .mount(&token_server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(path("/gateway"))
-            .and(header("authorization", "QQBot token-123"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "url": "wss://gateway.qq.example/ws"
-            })))
-            .mount(&api_server)
-            .await;
+            }),
+        )]);
 
         let client = QqClient::new(test_config(&api_server.uri(), &token_server.uri())).unwrap();
         let output = client
@@ -1232,23 +1447,21 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn api_request_returns_error_on_failure() {
-        let api_server = MockServer::start().await;
-        let token_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/app/getAppAccessToken"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        let api_server = TestHttpServer::respond(vec![TestHttpResponse::text(
+            "GET",
+            "/gateway",
+            500,
+            "internal error",
+        )]);
+        let token_server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/app/getAppAccessToken",
+            200,
+            json!({
                 "access_token": "token-123",
                 "expires_in": 7200
-            })))
-            .mount(&token_server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(path("/gateway"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
-            .mount(&api_server)
-            .await;
+            }),
+        )]);
 
         let client = QqClient::new(test_config(&api_server.uri(), &token_server.uri())).unwrap();
         let err = client
@@ -1261,12 +1474,12 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn access_token_maps_unauthorized_status() {
-        let token_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/app/getAppAccessToken"))
-            .respond_with(ResponseTemplate::new(401).set_body_string("invalid bot secret"))
-            .mount(&token_server)
-            .await;
+        let token_server = TestHttpServer::respond(vec![TestHttpResponse::text(
+            "POST",
+            "/app/getAppAccessToken",
+            401,
+            "invalid bot secret",
+        )]);
 
         let client =
             QqClient::new(test_config("http://localhost:9999", &token_server.uri())).unwrap();
@@ -1284,27 +1497,19 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn api_request_maps_retry_after_header_to_rate_limit() {
-        let api_server = MockServer::start().await;
-        let token_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/app/getAppAccessToken"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        let api_server = TestHttpServer::respond(vec![
+            TestHttpResponse::text("GET", "/gateway", 429, "rate limited")
+                .with_header("Retry-After", "3"),
+        ]);
+        let token_server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/app/getAppAccessToken",
+            200,
+            json!({
                 "access_token": "token-123",
                 "expires_in": 7200
-            })))
-            .mount(&token_server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(path("/gateway"))
-            .respond_with(
-                ResponseTemplate::new(429)
-                    .insert_header("Retry-After", "3")
-                    .set_body_string("rate limited"),
-            )
-            .mount(&api_server)
-            .await;
+            }),
+        )]);
 
         let client = QqClient::new(test_config(&api_server.uri(), &token_server.uri())).unwrap();
         let err = client
@@ -1321,26 +1526,33 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn token_caching_reuses_valid_token() {
-        let api_server = MockServer::start().await;
-        let token_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/app/getAppAccessToken"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        let api_server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "GET",
+                "/gateway",
+                200,
+                json!({
+                    "url": "wss://gateway.qq.example/ws"
+                }),
+            ),
+            TestHttpResponse::json(
+                "GET",
+                "/gateway",
+                200,
+                json!({
+                    "url": "wss://gateway.qq.example/ws"
+                }),
+            ),
+        ]);
+        let token_server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/app/getAppAccessToken",
+            200,
+            json!({
                 "access_token": "cached-token",
                 "expires_in": 7200
-            })))
-            .expect(1) // should only be called once
-            .mount(&token_server)
-            .await;
-
-        Mock::given(method("GET"))
-            .and(path("/gateway"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "url": "wss://gateway.qq.example/ws"
-            })))
-            .mount(&api_server)
-            .await;
+            }),
+        )]);
 
         let client = QqClient::new(test_config(&api_server.uri(), &token_server.uri())).unwrap();
 

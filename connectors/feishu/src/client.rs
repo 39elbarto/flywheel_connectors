@@ -828,8 +828,122 @@ impl FeishuClient {
 mod tests {
     use super::*;
     use fcp_sdk::migration::ConnectorRuntimeConfig;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: Option<serde_json::Value>,
+    }
+
+    impl TestHttpResponse {
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: Some(body),
+            }
+        }
+
+        fn empty(method: &'static str, path: &'static str, status: u16) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: None,
+            }
+        }
+    }
+
+    struct TestApiServer {
+        uri: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestApiServer {
+        fn start(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let handle = thread::spawn(move || {
+                for response in responses {
+                    let (stream, _) = listener.accept().unwrap();
+                    serve_response(stream, response);
+                }
+            });
+            Self {
+                uri: format!("http://{addr}"),
+                handle: Some(handle),
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.uri
+        }
+
+        fn finish(mut self) {
+            if let Some(handle) = self.handle.take() {
+                handle.join().expect("test API server thread finished");
+            }
+        }
+    }
+
+    fn serve_response(mut stream: TcpStream, response: TestHttpResponse) {
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().unwrap_or_default();
+        let target = parts.next().unwrap_or_default();
+        assert_eq!(method, response.method);
+        assert_eq!(target.split('?').next().unwrap_or(target), response.path);
+
+        let mut content_length = 0usize;
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header).unwrap();
+            let trimmed = header.trim_end();
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some(value) = trimmed.strip_prefix("content-length:") {
+                content_length = value.trim().parse().unwrap();
+            } else if let Some(value) = trimmed.strip_prefix("Content-Length:") {
+                content_length = value.trim().parse().unwrap();
+            }
+        }
+        if content_length > 0 {
+            let mut body = vec![0u8; content_length];
+            reader.read_exact(&mut body).unwrap();
+        }
+
+        let body = response
+            .body
+            .map(|body| body.to_string())
+            .unwrap_or_default();
+        let reason = match response.status {
+            200 => "OK",
+            500 => "Internal Server Error",
+            _ => "Test Status",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            response.status,
+            reason,
+            body.len(),
+            body
+        )
+        .unwrap();
+    }
 
     #[test]
     fn client_creation() {
@@ -944,20 +1058,20 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn health_check_success() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "POST",
+            "/open-apis/auth/v3/tenant_access_token/internal",
+            200,
+            serde_json::json!({
                 "code": 0,
                 "msg": "ok",
                 "tenant_access_token": "t-test",
                 "expire": 7200
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = FeishuClient::new(
-            &mock_server.uri(),
+            server.uri(),
             "cli_test",
             "secret",
             HttpRetryConfig::default(),
@@ -965,24 +1079,25 @@ mod tests {
         )
         .unwrap();
         assert!(client.health_check().await.is_ok());
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn obtain_tenant_token() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![TestHttpResponse::json(
+            "POST",
+            "/open-apis/auth/v3/tenant_access_token/internal",
+            200,
+            serde_json::json!({
                 "code": 0,
                 "msg": "ok",
                 "tenant_access_token": "t-obtained",
                 "expire": 7200
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = FeishuClient::new(
-            &mock_server.uri(),
+            server.uri(),
             "cli_test",
             "secret",
             HttpRetryConfig::default(),
@@ -992,19 +1107,19 @@ mod tests {
         let token = client.obtain_tenant_access_token().await.unwrap();
         assert_eq!(token, "t-obtained");
         assert!(client.auth_header().is_ok());
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn health_check_server_error() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-            .respond_with(ResponseTemplate::new(500))
-            .mount(&mock_server)
-            .await;
+        let server = TestApiServer::start(vec![TestHttpResponse::empty(
+            "POST",
+            "/open-apis/auth/v3/tenant_access_token/internal",
+            500,
+        )]);
 
         let client = FeishuClient::new(
-            &mock_server.uri(),
+            server.uri(),
             "cli_test",
             "secret",
             HttpRetryConfig::default(),
@@ -1012,24 +1127,28 @@ mod tests {
         )
         .unwrap();
         assert!(client.health_check().await.is_err());
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]
     async fn list_chats_bootstraps_token_on_first_request() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestApiServer::start(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/open-apis/auth/v3/tenant_access_token/internal",
+                200,
+                serde_json::json!({
                 "code": 0,
                 "msg": "ok",
                 "tenant_access_token": "t-lazy",
                 "expire": 7200
-            })))
-            .mount(&mock_server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/open-apis/im/v1/chats"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                }),
+            ),
+            TestHttpResponse::json(
+                "GET",
+                "/open-apis/im/v1/chats",
+                200,
+                serde_json::json!({
                 "code": 0,
                 "msg": "ok",
                 "data": {
@@ -1037,12 +1156,12 @@ mod tests {
                     "page_token": null,
                     "has_more": false
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            ),
+        ]);
 
         let client = FeishuClient::new(
-            &mock_server.uri(),
+            server.uri(),
             "cli_test",
             "secret",
             HttpRetryConfig::default(),
@@ -1055,6 +1174,7 @@ mod tests {
         assert_eq!(response.items.len(), 1);
         assert_eq!(response.items[0].chat_id, "oc_123");
         assert_eq!(client.auth_header().unwrap(), "Bearer t-lazy");
+        server.finish();
     }
 
     #[fcp_async_core::runtime::test]

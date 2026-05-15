@@ -555,7 +555,7 @@ fn operator_guidance() -> OperatorGuidance {
             RemediationHint {
                 code: "network_constraints_invalid",
                 symptom: "doctor or self_check reports invalid Graph or Bot Framework endpoint policy",
-                action: "Use https://graph.microsoft.com/v1.0 (or /beta only when intentionally testing beta APIs) and a clean HTTPS Bot Framework service origin, or localhost-only mocks during deterministic verification.",
+                action: "Use https://graph.microsoft.com/v1.0 (or /beta only when intentionally testing beta APIs) and a clean HTTPS Bot Framework service origin, or localhost-only loopback endpoints during deterministic verification.",
             },
             RemediationHint {
                 code: "graph_rate_limited",
@@ -2532,7 +2532,280 @@ mod tests {
     use super::*;
     use fcp_prelude::{IdempotencyClass, SafetyTier};
     use fcp_sdk::ClaimOutcome;
-    use std::collections::BTreeSet;
+    use std::{
+        collections::{BTreeSet, HashMap, VecDeque},
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering as AtomicOrdering},
+        },
+        thread,
+        time::Duration as StdDuration,
+    };
+
+    #[derive(Clone)]
+    enum LoopbackMatcher {
+        Method(&'static str),
+        Path(&'static str),
+    }
+
+    fn method(expected: &'static str) -> LoopbackMatcher {
+        LoopbackMatcher::Method(expected)
+    }
+
+    fn path(expected: &'static str) -> LoopbackMatcher {
+        LoopbackMatcher::Path(expected)
+    }
+
+    #[derive(Clone)]
+    struct LoopbackResponse {
+        status: u16,
+        body: Vec<u8>,
+    }
+
+    impl LoopbackResponse {
+        fn new(status: u16) -> Self {
+            Self {
+                status,
+                body: Vec::new(),
+            }
+        }
+
+        fn set_body_json(mut self, body: impl serde::Serialize) -> Self {
+            self.body = serde_json::to_vec(&body).expect("serialize loopback response");
+            self
+        }
+    }
+
+    #[derive(Clone)]
+    struct LoopbackRequest {
+        method: String,
+        target: String,
+    }
+
+    #[derive(Clone)]
+    struct LoopbackRoute {
+        matchers: Vec<LoopbackMatcher>,
+        response: LoopbackResponse,
+        reject_if_called: bool,
+    }
+
+    impl LoopbackRoute {
+        fn given(matcher: LoopbackMatcher) -> LoopbackRouteBuilder {
+            LoopbackRouteBuilder {
+                matchers: vec![matcher],
+                response: LoopbackResponse::new(200),
+                expected_calls: 1,
+            }
+        }
+
+        fn matches(&self, request: &LoopbackRequest) -> bool {
+            self.matchers.iter().all(|matcher| match matcher {
+                LoopbackMatcher::Method(expected) => request.method == *expected,
+                LoopbackMatcher::Path(expected) => {
+                    request
+                        .target
+                        .split_once('?')
+                        .map_or(request.target.as_str(), |(path, _)| path)
+                        == *expected
+                }
+            })
+        }
+    }
+
+    struct LoopbackRouteBuilder {
+        matchers: Vec<LoopbackMatcher>,
+        response: LoopbackResponse,
+        expected_calls: usize,
+    }
+
+    impl LoopbackRouteBuilder {
+        fn and(mut self, matcher: LoopbackMatcher) -> Self {
+            self.matchers.push(matcher);
+            self
+        }
+
+        fn respond_with(mut self, response: LoopbackResponse) -> Self {
+            self.response = response;
+            self
+        }
+
+        fn expect(mut self, expected_calls: usize) -> Self {
+            self.expected_calls = expected_calls;
+            self
+        }
+
+        #[allow(clippy::unused_async)]
+        async fn mount(self, server: &LoopbackServer) {
+            let mut routes = server.routes.lock().expect("lock loopback routes");
+            if self.expected_calls == 0 {
+                routes.push_back(LoopbackRoute {
+                    matchers: self.matchers,
+                    response: self.response,
+                    reject_if_called: true,
+                });
+                return;
+            }
+            for _ in 0..self.expected_calls {
+                routes.push_back(LoopbackRoute {
+                    matchers: self.matchers.clone(),
+                    response: self.response.clone(),
+                    reject_if_called: false,
+                });
+            }
+        }
+    }
+
+    struct LoopbackServer {
+        base_url: String,
+        routes: Arc<Mutex<VecDeque<LoopbackRoute>>>,
+        requests: Arc<Mutex<Vec<LoopbackRequest>>>,
+        stop: Arc<AtomicBool>,
+        join: Option<thread::JoinHandle<()>>,
+    }
+
+    impl LoopbackServer {
+        #[allow(clippy::unused_async)]
+        async fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback server");
+            listener
+                .set_nonblocking(true)
+                .expect("set loopback nonblocking");
+            let addr = listener.local_addr().expect("loopback address");
+            let routes = Arc::new(Mutex::new(VecDeque::<LoopbackRoute>::new()));
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread_routes = Arc::clone(&routes);
+            let thread_requests = Arc::clone(&requests);
+            let thread_stop = Arc::clone(&stop);
+            let join = thread::spawn(move || {
+                while !thread_stop.load(AtomicOrdering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            stream
+                                .set_nonblocking(false)
+                                .expect("set loopback stream blocking");
+                            let request = read_loopback_request(&mut stream);
+                            let route = {
+                                let mut routes =
+                                    thread_routes.lock().expect("lock loopback routes");
+                                let route_index = routes
+                                    .iter()
+                                    .position(|route| route.matches(&request))
+                                    .expect("loopback route registered");
+                                routes.remove(route_index).expect("remove loopback route")
+                            };
+                            assert!(!route.reject_if_called, "unexpected loopback request");
+                            thread_requests
+                                .lock()
+                                .expect("lock loopback requests")
+                                .push(request.clone());
+                            write_loopback_response(&mut stream, &route.response);
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(StdDuration::from_millis(5));
+                        }
+                        Err(error) => panic!("accept loopback request: {error}"),
+                    }
+                }
+            });
+            Self {
+                base_url: format!("http://{addr}"),
+                routes,
+                requests,
+                stop,
+                join: Some(join),
+            }
+        }
+
+        fn uri(&self) -> String {
+            self.base_url.clone()
+        }
+
+        #[allow(clippy::unused_async)]
+        async fn received_requests(&self) -> Option<Vec<LoopbackRequest>> {
+            Some(
+                self.requests
+                    .lock()
+                    .expect("lock loopback requests")
+                    .clone(),
+            )
+        }
+    }
+
+    impl Drop for LoopbackServer {
+        fn drop(&mut self) {
+            self.stop.store(true, AtomicOrdering::Relaxed);
+            let _ = TcpStream::connect(self.base_url.trim_start_matches("http://"));
+            if let Some(join) = self.join.take() {
+                join.join().expect("loopback thread should exit");
+            }
+        }
+    }
+
+    fn read_loopback_request(stream: &mut TcpStream) -> LoopbackRequest {
+        let mut buffer = Vec::new();
+        let mut scratch = [0_u8; 1024];
+        let header_end = loop {
+            let read = stream.read(&mut scratch).expect("read loopback request");
+            assert!(read > 0, "unexpected EOF before headers");
+            buffer.extend_from_slice(&scratch[..read]);
+            if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+        let header_text =
+            std::str::from_utf8(&buffer[..header_end]).expect("HTTP headers are UTF-8");
+        let mut lines = header_text.split("\r\n");
+        let request_line = lines.next().expect("request line");
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().expect("method").to_string();
+        let target = parts.next().expect("target").to_string();
+        let mut headers = HashMap::new();
+        for line in lines.filter(|line| !line.is_empty()) {
+            let (name, value) = line.split_once(':').expect("header separator");
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+        let content_length = headers
+            .get("content-length")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let mut body = buffer[header_end..].to_vec();
+        while body.len() < content_length {
+            let read = stream.read(&mut scratch).expect("read loopback body");
+            assert!(read > 0, "unexpected EOF before body");
+            body.extend_from_slice(&scratch[..read]);
+        }
+        body.truncate(content_length);
+        LoopbackRequest { method, target }
+    }
+
+    fn write_loopback_response(stream: &mut TcpStream, response: &LoopbackResponse) {
+        let head = format!(
+            "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            response.status,
+            status_reason(response.status),
+            response.body.len()
+        );
+        stream
+            .write_all(head.as_bytes())
+            .expect("write response header");
+        stream
+            .write_all(&response.body)
+            .expect("write response body");
+        stream.flush().expect("flush response");
+    }
+
+    const fn status_reason(status: u16) -> &'static str {
+        match status {
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            429 => "Too Many Requests",
+            _ => "OK",
+        }
+    }
 
     fn manually_configured_connector(
         auth: TeamsAuth,
@@ -2886,14 +3159,14 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn invoke_send_denies_duplicate_claim_before_graph_http() {
-        let mock_server = wiremock::MockServer::start().await;
+        let server = LoopbackServer::start().await;
         let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
         let checker_for_connector: Arc<dyn ThreadOwnershipChecker> = checker.clone();
         let connector = TeamsConnector::new().with_thread_ownership_checker(
             checker_for_connector,
             ChatCoordinationBackend::InMemory,
         );
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
 
         let claim_key = ClaimKey::for_chat_message(
             ZoneId::work(),
@@ -2930,10 +3203,10 @@ mod tests {
             }
             other => panic!("expected Unauthorized duplicate-claim denial, got {other:?}"),
         }
-        let received = mock_server
+        let received = server
             .received_requests()
             .await
-            .expect("wiremock should report received requests");
+            .expect("loopback should report received requests");
         assert!(
             received.is_empty(),
             "Graph HTTP must not run after duplicate coordination denial"
@@ -2942,21 +3215,21 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_reply_operation_reports_threaded_channel_delivery() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path(
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("POST"))
+            .and(path(
                 "/teams/team_1/channels/channel_1/messages/root_1/replies",
             ))
-            .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(json!({
+            .respond_with(LoopbackResponse::new(201).set_body_json(json!({
                 "id": "reply_1",
                 "replyToId": "root_1",
                 "body": { "contentType": "text", "content": "threaded" }
             })))
             .expect(1)
-            .mount(&mock_server)
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let connector = TeamsConnector::new();
         let output = connector
             .invoke_reply_operation(
@@ -2980,33 +3253,31 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_reply_operation_channel_falls_back_to_flat_send_on_graph_400() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path(
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("POST"))
+            .and(path(
                 "/teams/team_1/channels/channel_1/messages/root_1/replies",
             ))
-            .respond_with(wiremock::ResponseTemplate::new(400).set_body_json(json!({
+            .respond_with(LoopbackResponse::new(400).set_body_json(json!({
                 "error": {
                     "code": "BadRequest",
                     "message": "Threaded replies are not supported in this conversation"
                 }
             })))
             .expect(1)
-            .mount(&mock_server)
+            .mount(&server)
             .await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path(
-                "/teams/team_1/channels/channel_1/messages",
-            ))
-            .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(json!({
+        LoopbackRoute::given(method("POST"))
+            .and(path("/teams/team_1/channels/channel_1/messages"))
+            .respond_with(LoopbackResponse::new(201).set_body_json(json!({
                 "id": "flat_1",
                 "body": { "contentType": "text", "content": "fallback" }
             })))
             .expect(1)
-            .mount(&mock_server)
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let connector = TeamsConnector::new();
         let output = connector
             .invoke_reply_operation(
@@ -3041,32 +3312,30 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_reply_operation_chat_falls_back_to_flat_send_on_graph_400() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path(
-                "/chats/chat_1/messages/replyWithQuote",
-            ))
-            .respond_with(wiremock::ResponseTemplate::new(400).set_body_json(json!({
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("POST"))
+            .and(path("/chats/chat_1/messages/replyWithQuote"))
+            .respond_with(LoopbackResponse::new(400).set_body_json(json!({
                 "error": {
                     "code": "BadRequest",
                     "message": "Reply with quote is unavailable"
                 }
             })))
             .expect(1)
-            .mount(&mock_server)
+            .mount(&server)
             .await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/chats/chat_1/messages"))
-            .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(json!({
+        LoopbackRoute::given(method("POST"))
+            .and(path("/chats/chat_1/messages"))
+            .respond_with(LoopbackResponse::new(201).set_body_json(json!({
                 "id": "flat_chat_1",
                 "chatId": "chat_1",
                 "body": { "contentType": "text", "content": "fallback" }
             })))
             .expect(1)
-            .mount(&mock_server)
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let connector = TeamsConnector::new();
         let output = connector
             .invoke_reply_operation(
@@ -3088,27 +3357,25 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_reply_operation_does_not_fallback_on_rate_limit() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path(
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("POST"))
+            .and(path(
                 "/teams/team_1/channels/channel_1/messages/root_1/replies",
             ))
-            .respond_with(wiremock::ResponseTemplate::new(429))
+            .respond_with(LoopbackResponse::new(429))
             .expect(1)
-            .mount(&mock_server)
+            .mount(&server)
             .await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path(
-                "/teams/team_1/channels/channel_1/messages",
-            ))
-            .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(json!({
+        LoopbackRoute::given(method("POST"))
+            .and(path("/teams/team_1/channels/channel_1/messages"))
+            .respond_with(LoopbackResponse::new(201).set_body_json(json!({
                 "id": "must_not_send"
             })))
             .expect(0)
-            .mount(&mock_server)
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let connector = TeamsConnector::new();
         let error = connector
             .invoke_reply_operation(
@@ -3128,32 +3395,30 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_reply_operation_does_not_fallback_on_forbidden() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path(
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("POST"))
+            .and(path(
                 "/teams/team_1/channels/channel_1/messages/root_1/replies",
             ))
-            .respond_with(wiremock::ResponseTemplate::new(403).set_body_json(json!({
+            .respond_with(LoopbackResponse::new(403).set_body_json(json!({
                 "error": {
                     "code": "Forbidden",
                     "message": "Insufficient privileges to complete the operation."
                 }
             })))
             .expect(1)
-            .mount(&mock_server)
+            .mount(&server)
             .await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path(
-                "/teams/team_1/channels/channel_1/messages",
-            ))
-            .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(json!({
+        LoopbackRoute::given(method("POST"))
+            .and(path("/teams/team_1/channels/channel_1/messages"))
+            .respond_with(LoopbackResponse::new(201).set_body_json(json!({
                 "id": "must_not_send"
             })))
             .expect(0)
-            .mount(&mock_server)
+            .mount(&server)
             .await;
 
-        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let client = TeamsClient::new(&server.uri(), "tok", Duration::from_secs(10)).unwrap();
         let connector = TeamsConnector::new();
         let error = connector
             .invoke_reply_operation(
@@ -3749,24 +4014,22 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_self_check_unauthorized_is_failed() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/me"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(401).set_body_json(serde_json::json!({
-                    "error": {
-                        "code": "InvalidAuthenticationToken",
-                        "message": "Access token has expired."
-                    }
-                })),
-            )
-            .mount(&mock_server)
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("GET"))
+            .and(path("/me"))
+            .respond_with(LoopbackResponse::new(401).set_body_json(serde_json::json!({
+                "error": {
+                    "code": "InvalidAuthenticationToken",
+                    "message": "Access token has expired."
+                }
+            })))
+            .mount(&server)
             .await;
 
         let mut connector = TeamsConnector::new();
         connector
             .configure(json!({
-                "graph_base_url": mock_server.uri(),
+                "graph_base_url": server.uri(),
                 "auth": { "mode": "access_token", "access_token": "tok" }
             }))
             .await
@@ -3829,24 +4092,24 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_self_check_forbidden_maps_admin_consent_remediation() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/me"))
+        let server = LoopbackServer::start().await;
+        LoopbackRoute::given(method("GET"))
+            .and(path("/me"))
             .respond_with(
-                wiremock::ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                LoopbackResponse::new(403).set_body_json(serde_json::json!({
                     "error": {
                         "code": "Authorization_RequestDenied",
                         "message": "Insufficient privileges to complete the operation. Admin consent is required."
                     }
                 })),
             )
-            .mount(&mock_server)
+            .mount(&server)
             .await;
 
         let mut connector = TeamsConnector::new();
         connector
             .configure(json!({
-                "graph_base_url": mock_server.uri(),
+                "graph_base_url": server.uri(),
                 "auth": { "mode": "access_token", "access_token": "tok" }
             }))
             .await

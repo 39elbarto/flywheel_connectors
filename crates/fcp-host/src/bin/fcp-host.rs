@@ -4968,6 +4968,11 @@ fn connector_lease_flush_before_yield_payload(
 #[derive(Debug, Serialize)]
 #[serde(tag = "code")]
 enum HrwLeaseRouteRefusal<'a> {
+    LeaseQuorumConfigInvalid {
+        configured_eligible_nodes_count: usize,
+        required_quorum_signers_count: usize,
+        node_set_env: &'static str,
+    },
     NotSelectedCoordinator {
         #[serde(flatten)]
         reason: &'a fcp_mesh::planner::LeaseTransferReason,
@@ -5023,6 +5028,23 @@ fn hrw_lease_refusal_message_for(action: &str, refusal: &HrwLeaseRouteRefusal<'_
     format!("HRW lease routing refused singleton_writer {action}: {payload}")
 }
 
+fn enforce_hrw_singleton_writer_quorum_config(
+    action: &str,
+    routing: &HrwLeaseRoutingConfig,
+) -> HostResult<()> {
+    if routing.eligible_nodes.len() >= CONNECTOR_STATE_LEASE_REQUIRED_QUORUM_SIGNATURES {
+        return Ok(());
+    }
+    let refusal = HrwLeaseRouteRefusal::LeaseQuorumConfigInvalid {
+        configured_eligible_nodes_count: routing.eligible_nodes.len(),
+        required_quorum_signers_count: CONNECTOR_STATE_LEASE_REQUIRED_QUORUM_SIGNATURES,
+        node_set_env: HRW_LEASE_NODES_ENV,
+    };
+    Err(HostError::PreflightFailed(hrw_lease_refusal_message_for(
+        action, &refusal,
+    )))
+}
+
 fn parse_hrw_launch_zone_id(
     connector_id: &ConnectorId,
     allowed_zones: &[String],
@@ -5051,6 +5073,7 @@ fn enforce_hrw_singleton_writer_launch_route(
     let Some(routing) = routing else {
         return Ok(());
     };
+    enforce_hrw_singleton_writer_quorum_config("launch", routing)?;
 
     let connector_id: ConnectorId = config.id.parse().map_err(|err| {
         HostError::InvalidFilter(format!("invalid connector id '{}': {err}", config.id))
@@ -5156,6 +5179,7 @@ async fn enforce_hrw_lease_route(
             &refusal,
         )));
     };
+    enforce_hrw_singleton_writer_quorum_config("invoke", routing)?;
 
     let selection = fcp_mesh::planner::admit_lease_holder(
         &request.zone_id,
@@ -19860,6 +19884,40 @@ deny_ptrace = true
             .expect("elected holder should build singleton_writer registry entry");
         assert_eq!(entry.config.id, connector_id);
         assert!(matches!(entry.connector, ConnectorRuntime::Wasi(_)));
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn build_registry_entry_hrw_launch_rejects_missing_quorum_config() {
+        let connector_id = "fcp.test.hrw-launch-quorum-config:utility:1.0.0";
+        let operation_id = "test.singleton";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.allowed_operations = vec![operation_id.to_string()];
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "api.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+        config.config = Some(json!({ "state": { "model": "singleton_writer" } }));
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: TailscaleNodeId::new("node-a"),
+            eligible_nodes: vec![TailscaleNodeId::new("node-a")],
+            current_lease_seq: None,
+        }));
+
+        let error =
+            match build_registry_entry(config, Arc::new(ResilienceLayer::default()), None).await {
+                Ok(_) => panic!("singleton_writer launch must fail before spawn without quorum"),
+                Err(error) => error,
+            };
+        let message = error.to_string();
+        assert!(message.contains("HRW lease routing refused singleton_writer launch"));
+        assert!(message.contains(r#""code":"LeaseQuorumConfigInvalid""#));
+        assert!(message.contains(r#""configured_eligible_nodes_count":1"#));
+        assert!(message.contains(r#""required_quorum_signers_count":2"#));
+        assert!(message.contains(HRW_LEASE_NODES_ENV));
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

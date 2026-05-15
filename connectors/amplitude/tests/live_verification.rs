@@ -18,6 +18,7 @@ const PROJECT_ID_ENV: &str = "AMPLITUDE_SANDBOX_PROJECT_ID";
 const BASE_URL_ENV: &str = "AMPLITUDE_SANDBOX_BASE_URL";
 const NAMESPACE_ENV: &str = "FCP_SANDBOX_RUN_NAMESPACE";
 const OP_COHORTS_LIST: &str = "amplitude.cohorts.list";
+const OP_HEALTH: &str = "amplitude.health";
 
 fn manifest() -> EnvironmentManifest {
     EnvironmentManifest::sandbox("amplitude", "Amplitude sandbox")
@@ -63,19 +64,21 @@ fn emit_live_jsonl(status: &str, reason: &str, observed_count: usize, evidence: 
             "required_secret_env": [API_KEY_ENV, SECRET_KEY_ENV],
             "required_env": [PROJECT_ID_ENV, NAMESPACE_ENV],
             "defaulted_env": BASE_URL_ENV,
-            "operation": OP_COHORTS_LIST,
+            "operation": [OP_HEALTH, OP_COHORTS_LIST],
             "status": status,
             "provider": "Amplitude sandbox",
             "environment": "sandbox",
-            "resource_class": "cohort_listing",
+            "resource_class": "cohort_listing_and_health",
             "observed_count": observed_count,
-            "call_ceiling": 1,
-            "rate_limit_guidance": "Performs one read-only cohort listing against the sandbox analytics project.",
+            "call_ceiling": 2,
+            "rate_limit_guidance": "Performs one idempotent auth health probe and one read-only cohort listing against the sandbox analytics project.",
             "mutation_expected": false,
             "cleanup_strategy": "prefix_delete",
             "provider_resource_ids_logged": false,
             "secret_values_logged": false,
             "project_id_logged": false,
+            "request_category": ["health", "cohorts.list"],
+            "idempotent_probe": OP_HEALTH,
             "skip_reason": if status == "skipped" { Some(reason) } else { None },
             "fcp_error_mapping": if status == "failed" { Some(reason) } else { None },
             "evidence": evidence,
@@ -106,6 +109,13 @@ async fn amplitude_live_sandbox_cohort_listing_or_structured_skip_jsonl() {
     }
 
     let connector = configured_connector(&env).await;
+    let _health = connector
+        .handle_invoke(json!({
+            "operation_id": OP_HEALTH,
+            "input": {},
+        }))
+        .await
+        .expect("check live Amplitude health");
     match connector
         .handle_invoke(json!({
             "operation_id": OP_COHORTS_LIST,
@@ -121,7 +131,7 @@ async fn amplitude_live_sandbox_cohort_listing_or_structured_skip_jsonl() {
                 observed_count,
                 &json!({
                     "environment": env.evidence_summary(),
-                    "operation_result": "cohorts.list completed",
+                    "operation_result": "health and cohorts.list completed",
                 }),
             );
         }

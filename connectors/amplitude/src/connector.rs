@@ -24,6 +24,13 @@ use crate::{
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/amplitude_connector_verification.sh";
 const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/amplitude_connector/<timestamp>";
+const OP_CHARTS_QUERY: &str = "amplitude.charts.query";
+const OP_COHORTS_LIST: &str = "amplitude.cohorts.list";
+const OP_EVENTS_EXPORT: &str = "amplitude.events.export";
+const OP_HEALTH: &str = "amplitude.health";
+const CAP_CHARTS_READ: &str = "amplitude.charts.read";
+const CAP_COHORTS_READ: &str = "amplitude.cohorts.read";
+const CAP_EVENTS_READ: &str = "amplitude.events.read";
 const VERIFY_COMMANDS: [&str; 10] = [
     "scripts/e2e/amplitude_connector_verification.sh",
     "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo run -q -p fwc -- manifest fix connectors/amplitude/manifest.toml --check --json",
@@ -432,9 +439,9 @@ impl AmplitudeConnector {
             "connector_id": "fcp.amplitude",
             "connector_version": "0.1.0",
             "capabilities": [
-                "amplitude.charts.read",
-                "amplitude.cohorts.read",
-                "amplitude.events.read"
+                CAP_CHARTS_READ,
+                CAP_COHORTS_READ,
+                CAP_EVENTS_READ
             ]
         }))
     }
@@ -569,7 +576,7 @@ impl AmplitudeConnector {
         let introspection = Introspection {
             operations: vec![
                 OperationInfo {
-                    id: OperationId::from_static("amplitude.charts.query"),
+                    id: OperationId::from_static(OP_CHARTS_QUERY),
                     summary: "Query a chart by ID".into(),
                     input_schema: json!({
                         "type": "object",
@@ -583,7 +590,7 @@ impl AmplitudeConnector {
                         "required": ["data"],
                         "properties": {"data": {"type": "object"}}
                     }),
-                    capability: CapabilityId::from_static("amplitude.charts.read"),
+                    capability: CapabilityId::from_static(CAP_CHARTS_READ),
                     risk_level: RiskLevel::Low,
                     description: None,
                     rate_limit: None,
@@ -601,7 +608,7 @@ impl AmplitudeConnector {
                     },
                 },
                 OperationInfo {
-                    id: OperationId::from_static("amplitude.cohorts.list"),
+                    id: OperationId::from_static(OP_COHORTS_LIST),
                     summary: "List cohorts".into(),
                     input_schema: json!({"type": "object", "required": []}),
                     output_schema: json!({
@@ -609,7 +616,7 @@ impl AmplitudeConnector {
                         "required": ["cohorts"],
                         "properties": {"cohorts": {"type": "array"}}
                     }),
-                    capability: CapabilityId::from_static("amplitude.cohorts.read"),
+                    capability: CapabilityId::from_static(CAP_COHORTS_READ),
                     risk_level: RiskLevel::Low,
                     description: None,
                     rate_limit: None,
@@ -624,7 +631,7 @@ impl AmplitudeConnector {
                     },
                 },
                 OperationInfo {
-                    id: OperationId::from_static("amplitude.events.export"),
+                    id: OperationId::from_static(OP_EVENTS_EXPORT),
                     summary: "Export events for a date range".into(),
                     input_schema: json!({
                         "type": "object",
@@ -639,7 +646,7 @@ impl AmplitudeConnector {
                         "required": ["data"],
                         "properties": {"data": {"type": "array"}}
                     }),
-                    capability: CapabilityId::from_static("amplitude.events.read"),
+                    capability: CapabilityId::from_static(CAP_EVENTS_READ),
                     risk_level: RiskLevel::Low,
                     description: None,
                     rate_limit: None,
@@ -654,6 +661,33 @@ impl AmplitudeConnector {
                             CapabilityId::from_static("amplitude.cohorts.list"),
                             CapabilityId::from_static("amplitude.charts.query"),
                         ],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static(OP_HEALTH),
+                    summary: "Check Amplitude API reachability".into(),
+                    input_schema: json!({"type": "object", "required": []}),
+                    output_schema: json!({
+                        "type": "object",
+                        "required": ["healthy", "probe", "cohorts_count"],
+                        "properties": {
+                            "healthy": {"type": "boolean"},
+                            "probe": {"type": "string"},
+                            "cohorts_count": {"type": "integer", "minimum": 0}
+                        }
+                    }),
+                    capability: CapabilityId::from_static(CAP_COHORTS_READ),
+                    risk_level: RiskLevel::Low,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Verify Amplitude credentials and provider reachability without mutating the analytics project.".into(),
+                        common_mistakes: vec![],
+                        examples: vec!["{}".into()],
+                        related: vec![CapabilityId::from_static(OP_COHORTS_LIST)],
                     },
                 },
             ],
@@ -714,9 +748,10 @@ impl AmplitudeConnector {
         })?;
 
         let result = match operation {
-            "amplitude.charts.query" => self.invoke_charts_query(client, &input).await,
-            "amplitude.cohorts.list" => self.invoke_cohorts_list(client).await,
-            "amplitude.events.export" => self.invoke_events_export(client, &input).await,
+            OP_CHARTS_QUERY => self.invoke_charts_query(client, &input).await,
+            OP_COHORTS_LIST => self.invoke_cohorts_list(client).await,
+            OP_EVENTS_EXPORT => self.invoke_events_export(client, &input).await,
+            OP_HEALTH => self.invoke_health(client).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -813,6 +848,18 @@ impl AmplitudeConnector {
         serde_json::to_value(response).map_err(AmplitudeError::Json)
     }
 
+    async fn invoke_health(
+        &self,
+        client: &AmplitudeClient,
+    ) -> Result<serde_json::Value, AmplitudeError> {
+        let response = client.list_cohorts().await?;
+        Ok(json!({
+            "healthy": true,
+            "probe": OP_COHORTS_LIST,
+            "cohorts_count": response.cohorts.len(),
+        }))
+    }
+
     async fn invoke_events_export(
         &self,
         client: &AmplitudeClient,
@@ -836,7 +883,7 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
 fn operation_supported(operation: &str) -> bool {
     matches!(
         operation,
-        "amplitude.charts.query" | "amplitude.cohorts.list" | "amplitude.events.export"
+        OP_CHARTS_QUERY | OP_COHORTS_LIST | OP_EVENTS_EXPORT | OP_HEALTH
     )
 }
 
@@ -845,11 +892,11 @@ fn validate_simulate_input(
     input: &serde_json::Value,
 ) -> Result<(), AmplitudeError> {
     match operation {
-        "amplitude.charts.query" => {
+        OP_CHARTS_QUERY => {
             require_str(input, "chart_id")?;
         }
-        "amplitude.cohorts.list" => {}
-        "amplitude.events.export" => {
+        OP_COHORTS_LIST | OP_HEALTH => {}
+        OP_EVENTS_EXPORT => {
             require_str(input, "start")?;
             require_str(input, "end")?;
         }
@@ -893,6 +940,14 @@ fn operations_info() -> serde_json::Value {
             "id": "amplitude.events.export",
             "summary": "Export events for a date range",
             "capability": "amplitude.events.read",
+            "risk_level": "low",
+            "safety_tier": "safe",
+            "idempotency": "strict",
+        },
+        {
+            "id": "amplitude.health",
+            "summary": "Check Amplitude API reachability",
+            "capability": "amplitude.cohorts.read",
             "risk_level": "low",
             "safety_tier": "safe",
             "idempotency": "strict",

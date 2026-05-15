@@ -15,6 +15,7 @@ The current crate exposes these operations:
 - `amplitude.charts.query`
 - `amplitude.cohorts.list`
 - `amplitude.events.export`
+- `amplitude.health`
 
 Important runtime truths:
 
@@ -70,10 +71,13 @@ The readiness contract should surface these operator truths:
 
 - whether the configured base URL satisfies Amplitude host policy
 - whether both Basic-auth secrets are present
-- whether a live `amplitude.cohorts.list` probe succeeds
+- whether live `amplitude.health` and `amplitude.cohorts.list` probes succeed
 - that the connector is intentionally limited to read-only analytics metadata and export flows
 
 The gated sandbox live suite uses `FCP_LIVE_SANDBOX=1` plus `AMPLITUDE_SANDBOX_API_KEY`, `AMPLITUDE_SANDBOX_SECRET_KEY`, `AMPLITUDE_SANDBOX_PROJECT_ID`, and `FCP_SANDBOX_RUN_NAMESPACE`. `AMPLITUDE_SANDBOX_BASE_URL` defaults to `https://amplitude.com/api/2`.
+The live suite performs the idempotent `amplitude.health` auth/reachability
+probe plus read-only `amplitude.cohorts.list`, records a two-call ceiling, and
+does not ingest events or mutate analytics project state.
 
 Focused live-suite rerun:
 

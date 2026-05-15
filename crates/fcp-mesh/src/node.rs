@@ -13,11 +13,13 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use fcp_cbor::CanonicalSerializer;
 use fcp_crypto::{CwtClaims, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_prelude::{
-    CapabilityVerifier, ConnectorStateChange, FcpError, InvokeRequest, InvokeValidationError,
-    ObjectId, OperationIntent, OperationReceipt, RevocationRegistry, StoredObject, TailscaleNodeId,
-    ZoneId, ZoneKey, ZoneKeyAlgorithm, ZoneTransportPolicy,
+    CapabilityVerifier, ConnectorStateChange, EvictionPolicy, FcpError, InvokeRequest,
+    InvokeValidationError, Lease as CoreLease, ObjectId, ObjectIdKey, OperationIntent,
+    OperationReceipt, RevocationRegistry, StorageMeta, StoredObject, TailscaleNodeId, ZoneId,
+    ZoneKey, ZoneKeyAlgorithm, ZoneTransportPolicy,
 };
 use fcp_protocol::{DecodeStatus, SymbolAck, SymbolRequest};
 use fcp_raptorq::RaptorQConfig;
@@ -277,6 +279,10 @@ pub enum MeshNodeError {
     /// Connector-state root observation failed.
     #[error("connector-state store error: {0}")]
     ConnectorStateStore(#[from] ConnectorStateStoreError),
+
+    /// Canonical object serialization failed.
+    #[error("canonical serialization error: {0}")]
+    Serialization(#[from] fcp_cbor::SerializationError),
 }
 
 /// Enforcement errors for control-plane requests.
@@ -1394,6 +1400,48 @@ impl MeshNode {
             now_ms,
         );
         Ok(change)
+    }
+
+    /// Store a durable core lease object locally and announce it for gossip.
+    ///
+    /// The lease coordinator owns admission and fencing-token selection. This
+    /// bridge turns an already-issued lease into a content-addressed mesh
+    /// object, so peers can fetch the authority object through the normal
+    /// gossip object path.
+    ///
+    /// # Errors
+    /// Returns an error if canonical lease encoding or local object storage
+    /// fails.
+    pub async fn publish_signed_lease_object(
+        &mut self,
+        lease: &CoreLease,
+        object_id_key: &ObjectIdKey,
+        now_ms: u64,
+    ) -> Result<ObjectId, MeshNodeError> {
+        let body = CanonicalSerializer::serialize(lease, &lease.header.schema)?;
+        let object_id = StoredObject::derive_id(&lease.header, &body, object_id_key)?;
+        let stored = StoredObject {
+            object_id,
+            header: lease.header.clone(),
+            body,
+            storage: StorageMeta {
+                retention: EvictionPolicy::Lease {
+                    expires_at: lease.exp,
+                },
+            },
+        };
+
+        match self.object_store.put(stored).await {
+            Ok(()) | Err(fcp_store::ObjectStoreError::AlreadyExists(_)) => {}
+            Err(err) => return Err(MeshNodeError::ObjectStore(err)),
+        }
+        self.announce_object(
+            &lease.header.zone_id,
+            &object_id,
+            ObjectAdmissionClass::Admitted,
+            now_ms,
+        );
+        Ok(object_id)
     }
 
     /// Announce a symbol for gossip (admitted objects only).
@@ -3442,6 +3490,29 @@ mod tests {
         }
     }
 
+    fn test_core_lease(zone_id: &ZoneId, subject_object_id: ObjectId) -> fcp_prelude::Lease {
+        let schema = fcp_cbor::SchemaId::new("fcp.lease", "lease", semver::Version::new(1, 0, 0));
+        let header = ObjectHeader {
+            schema: schema.clone(),
+            zone_id: zone_id.clone(),
+            created_at: 10,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![subject_object_id],
+            foreign_refs: Vec::new(),
+            ttl_secs: Some(60),
+            placement: None,
+        };
+        fcp_prelude::Lease {
+            header,
+            holder: TailscaleNodeId::new("node-1"),
+            lease_seq: 7,
+            exp: 70,
+            subject_object_id,
+            purpose: fcp_prelude::LeasePurpose::ConnectorStateWrite,
+            quorum_signatures: fcp_core::SignatureSet::new(),
+        }
+    }
+
     fn test_object_symbol_meta(object_id: ObjectId, zone_id: &ZoneId) -> ObjectSymbolMeta {
         let oti = ObjectTransmissionInformation::new(256, 64, 1, 1, 1);
         ObjectSymbolMeta {
@@ -4279,6 +4350,64 @@ mod tests {
             .handle_gossip_request(request, 42)
             .expect("gossip request");
         assert_eq!(response.have_objects, vec![root_object_id]);
+        assert_eq!(node.metrics().gossip_announcements, 1);
+    }
+
+    #[test]
+    fn publish_signed_lease_object_stores_and_announces_gossip_object() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let subject_object_id = test_object_id("connector-state");
+        let object_id_key = ObjectIdKey::from_bytes([0x42; 32]);
+        let lease = test_core_lease(&zone_id, subject_object_id);
+
+        let lease_object_id = fcp_async_core::runtime::block_on_sync(async {
+            let lease_object_id = node
+                .publish_signed_lease_object(&lease, &object_id_key, 50_000)
+                .await
+                .expect("publish lease");
+            let stored_lease = node
+                .object_store()
+                .get(&lease_object_id)
+                .await
+                .expect("stored lease");
+            assert_eq!(stored_lease.header.schema, lease.header.schema);
+            assert_eq!(
+                stored_lease.storage.retention,
+                EvictionPolicy::Lease {
+                    expires_at: lease.exp,
+                }
+            );
+            let decoded: fcp_prelude::Lease =
+                CanonicalSerializer::deserialize(&stored_lease.body, &stored_lease.header.schema)
+                    .expect("decode lease");
+            assert_eq!(decoded.holder, lease.holder);
+            assert_eq!(decoded.lease_seq, lease.lease_seq);
+            assert_eq!(decoded.subject_object_id, subject_object_id);
+            lease_object_id
+        })
+        .expect("runtime");
+
+        let peer = NodeId::new("peer-1");
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            Vec::new(),
+            50_000,
+        );
+        node.update_peer_zones(&peer, zone_set(zone_id.clone()));
+
+        let request = GossipRequest::for_objects(
+            TailscaleNodeId::new("peer-1"),
+            zone_id,
+            vec![lease_object_id],
+            50,
+        );
+        let response = node
+            .handle_gossip_request(request, 50)
+            .expect("gossip request");
+        assert_eq!(response.have_objects, vec![lease_object_id]);
         assert_eq!(node.metrics().gossip_announcements, 1);
     }
 

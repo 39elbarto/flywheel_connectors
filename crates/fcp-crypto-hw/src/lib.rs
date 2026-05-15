@@ -8,10 +8,15 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod aead;
 pub mod blake3;
 pub mod cpuid;
 pub mod dispatch;
 
+pub use aead::{
+    CHACHA20POLY1305_KEY_SIZE, CHACHA20POLY1305_NONCE_SIZE, CHACHA20POLY1305_TAG_SIZE,
+    Chacha20Poly1305Backend, Chacha20Poly1305Dispatch, Chacha20Poly1305Error,
+};
 pub use blake3::{Blake3DispatchError, Blake3Hasher, Blake3Tier};
 pub use cpuid::{HwFeatureSet, detect};
 pub use dispatch::{

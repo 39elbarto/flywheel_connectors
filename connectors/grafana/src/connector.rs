@@ -94,7 +94,7 @@ impl GrafanaConfig {
 /// localhost is rejected, forcing operators to add their host to
 /// this list explicitly when they migrate the connector to a new
 /// deployment. That conscious-step is the security property: the
-/// auth_token cannot be silently routed to an attacker host via a
+/// `auth_token` cannot be silently routed to an attacker host via a
 /// config-file typo or supply-chain manipulation.
 const ALLOWED_GRAFANA_HOSTS: &[&str] = &[
     // Grafana Labs — registry, docs, and the default
@@ -154,9 +154,8 @@ fn validate_base_url(base_url: &str) -> FcpResult<()> {
         return Err(FcpError::InvalidRequest {
             code: 1003,
             message: format!(
-                "Endpoint must use https and one of {:?} (or *.grafana.net subdomains; \
-                 localhost/127.0.0.1 allowed for tests): {base_url}",
-                ALLOWED_GRAFANA_HOSTS
+                "Endpoint must use https and one of {ALLOWED_GRAFANA_HOSTS:?} (or *.grafana.net subdomains; \
+                 localhost/127.0.0.1 allowed for tests): {base_url}"
             ),
         });
     }

@@ -465,9 +465,25 @@ fn test_community_to_work_requires_declassification() {
     let mut logger = E2eLogger::new();
     let request_object_id = object_id("work-to-community-request");
 
-    // The bead's function name is preserved verbatim. In the current IFC
-    // lattice, the executable declassification edge is work-confidential data
-    // entering a community context.
+    let literal_community_to_work = evaluate_zone_check(
+        &mut logger,
+        "community_to_work_without_elevation",
+        ZoneId::community(),
+        ZoneId::work(),
+        request_object_id,
+        &[],
+        SafetyTier::Safe,
+        NOW_MS,
+    );
+    assert_decision(
+        &literal_community_to_work,
+        Decision::Deny,
+        DecisionReasonCode::ApprovalMissingElevation,
+    );
+
+    // The declassification edge in the IFC lattice is work-confidential data
+    // entering a community context; keep it in this test because the bead's
+    // function name is the stable externally referenced proof hook.
     let denied = evaluate_zone_check(
         &mut logger,
         "community_to_work_without_declassification",

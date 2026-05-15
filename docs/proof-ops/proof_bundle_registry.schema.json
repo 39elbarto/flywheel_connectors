@@ -1,0 +1,452 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flywheel.local/schemas/fcp/proof-bundle-registry.v1.json",
+  "title": "FCP proof-bundle registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "registry_id",
+    "generated_at_unix_ms",
+    "sources",
+    "proofs"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fcp.proof-bundle-registry.v1"
+    },
+    "registry_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_at_unix_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/source"
+      }
+    },
+    "proofs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/proof"
+      }
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "path",
+        "purpose",
+        "source_kind",
+        "default_proof_class"
+      ],
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "purpose": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_kind": {
+          "$ref": "#/$defs/source_kind"
+        },
+        "default_proof_class": {
+          "$ref": "#/$defs/proof_class"
+        },
+        "owning_bead": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proof_id",
+        "owning_bead",
+        "claim_text",
+        "source_document",
+        "proof_class",
+        "rerun",
+        "expected_artifacts",
+        "git_revision_under_test",
+        "generated_at_unix_ms",
+        "freshness_policy",
+        "verifier",
+        "redaction"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "proof_class": {
+                "const": "structured_skip"
+              }
+            },
+            "required": [
+              "proof_class"
+            ]
+          },
+          "then": {
+            "required": [
+              "structured_skip"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "proof_class": {
+                "enum": [
+                  "replay",
+                  "offline_static",
+                  "static_doc",
+                  "structured_skip"
+                ]
+              }
+            },
+            "required": [
+              "proof_class"
+            ]
+          },
+          "then": {
+            "properties": {
+              "verifier": {
+                "properties": {
+                  "live_claim": {
+                    "const": false
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "proof_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "owning_bead": {
+          "type": "string",
+          "minLength": 1
+        },
+        "claim_text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_document": {
+          "$ref": "#/$defs/source_document"
+        },
+        "proof_class": {
+          "$ref": "#/$defs/proof_class"
+        },
+        "rerun": {
+          "$ref": "#/$defs/command"
+        },
+        "expected_artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/artifact"
+          }
+        },
+        "git_revision_under_test": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generated_at_unix_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "freshness_policy": {
+          "$ref": "#/$defs/freshness_policy"
+        },
+        "verifier": {
+          "$ref": "#/$defs/verifier"
+        },
+        "structured_skip": {
+          "$ref": "#/$defs/structured_skip"
+        },
+        "redaction": {
+          "$ref": "#/$defs/redaction"
+        }
+      }
+    },
+    "source_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "section",
+        "row_label"
+      ],
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "section": {
+          "type": "string",
+          "minLength": 1
+        },
+        "row_label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "line_hint": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "argv",
+        "working_dir",
+        "requires_rch",
+        "required_env_keys",
+        "expected_exit_codes"
+      ],
+      "properties": {
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "working_dir": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requires_rch": {
+          "type": "boolean"
+        },
+        "required_env_keys": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "expected_exit_codes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "kind",
+        "required"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "required": {
+                "const": true
+              }
+            },
+            "required": [
+              "required"
+            ]
+          },
+          "then": {
+            "required": [
+              "digest"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "produced_by": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "digest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "value"
+      ],
+      "properties": {
+        "algorithm": {
+          "enum": [
+            "blake3",
+            "sha256",
+            "sha512"
+          ]
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "freshness_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_age_ms",
+        "required_for_green",
+        "stale_action"
+      ],
+      "properties": {
+        "max_age_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "required_for_green": {
+          "type": "boolean"
+        },
+        "stale_action": {
+          "enum": [
+            "fail_closed",
+            "warn_only",
+            "skip_only"
+          ]
+        }
+      }
+    },
+    "verifier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command",
+        "result",
+        "observed_at_unix_ms",
+        "log_path",
+        "live_claim"
+      ],
+      "properties": {
+        "command": {
+          "$ref": "#/$defs/command"
+        },
+        "result": {
+          "enum": [
+            "passed",
+            "failed",
+            "blocked",
+            "skipped"
+          ]
+        },
+        "observed_at_unix_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "log_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "live_claim": {
+          "type": "boolean"
+        }
+      }
+    },
+    "structured_skip": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowed",
+        "reason_code"
+      ],
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "reason_code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evidence_path": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "classification"
+      ],
+      "properties": {
+        "classification": {
+          "enum": [
+            "public",
+            "internal",
+            "redacted",
+            "secret_bearing"
+          ]
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    },
+    "source_kind": {
+      "enum": [
+        "final_proof_manifest",
+        "section_proof_index",
+        "core_platform_evidence_index",
+        "e2e_bundle_manifest_producer",
+        "fwc_proof_graph_surface",
+        "other"
+      ]
+    },
+    "proof_class": {
+      "enum": [
+        "live",
+        "host_backed",
+        "replay",
+        "offline_static",
+        "static_doc",
+        "structured_skip"
+      ]
+    }
+  }
+}

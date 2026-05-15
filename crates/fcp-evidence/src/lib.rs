@@ -147,6 +147,18 @@ pub use proof_graph_indexer::{
     ReadinessMatrixRow, ReadmeFeatureRow, SourceLocation, VerificationScriptRecord,
 };
 
+// ── Proof Bundle Registry (8fhsm.1) ───────────────────────────────
+
+pub mod proof_bundle_registry;
+
+pub use proof_bundle_registry::{
+    ArtifactDigest, ArtifactDigestAlgorithm, ExpectedProofArtifact, FreshnessClassification,
+    FreshnessPolicy, PROOF_BUNDLE_REGISTRY_SCHEMA, ProofBundleEntry, ProofBundleRegistry,
+    ProofBundleRegistryError, ProofBundleSource, ProofBundleSourceKind, ProofClass, ProofRedaction,
+    ProofRegistryCommand, ProofSourceDocumentRow, RedactionClassification, StaleProofAction,
+    StructuredSkipReason, VerificationResult, VerifierObservation,
+};
+
 // ── Proof Runner Contract (b88ec.5) ───────────────────────────────
 
 pub mod proof_runner;

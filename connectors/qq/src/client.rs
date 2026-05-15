@@ -651,7 +651,7 @@ fn mention_value_targets_bot(
         Value::Array(items) => items
             .iter()
             .any(|item| mention_value_targets_bot(item, bot_user_id, require_explicit_type)),
-        Value::String(raw) => raw.trim() == bot_user_id,
+        Value::String(raw) => !require_explicit_type && raw.trim() == bot_user_id,
         Value::Object(object) => {
             let mention_type = object
                 .get("type")
@@ -2158,6 +2158,32 @@ mod tests {
         assert_eq!(projected.reason_code, "missing_group_mention");
         assert_eq!(
             projected.policy.as_ref().map(|policy| policy.mentioned_bot),
+            Some(false)
+        );
+
+        let bare_string = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(2),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-bare-string-message",
+                    "content": "plain message",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1",
+                    "message": "bot-openid"
+                })),
+                id: Some("evt-bare-string-message".into()),
+            })
+            .unwrap();
+
+        assert!(!bare_string.accepted);
+        assert_eq!(bare_string.reason_code, "missing_group_mention");
+        assert_eq!(
+            bare_string
+                .policy
+                .as_ref()
+                .map(|policy| policy.mentioned_bot),
             Some(false)
         );
     }

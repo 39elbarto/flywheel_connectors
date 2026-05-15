@@ -412,6 +412,39 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         &missing_mention,
     );
 
+    let untyped_message_id = invoke_projection(
+        &connector,
+        &signing_key,
+        &instance_id,
+        "qq-gateway-untyped-message-id",
+        json!({
+            "op": 0,
+            "s": 3,
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": "evt-untyped-message-id",
+            "d": {
+                "id": "msg-untyped-message-id",
+                "content": "plain message",
+                "group_openid": "group-allowed",
+                "group_member_openid": "member-1",
+                "message": {
+                    "id": "bot-openid",
+                    "text": "not a mention segment"
+                }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(untyped_message_id["accepted"], false);
+    assert_eq!(untyped_message_id["reason_code"], "missing_group_mention");
+    assert_eq!(untyped_message_id["policy"]["mentioned_bot"], false);
+    log_projection_step(
+        &mut logs,
+        "untyped_message_id_not_mention",
+        "ok",
+        &untyped_message_id,
+    );
+
     let structured_mention = invoke_projection(
         &connector,
         &signing_key,
@@ -419,7 +452,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "qq-gateway-structured-mention",
         json!({
             "op": 0,
-            "s": 3,
+            "s": 4,
             "t": "GROUP_MESSAGE_CREATE",
             "id": "evt-structured-mention",
             "d": {
@@ -451,7 +484,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "qq-gateway-oversized-media",
         json!({
             "op": 0,
-            "s": 4,
+            "s": 5,
             "t": "GROUP_AT_MESSAGE_CREATE",
             "id": "evt-oversized-media",
             "d": {
@@ -491,7 +524,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "qq-gateway-reply-media",
         json!({
             "op": 0,
-            "s": 5,
+            "s": 6,
             "t": "GROUP_AT_MESSAGE_CREATE",
             "id": "evt-reply-media",
             "d": {
@@ -527,7 +560,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "qq-gateway-duplicate",
         json!({
             "op": 0,
-            "s": 6,
+            "s": 7,
             "t": "GROUP_AT_MESSAGE_CREATE",
             "id": "evt-accepted",
             "d": {
@@ -574,10 +607,12 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "session-1",
         "hello-1",
         "evt-accepted",
+        "evt-untyped-message-id",
         "evt-structured-mention",
         "evt-reply-media",
         "evt-oversized-media",
         "msg-accepted",
+        "msg-untyped-message-id",
         "msg-structured-mention",
         "msg-reply-media",
         "msg-oversized-media",
@@ -587,6 +622,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "member-1",
         "Alice",
         "deploy status",
+        "plain message",
+        "not a mention segment",
         "please inspect this",
         "see attached trace",
         "too large",

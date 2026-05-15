@@ -629,23 +629,28 @@ fn mentions_bot(event: &NormalizedQqEvent, policy: &QqInboundPolicyConfig) -> bo
 }
 
 fn structured_mentions_bot(raw: &Value, bot_user_id: &str) -> bool {
-    [
-        "mentions",
-        "message",
-        "message_segments",
-        "segments",
-        "content_segments",
-    ]
-    .iter()
-    .filter_map(|field| raw.get(*field))
-    .any(|value| mention_value_targets_bot(value, bot_user_id))
+    raw.get("mentions")
+        .is_some_and(|mentions| mention_value_targets_bot(mentions, bot_user_id, false))
+        || [
+            "message",
+            "message_segments",
+            "segments",
+            "content_segments",
+        ]
+        .iter()
+        .filter_map(|field| raw.get(*field))
+        .any(|value| mention_value_targets_bot(value, bot_user_id, true))
 }
 
-fn mention_value_targets_bot(value: &Value, bot_user_id: &str) -> bool {
+fn mention_value_targets_bot(
+    value: &Value,
+    bot_user_id: &str,
+    require_explicit_type: bool,
+) -> bool {
     match value {
         Value::Array(items) => items
             .iter()
-            .any(|item| mention_value_targets_bot(item, bot_user_id)),
+            .any(|item| mention_value_targets_bot(item, bot_user_id, require_explicit_type)),
         Value::String(raw) => raw.trim() == bot_user_id,
         Value::Object(object) => {
             let mention_type = object
@@ -657,6 +662,9 @@ fn mention_value_targets_bot(value: &Value, bot_user_id: &str) -> bool {
                 .as_deref()
                 .is_none_or(|kind| matches!(kind, "at" | "mention" | "user_mention"));
             if !looks_like_mention {
+                return false;
+            }
+            if require_explicit_type && mention_type.is_none() {
                 return false;
             }
 
@@ -2113,6 +2121,44 @@ mod tests {
         assert_eq!(
             projected.policy.as_ref().map(|policy| policy.reason_code),
             Some("group_allowed")
+        );
+    }
+
+    #[test]
+    fn gateway_runtime_rejects_untyped_message_id_as_group_mention() {
+        let mut config = QqGatewayRuntimeConfig {
+            enabled: true,
+            max_queue_depth: 4,
+            ..QqGatewayRuntimeConfig::default()
+        };
+        config.policy.bot_user_id = Some("bot-openid".into());
+        config.policy.group_require_mention = true;
+        let mut runtime = QqGatewayRuntime::new(config);
+
+        let projected = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-untyped-message-id",
+                    "content": "plain message",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1",
+                    "message": {
+                        "id": "bot-openid",
+                        "text": "not a mention segment"
+                    }
+                })),
+                id: Some("evt-untyped-message-id".into()),
+            })
+            .unwrap();
+
+        assert!(!projected.accepted);
+        assert_eq!(projected.reason_code, "missing_group_mention");
+        assert_eq!(
+            projected.policy.as_ref().map(|policy| policy.mentioned_bot),
+            Some(false)
         );
     }
 

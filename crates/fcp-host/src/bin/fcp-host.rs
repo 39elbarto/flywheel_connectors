@@ -3422,6 +3422,7 @@ Startup configuration is supplied via environment variables:
   FCP_HOST_SUPPLY_CHAIN_*
   FCP_HOST_HRW_LEASE_LOCAL_NODE
   FCP_HOST_HRW_LEASE_NODES
+  FCP_HOST_HRW_LEASE_CURRENT_SEQ
 ",
         env!("CARGO_PKG_VERSION")
     );
@@ -4353,11 +4354,13 @@ fn emit_deployment_tier_denial_audit_event(
 
 const HRW_LEASE_LOCAL_NODE_ENV: &str = "FCP_HOST_HRW_LEASE_LOCAL_NODE";
 const HRW_LEASE_NODES_ENV: &str = "FCP_HOST_HRW_LEASE_NODES";
+const HRW_LEASE_CURRENT_SEQ_ENV: &str = "FCP_HOST_HRW_LEASE_CURRENT_SEQ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HrwLeaseRoutingConfig {
     local_node: TailscaleNodeId,
     eligible_nodes: Vec<TailscaleNodeId>,
+    current_lease_seq: Option<u64>,
 }
 
 #[cfg(test)]
@@ -4418,9 +4421,13 @@ fn parse_hrw_lease_node_set(raw: &str, env_name: &str) -> HostResult<Vec<Tailsca
 fn parse_hrw_lease_routing_config_from_env_values(
     local_node: Option<&str>,
     eligible_nodes: Option<&str>,
+    current_lease_seq: Option<u64>,
 ) -> HostResult<Option<HrwLeaseRoutingConfig>> {
     match (local_node, eligible_nodes) {
-        (None, None) => Ok(None),
+        (None, None) if current_lease_seq.is_none() => Ok(None),
+        (None, None) => Err(HostError::InvalidFilter(format!(
+            "set {HRW_LEASE_LOCAL_NODE_ENV} and {HRW_LEASE_NODES_ENV} when using {HRW_LEASE_CURRENT_SEQ_ENV}"
+        ))),
         (Some(local_node), Some(eligible_nodes)) => {
             let local_node = parse_hrw_lease_node_id(local_node, HRW_LEASE_LOCAL_NODE_ENV)?;
             let eligible_nodes = parse_hrw_lease_node_set(eligible_nodes, HRW_LEASE_NODES_ENV)?;
@@ -4433,6 +4440,7 @@ fn parse_hrw_lease_routing_config_from_env_values(
             Ok(Some(HrwLeaseRoutingConfig {
                 local_node,
                 eligible_nodes,
+                current_lease_seq,
             }))
         }
         (Some(_), None) | (None, Some(_)) => Err(HostError::InvalidFilter(format!(
@@ -4455,7 +4463,12 @@ fn current_hrw_lease_routing_config() -> HostResult<Option<HrwLeaseRoutingConfig
 
     let local_node = read_optional_trimmed_env_string(HRW_LEASE_LOCAL_NODE_ENV)?;
     let eligible_nodes = read_optional_trimmed_env_string(HRW_LEASE_NODES_ENV)?;
-    parse_hrw_lease_routing_config_from_env_values(local_node.as_deref(), eligible_nodes.as_deref())
+    let current_lease_seq = read_env_u64(HRW_LEASE_CURRENT_SEQ_ENV)?;
+    parse_hrw_lease_routing_config_from_env_values(
+        local_node.as_deref(),
+        eligible_nodes.as_deref(),
+        current_lease_seq,
+    )
 }
 
 fn json_schema_declares_singleton_writer(value: &Value) -> bool {
@@ -4518,8 +4531,24 @@ fn singleton_writer_lease_subject_id(request: &InvokeRequest) -> ObjectId {
     ObjectId::from_bytes(*hasher.finalize().as_bytes())
 }
 
-fn hrw_lease_refusal_message(reason: &fcp_mesh::planner::LeaseTransferReason) -> String {
-    let payload = serde_json::to_string(reason).unwrap_or_else(|error| {
+#[derive(Debug, Serialize)]
+#[serde(tag = "code")]
+enum HrwLeaseRouteRefusal<'a> {
+    NotSelectedCoordinator {
+        #[serde(flatten)]
+        reason: &'a fcp_mesh::planner::LeaseTransferReason,
+    },
+    LeaseFenced {
+        zone_id: ZoneId,
+        subject_id: ObjectId,
+        purpose: CoreLeasePurpose,
+        current_lease_seq: u64,
+        provided_lease_seq: Option<u64>,
+    },
+}
+
+fn hrw_lease_refusal_message(refusal: &HrwLeaseRouteRefusal<'_>) -> String {
+    let payload = serde_json::to_string(refusal).unwrap_or_else(|error| {
         format!("{{\"reason\":\"serialization_error\",\"message\":\"{error}\"}}")
     });
     format!("HRW lease routing refused singleton_writer invoke: {payload}")
@@ -4536,29 +4565,19 @@ fn enforce_hrw_lease_route(
             subject_id,
             purpose: CoreLeasePurpose::ConnectorStateWrite,
         };
+        let refusal = HrwLeaseRouteRefusal::NotSelectedCoordinator { reason: &reason };
         return Err(HostError::PreflightFailed(hrw_lease_refusal_message(
-            &reason,
+            &refusal,
         )));
     };
 
-    fcp_mesh::planner::admit_lease_holder(
+    let selection = fcp_mesh::planner::admit_lease_holder(
         &request.zone_id,
         &subject_id,
         CoreLeasePurpose::ConnectorStateWrite,
         &routing.eligible_nodes,
         &routing.local_node,
     )
-    .map(|selection| {
-        tracing::debug!(
-            event = "hrw_lease_route_admitted",
-            connector_id = %request.connector_id,
-            operation = %request.operation,
-            zone_id = %request.zone_id,
-            subject_id = %selection.subject_id,
-            holder = %selection.holder.as_str(),
-            "singleton_writer invoke admitted by HRW lease routing"
-        );
-    })
     .map_err(|reason| {
         tracing::warn!(
             event = "hrw_lease_route_refused",
@@ -4568,8 +4587,48 @@ fn enforce_hrw_lease_route(
             reason = ?reason,
             "singleton_writer invoke refused by HRW lease routing"
         );
-        HostError::PreflightFailed(hrw_lease_refusal_message(&reason))
-    })
+        let refusal = HrwLeaseRouteRefusal::NotSelectedCoordinator { reason: &reason };
+        HostError::PreflightFailed(hrw_lease_refusal_message(&refusal))
+    })?;
+
+    if let Some(current_lease_seq) = routing.current_lease_seq
+        && request
+            .lease_seq
+            .is_none_or(|provided| provided < current_lease_seq)
+    {
+        let refusal = HrwLeaseRouteRefusal::LeaseFenced {
+            zone_id: request.zone_id.clone(),
+            subject_id,
+            purpose: CoreLeasePurpose::ConnectorStateWrite,
+            current_lease_seq,
+            provided_lease_seq: request.lease_seq,
+        };
+        tracing::warn!(
+            event = "hrw_lease_route_fenced",
+            connector_id = %request.connector_id,
+            operation = %request.operation,
+            zone_id = %request.zone_id,
+            subject_id = %subject_id,
+            current_lease_seq,
+            provided_lease_seq = ?request.lease_seq,
+            "singleton_writer invoke refused by HRW lease fence"
+        );
+        return Err(HostError::PreflightFailed(hrw_lease_refusal_message(
+            &refusal,
+        )));
+    }
+
+    tracing::debug!(
+        event = "hrw_lease_route_admitted",
+        connector_id = %request.connector_id,
+        operation = %request.operation,
+        zone_id = %request.zone_id,
+        subject_id = %selection.subject_id,
+        holder = %selection.holder.as_str(),
+        current_lease_seq = ?routing.current_lease_seq,
+        "singleton_writer invoke admitted by HRW lease routing"
+    );
+    Ok(())
 }
 
 fn enforce_live_deployment_tier(request: &InvokeRequest, tier: SafetyTier) -> HostResult<()> {
@@ -18356,6 +18415,7 @@ deny_ptrace = true
         let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
             local_node: local_node.clone(),
             eligible_nodes: eligible_nodes.clone(),
+            current_lease_seq: None,
         }));
 
         let (status, message) = invoke_handler(
@@ -18368,6 +18428,7 @@ deny_ptrace = true
 
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert!(message.contains("HRW lease routing refused singleton_writer invoke"));
+        assert!(message.contains(r#""code":"NotSelectedCoordinator""#));
         assert!(message.contains(r#""reason":"wrong_holder""#));
         assert!(message.contains(expected.as_str()));
         assert!(message.contains(local_node.as_str()));
@@ -18381,8 +18442,34 @@ deny_ptrace = true
         policies.insert(ZoneId::work(), host_runtime_policy(ZoneId::work()));
         *state.zone_policies.write().await = policies;
         let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: expected.clone(),
+            eligible_nodes: eligible_nodes.clone(),
+            current_lease_seq: Some(8),
+        }));
+
+        let (status, message) = invoke_handler(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Json(request.clone()),
+        )
+        .await
+        .expect_err("stale singleton_writer lease sequence must be fenced");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(message.contains(r#""code":"LeaseFenced""#));
+        assert!(message.contains(r#""current_lease_seq":8"#));
+        assert!(message.contains(r#""provided_lease_seq":7"#));
+        assert_eq!(
+            invoke_count.load(Ordering::SeqCst),
+            0,
+            "LeaseFenced refusal must happen before connector dispatch"
+        );
+        drop(_guard);
+
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
             local_node: expected,
             eligible_nodes,
+            current_lease_seq: Some(7),
         }));
 
         let Json(response) = invoke_handler(State(state), HeaderMap::new(), Json(request))

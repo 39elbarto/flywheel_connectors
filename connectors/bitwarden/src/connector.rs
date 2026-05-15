@@ -12,7 +12,7 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{BitwardenAuth, BitwardenClient, DEFAULT_BASE_URL},
+    client::{BitwardenAuth, BitwardenClient, DEFAULT_BASE_URL, DEFAULT_IDENTITY_URL},
     error::BitwardenError,
 };
 
@@ -25,12 +25,12 @@ struct BitwardenConfig {
 
 impl BitwardenConfig {
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
-        let access_token = params
-            .get("access_token")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_string);
+        let access_token = optional_trimmed_string(params, "access_token")?;
+        let client_id = optional_trimmed_string(params, "client_id")?;
+        let client_secret = optional_trimmed_string(params, "client_secret")?;
+        let organization_id = optional_trimmed_string(params, "organization_id")?;
+        let identity_url = optional_trimmed_string(params, "identity_url")?
+            .unwrap_or_else(|| DEFAULT_IDENTITY_URL.to_string());
 
         let credential_id = match params.get("credential_id") {
             Some(value) => {
@@ -48,21 +48,55 @@ impl BitwardenConfig {
             None => None,
         };
 
-        let auth = match (access_token, credential_id) {
-            (Some(token), None) => BitwardenAuth::BearerToken(token),
-            (None, Some(cred_id)) => BitwardenAuth::CredentialId(cred_id),
-            (Some(_), Some(_)) => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Provide exactly one of access_token or credential_id".into(),
-                });
+        let public_api_fields = [
+            client_id.as_ref(),
+            client_secret.as_ref(),
+            organization_id.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .count();
+
+        let has_vault_auth = access_token.is_some() || credential_id.is_some();
+        if has_vault_auth && public_api_fields > 0
+            || access_token.is_some() && credential_id.is_some()
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message:
+                    "Provide exactly one Bitwarden auth mode: access_token, credential_id, or Public API client credentials"
+                        .into(),
+            });
+        }
+        if public_api_fields > 0 && public_api_fields < 3 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message:
+                    "Provide all of client_id, client_secret, and organization_id for Bitwarden Public API auth"
+                        .into(),
+            });
+        }
+
+        let auth = if let Some(token) = access_token {
+            BitwardenAuth::BearerToken(token)
+        } else if let Some(cred_id) = credential_id {
+            BitwardenAuth::CredentialId(cred_id)
+        } else if let (Some(client_id), Some(client_secret), Some(organization_id)) =
+            (client_id, client_secret, organization_id)
+        {
+            BitwardenAuth::PublicApiClientCredentials {
+                client_id,
+                client_secret,
+                organization_id,
+                identity_url,
             }
-            (None, None) => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing access_token or credential_id in configuration".into(),
-                });
-            }
+        } else {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message:
+                    "Missing Bitwarden auth configuration: provide access_token, credential_id, or client_id/client_secret/organization_id"
+                        .into(),
+            });
         };
 
         let base_url = params
@@ -72,6 +106,24 @@ impl BitwardenConfig {
             .to_string();
 
         Ok(Self { auth, base_url })
+    }
+}
+
+fn optional_trimmed_string(params: &serde_json::Value, field: &str) -> FcpResult<Option<String>> {
+    match params.get(field) {
+        Some(value) => {
+            let raw = value.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("{field} must be a string"),
+            })?;
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        None => Ok(None),
     }
 }
 
@@ -667,6 +719,49 @@ mod tests {
     }
 
     #[test]
+    fn config_from_public_api_client_credentials() -> Result<(), Box<dyn std::error::Error>> {
+        let config = BitwardenConfig::from_params(&json!({
+            "client_id": "organization.client-id",
+            "client_secret": "client-secret",
+            "organization_id": "org-1",
+        }))?;
+        assert!(config.auth.is_public_api());
+        assert_eq!(config.base_url, DEFAULT_BASE_URL);
+        let BitwardenAuth::PublicApiClientCredentials {
+            client_id,
+            client_secret,
+            organization_id,
+            identity_url,
+        } = config.auth
+        else {
+            return Err("expected public API client credentials".into());
+        };
+        assert_eq!(client_id, "organization.client-id");
+        assert_eq!(client_secret, "client-secret");
+        assert_eq!(organization_id, "org-1");
+        assert_eq!(identity_url, DEFAULT_IDENTITY_URL);
+        Ok(())
+    }
+
+    #[test]
+    fn config_from_public_api_client_credentials_custom_urls()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = BitwardenConfig::from_params(&json!({
+            "client_id": "organization.client-id",
+            "client_secret": "client-secret",
+            "organization_id": "org-1",
+            "base_url": "https://api.bitwarden.eu/",
+            "identity_url": "https://identity.bitwarden.eu/connect/token",
+        }))?;
+        assert_eq!(config.base_url, "https://api.bitwarden.eu/");
+        let BitwardenAuth::PublicApiClientCredentials { identity_url, .. } = config.auth else {
+            return Err("expected public API client credentials".into());
+        };
+        assert_eq!(identity_url, "https://identity.bitwarden.eu/connect/token");
+        Ok(())
+    }
+
+    #[test]
     fn config_custom_base_url() {
         let config = BitwardenConfig::from_params(&json!({
             "access_token": "tok",
@@ -681,6 +776,26 @@ mod tests {
         let result = BitwardenConfig::from_params(&json!({
             "access_token": "tok",
             "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_access_token_with_public_api_fields() {
+        let result = BitwardenConfig::from_params(&json!({
+            "access_token": "tok",
+            "client_id": "organization.client-id",
+            "client_secret": "client-secret",
+            "organization_id": "org-1",
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_partial_public_api_fields() {
+        let result = BitwardenConfig::from_params(&json!({
+            "client_id": "organization.client-id",
+            "client_secret": "client-secret",
         }));
         assert!(result.is_err());
     }
@@ -719,6 +834,16 @@ mod tests {
     fn config_rejects_invalid_uuid_credential_id() {
         let result = BitwardenConfig::from_params(&json!({
             "credential_id": "not-a-uuid",
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_non_string_public_api_field() {
+        let result = BitwardenConfig::from_params(&json!({
+            "client_id": 42,
+            "client_secret": "client-secret",
+            "organization_id": "org-1",
         }));
         assert!(result.is_err());
     }
@@ -917,13 +1042,13 @@ mod tests {
     }
 
     #[test]
-    fn config_trims_access_token() {
-        let config =
-            BitwardenConfig::from_params(&json!({ "access_token": "  tok_test  " })).unwrap();
-        match &config.auth {
-            BitwardenAuth::BearerToken(t) => assert_eq!(t, "tok_test"),
-            BitwardenAuth::CredentialId(_) => panic!("expected BearerToken"),
-        }
+    fn config_trims_access_token() -> Result<(), Box<dyn std::error::Error>> {
+        let config = BitwardenConfig::from_params(&json!({ "access_token": "  tok_test  " }))?;
+        let BitwardenAuth::BearerToken(t) = &config.auth else {
+            return Err("expected BearerToken".into());
+        };
+        assert_eq!(t, "tok_test");
+        Ok(())
     }
 
     #[test]

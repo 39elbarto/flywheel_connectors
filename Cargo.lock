@@ -2887,12 +2887,14 @@ dependencies = [
  "fcp-core",
  "fcp-prelude",
  "fcp-sdk",
+ "fcp-testkit",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
+ "url",
  "wiremock",
 ]
 

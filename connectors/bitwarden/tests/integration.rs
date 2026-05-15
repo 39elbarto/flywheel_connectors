@@ -12,7 +12,7 @@
 )]
 
 use serde_json::json;
-use wiremock::matchers::{header, method, path, path_regex, query_param};
+use wiremock::matchers::{body_string_contains, header, method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use fcp_bitwarden::connector::BitwardenConnector;
@@ -23,6 +23,23 @@ async fn setup_connector(mock_url: &str) -> BitwardenConnector {
         .await
         .unwrap();
     c.handle_handshake(json!({"session_id": "test"}))
+        .await
+        .unwrap();
+    c
+}
+
+async fn setup_public_api_connector(mock_url: &str) -> BitwardenConnector {
+    let mut c = BitwardenConnector::new();
+    c.handle_configure(json!({
+        "client_id": "organization.client-id",
+        "client_secret": "client-secret",
+        "organization_id": "org-1",
+        "base_url": mock_url,
+        "identity_url": format!("{mock_url}/connect/token")
+    }))
+    .await
+    .unwrap();
+    c.handle_handshake(json!({"session_id": "test-public-api"}))
         .await
         .unwrap();
     c
@@ -161,6 +178,59 @@ async fn collections_list_empty() {
         .await
         .unwrap();
     assert!(result["data"].as_array().unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn collections_list_public_api_client_credentials() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/connect/token"))
+        .and(body_string_contains("grant_type=client_credentials"))
+        .and(body_string_contains("scope=api.organization"))
+        .and(body_string_contains("client_id=organization.client-id"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "public-api-token",
+            "expires_in": 3600,
+            "token_type": "Bearer"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/public/collections"))
+        .and(header("Authorization", "Bearer public-api-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [
+                {"id": "col-public", "name": "Sandbox Collection", "organizationId": "org-1"}
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_public_api_connector(&server.uri()).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "bitwarden.collections.list",
+            "input": {}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(result["data"].as_array().unwrap().len(), 1);
+    assert_eq!(result["object"], "list");
+}
+
+#[fcp_async_core::runtime::test]
+async fn public_api_client_credentials_reject_vault_item_operations() {
+    let server = MockServer::start().await;
+    let c = setup_public_api_connector(&server.uri()).await;
+    let error = c
+        .handle_invoke(json!({
+            "operation_id": "bitwarden.items.list",
+            "input": {}
+        }))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Public API client credentials"));
 }
 
 // -- Items List --

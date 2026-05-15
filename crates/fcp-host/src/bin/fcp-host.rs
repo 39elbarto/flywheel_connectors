@@ -2501,6 +2501,67 @@ async fn connector_state_canonical_status_from_config(
         })
 }
 
+struct HostConnectorLeaseYieldFlushContext {
+    state_root: PathBuf,
+    flush: fcp_store::ConnectorStateLeaseYieldFlush,
+    warnings: Vec<String>,
+}
+
+async fn connector_lease_yield_flush_context_for_registered_connector(
+    state: &AppState,
+    connector_id: &ConnectorId,
+    zone: &ZoneId,
+) -> Result<HostConnectorLeaseYieldFlushContext, String> {
+    let inventory = state.registry.inventory().await;
+    let config = find_connector_inventory_entry(&inventory, connector_id)
+        .ok_or_else(|| format!("connector `{connector_id}` is not present in the host registry"))?;
+    if !connector_config_declares_singleton_writer(config) {
+        return Err(format!(
+            "connector `{connector_id}` does not declare singleton_writer state; refusing lease-yield flush"
+        ));
+    }
+
+    let state_root =
+        configured_connector_state_root(config).unwrap_or_else(connector_state_root_dir);
+    let object_store_dir = connector_state_canonical_object_store_dir(&state_root, connector_id);
+    let object_id_key = configured_connector_state_object_id_key(config)?.ok_or_else(|| {
+        format!(
+            "Cannot flush connector-state for `{connector_id}` before lease yield because neither `{}` nor `{}` is configured.",
+            FCP_HOST_CONNECTOR_STATE_OBJECT_ID_KEY_ENV, CONNECTOR_STATE_OBJECT_ID_KEY_ENV
+        )
+    })?;
+    let object_store = fcp_store::DurableObjectStore::open(
+        fcp_store::DurableObjectStoreConfig::new(&object_store_dir),
+    )
+    .map_err(|error| {
+        format!(
+            "Canonical fcp-store object store at `{}` could not be opened for lease-yield flush: {error}",
+            object_store_dir.display()
+        )
+    })?;
+    let object_store: Arc<dyn fcp_store::ObjectStore> = Arc::new(object_store);
+    let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+        object_store,
+        object_id_key,
+        connector_id.clone(),
+        zone.clone(),
+    );
+    let flush = state_store
+        .flush_before_lease_yield()
+        .await
+        .map_err(|error| {
+            format!(
+                "Canonical fcp-store state at `{}` could not be flushed before lease yield: {error}",
+                object_store_dir.display()
+            )
+        })?;
+    Ok(HostConnectorLeaseYieldFlushContext {
+        state_root,
+        flush,
+        warnings: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 #[must_use]
 fn host_connector_state_explain_payload_with_canonical_status(
@@ -2830,6 +2891,11 @@ struct ConnectorStateExplainQuery {
 
 #[derive(Debug, Default, Deserialize)]
 struct ConnectorLeaseStatusQuery {
+    zone: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ConnectorLeaseFlushBeforeYieldQuery {
     zone: Option<String>,
 }
 
@@ -4648,6 +4714,48 @@ fn connector_lease_status_payload(
     })
 }
 
+#[must_use]
+fn connector_lease_flush_before_yield_payload(
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+    state_root: &StdPath,
+    flush: &fcp_store::ConnectorStateLeaseYieldFlush,
+    warnings: Vec<String>,
+) -> Value {
+    json!({
+        "status": "ok",
+        "command": "fcp-host",
+        "subcommand": "connector lease flush-before-yield",
+        "schema_version": "1.0.0",
+        "source": "host-canonical-state-flush",
+        "connector_id": connector_id.to_string(),
+        "zone_id": zone_id.as_str(),
+        "state_root": {
+            "path": state_root.display().to_string(),
+            "source": "host",
+        },
+        "purpose": CoreLeasePurpose::ConnectorStateWrite,
+        "flush": {
+            "root_present": flush.root_object_id.is_some(),
+            "connector_id": flush.connector_id.to_string(),
+            "zone_id": flush.zone_id.as_str(),
+            "instance_id": flush.instance_id.as_ref().map(InstanceId::as_str),
+            "root_object_id": flush.root_object_id.as_ref().map(ToString::to_string),
+            "head_object_id": flush.head_object_id.as_ref().map(ToString::to_string),
+            "last_canonical_seq": flush.last_canonical_seq,
+            "lease_seq": flush.lease_seq,
+            "lease_object_id": flush.lease_object_id.as_ref().map(ToString::to_string),
+            "status_source": "fcp-store",
+        },
+        "telemetry": {
+            "event_name": metrics::LEASE_FLUSHED_ON_YIELD_METRIC,
+            "purpose_label": CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+            "redaction_scope": "public",
+        },
+        "warnings": warnings,
+    })
+}
+
 #[derive(Debug, Serialize)]
 #[serde(tag = "code")]
 enum HrwLeaseRouteRefusal<'a> {
@@ -6200,6 +6308,10 @@ async fn async_main(telemetry_config: TelemetryConfig) -> HostResult<()> {
         .route(
             "/rpc/admin/connectors/{connector_id}/lease/status",
             get(connector_lease_status_handler),
+        )
+        .route(
+            "/rpc/admin/connectors/{connector_id}/lease/flush-before-yield",
+            post(connector_lease_flush_before_yield_handler),
         )
         .route(
             "/rpc/connectors/{connector_id}/config/diff",
@@ -8277,6 +8389,64 @@ async fn connector_lease_status_handler(
         holder_node_id_hash = ?holder_node_id_hash,
         duration_ms = started_at.elapsed().as_millis() as u64,
         "connector lease status request complete"
+    );
+    Ok(Json(payload))
+}
+
+async fn connector_lease_flush_before_yield_handler(
+    State(state): State<Arc<AppState>>,
+    Path(connector_id): Path<String>,
+    Query(query): Query<ConnectorLeaseFlushBeforeYieldQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let connector_id = parse_connector_id(&connector_id)?;
+    if state.registry.get(&connector_id).await.is_none() {
+        return Err(map_host_error(HostError::ConnectorNotFound(
+            connector_id.to_string(),
+        )));
+    }
+    let zone = match query
+        .zone
+        .as_deref()
+        .map(str::trim)
+        .filter(|zone| !zone.is_empty())
+    {
+        Some(zone) => zone.parse::<ZoneId>().map_err(|error| {
+            map_host_error(HostError::InvalidFilter(format!(
+                "invalid connector lease flush-before-yield zone `{zone}`: {error}"
+            )))
+        })?,
+        None => ZoneId::work(),
+    };
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "connector_lease_flush_before_yield_request",
+        connector_id = %connector_id,
+        zone_id = %zone,
+        "processing connector lease flush-before-yield request"
+    );
+    let HostConnectorLeaseYieldFlushContext {
+        state_root,
+        flush,
+        warnings,
+    } = connector_lease_yield_flush_context_for_registered_connector(&state, &connector_id, &zone)
+        .await
+        .map_err(|error| map_host_error(HostError::PreflightFailed(error)))?;
+    let payload = connector_lease_flush_before_yield_payload(
+        &connector_id,
+        &zone,
+        &state_root,
+        &flush,
+        warnings,
+    );
+    tracing::debug!(
+        event = "connector_lease_flush_before_yield_response",
+        connector_id = %connector_id,
+        zone_id = %zone,
+        root_object_id = flush.root_object_id.as_ref().map(ToString::to_string),
+        head_object_id = flush.head_object_id.as_ref().map(ToString::to_string),
+        last_canonical_seq = ?flush.last_canonical_seq,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "connector lease flush-before-yield request complete"
     );
     Ok(Json(payload))
 }
@@ -24073,6 +24243,21 @@ done"#;
             .with_state(Arc::clone(&state))
     }
 
+    fn connector_lease_flush_before_yield_test_app(state: Arc<AppState>) -> axum::Router {
+        let protected = axum::Router::new()
+            .route(
+                "/rpc/admin/connectors/{connector_id}/lease/flush-before-yield",
+                post(connector_lease_flush_before_yield_handler),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                admin_auth_middleware,
+            ));
+        axum::Router::new()
+            .merge(protected)
+            .with_state(Arc::clone(&state))
+    }
+
     fn host_telemetry_test_state(telemetry_config: TelemetryConfig) -> Arc<AppState> {
         let base = cancel_route_test_state();
         Arc::new(AppState {
@@ -24833,6 +25018,133 @@ done"#;
             Some(eligible_nodes.len())
         );
         assert_eq!(payload["telemetry"]["event_names"][3], "fcp.lease.fenced");
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_lease_flush_before_yield_admin_route_reports_durable_state_barrier()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let state_root = tempdir.path().join("managed-state");
+        let connector_id = "fcp.test.lease-flush:utility:1.0.0";
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id = ZoneId::work();
+        let object_id_key = ObjectIdKey::from_bytes([0xCF; 32]);
+        let object_store_dir =
+            connector_state_canonical_object_store_dir(&state_root, &connector_key);
+        let object_store: Arc<dyn fcp_store::ObjectStore> = Arc::new(
+            fcp_store::DurableObjectStore::open(fcp_store::DurableObjectStoreConfig::new(
+                &object_store_dir,
+            ))
+            .expect("durable connector-state object store should open"),
+        );
+        let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+            Arc::clone(&object_store),
+            object_id_key,
+            connector_key.clone(),
+            zone_id.clone(),
+        )
+        .with_snapshot_every_entries(0)
+        .with_snapshot_every_secs(0);
+        let (authorization, signing_key) =
+            connector_state_write_authorization_for_test_with_key(&connector_key, &zone_id);
+        let append = fcp_core::ConnectorStateStore::append_object(
+            &state_store,
+            &connector_key,
+            &authorization,
+            sign_durable_connector_state_object_for_test(
+                durable_connector_state_object_for_test(
+                    &connector_key,
+                    &zone_id,
+                    0,
+                    None,
+                    ObjectId::from_bytes([0x91; 32]),
+                ),
+                &signing_key,
+            ),
+        )
+        .await
+        .expect("durable connector-state append should commit");
+        let (head_object_id, root_object_id) = match append {
+            fcp_core::ConnectorStateAppendOutcome::Committed {
+                object_id,
+                root_object_id,
+                seq,
+                snapshot_object_id,
+            } => {
+                assert_eq!(seq, 0);
+                assert_eq!(snapshot_object_id, None);
+                (object_id, root_object_id)
+            }
+            fcp_core::ConnectorStateAppendOutcome::Conflict { .. } => {
+                panic!("initial durable connector-state append should not conflict")
+            }
+        };
+        drop(state_store);
+        drop(object_store);
+
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(1);
+        let runner_task = task::spawn(async move { while runner_rx.recv().await.is_some() {} });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let mut config = dispatcher_test_config(connector_id);
+        config.env.insert(
+            CONNECTOR_STATE_DIR_ENV.to_string(),
+            state_root.display().to_string(),
+        );
+        config.env.insert(
+            CONNECTOR_STATE_OBJECT_ID_KEY_ENV.to_string(),
+            hex::encode(object_id_key.as_bytes()),
+        );
+        config.env.insert(
+            "FCP_CONNECTOR_STATE_MODEL".to_string(),
+            "singleton_writer".to_string(),
+        );
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = dispatcher_app_state(registry, lifecycle, None, HashMap::new());
+        let state = Arc::new(AppState {
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            ..(*state).clone()
+        });
+        let app = connector_lease_flush_before_yield_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::POST,
+            "/rpc/admin/connectors/fcp.test.lease-flush:utility:1.0.0/lease/flush-before-yield?zone=z%3Awork",
+            serde_json::json!({}),
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(payload["schema_version"], "1.0.0");
+        assert_eq!(payload["source"], "host-canonical-state-flush");
+        assert_eq!(payload["connector_id"], connector_key.to_string());
+        assert_eq!(payload["zone_id"], zone_id.as_str());
+        assert_eq!(payload["flush"]["root_present"], true);
+        assert_eq!(
+            payload["flush"]["root_object_id"],
+            root_object_id.to_string()
+        );
+        assert_eq!(
+            payload["flush"]["head_object_id"],
+            head_object_id.to_string()
+        );
+        assert_eq!(payload["flush"]["last_canonical_seq"], 0);
+        assert_eq!(payload["flush"]["lease_seq"], 10);
+        assert_eq!(
+            payload["flush"]["lease_object_id"],
+            ObjectId::from_bytes([0x91; 32]).to_string()
+        );
+        assert_eq!(
+            payload["telemetry"]["event_name"],
+            "fcp.lease.flushed_on_yield"
+        );
         Ok(())
     }
 

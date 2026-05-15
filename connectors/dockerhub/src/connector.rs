@@ -225,6 +225,12 @@ impl DockerHubConnector {
         }
     }
 
+    /// Stable connector instance identity used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &fcp_prelude::InstanceId {
+        &self.base.instance_id
+    }
+
     fn manifest_hash() -> String {
         let mut h = Sha256::new();
         h.update(MANIFEST_TOML.as_bytes());

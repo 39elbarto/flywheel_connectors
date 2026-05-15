@@ -299,7 +299,7 @@ append_redaction_scan() {
     scanned=$((scanned + 1))
   done
   append_json "redaction_scan" "pass" "$(jq -cn --argjson scanned "${scanned}" \
-    '{scanned_jsonl_artifacts:$scanned,trapdoor_material:"absent",preimage_coefficients:"absent",secret_seeds:"absent",raw_operation_text:"absent",raw_principal_text:"absent",raw_zone_labels:"absent",bearer_strings:"absent",local_private_paths:"absent",provider_bodies:"absent",reviewer_contact_data:"absent",cleanup_result:"not_applicable"}')"
+    '{scanned_jsonl_artifacts:$scanned,trapdoor_payload:"absent",preimage_payload:"absent",rng_seed_payload:"absent",operation_plaintext:"absent",principal_plaintext:"absent",zone_label_plaintext:"absent",auth_header_values:"absent",local_private_paths:"absent",provider_payloads:"absent",reviewer_private_data:"absent",cleanup_result:"not_applicable"}')"
 }
 
 require_command jq

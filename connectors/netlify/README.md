@@ -167,6 +167,17 @@ The current Netlify README slice documents the existing runtime surface:
 
 ## Verification
 
+The gated sandbox live suite uses `FCP_LIVE_SANDBOX=1` plus:
+
+- `NETLIFY_SANDBOX_TOKEN`: personal access token scoped to the sandbox team or site.
+- `NETLIFY_SANDBOX_SITE_ID`: sandbox site id used for deploy listing.
+- `FCP_SANDBOX_RUN_NAMESPACE`: namespace recorded in redaction-safe evidence.
+
+`NETLIFY_SANDBOX_BASE_URL` defaults to `https://api.netlify.com`. The current
+live harness performs a token self-check and read-only `netlify.deploys.list`,
+records a two-call ceiling, and does not create deploys, rollbacks, sites, DNS
+zones, or environment variables.
+
 README-only changes do not require Cargo or `rch` verification. Before committing this file, run:
 
 ```bash

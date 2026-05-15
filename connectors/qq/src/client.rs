@@ -350,7 +350,17 @@ impl QqGatewayRuntime {
                 {
                     self.session.set_resume_token(session_id.trim().to_string());
                 }
+                self.reconnect_attempts = 0;
                 Ok(self.dropped_projection(event.s, event.id, "hello"))
+            }
+            7 => Ok(self.reconnect_projection(event.s, event.id, "reconnect_requested")),
+            9 => {
+                let reason_code = if event.d.as_ref().and_then(Value::as_bool).unwrap_or(false) {
+                    "invalid_session_resumable"
+                } else {
+                    "invalid_session_identify_required"
+                };
+                Ok(self.reconnect_projection(event.s, event.id, reason_code))
             }
             11 => {
                 self.session.record_heartbeat_ack(Instant::now());
@@ -359,6 +369,21 @@ impl QqGatewayRuntime {
             }
             _ => Ok(self.dropped_projection(event.s, event.id, "unsupported_opcode")),
         }
+    }
+
+    fn reconnect_projection(
+        &mut self,
+        sequence: Option<u64>,
+        event_id: Option<String>,
+        reason_code: &'static str,
+    ) -> QqGatewayEventProjection {
+        self.reconnect_attempts = self.reconnect_attempts.saturating_add(1);
+        let reason_code = if self.reconnect_attempts > self.config.max_reconnect_attempts {
+            "reconnect_attempts_exhausted"
+        } else {
+            reason_code
+        };
+        self.dropped_projection(sequence, event_id, reason_code)
     }
 
     fn project_dispatch(&mut self, event: &QqGatewayEvent) -> QqResult<QqGatewayEventProjection> {
@@ -2578,5 +2603,77 @@ mod tests {
             .unwrap();
         assert_eq!(heartbeat.reason_code, "heartbeat_ack");
         assert_eq!(heartbeat.runtime.heartbeat_ack_count, 1);
+    }
+
+    #[test]
+    fn gateway_runtime_tracks_reconnect_frames_and_caps_attempts() {
+        let mut runtime = QqGatewayRuntime::new(QqGatewayRuntimeConfig {
+            enabled: true,
+            max_reconnect_attempts: 2,
+            reconnect_backoff_ms: 250,
+            restore_session_id: Some("session-before-reconnect".into()),
+            ..QqGatewayRuntimeConfig::default()
+        });
+
+        let reconnect = runtime
+            .project_event(QqGatewayEvent {
+                op: 7,
+                s: None,
+                t: None,
+                d: None,
+                id: Some("evt-reconnect".into()),
+            })
+            .unwrap();
+        assert_eq!(reconnect.reason_code, "reconnect_requested");
+        assert_eq!(reconnect.runtime.reconnect_attempts, 1);
+        assert_eq!(reconnect.runtime.max_reconnect_attempts, 2);
+        assert_eq!(reconnect.runtime.reconnect_backoff_ms, 250);
+        assert_eq!(
+            reconnect.runtime.session_id.as_deref(),
+            Some("session-before-reconnect")
+        );
+
+        let resumable_invalid_session = runtime
+            .project_event(QqGatewayEvent {
+                op: 9,
+                s: None,
+                t: None,
+                d: Some(json!(true)),
+                id: Some("evt-invalid-resumable".into()),
+            })
+            .unwrap();
+        assert_eq!(
+            resumable_invalid_session.reason_code,
+            "invalid_session_resumable"
+        );
+        assert_eq!(resumable_invalid_session.runtime.reconnect_attempts, 2);
+
+        let exhausted = runtime
+            .project_event(QqGatewayEvent {
+                op: 9,
+                s: None,
+                t: None,
+                d: Some(json!(false)),
+                id: Some("evt-invalid-exhausted".into()),
+            })
+            .unwrap();
+        assert_eq!(exhausted.reason_code, "reconnect_attempts_exhausted");
+        assert_eq!(exhausted.runtime.reconnect_attempts, 3);
+
+        let hello = runtime
+            .project_event(QqGatewayEvent {
+                op: 10,
+                s: None,
+                t: None,
+                d: Some(json!({"session_id": "session-after-reconnect"})),
+                id: Some("evt-hello-after-reconnect".into()),
+            })
+            .unwrap();
+        assert_eq!(hello.reason_code, "hello");
+        assert_eq!(hello.runtime.reconnect_attempts, 0);
+        assert_eq!(
+            hello.runtime.session_id.as_deref(),
+            Some("session-after-reconnect")
+        );
     }
 }

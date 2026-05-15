@@ -150,6 +150,9 @@ if [[ "${overall_status}" == "passed" ]]; then
           "reply_media_projection",
           "duplicate_drop",
           "heartbeat_ack",
+          "reconnect_requested",
+          "invalid_session_resumable",
+          "reconnect_attempts_exhausted",
           "shutdown"
         ];
       def steps: map(.step);
@@ -162,11 +165,14 @@ if [[ "${overall_status}" == "passed" ]]; then
         reply_shape_ok: any(.[]; .step == "reply_media_projection" and .details.normalized.is_reply == true and (.details.normalized.reply_to_hash | type) == "string"),
         media_shape_ok: any(.[]; .step == "oversized_media_policy_drop" and .details.reason_code == "attachment_bytes_exceeded"),
         replay_shape_ok: any(.[]; .step == "duplicate_drop" and .details.reason_code == "duplicate_event"),
-        heartbeat_shape_ok: any(.[]; .step == "heartbeat_ack" and .details.reason_code == "heartbeat_ack")
+        heartbeat_shape_ok: any(.[]; .step == "heartbeat_ack" and .details.reason_code == "heartbeat_ack"),
+        reconnect_shape_ok: (any(.[]; .step == "reconnect_requested" and .details.reason_code == "reconnect_requested" and .details.runtime.reconnect_attempts == 1)
+          and any(.[]; .step == "invalid_session_resumable" and .details.reason_code == "invalid_session_resumable" and .details.runtime.reconnect_attempts == 2)
+          and any(.[]; .step == "reconnect_attempts_exhausted" and .details.reason_code == "reconnect_attempts_exhausted" and .details.runtime.max_reconnect_attempts == 1))
       } as $v
       | $v
       | .status = (
-          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok)
+          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok)
           then "passed"
           else "failed"
           end

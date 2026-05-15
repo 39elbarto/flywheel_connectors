@@ -769,6 +769,106 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(heartbeat["runtime"]["heartbeat_ack_count"], 1);
     log_projection_step(&mut logs, "heartbeat_ack", "ok", &heartbeat);
 
+    let reconnect = invoke_projection(
+        &connector,
+        &signing_key,
+        &instance_id,
+        "qq-gateway-reconnect",
+        json!({
+            "op": 7,
+            "id": "evt-reconnect-requested"
+        }),
+    )
+    .await;
+    assert_eq!(reconnect["accepted"], false);
+    assert_eq!(reconnect["reason_code"], "reconnect_requested");
+    assert_eq!(reconnect["runtime"]["reconnect_attempts"], 1);
+    log_projection_step(&mut logs, "reconnect_requested", "ok", &reconnect);
+
+    let invalid_session = invoke_projection(
+        &connector,
+        &signing_key,
+        &instance_id,
+        "qq-gateway-invalid-session",
+        json!({
+            "op": 9,
+            "id": "evt-invalid-session",
+            "d": true
+        }),
+    )
+    .await;
+    assert_eq!(invalid_session["accepted"], false);
+    assert_eq!(invalid_session["reason_code"], "invalid_session_resumable");
+    assert_eq!(invalid_session["runtime"]["reconnect_attempts"], 2);
+    log_projection_step(
+        &mut logs,
+        "invalid_session_resumable",
+        "ok",
+        &invalid_session,
+    );
+
+    let reconnect_cap_instance_id = InstanceId::new();
+    let mut reconnect_cap_connector = QqConnector::new();
+    reconnect_cap_connector
+        .configure(json!({
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999",
+            "app_id": "qq-app",
+            "client_secret": "test-secret",
+            "gateway": {
+                "enabled": true,
+                "max_reconnect_attempts": 1,
+                "reconnect_backoff_ms": 250
+            }
+        }))
+        .await
+        .expect("configure reconnect cap QQ connector");
+    reconnect_cap_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            reconnect_cap_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake reconnect cap QQ connector");
+    let reconnect_cap_first = invoke_projection(
+        &reconnect_cap_connector,
+        &signing_key,
+        &reconnect_cap_instance_id,
+        "qq-gateway-reconnect-cap-first",
+        json!({
+            "op": 7,
+            "id": "evt-reconnect-cap-first"
+        }),
+    )
+    .await;
+    assert_eq!(reconnect_cap_first["reason_code"], "reconnect_requested");
+    assert_eq!(reconnect_cap_first["runtime"]["reconnect_attempts"], 1);
+    let reconnect_exhausted = invoke_projection(
+        &reconnect_cap_connector,
+        &signing_key,
+        &reconnect_cap_instance_id,
+        "qq-gateway-reconnect-exhausted",
+        json!({
+            "op": 9,
+            "id": "evt-reconnect-exhausted",
+            "d": false
+        }),
+    )
+    .await;
+    assert_eq!(
+        reconnect_exhausted["reason_code"],
+        "reconnect_attempts_exhausted"
+    );
+    assert_eq!(reconnect_exhausted["runtime"]["reconnect_attempts"], 2);
+    assert_eq!(reconnect_exhausted["runtime"]["max_reconnect_attempts"], 1);
+    assert_eq!(reconnect_exhausted["runtime"]["reconnect_backoff_ms"], 250);
+    log_projection_step(
+        &mut logs,
+        "reconnect_attempts_exhausted",
+        "ok",
+        &reconnect_exhausted,
+    );
+
     connector
         .shutdown(ShutdownRequest {
             r#type: "shutdown".into(),
@@ -794,6 +894,10 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-missing-binding",
         "evt-missing-message-id",
         "evt-missing-reply-target",
+        "evt-reconnect-requested",
+        "evt-invalid-session",
+        "evt-reconnect-cap-first",
+        "evt-reconnect-exhausted",
         "msg-accepted",
         "msg-untyped-message-id",
         "msg-structured-mention",
@@ -835,4 +939,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert!(log_contents.contains("attachment_total_bytes"));
     assert!(log_contents.contains("attachment_url_hashes"));
     assert!(log_contents.contains("attachment_bytes_exceeded"));
+    assert!(log_contents.contains("reconnect_requested"));
+    assert!(log_contents.contains("invalid_session_resumable"));
+    assert!(log_contents.contains("reconnect_attempts_exhausted"));
 }

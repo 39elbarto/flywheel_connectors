@@ -129,6 +129,7 @@ When `policy.max_attachment_bytes` is set, gateway projection denies message eve
 When `gateway.enabled` is false, `qq.gateway.project_event` fails closed with `gateway_disabled` and does not update session, sequence, heartbeat, policy, or queue state.
 Gateway projection also fails closed before authorization when the normalized event is missing the route binding required for its QQ delivery mode: `channel_id` and sender for channel events, `group_openid` and sender for group events, and sender for C2C events.
 Events without a stable QQ message id, or replies whose `message_reference` does not carry a usable target message id, are dropped before authorization so fan-out and reply tracking never rely on unbound message identity.
+Gateway reconnect (`op=7`) and invalid-session (`op=9`) frames are projected as dropped control records with bounded reconnect attempt accounting; once `max_reconnect_attempts` is exceeded, the reason becomes `reconnect_attempts_exhausted`. A subsequent hello frame resets the attempt counter.
 
 ## Chat Coordination Configuration
 

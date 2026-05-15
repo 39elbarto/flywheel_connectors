@@ -3961,6 +3961,241 @@ mod tests {
     use crate::types::MatrixWorkflowPolicy;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration as StdDuration, Instant as StdInstant};
+
+    enum TestHttpPath {
+        Exact(&'static str),
+        Prefix(&'static str),
+    }
+
+    enum TestHttpBody {
+        Json(Value),
+        Text(&'static str),
+    }
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: TestHttpPath,
+        status: u16,
+        query_contains: Vec<&'static str>,
+        json_body_fields: Option<Value>,
+        response_headers: Vec<(&'static str, &'static str)>,
+        body: TestHttpBody,
+    }
+
+    struct TestHttpServer {
+        url: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestHttpResponse {
+        fn json(method: &'static str, path: &'static str, status: u16, body: Value) -> Self {
+            Self {
+                method,
+                path: TestHttpPath::Exact(path),
+                status,
+                query_contains: Vec::new(),
+                json_body_fields: None,
+                response_headers: Vec::new(),
+                body: TestHttpBody::Json(body),
+            }
+        }
+
+        fn json_path_prefix(
+            method: &'static str,
+            path_prefix: &'static str,
+            status: u16,
+            body: Value,
+        ) -> Self {
+            Self {
+                method,
+                path: TestHttpPath::Prefix(path_prefix),
+                status,
+                query_contains: Vec::new(),
+                json_body_fields: None,
+                response_headers: Vec::new(),
+                body: TestHttpBody::Json(body),
+            }
+        }
+
+        fn text(method: &'static str, path: &'static str, status: u16, body: &'static str) -> Self {
+            Self {
+                method,
+                path: TestHttpPath::Exact(path),
+                status,
+                query_contains: Vec::new(),
+                json_body_fields: None,
+                response_headers: Vec::new(),
+                body: TestHttpBody::Text(body),
+            }
+        }
+
+        fn with_query_contains(mut self, fragment: &'static str) -> Self {
+            self.query_contains.push(fragment);
+            self
+        }
+
+        fn with_json_body_fields(mut self, fields: Value) -> Self {
+            self.json_body_fields = Some(fields);
+            self
+        }
+
+        fn with_response_header(mut self, name: &'static str, value: &'static str) -> Self {
+            self.response_headers.push((name, value));
+            self
+        }
+    }
+
+    impl TestHttpServer {
+        fn respond(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let handle = thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                for response in responses {
+                    let stream = accept_test_connection(&listener);
+                    handle_test_request(stream, response);
+                }
+            });
+            Self {
+                url,
+                handle: Some(handle),
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.url
+        }
+    }
+
+    impl Drop for TestHttpServer {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                if thread::panicking() {
+                    let _ = handle.join();
+                } else {
+                    handle.join().unwrap();
+                }
+            }
+        }
+    }
+
+    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+        let deadline = StdInstant::now() + StdDuration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    return stream;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        StdInstant::now() < deadline,
+                        "test listener did not receive expected request"
+                    );
+                    thread::sleep(StdDuration::from_millis(10));
+                }
+                Err(err) => panic!("test listener failed: {err}"),
+            }
+        }
+    }
+
+    fn handle_test_request(stream: TcpStream, response: TestHttpResponse) {
+        stream
+            .set_read_timeout(Some(StdDuration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        assert_eq!(request_parts.next(), Some(response.method));
+        let target = request_parts.next().unwrap_or_default();
+        let actual_path = target.split('?').next().unwrap_or_default();
+        match response.path {
+            TestHttpPath::Exact(path) => assert_eq!(actual_path, path),
+            TestHttpPath::Prefix(prefix) => assert!(
+                actual_path.starts_with(prefix),
+                "request path {actual_path:?} did not start with {prefix:?}"
+            ),
+        }
+        for fragment in &response.query_contains {
+            assert!(
+                target.contains(fragment),
+                "request target {target:?} did not contain query fragment {fragment:?}"
+            );
+        }
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_length = value.trim().parse().unwrap();
+            }
+        }
+
+        let mut request_body = vec![0u8; content_length];
+        if content_length > 0 {
+            reader.read_exact(&mut request_body).unwrap();
+        }
+        if let Some(expected_fields) = response.json_body_fields {
+            let actual_body: Value =
+                serde_json::from_slice(&request_body).expect("request body should be JSON");
+            assert_json_contains(&actual_body, &expected_fields);
+        }
+
+        let mut stream = reader.into_inner();
+        let (body, content_type) = match response.body {
+            TestHttpBody::Json(body) => (body.to_string().into_bytes(), Some("application/json")),
+            TestHttpBody::Text(body) => (body.as_bytes().to_vec(), None),
+        };
+        let reason = match response.status {
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            429 => "Too Many Requests",
+            _ => "OK",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-length: {}\r\nconnection: close\r\n",
+            response.status,
+            reason,
+            body.len()
+        )
+        .unwrap();
+        if let Some(content_type) = content_type {
+            write!(stream, "content-type: {content_type}\r\n").unwrap();
+        }
+        for (name, value) in response.response_headers {
+            write!(stream, "{name}: {value}\r\n").unwrap();
+        }
+        write!(stream, "\r\n").unwrap();
+        stream.write_all(&body).unwrap();
+        stream.flush().unwrap();
+    }
+
+    fn assert_json_contains(actual: &Value, expected: &Value) {
+        match (actual, expected) {
+            (Value::Object(actual_map), Value::Object(expected_map)) => {
+                for (key, expected_value) in expected_map {
+                    let actual_value = actual_map
+                        .get(key)
+                        .unwrap_or_else(|| panic!("request JSON should contain field {key:?}"));
+                    assert_json_contains(actual_value, expected_value);
+                }
+            }
+            _ => assert_eq!(actual, expected),
+        }
+    }
 
     /// Generate a matched signing key + public key bytes for test handshake/invoke pairs.
     fn test_signing_key() -> Ed25519SigningKey {
@@ -6074,23 +6309,21 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn shutdown_interrupts_supervised_sync_poll_sleep() {
-        let mock = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/_matrix/client/v3/sync"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "next_batch": "batch_shutdown",
-                    "rooms": {}
-                })),
-            )
-            .mount(&mock)
-            .await;
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "GET",
+            "/_matrix/client/v3/sync",
+            200,
+            serde_json::json!({
+                "next_batch": "batch_shutdown",
+                "rooms": {}
+            }),
+        )]);
 
         let key = test_signing_key();
         let mut connector = MatrixConnector::new();
         connector
             .configure(json!({
-                "homeserver_url": mock.uri(),
+                "homeserver_url": server.uri(),
                 "auth": { "mode": "access_token", "access_token": "tok" },
                 "supervised_sync": {
                     "enabled": true,
@@ -6156,25 +6389,24 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn shutdown_interrupts_supervised_sync_retry_sleep() {
-        let mock = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/_matrix/client/v3/sync"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(429)
-                    .insert_header("retry-after", "60")
-                    .set_body_json(serde_json::json!({
-                        "errcode": "M_LIMIT_EXCEEDED",
-                        "error": "retry later"
-                    })),
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "GET",
+                "/_matrix/client/v3/sync",
+                429,
+                serde_json::json!({
+                    "errcode": "M_LIMIT_EXCEEDED",
+                    "error": "retry later"
+                }),
             )
-            .mount(&mock)
-            .await;
+            .with_response_header("retry-after", "60"),
+        ]);
 
         let key = test_signing_key();
         let mut connector = MatrixConnector::new();
         connector
             .configure(json!({
-                "homeserver_url": mock.uri(),
+                "homeserver_url": server.uri(),
                 "auth": { "mode": "access_token", "access_token": "tok" },
                 "supervised_sync": {
                     "enabled": true,
@@ -6352,23 +6584,20 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn send_message_granted_claim_sends_with_coordination_audit() {
-        let mock = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("PUT"))
-            .and(wiremock::matchers::path_regex(
-                r"^/_matrix/client/v3/rooms/%21room%3Amatrix\.org/send/m\.room\.message/.+$",
-            ))
-            .and(wiremock::matchers::body_json(json!({
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::json_path_prefix(
+                "PUT",
+                "/_matrix/client/v3/rooms/%21room%3Amatrix.org/send/m.room.message/",
+                200,
+                serde_json::json!({
+                    "event_id": "$sent_event"
+                }),
+            )
+            .with_json_body_fields(json!({
                 "msgtype": "m.notice",
                 "body": "hello from Matrix"
-            })))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "event_id": "$sent_event"
-                })),
-            )
-            .expect(1)
-            .mount(&mock)
-            .await;
+            })),
+        ]);
 
         let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
         let mut connector = MatrixConnector::new()
@@ -6376,7 +6605,7 @@ mod tests {
         let signing_key = test_signing_key();
         connector
             .configure(json!({
-                "homeserver_url": mock.uri(),
+                "homeserver_url": server.uri(),
                 "auth": { "mode": "access_token", "access_token": "tok" },
                 "chat_coordination": { "backend": "in_memory" }
             }))
@@ -6497,19 +6726,14 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn send_message_fail_open_sends_with_degraded_coordination_audit() {
-        let mock = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("PUT"))
-            .and(wiremock::matchers::path_regex(
-                r"^/_matrix/client/v3/rooms/%21room%3Amatrix\.org/send/m\.room\.message/.+$",
-            ))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "event_id": "$degraded_event"
-                })),
-            )
-            .expect(1)
-            .mount(&mock)
-            .await;
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json_path_prefix(
+            "PUT",
+            "/_matrix/client/v3/rooms/%21room%3Amatrix.org/send/m.room.message/",
+            200,
+            serde_json::json!({
+                "event_id": "$degraded_event"
+            }),
+        )]);
 
         let mut connector = MatrixConnector::new().with_thread_ownership_checker(
             Arc::new(IndeterminateThreadOwnershipChecker {
@@ -6520,7 +6744,7 @@ mod tests {
         let signing_key = test_signing_key();
         connector
             .configure(json!({
-                "homeserver_url": mock.uri(),
+                "homeserver_url": server.uri(),
                 "auth": { "mode": "access_token", "access_token": "tok" },
                 "chat_coordination": {
                     "backend": "agent_mail",
@@ -6685,23 +6909,19 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn self_check_unauthorized_is_failed() {
-        let mock = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path(
-                "/_matrix/client/v3/account/whoami",
-            ))
-            .respond_with(
-                wiremock::ResponseTemplate::new(401).set_body_json(serde_json::json!({
-                    "errcode": "M_UNKNOWN_TOKEN",
-                    "error": "Unrecognised access token."
-                })),
-            )
-            .mount(&mock)
-            .await;
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "GET",
+            "/_matrix/client/v3/account/whoami",
+            401,
+            serde_json::json!({
+                "errcode": "M_UNKNOWN_TOKEN",
+                "error": "Unrecognised access token."
+            }),
+        )]);
 
         let mut c = MatrixConnector::new();
         c.configure(json!({
-            "homeserver_url": mock.uri(),
+            "homeserver_url": server.uri(),
             "auth": { "mode": "access_token", "access_token": "tok" }
         }))
         .await
@@ -6723,12 +6943,12 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn sync_records_success_telemetry() {
-        let mock = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/_matrix/client/v3/sync"))
-            .and(wiremock::matchers::query_param("timeout", "1000"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "GET",
+                "/_matrix/client/v3/sync",
+                200,
+                serde_json::json!({
                     "next_batch": "batch_2",
                     "rooms": {
                         "join": {
@@ -6770,16 +6990,16 @@ mod tests {
                             }
                         }
                     }
-                })),
+                }),
             )
-            .mount(&mock)
-            .await;
+            .with_query_contains("timeout=1000"),
+        ]);
 
         let key = test_signing_key();
         let mut c = MatrixConnector::new();
         configure_and_handshake_with_key(
             &mut c,
-            &mock.uri(),
+            server.uri(),
             &key,
             vec![CapabilityId::from_static(CAP_READ)],
         )
@@ -6872,12 +7092,12 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn sync_emits_authorized_event_for_active_subscription() {
-        let mock = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/_matrix/client/v3/sync"))
-            .and(wiremock::matchers::query_param("timeout", "1000"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "GET",
+                "/_matrix/client/v3/sync",
+                200,
+                serde_json::json!({
                     "next_batch": "batch_stream",
                     "rooms": {
                         "join": {
@@ -6905,15 +7125,15 @@ mod tests {
                             }
                         }
                     }
-                })),
+                }),
             )
-            .mount(&mock)
-            .await;
+            .with_query_contains("timeout=1000"),
+        ]);
 
         let key = test_signing_key();
         let mut c = MatrixConnector::new();
         c.configure(json!({
-            "homeserver_url": mock.uri(),
+            "homeserver_url": server.uri(),
             "auth": { "mode": "access_token", "access_token": "tok" },
             "inbound_policy": { "require_mention": false }
         }))
@@ -7010,24 +7230,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn sync_records_failure_telemetry() {
-        let mock = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/_matrix/client/v3/sync"))
-            .and(wiremock::matchers::query_param("since", "batch_1"))
-            .and(wiremock::matchers::query_param("timeout", "1000"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(429)
-                    .insert_header("retry-after", "60")
-                    .set_body_string("rate limited"),
-            )
-            .mount(&mock)
-            .await;
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::text("GET", "/_matrix/client/v3/sync", 429, "rate limited")
+                .with_query_contains("since=batch_1")
+                .with_query_contains("timeout=1000")
+                .with_response_header("retry-after", "60"),
+        ]);
 
         let key = test_signing_key();
         let mut c = MatrixConnector::new();
         configure_and_handshake_with_key(
             &mut c,
-            &mock.uri(),
+            server.uri(),
             &key,
             vec![CapabilityId::from_static(CAP_READ)],
         )

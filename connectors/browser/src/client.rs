@@ -5634,11 +5634,12 @@ fn looks_like_chrome_cdp_version(body: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeSet, VecDeque};
-
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path},
+    use std::{
+        collections::{BTreeSet, VecDeque},
+        io::{BufRead, BufReader, Read, Write},
+        net::{TcpListener, TcpStream},
+        sync::{Arc, Mutex},
+        thread::{self, JoinHandle},
     };
 
     fn browser_control_contract_without_proxy_operations() -> serde_json::Value {
@@ -5655,13 +5656,207 @@ mod tests {
         descriptor
     }
 
+    #[derive(Clone)]
+    struct TestControlResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: Vec<u8>,
+        content_type: &'static str,
+        delay: Duration,
+        expected_headers: Vec<(&'static str, String)>,
+    }
+
+    impl TestControlResponse {
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: impl serde::Serialize,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: serde_json::to_vec(&body).expect("serialize response json"),
+                content_type: "application/json",
+                delay: Duration::ZERO,
+                expected_headers: Vec::new(),
+            }
+        }
+
+        fn text(method: &'static str, path: &'static str, status: u16, body: &str) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: body.as_bytes().to_vec(),
+                content_type: "text/plain; charset=utf-8",
+                delay: Duration::ZERO,
+                expected_headers: Vec::new(),
+            }
+        }
+
+        fn bytes(method: &'static str, path: &'static str, status: u16, body: Vec<u8>) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body,
+                content_type: "application/octet-stream",
+                delay: Duration::ZERO,
+                expected_headers: Vec::new(),
+            }
+        }
+
+        fn with_delay(mut self, delay: Duration) -> Self {
+            self.delay = delay;
+            self
+        }
+
+        fn expect_header(mut self, name: &'static str, value: impl Into<String>) -> Self {
+            self.expected_headers.push((name, value.into()));
+            self
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct TestControlRequest {
+        method: String,
+        path: String,
+    }
+
+    struct TestControlServer {
+        base_url: String,
+        requests: Arc<Mutex<Vec<TestControlRequest>>>,
+        _handle: JoinHandle<()>,
+    }
+
+    impl TestControlServer {
+        fn respond(response: TestControlResponse) -> Self {
+            Self::respond_sequence(vec![response])
+        }
+
+        fn respond_sequence(responses: Vec<TestControlResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+            let base_url = format!("http://{}", listener.local_addr().expect("local address"));
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let thread_requests = Arc::clone(&requests);
+            let handle = thread::spawn(move || {
+                for response in responses {
+                    let (stream, _) = listener.accept().expect("accept browser client request");
+                    handle_test_control_request(stream, &response, &thread_requests);
+                }
+            });
+            Self {
+                base_url,
+                requests,
+                _handle: handle,
+            }
+        }
+
+        fn uri(&self) -> String {
+            self.base_url.clone()
+        }
+
+        fn received_requests(&self) -> Vec<TestControlRequest> {
+            self.requests.lock().expect("request log poisoned").clone()
+        }
+    }
+
+    fn health_response(body: serde_json::Value) -> TestControlResponse {
+        TestControlResponse::json("GET", "/health", 200, body)
+    }
+
+    fn handle_test_control_request(
+        mut stream: TcpStream,
+        response: &TestControlResponse,
+        requests: &Arc<Mutex<Vec<TestControlRequest>>>,
+    ) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set read timeout");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .expect("read request line");
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().expect("request method").to_owned();
+        let raw_path = parts.next().expect("request target").to_owned();
+        let path = raw_path.split('?').next().expect("request path").to_owned();
+
+        let mut headers = Vec::<(String, String)>::new();
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read header line");
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            let name = name.trim().to_string();
+            let value = value.trim().to_string();
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.parse().expect("content-length parses");
+            }
+            headers.push((name, value));
+        }
+        if content_length > 0 {
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).expect("read request body");
+        }
+
+        assert_eq!(method, response.method);
+        assert_eq!(path, response.path);
+        for (expected_name, expected_value) in &response.expected_headers {
+            let actual = headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(expected_name))
+                .map(|(_, value)| value.as_str());
+            assert_eq!(actual, Some(expected_value.as_str()), "{expected_name}");
+        }
+
+        requests
+            .lock()
+            .expect("request log poisoned")
+            .push(TestControlRequest { method, path });
+
+        if !response.delay.is_zero() {
+            thread::sleep(response.delay);
+        }
+
+        let status_text = match response.status {
+            400 => "Bad Request",
+            404 => "Not Found",
+            429 => "Too Many Requests",
+            500 => "Internal Server Error",
+            _ => "OK",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            response.status,
+            status_text,
+            response.content_type,
+            response.body.len(),
+        )
+        .expect("write response header");
+        if stream.write_all(&response.body).is_ok() {
+            let _ = stream.flush();
+        }
+    }
+
     #[derive(Debug, Default)]
-    struct FakeCdpTransport {
+    struct ScriptedCdpTransport {
         sent: Vec<WebSocketMessage>,
         received: VecDeque<WebSocketMessage>,
     }
 
-    impl FakeCdpTransport {
+    impl ScriptedCdpTransport {
         fn with_received(messages: impl IntoIterator<Item = WebSocketMessage>) -> Self {
             Self {
                 sent: Vec::new(),
@@ -5683,7 +5878,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl CdpCommandTransport for FakeCdpTransport {
+    impl CdpCommandTransport for ScriptedCdpTransport {
         async fn send_cdp_message(
             &mut self,
             _cx: &Cx,
@@ -6663,19 +6858,12 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_health_check_accepts_fcp_browser_control_plane() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/health"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(browser_control_contract_descriptor()),
-            )
-            .mount(&mock_server)
-            .await;
+        let server =
+            TestControlServer::respond(health_response(browser_control_contract_descriptor()));
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri());
+            .with_browser_url(&server.uri());
 
         client.health_check().await.unwrap();
     }
@@ -7009,7 +7197,7 @@ while :; do sleep 1; done
     #[fcp_async_core::runtime::test]
     async fn test_execute_cdp_command_sends_request_and_waits_for_matching_response() {
         let cx = fcp_async_core::compatibility_cx();
-        let mut transport = FakeCdpTransport::with_received([
+        let mut transport = ScriptedCdpTransport::with_received([
             WebSocketMessage::Text(
                 r#"{"method":"Page.frameStartedLoading","params":{"frameId":"abc"}}"#.into(),
             ),
@@ -7041,7 +7229,7 @@ while :; do sleep 1; done
     #[fcp_async_core::runtime::test]
     async fn test_execute_cdp_command_reports_close_before_matching_response() {
         let cx = fcp_async_core::compatibility_cx();
-        let mut transport = FakeCdpTransport::with_received([WebSocketMessage::Text(
+        let mut transport = ScriptedCdpTransport::with_received([WebSocketMessage::Text(
             r#"{"method":"Page.frameStartedLoading"}"#.into(),
         )]);
 
@@ -7061,7 +7249,7 @@ while :; do sleep 1; done
     async fn test_execute_cdp_command_checks_cancellation_before_send() {
         let cx = Cx::for_testing();
         cx.set_cancel_requested(true);
-        let mut transport = FakeCdpTransport::default();
+        let mut transport = ScriptedCdpTransport::default();
 
         let err = execute_cdp_command(
             &cx,
@@ -7079,7 +7267,7 @@ while :; do sleep 1; done
     #[fcp_async_core::runtime::test]
     async fn test_cdp_session_allocates_monotonic_command_ids() {
         let cx = fcp_async_core::compatibility_cx();
-        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
             WebSocketMessage::Text(r#"{"id":1,"result":{"enabled":true}}"#.into()),
             WebSocketMessage::Text(r#"{"id":2,"result":{"frameId":"abc"}}"#.into()),
         ]));
@@ -7112,7 +7300,7 @@ while :; do sleep 1; done
     #[fcp_async_core::runtime::test]
     async fn test_cdp_session_navigate_page_issues_documented_cdp_sequence() {
         let cx = fcp_async_core::compatibility_cx();
-        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
             WebSocketMessage::Text(r#"{"id":1,"result":{}}"#.into()),
             WebSocketMessage::Text(r#"{"id":2,"result":{}}"#.into()),
             WebSocketMessage::Text(r#"{"id":3,"result":{}}"#.into()),
@@ -7168,7 +7356,7 @@ while :; do sleep 1; done
             frame_id: "frame-1".to_string(),
             loader_id: Some("loader-1".to_string()),
         };
-        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
             WebSocketMessage::Text(
                 serde_json::json!({
                     "method": "Network.responseReceived",
@@ -7222,10 +7410,11 @@ while :; do sleep 1; done
     #[fcp_async_core::runtime::test]
     async fn test_cdp_session_evaluate_expression_issues_documented_command() {
         let cx = fcp_async_core::compatibility_cx();
-        let mut session =
-            CdpSession::new(FakeCdpTransport::with_received([WebSocketMessage::Text(
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
+            WebSocketMessage::Text(
                 r#"{"id":1,"result":{"result":{"type":"string","value":"Example Domain"}}}"#.into(),
-            )]));
+            ),
+        ]));
 
         let response = session
             .evaluate_expression(&cx, "document.title")
@@ -7296,8 +7485,8 @@ while :; do sleep 1; done
         let cx = fcp_async_core::compatibility_cx();
         let selector = r#"main[data-label="hero"]"#;
         let expression = cdp_extract_text_expression(Some(selector), Some(true)).unwrap();
-        let mut session =
-            CdpSession::new(FakeCdpTransport::with_received([WebSocketMessage::Text(
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
+            WebSocketMessage::Text(
                 serde_json::json!({
                     "id": 1,
                     "result": {
@@ -7311,7 +7500,8 @@ while :; do sleep 1; done
                     },
                 })
                 .to_string(),
-            )]));
+            ),
+        ]));
 
         let response = session
             .extract_text(&cx, Some(selector), Some(true))
@@ -7342,8 +7532,8 @@ while :; do sleep 1; done
     async fn test_cdp_session_extract_links_includes_selected_anchor_and_descendants() {
         let cx = fcp_async_core::compatibility_cx();
         let expression = cdp_extract_links_expression(Some("nav.primary")).unwrap();
-        let mut session =
-            CdpSession::new(FakeCdpTransport::with_received([WebSocketMessage::Text(
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
+            WebSocketMessage::Text(
                 serde_json::json!({
                     "id": 1,
                     "result": {
@@ -7359,7 +7549,8 @@ while :; do sleep 1; done
                     },
                 })
                 .to_string(),
-            )]));
+            ),
+        ]));
 
         let response = session
             .extract_links(&cx, Some("nav.primary"))
@@ -7410,8 +7601,8 @@ while :; do sleep 1; done
         let selector = r#"button[data-action="submit"]"#;
         let expression =
             cdp_wait_for_selector_expression(selector, Some("visible"), Some(1_250)).unwrap();
-        let mut session =
-            CdpSession::new(FakeCdpTransport::with_received([WebSocketMessage::Text(
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
+            WebSocketMessage::Text(
                 serde_json::json!({
                     "id": 1,
                     "result": {
@@ -7422,7 +7613,8 @@ while :; do sleep 1; done
                     },
                 })
                 .to_string(),
-            )]));
+            ),
+        ]));
 
         let response = session
             .wait_for_selector(&cx, selector, Some("visible"), Some(1_250))
@@ -7475,7 +7667,7 @@ while :; do sleep 1; done
         let selector = "button.submit";
         let wait_expression =
             cdp_wait_for_selector_expression(selector, Some("visible"), Some(500)).unwrap();
-        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
             WebSocketMessage::Text(
                 serde_json::json!({
                     "id": 1,
@@ -7566,8 +7758,8 @@ while :; do sleep 1; done
     #[fcp_async_core::runtime::test]
     async fn test_cdp_session_click_stops_when_selector_never_visible() {
         let cx = fcp_async_core::compatibility_cx();
-        let mut session =
-            CdpSession::new(FakeCdpTransport::with_received([WebSocketMessage::Text(
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
+            WebSocketMessage::Text(
                 serde_json::json!({
                     "id": 1,
                     "result": {
@@ -7578,7 +7770,8 @@ while :; do sleep 1; done
                     },
                 })
                 .to_string(),
-            )]));
+            ),
+        ]));
 
         let error = session.click(&cx, ".missing", Some(0)).await.unwrap_err();
         let transport = session.into_transport();
@@ -7606,7 +7799,7 @@ while :; do sleep 1; done
             Some(CONTROL_TIMEOUT_MS_STANDARD),
         )
         .unwrap();
-        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
             WebSocketMessage::Text(r#"{"id":1,"result":{"root":{"nodeId":1}}}"#.into()),
             WebSocketMessage::Text(r#"{"id":2,"result":{"nodeId":2}}"#.into()),
             WebSocketMessage::Text(r#"{"id":3,"result":{}}"#.into()),
@@ -7809,7 +8002,7 @@ while :; do sleep 1; done
     async fn test_cdp_session_fill_form_rejects_missing_field_selector() {
         let cx = fcp_async_core::compatibility_cx();
         let fields = serde_json::json!({ "#missing": "value" });
-        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
             WebSocketMessage::Text(r#"{"id":1,"result":{"root":{"nodeId":1}}}"#.into()),
             WebSocketMessage::Text(r#"{"id":2,"result":{"nodeId":0}}"#.into()),
         ]));
@@ -7845,7 +8038,7 @@ while :; do sleep 1; done
     #[fcp_async_core::runtime::test]
     async fn test_cdp_session_capture_screenshot_issues_full_page_sequence() {
         let cx = fcp_async_core::compatibility_cx();
-        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
             WebSocketMessage::Text(
                 r#"{"id":1,"result":{"cssContentSize":{"x":0,"y":0,"width":1280,"height":2048}}}"#
                     .into(),
@@ -7894,7 +8087,7 @@ while :; do sleep 1; done
     #[fcp_async_core::runtime::test]
     async fn test_cdp_session_capture_screenshot_uses_selector_clip() {
         let cx = fcp_async_core::compatibility_cx();
-        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
             WebSocketMessage::Text(r#"{"id":1,"result":{"root":{"nodeId":1}}}"#.into()),
             WebSocketMessage::Text(r#"{"id":2,"result":{"nodeId":2}}"#.into()),
             WebSocketMessage::Text(
@@ -7961,7 +8154,7 @@ while :; do sleep 1; done
     #[fcp_async_core::runtime::test]
     async fn test_cdp_session_capture_screenshot_rejects_missing_selector() {
         let cx = fcp_async_core::compatibility_cx();
-        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
             WebSocketMessage::Text(r#"{"id":1,"result":{"root":{"nodeId":1}}}"#.into()),
             WebSocketMessage::Text(r#"{"id":2,"result":{"nodeId":0}}"#.into()),
         ]));
@@ -7998,10 +8191,11 @@ while :; do sleep 1; done
 4 0 obj << /Type /Page /Parent 2 0 R >> endobj
 %%EOF",
         );
-        let mut session =
-            CdpSession::new(FakeCdpTransport::with_received([WebSocketMessage::Text(
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
+            WebSocketMessage::Text(
                 serde_json::json!({ "id": 1, "result": { "data": pdf_data } }).to_string(),
-            )]));
+            ),
+        ]));
 
         let response = session
             .render_pdf(&cx, Some("a4"), Some(true), Some(false))
@@ -8055,7 +8249,7 @@ while :; do sleep 1; done
     #[fcp_async_core::runtime::test]
     async fn test_cdp_session_get_cookies_issues_documented_command_and_filters_domain() {
         let cx = fcp_async_core::compatibility_cx();
-        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
             WebSocketMessage::Text(
                 r#"{"id":1,"result":{"cookies":[{"name":"theme","value":"light","domain":".example.test","path":"/","httpOnly":true,"secure":true,"sameSite":"Lax"},{"name":"mode","value":"dense","domain":"app.example.test","path":"/app"},{"name":"outside","value":"skip","domain":"example.org","path":"/"},{"name":"host","value":"local","path":"/"}]}}"#
                     .into(),
@@ -8094,10 +8288,9 @@ while :; do sleep 1; done
     #[fcp_async_core::runtime::test]
     async fn test_cdp_session_set_cookies_issues_documented_command_and_counts_input() {
         let cx = fcp_async_core::compatibility_cx();
-        let mut session =
-            CdpSession::new(FakeCdpTransport::with_received([WebSocketMessage::Text(
-                r#"{"id":1,"result":{}}"#.into(),
-            )]));
+        let mut session = CdpSession::new(ScriptedCdpTransport::with_received([
+            WebSocketMessage::Text(r#"{"id":1,"result":{}}"#.into()),
+        ]));
         let cookies = [
             Cookie {
                 name: "theme".to_string(),
@@ -8179,7 +8372,7 @@ while :; do sleep 1; done
     #[test]
     fn test_cdp_session_rejects_exhausted_command_ids() {
         let mut session = CdpSession {
-            transport: FakeCdpTransport::default(),
+            transport: ScriptedCdpTransport::default(),
             next_command_id: u64::MAX,
         };
 
@@ -8385,25 +8578,22 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_health_check_rejects_raw_chrome_cdp_endpoint() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/health"))
-            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
-            .mount(&mock_server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/json/version"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "Browser": "HeadlessChrome/123.0.0.0",
-                "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/abc"
-            })))
-            .mount(&mock_server)
-            .await;
+        let server = TestControlServer::respond_sequence(vec![
+            TestControlResponse::text("GET", "/health", 404, "not found"),
+            TestControlResponse::json(
+                "GET",
+                "/json/version",
+                200,
+                serde_json::json!({
+                    "Browser": "HeadlessChrome/123.0.0.0",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/abc"
+                }),
+            ),
+        ]);
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri())
+            .with_browser_url(&server.uri())
             .with_retry_config(0);
 
         let err = client.health_check().await.unwrap_err();
@@ -8431,38 +8621,39 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_navigate() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/navigate"))
-            .and(header(CONTROL_OPERATION_HEADER, "browser.navigate"))
-            .and(header(
+        let server = TestControlServer::respond(
+            TestControlResponse::json(
+                "POST",
+                "/navigate",
+                200,
+                serde_json::json!({
+                    "url": "https://example.com",
+                    "status": 200,
+                    "title": "Example Domain"
+                }),
+            )
+            .expect_header(CONTROL_OPERATION_HEADER, "browser.navigate")
+            .expect_header(
                 CONTROL_RESPONSE_BUDGET_HEADER,
                 CONTROL_RESPONSE_BYTES_CAPTURE.to_string(),
-            ))
-            .and(header(
+            )
+            .expect_header(
                 CONTROL_TIMEOUT_BUDGET_HEADER,
                 CONTROL_TIMEOUT_MS_CAPTURE.to_string(),
-            ))
-            .and(header(CONTROL_TARGET_SCOPE_HEADER, "page"))
-            .and(header(
+            )
+            .expect_header(CONTROL_TARGET_SCOPE_HEADER, "page")
+            .expect_header(
                 CONTROL_TARGET_SELECTION_HEADER,
                 "create_or_reuse_active_page",
-            ))
-            .and(header(CONTROL_STALE_TARGET_RECOVERY_HEADER, "true"))
-            .and(header(CONTROL_CURRENT_TAB_GUARD_HEADER, "false"))
-            .and(header(CONTROL_EXPORT_GUARD_HEADER, "false"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "url": "https://example.com",
-                "status": 200,
-                "title": "Example Domain"
-            })))
-            .mount(&mock_server)
-            .await;
+            )
+            .expect_header(CONTROL_STALE_TARGET_RECOVERY_HEADER, "true")
+            .expect_header(CONTROL_CURRENT_TAB_GUARD_HEADER, "false")
+            .expect_header(CONTROL_EXPORT_GUARD_HEADER, "false"),
+        );
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri());
+            .with_browser_url(&server.uri());
 
         let result = client
             .navigate("https://example.com", None, None, None)
@@ -8475,29 +8666,27 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_screenshot() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/screenshot"))
-            .and(header(CONTROL_TARGET_SCOPE_HEADER, "page"))
-            .and(header(
-                CONTROL_TARGET_SELECTION_HEADER,
-                "active_page_required",
-            ))
-            .and(header(CONTROL_STALE_TARGET_RECOVERY_HEADER, "true"))
-            .and(header(CONTROL_CURRENT_TAB_GUARD_HEADER, "true"))
-            .and(header(CONTROL_EXPORT_GUARD_HEADER, "true"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "image_data": "iVBOR...",
-                "width": 1920,
-                "height": 1080
-            })))
-            .mount(&mock_server)
-            .await;
+        let server = TestControlServer::respond(
+            TestControlResponse::json(
+                "POST",
+                "/screenshot",
+                200,
+                serde_json::json!({
+                    "image_data": "iVBOR...",
+                    "width": 1920,
+                    "height": 1080
+                }),
+            )
+            .expect_header(CONTROL_TARGET_SCOPE_HEADER, "page")
+            .expect_header(CONTROL_TARGET_SELECTION_HEADER, "active_page_required")
+            .expect_header(CONTROL_STALE_TARGET_RECOVERY_HEADER, "true")
+            .expect_header(CONTROL_CURRENT_TAB_GUARD_HEADER, "true")
+            .expect_header(CONTROL_EXPORT_GUARD_HEADER, "true"),
+        );
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri());
+            .with_browser_url(&server.uri());
 
         let result = client
             .screenshot(None, Some(true), None, None)
@@ -8509,20 +8698,19 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_extract_text() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/extract_text"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestControlServer::respond(TestControlResponse::json(
+            "POST",
+            "/extract_text",
+            200,
+            serde_json::json!({
                 "text": "Hello, world!",
                 "word_count": 2
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri());
+            .with_browser_url(&server.uri());
 
         let result = client.extract_text(Some("body"), None).await.unwrap();
         assert_eq!(result.text, "Hello, world!");
@@ -8531,22 +8719,21 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_extract_links() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/extract_links"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestControlServer::respond(TestControlResponse::json(
+            "POST",
+            "/extract_links",
+            200,
+            serde_json::json!({
                 "links": [
                     { "href": "https://example.com/a", "text": "Link A" },
                     { "href": "https://example.com/b", "text": "Link B" }
                 ]
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri());
+            .with_browser_url(&server.uri());
 
         let result = client.extract_links(None).await.unwrap();
         assert_eq!(result.links.len(), 2);
@@ -8555,20 +8742,19 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_click() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/click"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestControlServer::respond(TestControlResponse::json(
+            "POST",
+            "/click",
+            200,
+            serde_json::json!({
                 "clicked": true,
                 "navigation_url": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri());
+            .with_browser_url(&server.uri());
 
         let result = client.click("button.submit", None).await.unwrap();
         assert!(result.clicked);
@@ -8576,19 +8762,18 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_evaluate_js() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/evaluate"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestControlServer::respond(TestControlResponse::json(
+            "POST",
+            "/evaluate",
+            200,
+            serde_json::json!({
                 "result": "Example Domain"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri());
+            .with_browser_url(&server.uri());
 
         let result = client.evaluate_js("document.title").await.unwrap();
         assert_eq!(result.result, "Example Domain");
@@ -8596,21 +8781,20 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_get_cookies() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/cookies"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestControlServer::respond(TestControlResponse::json(
+            "POST",
+            "/cookies",
+            200,
+            serde_json::json!({
                 "cookies": [
                     { "name": "session", "value": "abc123", "domain": "example.com" }
                 ]
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri());
+            .with_browser_url(&server.uri());
 
         let cookies = client.get_cookies(Some("example.com")).await.unwrap();
         assert_eq!(cookies.len(), 1);
@@ -8619,19 +8803,18 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_set_cookies() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/set_cookies"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestControlServer::respond(TestControlResponse::json(
+            "POST",
+            "/set_cookies",
+            200,
+            serde_json::json!({
                 "set_count": 1
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri());
+            .with_browser_url(&server.uri());
 
         let cookies = vec![Cookie {
             name: "session".into(),
@@ -8649,28 +8832,23 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_set_proxy() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/health"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(browser_control_contract_descriptor()),
-            )
-            .mount(&mock_server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/proxy/set"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "enabled": true,
-                "mode": "fixed_servers",
-                "server": "http://proxy.example.com:8080"
-            })))
-            .mount(&mock_server)
-            .await;
+        let server = TestControlServer::respond_sequence(vec![
+            health_response(browser_control_contract_descriptor()),
+            TestControlResponse::json(
+                "POST",
+                "/proxy/set",
+                200,
+                serde_json::json!({
+                    "enabled": true,
+                    "mode": "fixed_servers",
+                    "server": "http://proxy.example.com:8080"
+                }),
+            ),
+        ]);
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri());
+            .with_browser_url(&server.uri());
 
         let proxy = ProxyConfig {
             server: "http://proxy.example.com:8080".into(),
@@ -8689,29 +8867,13 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_set_proxy_rejects_worker_without_proxy_contract_before_post() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/health"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(browser_control_contract_without_proxy_operations()),
-            )
-            .mount(&mock_server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/proxy/set"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "enabled": true,
-                "mode": "fixed_servers",
-                "server": "http://proxy.example.com:8080"
-            })))
-            .mount(&mock_server)
-            .await;
+        let server = TestControlServer::respond(health_response(
+            browser_control_contract_without_proxy_operations(),
+        ));
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri());
+            .with_browser_url(&server.uri());
         let proxy = ProxyConfig {
             server: "http://proxy.example.com:8080".into(),
             bypass_list: None,
@@ -8725,12 +8887,8 @@ while :; do sleep 1; done
         assert!(err.contains("browser.set_proxy"));
         assert!(err.contains("browser.clear_proxy"));
 
-        let requests = mock_server.received_requests().await.unwrap();
-        assert!(
-            requests
-                .iter()
-                .all(|request| request.url.path() != "/proxy/set")
-        );
+        let requests = server.received_requests();
+        assert!(requests.iter().all(|request| request.path != "/proxy/set"));
     }
 
     #[test]
@@ -8777,28 +8935,23 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_clear_proxy() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/health"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(browser_control_contract_descriptor()),
-            )
-            .mount(&mock_server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/proxy/clear"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "enabled": false,
-                "mode": "direct",
-                "server": null
-            })))
-            .mount(&mock_server)
-            .await;
+        let server = TestControlServer::respond_sequence(vec![
+            health_response(browser_control_contract_descriptor()),
+            TestControlResponse::json(
+                "POST",
+                "/proxy/clear",
+                200,
+                serde_json::json!({
+                    "enabled": false,
+                    "mode": "direct",
+                    "server": null
+                }),
+            ),
+        ]);
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri());
+            .with_browser_url(&server.uri());
 
         let result = client.clear_proxy().await.unwrap();
         assert!(!result.enabled);
@@ -8820,21 +8973,14 @@ while :; do sleep 1; done
             },
         };
 
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/slow"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_delay(std::time::Duration::from_millis(250))
-                    .set_body_json(serde_json::json!({ "ok": true })),
-            )
-            .mount(&mock_server)
-            .await;
+        let server = TestControlServer::respond(
+            TestControlResponse::json("POST", "/slow", 200, serde_json::json!({ "ok": true }))
+                .with_delay(Duration::from_millis(250)),
+        );
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri())
+            .with_browser_url(&server.uri())
             .with_retry_config(0);
 
         let err = client
@@ -8861,17 +9007,16 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_server_error_retry() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/navigate"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
-            .mount(&mock_server)
-            .await;
+        let server = TestControlServer::respond(TestControlResponse::text(
+            "POST",
+            "/navigate",
+            500,
+            "internal error",
+        ));
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri())
+            .with_browser_url(&server.uri())
             .with_retry_config(0);
 
         let result = client
@@ -8884,21 +9029,20 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_server_error_redacts_sensitive_body_fields() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/navigate"))
-            .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({
+        let server = TestControlServer::respond(TestControlResponse::json(
+            "POST",
+            "/navigate",
+            500,
+            serde_json::json!({
                 "error": "upstream failed",
                 "access_token": "browser-worker-token",
                 "cookies": [{ "name": "session", "value": "cookie-secret" }]
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri())
+            .with_browser_url(&server.uri())
             .with_retry_config(0);
 
         let err = client
@@ -8913,22 +9057,21 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_client_error_redacts_sensitive_api_message() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/click"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+        let server = TestControlServer::respond(TestControlResponse::json(
+            "POST",
+            "/click",
+            400,
+            serde_json::json!({
                 "error": {
                     "message": "Authorization failed for Bearer browser-worker-token",
                     "code": "auth_failed"
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri())
+            .with_browser_url(&server.uri())
             .with_retry_config(0);
 
         let err = client.click(".submit", None).await.unwrap_err();
@@ -8940,21 +9083,16 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_oversized_browser_control_response_is_rejected() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/wait_for_selector"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![
-                b'x';
-                CONTROL_RESPONSE_BYTES_SMALL
-                    + 1
-            ]))
-            .mount(&mock_server)
-            .await;
+        let server = TestControlServer::respond(TestControlResponse::bytes(
+            "POST",
+            "/wait_for_selector",
+            200,
+            vec![b'x'; CONTROL_RESPONSE_BYTES_SMALL + 1],
+        ));
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri())
+            .with_browser_url(&server.uri())
             .with_retry_config(0);
 
         let result = client
@@ -8967,17 +9105,12 @@ while :; do sleep 1; done
 
     #[fcp_async_core::runtime::test]
     async fn test_rate_limited() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/navigate"))
-            .respond_with(ResponseTemplate::new(429))
-            .mount(&mock_server)
-            .await;
+        let server =
+            TestControlServer::respond(TestControlResponse::text("POST", "/navigate", 429, ""));
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&mock_server.uri())
+            .with_browser_url(&server.uri())
             .with_retry_config(0);
 
         let result = client

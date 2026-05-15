@@ -2493,11 +2493,132 @@ mod tests {
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
     use fcp_prelude::CapabilityConstraints;
-    use std::path::PathBuf;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::{TcpListener, TcpStream},
+        path::PathBuf,
+        thread::{self, JoinHandle},
+        time::Duration as StdDuration,
     };
+
+    struct TestControlResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: Vec<u8>,
+        content_type: &'static str,
+    }
+
+    impl TestControlResponse {
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: impl serde::Serialize,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: serde_json::to_vec(&body).expect("serialize response json"),
+                content_type: "application/json",
+            }
+        }
+
+        fn text(method: &'static str, path: &'static str, status: u16, body: &str) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: body.as_bytes().to_vec(),
+                content_type: "text/plain; charset=utf-8",
+            }
+        }
+    }
+
+    struct TestControlServer {
+        base_url: String,
+        _handle: JoinHandle<()>,
+    }
+
+    impl TestControlServer {
+        fn respond(response: TestControlResponse) -> Self {
+            Self::respond_sequence(vec![response])
+        }
+
+        fn respond_sequence(responses: Vec<TestControlResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+            let base_url = format!("http://{}", listener.local_addr().expect("local address"));
+            let handle = thread::spawn(move || {
+                for response in responses {
+                    let (stream, _) = listener.accept().expect("accept browser client request");
+                    handle_test_control_request(stream, &response);
+                }
+            });
+            Self {
+                base_url,
+                _handle: handle,
+            }
+        }
+
+        fn uri(&self) -> String {
+            self.base_url.clone()
+        }
+    }
+
+    fn handle_test_control_request(mut stream: TcpStream, response: &TestControlResponse) {
+        stream
+            .set_read_timeout(Some(StdDuration::from_secs(5)))
+            .expect("set read timeout");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .expect("read request line");
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().expect("request method");
+        let raw_path = parts.next().expect("request target");
+        let path = raw_path.split('?').next().expect("request path");
+        assert_eq!(method, response.method);
+        assert_eq!(path, response.path);
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read header line");
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().expect("content-length parses");
+            }
+        }
+        if content_length > 0 {
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).expect("read request body");
+        }
+
+        let status_text = match response.status {
+            404 => "Not Found",
+            _ => "OK",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            response.status,
+            status_text,
+            response.content_type,
+            response.body.len(),
+        )
+        .expect("write response header");
+        if stream.write_all(&response.body).is_ok() {
+            let _ = stream.flush();
+        }
+    }
 
     fn test_constraints_cbor() -> Vec<u8> {
         let constraints = CapabilityConstraints {
@@ -3277,18 +3398,16 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_self_check_accepts_fcp_browser_control_plane_health() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/health"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(browser_control_contract_descriptor()),
-            )
-            .mount(&mock_server)
-            .await;
+        let server = TestControlServer::respond(TestControlResponse::json(
+            "GET",
+            "/health",
+            200,
+            browser_control_contract_descriptor(),
+        ));
 
         let mut connector = BrowserConnector::new();
         connector
-            .handle_configure(json!({ "browser_url": mock_server.uri() }))
+            .handle_configure(json!({ "browser_url": server.uri() }))
             .await
             .unwrap();
 
@@ -3298,24 +3417,22 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_self_check_rejects_raw_chrome_cdp_endpoint() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/health"))
-            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
-            .mount(&mock_server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/json/version"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "Browser": "Chrome/123.0.0.0",
-                "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/abc"
-            })))
-            .mount(&mock_server)
-            .await;
+        let server = TestControlServer::respond_sequence(vec![
+            TestControlResponse::text("GET", "/health", 404, "not found"),
+            TestControlResponse::json(
+                "GET",
+                "/json/version",
+                200,
+                json!({
+                    "Browser": "Chrome/123.0.0.0",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/abc"
+                }),
+            ),
+        ]);
 
         let mut connector = BrowserConnector::new();
         connector
-            .handle_configure(json!({ "browser_url": mock_server.uri() }))
+            .handle_configure(json!({ "browser_url": server.uri() }))
             .await
             .unwrap();
 

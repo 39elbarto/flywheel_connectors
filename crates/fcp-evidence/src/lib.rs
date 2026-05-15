@@ -153,9 +153,11 @@ pub mod proof_bundle_registry;
 
 pub use proof_bundle_registry::{
     ArtifactDigest, ArtifactDigestAlgorithm, ExpectedProofArtifact, FreshnessClassification,
-    FreshnessPolicy, PROOF_BUNDLE_REGISTRY_SCHEMA, ProofBundleEntry, ProofBundleRegistry,
-    ProofBundleRegistryError, ProofBundleSource, ProofBundleSourceKind, ProofClass, ProofRedaction,
-    ProofRegistryCommand, ProofSourceDocumentRow, RedactionClassification, StaleProofAction,
+    FreshnessPolicy, ObservedProofArtifact, PROOF_BUNDLE_REGISTRY_SCHEMA, ProofBundleEntry,
+    ProofBundleRegistry, ProofBundleRegistryError, ProofBundleSource, ProofBundleSourceKind,
+    ProofBundleValidationReport, ProofBundleValidationRow, ProofBundleValidator, ProofClass,
+    ProofFreshnessStatus, ProofRedaction, ProofRegistryCommand, ProofSourceDocumentRow,
+    ProofValidationReasonCode, ProofValidationStatus, RedactionClassification, StaleProofAction,
     StructuredSkipReason, VerificationResult, VerifierObservation,
 };
 

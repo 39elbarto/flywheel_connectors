@@ -6,7 +6,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -66,6 +66,376 @@ impl ProofBundleRegistry {
 
         Ok(())
     }
+}
+
+/// Deterministic proof-bundle validator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProofBundleValidator {
+    now_unix_ms: u64,
+}
+
+impl ProofBundleValidator {
+    /// Create a validator pinned to a caller-supplied clock.
+    #[must_use]
+    pub const fn new(now_unix_ms: u64) -> Self {
+        Self { now_unix_ms }
+    }
+
+    /// Validate a registry and observed artifact catalog without running commands.
+    #[must_use]
+    pub fn validate(
+        &self,
+        registry: &ProofBundleRegistry,
+        observed_artifacts: &BTreeMap<String, ObservedProofArtifact>,
+    ) -> ProofBundleValidationReport {
+        let source_ids = registry
+            .sources
+            .iter()
+            .map(|source| source.source_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let proofs = registry
+            .proofs
+            .iter()
+            .map(|proof| (*self).validate_proof(proof, &source_ids, observed_artifacts))
+            .collect::<Vec<_>>();
+        let status = aggregate_status(&proofs);
+
+        ProofBundleValidationReport {
+            schema: PROOF_BUNDLE_REGISTRY_SCHEMA.to_owned(),
+            registry_id: registry.registry_id.clone(),
+            generated_at_unix_ms: self.now_unix_ms,
+            status,
+            proofs,
+        }
+    }
+
+    fn validate_proof(
+        self,
+        proof: &ProofBundleEntry,
+        known_sources: &BTreeSet<&str>,
+        observed_artifacts: &BTreeMap<String, ObservedProofArtifact>,
+    ) -> ProofBundleValidationRow {
+        let artifact_paths = proof
+            .expected_artifacts
+            .iter()
+            .map(|artifact| artifact.path.clone())
+            .collect::<Vec<_>>();
+        let freshness = ProofFreshnessStatus::from_policy(
+            &proof.freshness_policy,
+            proof.generated_at_unix_ms,
+            self.now_unix_ms,
+        );
+
+        let (status, reason_code, detail) =
+            Self::validate_proof_status(proof, known_sources, observed_artifacts, &freshness);
+
+        ProofBundleValidationRow {
+            proof_id: proof.proof_id.clone(),
+            owning_bead: proof.owning_bead.clone(),
+            status,
+            reason_code,
+            detail,
+            proof_class: proof.proof_class,
+            source_document: proof.source_document.clone(),
+            artifact_paths,
+            rerun_argv: proof.rerun.argv.clone(),
+            freshness,
+        }
+    }
+
+    fn validate_proof_status(
+        proof: &ProofBundleEntry,
+        known_sources: &BTreeSet<&str>,
+        observed_artifacts: &BTreeMap<String, ObservedProofArtifact>,
+        freshness: &ProofFreshnessStatus,
+    ) -> (
+        ProofValidationStatus,
+        ProofValidationReasonCode,
+        Option<String>,
+    ) {
+        if is_blank(&proof.owning_bead) {
+            return red(ProofValidationReasonCode::MissingOwner, None);
+        }
+        if !known_sources.contains(proof.source_document.source_id.as_str()) {
+            return red(
+                ProofValidationReasonCode::MissingSource,
+                Some(proof.source_document.source_id.clone()),
+            );
+        }
+        if proof.rerun.argv.is_empty() {
+            return red(ProofValidationReasonCode::RerunMissing, None);
+        }
+        if proof.verifier.command.argv.is_empty() {
+            return red(ProofValidationReasonCode::VerifierCommandMissing, None);
+        }
+        if proof.verifier.live_claim && !proof.proof_class.permits_live_claim() {
+            return red(ProofValidationReasonCode::NonLiveProofClaimedLive, None);
+        }
+        if proof.proof_class == ProofClass::StructuredSkip
+            || proof.verifier.result == VerificationResult::Skipped
+        {
+            return yellow(ProofValidationReasonCode::StructuredSkipNonGreen, None);
+        }
+        if freshness.classification == FreshnessClassification::StaleFailClosed {
+            return red(ProofValidationReasonCode::StaleFailClosed, None);
+        }
+        if freshness.classification == FreshnessClassification::StaleWarnOnly {
+            return yellow(ProofValidationReasonCode::StaleWarnOnly, None);
+        }
+        if freshness.classification == FreshnessClassification::StaleSkipOnly {
+            return yellow(ProofValidationReasonCode::StaleSkipOnly, None);
+        }
+
+        if let Some((reason, detail)) = validate_artifacts(proof, observed_artifacts) {
+            return red(reason, detail);
+        }
+
+        match proof.verifier.result {
+            VerificationResult::Passed => {
+                if proof.proof_class.permits_live_claim() {
+                    green()
+                } else {
+                    yellow(ProofValidationReasonCode::OfflineEvidenceNonLive, None)
+                }
+            }
+            VerificationResult::Failed => red(ProofValidationReasonCode::VerifierFailed, None),
+            VerificationResult::Blocked => (
+                ProofValidationStatus::InfraBlocked,
+                ProofValidationReasonCode::VerifierInfraBlocked,
+                None,
+            ),
+            VerificationResult::Skipped => {
+                yellow(ProofValidationReasonCode::StructuredSkipNonGreen, None)
+            }
+        }
+    }
+}
+
+/// Observed artifact metadata supplied to the validator by a caller.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedProofArtifact {
+    /// Path matching `ExpectedProofArtifact.path`.
+    pub path: String,
+    /// Whether the artifact was present.
+    pub exists: bool,
+    /// Observed digest, if computed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<ArtifactDigest>,
+}
+
+/// JSON-serializable validator report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofBundleValidationReport {
+    /// Report schema.
+    pub schema: String,
+    /// Registry id under validation.
+    pub registry_id: String,
+    /// Report generation timestamp as Unix milliseconds.
+    pub generated_at_unix_ms: u64,
+    /// Aggregate status.
+    pub status: ProofValidationStatus,
+    /// Per-proof rows.
+    pub proofs: Vec<ProofBundleValidationRow>,
+}
+
+/// Per-proof validator row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofBundleValidationRow {
+    /// Proof id.
+    pub proof_id: String,
+    /// Owning Beads id.
+    pub owning_bead: String,
+    /// Deterministic proof status.
+    pub status: ProofValidationStatus,
+    /// Primary reason code.
+    pub reason_code: ProofValidationReasonCode,
+    /// Optional detail such as a missing path or source id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Evidence class.
+    pub proof_class: ProofClass,
+    /// Source row.
+    pub source_document: ProofSourceDocumentRow,
+    /// Artifact paths considered by the validator.
+    pub artifact_paths: Vec<String>,
+    /// Rerun argv from the registry.
+    pub rerun_argv: Vec<String>,
+    /// Freshness age/window details.
+    pub freshness: ProofFreshnessStatus,
+}
+
+/// Proof validator status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProofValidationStatus {
+    /// Proof is valid for a live or host-backed green gate.
+    Green,
+    /// Proof is valid metadata but not green live proof.
+    Yellow,
+    /// Proof failed closed.
+    Red,
+    /// Proof could not run because infrastructure was unavailable.
+    InfraBlocked,
+}
+
+/// Proof validator reason code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProofValidationReasonCode {
+    /// Passed as green proof.
+    Pass,
+    /// Owning bead is absent.
+    MissingOwner,
+    /// Source row does not match the source inventory.
+    MissingSource,
+    /// Rerun command is absent.
+    RerunMissing,
+    /// Verifier command is absent.
+    VerifierCommandMissing,
+    /// Required artifact path is absent.
+    MissingArtifact,
+    /// Required artifact digest is absent.
+    MissingDigest,
+    /// Observed digest differs from the expected digest.
+    DigestMismatch,
+    /// Required proof is stale and fail-closed.
+    StaleFailClosed,
+    /// Stale proof is advisory only.
+    StaleWarnOnly,
+    /// Stale proof is skipped.
+    StaleSkipOnly,
+    /// Structured skip is non-green.
+    StructuredSkipNonGreen,
+    /// Replay/static/offline evidence is valid but non-live.
+    OfflineEvidenceNonLive,
+    /// Verifier failed.
+    VerifierFailed,
+    /// Verifier was blocked by infrastructure.
+    VerifierInfraBlocked,
+    /// Replay/static/offline proof tried to claim live status.
+    NonLiveProofClaimedLive,
+}
+
+/// Freshness details emitted for every proof row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProofFreshnessStatus {
+    /// Current artifact age in milliseconds.
+    pub age_ms: u64,
+    /// Configured max age in milliseconds.
+    pub max_age_ms: u64,
+    /// Freshness classification.
+    pub classification: FreshnessClassification,
+}
+
+impl ProofFreshnessStatus {
+    const fn from_policy(
+        policy: &FreshnessPolicy,
+        generated_at_unix_ms: u64,
+        now_unix_ms: u64,
+    ) -> Self {
+        Self {
+            age_ms: now_unix_ms.saturating_sub(generated_at_unix_ms),
+            max_age_ms: policy.max_age_ms,
+            classification: policy.classify(generated_at_unix_ms, now_unix_ms),
+        }
+    }
+}
+
+fn validate_artifacts(
+    proof: &ProofBundleEntry,
+    observed_artifacts: &BTreeMap<String, ObservedProofArtifact>,
+) -> Option<(ProofValidationReasonCode, Option<String>)> {
+    for expected in &proof.expected_artifacts {
+        if !expected.required {
+            continue;
+        }
+        let Some(expected_digest) = &expected.digest else {
+            return Some((
+                ProofValidationReasonCode::MissingDigest,
+                Some(expected.path.clone()),
+            ));
+        };
+        let Some(observed) = observed_artifacts.get(&expected.path) else {
+            return Some((
+                ProofValidationReasonCode::MissingArtifact,
+                Some(expected.path.clone()),
+            ));
+        };
+        if !observed.exists {
+            return Some((
+                ProofValidationReasonCode::MissingArtifact,
+                Some(expected.path.clone()),
+            ));
+        }
+        let Some(observed_digest) = &observed.digest else {
+            return Some((
+                ProofValidationReasonCode::MissingDigest,
+                Some(expected.path.clone()),
+            ));
+        };
+        if observed_digest != expected_digest {
+            return Some((
+                ProofValidationReasonCode::DigestMismatch,
+                Some(expected.path.clone()),
+            ));
+        }
+    }
+    None
+}
+
+fn aggregate_status(proofs: &[ProofBundleValidationRow]) -> ProofValidationStatus {
+    if proofs
+        .iter()
+        .any(|proof| proof.status == ProofValidationStatus::Red)
+    {
+        ProofValidationStatus::Red
+    } else if proofs
+        .iter()
+        .any(|proof| proof.status == ProofValidationStatus::InfraBlocked)
+    {
+        ProofValidationStatus::InfraBlocked
+    } else if proofs
+        .iter()
+        .any(|proof| proof.status == ProofValidationStatus::Yellow)
+    {
+        ProofValidationStatus::Yellow
+    } else {
+        ProofValidationStatus::Green
+    }
+}
+
+const fn green() -> (
+    ProofValidationStatus,
+    ProofValidationReasonCode,
+    Option<String>,
+) {
+    (
+        ProofValidationStatus::Green,
+        ProofValidationReasonCode::Pass,
+        None,
+    )
+}
+
+const fn yellow(
+    reason_code: ProofValidationReasonCode,
+    detail: Option<String>,
+) -> (
+    ProofValidationStatus,
+    ProofValidationReasonCode,
+    Option<String>,
+) {
+    (ProofValidationStatus::Yellow, reason_code, detail)
+}
+
+const fn red(
+    reason_code: ProofValidationReasonCode,
+    detail: Option<String>,
+) -> (
+    ProofValidationStatus,
+    ProofValidationReasonCode,
+    Option<String>,
+) {
+    (ProofValidationStatus::Red, reason_code, detail)
 }
 
 /// Source surface represented by one or more proof entries.
@@ -685,6 +1055,32 @@ mod tests {
         }
     }
 
+    fn observed_artifacts(proof: &ProofBundleEntry) -> BTreeMap<String, ObservedProofArtifact> {
+        proof
+            .expected_artifacts
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.path.clone(),
+                    ObservedProofArtifact {
+                        path: artifact.path.clone(),
+                        exists: true,
+                        digest: artifact.digest.clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn validation_row(
+        proof: ProofBundleEntry,
+        artifacts: &BTreeMap<String, ObservedProofArtifact>,
+    ) -> ProofBundleValidationRow {
+        let report = ProofBundleValidator::new(NOW_MS).validate(&registry_with(proof), artifacts);
+        assert_eq!(report.proofs.len(), 1);
+        report.proofs[0].clone()
+    }
+
     #[test]
     fn valid_static_doc_registry_passes_without_live_claim() {
         registry_with(proof())
@@ -796,5 +1192,152 @@ mod tests {
             error,
             ProofBundleRegistryError::LiveClaimForNonLiveProof { .. }
         ));
+    }
+
+    #[test]
+    fn validator_emits_green_for_fresh_live_pass() {
+        let mut proof = proof();
+        proof.proof_class = ProofClass::Live;
+        proof.verifier.live_claim = true;
+        let artifacts = observed_artifacts(&proof);
+
+        let report = ProofBundleValidator::new(NOW_MS).validate(&registry_with(proof), &artifacts);
+
+        assert_eq!(report.status, ProofValidationStatus::Green);
+        assert_eq!(report.proofs.len(), 1);
+        assert_eq!(report.proofs[0].status, ProofValidationStatus::Green);
+        assert_eq!(
+            report.proofs[0].reason_code,
+            ProofValidationReasonCode::Pass
+        );
+
+        let json = serde_json::to_value(&report).expect("validation report should serialize");
+        assert_eq!(
+            json["proofs"][0]["owning_bead"],
+            "flywheel_connectors-8bqme.3"
+        );
+        assert_eq!(
+            json["proofs"][0]["freshness"]["max_age_ms"],
+            serde_json::json!(60_000)
+        );
+        assert_eq!(
+            json["proofs"][0]["artifact_paths"][0],
+            "docs/FCP3_Final_Proof_Manifest.md"
+        );
+    }
+
+    #[test]
+    fn validator_fails_stale_required_proof() {
+        let proof = ProofBundleEntry {
+            generated_at_unix_ms: NOW_MS - 120_000,
+            ..proof()
+        };
+        let artifacts = observed_artifacts(&proof);
+
+        let row = validation_row(proof, &artifacts);
+
+        assert_eq!(row.status, ProofValidationStatus::Red);
+        assert_eq!(row.reason_code, ProofValidationReasonCode::StaleFailClosed);
+        assert_eq!(
+            row.freshness.classification,
+            FreshnessClassification::StaleFailClosed
+        );
+    }
+
+    #[test]
+    fn validator_fails_missing_required_artifact() {
+        let proof = proof();
+        let artifacts = BTreeMap::new();
+
+        let row = validation_row(proof, &artifacts);
+
+        assert_eq!(row.status, ProofValidationStatus::Red);
+        assert_eq!(row.reason_code, ProofValidationReasonCode::MissingArtifact);
+        assert_eq!(
+            row.detail.as_deref(),
+            Some("docs/FCP3_Final_Proof_Manifest.md")
+        );
+    }
+
+    #[test]
+    fn validator_fails_digest_mismatch() {
+        let proof = proof();
+        let mut artifacts = observed_artifacts(&proof);
+        if let Some(artifact) = artifacts.get_mut("docs/FCP3_Final_Proof_Manifest.md") {
+            artifact.digest = Some(ArtifactDigest {
+                algorithm: ArtifactDigestAlgorithm::Blake3,
+                value: "fedcba9876543210".repeat(4),
+            });
+        }
+
+        let row = validation_row(proof, &artifacts);
+
+        assert_eq!(row.status, ProofValidationStatus::Red);
+        assert_eq!(row.reason_code, ProofValidationReasonCode::DigestMismatch);
+    }
+
+    #[test]
+    fn validator_fails_missing_rerun_command() {
+        let mut proof = proof();
+        proof.rerun.argv.clear();
+        let artifacts = observed_artifacts(&proof);
+
+        let row = validation_row(proof, &artifacts);
+
+        assert_eq!(row.status, ProofValidationStatus::Red);
+        assert_eq!(row.reason_code, ProofValidationReasonCode::RerunMissing);
+    }
+
+    #[test]
+    fn validator_marks_structured_skip_non_green() {
+        let mut proof = proof();
+        proof.proof_class = ProofClass::StructuredSkip;
+        proof.verifier.result = VerificationResult::Skipped;
+        proof.structured_skip = Some(StructuredSkipReason {
+            allowed: true,
+            reason_code: "missing_live_fixture".to_owned(),
+            evidence_path: Some("target/proof/skip.json".to_owned()),
+        });
+        let artifacts = observed_artifacts(&proof);
+
+        let row = validation_row(proof, &artifacts);
+
+        assert_eq!(row.status, ProofValidationStatus::Yellow);
+        assert_eq!(
+            row.reason_code,
+            ProofValidationReasonCode::StructuredSkipNonGreen
+        );
+    }
+
+    #[test]
+    fn validator_distinguishes_infra_blocked_verifier() {
+        let mut proof = proof();
+        proof.proof_class = ProofClass::HostBacked;
+        proof.verifier.live_claim = true;
+        proof.verifier.result = VerificationResult::Blocked;
+        let artifacts = observed_artifacts(&proof);
+
+        let report = ProofBundleValidator::new(NOW_MS).validate(&registry_with(proof), &artifacts);
+
+        assert_eq!(report.status, ProofValidationStatus::InfraBlocked);
+        assert_eq!(report.proofs[0].status, ProofValidationStatus::InfraBlocked);
+        assert_eq!(
+            report.proofs[0].reason_code,
+            ProofValidationReasonCode::VerifierInfraBlocked
+        );
+    }
+
+    #[test]
+    fn validator_marks_static_doc_as_non_live_yellow() {
+        let proof = proof();
+        let artifacts = observed_artifacts(&proof);
+
+        let row = validation_row(proof, &artifacts);
+
+        assert_eq!(row.status, ProofValidationStatus::Yellow);
+        assert_eq!(
+            row.reason_code,
+            ProofValidationReasonCode::OfflineEvidenceNonLive
+        );
     }
 }

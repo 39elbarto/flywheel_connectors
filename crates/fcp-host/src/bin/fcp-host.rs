@@ -134,7 +134,7 @@ use fcp_sandbox::{
     EgressTcpConnectRequest, HttpHeader, NoOpCredentialInjector, TlsVerifier, WasiConfig,
     WasiConnectorRunner, host_matches_allow_list,
 };
-use fcp_telemetry::{TelemetryConfig, TelemetryError, otlp_readiness};
+use fcp_telemetry::{TelemetryConfig, TelemetryError, metrics, otlp_readiness};
 use futures_util::future::join_all;
 use hyper::body::Incoming;
 use hyper_util::{
@@ -4362,6 +4362,7 @@ fn emit_deployment_tier_denial_audit_event(
 const HRW_LEASE_LOCAL_NODE_ENV: &str = "FCP_HOST_HRW_LEASE_LOCAL_NODE";
 const HRW_LEASE_NODES_ENV: &str = "FCP_HOST_HRW_LEASE_NODES";
 const HRW_LEASE_CURRENT_SEQ_ENV: &str = "FCP_HOST_HRW_LEASE_CURRENT_SEQ";
+const CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL: &str = "connector_state_write";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HrwLeaseRoutingConfig {
@@ -4638,14 +4639,9 @@ fn connector_lease_status_payload(
             "route": "/rpc/admin/connectors/{connector_id}/lease/status",
         },
         "telemetry": {
-            "event_names": [
-                "fcp.lease.issued",
-                "fcp.lease.renewed",
-                "fcp.lease.handed_off",
-                "fcp.lease.fenced",
-                "fcp.lease.revoked",
-                "fcp.lease.flushed_on_yield"
-            ],
+            "event_names": metrics::LEASE_EVENT_NAMES,
+            "handoffs_counter": metrics::LEASE_HANDOFFS_TOTAL_METRIC,
+            "handoff_duration_histogram": metrics::LEASE_HANDOFF_DURATION_SECONDS_METRIC,
             "redaction_scope": "public"
         },
         "warnings": warnings,
@@ -4721,6 +4717,10 @@ fn enforce_hrw_singleton_writer_launch_route(
         &routing.local_node,
     )
     .map_err(|reason| {
+        metrics::record_lease_fenced(
+            CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+            "launch_not_selected_coordinator",
+        );
         tracing::warn!(
             event = "hrw_lease_launch_refused",
             connector_id = %connector_id,
@@ -4754,6 +4754,10 @@ fn enforce_hrw_lease_route(
             subject_id,
             purpose: CoreLeasePurpose::ConnectorStateWrite,
         };
+        metrics::record_lease_fenced(
+            CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+            "invoke_no_eligible_holder",
+        );
         let refusal = HrwLeaseRouteRefusal::NotSelectedCoordinator { reason: &reason };
         return Err(HostError::PreflightFailed(hrw_lease_refusal_message(
             &refusal,
@@ -4768,6 +4772,10 @@ fn enforce_hrw_lease_route(
         &routing.local_node,
     )
     .map_err(|reason| {
+        metrics::record_lease_fenced(
+            CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+            "invoke_not_selected_coordinator",
+        );
         tracing::warn!(
             event = "hrw_lease_route_refused",
             connector_id = %request.connector_id,
@@ -4792,6 +4800,10 @@ fn enforce_hrw_lease_route(
             current_lease_seq,
             provided_lease_seq: request.lease_seq,
         };
+        metrics::record_lease_fenced(
+            CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+            "stale_or_missing_lease_seq",
+        );
         tracing::warn!(
             event = "hrw_lease_route_fenced",
             connector_id = %request.connector_id,

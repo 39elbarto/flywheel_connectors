@@ -29,6 +29,7 @@ use fcp_core::{
     validate_lease as validate_core_lease,
 };
 use fcp_prelude::{ObjectId, TailscaleNodeId, ZoneId, select_coordinator};
+use fcp_telemetry::metrics;
 use serde::{Deserialize, Serialize};
 
 use crate::authority::{AuthorityReasonCode, AuthorityTimelineEvent, ObservedLeaseAuthority};
@@ -273,6 +274,9 @@ impl LeaseCoordinator {
 
         // No active leases — grant immediately
         if active.is_empty() {
+            let observed_prior_holder = existing_leases
+                .iter()
+                .any(|obs| obs.lease.subject_id == *subject_id && obs.lease.purpose == *purpose);
             if let Some(reason) = rebase_status.rejection_reason() {
                 timeline.push(AuthorityTimelineEvent {
                     observed_at_ms: now_secs * 1000,
@@ -362,6 +366,11 @@ impl LeaseCoordinator {
                     requester.as_str()
                 ),
             });
+            let purpose_label = purpose.to_string();
+            metrics::record_lease_issued(&purpose_label, "granted");
+            if observed_prior_holder {
+                metrics::record_lease_handed_off("previous_expired", None);
+            }
 
             return (
                 AcquireOutcome::Granted {
@@ -398,6 +407,8 @@ impl LeaseCoordinator {
                     active.len()
                 ),
             });
+            let purpose_label = purpose.to_string();
+            metrics::record_lease_fenced(&purpose_label, "conflict_detected");
 
             return (
                 AcquireOutcome::Conflict {
@@ -465,6 +476,8 @@ impl LeaseCoordinator {
                 current.lease.expires_at
             ),
         });
+        let purpose_label = purpose.to_string();
+        metrics::record_lease_fenced(&purpose_label, "active_holder");
 
         (
             AcquireOutcome::Denied {
@@ -628,6 +641,8 @@ impl LeaseCoordinator {
                 expires_at: None,
                 explanation: reason.clone(),
             });
+            let purpose_label = purpose.to_string();
+            metrics::record_lease_fenced(&purpose_label, "not_held");
             return (RenewOutcome::Denied { reason }, timeline);
         };
 
@@ -658,6 +673,8 @@ impl LeaseCoordinator {
                 expires_at: Some(held.lease.expires_at),
                 explanation: reason.clone(),
             });
+            let purpose_label = purpose.to_string();
+            metrics::record_lease_fenced(&purpose_label, "superseded");
             return (RenewOutcome::Denied { reason }, timeline);
         }
 
@@ -681,6 +698,8 @@ impl LeaseCoordinator {
                 requester.as_str()
             ),
         });
+        let purpose_label = purpose.to_string();
+        metrics::record_lease_renewed(&purpose_label, "renewed");
 
         (
             RenewOutcome::Renewed {
@@ -726,6 +745,8 @@ impl LeaseCoordinator {
                     "Lease released by {holder} (fencing_token={held_fencing_token})"
                 ),
             });
+            let purpose_label = purpose.to_string();
+            metrics::record_lease_revoked(&purpose_label, "voluntary_release");
             (ReleaseOutcome::Released, timeline)
         } else {
             timeline.push(AuthorityTimelineEvent {

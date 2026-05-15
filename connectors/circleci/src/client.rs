@@ -484,8 +484,187 @@ async fn handle_response_as_list<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+
+    #[derive(Clone, Copy)]
+    struct ResponseSpec {
+        status: u16,
+        headers: &'static [(&'static str, &'static str)],
+        body: &'static str,
+        delay_ms: u64,
+    }
+
+    impl ResponseSpec {
+        const fn json(status: u16, body: &'static str) -> Self {
+            Self {
+                status,
+                headers: &[("content-type", "application/json")],
+                body,
+                delay_ms: 0,
+            }
+        }
+
+        const fn with_headers(
+            status: u16,
+            headers: &'static [(&'static str, &'static str)],
+            body: &'static str,
+        ) -> Self {
+            Self {
+                status,
+                headers,
+                body,
+                delay_ms: 0,
+            }
+        }
+
+        const fn delayed_json(status: u16, body: &'static str, delay_ms: u64) -> Self {
+            Self {
+                status,
+                headers: &[("content-type", "application/json")],
+                body,
+                delay_ms,
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct RequestObservation {
+        request_line: String,
+        headers: Vec<String>,
+    }
+
+    impl RequestObservation {
+        fn header_value(&self, name: &str) -> Option<&str> {
+            self.headers.iter().find_map(|line| {
+                let (header_name, value) = line.split_once(':')?;
+                header_name.eq_ignore_ascii_case(name).then(|| value.trim())
+            })
+        }
+    }
+
+    struct LoopbackFixture {
+        base_url: String,
+        handle: Option<JoinHandle<Vec<RequestObservation>>>,
+    }
+
+    impl LoopbackFixture {
+        fn start(responses: Vec<ResponseSpec>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+            let address = listener.local_addr().expect("read listener address");
+            let handle = thread::spawn(move || {
+                responses
+                    .into_iter()
+                    .map(|response| {
+                        let (stream, _) = listener.accept().expect("accept request");
+                        handle_request(stream, response)
+                    })
+                    .collect()
+            });
+
+            Self {
+                base_url: format!("http://{address}"),
+                handle: Some(handle),
+            }
+        }
+
+        fn base_url(&self) -> &str {
+            &self.base_url
+        }
+
+        fn join(mut self) -> Vec<RequestObservation> {
+            self.handle
+                .take()
+                .expect("loopback handle present")
+                .join()
+                .expect("loopback thread completed")
+        }
+    }
+
+    fn handle_request(mut stream: TcpStream, response: ResponseSpec) -> RequestObservation {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set request read timeout");
+        let raw = read_http_request(&mut stream);
+        let header_end = find_header_end(&raw).expect("request contains header terminator");
+        let request = String::from_utf8_lossy(&raw[..header_end]);
+        let mut lines = request.lines();
+        let request_line = lines.next().unwrap_or_default().to_string();
+        let headers = lines.map(str::to_string).collect::<Vec<_>>();
+
+        if response.delay_ms > 0 {
+            thread::sleep(Duration::from_millis(response.delay_ms));
+        }
+        write_response(&mut stream, response);
+
+        RequestObservation {
+            request_line,
+            headers,
+        }
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let bytes_read = stream.read(&mut buffer).expect("read request");
+            assert!(bytes_read > 0, "request should not close early");
+            request.extend_from_slice(&buffer[..bytes_read]);
+            if let Some(header_end) = find_header_end(&request) {
+                let expected_body_len = content_length(&request[..header_end]);
+                let body_bytes = request.len().saturating_sub(header_end + 4);
+                if body_bytes >= expected_body_len {
+                    return request;
+                }
+            }
+        }
+    }
+
+    fn find_header_end(request: &[u8]) -> Option<usize> {
+        request.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    fn content_length(headers: &[u8]) -> usize {
+        let text = String::from_utf8_lossy(headers);
+        text.lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0)
+    }
+
+    fn write_response(stream: &mut TcpStream, response: ResponseSpec) {
+        if write!(
+            stream,
+            "HTTP/1.1 {} {}\r\nconnection: close\r\ncontent-length: {}\r\n",
+            response.status,
+            status_reason(response.status),
+            response.body.len()
+        )
+        .is_err()
+        {
+            return;
+        }
+        for (name, value) in response.headers {
+            if write!(stream, "{name}: {value}\r\n").is_err() {
+                return;
+            }
+        }
+        let _ = write!(stream, "\r\n{}", response.body);
+    }
+
+    const fn status_reason(status: u16) -> &'static str {
+        match status {
+            200 => "OK",
+            401 => "Unauthorized",
+            429 => "Too Many Requests",
+            _ => "Status",
+        }
+    }
 
     #[test]
     fn client_creation() {
@@ -566,35 +745,30 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn health_check_success() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/me"))
-            .and(header("Circle-Token", "test_token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "u1"})))
-            .mount(&mock_server)
-            .await;
+        let fixture = LoopbackFixture::start(vec![ResponseSpec::json(200, r#"{"id":"u1"}"#)]);
 
         let client = CircleCiClient::new(
-            &mock_server.uri(),
+            fixture.base_url(),
             "test_token",
             HttpRetryConfig::default(),
             30_000,
         )
         .unwrap();
         assert!(client.health_check().await.is_ok());
+        let observations = fixture.join();
+        assert_eq!(observations[0].request_line, "GET /me HTTP/1.1");
+        assert_eq!(
+            observations[0].header_value("circle-token"),
+            Some("test_token")
+        );
     }
 
     #[fcp_async_core::runtime::test]
     async fn health_check_unauthorized() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/me"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&mock_server)
-            .await;
+        let fixture = LoopbackFixture::start(vec![ResponseSpec::json(401, "")]);
 
         let client = CircleCiClient::new(
-            &mock_server.uri(),
+            fixture.base_url(),
             "bad_token",
             HttpRetryConfig::default(),
             30_000,
@@ -602,19 +776,20 @@ mod tests {
         .unwrap();
         let err = client.health_check().await.unwrap_err();
         assert!(matches!(err, Error::Unauthorized(_)));
+        let observations = fixture.join();
+        assert_eq!(observations[0].request_line, "GET /me HTTP/1.1");
     }
 
     #[fcp_async_core::runtime::test]
     async fn health_check_rate_limited() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/me"))
-            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "60"))
-            .mount(&mock_server)
-            .await;
+        let fixture = LoopbackFixture::start(vec![ResponseSpec::with_headers(
+            429,
+            &[("retry-after", "60")],
+            "",
+        )]);
 
         let client = CircleCiClient::new(
-            &mock_server.uri(),
+            fixture.base_url(),
             "test_token",
             HttpRetryConfig::default(),
             30_000,
@@ -627,23 +802,17 @@ mod tests {
                 retry_after_ms: 60000
             }
         ));
+        let observations = fixture.join();
+        assert_eq!(observations[0].request_line, "GET /me HTTP/1.1");
     }
 
     #[fcp_async_core::runtime::test]
     async fn health_check_respects_configured_timeout() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/me"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_delay(Duration::from_millis(250))
-                    .set_body_json(serde_json::json!({"id": "u1"})),
-            )
-            .mount(&mock_server)
-            .await;
+        let fixture =
+            LoopbackFixture::start(vec![ResponseSpec::delayed_json(200, r#"{"id":"u1"}"#, 250)]);
 
         let client = CircleCiClient::new(
-            &mock_server.uri(),
+            fixture.base_url(),
             "test_token",
             HttpRetryConfig::default(),
             50,
@@ -651,5 +820,7 @@ mod tests {
         .unwrap();
         let err = client.health_check().await.unwrap_err();
         assert!(matches!(err, Error::Http(_)));
+        let observations = fixture.join();
+        assert_eq!(observations[0].request_line, "GET /me HTTP/1.1");
     }
 }

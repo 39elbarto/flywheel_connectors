@@ -145,6 +145,7 @@ The readiness closeout bead for this connector surface is `flywheel_connectors-j
   - `rch exec -- cargo check -p fcp-feishu --all-targets`
   - `rch exec -- cargo fmt --manifest-path connectors/feishu/Cargo.toml --check`
   - `rch exec -- cargo test -p fcp-feishu --test integration -- --nocapture`
+  - `rch exec -- cargo test -p fcp-feishu --test live_verification -- --nocapture`
   - `rch exec -- cargo test -p fcp-feishu -- --nocapture`
   - `rch exec -- cargo clippy -p fcp-feishu --all-targets -- -D warnings`
 
@@ -160,10 +161,12 @@ Prerequisites:
 - Use a disposable Feishu/Lark tenant app or a localhost mock server.
 - Grant the tenant app the scopes needed for the operations you plan to verify.
 - Keep one connector instance bound to one app credential pair and one production host boundary.
+- For gated live sandbox proof, set `FCP_LIVE_SANDBOX=1`, `FEISHU_SANDBOX_APP_ID`, `FEISHU_SANDBOX_APP_SECRET`, `FEISHU_SANDBOX_TENANT_KEY`, `FEISHU_SANDBOX_CHAT_ID`, and `FCP_SANDBOX_RUN_NAMESPACE`. `FEISHU_SANDBOX_BASE_URL` defaults to `https://open.feishu.cn`.
 
 Dedicated environment:
 
 - Never aim the verification bundle at a production chat where `feishu.messages.send` or `feishu.messages.reply` would cause operational harm.
+- The live sandbox suite sends one namespaced bot message to the dedicated sandbox chat after invalid-secret denial, tenant-token health, and chat metadata checks. Messages are treated as immutable provider artifacts; JSONL evidence hashes tenant, chat, namespace, and message identifiers and never logs raw content.
 
 Redaction rules:
 
@@ -186,5 +189,6 @@ Rerun commands:
 - `rch exec -- cargo check -p fcp-feishu --all-targets`
 - `rch exec -- cargo fmt --manifest-path connectors/feishu/Cargo.toml --check`
 - `rch exec -- cargo test -p fcp-feishu --test integration -- --nocapture`
+- `rch exec -- cargo test -p fcp-feishu --test live_verification -- --nocapture`
 - `rch exec -- cargo test -p fcp-feishu -- --nocapture`
 - `rch exec -- cargo clippy -p fcp-feishu --all-targets -- -D warnings`

@@ -14,6 +14,9 @@ use crate::{
     types::ApiErrorResponse,
 };
 
+const PULUMI_API_ACCEPT: &str = "application/vnd.pulumi+8";
+const PULUMI_API_CONTENT_TYPE: &str = "application/json";
+
 /// Validate a URL path segment to prevent path-traversal attacks.
 fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> PulumiResult<&'a str> {
     let trimmed = value.trim();
@@ -122,7 +125,7 @@ impl PulumiClient {
 
     fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
-            PulumiAuth::BearerToken(token) => req.bearer_auth(token),
+            PulumiAuth::BearerToken(token) => req.header("Authorization", format!("token {token}")),
             PulumiAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
         }
     }
@@ -181,7 +184,8 @@ impl PulumiClient {
         debug!(url = %redact_url(&url), "GET request");
         let mut req = self
             .add_auth(self.client.get(&url))
-            .header("Accept", "application/json");
+            .header("Accept", PULUMI_API_ACCEPT)
+            .header("Content-Type", PULUMI_API_CONTENT_TYPE);
         if let Some(q) = query {
             req = req.query(q);
         }
@@ -195,7 +199,8 @@ impl PulumiClient {
         debug!(url = %redact_url(&url), "POST request");
         let req = self
             .add_auth(self.client.post(&url))
-            .header("Accept", "application/json")
+            .header("Accept", PULUMI_API_ACCEPT)
+            .header("Content-Type", PULUMI_API_CONTENT_TYPE)
             .json(body);
         let resp = req.send().await?;
         self.handle_response(resp).await
@@ -207,7 +212,8 @@ impl PulumiClient {
         debug!(url = %redact_url(&url), "DELETE request");
         let req = self
             .add_auth(self.client.delete(&url))
-            .header("Accept", "application/json");
+            .header("Accept", PULUMI_API_ACCEPT)
+            .header("Content-Type", PULUMI_API_CONTENT_TYPE);
         let resp = req.send().await?;
         self.handle_response(resp).await
     }

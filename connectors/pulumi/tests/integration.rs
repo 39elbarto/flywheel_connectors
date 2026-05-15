@@ -89,7 +89,9 @@ async fn stacks_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex("/stacks.*"))
-        .and(header("Authorization", "Bearer pul-test-token"))
+        .and(header("Authorization", "token pul-test-token"))
+        .and(header("Accept", "application/vnd.pulumi+8"))
+        .and(header("Content-Type", "application/json"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "stacks": [
                 {"orgName": "myorg", "projectName": "proj1", "stackName": "dev"},

@@ -32,6 +32,8 @@ anyhow.workspace = true
 base64.workspace = true
 
 [dev-dependencies]
+chrono.workspace = true
+ciborium.workspace = true
 fcp-crypto.workspace = true
 fcp-testkit.workspace = true
 jsonschema.workspace = true

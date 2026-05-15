@@ -196,10 +196,21 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 There is no dedicated tracked `scripts/e2e/intercom_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
 
+`connectors/intercom/tests/live_verification.rs` uses `EnvironmentManifest::sandbox(...)` with this environment contract:
+
+- Required gate: `FCP_LIVE_SANDBOX=1`.
+- Required secret: `INTERCOM_SANDBOX_TOKEN`.
+- Required non-secrets: `INTERCOM_SANDBOX_WORKSPACE_ID`, `FCP_SANDBOX_RUN_NAMESPACE`.
+- Defaulted endpoint: `INTERCOM_SANDBOX_BASE_URL=https://api.intercom.io`.
+- Live flow: `intercom.contacts.list`, then one namespaced synthetic `intercom.contacts.create`, then `intercom.contacts.delete` for the created contact.
+- JSONL prefix: `INTERCOM_LIVE_SANDBOX_JSONL`.
+- Redaction: the suite does not log the token, workspace id, synthetic contact email, created contact id, base URL, or raw provider payload.
+
 The verification surface captures:
 
 - runtime operation inventory and policy metadata
 - deterministic WireMock coverage for Intercom REST paths
+- sandbox live verification for one read/list plus one create/delete cleanup pair
 - auth, endpoint policy, provider error, lifecycle, simulation, introspection, self-check, and doctor coverage
 - destructive-delete capability and path-segment hardening regressions
 - formatting, check, test, and clippy proof through `rch`
@@ -215,7 +226,7 @@ The verification surface captures:
 
 **Dedicated environment**:
 
-- Keep live contacts synthetic and clearly marked as test data.
+- Keep live contacts synthetic and clearly marked as test data. The live verification suite creates one `fcp-sandbox-...@example.com` contact and deletes the provider-assigned contact id before passing.
 - Avoid deleting real customer contacts.
 - Use conversation replies only in disposable conversations or internal test workspaces.
 - Provide explicit `admin_id` for conversation replies instead of relying on the runtime default.
@@ -232,6 +243,7 @@ The verification surface captures:
 - If self-check reports `credential_injection_required`, use direct token mode or wire host-side injection.
 - If contact delete rejects `contact_id`, use the Intercom-assigned ASCII ID and avoid emails, external IDs with punctuation, slashes, dots, or query characters.
 - If `contacts.list` does not honor a `query` object, use the implemented pagination fields only; contact search is not in this runtime slice.
+- If the live suite fails after contact creation, inspect the `cleanup_result` field in `INTERCOM_LIVE_SANDBOX_JSONL`; it reports whether cleanup did not start or delete failed without logging the contact id.
 - If conversation reply fails, provide `conversation_id`, `body`, `message_type`, and a valid `admin_id` for live Intercom calls.
 - If `simulate` allows an operation but policy should deny it, remember that current simulation only checks operation ID.
 

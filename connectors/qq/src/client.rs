@@ -1144,7 +1144,6 @@ mod tests {
             .or_else(|| response.body_text.map(str::to_string))
             .unwrap_or_default();
         let reason = match response.status {
-            200 => "OK",
             401 => "Unauthorized",
             429 => "Too Many Requests",
             500 => "Internal Server Error",
@@ -1400,7 +1399,7 @@ mod tests {
             }),
         )]);
 
-        let client = QqClient::new(test_config(&api_server.uri(), &token_server.uri())).unwrap();
+        let client = QqClient::new(test_config(api_server.uri(), token_server.uri())).unwrap();
         let output = client
             .api_request(
                 reqwest::Method::POST,
@@ -1436,7 +1435,7 @@ mod tests {
             }),
         )]);
 
-        let client = QqClient::new(test_config(&api_server.uri(), &token_server.uri())).unwrap();
+        let client = QqClient::new(test_config(api_server.uri(), token_server.uri())).unwrap();
         let output = client
             .api_request(reqwest::Method::GET, "/gateway", None)
             .await
@@ -1463,7 +1462,7 @@ mod tests {
             }),
         )]);
 
-        let client = QqClient::new(test_config(&api_server.uri(), &token_server.uri())).unwrap();
+        let client = QqClient::new(test_config(api_server.uri(), token_server.uri())).unwrap();
         let err = client
             .api_request(reqwest::Method::GET, "/gateway", None)
             .await
@@ -1482,7 +1481,7 @@ mod tests {
         )]);
 
         let client =
-            QqClient::new(test_config("http://localhost:9999", &token_server.uri())).unwrap();
+            QqClient::new(test_config("http://localhost:9999", token_server.uri())).unwrap();
         let err = client.access_token().await.unwrap_err();
         match err {
             QqError::Unauthorized(message) => {
@@ -1511,7 +1510,7 @@ mod tests {
             }),
         )]);
 
-        let client = QqClient::new(test_config(&api_server.uri(), &token_server.uri())).unwrap();
+        let client = QqClient::new(test_config(api_server.uri(), token_server.uri())).unwrap();
         let err = client
             .api_request(reqwest::Method::GET, "/gateway", None)
             .await
@@ -1554,7 +1553,7 @@ mod tests {
             }),
         )]);
 
-        let client = QqClient::new(test_config(&api_server.uri(), &token_server.uri())).unwrap();
+        let client = QqClient::new(test_config(api_server.uri(), token_server.uri())).unwrap();
 
         // First call fetches token
         let _ = client

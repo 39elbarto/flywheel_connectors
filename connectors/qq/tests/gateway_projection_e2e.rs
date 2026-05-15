@@ -454,6 +454,74 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         &missing_binding,
     );
 
+    let missing_message_id = invoke_projection(
+        &binding_connector,
+        &signing_key,
+        &binding_instance_id,
+        "qq-gateway-missing-message-id",
+        json!({
+            "op": 0,
+            "s": 2,
+            "t": "GROUP_AT_MESSAGE_CREATE",
+            "id": "evt-missing-message-id",
+            "d": {
+                "content": "event missing message id",
+                "group_openid": "group-binding",
+                "group_member_openid": "member-1"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(missing_message_id["accepted"], false);
+    assert_eq!(missing_message_id["reason_code"], "message_id_missing");
+    assert_eq!(
+        missing_message_id["policy"]["reason_code"],
+        "message_id_missing"
+    );
+    assert_eq!(missing_message_id["runtime"]["accepted_events"], 0);
+    assert_eq!(missing_message_id["runtime"]["queue_depth"], 0);
+    log_projection_step(
+        &mut logs,
+        "missing_message_identity_drop",
+        "ok",
+        &missing_message_id,
+    );
+
+    let missing_reply_target = invoke_projection(
+        &binding_connector,
+        &signing_key,
+        &binding_instance_id,
+        "qq-gateway-missing-reply-target",
+        json!({
+            "op": 0,
+            "s": 3,
+            "t": "GROUP_AT_MESSAGE_CREATE",
+            "id": "evt-missing-reply-target",
+            "d": {
+                "id": "msg-missing-reply-target",
+                "content": "bot-openid blank reply target",
+                "group_openid": "group-binding",
+                "group_member_openid": "member-1",
+                "message_reference": { "message_id": "   " }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(missing_reply_target["accepted"], false);
+    assert_eq!(missing_reply_target["reason_code"], "reply_target_missing");
+    assert_eq!(
+        missing_reply_target["policy"]["reason_code"],
+        "reply_target_missing"
+    );
+    assert_eq!(missing_reply_target["runtime"]["accepted_events"], 0);
+    assert_eq!(missing_reply_target["runtime"]["queue_depth"], 0);
+    log_projection_step(
+        &mut logs,
+        "missing_reply_target_drop",
+        "ok",
+        &missing_reply_target,
+    );
+
     let hello = invoke_projection(
         &connector,
         &signing_key,
@@ -724,6 +792,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-oversized-media",
         "evt-disabled",
         "evt-missing-binding",
+        "evt-missing-message-id",
+        "evt-missing-reply-target",
         "msg-accepted",
         "msg-untyped-message-id",
         "msg-structured-mention",
@@ -731,6 +801,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "msg-oversized-media",
         "msg-disabled",
         "msg-missing-binding",
+        "msg-missing-reply-target",
         "msg-root",
         "bot-openid",
         "group-allowed",
@@ -741,6 +812,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "Alice",
         "gateway disabled should not authorize",
         "event missing sender binding",
+        "event missing message id",
+        "blank reply target",
         "deploy status",
         "plain message",
         "not a mention segment",

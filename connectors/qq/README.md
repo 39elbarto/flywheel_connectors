@@ -128,6 +128,7 @@ When `policy.group_require_mention` is enabled, gateway projection treats `GROUP
 When `policy.max_attachment_bytes` is set, gateway projection denies message events whose declared attachment byte total exceeds the cap or whose attachment size metadata is missing.
 When `gateway.enabled` is false, `qq.gateway.project_event` fails closed with `gateway_disabled` and does not update session, sequence, heartbeat, policy, or queue state.
 Gateway projection also fails closed before authorization when the normalized event is missing the route binding required for its QQ delivery mode: `channel_id` and sender for channel events, `group_openid` and sender for group events, and sender for C2C events.
+Events without a stable QQ message id, or replies whose `message_reference` does not carry a usable target message id, are dropped before authorization so fan-out and reply tracking never rely on unbound message identity.
 
 ## Chat Coordination Configuration
 

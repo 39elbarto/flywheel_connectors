@@ -531,6 +531,18 @@ pub fn evaluate_inbound_policy(
 }
 
 fn missing_route_binding_reason(event: &NormalizedQqEvent) -> Option<&'static str> {
+    if is_blank(event.message_id.as_deref()) {
+        return Some("message_id_missing");
+    }
+    if event
+        .raw
+        .get("message_reference")
+        .is_some_and(|reference| !reference.is_null())
+        && is_blank(event.reply_to.as_deref())
+    {
+        return Some("reply_target_missing");
+    }
+
     match event.routing {
         QqRouting::Channel => {
             if is_blank(event.channel_id.as_deref()) {
@@ -2368,6 +2380,67 @@ mod tests {
         assert_eq!(c2c_missing_sender.reason_code, "c2c_sender_missing");
         assert_eq!(c2c_missing_sender.runtime.accepted_events, 0);
         assert_eq!(c2c_missing_sender.runtime.queue_depth, 0);
+    }
+
+    #[test]
+    fn gateway_runtime_rejects_messages_missing_identity_bindings() {
+        let mut config = QqGatewayRuntimeConfig {
+            enabled: true,
+            max_queue_depth: 8,
+            ..QqGatewayRuntimeConfig::default()
+        };
+        config.policy.group_require_mention = false;
+        let mut runtime = QqGatewayRuntime::new(config);
+
+        let missing_message_id = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "content": "message without stable id",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1"
+                })),
+                id: Some("evt-no-message-id".into()),
+            })
+            .unwrap();
+        assert!(!missing_message_id.accepted);
+        assert_eq!(missing_message_id.reason_code, "message_id_missing");
+        assert_eq!(
+            missing_message_id
+                .policy
+                .as_ref()
+                .map(|policy| policy.reason_code),
+            Some("message_id_missing")
+        );
+
+        let blank_reply_target = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(2),
+                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-blank-reply",
+                    "content": "reply without target id",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1",
+                    "message_reference": {"message_id": "   "}
+                })),
+                id: Some("evt-blank-reply".into()),
+            })
+            .unwrap();
+        assert!(!blank_reply_target.accepted);
+        assert_eq!(blank_reply_target.reason_code, "reply_target_missing");
+        assert_eq!(
+            blank_reply_target
+                .policy
+                .as_ref()
+                .map(|policy| policy.reason_code),
+            Some("reply_target_missing")
+        );
+        assert_eq!(blank_reply_target.runtime.accepted_events, 0);
+        assert_eq!(blank_reply_target.runtime.queue_depth, 0);
     }
 
     #[test]

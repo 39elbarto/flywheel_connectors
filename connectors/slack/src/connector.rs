@@ -3612,8 +3612,9 @@ mod tests {
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_prelude::CapabilityConstraints;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
 
     #[test]
     fn validate_slack_base_url_accepts_slack_com() {
@@ -3680,6 +3681,120 @@ mod tests {
         F: std::future::Future<Output = T>,
     {
         fcp_async_core::runtime::block_on_sync(future).expect("build sync test runtime")
+    }
+
+    struct LoopbackHttpResponse {
+        status: u16,
+        headers: Vec<(&'static str, &'static str)>,
+        body: Vec<u8>,
+    }
+
+    impl LoopbackHttpResponse {
+        #[must_use]
+        fn json(status: u16, body: &serde_json::Value) -> Self {
+            Self {
+                status,
+                headers: vec![("content-type", "application/json")],
+                body: body.to_string().into_bytes(),
+            }
+        }
+
+        #[must_use]
+        fn with_header(mut self, name: &'static str, value: &'static str) -> Self {
+            self.headers.push((name, value));
+            self
+        }
+    }
+
+    struct LoopbackHttpServer {
+        base_url: String,
+        _join: JoinHandle<()>,
+    }
+
+    impl LoopbackHttpServer {
+        fn auth_test(response: LoopbackHttpResponse) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback HTTP listener");
+            let addr = listener
+                .local_addr()
+                .expect("loopback HTTP listener address");
+            let join = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept loopback HTTP request");
+                handle_auth_test_request(&mut stream, &response);
+            });
+
+            Self {
+                base_url: format!("http://{addr}"),
+                _join: join,
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.base_url
+        }
+    }
+
+    fn handle_auth_test_request(stream: &mut TcpStream, response: &LoopbackHttpResponse) {
+        let mut reader = BufReader::new(stream.try_clone().expect("clone loopback HTTP stream"));
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .expect("read loopback HTTP request line");
+        let mut parts = request_line.split_whitespace();
+        assert_eq!(parts.next(), Some("POST"));
+        assert_eq!(parts.next(), Some("/auth.test"));
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .expect("read loopback HTTP header");
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.trim().eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse().expect("parse content-length");
+                }
+            }
+        }
+
+        if content_length > 0 {
+            let mut body = vec![0u8; content_length];
+            reader
+                .read_exact(&mut body)
+                .expect("read loopback HTTP request body");
+        }
+
+        write_loopback_response(stream, response);
+    }
+
+    fn write_loopback_response(stream: &mut TcpStream, response: &LoopbackHttpResponse) {
+        let reason = match response.status {
+            200 => "OK",
+            401 => "Unauthorized",
+            429 => "Too Many Requests",
+            _ => "OK",
+        };
+        let mut raw = format!(
+            "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            response.status,
+            reason,
+            response.body.len()
+        );
+        for (name, value) in &response.headers {
+            raw.push_str(name);
+            raw.push_str(": ");
+            raw.push_str(value);
+            raw.push_str("\r\n");
+        }
+        raw.push_str("\r\n");
+        stream
+            .write_all(raw.as_bytes())
+            .expect("write loopback HTTP response headers");
+        stream
+            .write_all(&response.body)
+            .expect("write loopback HTTP response body");
     }
 
     fn generate_valid_token(
@@ -4275,38 +4390,32 @@ mod tests {
 
     #[test]
     fn test_doctor_valid_token_all_scopes() {
-        // ubs:ignore - static wiremock response headers are configured inside this test
         run_with_test_runtime(async {
-            let mock_server = MockServer::start().await;
-
-            Mock::given(method("POST"))
-                .and(path("/auth.test"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        // ubs:ignore - static wiremock response header, not request-derived input
-                        .insert_header(
-                            "x-oauth-scopes",
-                            "channels:read,channels:history,chat:write,users:read,reactions:write",
-                        )
-                        .set_body_json(json!({
-                            "ok": true,
-                            "url": "https://test-workspace.slack.com/",
-                            "team": "Test Workspace",
-                            "user": "testbot",
-                            "team_id": "T00000001",
-                            "user_id": "U00000001",
-                            "bot_id": "B00000001",
-                            "is_enterprise_install": false
-                        })),
+            let server = LoopbackHttpServer::auth_test(
+                LoopbackHttpResponse::json(
+                    200,
+                    &json!({
+                        "ok": true,
+                        "url": "https://test-workspace.slack.com/",
+                        "team": "Test Workspace",
+                        "user": "testbot",
+                        "team_id": "T00000001",
+                        "user_id": "U00000001",
+                        "bot_id": "B00000001",
+                        "is_enterprise_install": false
+                    }),
                 )
-                .mount(&mock_server)
-                .await;
+                .with_header(
+                    "x-oauth-scopes",
+                    "channels:read,channels:history,chat:write,users:read,reactions:write",
+                ),
+            );
 
             let mut connector = SlackConnector::new();
             connector.client = Some(
                 SlackClient::new("xoxb-test-token")
                     .unwrap()
-                    .with_base_url(mock_server.uri()),
+                    .with_base_url(server.uri()),
             );
 
             let result = connector.handle_doctor().await.unwrap();
@@ -4328,33 +4437,27 @@ mod tests {
 
     #[test]
     fn test_doctor_missing_scopes() {
-        // ubs:ignore - static wiremock response headers are configured inside this test
         run_with_test_runtime(async {
-            let mock_server = MockServer::start().await;
-
-            Mock::given(method("POST"))
-                .and(path("/auth.test"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        // ubs:ignore - static wiremock response header, not request-derived input
-                        .insert_header("x-oauth-scopes", "channels:read")
-                        .set_body_json(json!({
-                            "ok": true,
-                            "url": "https://test.slack.com/",
-                            "team": "Test",
-                            "user": "bot",
-                            "team_id": "T1",
-                            "user_id": "U1"
-                        })),
+            let server = LoopbackHttpServer::auth_test(
+                LoopbackHttpResponse::json(
+                    200,
+                    &json!({
+                        "ok": true,
+                        "url": "https://test.slack.com/",
+                        "team": "Test",
+                        "user": "bot",
+                        "team_id": "T1",
+                        "user_id": "U1"
+                    }),
                 )
-                .mount(&mock_server)
-                .await;
+                .with_header("x-oauth-scopes", "channels:read"),
+            );
 
             let mut connector = SlackConnector::new();
             connector.client = Some(
                 SlackClient::new("xoxb-test")
                     .unwrap()
-                    .with_base_url(mock_server.uri()),
+                    .with_base_url(server.uri()),
             );
 
             let result = connector.handle_doctor().await.unwrap();
@@ -4374,22 +4477,19 @@ mod tests {
     #[test]
     fn test_doctor_invalid_token() {
         run_with_test_runtime(async {
-            let mock_server = MockServer::start().await;
-
-            Mock::given(method("POST"))
-                .and(path("/auth.test"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            let server = LoopbackHttpServer::auth_test(LoopbackHttpResponse::json(
+                200,
+                &json!({
                     "ok": false,
                     "error": "invalid_auth"
-                })))
-                .mount(&mock_server)
-                .await;
+                }),
+            ));
 
             let mut connector = SlackConnector::new();
             connector.client = Some(
                 SlackClient::new("xoxb-bad-token")
                     .unwrap()
-                    .with_base_url(mock_server.uri()),
+                    .with_base_url(server.uri()),
             );
 
             let result = connector.handle_doctor().await.unwrap();
@@ -5692,27 +5792,30 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_self_check_with_valid_token() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/auth.test"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "ok": true,
-                "url": "https://test.slack.com/",
-                "team": "Test Team",
-                "user": "testbot",
-                "team_id": "T123",
-                "user_id": "U123",
-                "bot_id": "B123"
-            })).insert_header("x-oauth-scopes", "chat:write,channels:read,channels:history,users:read,reactions:write,team:read"))
-            .mount(&mock_server)
-            .await;
+        let server = LoopbackHttpServer::auth_test(
+            LoopbackHttpResponse::json(
+                200,
+                &json!({
+                    "ok": true,
+                    "url": "https://test.slack.com/",
+                    "team": "Test Team",
+                    "user": "testbot",
+                    "team_id": "T123",
+                    "user_id": "U123",
+                    "bot_id": "B123"
+                }),
+            )
+            .with_header(
+                "x-oauth-scopes",
+                "chat:write,channels:read,channels:history,users:read,reactions:write,team:read",
+            ),
+        );
 
         let mut connector = SlackConnector::new();
         connector.client = Some(
             SlackClient::new("xoxb-test")
                 .unwrap()
-                .with_base_url(mock_server.uri()),
+                .with_base_url(server.uri()),
         );
         connector.base.set_configured(true);
 

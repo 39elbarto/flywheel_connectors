@@ -5629,6 +5629,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "ciborium",
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",

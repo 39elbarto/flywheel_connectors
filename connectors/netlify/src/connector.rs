@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
+    HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId, Introspection, InvokeRequest,
     InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
     UnsubscribeRequest,
@@ -229,6 +229,11 @@ impl NetlifyConnector {
             started_at: Instant::now(),
             verifier: None,
         }
+    }
+
+    #[must_use]
+    pub fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
     }
 
     fn manifest_hash() -> String {

@@ -15,8 +15,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use fcp_evidence::{
-    ClaimId, ClaimNode, ClaimStatus, EvidenceKind, EvidenceNode, ProofGapStatus, ProofGraph,
-    ProofGraphCorpus, ProofGraphIndexer, RerunCommand, SupportEdge, SupportRelationship,
+    ClaimId, ClaimNode, ClaimStatus, EvidenceKind, EvidenceNode, ObservedProofArtifact,
+    ProofBundleRegistry, ProofBundleValidationReport, ProofBundleValidator, ProofGapStatus,
+    ProofGraph, ProofGraphCorpus, ProofGraphIndexer, ProofValidationStatus, RerunCommand,
+    SupportEdge, SupportRelationship,
 };
 use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use serde::Serialize;
@@ -48,6 +50,8 @@ pub enum ProofCommand {
     Run(ProofRunArgs),
     /// Generate connector capability passports from manifests and proof state.
     Passport(ProofPassportArgs),
+    /// Validate proof-bundle freshness and artifact status as deterministic JSON.
+    Status(ProofStatusArgs),
 }
 
 /// Shared corpus loader arguments.
@@ -121,6 +125,22 @@ pub struct ProofPassportArgs {
     /// Optional connector selector. Matches manifest slug, connector id, or name.
     #[arg(long, value_name = "CONNECTOR")]
     pub connector: Option<String>,
+}
+
+/// Arguments for `fwc proof status`.
+#[derive(Args, Debug, Clone, Serialize)]
+pub struct ProofStatusArgs {
+    /// Structured `ProofBundleRegistry` JSON file.
+    #[arg(long, value_name = "PATH")]
+    pub registry: PathBuf,
+
+    /// Optional observed artifact catalog JSON keyed by artifact path.
+    #[arg(long = "artifacts", value_name = "PATH")]
+    pub artifacts: Option<PathBuf>,
+
+    /// Evaluation time in Unix milliseconds. Defaults to the current clock.
+    #[arg(long = "now-unix-ms")]
+    pub now_unix_ms: Option<u64>,
 }
 
 /// Structured result returned to the main dispatcher.
@@ -359,6 +379,7 @@ pub fn run(args: &ProofArgs) -> Result<ProofCommandResult> {
         ProofCommand::Explain(args) => explain(args),
         ProofCommand::Run(args) => run_known_command(args),
         ProofCommand::Passport(args) => passport(args),
+        ProofCommand::Status(args) => status(args),
     }
 }
 
@@ -556,6 +577,40 @@ fn passport(args: &ProofPassportArgs) -> Result<ProofCommandResult> {
     Ok(ok(payload))
 }
 
+fn status(args: &ProofStatusArgs) -> Result<ProofCommandResult> {
+    let registry = load_registry(&args.registry)?;
+    let observed_artifacts = load_observed_artifacts(args.artifacts.as_deref())?;
+    let now_unix_ms = args.now_unix_ms.unwrap_or_else(current_unix_ms);
+    let report = ProofBundleValidator::new(now_unix_ms).validate(&registry, &observed_artifacts);
+    let counts = proof_status_counts(&report);
+    let proof_rows = proof_status_rows(&registry, &report, &observed_artifacts);
+    let success = report.status == ProofValidationStatus::Green;
+    let mut payload = json!({
+        "status": if success { "ok" } else { "error" },
+        "command": "proof",
+        "subcommand": "status",
+        "schema_version": "fcp.proof-bundle-status.v1",
+        "source": {
+            "registry": args.registry.display().to_string(),
+            "artifacts": args.artifacts.as_ref().map(|path| path.display().to_string()),
+        },
+        "now_unix_ms": now_unix_ms,
+        "proof_status": report.status,
+        "aggregate_counts": counts,
+        "proofs": proof_rows,
+        "next_actions": [
+            "Re-run stale or missing proof rows using the recorded rerun argv.",
+            "Treat infra_blocked rows as infrastructure evidence, not proof failure.",
+            "Do not count replay, static, offline, or structured-skip rows as green live proof."
+        ],
+    });
+    insert_toon(
+        &mut payload,
+        "Validated proof-bundle freshness without executing rerun commands.",
+    );
+    Ok(ProofCommandResult { payload, success })
+}
+
 fn load_graph(args: &ProofCorpusArgs) -> Result<LoadedProofGraph> {
     let file = File::open(&args.corpus)
         .with_context(|| format!("opening ProofGraph corpus `{}`", args.corpus.display()))?;
@@ -572,6 +627,23 @@ fn load_graph(args: &ProofCorpusArgs) -> Result<LoadedProofGraph> {
     })
 }
 
+fn load_registry(path: &Path) -> Result<ProofBundleRegistry> {
+    let file = File::open(path)
+        .with_context(|| format!("opening proof-bundle registry `{}`", path.display()))?;
+    serde_json::from_reader(file)
+        .with_context(|| format!("parsing proof-bundle registry `{}`", path.display()))
+}
+
+fn load_observed_artifacts(path: Option<&Path>) -> Result<BTreeMap<String, ObservedProofArtifact>> {
+    let Some(path) = path else {
+        return Ok(BTreeMap::new());
+    };
+    let file = File::open(path)
+        .with_context(|| format!("opening proof artifact catalog `{}`", path.display()))?;
+    serde_json::from_reader(file)
+        .with_context(|| format!("parsing proof artifact catalog `{}`", path.display()))
+}
+
 fn load_passport_manifests(paths: &[PathBuf]) -> Result<Vec<LoadedManifest>> {
     paths
         .iter()
@@ -583,6 +655,78 @@ fn load_passport_manifests(paths: &[PathBuf]) -> Result<Vec<LoadedManifest>> {
             Ok(LoadedManifest {
                 path: path.clone(),
                 manifest,
+            })
+        })
+        .collect()
+}
+
+fn proof_status_counts(report: &ProofBundleValidationReport) -> Value {
+    let mut green = 0usize;
+    let mut yellow = 0usize;
+    let mut red = 0usize;
+    let mut infra_blocked = 0usize;
+    for row in &report.proofs {
+        match row.status {
+            ProofValidationStatus::Green => green += 1,
+            ProofValidationStatus::Yellow => yellow += 1,
+            ProofValidationStatus::Red => red += 1,
+            ProofValidationStatus::InfraBlocked => infra_blocked += 1,
+        }
+    }
+    json!({
+        "total": report.proofs.len(),
+        "green": green,
+        "yellow": yellow,
+        "red": red,
+        "infra_blocked": infra_blocked,
+    })
+}
+
+fn proof_status_rows(
+    registry: &ProofBundleRegistry,
+    report: &ProofBundleValidationReport,
+    observed_artifacts: &BTreeMap<String, ObservedProofArtifact>,
+) -> Vec<Value> {
+    report
+        .proofs
+        .iter()
+        .map(|row| {
+            let entry = registry
+                .proofs
+                .iter()
+                .find(|proof| proof.proof_id == row.proof_id);
+            json!({
+                "proof_id": row.proof_id,
+                "status": row.status,
+                "reason_code": row.reason_code,
+                "detail": row.detail,
+                "owning_bead": row.owning_bead,
+                "proof_class": row.proof_class,
+                "source_document": row.source_document,
+                "generated_at_unix_ms": entry.map(|proof| proof.generated_at_unix_ms),
+                "git_revision_under_test": entry.map(|proof| proof.git_revision_under_test.as_str()),
+                "freshness_window": row.freshness,
+                "rerun": entry.map_or_else(
+                    || json!({ "argv": row.rerun_argv }),
+                    |proof| json!(proof.rerun)
+                ),
+                "artifacts": entry.map_or_else(Vec::new, |proof| {
+                    proof.expected_artifacts
+                        .iter()
+                        .map(|expected| {
+                            let observed = observed_artifacts.get(&expected.path);
+                            json!({
+                                "path": expected.path,
+                                "kind": expected.kind,
+                                "required": expected.required,
+                                "expected_digest": expected.digest,
+                                "observed_exists": observed.is_some_and(|artifact| artifact.exists),
+                                "observed_digest": observed.and_then(|artifact| artifact.digest.as_ref()),
+                                "produced_by": expected.produced_by,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                }),
             })
         })
         .collect()
@@ -1937,6 +2081,7 @@ mod tests {
 
     const NOW: u64 = 1_750_000_000_000;
     const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+    const PROOF_DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     fn corpus_args(path: &Path) -> ProofCorpusArgs {
         ProofCorpusArgs {
@@ -2359,6 +2504,102 @@ output_schema = {{}}
         file
     }
 
+    fn write_value(value: &Value) -> NamedTempFile {
+        let file = NamedTempFile::new().expect("create temp json");
+        let bytes = serde_json::to_vec_pretty(value).expect("serialize json");
+        std::fs::write(file.path(), bytes).expect("write json");
+        file
+    }
+
+    fn proof_status_registry(
+        proof_class: &str,
+        verifier_result: &str,
+        live_claim: bool,
+        structured_skip: Option<Value>,
+    ) -> Value {
+        let mut proof = json!({
+            "proof_id": "proof.live.fresh",
+            "owning_bead": "flywheel_connectors-8fhsm.3",
+            "claim_text": "Fresh proof-bundle status is available",
+            "source_document": {
+                "source_id": "proof-fixture",
+                "section": "Fixture",
+                "row_label": "fresh"
+            },
+            "proof_class": proof_class,
+            "rerun": {
+                "argv": ["cargo", "test", "-p", "fcp-evidence"],
+                "working_dir": ".",
+                "requires_rch": true,
+                "required_env_keys": [],
+                "expected_exit_codes": [0]
+            },
+            "expected_artifacts": [{
+                "path": "artifacts/proof.json",
+                "kind": "manifest",
+                "required": true,
+                "digest": {
+                    "algorithm": "blake3",
+                    "value": PROOF_DIGEST
+                },
+                "produced_by": "tests"
+            }],
+            "git_revision_under_test": "abcdef0",
+            "generated_at_unix_ms": NOW,
+            "freshness_policy": {
+                "max_age_ms": DAY_MS,
+                "required_for_green": true,
+                "stale_action": "fail_closed"
+            },
+            "verifier": {
+                "command": {
+                    "argv": ["cargo", "test", "-p", "fcp-evidence"],
+                    "working_dir": ".",
+                    "requires_rch": true,
+                    "required_env_keys": [],
+                    "expected_exit_codes": [0]
+                },
+                "result": verifier_result,
+                "observed_at_unix_ms": NOW,
+                "log_path": "target/proof/status.log",
+                "live_claim": live_claim
+            },
+            "redaction": {
+                "classification": "public"
+            }
+        });
+        if let Some(skip) = structured_skip {
+            proof["structured_skip"] = skip;
+        }
+        json!({
+            "schema": "fcp.proof-bundle-registry.v1",
+            "registry_id": "proof-status-fixture",
+            "generated_at_unix_ms": NOW,
+            "sources": [{
+                "source_id": "proof-fixture",
+                "path": "fixtures/proof-status.json",
+                "purpose": "Proof status command fixture",
+                "source_kind": "other",
+                "default_proof_class": proof_class,
+                "owning_bead": "flywheel_connectors-8fhsm.3"
+            }],
+            "proofs": [proof]
+        })
+    }
+
+    fn observed_artifact_catalog() -> Value {
+        json!({
+            "artifacts/proof.json": {
+                "path": "artifacts/proof.json",
+                "exists": true,
+                "digest": {
+                    "algorithm": "blake3",
+                    "value": PROOF_DIGEST
+                }
+            }
+        })
+    }
+
     fn write_manifest(raw: &str) -> NamedTempFile {
         let file = NamedTempFile::new().expect("create temp manifest");
         std::fs::write(file.path(), raw).expect("write manifest");
@@ -2516,6 +2757,94 @@ related = []
         assert_eq!(result.payload["status"], "ok");
         assert!(result.payload["graph"]["claims"]["claim:latency-proof"].is_object());
         assert_eq!(result.payload["summary"]["claims"], 2);
+    }
+
+    #[test]
+    fn status_outputs_json_counts_and_artifact_digests() {
+        let registry = write_value(&proof_status_registry("live", "passed", true, None));
+        let artifacts = write_value(&observed_artifact_catalog());
+
+        let result = run(&ProofArgs {
+            command: ProofCommand::Status(ProofStatusArgs {
+                registry: registry.path().to_path_buf(),
+                artifacts: Some(artifacts.path().to_path_buf()),
+                now_unix_ms: Some(NOW),
+            }),
+        })
+        .expect("run proof status");
+
+        assert!(result.success);
+        assert_eq!(result.payload["status"], "ok");
+        assert_eq!(result.payload["subcommand"], "status");
+        assert_eq!(result.payload["aggregate_counts"]["green"], 1);
+        assert_eq!(result.payload["aggregate_counts"]["red"], 0);
+        assert_eq!(result.payload["proofs"][0]["status"], "green");
+        assert_eq!(
+            result.payload["proofs"][0]["artifacts"][0]["expected_digest"]["value"],
+            PROOF_DIGEST
+        );
+        assert_eq!(
+            result.payload["proofs"][0]["artifacts"][0]["observed_digest"]["value"],
+            PROOF_DIGEST
+        );
+        assert_redaction_safe(&result.payload);
+    }
+
+    #[test]
+    fn status_keeps_structured_skip_reviewable_but_non_green() {
+        let registry = write_value(&proof_status_registry(
+            "structured_skip",
+            "skipped",
+            false,
+            Some(json!({
+                "allowed": true,
+                "reason_code": "missing_live_fixture",
+                "evidence_path": "target/proof/skip.json"
+            })),
+        ));
+        let artifacts = write_value(&observed_artifact_catalog());
+
+        let result = run(&ProofArgs {
+            command: ProofCommand::Status(ProofStatusArgs {
+                registry: registry.path().to_path_buf(),
+                artifacts: Some(artifacts.path().to_path_buf()),
+                now_unix_ms: Some(NOW),
+            }),
+        })
+        .expect("run proof status");
+
+        assert!(!result.success);
+        assert_eq!(result.payload["aggregate_counts"]["green"], 0);
+        assert_eq!(result.payload["aggregate_counts"]["yellow"], 1);
+        assert_eq!(
+            result.payload["proofs"][0]["reason_code"],
+            "structured_skip_non_green"
+        );
+    }
+
+    #[test]
+    fn status_keeps_infra_blocked_separate_from_green_and_red() {
+        let registry = write_value(&proof_status_registry("host_backed", "blocked", true, None));
+        let artifacts = write_value(&observed_artifact_catalog());
+
+        let result = run(&ProofArgs {
+            command: ProofCommand::Status(ProofStatusArgs {
+                registry: registry.path().to_path_buf(),
+                artifacts: Some(artifacts.path().to_path_buf()),
+                now_unix_ms: Some(NOW),
+            }),
+        })
+        .expect("run proof status");
+
+        assert!(!result.success);
+        assert_eq!(result.payload["aggregate_counts"]["green"], 0);
+        assert_eq!(result.payload["aggregate_counts"]["red"], 0);
+        assert_eq!(result.payload["aggregate_counts"]["infra_blocked"], 1);
+        assert_eq!(result.payload["proofs"][0]["status"], "infra_blocked");
+        assert_eq!(
+            result.payload["proofs"][0]["reason_code"],
+            "verifier_infra_blocked"
+        );
     }
 
     #[test]

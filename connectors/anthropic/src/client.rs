@@ -880,20 +880,175 @@ mod tests {
     use super::*;
     use fcp_testkit::LogCapture;
     use futures_util::stream;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path},
-    };
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration as StdDuration, Instant as StdInstant};
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: serde_json::Value,
+        required_headers: Vec<(&'static str, &'static str)>,
+    }
+
+    struct TestHttpServer {
+        url: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestHttpResponse {
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body,
+                required_headers: Vec::new(),
+            }
+        }
+
+        fn with_required_header(mut self, name: &'static str, value: &'static str) -> Self {
+            self.required_headers.push((name, value));
+            self
+        }
+    }
+
+    impl TestHttpServer {
+        fn respond(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let handle = thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                for response in responses {
+                    let stream = accept_test_connection(&listener);
+                    handle_test_request(stream, &response);
+                }
+            });
+            Self {
+                url,
+                handle: Some(handle),
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.url
+        }
+    }
+
+    impl Drop for TestHttpServer {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                if thread::panicking() {
+                    let _ = handle.join();
+                } else {
+                    handle.join().unwrap();
+                }
+            }
+        }
+    }
+
+    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+        let deadline = StdInstant::now() + StdDuration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    return stream;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        StdInstant::now() < deadline,
+                        "test server did not receive expected request"
+                    );
+                    thread::sleep(StdDuration::from_millis(10));
+                }
+                Err(err) => panic!("test listener failed: {err}"),
+            }
+        }
+    }
+
+    fn handle_test_request(stream: TcpStream, response: &TestHttpResponse) {
+        stream
+            .set_read_timeout(Some(StdDuration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        assert_eq!(request_parts.next(), Some(response.method));
+        let actual_path = request_parts
+            .next()
+            .and_then(|path| path.split('?').next())
+            .unwrap_or_default();
+        assert_eq!(actual_path, response.path);
+
+        let mut content_length = 0usize;
+        let mut required_headers_seen = vec![false; response.required_headers.len()];
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse().unwrap();
+                }
+                for (index, (required_name, required_value)) in
+                    response.required_headers.iter().enumerate()
+                {
+                    if name.eq_ignore_ascii_case(required_name) && value.trim() == *required_value {
+                        required_headers_seen[index] = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            required_headers_seen.into_iter().all(|seen| seen),
+            "required header was not sent"
+        );
+        if content_length > 0 {
+            let mut request_body = vec![0u8; content_length];
+            reader.read_exact(&mut request_body).unwrap();
+        }
+
+        let mut stream = reader.into_inner();
+        let body = response.body.to_string();
+        let reason = match response.status {
+            200 => "OK",
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            429 => "Too Many Requests",
+            529 => "Overloaded",
+            _ => "OK",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{body}",
+            response.status,
+            reason,
+            body.len()
+        )
+        .unwrap();
+        stream.flush().unwrap();
+    }
 
     #[fcp_async_core::runtime::test]
     async fn test_chat_success() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .and(header("x-api-key", "test_key"))
-            .and(header("anthropic-version", DEFAULT_API_VERSION))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1/messages",
+                200,
+                serde_json::json!({
                 "id": "msg_123",
                 "type": "message",
                 "role": "assistant",
@@ -904,13 +1059,15 @@ mod tests {
                     "input_tokens": 10,
                     "output_tokens": 5
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+            .with_required_header("x-api-key", "test_key")
+            .with_required_header("anthropic-version", DEFAULT_API_VERSION),
+        ]);
 
         let client = AnthropicClient::new("test_key")
             .unwrap()
-            .with_base_url(mock_server.uri());
+            .with_base_url(server.uri());
 
         let response = client
             .chat(Model::ClaudeSonnet4, "Hi", None, 1024)
@@ -924,22 +1081,21 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_unauthorized() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/v1/messages",
+            401,
+            serde_json::json!({
                 "error": {
                     "type": "authentication_error",
                     "message": "Invalid API key"
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = AnthropicClient::new("bad_key")
             .unwrap()
-            .with_base_url(mock_server.uri())
+            .with_base_url(server.uri())
             .with_retry_config(1, 10, 100);
 
         let result = client.chat(Model::ClaudeSonnet4, "Hi", None, 1024).await;
@@ -953,23 +1109,22 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_rate_limited() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/v1/messages",
+            429,
+            serde_json::json!({
                 "error": {
                     "type": "rate_limit_error",
                     "message": "Rate limit exceeded"
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = AnthropicClient::new("test_key")
             .unwrap()
-            .with_base_url(mock_server.uri())
-            .with_retry_config(1, 10, 100);
+            .with_base_url(server.uri())
+            .with_retry_config(0, 10, 100);
 
         let result = client.chat(Model::ClaudeSonnet4, "Hi", None, 1024).await;
 
@@ -982,23 +1137,22 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_overloaded() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(529).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/v1/messages",
+            529,
+            serde_json::json!({
                 "error": {
                     "type": "overloaded_error",
                     "message": "Overloaded"
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = AnthropicClient::new("test_key")
             .unwrap()
-            .with_base_url(mock_server.uri())
-            .with_retry_config(1, 10, 100);
+            .with_base_url(server.uri())
+            .with_retry_config(0, 10, 100);
 
         let result = client.chat(Model::ClaudeSonnet4, "Hi", None, 1024).await;
 
@@ -1011,22 +1165,21 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_context_length_exceeded() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/v1/messages",
+            400,
+            serde_json::json!({
                 "error": {
                     "type": "invalid_request_error",
                     "message": "context length exceeded"
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = AnthropicClient::new("test_key")
             .unwrap()
-            .with_base_url(mock_server.uri())
+            .with_base_url(server.uri())
             .with_retry_config(1, 10, 100);
 
         let result = client.chat(Model::ClaudeSonnet4, "Hi", None, 1024).await;
@@ -1044,13 +1197,12 @@ mod tests {
         let _guard = capture.install_json_with_filter("debug");
         tracing::debug!("log_capture_ready");
 
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .and(header("x-api-key", "test_key"))
-            .and(header("anthropic-version", DEFAULT_API_VERSION))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1/messages",
+                200,
+                serde_json::json!({
                 "id": "msg_123",
                 "type": "message",
                 "role": "assistant",
@@ -1061,13 +1213,15 @@ mod tests {
                     "input_tokens": 10,
                     "output_tokens": 5
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+            .with_required_header("x-api-key", "test_key")
+            .with_required_header("anthropic-version", DEFAULT_API_VERSION),
+        ]);
 
         let client = AnthropicClient::new("test_key")
             .unwrap()
-            .with_base_url(mock_server.uri());
+            .with_base_url(server.uri());
         let secret_prompt = "TopSecretPrompt";
         let _ = client
             .chat(Model::ClaudeSonnet4, secret_prompt, None, 1024)

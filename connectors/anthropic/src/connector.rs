@@ -2016,11 +2016,12 @@ mod tests {
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
     use fcp_prelude::CapabilityConstraints;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path},
-    };
+    use std::sync::{Arc, Mutex};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration as StdDuration, Instant as StdInstant};
 
     fn generate_valid_token(
         signing_key: &Ed25519SigningKey,
@@ -2057,6 +2058,191 @@ mod tests {
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
+    }
+
+    #[derive(Clone)]
+    struct TestHttpRequest {
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: serde_json::Value,
+        required_headers: Vec<(&'static str, &'static str)>,
+    }
+
+    struct TestHttpServer {
+        url: String,
+        requests: Arc<Mutex<Vec<TestHttpRequest>>>,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestHttpResponse {
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body,
+                required_headers: Vec::new(),
+            }
+        }
+
+        fn with_required_header(mut self, name: &'static str, value: &'static str) -> Self {
+            self.required_headers.push((name, value));
+            self
+        }
+    }
+
+    impl TestHttpServer {
+        fn respond(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let worker_requests = Arc::clone(&requests);
+            let handle = thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                for response in responses {
+                    let stream = accept_test_connection(&listener);
+                    let request = handle_test_request(stream, &response);
+                    worker_requests.lock().unwrap().push(request);
+                }
+            });
+            Self {
+                url,
+                requests,
+                handle: Some(handle),
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.url
+        }
+
+        fn requests(&self) -> Vec<TestHttpRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for TestHttpServer {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                if thread::panicking() {
+                    let _ = handle.join();
+                } else {
+                    handle.join().unwrap();
+                }
+            }
+        }
+    }
+
+    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+        let deadline = StdInstant::now() + StdDuration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    return stream;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        StdInstant::now() < deadline,
+                        "test server did not receive expected request"
+                    );
+                    thread::sleep(StdDuration::from_millis(10));
+                }
+                Err(err) => panic!("test listener failed: {err}"),
+            }
+        }
+    }
+
+    fn handle_test_request(stream: TcpStream, response: &TestHttpResponse) -> TestHttpRequest {
+        stream
+            .set_read_timeout(Some(StdDuration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        assert_eq!(request_parts.next(), Some(response.method));
+        let actual_path = request_parts
+            .next()
+            .and_then(|path| path.split('?').next())
+            .unwrap_or_default();
+        assert_eq!(actual_path, response.path);
+
+        let mut headers = Vec::new();
+        let mut content_length = 0usize;
+        let mut required_headers_seen = vec![false; response.required_headers.len()];
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':') {
+                let value = value.trim();
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = value.parse().unwrap();
+                }
+                for (index, (required_name, required_value)) in
+                    response.required_headers.iter().enumerate()
+                {
+                    if name.eq_ignore_ascii_case(required_name) && value == *required_value {
+                        required_headers_seen[index] = true;
+                    }
+                }
+                headers.push((name.to_ascii_lowercase(), value.to_string()));
+            }
+        }
+        assert!(
+            required_headers_seen.into_iter().all(|seen| seen),
+            "required header was not sent"
+        );
+        let mut request_body = vec![0u8; content_length];
+        if content_length > 0 {
+            reader.read_exact(&mut request_body).unwrap();
+        }
+
+        let mut stream = reader.into_inner();
+        let body = response.body.to_string();
+        let reason = match response.status {
+            200 => "OK",
+            401 => "Unauthorized",
+            429 => "Too Many Requests",
+            _ => "OK",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{body}",
+            response.status,
+            reason,
+            body.len()
+        )
+        .unwrap();
+        stream.flush().unwrap();
+
+        TestHttpRequest {
+            headers,
+            body: request_body,
+        }
+    }
+
+    fn header_value<'a>(request: &'a TestHttpRequest, name: &str) -> Option<&'a str> {
+        request
+            .headers
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
     }
 
     #[fcp_async_core::runtime::test]
@@ -2785,12 +2971,12 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_self_check_api_key_valid() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .and(header("x-api-key", "sk-valid"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1/messages",
+                200,
+                json!({
                 "id": "msg_health",
                 "type": "message",
                 "role": "assistant",
@@ -2798,15 +2984,16 @@ mod tests {
                 "model": "claude-3-5-haiku-20241022",
                 "stop_reason": "max_tokens",
                 "usage": { "input_tokens": 1, "output_tokens": 1 }
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+            .with_required_header("x-api-key", "sk-valid"),
+        ]);
 
         let mut connector = AnthropicConnector::new();
         connector
             .handle_configure(json!({
                 "api_key": "sk-valid",
-                "base_url": mock_server.uri()
+                "base_url": server.uri()
             }))
             .await
             .unwrap();
@@ -2819,24 +3006,23 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_self_check_api_key_invalid() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/v1/messages",
+            401,
+            json!({
                 "error": {
                     "type": "authentication_error",
                     "message": "Invalid API key"
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let mut connector = AnthropicConnector::new();
         connector
             .handle_configure(json!({
                 "api_key": "sk-bad",
-                "base_url": mock_server.uri()
+                "base_url": server.uri()
             }))
             .await
             .unwrap();
@@ -2851,35 +3037,32 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_self_check_rate_limited() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/v1/messages",
+            429,
+            json!({
                 "error": {
                     "type": "rate_limit_error",
                     "message": "Rate limit exceeded"
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let mut connector = AnthropicConnector::new();
         connector
             .handle_configure(json!({
                 "api_key": "sk-test",
-                "base_url": mock_server.uri()
+                "base_url": server.uri()
             }))
             .await
             .unwrap();
 
-        // Need to set retry to 0 to avoid actual retries in test
         if let Some(client) = &mut connector.client {
-            // Recreate with no retries
             let new_client = AnthropicClient::new("sk-test")
                 .unwrap()
-                .with_base_url(mock_server.uri())
-                .with_retry_config(1, 1, 1);
+                .with_base_url(server.uri())
+                .with_retry_config(0, 1, 1);
             *client = new_client;
         }
 
@@ -2984,11 +3167,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_invoke_message_oauth_betas_service_tier_and_thinking_redaction() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/v1/messages",
+            200,
+            json!({
                 "id": "msg_oauth",
                 "type": "message",
                 "role": "assistant",
@@ -3005,15 +3188,14 @@ mod tests {
                     "cache_read_input_tokens": 6,
                     "service_tier": "standard"
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let mut connector = AnthropicConnector::new();
         connector
             .handle_configure(json!({
                 "claude_code_oauth_token": "oauth-token",
-                "base_url": mock_server.uri(),
+                "base_url": server.uri(),
                 "default_betas": ["files-api-2025-04-14"]
             }))
             .await
@@ -3076,21 +3258,15 @@ mod tests {
         assert_eq!(result["usage"]["service_tier"], "standard");
         assert_eq!(result["provenance"]["has_thinking"], true);
 
-        let requests = mock_server.received_requests().await.unwrap_or_default();
+        let requests = server.requests();
         assert_eq!(requests.len(), 1);
         let request = &requests[0];
         assert_eq!(
-            request
-                .headers
-                .get("authorization")
-                .and_then(|value| value.to_str().ok()),
+            header_value(request, "authorization"),
             Some("Bearer oauth-token")
         );
         assert_eq!(
-            request
-                .headers
-                .get("anthropic-beta")
-                .and_then(|value| value.to_str().ok()),
+            header_value(request, "anthropic-beta"),
             Some(
                 "files-api-2025-04-14,code-execution-2025-08-25,interleaved-thinking-2025-05-14,claude-code-20250219,oauth-2025-04-20"
             )

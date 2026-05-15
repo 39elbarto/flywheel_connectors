@@ -257,6 +257,19 @@ impl ThompsonScheduler {
             .unwrap_or_default()
     }
 
+    /// Whether any listed candidate has recorded evidence for the operation class.
+    #[must_use]
+    pub fn has_evidence_for(
+        &self,
+        candidates: &[NodeId],
+        operation_class: ResourcePoolClass,
+    ) -> bool {
+        candidates.iter().any(|node_id| {
+            self.posteriors
+                .contains_key(&(node_id.clone(), operation_class))
+        })
+    }
+
     /// Record one route outcome.
     pub fn record_outcome(
         &mut self,

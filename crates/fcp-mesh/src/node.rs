@@ -52,8 +52,8 @@ use crate::gossip::{
     ReconcileRequest, ReconcileResponse, RevocationPushMessage,
 };
 use crate::planner::{
-    CandidateNode, ExecutionPlanner, HeldLease, LeasePurpose, NodeInfo, PlannerContext,
-    PlannerInput,
+    BetaPosterior, CandidateNode, DecisionReason, ExecutionPlanner, HeldLease, LeasePurpose,
+    NodeInfo, PlannerContext, PlannerInput, ResourcePoolClass, ThompsonChoice, ThompsonScheduler,
 };
 use crate::session::MeshSession;
 use crate::symbol_request::{
@@ -584,6 +584,7 @@ pub struct MeshNode {
     symbol_requests: SymbolRequestHandler,
     symbol_metrics: SymbolRequestMetrics,
     planner: ExecutionPlanner,
+    thompson_scheduler: ThompsonScheduler,
     degraded_encoder: DegradedModeEncoder,
     degraded_decoder: DegradedModeDecoder,
     object_store: Arc<dyn ObjectStore>,
@@ -644,6 +645,7 @@ impl MeshNode {
             symbol_requests: SymbolRequestHandler::new(config.symbol_request_policy),
             symbol_metrics: SymbolRequestMetrics::default(),
             planner: ExecutionPlanner::new(),
+            thompson_scheduler: ThompsonScheduler::new(),
             degraded_encoder: DegradedModeEncoder::new(
                 config.raptorq_config.clone(),
                 config.sender_instance_id,
@@ -1221,6 +1223,16 @@ impl MeshNode {
     /// Plan execution candidates for a connector.
     #[must_use]
     pub fn plan_execution(&self, context: &PlannerContext, now_ms: u64) -> Vec<CandidateNode> {
+        let mut rng = rand::thread_rng();
+        self.plan_execution_with_rng(context, now_ms, &mut rng)
+    }
+
+    fn plan_execution_with_rng<R: rand::Rng + ?Sized>(
+        &self,
+        context: &PlannerContext,
+        now_ms: u64,
+        rng: &mut R,
+    ) -> Vec<CandidateNode> {
         let mut input = self.build_planner_input(now_ms);
         if context.singleton_writer {
             // Do not apply singleton enforcement from an unrelated lease when the
@@ -1230,7 +1242,106 @@ impl MeshNode {
                 .as_ref()
                 .and_then(|subject_id| self.preferred_singleton_holder(Some(subject_id), now_ms));
         }
-        self.planner.plan(&input, context)
+        let candidates = self.planner.plan(&input, context);
+        self.apply_thompson_ranking(candidates, context, rng)
+    }
+
+    fn apply_thompson_ranking<R: rand::Rng + ?Sized>(
+        &self,
+        mut candidates: Vec<CandidateNode>,
+        context: &PlannerContext,
+        rng: &mut R,
+    ) -> Vec<CandidateNode> {
+        let Some(operation_class) = context.resource_pool_class else {
+            return candidates;
+        };
+        if candidates.len() < 2 {
+            return candidates;
+        }
+
+        let node_ids: Vec<_> = candidates
+            .iter()
+            .map(|candidate| candidate.node_id.clone())
+            .collect();
+        if !self
+            .thompson_scheduler
+            .has_evidence_for(&node_ids, operation_class)
+        {
+            return candidates;
+        }
+
+        let Some(choice) = self
+            .thompson_scheduler
+            .choose_with_rng(&node_ids, operation_class, rng)
+        else {
+            return candidates;
+        };
+        let Some(selected_index) = candidates
+            .iter()
+            .position(|candidate| candidate.node_id.as_str() == choice.node_id.as_str())
+        else {
+            return candidates;
+        };
+
+        if selected_index != 0 {
+            let selected = candidates.remove(selected_index);
+            candidates.insert(0, selected);
+        }
+        Self::rewrite_execution_ranks(&mut candidates, &choice);
+        candidates
+    }
+
+    fn rewrite_execution_ranks(candidates: &mut [CandidateNode], choice: &ThompsonChoice) {
+        for (rank, candidate) in candidates.iter_mut().enumerate() {
+            candidate.decision_reasons.retain(|reason| {
+                !matches!(
+                    reason,
+                    DecisionReason::SelectedAsBest { .. }
+                        | DecisionReason::EligibleNotSelected { .. }
+                )
+            });
+
+            if rank == 0 {
+                candidate
+                    .decision_reasons
+                    .push(DecisionReason::SelectedAsBest { rank: 1 });
+                candidate.decision_reasons.push(DecisionReason::Custom(format!(
+                    "thompson_sample operation_class={:?} sample={:.6} posterior_mean={:.6} posterior_variance={:.6}",
+                    choice.operation_class,
+                    choice.sample,
+                    choice.posterior_mean,
+                    choice.posterior_variance
+                )));
+            } else {
+                candidate
+                    .decision_reasons
+                    .push(DecisionReason::EligibleNotSelected {
+                        rank: rank + 1,
+                        better_count: rank,
+                    });
+            }
+        }
+    }
+
+    /// Record the outcome of a routed execution for adaptive scheduling.
+    pub fn record_execution_outcome(
+        &mut self,
+        node_id: NodeId,
+        operation_class: ResourcePoolClass,
+        success: bool,
+    ) {
+        self.thompson_scheduler
+            .record_outcome(node_id, operation_class, success);
+    }
+
+    /// Return the current adaptive routing posterior for a node and operation class.
+    #[must_use]
+    pub fn execution_posterior(
+        &self,
+        node_id: &NodeId,
+        operation_class: ResourcePoolClass,
+    ) -> BetaPosterior {
+        self.thompson_scheduler.posterior(node_id, operation_class)
     }
 
     /// Enforce capability, holder proof, and revocation checks for an invoke request.
@@ -6353,6 +6464,61 @@ mod tests {
         let candidates = node.plan_execution(&context, 2000);
         // Node has the required connector installed, should be a candidate
         assert!(!candidates.is_empty());
+    }
+
+    #[test]
+    fn plan_execution_uses_thompson_scheduler_after_recorded_outcomes() {
+        use crate::device::{DeviceProfileBuilder, InstalledConnector};
+        use rand::{SeedableRng, rngs::StdRng};
+
+        let mut node = test_node("node-1");
+        let connector_id =
+            fcp_core::ConnectorId::new("fcp.test", "adaptive", "v1").expect("valid connector id");
+        let installed = InstalledConnector::new(
+            connector_id.clone(),
+            "1.0.0",
+            ObjectId::from_bytes([0xBC; 32]),
+        );
+        let peer_id = NodeId::new("peer-1");
+        let operation_class = ResourcePoolClass::RequestResponse;
+
+        let local_profile = DeviceProfileBuilder::new(NodeId::new("node-1"))
+            .add_connector(installed.clone())
+            .build();
+        let peer_profile = DeviceProfileBuilder::new(peer_id.clone())
+            .add_connector(installed)
+            .build();
+
+        node.update_local_state(local_profile, HashSet::new(), Vec::new());
+        node.update_peer_state(
+            peer_id.clone(),
+            peer_profile,
+            HashSet::new(),
+            Vec::new(),
+            1000,
+        );
+
+        for _ in 0..200 {
+            node.record_execution_outcome(NodeId::new("node-1"), operation_class, false);
+            node.record_execution_outcome(peer_id.clone(), operation_class, true);
+        }
+
+        let context = PlannerContext::new(connector_id).with_resource_pool_class(operation_class);
+        let mut rng = StdRng::seed_from_u64(0xFC04_2004);
+        let candidates = node.plan_execution_with_rng(&context, 2000, &mut rng);
+
+        assert_eq!(candidates[0].node_id.as_str(), "peer-1");
+        assert!(
+            candidates[0].decision_reasons.iter().any(|reason| matches!(
+                reason,
+                DecisionReason::Custom(message) if message.contains("thompson_sample")
+            )),
+            "selected candidate should carry Thompson sampling evidence"
+        );
+
+        let posterior = node.execution_posterior(&peer_id, operation_class);
+        assert_eq!(posterior.alpha(), 201);
+        assert_eq!(posterior.beta(), 1);
     }
 
     // Regression for flywheel_connectors-fqzmp: build_planner_input used to

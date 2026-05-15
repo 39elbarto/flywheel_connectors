@@ -35537,8 +35537,18 @@ deny_ptrace = true
                         "purpose": "connector_state_write",
                         "holder_node_id_hash": "blake3:holder",
                         "fencing_token": 9,
+                        "durable_lease_seq": 9,
                         "expiry": Value::Null,
                         "quorum_signers_count": 2,
+                        "required_quorum_signers_count": 2,
+                        "quorum_satisfied": true,
+                        "durable_validation": {
+                            "status": "valid",
+                            "error": Value::Null,
+                            "validated_at_unix_secs": 1_800_200_000_u64,
+                        },
+                        "lease_object_id": "2222222222222222222222222222222222222222222222222222222222222222",
+                        "lease_evidence_source": "canonical-fcp-store-lease-object",
                         "ranked_holders": [],
                         "live_host": {
                             "requested": true,
@@ -35577,7 +35587,15 @@ deny_ptrace = true
             "fcp.github:enterprise:v1"
         );
         assert_eq!(payload["fencing_token"], 9);
+        assert_eq!(payload["durable_lease_seq"], 9);
         assert_eq!(payload["quorum_signers_count"], 2);
+        assert_eq!(payload["required_quorum_signers_count"], 2);
+        assert_eq!(payload["quorum_satisfied"], true);
+        assert_eq!(payload["durable_validation"]["status"], "valid");
+        assert_eq!(
+            payload["lease_evidence_source"],
+            "canonical-fcp-store-lease-object"
+        );
         assert!(
             payload["live_host"]["endpoint_hash"]
                 .as_str()

@@ -7597,6 +7597,7 @@ dependencies = [
  "fcp-core",
  "fcp-prelude",
  "fcp-sdk",
+ "fcp-testkit",
  "hex",
  "jsonschema",
  "percent-encoding",

@@ -4591,6 +4591,7 @@ const HRW_LEASE_LOCAL_NODE_ENV: &str = "FCP_HOST_HRW_LEASE_LOCAL_NODE";
 const HRW_LEASE_NODES_ENV: &str = "FCP_HOST_HRW_LEASE_NODES";
 const HRW_LEASE_CURRENT_SEQ_ENV: &str = "FCP_HOST_HRW_LEASE_CURRENT_SEQ";
 const CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL: &str = "connector_state_write";
+const CONNECTOR_STATE_LEASE_REQUIRED_QUORUM_SIGNATURES: usize = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HrwLeaseRoutingConfig {
@@ -4834,6 +4835,18 @@ fn connector_lease_status_payload(
     let expiry_unix_secs = durable.expiry_unix_secs.map_or(Value::Null, Value::from);
     let quorum_signers_count =
         u64::try_from(durable.quorum_signers_count.unwrap_or(0)).unwrap_or(u64::MAX);
+    let required_quorum_signers_count =
+        u64::try_from(CONNECTOR_STATE_LEASE_REQUIRED_QUORUM_SIGNATURES).unwrap_or(u64::MAX);
+    let quorum_satisfied = durable
+        .quorum_signers_count
+        .map(|count| count >= CONNECTOR_STATE_LEASE_REQUIRED_QUORUM_SIGNATURES);
+    if let Some(count) = durable.quorum_signers_count
+        && count < CONNECTOR_STATE_LEASE_REQUIRED_QUORUM_SIGNATURES
+    {
+        warnings.push(format!(
+            "Durable lease object has {count} quorum signatures, below the required {CONNECTOR_STATE_LEASE_REQUIRED_QUORUM_SIGNATURES}; host status treats this as non-quorum lease evidence."
+        ));
+    }
 
     if let Some(routing) = routing {
         let ranked = fcp_mesh::planner::rank_lease_holders_by_hrw(
@@ -4887,6 +4900,8 @@ fn connector_lease_status_payload(
         "expiry": expiry,
         "expiry_unix_secs": expiry_unix_secs,
         "quorum_signers_count": quorum_signers_count,
+        "required_quorum_signers_count": required_quorum_signers_count,
+        "quorum_satisfied": quorum_satisfied,
         "lease_object_id": durable.lease_object_id.map(|object_id| object_id.to_string()),
         "lease_evidence_source": durable.source.unwrap_or("unavailable"),
         "local_node_id_hash": local_node_id_hash,
@@ -25579,6 +25594,8 @@ done"#;
         assert_eq!(payload["fencing_token"], 9);
         assert_eq!(payload["durable_lease_seq"], 10);
         assert_eq!(payload["quorum_signers_count"], 2);
+        assert_eq!(payload["required_quorum_signers_count"], 2);
+        assert_eq!(payload["quorum_satisfied"], true);
         let warnings = payload["warnings"]
             .as_array()
             .expect("warnings should be an array");
@@ -25587,6 +25604,45 @@ done"#;
                 |warning| warning.contains("differs from durable fcp-store lease_seq 10")
             )),
             "sequence mismatch should be explicit in operator status: {payload}"
+        );
+    }
+
+    #[test]
+    fn connector_lease_status_payload_warns_on_below_quorum_durable_lease() {
+        let connector_id = ConnectorId::from_static("fcp.test.lease-below-quorum:utility:1.0.0");
+        let zone_id = ZoneId::work();
+        let routing = HrwLeaseRoutingConfig {
+            local_node: TailscaleNodeId::new("node-a"),
+            eligible_nodes: vec![
+                TailscaleNodeId::new("node-a"),
+                TailscaleNodeId::new("node-b"),
+                TailscaleNodeId::new("node-c"),
+            ],
+            current_lease_seq: Some(10),
+        };
+        let durable = ConnectorLeaseDurableEvidence {
+            lease_object_id: Some(ObjectId::from_bytes([0x45; 32])),
+            lease_seq: Some(10),
+            expiry_unix_secs: Some(1_800_200_300),
+            quorum_signers_count: Some(1),
+            source: Some("canonical-fcp-store-lease-object"),
+            warnings: Vec::new(),
+        };
+
+        let payload =
+            connector_lease_status_payload(&connector_id, &zone_id, Some(&routing), &durable);
+
+        assert_eq!(payload["quorum_signers_count"], 1);
+        assert_eq!(payload["required_quorum_signers_count"], 2);
+        assert_eq!(payload["quorum_satisfied"], false);
+        let warnings = payload["warnings"]
+            .as_array()
+            .expect("warnings should be an array");
+        assert!(
+            warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("below the required 2"))),
+            "below-quorum durable lease should be explicit in operator status: {payload}"
         );
     }
 

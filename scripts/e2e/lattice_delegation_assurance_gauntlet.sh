@@ -6,7 +6,7 @@ RUN_ID="${RUN_ID:-lattice-assurance-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_DIR="${OUT_DIR:-target/fcp-crypto-pq}"
 ARTIFACT="${ARTIFACT:-${OUT_DIR}/lattice-delegation-assurance-gauntlet.${RUN_ID}.jsonl}"
 TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-lattice-assurance-${RUN_ID}}"
-ARTIFACT_STAGE_ROOT="${ARTIFACT_STAGE_ROOT:-rch-lattice-evidence/${RUN_ID}}"
+ARTIFACT_STAGE_ROOT="${ARTIFACT_STAGE_ROOT:-${OUT_DIR}/rch-lattice-evidence/${RUN_ID}}"
 LOG_PREFIX="${OUT_DIR}/${RUN_ID}"
 
 mkdir -p "${OUT_DIR}" "${ARTIFACT_STAGE_ROOT}"
@@ -105,6 +105,17 @@ require_text() {
   fi
 }
 
+assert_clean_tree() {
+  local step="$1"
+  local status
+  git update-index -q --refresh 2>/dev/null || true
+  status="$(git status --porcelain --untracked-files=normal)"
+  if [ -n "${status}" ]; then
+    fail_step "${step}" "$(jq -cn --arg status "${status}" \
+      '{dirty_tree_entries:($status | split("\n") | map(select(length > 0))),cleanup_result:"not_applicable"}')"
+  fi
+}
+
 append_tool_versions() {
   append_json "tool_versions" "pass" "$(jq -cn \
     --arg cargo "$(tool_version cargo -V)" \
@@ -138,6 +149,7 @@ run_and_capture() {
     hash="$(sha256_file "${log}")"
     passed_tests="$(extract_passed_tests "${log}")"
     passed_tests_json="$(json_string_or_null "${passed_tests}")"
+    assert_clean_tree "clean_tree_after_${step}"
     append_json "${step}" "pass" "$(jq -cn \
       --arg command_line "${display_command}" \
       --arg log_artifact "target/fcp-crypto-pq/${RUN_ID}.${step}.log" \
@@ -297,6 +309,7 @@ require_command ubs
 require_command shasum
 
 append_tool_versions
+assert_clean_tree "preflight_clean_tree"
 
 LEAN_FILE="lean/Fcp/Invariants/LatticeDelegation.lean"
 for theorem in \
@@ -327,24 +340,24 @@ else
 fi
 
 run_rch_cargo "crypto_representation_profile_tests" \
-  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo test -p fcp-crypto-pq --test representation_profile -- --nocapture" \
-  cargo test -p fcp-crypto-pq --test representation_profile -- --nocapture
+  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo test --locked -p fcp-crypto-pq --test representation_profile -- --nocapture" \
+  cargo test --locked -p fcp-crypto-pq --test representation_profile -- --nocapture
 
 run_rch_cargo "crypto_v4_unit_tests" \
-  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo test -p fcp-crypto-pq --lib v4_ -- --nocapture" \
-  cargo test -p fcp-crypto-pq --lib v4_ -- --nocapture
+  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo test --locked -p fcp-crypto-pq --lib v4_ -- --nocapture" \
+  cargo test --locked -p fcp-crypto-pq --lib v4_ -- --nocapture
 
 run_rch_cargo "policy_lattice_delegation_tests" \
-  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo test -p fcp-policy --test lattice_delegation_proptest -- --nocapture" \
-  cargo test -p fcp-policy --test lattice_delegation_proptest -- --nocapture
+  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo test --locked -p fcp-policy --test lattice_delegation_proptest -- --nocapture" \
+  cargo test --locked -p fcp-policy --test lattice_delegation_proptest -- --nocapture
 
 run_rch_cargo "host_lattice_dispatcher_e2e" \
-  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo test -p fcp-host --test lattice_policy_dispatcher_e2e -- --nocapture" \
-  cargo test -p fcp-host --test lattice_policy_dispatcher_e2e -- --nocapture
+  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo test --locked -p fcp-host --test lattice_policy_dispatcher_e2e -- --nocapture" \
+  cargo test --locked -p fcp-host --test lattice_policy_dispatcher_e2e -- --nocapture
 
 run_rch_cargo "criterion_lattice_crypto_bench" \
-  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo bench -p fcp-crypto-pq --bench lattice_vs_ed25519_vs_mldsa -- --sample-size 10 --measurement-time 1 --warm-up-time 1" \
-  cargo bench -p fcp-crypto-pq --bench lattice_vs_ed25519_vs_mldsa -- --sample-size 10 --measurement-time 1 --warm-up-time 1
+  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo bench --locked -p fcp-crypto-pq --bench lattice_vs_ed25519_vs_mldsa -- --sample-size 10 --measurement-time 1 --warm-up-time 1" \
+  cargo bench --locked -p fcp-crypto-pq --bench lattice_vs_ed25519_vs_mldsa -- --sample-size 10 --measurement-time 1 --warm-up-time 1
 
 run_rch_cargo "rustfmt_lattice_surfaces" \
   "rch exec -- env CARGO_TARGET_DIR=<hashed> rustfmt --edition 2024 --check lattice proof Rust surfaces" \
@@ -355,20 +368,20 @@ run_rch_cargo "rustfmt_lattice_surfaces" \
     crates/fcp-crypto-pq/benches/lattice_vs_ed25519_vs_mldsa.rs
 
 run_rch_cargo "cargo_check_lattice_surfaces" \
-  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo check -p fcp-crypto-pq -p fcp-policy -p fcp-host --all-targets" \
-  cargo check -p fcp-crypto-pq -p fcp-policy -p fcp-host --all-targets
+  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo check --locked -p fcp-crypto-pq -p fcp-policy -p fcp-host --all-targets" \
+  cargo check --locked -p fcp-crypto-pq -p fcp-policy -p fcp-host --all-targets
 
 run_rch_cargo "cargo_clippy_crypto_representation" \
-  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo clippy -p fcp-crypto-pq --test representation_profile --no-deps -- -D warnings" \
-  cargo clippy -p fcp-crypto-pq --test representation_profile --no-deps -- -D warnings
+  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo clippy --locked -p fcp-crypto-pq --test representation_profile --no-deps -- -D warnings" \
+  cargo clippy --locked -p fcp-crypto-pq --test representation_profile --no-deps -- -D warnings
 
 run_rch_cargo "cargo_clippy_policy_lattice" \
-  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo clippy -p fcp-policy --test lattice_delegation_proptest --no-deps -- -D warnings" \
-  cargo clippy -p fcp-policy --test lattice_delegation_proptest --no-deps -- -D warnings
+  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo clippy --locked -p fcp-policy --test lattice_delegation_proptest --no-deps -- -D warnings" \
+  cargo clippy --locked -p fcp-policy --test lattice_delegation_proptest --no-deps -- -D warnings
 
 run_rch_cargo "cargo_clippy_host_dispatcher" \
-  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo clippy -p fcp-host --test lattice_policy_dispatcher_e2e --no-deps -- -D warnings" \
-  cargo clippy -p fcp-host --test lattice_policy_dispatcher_e2e --no-deps -- -D warnings
+  "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo clippy --locked -p fcp-host --test lattice_policy_dispatcher_e2e --no-deps -- -D warnings" \
+  cargo clippy --locked -p fcp-host --test lattice_policy_dispatcher_e2e --no-deps -- -D warnings
 
 run_and_capture "bash_syntax" \
   "bash -n scripts/e2e/lattice_delegation_formal_correspondence.sh scripts/e2e/lattice_delegation_assurance_gauntlet.sh" \

@@ -607,8 +607,6 @@ mod tests {
     use std::net::TcpListener as StdTcpListener;
     use std::sync::{Arc, Mutex};
     use std::thread;
-    use wiremock::matchers::{body_json, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn test_normalize_chat_id() {
@@ -639,15 +637,6 @@ mod tests {
         assert!(normalize_chat_id("-").is_err()); // Just a dash
     }
 
-    // Helper to create a mock server with a test client
-    async fn setup_mock_client() -> (MockServer, TelegramClient) {
-        let mock_server = MockServer::start().await;
-        let client = TelegramClient::new("test_token_12345")
-            .unwrap()
-            .with_base_url(mock_server.uri());
-        (mock_server, client)
-    }
-
     #[derive(Clone, Debug)]
     struct StructuredHttpRequest {
         method: String,
@@ -673,31 +662,31 @@ mod tests {
         }
     }
 
-    struct StructuredFakeHttpServer {
+    struct StructuredTestHttpServer {
         base_url: String,
         _requests: Arc<Mutex<Vec<StructuredHttpRequest>>>,
         _join: thread::JoinHandle<()>,
     }
 
-    impl StructuredFakeHttpServer {
+    impl StructuredTestHttpServer {
         fn spawn<F>(expected_requests: usize, responder: F) -> Self
         where
             F: Fn(usize, &StructuredHttpRequest) -> StructuredHttpResponse + Send + Sync + 'static,
         {
-            let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind fake http server");
-            let addr = listener.local_addr().expect("fake http server addr");
+            let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test http server");
+            let addr = listener.local_addr().expect("test http server addr");
             let requests = Arc::new(Mutex::new(Vec::new()));
             let requests_for_thread = Arc::clone(&requests);
             let responder = Arc::new(responder);
 
             let join = thread::spawn(move || {
                 for idx in 0..expected_requests {
-                    let (mut stream, _) = listener.accept().expect("accept fake http connection");
+                    let (mut stream, _) = listener.accept().expect("accept test http connection");
                     let request = read_structured_http_request(&mut stream);
                     let response = responder(idx, &request);
                     requests_for_thread
                         .lock()
-                        .expect("lock fake http requests")
+                        .expect("lock test http requests")
                         .push(request);
                     write_structured_http_response(&mut stream, response);
                 }
@@ -715,12 +704,18 @@ mod tests {
         }
     }
 
+    fn test_client(server: &StructuredTestHttpServer) -> TelegramClient {
+        TelegramClient::new("test_token_12345")
+            .unwrap()
+            .with_base_url(server.uri())
+    }
+
     fn read_structured_http_request(stream: &mut std::net::TcpStream) -> StructuredHttpRequest {
         let mut buffer = Vec::new();
         let mut temp = [0u8; 1024];
         let header_end = loop {
-            let read = stream.read(&mut temp).expect("read fake http request");
-            assert!(read > 0, "unexpected EOF while reading fake http request");
+            let read = stream.read(&mut temp).expect("read test http request");
+            assert!(read > 0, "unexpected EOF while reading test http request");
             buffer.extend_from_slice(&temp[..read]);
             if let Some(pos) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
                 break pos + 4;
@@ -752,8 +747,8 @@ mod tests {
             .unwrap_or(0);
         let mut body = buffer[header_end..].to_vec();
         while body.len() < content_length {
-            let read = stream.read(&mut temp).expect("read fake http body");
-            assert!(read > 0, "unexpected EOF while reading fake http body");
+            let read = stream.read(&mut temp).expect("read test http body");
+            assert!(read > 0, "unexpected EOF while reading test http body");
             body.extend_from_slice(&temp[..read]);
         }
         body.truncate(content_length);
@@ -790,15 +785,19 @@ mod tests {
         raw.push_str("\r\n");
         stream
             .write_all(raw.as_bytes())
-            .expect("write fake http response headers");
+            .expect("write test http response headers");
         stream
             .write_all(&response.body)
-            .expect("write fake http response body");
+            .expect("write test http response body");
+    }
+
+    fn request_json(request: &StructuredHttpRequest) -> serde_json::Value {
+        serde_json::from_slice(&request.body).expect("request body should be JSON")
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_get_me_success() {
-        let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
+        let server = StructuredTestHttpServer::spawn(1, |_idx, request| {
             assert_eq!(request.method, "GET");
             assert_eq!(request.path, "/bottest_token_12345/getMe");
             assert!(
@@ -818,9 +817,7 @@ mod tests {
                 }),
             )
         });
-        let client = TelegramClient::new("test_token_12345")
-            .unwrap()
-            .with_base_url(fake_server.uri());
+        let client = test_client(&server);
 
         let bot_info = client.get_me().await.unwrap();
         assert_eq!(bot_info.id, 123456789);
@@ -831,7 +828,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_me_unauthorized() {
-        let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
+        let server = StructuredTestHttpServer::spawn(1, |_idx, request| {
             assert_eq!(request.method, "GET");
             assert_eq!(request.path, "/bottest_token_12345/getMe");
             StructuredHttpResponse::json(
@@ -843,9 +840,7 @@ mod tests {
                 }),
             )
         });
-        let client = TelegramClient::new("test_token_12345")
-            .unwrap()
-            .with_base_url(fake_server.uri());
+        let client = test_client(&server);
 
         let result = client.get_me().await;
         assert!(result.is_err());
@@ -859,7 +854,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_send_message_success() {
-        let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
+        let server = StructuredTestHttpServer::spawn(1, |_idx, request| {
             assert_eq!(request.method, "POST");
             assert_eq!(request.path, "/bottest_token_12345/sendMessage");
             assert_eq!(
@@ -887,9 +882,7 @@ mod tests {
                 }),
             )
         });
-        let client = TelegramClient::new("test_token_12345")
-            .unwrap()
-            .with_base_url(fake_server.uri());
+        let client = test_client(&server);
 
         let message = client
             .send_message("123456", "Hello, World!", SendMessageOptions::default())
@@ -903,11 +896,12 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_send_message_with_html_parse_mode() {
-        let (mock_server, client) = setup_mock_client().await;
-
-        Mock::given(method("POST"))
-            .and(path("/bottest_token_12345/sendMessage"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = StructuredTestHttpServer::spawn(1, |_idx, request| {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/bottest_token_12345/sendMessage");
+            StructuredHttpResponse::json(
+                200,
+                &serde_json::json!({
                 "ok": true,
                 "result": {
                     "message_id": 43,
@@ -919,9 +913,10 @@ mod tests {
                     "date": 1234567890,
                     "text": "Bold text"
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+        });
+        let client = test_client(&server);
 
         let options = SendMessageOptions::default().html();
         let message = client
@@ -934,18 +929,22 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_send_message_with_reply_and_thread() {
-        let (mock_server, client) = setup_mock_client().await;
-
-        Mock::given(method("POST"))
-            .and(path("/bottest_token_12345/sendMessage"))
-            .and(body_json(serde_json::json!({
+        let server = StructuredTestHttpServer::spawn(1, |_idx, request| {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/bottest_token_12345/sendMessage");
+            assert_eq!(
+                request_json(request),
+                serde_json::json!({
                 "chat_id": "123456",
                 "text": "*Hello*",
                 "parse_mode": "MarkdownV2",
                 "reply_to_message_id": 7,
                 "message_thread_id": 9
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                })
+            );
+            StructuredHttpResponse::json(
+                200,
+                &serde_json::json!({
                 "ok": true,
                 "result": {
                     "message_id": 44,
@@ -957,9 +956,10 @@ mod tests {
                     "date": 1234567890,
                     "text": "Hello"
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+        });
+        let client = test_client(&server);
 
         let mut options = SendMessageOptions::default()
             .markdown_v2()
@@ -976,22 +976,22 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_send_message_rate_limited() {
-        let (mock_server, client) = setup_mock_client().await;
-
-        Mock::given(method("POST"))
-            .and(path("/bottest_token_12345/sendMessage"))
-            .respond_with(
-                ResponseTemplate::new(429)
-                    .insert_header("retry-after", "0")
-                    .set_body_json(serde_json::json!({
+        let server = StructuredTestHttpServer::spawn(3, |_idx, request| {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/bottest_token_12345/sendMessage");
+            let mut response = StructuredHttpResponse::json(
+                429,
+                &serde_json::json!({
                         "ok": false,
                         "error_code": 429,
                         "description": "Too Many Requests: retry after 0",
                         "parameters": {"retry_after": 0}
-                    })),
-            )
-            .mount(&mock_server)
-            .await;
+                }),
+            );
+            response.headers.push(("retry-after".into(), "0".into()));
+            response
+        });
+        let client = test_client(&server);
 
         let result = client
             .send_message("123456", "Test", SendMessageOptions::default())
@@ -1008,11 +1008,12 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_updates_success() {
-        let (mock_server, client) = setup_mock_client().await;
-
-        Mock::given(method("POST"))
-            .and(path("/bottest_token_12345/getUpdates"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = StructuredTestHttpServer::spawn(1, |_idx, request| {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/bottest_token_12345/getUpdates");
+            StructuredHttpResponse::json(
+                200,
+                &serde_json::json!({
                 "ok": true,
                 "result": [
                     {
@@ -1042,9 +1043,10 @@ mod tests {
                         }
                     }
                 ]
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+        });
+        let client = test_client(&server);
 
         let request = GetUpdatesRequest {
             offset: None,
@@ -1061,16 +1063,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_updates_empty() {
-        let (mock_server, client) = setup_mock_client().await;
-
-        Mock::given(method("POST"))
-            .and(path("/bottest_token_12345/getUpdates"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = StructuredTestHttpServer::spawn(1, |_idx, request| {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/bottest_token_12345/getUpdates");
+            StructuredHttpResponse::json(
+                200,
+                &serde_json::json!({
                 "ok": true,
                 "result": []
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+        });
+        let client = test_client(&server);
 
         let request = GetUpdatesRequest {
             offset: Some(100),
@@ -1085,24 +1089,29 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_set_webhook_success() {
-        let (mock_server, client) = setup_mock_client().await;
-
-        Mock::given(method("POST"))
-            .and(path("/bottest_token_12345/setWebhook"))
-            .and(body_json(serde_json::json!({
+        let server = StructuredTestHttpServer::spawn(1, |_idx, request| {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/bottest_token_12345/setWebhook");
+            assert_eq!(
+                request_json(request),
+                serde_json::json!({
                 "url": "https://example.com/fcp/telegram/webhook",
                 "ip_address": "203.0.113.10",
                 "max_connections": 40,
                 "allowed_updates": ["message", "callback_query"],
                 "drop_pending_updates": true,
                 "secret_token": "telegram_webhook_secret-1"
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                })
+            );
+            StructuredHttpResponse::json(
+                200,
+                &serde_json::json!({
                 "ok": true,
                 "result": true
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+        });
+        let client = test_client(&server);
 
         let success = client
             .set_webhook(SetWebhookRequest {
@@ -1121,30 +1130,36 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_delete_webhook_success() {
-        let (mock_server, client) = setup_mock_client().await;
-
-        Mock::given(method("POST"))
-            .and(path("/bottest_token_12345/deleteWebhook"))
-            .and(body_json(serde_json::json!({
+        let server = StructuredTestHttpServer::spawn(1, |_idx, request| {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/bottest_token_12345/deleteWebhook");
+            assert_eq!(
+                request_json(request),
+                serde_json::json!({
                 "drop_pending_updates": true
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                })
+            );
+            StructuredHttpResponse::json(
+                200,
+                &serde_json::json!({
                 "ok": true,
                 "result": true
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+        });
+        let client = test_client(&server);
 
         assert!(client.delete_webhook(Some(true)).await.unwrap());
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_get_webhook_info_success() {
-        let (mock_server, client) = setup_mock_client().await;
-
-        Mock::given(method("GET"))
-            .and(path("/bottest_token_12345/getWebhookInfo"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = StructuredTestHttpServer::spawn(1, |_idx, request| {
+            assert_eq!(request.method, "GET");
+            assert_eq!(request.path, "/bottest_token_12345/getWebhookInfo");
+            StructuredHttpResponse::json(
+                200,
+                &serde_json::json!({
                 "ok": true,
                 "result": {
                     "url": "https://example.com/fcp/telegram/webhook",
@@ -1156,9 +1171,10 @@ mod tests {
                     "max_connections": 40,
                     "allowed_updates": ["message", "callback_query"]
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+        });
+        let client = test_client(&server);
 
         let info = client.get_webhook_info().await.unwrap();
         assert_eq!(info.url, "https://example.com/fcp/telegram/webhook");
@@ -1174,11 +1190,13 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_file_success() {
-        let (mock_server, client) = setup_mock_client().await;
-
-        Mock::given(method("GET"))
-            .and(path("/bottest_token_12345/getFile"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = StructuredTestHttpServer::spawn(1, |_idx, request| {
+            assert_eq!(request.method, "GET");
+            assert!(request.path.starts_with("/bottest_token_12345/getFile?"));
+            assert!(request.path.contains("file_id=AgACAgIAAxkBAAI"));
+            StructuredHttpResponse::json(
+                200,
+                &serde_json::json!({
                 "ok": true,
                 "result": {
                     "file_id": "AgACAgIAAxkBAAI",
@@ -1186,9 +1204,10 @@ mod tests {
                     "file_size": 12345,
                     "file_path": "photos/file_0.jpg"
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+        });
+        let client = test_client(&server);
 
         let file = client.get_file("AgACAgIAAxkBAAI").await.unwrap();
         assert_eq!(file.file_id, "AgACAgIAAxkBAAI");
@@ -1237,17 +1256,21 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_send_photo_success() {
-        let (mock_server, client) = setup_mock_client().await;
-
-        Mock::given(method("POST"))
-            .and(path("/bottest_token_12345/sendPhoto"))
-            .and(body_json(serde_json::json!({
+        let server = StructuredTestHttpServer::spawn(1, |_idx, request| {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/bottest_token_12345/sendPhoto");
+            assert_eq!(
+                request_json(request),
+                serde_json::json!({
                 "chat_id": "123456",
                 "photo": "AgACAgIAAxk",
                 "caption": "Test photo",
                 "message_thread_id": 42
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                })
+            );
+            StructuredHttpResponse::json(
+                200,
+                &serde_json::json!({
                 "ok": true,
                 "result": {
                     "message_id": 50,
@@ -1265,9 +1288,10 @@ mod tests {
                         "file_size": 12345
                     }]
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+        });
+        let client = test_client(&server);
 
         let options = SendMediaOptions {
             caption: Some("Test photo".into()),
@@ -1286,11 +1310,12 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_send_document_success() {
-        let (mock_server, client) = setup_mock_client().await;
-
-        Mock::given(method("POST"))
-            .and(path("/bottest_token_12345/sendDocument"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = StructuredTestHttpServer::spawn(1, |_idx, request| {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/bottest_token_12345/sendDocument");
+            StructuredHttpResponse::json(
+                200,
+                &serde_json::json!({
                 "ok": true,
                 "result": {
                     "message_id": 51,
@@ -1308,9 +1333,10 @@ mod tests {
                         "file_size": 98765
                     }
                 }
-            })))
-            .mount(&mock_server)
-            .await;
+                }),
+            )
+        });
+        let client = test_client(&server);
 
         let message = client
             .send_document("123456", "BQACAgIAAxk", SendMediaOptions::default())

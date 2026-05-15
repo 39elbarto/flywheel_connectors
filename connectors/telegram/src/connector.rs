@@ -3549,6 +3549,7 @@ impl FcpConnector for TelegramConnector {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::VecDeque,
         io::{Read, Write},
         net::{TcpListener, TcpStream},
         sync::{
@@ -3629,8 +3630,19 @@ mod tests {
             result.err()
         );
 
-        // Test actual overflow
-        let long_text = "a".repeat(MESSAGE_TEXT_MAX_CHARS + 1);
+        let chunked_text = "a".repeat(MESSAGE_TEXT_MAX_CHARS + 1);
+        let input_chunked = json!({
+            "chat_id": "123",
+            "text": chunked_text
+        });
+        let result_chunked =
+            TelegramConnector::validate_input_early("telegram.send_message", &input_chunked);
+        assert!(
+            result_chunked.is_ok(),
+            "Validation should allow chunkable text above the single-message limit"
+        );
+
+        let long_text = "a".repeat(MESSAGE_TEXT_CHUNKED_MAX_UTF16_UNITS + 1);
         let input_long = json!({
             "chat_id": "123",
             "text": long_text
@@ -3639,7 +3651,7 @@ mod tests {
             TelegramConnector::validate_input_early("telegram.send_message", &input_long);
         assert!(
             result_long.is_err(),
-            "Validation should fail for > {MESSAGE_TEXT_MAX_CHARS} chars"
+            "Validation should fail beyond the chunked-send limit"
         );
     }
 
@@ -3690,9 +3702,6 @@ mod tests {
         fcp_core::CapabilityToken::from_raw(cose)
     }
 
-    use wiremock::matchers::{body_json, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
     const TEST_BOT_ID: &str = "123456";
     const TEST_BOT_PARTS: [&str; 4] = ["ABCDEFGH", "IJKLMNOP", "QRSTUVWX", "yz012345"];
 
@@ -3702,6 +3711,180 @@ mod tests {
 
     fn token_path(method: &str) -> String {
         format!("/bot{}/{method}", test_bot_credential())
+    }
+
+    #[derive(Clone, Debug)]
+    struct TestTelegramRequest {
+        path: String,
+    }
+
+    struct TestTelegramRoute {
+        method: &'static str,
+        path: String,
+        expected_body: Option<serde_json::Value>,
+        response: serde_json::Value,
+    }
+
+    impl TestTelegramRoute {
+        fn new(method: &'static str, path: impl Into<String>, response: serde_json::Value) -> Self {
+            Self {
+                method,
+                path: path.into(),
+                expected_body: None,
+                response,
+            }
+        }
+
+        fn with_body(mut self, body: serde_json::Value) -> Self {
+            self.expected_body = Some(body);
+            self
+        }
+    }
+
+    struct TestTelegramServer {
+        base_url: String,
+        stop: Arc<AtomicBool>,
+        handle: Option<thread::JoinHandle<()>>,
+        routes: Arc<Mutex<VecDeque<TestTelegramRoute>>>,
+        requests: Arc<Mutex<Vec<TestTelegramRequest>>>,
+    }
+
+    impl TestTelegramServer {
+        fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind telegram test server");
+            listener
+                .set_nonblocking(true)
+                .expect("configure telegram test listener");
+            let addr = listener.local_addr().expect("telegram test server addr");
+            let stop = Arc::new(AtomicBool::new(false));
+            let routes = Arc::new(Mutex::new(VecDeque::<TestTelegramRoute>::new()));
+            let requests = Arc::new(Mutex::new(Vec::<TestTelegramRequest>::new()));
+            let thread_stop = Arc::clone(&stop);
+            let thread_routes = Arc::clone(&routes);
+            let thread_requests = Arc::clone(&requests);
+            let handle = thread::spawn(move || {
+                while !thread_stop.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            handle_test_telegram_request(
+                                &mut stream,
+                                &thread_routes,
+                                &thread_requests,
+                            );
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(StdDuration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            Self {
+                base_url: format!("http://{addr}"),
+                stop,
+                handle: Some(handle),
+                routes,
+                requests,
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.base_url
+        }
+
+        fn respond(&self, route: TestTelegramRoute) {
+            self.routes.lock().expect("route lock").push_back(route);
+        }
+
+        fn requests(&self) -> Vec<TestTelegramRequest> {
+            self.requests.lock().expect("request lock").clone()
+        }
+    }
+
+    impl Drop for TestTelegramServer {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            let _ = TcpStream::connect(self.base_url.trim_start_matches("http://"));
+            if let Some(handle) = self.handle.take() {
+                if thread::panicking() {
+                    let _ = handle.join();
+                } else {
+                    handle.join().expect("telegram test server thread joins");
+                }
+            }
+        }
+    }
+
+    fn handle_test_telegram_request(
+        stream: &mut TcpStream,
+        routes: &Arc<Mutex<VecDeque<TestTelegramRoute>>>,
+        requests: &Arc<Mutex<Vec<TestTelegramRequest>>>,
+    ) {
+        let Some((method, path, raw_body)) = read_loopback_http_request(stream) else {
+            return;
+        };
+        requests
+            .lock()
+            .expect("request lock")
+            .push(TestTelegramRequest { path: path.clone() });
+
+        let route = {
+            let mut routes = routes.lock().expect("route lock");
+            routes
+                .iter()
+                .position(|route| {
+                    route.method == method && request_path_matches(&path, &route.path)
+                })
+                .map(|index| routes.remove(index).expect("route exists"))
+        };
+
+        let response = if let Some(route) = route {
+            if let Some(expected_body) = route.expected_body {
+                let body = if raw_body.trim().is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::from_str(&raw_body)
+                        .expect("telegram test request body should be JSON")
+                };
+                assert_eq!(body, expected_body);
+            }
+            route.response
+        } else if method == "GET" && path == token_path("getMe") {
+            serde_json::json!({
+                "ok": true,
+                "result": {
+                    "id": 123456789,
+                    "is_bot": true,
+                    "first_name": "Test Bot",
+                    "username": "test_bot"
+                }
+            })
+        } else if method == "POST" && path == token_path("getUpdates") {
+            serde_json::json!({ "ok": true, "result": [] })
+        } else {
+            serde_json::json!({
+                "ok": false,
+                "error_code": 404,
+                "description": "unexpected telegram test route"
+            })
+        };
+
+        write_loopback_http_response(stream, &response);
+    }
+
+    fn request_path_matches(actual: &str, expected: &str) -> bool {
+        actual == expected
+            || actual
+                .strip_prefix(expected)
+                .is_some_and(|suffix| suffix.starts_with('?'))
+    }
+
+    fn count_requests_for_path(requests: &[TestTelegramRequest], expected_path: &str) -> usize {
+        requests
+            .iter()
+            .filter(|request| request_path_matches(&request.path, expected_path))
+            .count()
     }
 
     fn unique_zone_dir(label: &str) -> String {
@@ -4078,41 +4261,18 @@ mod tests {
 
     async fn setup_connector_with_token(
         cap: &str,
-    ) -> (TelegramConnector, fcp_core::CapabilityToken, MockServer) {
-        let mock_server = MockServer::start().await;
-
-        // Mock getMe for handshake
-        Mock::given(method("GET"))
-            .and(path(token_path("getMe")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": {
-                    "id": 123456789,
-                    "is_bot": true,
-                    "first_name": "Test Bot",
-                    "username": "test_bot"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        // Mock getUpdates for polling
-        Mock::given(method("POST"))
-            .and(path(token_path("getUpdates")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": []
-            })))
-            .mount(&mock_server)
-            .await;
-
+    ) -> (
+        TelegramConnector,
+        fcp_core::CapabilityToken,
+        TestTelegramServer,
+    ) {
+        let server = TestTelegramServer::start();
         let mut connector = TelegramConnector::new();
 
-        // Configure with dummy credential and mock base URL
         connector
             .handle_configure(serde_json::json!({
                 "credential": test_bot_credential(),
-                "base_url": mock_server.uri()
+                "base_url": server.uri()
             }))
             .await
             .unwrap();
@@ -4134,37 +4294,12 @@ mod tests {
             .unwrap();
 
         let capability = generate_valid_token(&signing_key, cap, &connector.base.instance_id);
-        (connector, capability, mock_server)
-    }
-
-    async fn mount_telegram_setup_mocks(mock_server: &MockServer) {
-        Mock::given(method("GET"))
-            .and(path(token_path("getMe")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": {
-                    "id": 123456789,
-                    "is_bot": true,
-                    "first_name": "Test Bot",
-                    "username": "test_bot"
-                }
-            })))
-            .mount(mock_server)
-            .await;
-
-        Mock::given(method("POST"))
-            .and(path(token_path("getUpdates")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": []
-            })))
-            .mount(mock_server)
-            .await;
+        (connector, capability, server)
     }
 
     async fn configure_handshaken_connector(
         connector: &mut TelegramConnector,
-        mock_server: &MockServer,
+        server: &TestTelegramServer,
         signing_key: &Ed25519SigningKey,
         cap: &str,
         zone_label: &str,
@@ -4172,7 +4307,7 @@ mod tests {
         connector
             .handle_configure(serde_json::json!({
                 "credential": test_bot_credential(),
-                "base_url": mock_server.uri()
+                "base_url": server.uri()
             }))
             .await
             .expect("configure connector");
@@ -4190,13 +4325,6 @@ mod tests {
             .expect("handshake connector");
 
         generate_valid_token(signing_key, cap, &connector.base.instance_id)
-    }
-
-    fn count_requests_for_path(requests: &[wiremock::Request], expected_path: &str) -> usize {
-        requests
-            .iter()
-            .filter(|request| request.url.path() == expected_path)
-            .count()
     }
 
     #[test]
@@ -4325,26 +4453,12 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_handshake_requires_zone_dir_for_polling_state() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path(token_path("getMe")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": {
-                    "id": 123456789,
-                    "is_bot": true,
-                    "first_name": "Test Bot",
-                    "username": "test_bot"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
+        let server = TestTelegramServer::start();
         let mut connector = TelegramConnector::new();
         connector
             .handle_configure(serde_json::json!({
                 "credential": test_bot_credential(),
-                "base_url": mock_server.uri()
+                "base_url": server.uri()
             }))
             .await
             .expect("configure should succeed");
@@ -4395,38 +4509,14 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_polling_lease_fences_second_instance() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path(token_path("getMe")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": {
-                    "id": 123456789,
-                    "is_bot": true,
-                    "first_name": "Test Bot",
-                    "username": "test_bot"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        Mock::given(method("POST"))
-            .and(path(token_path("getUpdates")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": []
-            })))
-            .mount(&mock_server)
-            .await;
-
+        let server = TestTelegramServer::start();
         let zone_dir = unique_zone_dir("lease-fence");
 
         let mut connector_a = TelegramConnector::new();
         connector_a
             .handle_configure(serde_json::json!({
                 "credential": test_bot_credential(),
-                "base_url": mock_server.uri(),
+                "base_url": server.uri(),
                 "poll_timeout": 1
             }))
             .await
@@ -4449,7 +4539,7 @@ mod tests {
         connector_b
             .handle_configure(serde_json::json!({
                 "credential": test_bot_credential(),
-                "base_url": mock_server.uri(),
+                "base_url": server.uri(),
                 "poll_timeout": 1
             }))
             .await
@@ -4477,36 +4567,12 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_handshake_manifest_hash_and_shutdown_clear_state() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path(token_path("getMe")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": {
-                    "id": 123456789,
-                    "is_bot": true,
-                    "first_name": "Test Bot",
-                    "username": "test_bot"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        Mock::given(method("POST"))
-            .and(path(token_path("getUpdates")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": []
-            })))
-            .mount(&mock_server)
-            .await;
-
+        let server = TestTelegramServer::start();
         let mut connector = TelegramConnector::new();
         connector
             .handle_configure(serde_json::json!({
                 "credential": test_bot_credential(),
-                "base_url": mock_server.uri(),
+                "base_url": server.uri(),
                 "poll_timeout": 1
             }))
             .await
@@ -4978,25 +5044,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_polling_emits_event_envelope_from_get_updates() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path(token_path("getMe")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": {
-                    "id": 123456789,
-                    "is_bot": true,
-                    "first_name": "Test Bot",
-                    "username": "test_bot"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        Mock::given(method("POST"))
-            .and(path(token_path("getUpdates")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestTelegramServer::start();
+        server.respond(TestTelegramRoute::new(
+            "POST",
+            token_path("getUpdates"),
+            serde_json::json!({
                 "ok": true,
                 "result": [{
                     "update_id": 1000,
@@ -5018,9 +5070,8 @@ mod tests {
                         "text": "hello poll"
                     }
                 }]
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        ));
 
         let mut connector = TelegramConnector::new();
         let mut event_rx = connector.event_tx.subscribe();
@@ -5028,7 +5079,7 @@ mod tests {
         connector
             .handle_configure(json!({
                 "credential": test_bot_credential(),
-                "base_url": mock_server.uri(),
+                "base_url": server.uri(),
                 "poll_timeout": 1,
                 "inbound_policy": {
                     "mode": "allowlist",
@@ -5074,7 +5125,7 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_no_mock_loopback_polling_routes_root_and_topic_dm_events() {
+    async fn test_loopback_polling_routes_root_and_topic_dm_events() {
         let loopback = LoopbackTelegramServer::start();
         let mut connector = TelegramConnector::new();
         let mut event_rx = connector.event_tx.subscribe();
@@ -5094,7 +5145,7 @@ mod tests {
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
-        let zone_dir = unique_zone_dir("no-mock-topic-routing");
+        let zone_dir = unique_zone_dir("loopback-topic-routing");
         connector
             .handle_handshake(json!({
                 "protocol_version": "1.0.0",
@@ -5779,19 +5830,18 @@ mod tests {
     async fn test_get_file_rejects_traversal_download_path() {
         let (connector, token, server) = setup_connector_with_token("telegram.get_file").await;
 
-        Mock::given(method("GET"))
-            .and(path(token_path("getFile")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        server.respond(TestTelegramRoute::new(
+            "GET",
+            token_path("getFile"),
+            serde_json::json!({
                 "ok": true,
                 "result": {
                     "file_id": "AgACAgIAAxkBAAI",
                     "file_unique_id": "unique",
                     "file_path": "../../../etc/passwd"
                 }
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
+            }),
+        ));
 
         let result = connector
             .handle_invoke(serde_json::json!({
@@ -5819,40 +5869,41 @@ mod tests {
         tracing::debug!("log_capture_ready");
         let (connector, token, server) = setup_connector_with_token("telegram.send_message").await;
 
-        Mock::given(method("POST"))
-            .and(path(token_path("sendMessage")))
-            .and(body_json(serde_json::json!({
+        server.respond(
+            TestTelegramRoute::new(
+                "POST",
+                token_path("sendMessage"),
+                serde_json::json!({
+                    "ok": false,
+                    "error_code": 400,
+                    "description": "Bad Request: can't parse entities"
+                }),
+            )
+            .with_body(serde_json::json!({
                 "chat_id": "123456789",
                 "text": "<b>secret message</b>",
                 "parse_mode": "HTML"
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": false,
-                "error_code": 400,
-                "description": "Bad Request: can't parse entities"
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        Mock::given(method("POST"))
-            .and(path(token_path("sendMessage")))
-            .and(body_json(serde_json::json!({
+            })),
+        );
+        server.respond(
+            TestTelegramRoute::new(
+                "POST",
+                token_path("sendMessage"),
+                serde_json::json!({
+                    "ok": true,
+                    "result": {
+                        "message_id": 77,
+                        "chat": { "id": 123456789, "type": "private", "first_name": "Test" },
+                        "date": 1234567890,
+                        "text": "secret message"
+                    }
+                }),
+            )
+            .with_body(serde_json::json!({
                 "chat_id": "123456789",
                 "text": "secret message"
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": {
-                    "message_id": 77,
-                    "chat": { "id": 123456789, "type": "private", "first_name": "Test" },
-                    "date": 1234567890,
-                    "text": "secret message"
-                }
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
+            })),
+        );
 
         let input = serde_json::json!({
             "chat_id": "123456789",
@@ -5923,19 +5974,6 @@ mod tests {
     async fn test_send_message_text_at_limit() {
         let (connector, token, _server) = setup_connector_with_token("telegram.send_message").await;
 
-        // Create a message exactly at the platform limit - should pass validation
-        // but fail on NotConfigured -> Wait, we configured it with a mock!
-        // But invoke_send_message calls client.send_message.
-        // We haven't mocked sendMessage!
-        // So it will fail with 404 from mock server (because no mock matches).
-        // BUT the test expects NotConfigured? No, the original test expected NotConfigured because it wasn't configured.
-        // Now it IS configured.
-        // We should mock sendMessage to return success or error as needed.
-        // But this test specifically wants to test boundary condition.
-        // If validation passes (<= one Telegram chunk), it proceeds to call API.
-        // If we want to test that validation passed, we can check that it didn't fail with InvalidRequest.
-        // If the mock returns 404, that means it TRIED to send, so validation passed.
-
         let exact_text = "x".repeat(MESSAGE_TEXT_MAX_CHARS);
         let input = serde_json::json!({
             "chat_id": "123456789",
@@ -5950,13 +5988,9 @@ mod tests {
             }))
             .await;
 
-        // It should NOT be InvalidRequest.
-        // It will be External error (404 from mock) or Success if we mock it.
-        // Let's assert it is NOT InvalidRequest(1004).
-
         match result {
-            Ok(_) => {}                          // Success is fine (if we mocked it)
-            Err(FcpError::External { .. }) => {} // External error means it tried to send -> validation passed
+            Ok(_) => {}
+            Err(FcpError::External { .. }) => {}
             Err(e) => assert!(matches!(e, FcpError::External { .. })),
         }
     }
@@ -5965,40 +5999,41 @@ mod tests {
     async fn test_send_message_parse_error_falls_back() {
         let (connector, token, server) = setup_connector_with_token("telegram.send_message").await;
 
-        Mock::given(method("POST"))
-            .and(path(token_path("sendMessage")))
-            .and(body_json(serde_json::json!({
+        server.respond(
+            TestTelegramRoute::new(
+                "POST",
+                token_path("sendMessage"),
+                serde_json::json!({
+                    "ok": false,
+                    "error_code": 400,
+                    "description": "Bad Request: can't parse entities"
+                }),
+            )
+            .with_body(serde_json::json!({
                 "chat_id": "123456789",
                 "text": "<b>Hello</b>",
                 "parse_mode": "HTML"
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": false,
-                "error_code": 400,
-                "description": "Bad Request: can't parse entities"
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        Mock::given(method("POST"))
-            .and(path(token_path("sendMessage")))
-            .and(body_json(serde_json::json!({
+            })),
+        );
+        server.respond(
+            TestTelegramRoute::new(
+                "POST",
+                token_path("sendMessage"),
+                serde_json::json!({
+                    "ok": true,
+                    "result": {
+                        "message_id": 55,
+                        "chat": { "id": 123456789, "type": "private", "first_name": "Test" },
+                        "date": 1234567890,
+                        "text": "Hello"
+                    }
+                }),
+            )
+            .with_body(serde_json::json!({
                 "chat_id": "123456789",
                 "text": "Hello"
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": {
-                    "message_id": 55,
-                    "chat": { "id": 123456789, "type": "private", "first_name": "Test" },
-                    "date": 1234567890,
-                    "text": "Hello"
-                }
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
+            })),
+        );
 
         let input = serde_json::json!({
             "chat_id": "123456789",
@@ -6026,25 +6061,26 @@ mod tests {
     async fn test_send_message_invocation_passes_message_thread_id() {
         let (connector, token, server) = setup_connector_with_token("telegram.send_message").await;
 
-        Mock::given(method("POST"))
-            .and(path(token_path("sendMessage")))
-            .and(body_json(serde_json::json!({
+        server.respond(
+            TestTelegramRoute::new(
+                "POST",
+                token_path("sendMessage"),
+                serde_json::json!({
+                    "ok": true,
+                    "result": {
+                        "message_id": 56,
+                        "chat": { "id": 208214988, "type": "private", "first_name": "Topic" },
+                        "date": 1234567890,
+                        "text": "topic reply"
+                    }
+                }),
+            )
+            .with_body(serde_json::json!({
                 "chat_id": "208214988",
                 "text": "topic reply",
                 "message_thread_id": 17585
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": {
-                    "message_id": 56,
-                    "chat": { "id": 208214988, "type": "private", "first_name": "Topic" },
-                    "date": 1234567890,
-                    "text": "topic reply"
-                }
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
+            })),
+        );
 
         let result = connector
             .handle_invoke(serde_json::json!({
@@ -6064,28 +6100,27 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn send_message_denies_duplicate_owner_before_http_send() {
-        let server = MockServer::start().await;
-        mount_telegram_setup_mocks(&server).await;
-
-        Mock::given(method("POST"))
-            .and(path(token_path("sendMessage")))
-            .and(body_json(serde_json::json!({
+        let server = TestTelegramServer::start();
+        server.respond(
+            TestTelegramRoute::new(
+                "POST",
+                token_path("sendMessage"),
+                serde_json::json!({
+                    "ok": true,
+                    "result": {
+                        "message_id": 56,
+                        "chat": { "id": 208214988, "type": "supergroup", "title": "Topic" },
+                        "date": 1234567890,
+                        "text": "owner topic reply"
+                    }
+                }),
+            )
+            .with_body(serde_json::json!({
                 "chat_id": "208214988",
                 "text": "owner topic reply",
                 "message_thread_id": 17585
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": {
-                    "message_id": 56,
-                    "chat": { "id": 208214988, "type": "supergroup", "title": "Topic" },
-                    "date": 1234567890,
-                    "text": "owner topic reply"
-                }
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
+            })),
+        );
 
         let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
         let mut owner = TelegramConnector::new()
@@ -6148,7 +6183,7 @@ mod tests {
             .expect_err("peer should be denied before HTTP send");
         assert!(matches!(denied, FcpError::Unauthorized { code: 4090, .. }));
 
-        let requests = server.received_requests().await.unwrap_or_default();
+        let requests = server.requests();
         assert_eq!(
             count_requests_for_path(&requests, token_path("sendMessage").as_str()),
             1
@@ -6157,12 +6192,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn send_media_denies_duplicate_owner_before_http_send() {
-        let server = MockServer::start().await;
-        mount_telegram_setup_mocks(&server).await;
-
-        Mock::given(method("POST"))
-            .and(path(token_path("sendMessage")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = TestTelegramServer::start();
+        server.respond(TestTelegramRoute::new(
+            "POST",
+            token_path("sendMessage"),
+            serde_json::json!({
                 "ok": true,
                 "result": {
                     "message_id": 57,
@@ -6170,10 +6204,8 @@ mod tests {
                     "date": 1234567890,
                     "text": "owner topic reply"
                 }
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
+            }),
+        ));
 
         let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
         let mut owner = TelegramConnector::new()
@@ -6227,7 +6259,7 @@ mod tests {
             .expect_err("peer media send should be denied before HTTP send");
         assert!(matches!(denied, FcpError::Unauthorized { code: 4090, .. }));
 
-        let requests = server.received_requests().await.unwrap_or_default();
+        let requests = server.requests();
         assert_eq!(
             count_requests_for_path(&requests, token_path("sendMessage").as_str()),
             1
@@ -6244,24 +6276,25 @@ mod tests {
 
         let text = "*bold* [click](https://example.com)";
 
-        Mock::given(method("POST"))
-            .and(path(token_path("sendMessage")))
-            .and(body_json(serde_json::json!({
+        server.respond(
+            TestTelegramRoute::new(
+                "POST",
+                token_path("sendMessage"),
+                serde_json::json!({
+                    "ok": true,
+                    "result": {
+                        "message_id": 56,
+                        "chat": { "id": 123456789, "type": "private", "first_name": "Test" },
+                        "date": 1234567890,
+                        "text": text
+                    }
+                }),
+            )
+            .with_body(serde_json::json!({
                 "chat_id": "123456789",
                 "text": text
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": {
-                    "message_id": 56,
-                    "chat": { "id": 123456789, "type": "private", "first_name": "Test" },
-                    "date": 1234567890,
-                    "text": text
-                }
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
+            })),
+        );
 
         let input = serde_json::json!({
             "chat_id": "123456789",

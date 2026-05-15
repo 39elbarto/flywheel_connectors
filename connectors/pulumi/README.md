@@ -111,7 +111,7 @@ The current Pulumi README slice documents the existing runtime surface:
 - provider error mapping, retry classification, timeout behavior, and path-segment validation
 - runtime/manifest/provider-doc drift around authentication, endpoint paths, approvals, rate limits, network policy, state persistence, and capability-token verification
 - deterministic WireMock integration tests
-- gated sandbox live proof for invalid-token denial, stack metadata read, and update-history read
+- gated sandbox live proof for invalid-token denial, stack metadata read, update-history read, and production Pulumi CLI preview
 
 ## Auth And Zone Boundary
 
@@ -212,7 +212,7 @@ The tracked tests use deterministic WireMock servers. They cover:
 - provider 401, 403, 404, 429, and 500 responses
 - request and error counter updates
 
-The gated live suite requires `PULUMI_SANDBOX_ACCESS_TOKEN`, `PULUMI_SANDBOX_ORG`, `PULUMI_SANDBOX_PROJECT`, `PULUMI_SANDBOX_STACK`, and `FCP_SANDBOX_RUN_NAMESPACE`. It emits `PULUMI_LIVE_SANDBOX_JSONL` with hashed organization/project/stack/namespace identifiers, invalid-token denial status, provider-resource redaction flags, and no stack state payloads.
+The gated live suite requires `PULUMI_SANDBOX_ACCESS_TOKEN`, `PULUMI_SANDBOX_ORG`, `PULUMI_SANDBOX_PROJECT`, `PULUMI_SANDBOX_STACK`, and `FCP_SANDBOX_RUN_NAMESPACE`. It uses `pulumi` from `PATH` by default; set `PULUMI_SANDBOX_CLI` to an explicit binary path when needed. A fully configured run performs invalid-token denial, stack metadata read, update-history read, and `pulumi preview --refresh=false --expect-no-changes --suppress-outputs` against the sandbox stack. If the CLI prerequisite is absent, the suite emits an exact structured skip instead of passing. `PULUMI_LIVE_SANDBOX_JSONL` hashes organization/project/stack/namespace/CLI identifiers, records provider-resource redaction flags, and never logs stack state payloads.
 
 Before committing README-only changes for this connector, run:
 

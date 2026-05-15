@@ -2656,11 +2656,52 @@ async fn connector_lease_durable_evidence_from_config(
         return evidence;
     }
 
+    let validated_at_unix_secs = current_unix_secs_u64();
+    evidence.validated_at_unix_secs = Some(validated_at_unix_secs);
+    match validate_connector_state_core_lease_for_status(
+        &lease,
+        &expected_subject,
+        zone,
+        head.lease_seq,
+        validated_at_unix_secs,
+    ) {
+        Ok(()) => evidence.validation_status = Some("valid"),
+        Err(error) => {
+            evidence.validation_status = Some("invalid");
+            evidence.validation_error = Some(error.to_string());
+            evidence.warnings.push(format!(
+                "Durable lease object `{}` failed live lease validation: {error}",
+                head.lease_object_id
+            ));
+        }
+    }
     evidence.lease_seq = Some(lease.lease_seq);
     evidence.expiry_unix_secs = Some(lease.exp);
     evidence.quorum_signers_count = Some(lease.quorum_signatures.len());
     evidence.source = Some("canonical-fcp-store-lease-object");
     evidence
+}
+
+fn current_unix_secs_u64() -> u64 {
+    u64::try_from(Utc::now().timestamp()).unwrap_or(0)
+}
+
+fn validate_connector_state_core_lease_for_status(
+    lease: &CoreLease,
+    expected_subject: &ObjectId,
+    expected_zone: &ZoneId,
+    current_known_seq: u64,
+    now_unix_secs: u64,
+) -> Result<(), fcp_core::LeaseValidationError> {
+    fcp_core::validate_lease(
+        lease,
+        expected_subject,
+        expected_zone,
+        CoreLeasePurpose::ConnectorStateWrite,
+        current_known_seq,
+        now_unix_secs,
+        CONNECTOR_STATE_LEASE_REQUIRED_QUORUM_SIGNATURES,
+    )
 }
 
 struct HostConnectorLeaseYieldFlushContext {
@@ -4606,6 +4647,9 @@ struct ConnectorLeaseDurableEvidence {
     lease_seq: Option<u64>,
     expiry_unix_secs: Option<u64>,
     quorum_signers_count: Option<usize>,
+    validation_status: Option<&'static str>,
+    validation_error: Option<String>,
+    validated_at_unix_secs: Option<u64>,
     source: Option<&'static str>,
     warnings: Vec<String>,
 }
@@ -4902,6 +4946,11 @@ fn connector_lease_status_payload(
         "quorum_signers_count": quorum_signers_count,
         "required_quorum_signers_count": required_quorum_signers_count,
         "quorum_satisfied": quorum_satisfied,
+        "durable_validation": {
+            "status": durable.validation_status.unwrap_or("unavailable"),
+            "error": durable.validation_error,
+            "validated_at_unix_secs": durable.validated_at_unix_secs,
+        },
         "lease_object_id": durable.lease_object_id.map(|object_id| object_id.to_string()),
         "lease_evidence_source": durable.source.unwrap_or("unavailable"),
         "local_node_id_hash": local_node_id_hash,
@@ -25667,6 +25716,9 @@ done"#;
             lease_seq: Some(10),
             expiry_unix_secs: Some(1_800_200_300),
             quorum_signers_count: Some(2),
+            validation_status: Some("valid"),
+            validation_error: None,
+            validated_at_unix_secs: Some(1_800_200_000),
             source: Some("canonical-fcp-store-lease-object"),
             warnings: Vec::new(),
         };
@@ -25679,6 +25731,7 @@ done"#;
         assert_eq!(payload["quorum_signers_count"], 2);
         assert_eq!(payload["required_quorum_signers_count"], 2);
         assert_eq!(payload["quorum_satisfied"], true);
+        assert_eq!(payload["durable_validation"]["status"], "valid");
         let warnings = payload["warnings"]
             .as_array()
             .expect("warnings should be an array");
@@ -25708,6 +25761,9 @@ done"#;
             lease_seq: Some(10),
             expiry_unix_secs: Some(1_800_200_300),
             quorum_signers_count: Some(1),
+            validation_status: Some("invalid"),
+            validation_error: Some("insufficient quorum: required 2 signatures, got 1".to_string()),
+            validated_at_unix_secs: Some(1_800_200_000),
             source: Some("canonical-fcp-store-lease-object"),
             warnings: Vec::new(),
         };
@@ -25718,6 +25774,12 @@ done"#;
         assert_eq!(payload["quorum_signers_count"], 1);
         assert_eq!(payload["required_quorum_signers_count"], 2);
         assert_eq!(payload["quorum_satisfied"], false);
+        assert_eq!(payload["durable_validation"]["status"], "invalid");
+        assert!(
+            payload["durable_validation"]["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("insufficient quorum"))
+        );
         let warnings = payload["warnings"]
             .as_array()
             .expect("warnings should be an array");
@@ -25726,6 +25788,34 @@ done"#;
                 .as_str()
                 .is_some_and(|warning| warning.contains("below the required 2"))),
             "below-quorum durable lease should be explicit in operator status: {payload}"
+        );
+    }
+
+    #[test]
+    fn connector_lease_status_core_lease_validation_rejects_expired_durable_lease() {
+        let zone_id = ZoneId::work();
+        let subject_id = ObjectId::from_bytes([0x46; 32]);
+        let lease = durable_core_lease_for_test(
+            &zone_id,
+            subject_id,
+            TailscaleNodeId::new("node-a"),
+            10,
+            1_000,
+            test_signature_set(&["node-a", "node-b"]),
+        );
+
+        let error = validate_connector_state_core_lease_for_status(
+            &lease,
+            &subject_id,
+            &zone_id,
+            10,
+            1_001,
+        )
+        .expect_err("expired durable lease evidence must be invalid");
+
+        assert!(
+            error.to_string().contains("lease expired"),
+            "unexpected validation error: {error}"
         );
     }
 
@@ -26134,6 +26224,12 @@ done"#;
         assert_eq!(
             payload["lease_evidence_source"],
             "canonical-fcp-store-lease-object"
+        );
+        assert_eq!(payload["durable_validation"]["status"], "valid");
+        assert!(
+            payload["durable_validation"]["validated_at_unix_secs"]
+                .as_u64()
+                .is_some()
         );
         assert_eq!(payload["local_is_holder"], true);
         assert!(

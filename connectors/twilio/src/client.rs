@@ -1139,10 +1139,195 @@ fn ensure_whatsapp_prefix(number: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
-    };
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
+
+    enum TestHttpBody {
+        Json(serde_json::Value),
+        Text(&'static str),
+        Empty,
+    }
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: TestHttpBody,
+    }
+
+    struct TestHttpServer {
+        url: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestHttpResponse {
+        #[must_use]
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: TestHttpBody::Json(body),
+            }
+        }
+
+        #[must_use]
+        fn text(method: &'static str, path: &'static str, status: u16, body: &'static str) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: TestHttpBody::Text(body),
+            }
+        }
+
+        #[must_use]
+        const fn empty(method: &'static str, path: &'static str, status: u16) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: TestHttpBody::Empty,
+            }
+        }
+    }
+
+    impl TestHttpServer {
+        #[must_use]
+        fn respond(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let handle = thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                for response in responses {
+                    let stream = accept_test_connection(&listener);
+                    handle_test_request(stream, response);
+                }
+            });
+            Self {
+                url,
+                handle: Some(handle),
+            }
+        }
+
+        #[must_use]
+        fn account_base_url(&self) -> String {
+            format!("{}/2010-04-01/Accounts/ACtest123", self.url)
+        }
+    }
+
+    impl Drop for TestHttpServer {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                if thread::panicking() {
+                    let _ = handle.join();
+                } else {
+                    handle.join().unwrap();
+                }
+            }
+        }
+    }
+
+    fn test_server(responses: Vec<TestHttpResponse>) -> (TestHttpServer, String) {
+        let server = TestHttpServer::respond(responses);
+        let base = server.account_base_url();
+        (server, base)
+    }
+
+    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    return stream;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "test server did not receive expected request"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("test listener failed: {err}"),
+            }
+        }
+    }
+
+    fn handle_test_request(stream: TcpStream, response: TestHttpResponse) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        assert_eq!(request_parts.next(), Some(response.method));
+        let actual_path = request_parts
+            .next()
+            .and_then(|path| path.split('?').next())
+            .unwrap_or_default();
+        assert_eq!(actual_path, response.path);
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_length = value.trim().parse().unwrap();
+            }
+        }
+
+        let mut request_body = vec![0u8; content_length];
+        if content_length > 0 {
+            reader.read_exact(&mut request_body).unwrap();
+        }
+
+        let mut stream = reader.into_inner();
+        let (body, is_json_body) = match response.body {
+            TestHttpBody::Json(body) => (body.to_string(), true),
+            TestHttpBody::Text(body) => (body.to_string(), false),
+            TestHttpBody::Empty => (String::new(), false),
+        };
+        let reason = match response.status {
+            200 => "OK",
+            201 => "Created",
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            404 => "Not Found",
+            429 => "Too Many Requests",
+            500 => "Internal Server Error",
+            503 => "Service Unavailable",
+            _ => "OK",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-length: {}\r\nconnection: close\r\n",
+            response.status,
+            reason,
+            body.len()
+        )
+        .unwrap();
+        if is_json_body {
+            write!(stream, "content-type: application/json\r\n").unwrap();
+        }
+        write!(stream, "\r\n{body}").unwrap();
+        stream.flush().unwrap();
+    }
 
     fn test_client(base_url: &str) -> TwilioClient {
         TwilioClient::new("ACtest123", "test_auth_token")
@@ -1153,21 +1338,19 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_send_message() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("POST"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Messages.json"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "POST",
+            "/2010-04-01/Accounts/ACtest123/Messages.json",
+            201,
+            serde_json::json!({
                 "sid": "SMtest123",
                 "status": "queued",
                 "to": "+15551234567",
                 "from": "+15559876543",
                 "body": "Hello from FCP!",
                 "date_created": "2026-03-01T00:00:00Z"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let msg = client
@@ -1186,12 +1369,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_message() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Messages/SMabc.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages/SMabc.json",
+            200,
+            serde_json::json!({
                 "sid": "SMabc",
                 "status": "delivered",
                 "to": "+15551234567",
@@ -1199,9 +1381,8 @@ mod tests {
                 "body": "Test message",
                 "date_created": "2026-03-01T00:00:00Z",
                 "num_media": "0"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let msg = client.get_message("SMabc").await.unwrap();
@@ -1211,20 +1392,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_messages() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Messages.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages.json",
+            200,
+            serde_json::json!({
                 "messages": [
                     { "sid": "SM1", "status": "delivered", "to": "+1", "from": "+2" },
                     { "sid": "SM2", "status": "sent", "to": "+3", "from": "+4" }
                 ],
                 "next_page_uri": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client
@@ -1236,20 +1415,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_create_call() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("POST"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Calls.json"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "POST",
+            "/2010-04-01/Accounts/ACtest123/Calls.json",
+            201,
+            serde_json::json!({
                 "sid": "CAtest",
                 "status": "queued",
                 "to": "+15551234567",
                 "from": "+15559876543",
                 "date_created": "2026-03-01T00:00:00Z"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let call = client
@@ -1269,12 +1446,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_call() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Calls/CAxyz.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Calls/CAxyz.json",
+            200,
+            serde_json::json!({
                 "sid": "CAxyz",
                 "status": "completed",
                 "to": "+15551234567",
@@ -1282,9 +1458,8 @@ mod tests {
                 "duration": "42",
                 "date_created": "2026-03-01T00:00:00Z",
                 "price": "-0.0100"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let call = client.get_call("CAxyz").await.unwrap();
@@ -1294,21 +1469,19 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_hangup_call() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("POST"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Calls/CAactive.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "POST",
+            "/2010-04-01/Accounts/ACtest123/Calls/CAactive.json",
+            200,
+            serde_json::json!({
                 "sid": "CAactive",
                 "status": "completed",
                 "to": "+15551234567",
                 "from": "+15559876543",
                 "duration": "120",
                 "date_created": "2026-03-01T00:00:00Z"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let call = client.hangup_call("CAactive").await.unwrap();
@@ -1319,20 +1492,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_calls() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Calls.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Calls.json",
+            200,
+            serde_json::json!({
                 "calls": [
                     { "sid": "CA1", "status": "completed", "to": "+1", "from": "+2", "duration": "30" },
                     { "sid": "CA2", "status": "in-progress", "to": "+3", "from": "+4" }
                 ],
                 "next_page_uri": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client
@@ -1344,19 +1515,17 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_calls_with_filters() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Calls.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Calls.json",
+            200,
+            serde_json::json!({
                 "calls": [
                     { "sid": "CA1", "status": "completed", "to": "+15551234567", "from": "+2" }
                 ],
                 "next_page_uri": "/next"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client
@@ -1592,19 +1761,17 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_account() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123.json",
+            200,
+            serde_json::json!({
                 "sid": "ACtest123",
                 "friendly_name": "Test Account",
                 "status": "active",
                 "type": "Full"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let account = client.get_account().await.unwrap();
@@ -1614,21 +1781,17 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_phone_numbers() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/IncomingPhoneNumbers.json",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/IncomingPhoneNumbers.json",
+            200,
+            serde_json::json!({
                 "incoming_phone_numbers": [
                     { "sid": "PN1", "phone_number": "+15551234567", "friendly_name": "Main" }
                 ],
                 "next_page_uri": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client.list_phone_numbers(None, None).await.unwrap();
@@ -1637,14 +1800,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_unauthorized() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123.json"))
-            .respond_with(ResponseTemplate::new(401))
-            .mount(&mock_server)
-            .await;
+        let (_server, base) = test_server(vec![TestHttpResponse::empty(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123.json",
+            401,
+        )]);
 
         let client = test_client(&base);
         let result = client.get_account().await;
@@ -1654,19 +1814,15 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_not_found() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/Messages/SMmissing.json",
-            ))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages/SMmissing.json",
+            404,
+            serde_json::json!({
                 "code": 20404,
                 "message": "The requested resource was not found"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client.get_message("SMmissing").await;
@@ -1676,14 +1832,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_rate_limited() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123.json"))
-            .respond_with(ResponseTemplate::new(429))
-            .mount(&mock_server)
-            .await;
+        let (_server, base) = test_server(vec![TestHttpResponse::empty(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123.json",
+            429,
+        )]);
 
         let client = test_client(&base);
         let result = client.get_account().await;
@@ -1910,24 +2063,22 @@ mod tests {
         assert!(DEFAULT_API_BASE.contains("Accounts"));
     }
 
-    // ── Wiremock edge case tests ────────────────────────────────────────
+    // ── HTTP edge case tests ────────────────────────────────────────────
 
     #[fcp_async_core::runtime::test]
     async fn test_list_recordings() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Recordings.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Recordings.json",
+            200,
+            serde_json::json!({
                 "recordings": [
                     {"sid": "RE1", "duration": "30"},
                     {"sid": "RE2", "duration": "60"}
                 ],
                 "next_page_uri": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client.list_recordings(None, None, None).await.unwrap();
@@ -1936,14 +2087,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_forbidden_returns_unauthorized() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123.json"))
-            .respond_with(ResponseTemplate::new(403))
-            .mount(&mock_server)
-            .await;
+        let (_server, base) = test_server(vec![TestHttpResponse::empty(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123.json",
+            403,
+        )]);
 
         let client = test_client(&base);
         let result = client.get_account().await;
@@ -1953,17 +2101,15 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_api_error_with_error_body() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Messages.json"))
-            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages.json",
+            400,
+            serde_json::json!({
                 "code": 21211,
                 "message": "Invalid 'To' Phone Number"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client.list_messages(None, None, None, None, None).await;
@@ -1981,14 +2127,12 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_server_error_no_retry() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123.json"))
-            .respond_with(ResponseTemplate::new(503).set_body_string("Service Unavailable"))
-            .mount(&mock_server)
-            .await;
+        let (_server, base) = test_server(vec![TestHttpResponse::text(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123.json",
+            503,
+            "Service Unavailable",
+        )]);
 
         let client = test_client(&base);
         let result = client.get_account().await;
@@ -2006,21 +2150,19 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_send_message_with_media_url() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("POST"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Messages.json"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "POST",
+            "/2010-04-01/Accounts/ACtest123/Messages.json",
+            201,
+            serde_json::json!({
                 "sid": "SMmedia",
                 "status": "queued",
                 "to": "+15551111111",
                 "from": "+15552222222",
                 "body": "With media",
                 "num_media": "1"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let media = vec!["https://example.com/image.png".to_string()];
@@ -2040,20 +2182,18 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_send_message_with_callback() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("POST"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Messages.json"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "POST",
+            "/2010-04-01/Accounts/ACtest123/Messages.json",
+            201,
+            serde_json::json!({
                 "sid": "SMcb",
                 "status": "queued",
                 "to": "+15551111111",
                 "from": "+15552222222",
                 "body": "With callback"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let msg = client
@@ -2071,19 +2211,17 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_create_call_with_all_options() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("POST"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Calls.json"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "POST",
+            "/2010-04-01/Accounts/ACtest123/Calls.json",
+            201,
+            serde_json::json!({
                 "sid": "CAfull",
                 "status": "queued",
                 "to": "+15551111111",
                 "from": "+15552222222"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let call = client
@@ -2102,17 +2240,15 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_messages_with_filters() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Messages.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages.json",
+            200,
+            serde_json::json!({
                 "messages": [{"sid": "SMfiltered"}],
                 "next_page_uri": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client
@@ -2130,21 +2266,17 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_phone_numbers_with_filter() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/IncomingPhoneNumbers.json",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/IncomingPhoneNumbers.json",
+            200,
+            serde_json::json!({
                 "incoming_phone_numbers": [
                     {"sid": "PNfiltered", "phone_number": "+15551234567"}
                 ],
                 "next_page_uri": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client
@@ -2156,17 +2288,15 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_recordings_with_filters() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path("/2010-04-01/Accounts/ACtest123/Recordings.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Recordings.json",
+            200,
+            serde_json::json!({
                 "recordings": [{"sid": "REfiltered"}],
                 "next_page_uri": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client
@@ -2180,14 +2310,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_media() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media.json",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media.json",
+            200,
+            serde_json::json!({
                 "media_list": [
                     {
                         "sid": "ME001",
@@ -2205,9 +2332,8 @@ mod tests {
                     }
                 ],
                 "next_page_uri": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client.list_media("SMabc", None, None).await.unwrap();
@@ -2217,21 +2343,17 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_media_with_pagination() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media.json",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media.json",
+            200,
+            serde_json::json!({
                 "media_list": [
                     {"sid": "ME001", "content_type": "image/jpeg"}
                 ],
                 "next_page_uri": "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media.json?Page=1"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client.list_media("SMabc", Some(1), Some(0)).await.unwrap();
@@ -2241,19 +2363,15 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_list_media_empty() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/Messages/SMnomedia/Media.json",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages/SMnomedia/Media.json",
+            200,
+            serde_json::json!({
                 "media_list": [],
                 "next_page_uri": null
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client.list_media("SMnomedia", None, None).await.unwrap();
@@ -2262,14 +2380,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_media() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media/ME001.json",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media/ME001.json",
+            200,
+            serde_json::json!({
                 "sid": "ME001",
                 "account_sid": "ACtest123",
                 "parent_sid": "SMabc",
@@ -2277,9 +2392,8 @@ mod tests {
                 "date_created": "2026-03-01T00:00:00Z",
                 "date_updated": "2026-03-01T00:00:01Z",
                 "uri": "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media/ME001.json"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let media = client.get_media("SMabc", "ME001").await.unwrap();
@@ -2291,19 +2405,15 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_media_not_found() {
-        let mock_server = MockServer::start().await;
-        let base = format!("{}/2010-04-01/Accounts/ACtest123", mock_server.uri());
-
-        Mock::given(method("GET"))
-            .and(path(
-                "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media/MEmissing.json",
-            ))
-            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+        let (_server, base) = test_server(vec![TestHttpResponse::json(
+            "GET",
+            "/2010-04-01/Accounts/ACtest123/Messages/SMabc/Media/MEmissing.json",
+            404,
+            serde_json::json!({
                 "code": 20404,
                 "message": "The requested resource was not found"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let client = test_client(&base);
         let result = client.get_media("SMabc", "MEmissing").await;

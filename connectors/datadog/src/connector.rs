@@ -156,8 +156,7 @@ fn validate_base_url(base_url: &str) -> FcpResult<()> {
         return Err(FcpError::InvalidRequest {
             code: 1003,
             message: format!(
-                "Endpoint must use https and one of {:?} (localhost/127.0.0.1 allowed for tests): {base_url}",
-                ALLOWED_DATADOG_HOSTS
+                "Endpoint must use https and one of {ALLOWED_DATADOG_HOSTS:?} (localhost/127.0.0.1 allowed for tests): {base_url}"
             ),
         });
     }
@@ -1059,7 +1058,7 @@ mod tests {
     }
 
     /// br-ieiby: configure-time refuse for non-Datadog hosts. Closes
-    /// the auth-routing-to-attacker vector where api_key + app_key
+    /// the auth-routing-to-attacker vector where `api_key` + `app_key`
     /// would be sent to whatever host the caller named.
     #[test]
     fn config_rejects_non_datadog_host() {
@@ -1131,9 +1130,9 @@ mod tests {
         assert_eq!(config2.base_url, "http://127.0.0.1:9090/api");
     }
 
-    /// br-ieiby: every region's api_base_url must pass the policy.
+    /// br-ieiby: every region's `api_base_url` must pass the policy.
     /// Regression guard — if a future region addition forgets to add
-    /// its host to ALLOWED_DATADOG_HOSTS, this fails fast.
+    /// its host to `ALLOWED_DATADOG_HOSTS`, this fails fast.
     #[test]
     fn config_accepts_every_region_default_url() {
         for region_str in ["us1", "us3", "us5", "eu1", "ap1"] {
@@ -2032,7 +2031,7 @@ mod tests {
         let v = serde_json::to_value(&recipe).unwrap();
         assert_eq!(v["id"], "fcp.datadog.setup");
         assert_eq!(v["version"], "1");
-        assert!(v["steps"].as_array().unwrap().len() == 6);
+        assert_eq!(v["steps"].as_array().unwrap().len(), 6);
     }
 
     // ── Provisioning readiness ──────────────────────────────────────

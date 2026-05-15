@@ -9,7 +9,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 ///
 /// Datadog routes that hit the connector via `configured_connector` MUST
 /// emit both `DD-API-KEY: test-api-key` and `DD-APPLICATION-KEY: test-app-key`.
-/// Without these matchers on every Mock::given chain, a regression that
+/// Without these matchers on every `Mock::given` chain, a regression that
 /// dropped the headers in `connectors/datadog/src/client.rs` would still
 /// pass every integration test.
 const DD_API_KEY: &str = "test-api-key";

@@ -1904,6 +1904,119 @@ mod tests {
         (format!("http://{address}"), handle)
     }
 
+    struct LoopbackHttpServer {
+        uri: String,
+        handle: thread::JoinHandle<()>,
+    }
+
+    struct LoopbackHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: String,
+        content_type: &'static str,
+    }
+
+    impl LoopbackHttpServer {
+        fn start(responses: Vec<LoopbackHttpResponse>) -> Self {
+            let listener =
+                TcpListener::bind("127.0.0.1:0").expect("bind Signal loopback HTTP listener");
+            let address = listener.local_addr().expect("Signal listener address");
+            let handle = thread::spawn(move || {
+                for response in responses {
+                    let (mut stream, _) = listener
+                        .accept()
+                        .expect("accept Signal loopback HTTP client");
+                    let request = read_http_request(&mut stream);
+                    let first_line = request.lines().next().unwrap_or_default();
+                    let expected_prefix = format!("{} {}", response.method, response.path);
+                    assert!(
+                        first_line.starts_with(&expected_prefix),
+                        "unexpected Signal HTTP request line: {first_line:?}",
+                    );
+                    write_http_response(&mut stream, &response);
+                }
+            });
+
+            Self {
+                uri: format!("http://{address}"),
+                handle,
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.uri
+        }
+
+        fn join(self) {
+            self.handle
+                .join()
+                .expect("Signal loopback HTTP thread should finish");
+        }
+    }
+
+    impl LoopbackHttpResponse {
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: &serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: serde_json::to_string(body).expect("Signal JSON response should serialize"),
+                content_type: "application/json",
+            }
+        }
+
+        fn empty(method: &'static str, path: &'static str, status: u16) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: String::new(),
+                content_type: "text/plain",
+            }
+        }
+    }
+
+    fn read_http_request(stream: &mut impl Read) -> String {
+        let mut request = Vec::new();
+        let mut buf = [0_u8; 512];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream
+                .read(&mut buf)
+                .expect("read Signal loopback HTTP request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..read]);
+        }
+        String::from_utf8_lossy(&request).into_owned()
+    }
+
+    fn write_http_response(stream: &mut impl Write, response: &LoopbackHttpResponse) {
+        let reason = "OK";
+        let message = format!(
+            "HTTP/1.1 {} {reason}\r\n\
+             Content-Type: {}\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {}",
+            response.status,
+            response.content_type,
+            response.body.len(),
+            response.body,
+        );
+        stream
+            .write_all(message.as_bytes())
+            .expect("write Signal loopback HTTP response");
+        stream.flush().expect("flush Signal loopback HTTP response");
+    }
+
     #[fcp_async_core::runtime::test]
     async fn test_handshake() {
         let mut connector = SignalConnector::new();
@@ -2423,16 +2536,13 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_invoke_receive_messages_updates_cursor_and_group_cache() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/v1/about"))
-            .respond_with(wiremock::ResponseTemplate::new(200))
-            .mount(&mock_server)
-            .await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/v1/receive/%2B15551234567"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
+        let server = LoopbackHttpServer::start(vec![
+            LoopbackHttpResponse::empty("GET", "/v1/about", 200),
+            LoopbackHttpResponse::json(
+                "GET",
+                "/v1/receive/%2B15551234567",
+                200,
+                &serde_json::json!([
                     {
                         "timestamp": 1_700_000_001_000_u64,
                         "dataMessage": {
@@ -2447,29 +2557,27 @@ mod tests {
                             "attachments": []
                         }
                     }
-                ])),
-            )
-            .mount(&mock_server)
-            .await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/v1/groups/%2B15551234567"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                ]),
+            ),
+            LoopbackHttpResponse::json(
+                "GET",
+                "/v1/groups/%2B15551234567",
+                200,
+                &serde_json::json!([
                     {
                         "id": "group-1",
                         "name": "Bridge group",
                         "members": ["+15551111111"],
                         "admins": ["+15551111111"]
                     }
-                ])),
-            )
-            .mount(&mock_server)
-            .await;
+                ]),
+            ),
+        ]);
 
         let mut connector = SignalConnector::new();
         connector
             .configure(json!({
-                "daemon_url": mock_server.uri(),
+                "daemon_url": server.uri(),
                 "phone_number": "+15551234567"
             }))
             .await
@@ -2494,6 +2602,7 @@ mod tests {
             Some("1700000001000")
         );
         assert_eq!(connector.bridge().unwrap().cached_groups().len(), 1);
+        server.join();
     }
 
     #[fcp_async_core::runtime::test]
@@ -2527,22 +2636,17 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_invoke_send_message_denies_duplicate_claim_before_network() {
-        let mock_server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/v1/about"))
-            .respond_with(wiremock::ResponseTemplate::new(200))
-            .mount(&mock_server)
-            .await;
-        wiremock::Mock::given(wiremock::matchers::method("POST"))
-            .and(wiremock::matchers::path("/v2/send"))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = LoopbackHttpServer::start(vec![
+            LoopbackHttpResponse::empty("GET", "/v1/about", 200),
+            LoopbackHttpResponse::json(
+                "POST",
+                "/v2/send",
+                200,
+                &serde_json::json!({
                     "timestamp": 1_700_000_004_000_u64
-                })),
-            )
-            .expect(1)
-            .mount(&mock_server)
-            .await;
+                }),
+            ),
+        ]);
 
         let checker: Arc<dyn ThreadOwnershipChecker> =
             Arc::new(InMemoryThreadOwnershipChecker::new());
@@ -2554,7 +2658,7 @@ mod tests {
         for connector in [&mut first, &mut second] {
             connector
                 .configure(json!({
-                    "daemon_url": mock_server.uri(),
+                    "daemon_url": server.uri(),
                     "phone_number": "+15551234567"
                 }))
                 .await
@@ -2617,6 +2721,7 @@ mod tests {
             } if message.starts_with("thread_owned_by_peer:")
                 && message.contains(first.base.instance_id.as_str())
         ));
+        server.join();
     }
 
     #[fcp_async_core::runtime::test]

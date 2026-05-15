@@ -43,4 +43,5 @@ uuid.workspace = true
 [dev-dependencies]
 ciborium.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
+fcp-testkit = { path = "../../crates/fcp-testkit" }
 wiremock.workspace = true

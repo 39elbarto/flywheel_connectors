@@ -28,7 +28,11 @@ use fcp_zendesk::connector::ZendeskConnector;
 // ============================================================================
 
 /// Generate a valid COSE capability token signed by the given key.
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &str,
+    op: &str,
+) -> fcp_core::CapabilityToken {
     let cap = match op {
         "zendesk.create_ticket" | "zendesk.update_ticket" | "zendesk.apply_macro" => {
             "zendesk.write"
@@ -50,8 +54,10 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
         .principal("user:test")
         .operations(&[op])
         .issuer("node:test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .unwrap();
     fcp_core::CapabilityToken::from_raw(cose)
@@ -116,7 +122,7 @@ async fn test_create_ticket() {
     let key = setup_handshake(&mut connector, &["zendesk.create_ticket"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.create_ticket");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.create_ticket");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.create_ticket",
@@ -159,7 +165,7 @@ async fn test_get_ticket() {
     let key = setup_handshake(&mut connector, &["zendesk.get_ticket"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.get_ticket");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.get_ticket");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.get_ticket",
@@ -196,7 +202,7 @@ async fn test_update_ticket() {
     let key = setup_handshake(&mut connector, &["zendesk.update_ticket"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.update_ticket");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.update_ticket");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.update_ticket",
@@ -229,7 +235,7 @@ async fn test_delete_ticket() {
     let key = setup_handshake(&mut connector, &["zendesk.delete_ticket"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.delete_ticket");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.delete_ticket");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.delete_ticket",
@@ -264,7 +270,7 @@ async fn test_search_tickets() {
     let key = setup_handshake(&mut connector, &["zendesk.search_tickets"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.search_tickets");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.search_tickets");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.search_tickets",
@@ -304,7 +310,11 @@ async fn test_list_ticket_comments() {
     let key = setup_handshake(&mut connector, &["zendesk.list_ticket_comments"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.list_ticket_comments");
+    let token = generate_valid_token(
+        &key,
+        connector.instance_id(),
+        "zendesk.list_ticket_comments",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.list_ticket_comments",
@@ -339,7 +349,7 @@ async fn test_search_articles() {
     let key = setup_handshake(&mut connector, &["zendesk.search_articles"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.search_articles");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.search_articles");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.search_articles",
@@ -376,7 +386,7 @@ async fn test_get_article() {
     let key = setup_handshake(&mut connector, &["zendesk.get_article"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.get_article");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.get_article");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.get_article",
@@ -413,7 +423,7 @@ async fn test_apply_macro() {
     let key = setup_handshake(&mut connector, &["zendesk.apply_macro"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.apply_macro");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.apply_macro");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.apply_macro",
@@ -448,7 +458,7 @@ async fn test_error_401_unauthorized() {
     let key = setup_handshake(&mut connector, &["zendesk.get_ticket"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.get_ticket");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.get_ticket");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.get_ticket",
@@ -482,7 +492,7 @@ async fn test_error_404_not_found() {
     let key = setup_handshake(&mut connector, &["zendesk.get_ticket"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.get_ticket");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.get_ticket");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.get_ticket",
@@ -513,7 +523,7 @@ async fn test_error_429_rate_limited() {
     let key = setup_handshake(&mut connector, &["zendesk.get_ticket"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.get_ticket");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.get_ticket");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.get_ticket",
@@ -547,7 +557,7 @@ async fn test_error_500_server_error() {
     let key = setup_handshake(&mut connector, &["zendesk.create_ticket"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.create_ticket");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.create_ticket");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.create_ticket",
@@ -580,7 +590,7 @@ async fn test_invoke_not_configured() {
     let key = setup_handshake(&mut connector, &["zendesk.get_ticket"]).await;
     // Skip configure
 
-    let token = generate_valid_token(&key, "zendesk.get_ticket");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.get_ticket");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.get_ticket",
@@ -606,7 +616,7 @@ async fn test_invoke_wrong_capability() {
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
     // Try to invoke create_ticket with a get_ticket token
-    let token = generate_valid_token(&key, "zendesk.get_ticket");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.get_ticket");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.create_ticket",
@@ -627,7 +637,7 @@ async fn test_invoke_unknown_operation() {
     let key = setup_handshake(&mut connector, &["zendesk.nonexistent"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.nonexistent");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.nonexistent");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.nonexistent",
@@ -714,7 +724,7 @@ async fn test_create_ticket_missing_subject() {
     let key = setup_handshake(&mut connector, &["zendesk.create_ticket"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.create_ticket");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.create_ticket");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.create_ticket",
@@ -741,7 +751,7 @@ async fn test_get_ticket_missing_ticket_id() {
     let key = setup_handshake(&mut connector, &["zendesk.get_ticket"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.get_ticket");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.get_ticket");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.get_ticket",
@@ -768,7 +778,7 @@ async fn test_search_tickets_missing_query() {
     let key = setup_handshake(&mut connector, &["zendesk.search_tickets"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.search_tickets");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.search_tickets");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.search_tickets",
@@ -795,7 +805,7 @@ async fn test_apply_macro_missing_macro_id() {
     let key = setup_handshake(&mut connector, &["zendesk.apply_macro"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.apply_macro");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.apply_macro");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.apply_macro",
@@ -851,7 +861,7 @@ async fn test_list_sla_policies() {
     let key = setup_handshake(&mut connector, &["zendesk.sla.policies"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.sla.policies");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.sla.policies");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.sla.policies",
@@ -891,7 +901,7 @@ async fn test_get_ticket_sla() {
     let key = setup_handshake(&mut connector, &["zendesk.sla.ticket_status"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.sla.ticket_status");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.sla.ticket_status");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.sla.ticket_status",
@@ -921,7 +931,7 @@ async fn test_get_ticket_sla_missing_ticket_id() {
     let key = setup_handshake(&mut connector, &["zendesk.sla.ticket_status"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.sla.ticket_status");
+    let token = generate_valid_token(&key, connector.instance_id(), "zendesk.sla.ticket_status");
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.sla.ticket_status",
@@ -964,7 +974,11 @@ async fn test_list_ticket_metrics() {
     let key = setup_handshake(&mut connector, &["zendesk.analytics.ticket_metrics"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.analytics.ticket_metrics");
+    let token = generate_valid_token(
+        &key,
+        connector.instance_id(),
+        "zendesk.analytics.ticket_metrics",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.analytics.ticket_metrics",
@@ -1000,7 +1014,11 @@ async fn test_list_satisfaction_ratings() {
     let key = setup_handshake(&mut connector, &["zendesk.analytics.satisfaction_ratings"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.analytics.satisfaction_ratings");
+    let token = generate_valid_token(
+        &key,
+        connector.instance_id(),
+        "zendesk.analytics.satisfaction_ratings",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.analytics.satisfaction_ratings",
@@ -1038,7 +1056,11 @@ async fn test_list_satisfaction_ratings_no_filter() {
     let key = setup_handshake(&mut connector, &["zendesk.analytics.satisfaction_ratings"]).await;
     setup_configure(&mut connector, &format!("{}/api/v2", mock_server.uri())).await;
 
-    let token = generate_valid_token(&key, "zendesk.analytics.satisfaction_ratings");
+    let token = generate_valid_token(
+        &key,
+        connector.instance_id(),
+        "zendesk.analytics.satisfaction_ratings",
+    );
     let result = connector
         .handle_invoke(json!({
             "operation": "zendesk.analytics.satisfaction_ratings",

@@ -14,13 +14,13 @@ use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
     HandshakeRequest, InvokeRequest, InvokeStatus, OperationId, RequestId, ZoneId,
 };
+use fcp_testkit::live_suite::{CleanupStrategy, EnvironmentManifest, LiveEnvironment, LiveGate};
 use serde_json::{Value, json};
 
 const LIVE_GATE_ENV: &str = "FCP_LIVE_SANDBOX";
-const TOKEN_ENV: &str = "CIRCLECI_API_TOKEN";
-const BASE_URL_ENV: &str = "CIRCLECI_BASE_URL";
-const PROJECT_SLUG_ENV: &str = "CIRCLECI_PROJECT_SLUG";
-const VERIFY_PIPELINES_ENV: &str = "CIRCLECI_VERIFY_PIPELINES";
+const TOKEN_ENV: &str = "CIRCLECI_SANDBOX_TOKEN";
+const PROJECT_SLUG_ENV: &str = "CIRCLECI_SANDBOX_PROJECT_SLUG";
+const NAMESPACE_ENV: &str = "FCP_SANDBOX_RUN_NAMESPACE";
 const CONNECTOR_ID: &str = "fcp.circleci";
 const CAP_PIPELINES_READ: &str = "circleci.pipelines.read";
 const CAP_PIPELINES_WRITE: &str = "circleci.pipelines.write";
@@ -31,67 +31,90 @@ const CAP_PROJECTS_READ: &str = "circleci.projects.read";
 const OP_PIPELINES_LIST: &str = "circleci.pipelines.list";
 const OP_PROJECTS_LIST: &str = "circleci.projects.list";
 
+fn manifest() -> EnvironmentManifest {
+    EnvironmentManifest::sandbox("circleci", "CircleCI sandbox")
+        .with_env_secret(
+            "token",
+            TOKEN_ENV,
+            "CircleCI personal API token scoped to a sandbox project",
+        )
+        .with_env_var(
+            PROJECT_SLUG_ENV,
+            "CircleCI sandbox project slug such as gh/org/repo",
+        )
+        .with_env_var(
+            NAMESPACE_ENV,
+            "Shared namespace recorded in evidence for the sandbox run",
+        )
+        .with_account_setup(
+            "Use a dedicated CircleCI sandbox project. This suite lists projects and pipelines only; it does not trigger pipelines.",
+        )
+        .with_budget(0.01)
+        .with_cleanup(CleanupStrategy::None)
+        .with_rate_limits(0.5, true)
+        .with_metadata("request_categories", json!(["projects.list", "pipelines.list"]))
+        .with_metadata("pipeline_triggered", json!(false))
+}
+
 #[fcp_async_core::runtime::test]
 async fn live_verification_lists_projects_when_enabled() {
-    if !live_gate_enabled() {
-        emit_live_jsonl("skipped", &format!("{LIVE_GATE_ENV} is not set to 1"), 0);
+    let gate = LiveGate::sandbox();
+    let env = LiveEnvironment::from_manifest(manifest());
+    if !gate.is_enabled() || !env.is_ready() {
+        emit_live_jsonl(
+            "skipped",
+            &skip_reason(&gate, &env),
+            0,
+            &env.evidence_summary(),
+        );
         return;
     }
 
-    let Some(token) = env_nonempty(TOKEN_ENV) else {
-        emit_live_jsonl("skipped", &format!("{TOKEN_ENV} is not set"), 0);
-        return;
-    };
-    let base_url =
-        env_nonempty(BASE_URL_ENV).unwrap_or_else(|| "https://circleci.com/api/v2".into());
-
     let signing_key = Ed25519SigningKey::generate();
-    let connector = configured_connector(&base_url, &token, &signing_key).await;
+    let connector = configured_connector(&env, &signing_key).await;
     let projects = invoke(&connector, &signing_key, OP_PROJECTS_LIST, json!({}))
         .await
         .expect("list live CircleCI projects");
-    let mut observed_count = projects["items"].as_array().map_or(0, Vec::len);
-    let mut reason = "projects.list completed";
+    let project_count = projects["items"].as_array().map_or(0, Vec::len);
+    let project_slug = env
+        .env_vars
+        .get(PROJECT_SLUG_ENV)
+        .expect("project slug env is ready");
+    let pipelines = invoke(
+        &connector,
+        &signing_key,
+        OP_PIPELINES_LIST,
+        json!({
+            "project_slug": project_slug,
+            "page_token": null
+        }),
+    )
+    .await
+    .expect("list live CircleCI pipelines");
+    let pipeline_count = pipelines["items"].as_array().map_or(0, Vec::len);
 
-    if std::env::var(VERIFY_PIPELINES_ENV).ok().as_deref() == Some("1") {
-        let Some(project_slug) = env_nonempty(PROJECT_SLUG_ENV) else {
-            emit_live_jsonl(
-                "skipped",
-                &format!("{PROJECT_SLUG_ENV} is not set"),
-                observed_count,
-            );
-            return;
-        };
-        let pipelines = invoke(
-            &connector,
-            &signing_key,
-            OP_PIPELINES_LIST,
-            json!({
-                "project_slug": project_slug,
-                "page_token": null
-            }),
-        )
-        .await
-        .expect("list live CircleCI pipelines");
-        observed_count = pipelines["items"]
-            .as_array()
-            .map_or(observed_count, Vec::len);
-        reason = "projects.list and pipelines.list completed";
-    }
-
-    emit_live_jsonl("passed", reason, observed_count);
+    emit_live_jsonl(
+        "passed",
+        "projects.list and pipelines.list completed",
+        project_count + pipeline_count,
+        &json!({
+            "environment": env.evidence_summary(),
+            "project_count": project_count,
+            "pipeline_count": pipeline_count,
+            "operation_result": "circleci.projects.list and circleci.pipelines.list completed",
+        }),
+    );
 }
 
 async fn configured_connector(
-    base_url: &str,
-    token: &str,
+    env: &LiveEnvironment,
     signing_key: &Ed25519SigningKey,
 ) -> CircleCiConnector {
     let mut connector = CircleCiConnector::new();
     connector
         .configure(json!({
-            "api_token": token,
-            "base_url": base_url,
+            "api_token": env.secrets.require("token"),
+            "base_url": "https://circleci.com/api/v2",
             "request_timeout_ms": 10_000,
             "retry": {
                 "max_retries": 1,
@@ -190,31 +213,44 @@ async fn invoke(
     Ok(response.result.expect("successful response has result"))
 }
 
-fn live_gate_enabled() -> bool {
-    std::env::var(LIVE_GATE_ENV).ok().as_deref() == Some("1")
+fn skip_reason(gate: &LiveGate, env: &LiveEnvironment) -> String {
+    if gate.is_enabled() {
+        env.problems().join("; ")
+    } else {
+        gate.skip_reason()
+    }
 }
 
-fn env_nonempty(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn emit_live_jsonl(status: &str, reason: &str, observed_count: usize) {
+fn emit_live_jsonl(status: &str, reason: &str, observed_count: usize, evidence: &Value) {
     eprintln!(
         "CIRCLECI_LIVE_SANDBOX_JSONL {}",
         json!({
             "connector": "circleci",
-            "suite_class": "live",
+            "fixture_mode": "live",
+            "suite_class": "sandbox_required",
             "gate_env_var": LIVE_GATE_ENV,
-            "credential_env_vars": [TOKEN_ENV],
-            "optional_env_vars": [BASE_URL_ENV, PROJECT_SLUG_ENV, VERIFY_PIPELINES_ENV],
+            "required_secret_env": [TOKEN_ENV],
+            "required_env": [PROJECT_SLUG_ENV, NAMESPACE_ENV],
+            "operation": [OP_PROJECTS_LIST, OP_PIPELINES_LIST],
             "status": status,
-            "reason": reason,
+            "provider": "CircleCI sandbox",
+            "environment": "sandbox",
+            "resource_class": "project_and_pipeline_inventory",
             "observed_count": observed_count,
+            "call_ceiling": 2,
+            "rate_limit_guidance": "Performs one project inventory call and one sandbox project pipeline list.",
+            "mutation_expected": false,
+            "cleanup_strategy": "noop_read_only",
+            "cleanup_result": "not_required",
+            "provider_project_class": "dedicated_sandbox",
+            "request_category": ["projects.list", "pipelines.list"],
+            "pipeline_triggered": false,
+            "dropped_or_budgeted_count": 0,
             "credential_material_logged": false,
-            "project_slug_logged": false
+            "project_slug_logged": false,
+            "skip_reason": if status == "skipped" { Some(reason) } else { None },
+            "fcp_error_mapping": if status == "failed" { Some(reason) } else { None },
+            "evidence": evidence,
         })
     );
 }

@@ -130,6 +130,27 @@ These are excluded on purpose:
 - `doctor()` and `self_check()` should report token validity, server-host policy, project-slug expectations, and rerun/cancel caveats explicitly.
 - Tests should cover project slug variants, `429 Retry-After`, unauthorized token handling, workflow mutation duplication hazards, and CircleCI Server `base_url` overrides.
 
+## Live Verification Bundle
+
+The live suite is sandbox-required and must gated-skip unless `FCP_LIVE_SANDBOX=1`
+is set with all of these values:
+
+- `CIRCLECI_SANDBOX_TOKEN`: personal API token for a dedicated sandbox account or project.
+- `CIRCLECI_SANDBOX_PROJECT_SLUG`: sandbox project slug, such as `gh/org/repo`.
+- `FCP_SANDBOX_RUN_NAMESPACE`: shared namespace recorded in redaction-safe evidence.
+
+Run the proof lane with:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-circleci-bky21 cargo test -p fcp-circleci --test live_verification -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-circleci-bky21 cargo clippy -p fcp-circleci --all-targets -- -D warnings
+```
+
+The current sandbox proof is intentionally read-only: it performs
+`circleci.projects.list` and `circleci.pipelines.list`, records a two-call
+ceiling, and emits JSONL evidence with `pipeline_triggered=false`. It does not
+trigger, cancel, or rerun pipelines.
+
 ## Source Notes
 
 This contract is grounded in CircleCI’s official docs:

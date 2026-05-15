@@ -168,6 +168,7 @@ Prerequisites:
 - Use a disposable Calendly account, test organization, or localhost mock server before running the verification bundle.
 - Keep the connector bound to one authenticated user or organization boundary and confirm that every `user_uri` or `owner_uri` you pass is visible to that token.
 - Treat scheduling-link creation and scheduled-event cancellation as live mutations that can affect real invitees unless you are using a localhost mock override.
+- For the gated sandbox live suite, set `FCP_LIVE_SANDBOX=1`, `CALENDLY_SANDBOX_TOKEN`, `CALENDLY_SANDBOX_ORG_URI`, `CALENDLY_SANDBOX_EVENT_TYPE_URI`, and `FCP_SANDBOX_RUN_NAMESPACE`. `CALENDLY_SANDBOX_BASE_URL` defaults to `https://api.calendly.com`.
 
 Dedicated environment:
 - Prefer a disposable Calendly workspace or a localhost mock server. Do not run verification against a live production scheduling surface unless the resulting links, events, and invitee notifications are acceptable.
@@ -190,6 +191,7 @@ Rerun commands:
 - `fwc manifest fix connectors/calendly/manifest.toml --check --json`
 - `rch exec -- cargo fmt --manifest-path connectors/calendly/Cargo.toml --check`
 - `rch exec -- cargo check -p fcp-calendly --all-targets`
+- `rch exec -- cargo test -p fcp-calendly --test live_verification -- --nocapture`
 - `rch exec -- cargo test -p fcp-calendly --test integration -- --nocapture`
 - `rch exec -- cargo test -p fcp-calendly -- --nocapture`
 - `rch exec -- cargo clippy -p fcp-calendly --all-targets -- -D warnings`

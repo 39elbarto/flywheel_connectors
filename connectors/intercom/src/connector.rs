@@ -780,10 +780,10 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
     )
 }
 
-/// Reject base_url overrides with userinfo, query, or fragment. The
-/// IntercomClient concatenates via format!("{}{path}", self.base_url)
+/// Reject `base_url` overrides with userinfo, query, or fragment. The
+/// `IntercomClient` concatenates via `format!("{}{path}", self.base_url)`
 /// in every request method (client.rs:158/176/188); without this
-/// check, a base_url like `https://api.intercom.io?leak=x` would leak
+/// check, a `base_url` like `https://api.intercom.io?leak=x` would leak
 /// attacker-chosen query values on every request and put the endpoint
 /// path after the `?` boundary. Userinfo would bake into every
 /// request URL and silently override the Authorization header.
@@ -842,15 +842,14 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
         (
             false,
             format!(
-                "Endpoint must use https and one of {:?} (localhost/127.0.0.1/::1 allowed for tests): {base_url}",
-                ALLOWED_INTERCOM_HOSTS
+                "Endpoint must use https and one of {ALLOWED_INTERCOM_HOSTS:?} (localhost/127.0.0.1/::1 allowed for tests): {base_url}",
             ),
         )
     }
 }
 
 /// br-gs71m: allow-listed Intercom API hosts. Intercom regions per
-/// https://developers.intercom.com/docs/build-an-integration/learn-more/rest-apis/api-base-urls/
+/// <https://developers.intercom.com/docs/build-an-integration/learn-more/rest-apis/api-base-urls/>
 const ALLOWED_INTERCOM_HOSTS: &[&str] = &[
     "api.intercom.io",    // US (default)
     "api.eu.intercom.io", // EU region
@@ -1416,7 +1415,7 @@ mod tests {
     /// br-5g8rj: contacts.delete must require a DEDICATED capability,
     /// not the generic contacts.write shared with create/update.
     /// Locks in the split across BOTH the introspection-side
-    /// OperationInfo and the operations_info() JSON metadata
+    /// `OperationInfo` and the `operations_info()` JSON metadata
     /// builder so a future regression that re-conflates them is
     /// caught at test time.
     #[test]
@@ -1597,7 +1596,7 @@ mod tests {
         let recipe = provisioning_recipe();
         let v = serde_json::to_value(&recipe).unwrap();
         assert_eq!(v["id"], "intercom.bearer_token");
-        assert!(v["steps"].as_array().unwrap().len() == 3);
+        assert_eq!(v["steps"].as_array().unwrap().len(), 3);
     }
 
     #[test]
@@ -1700,7 +1699,7 @@ mod tests {
 
     /// br-gs71m: every regional API host (US/EU/AU) must pass the
     /// policy. Regression guard — if a future region addition forgets
-    /// to add its host to ALLOWED_INTERCOM_HOSTS, this fails fast.
+    /// to add its host to `ALLOWED_INTERCOM_HOSTS`, this fails fast.
     #[test]
     fn from_params_accepts_all_regional_hosts() {
         for host in [
@@ -1718,7 +1717,7 @@ mod tests {
         }
     }
 
-    /// br-gs71m: localhost / 127.0.0.1 / ::1 stay allowed for tests.
+    /// br-gs71m: localhost / 127.0.0.1 / `::1` stay allowed for tests.
     #[test]
     fn from_params_accepts_localhost_for_tests() {
         let config = IntercomConfig::from_params(&json!({

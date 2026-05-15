@@ -19,7 +19,7 @@ pub const DEFAULT_BASE_URL: &str = "https://api.intercom.io";
 
 /// Maximum byte length for an Intercom path-segment value
 /// (`contact_id`, `conversation_id`). Intercom's internal ids are
-/// 24-char MongoDB ObjectIds; `external_id` is customer-controlled
+/// 24-char `MongoDB` `ObjectIds`; `external_id` is customer-controlled
 /// but bounded in practice. 256 bytes is well above any legitimate
 /// value and bounds the worst case for path-injection payloads.
 /// br-low9w.
@@ -557,7 +557,7 @@ mod tests {
         assert!(IntercomClient::sanitize_path_segment("id\u{200B}admin", "contact_id").is_err(),);
     }
 
-    /// br-low9w: oversized payload bounded by MAX_PATH_SEGMENT_LEN
+    /// br-low9w: oversized payload bounded by `MAX_PATH_SEGMENT_LEN`
     /// even when the bytes themselves would individually pass the
     /// allow-list.
     #[test]

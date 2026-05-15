@@ -4771,6 +4771,10 @@ enum HrwLeaseRouteRefusal<'a> {
         purpose: CoreLeasePurpose,
         current_lease_seq: u64,
         provided_lease_seq: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        handoff_reason: Option<&'a fcp_mesh::planner::LeaseTransferReason>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        yield_flush: Option<HrwLeaseYieldFlushEvidence>,
     },
 }
 
@@ -4952,10 +4956,6 @@ async fn enforce_hrw_lease_route(
         &routing.local_node,
     )
     .map_err(|reason| {
-        metrics::record_lease_fenced(
-            CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
-            "invoke_not_selected_coordinator",
-        );
         tracing::warn!(
             event = "hrw_lease_route_refused",
             connector_id = %request.connector_id,
@@ -4983,6 +4983,43 @@ async fn enforce_hrw_lease_route(
                 } else {
                     None
                 };
+            if let Some(current_lease_seq) = routing.current_lease_seq
+                && request
+                    .lease_seq
+                    .is_none_or(|provided| provided < current_lease_seq)
+            {
+                let refusal = HrwLeaseRouteRefusal::LeaseFenced {
+                    zone_id: request.zone_id.clone(),
+                    subject_id,
+                    purpose: CoreLeasePurpose::ConnectorStateWrite,
+                    current_lease_seq,
+                    provided_lease_seq: request.lease_seq,
+                    handoff_reason: Some(&reason),
+                    yield_flush,
+                };
+                metrics::record_lease_fenced(
+                    CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+                    "stale_or_missing_lease_seq_after_handoff",
+                );
+                tracing::warn!(
+                    event = "hrw_lease_route_fenced_after_handoff",
+                    connector_id = %request.connector_id,
+                    operation = %request.operation,
+                    zone_id = %request.zone_id,
+                    subject_id = %subject_id,
+                    current_lease_seq,
+                    provided_lease_seq = ?request.lease_seq,
+                    reason = ?reason,
+                    "singleton_writer invoke refused by stale HRW handoff fence"
+                );
+                return Err(HostError::PreflightFailed(hrw_lease_refusal_message(
+                    &refusal,
+                )));
+            }
+            metrics::record_lease_fenced(
+                CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+                "invoke_not_selected_coordinator",
+            );
             let refusal = HrwLeaseRouteRefusal::NotSelectedCoordinator {
                 reason: &reason,
                 yield_flush,
@@ -5004,6 +5041,8 @@ async fn enforce_hrw_lease_route(
             purpose: CoreLeasePurpose::ConnectorStateWrite,
             current_lease_seq,
             provided_lease_seq: request.lease_seq,
+            handoff_reason: None,
+            yield_flush: None,
         };
         metrics::record_lease_fenced(
             CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
@@ -19413,7 +19452,7 @@ deny_ptrace = true
         let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
             local_node: old_holder.clone(),
             eligible_nodes: handoff_node_set.clone(),
-            current_lease_seq: Some(10),
+            current_lease_seq: Some(11),
         }));
         let (status, message) = invoke_handler(
             State(Arc::clone(&state)),
@@ -19424,7 +19463,10 @@ deny_ptrace = true
         .expect_err("isolated old holder must flush then yield to new HRW holder");
 
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(message.contains(r#""code":"NotSelectedCoordinator""#));
+        assert!(message.contains(r#""code":"LeaseFenced""#));
+        assert!(message.contains(r#""current_lease_seq":11"#));
+        assert!(message.contains(r#""provided_lease_seq":10"#));
+        assert!(message.contains(r#""handoff_reason""#));
         assert!(message.contains(r#""yield_flush""#));
         assert!(message.contains(old_holder.as_str()));
         assert!(message.contains(new_holder.as_str()));

@@ -43,6 +43,7 @@ fn log_step(logs: &mut File, step: &str, status: &str, details: &Value) {
         "status": status,
         "details": details,
     });
+    println!("QQ_GATEWAY_PROJECTION_JSONL {record}");
     writeln!(logs, "{record}").expect("write QQ gateway e2e log line");
     logs.flush().expect("flush QQ gateway e2e log");
 }

@@ -202,6 +202,12 @@ These are excluded on purpose:
 - The official platform semantics for active vs passive messages and channel-online requirements are subtle enough that they should be introduced explicitly in later beads instead of being hidden inside the first contract.
 - Gateway discovery is useful on its own, but websocket ingress, event normalization, and message-policy handling deserve their own beads and their own capability boundaries.
 
+## Verification
+
+- Gateway projection evidence: `RUN_ID=qq-gateway-projection-<id> RCH_REQUIRE_REMOTE=1 bash scripts/e2e/qq_gateway_projection_verification.sh`
+- The verifier runs the connector-boundary `qq_gateway_projection_logs_policy_replay_and_shutdown` e2e lane through `rch`, extracts `QQ_GATEWAY_PROJECTION_JSONL` records, checks policy, reply, media, replay, heartbeat, and shutdown coverage, and writes a replay bundle under `artifacts/e2e/qq-gateway-projection/<run-id>/`.
+- A structured `rch_remote_prerequisite_unavailable` skip means the remote Cargo proof lane did not run; it is not evidence that the full supervised WebSocket runtime is complete.
+
 ## Implementation Notes For `flywheel_connectors-j05nu.1.14.2`
 
 - Preserve the one-app, one-bot boundary. Do not widen the connector into a multi-app router.

@@ -160,6 +160,50 @@ struct CachedConnectorStateRoot {
     root: ConnectorStateRoot,
 }
 
+/// Canonical connector-state evidence collected immediately before yielding
+/// a singleton-writer lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConnectorStateLeaseYieldFlush {
+    /// Connector represented by this flush barrier.
+    pub connector_id: ConnectorId,
+    /// Optional connector instance represented by the root.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_id: Option<InstanceId>,
+    /// Zone that owns the canonical state.
+    pub zone_id: ZoneId,
+    /// Content-addressed root object that was verified, if one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_object_id: Option<ObjectId>,
+    /// Current canonical state-object head, if one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_object_id: Option<ObjectId>,
+    /// Last committed canonical sequence number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_canonical_seq: Option<u64>,
+    /// Fencing token on the canonical head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_seq: Option<u64>,
+    /// Lease object authorizing the canonical head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_object_id: Option<ObjectId>,
+}
+
+impl ConnectorStateLeaseYieldFlush {
+    #[must_use]
+    fn missing(store: &FcpStoreConnectorStateStore) -> Self {
+        Self {
+            connector_id: store.connector_id.clone(),
+            instance_id: store.instance_id.clone(),
+            zone_id: store.zone_id.clone(),
+            root_object_id: None,
+            head_object_id: None,
+            last_canonical_seq: None,
+            lease_seq: None,
+            lease_object_id: None,
+        }
+    }
+}
+
 /// Connector-state store backed by an [`ObjectStore`].
 #[derive(Clone)]
 pub struct FcpStoreConnectorStateStore {
@@ -641,6 +685,60 @@ impl FcpStoreConnectorStateStore {
             last_canonical_seq,
             mesh_replica_count,
         ))
+    }
+
+    /// Verify the canonical connector-state root and head before yielding a
+    /// singleton-writer lease.
+    ///
+    /// The store does not buffer connector-local writes, so callers must append
+    /// any in-flight state object before invoking this barrier. This method is
+    /// the fail-closed durability check used by host/supervisor adapters: it
+    /// reloads the canonical root, verifies the referenced head object, returns
+    /// the head sequence and fencing evidence, and emits lease flush telemetry.
+    ///
+    /// # Errors
+    /// Returns an error if the canonical root or referenced head is malformed,
+    /// missing, or fails content-id verification.
+    pub async fn flush_before_lease_yield(&self) -> Result<ConnectorStateLeaseYieldFlush> {
+        let result = self.flush_before_lease_yield_inner().await;
+        let outcome = match &result {
+            Ok(flush) if flush.root_object_id.is_some() => "success",
+            Ok(_) => "no_state",
+            Err(_) => "error",
+        };
+        fcp_telemetry::metrics::record_lease_flushed_on_yield("singleton_writer", outcome);
+        result
+    }
+
+    async fn flush_before_lease_yield_inner(&self) -> Result<ConnectorStateLeaseYieldFlush> {
+        let Some((root_object_id, root)) = self.read_root().await? else {
+            return Ok(ConnectorStateLeaseYieldFlush::missing(self));
+        };
+
+        let Some(head_object_id) = root.head else {
+            return Ok(ConnectorStateLeaseYieldFlush {
+                connector_id: root.connector_id,
+                instance_id: root.instance_id,
+                zone_id: root.zone_id,
+                root_object_id: Some(root_object_id),
+                head_object_id: None,
+                last_canonical_seq: None,
+                lease_seq: None,
+                lease_object_id: None,
+            });
+        };
+        let (_loaded_id, head) = self.load_state_object(&head_object_id).await?;
+
+        Ok(ConnectorStateLeaseYieldFlush {
+            connector_id: root.connector_id,
+            instance_id: root.instance_id,
+            zone_id: root.zone_id,
+            root_object_id: Some(root_object_id),
+            head_object_id: Some(head_object_id),
+            last_canonical_seq: Some(head.seq),
+            lease_seq: Some(head.lease_seq),
+            lease_object_id: Some(head.lease_object_id),
+        })
     }
 
     /// Emit a snapshot for the current head, if any.
@@ -2236,6 +2334,60 @@ mod tests {
         assert_eq!(status.head_object_id, Some(head));
         assert_eq!(status.last_canonical_seq, Some(seq));
         assert_eq!(status.mesh_replica_count, Some(2));
+    }
+
+    #[test]
+    fn flush_before_lease_yield_reports_committed_root_head_and_fence() {
+        let state_store = test_store(store());
+        let (head0, _) = append_ok(&state_store, state(0, None, lease_id(1)));
+        let outcome =
+            run_async(state_store.append_object(state(1, Some(head0), lease_id(2)))).unwrap();
+        let (head1, root1) = match outcome {
+            ConnectorStateAppendOutcome::Committed {
+                object_id,
+                root_object_id,
+                ..
+            } => (object_id, root_object_id),
+            ConnectorStateAppendOutcome::Conflict { .. } => panic!("unexpected conflict"),
+        };
+
+        let flush = run_async(state_store.flush_before_lease_yield()).unwrap();
+
+        assert_eq!(flush.connector_id, connector_id());
+        assert_eq!(flush.instance_id, None);
+        assert_eq!(flush.zone_id, zone_id());
+        assert_eq!(flush.root_object_id, Some(root1));
+        assert_eq!(flush.head_object_id, Some(head1));
+        assert_eq!(flush.last_canonical_seq, Some(1));
+        assert_eq!(flush.lease_seq, Some(11));
+        assert_eq!(flush.lease_object_id, Some(lease_id(2)));
+    }
+
+    #[test]
+    fn flush_before_lease_yield_reports_no_state_without_fabricating_root() {
+        let state_store = test_store(store());
+
+        let flush = run_async(state_store.flush_before_lease_yield()).unwrap();
+
+        assert_eq!(flush.connector_id, connector_id());
+        assert_eq!(flush.zone_id, zone_id());
+        assert!(flush.root_object_id.is_none());
+        assert!(flush.head_object_id.is_none());
+        assert!(flush.last_canonical_seq.is_none());
+        assert!(flush.lease_seq.is_none());
+        assert!(flush.lease_object_id.is_none());
+    }
+
+    #[test]
+    fn flush_before_lease_yield_fails_closed_on_missing_root_head() {
+        let state_store = test_store(store());
+        let missing_head = ObjectId::from_bytes([0xE7; 32]);
+        run_async(state_store.store_root(root_with_head(Some(missing_head), 1_700_000_200)))
+            .unwrap();
+
+        let err = run_async(state_store.flush_before_lease_yield()).unwrap_err();
+
+        assert!(matches!(err, ConnectorStateStoreError::MissingHead(id) if id == missing_head));
     }
 
     #[test]

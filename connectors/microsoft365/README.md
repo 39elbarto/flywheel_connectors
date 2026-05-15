@@ -68,6 +68,24 @@ The first slice is mailbox-oriented rather than admin-oriented. It is not a gene
 - Cross-mailbox access is therefore only possible when the caller's delegated or application permissions already authorize it inside the same tenant boundary.
 - `required_permissions` is a narrowing contract, not an expansion mechanism. If configured, the connector must reject tokens that do not advertise those claims.
 
+## Tier B Live Sandbox Verification
+
+The connector's gated sandbox proof is `rch exec -- cargo test -p fcp-microsoft365 --test live_verification -- --nocapture`. It is skipped unless `FCP_LIVE_SANDBOX=1` and the Microsoft 365 sandbox environment is complete.
+
+Required live inputs:
+
+- `MICROSOFT365_SANDBOX_TENANT_ID`
+- `MICROSOFT365_SANDBOX_CLIENT_ID`
+- `MICROSOFT365_SANDBOX_CLIENT_SECRET`
+- `MICROSOFT365_SANDBOX_USER_ID`
+- `FCP_SANDBOX_RUN_NAMESPACE`
+
+Optional endpoint overrides default to `https://graph.microsoft.com/v1.0` and `https://login.microsoftonline.com` through `MICROSOFT365_SANDBOX_API_URL` and `MICROSOFT365_SANDBOX_AUTH_URL`.
+
+Use a dedicated Microsoft 365 developer/test tenant, a sandbox app registration with `Files.ReadWrite.All` application permission and admin consent, and a disposable OneDrive-enabled user. The proof intentionally uses the broader connector's file operations, not mail/calendar delivery, so it can perform a reversible `upload_file` -> `list_items` -> `delete_item` -> post-delete `get_item` lifecycle without sending mail or calendar invitations. It also performs an invalid client-secret configure attempt as the auth-denial path.
+
+The live test emits `MICROSOFT365_LIVE_SANDBOX_JSONL` evidence with the command, git revision when provided through `FCP_LIVE_GIT_REVISION`, sandbox class, call ceiling, cleanup result, hashed user/file/item identifiers, and skip/failure reason. It never logs tenant id, client id, client secret, user id, file path, item id, provider resource ids, or raw provider error bodies.
+
 ## Network And Runtime Invariants
 
 - Base API host: `graph.microsoft.com`

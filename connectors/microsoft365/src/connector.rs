@@ -15,11 +15,10 @@ use base64::{
     engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64_URL},
 };
 use fcp_prelude::{
-    log_redaction::redact_url,
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
-    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse, log_redaction::redact_url,
 };
 use percent_encoding::percent_decode_str;
 use quick_xml::{Reader, escape::unescape, events::Event};

@@ -1108,6 +1108,8 @@ async fn build_registry_entry(
         config.config.as_ref(),
     )?;
     let manifest_constraints = load_manifest_operation_constraints(&config)?;
+    let hrw_routing = current_hrw_lease_routing_config()?;
+    enforce_hrw_singleton_writer_launch_route(&config, hrw_routing.as_ref())?;
     let connector =
         ConnectorRuntime::spawn(config.clone(), resilience, capability_verifying_key).await?;
     Ok(RegistryEntry {
@@ -4366,16 +4368,20 @@ struct HrwLeaseRoutingConfig {
 #[cfg(test)]
 static TEST_HRW_LEASE_ROUTING_OVERRIDE: std::sync::Mutex<Option<Option<HrwLeaseRoutingConfig>>> =
     std::sync::Mutex::new(None);
+#[cfg(test)]
+static TEST_HRW_LEASE_ROUTING_OVERRIDE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
-struct TestHrwLeaseRoutingOverrideGuard;
+struct TestHrwLeaseRoutingOverrideGuard {
+    _serial: std::sync::MutexGuard<'static, ()>,
+}
 
 #[cfg(test)]
 impl Drop for TestHrwLeaseRoutingOverrideGuard {
     fn drop(&mut self) {
         *TEST_HRW_LEASE_ROUTING_OVERRIDE
             .lock()
-            .expect("HRW lease routing override lock poisoned") = None;
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 }
 
@@ -4383,12 +4389,15 @@ impl Drop for TestHrwLeaseRoutingOverrideGuard {
 fn set_test_hrw_lease_routing_override(
     config: Option<HrwLeaseRoutingConfig>,
 ) -> TestHrwLeaseRoutingOverrideGuard {
+    let serial = TEST_HRW_LEASE_ROUTING_OVERRIDE_SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut guard = TEST_HRW_LEASE_ROUTING_OVERRIDE
         .lock()
-        .expect("HRW lease routing override lock poisoned");
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     assert!(guard.is_none(), "HRW lease routing override already set");
     *guard = Some(config);
-    TestHrwLeaseRoutingOverrideGuard
+    TestHrwLeaseRoutingOverrideGuard { _serial: serial }
 }
 
 fn parse_hrw_lease_node_id(raw: &str, env_name: &str) -> HostResult<TailscaleNodeId> {
@@ -4523,11 +4532,17 @@ fn update_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
 }
 
 fn singleton_writer_lease_subject_id(request: &InvokeRequest) -> ObjectId {
+    singleton_writer_connector_lease_subject_id(&request.connector_id, &request.zone_id)
+}
+
+fn singleton_writer_connector_lease_subject_id(
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+) -> ObjectId {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"FCP-HOST-SINGLETON-WRITER-HRW-LEASE-V1");
-    update_len_prefixed(&mut hasher, request.connector_id.as_str().as_bytes());
-    update_len_prefixed(&mut hasher, request.operation.as_str().as_bytes());
-    update_len_prefixed(&mut hasher, request.zone_id.as_str().as_bytes());
+    hasher.update(b"FCP-HOST-SINGLETON-WRITER-HRW-LEASE-V2");
+    update_len_prefixed(&mut hasher, connector_id.as_str().as_bytes());
+    update_len_prefixed(&mut hasher, zone_id.as_str().as_bytes());
     ObjectId::from_bytes(*hasher.finalize().as_bytes())
 }
 
@@ -4548,10 +4563,78 @@ enum HrwLeaseRouteRefusal<'a> {
 }
 
 fn hrw_lease_refusal_message(refusal: &HrwLeaseRouteRefusal<'_>) -> String {
+    hrw_lease_refusal_message_for("invoke", refusal)
+}
+
+fn hrw_lease_refusal_message_for(action: &str, refusal: &HrwLeaseRouteRefusal<'_>) -> String {
     let payload = serde_json::to_string(refusal).unwrap_or_else(|error| {
         format!("{{\"reason\":\"serialization_error\",\"message\":\"{error}\"}}")
     });
-    format!("HRW lease routing refused singleton_writer invoke: {payload}")
+    format!("HRW lease routing refused singleton_writer {action}: {payload}")
+}
+
+fn parse_hrw_launch_zone_id(
+    connector_id: &ConnectorId,
+    allowed_zones: &[String],
+) -> HostResult<ZoneId> {
+    match allowed_zones {
+        [zone] => zone.parse::<ZoneId>().map_err(|error| {
+            HostError::InvalidFilter(format!(
+                "invalid singleton_writer HRW launch zone `{zone}` for connector `{connector_id}`: {error}"
+            ))
+        }),
+        [] => Err(zone_envelope_required_error(connector_id)),
+        zones => Err(HostError::InvalidFilter(format!(
+            "singleton_writer HRW launch routing for connector `{connector_id}` requires exactly one allowed_zones entry, got {}",
+            zones.len()
+        ))),
+    }
+}
+
+fn enforce_hrw_singleton_writer_launch_route(
+    config: &ConnectorConfig,
+    routing: Option<&HrwLeaseRoutingConfig>,
+) -> HostResult<()> {
+    if !connector_config_declares_singleton_writer(config) {
+        return Ok(());
+    }
+    let Some(routing) = routing else {
+        return Ok(());
+    };
+
+    let connector_id: ConnectorId = config.id.parse().map_err(|err| {
+        HostError::InvalidFilter(format!("invalid connector id '{}': {err}", config.id))
+    })?;
+    let zone_id = parse_hrw_launch_zone_id(&connector_id, &config.allowed_zones)?;
+    let subject_id = singleton_writer_connector_lease_subject_id(&connector_id, &zone_id);
+    let selection = fcp_mesh::planner::admit_lease_holder(
+        &zone_id,
+        &subject_id,
+        CoreLeasePurpose::ConnectorStateWrite,
+        &routing.eligible_nodes,
+        &routing.local_node,
+    )
+    .map_err(|reason| {
+        tracing::warn!(
+            event = "hrw_lease_launch_refused",
+            connector_id = %connector_id,
+            zone_id = %zone_id,
+            reason = ?reason,
+            "singleton_writer connector launch refused by HRW lease routing"
+        );
+        let refusal = HrwLeaseRouteRefusal::NotSelectedCoordinator { reason: &reason };
+        HostError::PreflightFailed(hrw_lease_refusal_message_for("launch", &refusal))
+    })?;
+
+    tracing::debug!(
+        event = "hrw_lease_launch_admitted",
+        connector_id = %connector_id,
+        zone_id = %zone_id,
+        subject_id = %selection.subject_id,
+        holder = %selection.holder.as_str(),
+        "singleton_writer connector launch admitted by HRW lease routing"
+    );
+    Ok(())
 }
 
 fn enforce_hrw_lease_route(
@@ -18486,6 +18569,142 @@ deny_ptrace = true
             1,
             "Elected holder should reach connector dispatch"
         );
+    }
+
+    #[test]
+    fn singleton_writer_hrw_lease_subject_is_connector_zone_scoped() {
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let connector_id = ConnectorId::from_static("fcp.test.hrw-subject:utility:1.0.0");
+        let base = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.clone(),
+            operation: OperationId::from_static("test.write_a"),
+            zone_id: ZoneId::work(),
+            input: json!({ "lease_seq": 1 }),
+            capability_token: test_capability_token(
+                &signing_key,
+                "cap.test.write",
+                "test.write_a",
+                ZoneId::work().as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: Some(1),
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+        let mut other_operation = base.clone();
+        other_operation.operation = OperationId::from_static("test.write_b");
+        let mut other_zone = base.clone();
+        other_zone.zone_id = ZoneId::try_from("z:secure".to_string()).expect("zone id");
+
+        assert_eq!(
+            singleton_writer_lease_subject_id(&base),
+            singleton_writer_lease_subject_id(&other_operation),
+            "singleton_writer lease subjects must fence all operations on the same connector+zone"
+        );
+        assert_ne!(
+            singleton_writer_lease_subject_id(&base),
+            singleton_writer_lease_subject_id(&other_zone),
+            "different zones need distinct singleton_writer lease subjects"
+        );
+        assert_eq!(
+            singleton_writer_lease_subject_id(&base),
+            singleton_writer_connector_lease_subject_id(&connector_id, &ZoneId::work())
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn build_registry_entry_hrw_launch_refuses_non_holder_before_spawn() {
+        let connector_id = "fcp.test.hrw-launch-refuse:utility:1.0.0";
+        let operation_id = "test.singleton";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.allowed_operations = vec![operation_id.to_string()];
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "api.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+        config.config = Some(json!({ "state": { "model": "singleton_writer" } }));
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id = ZoneId::work();
+        let subject_id = singleton_writer_connector_lease_subject_id(&connector_key, &zone_id);
+        let eligible_nodes = vec![
+            TailscaleNodeId::new("node-a"),
+            TailscaleNodeId::new("node-b"),
+            TailscaleNodeId::new("node-c"),
+        ];
+        let expected =
+            fcp_mesh::planner::select_lease_holder(&zone_id, &subject_id, &eligible_nodes)
+                .expect("HRW holder selected");
+        let local_node = eligible_nodes
+            .iter()
+            .find(|node| *node != &expected)
+            .expect("test set includes non-holder")
+            .clone();
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: local_node.clone(),
+            eligible_nodes,
+            current_lease_seq: None,
+        }));
+
+        let error =
+            match build_registry_entry(config, Arc::new(ResilienceLayer::default()), None).await {
+                Ok(_) => panic!("non-holder singleton_writer launch must be refused before spawn"),
+                Err(error) => error,
+            };
+        let message = error.to_string();
+        assert!(message.contains("HRW lease routing refused singleton_writer launch"));
+        assert!(message.contains(r#""code":"NotSelectedCoordinator""#));
+        assert!(message.contains(r#""reason":"wrong_holder""#));
+        assert!(message.contains(expected.as_str()));
+        assert!(message.contains(local_node.as_str()));
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn build_registry_entry_hrw_launch_admits_elected_holder() {
+        let connector_id = "fcp.test.hrw-launch-admit:utility:1.0.0";
+        let operation_id = "test.singleton";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.allowed_operations = vec![operation_id.to_string()];
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "api.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+        config.config = Some(json!({ "state": { "model": "singleton_writer" } }));
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id = ZoneId::work();
+        let subject_id = singleton_writer_connector_lease_subject_id(&connector_key, &zone_id);
+        let eligible_nodes = vec![
+            TailscaleNodeId::new("node-a"),
+            TailscaleNodeId::new("node-b"),
+            TailscaleNodeId::new("node-c"),
+        ];
+        let expected =
+            fcp_mesh::planner::select_lease_holder(&zone_id, &subject_id, &eligible_nodes)
+                .expect("HRW holder selected");
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: expected,
+            eligible_nodes,
+            current_lease_seq: None,
+        }));
+
+        let entry = build_registry_entry(config, Arc::new(ResilienceLayer::default()), None)
+            .await
+            .expect("elected holder should build singleton_writer registry entry");
+        assert_eq!(entry.config.id, connector_id);
+        assert!(matches!(entry.connector, ConnectorRuntime::Wasi(_)));
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

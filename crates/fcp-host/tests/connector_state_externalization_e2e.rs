@@ -5,13 +5,14 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
+use fcp_cbor::CanonicalSerializer;
 use fcp_core::{
     BackoffPolicy, CONNECTOR_STATE_APPEND_OPERATION_ID, CONNECTOR_STATE_WRITE_CAPABILITY_ID,
     CapabilityConstraints, CapabilityToken, CapabilityVerifier, ConnectorId,
-    ConnectorStateAppendOutcome, ConnectorStateError, ConnectorStateObject, ConnectorStateRoot,
-    ConnectorStateStore, ConnectorStateWriteAuthorization, InstanceId, ObjectHeader, ObjectId,
-    ObjectIdKey, Provenance, RetentionClass, Signature, StorageMeta, StoredObject, ZoneId,
-    connector_state_resource_uri,
+    ConnectorStateAppendOutcome, ConnectorStateError, ConnectorStateModel, ConnectorStateObject,
+    ConnectorStateRoot, ConnectorStateStore, ConnectorStateWriteAuthorization, InstanceId,
+    ObjectHeader, ObjectId, ObjectIdKey, Provenance, RetentionClass, Signature, StorageMeta,
+    StoredObject, ZoneId, connector_state_resource_uri,
 };
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
@@ -19,6 +20,7 @@ use fcp_store::{
     CONNECTOR_STATE_CACHE_MARKER, FcpStoreConnectorStateStore, MemoryObjectStore,
     MemoryObjectStoreConfig, ObjectStore, ObjectStoreError,
 };
+use serde::Serialize;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -231,6 +233,42 @@ fn sign_state(
         .sign_with(signing_key)
         .expect("test connector state should sign");
     state
+}
+
+fn stored_object_for<T: Serialize>(header: &ObjectHeader, value: &T) -> StoredObject {
+    let body =
+        CanonicalSerializer::serialize(value, &header.schema).expect("test object should encode");
+    let object_id =
+        StoredObject::derive_id(header, &body, &object_id_key()).expect("test object id");
+    StoredObject {
+        object_id,
+        header: header.clone(),
+        body,
+        storage: StorageMeta {
+            retention: RetentionClass::Pinned,
+        },
+    }
+}
+
+fn root_with_head(head: ObjectId, created_at: u64) -> ConnectorStateRoot {
+    ConnectorStateRoot {
+        header: ObjectHeader {
+            schema: FcpStoreConnectorStateStore::root_schema_id(),
+            zone_id: zone_id(),
+            created_at,
+            provenance: Provenance::new(zone_id()),
+            refs: vec![head],
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        },
+        connector_id: connector_id(),
+        instance_id: None,
+        zone_id: zone_id(),
+        model: ConnectorStateModel::SingletonWriter,
+        head: Some(head),
+        state_schema_version: 1,
+    }
 }
 
 fn append_committed(
@@ -527,6 +565,56 @@ fn connector_state_externalization_rejects_invalid_state_signature() -> TestResu
         other => panic!("expected malformed-state rejection for invalid signature, got {other:?}"),
     }
     assert!(block_on(ConnectorStateStore::read_root(&host, &connector_id))?.is_none());
+
+    Ok(())
+}
+
+#[test]
+fn connector_state_externalization_rejects_persisted_invalid_signature_on_read() -> TestResult {
+    let object_store = memory_object_store();
+    let host = host_state_store(Arc::clone(&object_store));
+    let connector_id = connector_id();
+    let (_authorization, signing_key) =
+        connector_state_authorization_for_with_key(&connector_id, &zone_id());
+
+    let mut bad_state = sign_state(state(0, None, lease_id(1)), &signing_key);
+    bad_state.signature = Signature::zero();
+    let bad_state_object = stored_object_for(&bad_state.header, &bad_state);
+    let bad_head = bad_state_object.object_id;
+    block_on(object_store.put(bad_state_object))?;
+
+    let root = root_with_head(bad_head, 1_800_001_000);
+    let root_object = stored_object_for(&root.header, &root);
+    block_on(object_store.put(root_object))?;
+
+    let read_root_result = block_on(ConnectorStateStore::read_root(&host, &connector_id));
+    match read_root_result {
+        Err(ConnectorStateError::MalformedState {
+            connector_id: failed_connector_id,
+            reason,
+        }) => {
+            assert_eq!(failed_connector_id, connector_id);
+            assert!(
+                reason.contains("signature"),
+                "read-boundary rejection should mention signature, got `{reason}`"
+            );
+        }
+        other => panic!("expected read-boundary malformed-state rejection, got {other:?}"),
+    }
+
+    let read_chain_result = block_on(ConnectorStateStore::read_chain(
+        &host,
+        &connector_id,
+        None,
+        10,
+    ));
+    assert!(
+        matches!(
+            read_chain_result,
+            Err(ConnectorStateError::MalformedState { .. })
+        ),
+        "invalid persisted state must not be exposed through read_chain"
+    );
 
     Ok(())
 }

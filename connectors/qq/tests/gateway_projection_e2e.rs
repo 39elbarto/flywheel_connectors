@@ -344,6 +344,58 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         .await
         .expect("handshake QQ connector");
 
+    let disabled_instance_id = InstanceId::new();
+    let mut disabled_connector = QqConnector::new();
+    disabled_connector
+        .configure(json!({
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999",
+            "app_id": "qq-app",
+            "client_secret": "test-secret",
+            "gateway": {
+                "enabled": false,
+                "policy": {
+                    "group_policy": "open",
+                    "group_require_mention": false
+                }
+            }
+        }))
+        .await
+        .expect("configure disabled QQ connector");
+    disabled_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            disabled_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake disabled QQ connector");
+    let disabled = invoke_projection(
+        &disabled_connector,
+        &signing_key,
+        &disabled_instance_id,
+        "qq-gateway-disabled",
+        json!({
+            "op": 0,
+            "s": 1,
+            "t": "GROUP_AT_MESSAGE_CREATE",
+            "id": "evt-disabled",
+            "d": {
+                "id": "msg-disabled",
+                "content": "gateway disabled should not authorize",
+                "group_openid": "group-disabled",
+                "group_member_openid": "member-disabled"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(disabled["accepted"], false);
+    assert_eq!(disabled["reason_code"], "gateway_disabled");
+    assert_eq!(disabled["normalized"], Value::Null);
+    assert_eq!(disabled["policy"], Value::Null);
+    assert_eq!(disabled["runtime"]["last_sequence"], 0);
+    assert_eq!(disabled["runtime"]["accepted_events"], 0);
+    log_projection_step(&mut logs, "gateway_disabled_drop", "ok", &disabled);
+
     let hello = invoke_projection(
         &connector,
         &signing_key,
@@ -612,16 +664,21 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-structured-mention",
         "evt-reply-media",
         "evt-oversized-media",
+        "evt-disabled",
         "msg-accepted",
         "msg-untyped-message-id",
         "msg-structured-mention",
         "msg-reply-media",
         "msg-oversized-media",
+        "msg-disabled",
         "msg-root",
         "bot-openid",
         "group-allowed",
+        "group-disabled",
         "member-1",
+        "member-disabled",
         "Alice",
+        "gateway disabled should not authorize",
         "deploy status",
         "plain message",
         "not a mention segment",

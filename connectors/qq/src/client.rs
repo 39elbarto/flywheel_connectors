@@ -329,6 +329,10 @@ impl QqGatewayRuntime {
     /// Returns an error only when a dispatch event looks like a QQ message event but the
     /// message payload is malformed or exceeds parser bounds.
     pub fn project_event(&mut self, event: QqGatewayEvent) -> QqResult<QqGatewayEventProjection> {
+        if !self.config.enabled {
+            return Ok(self.dropped_projection(event.s, event.id, "gateway_disabled"));
+        }
+
         match event.op {
             0 => self.project_dispatch(&event),
             1 => {
@@ -1119,7 +1123,8 @@ mod tests {
             let handle = thread::spawn(move || {
                 listener.set_nonblocking(true).unwrap();
                 for response in responses {
-                    let stream = accept_test_connection(&listener);
+                    let stream =
+                        accept_test_connection(&listener).expect("test listener accepts request");
                     handle_test_request(stream, response);
                 }
             });
@@ -1147,13 +1152,13 @@ mod tests {
         }
     }
 
-    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+    fn accept_test_connection(listener: &TcpListener) -> std::io::Result<TcpStream> {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    stream.set_nonblocking(false).unwrap();
-                    return stream;
+                    stream.set_nonblocking(false)?;
+                    return Ok(stream);
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     assert!(
@@ -1162,7 +1167,7 @@ mod tests {
                     );
                     thread::sleep(Duration::from_millis(10));
                 }
-                Err(err) => panic!("test listener failed: {err}"),
+                Err(err) => return Err(err),
             }
         }
     }
@@ -2186,6 +2191,63 @@ mod tests {
                 .map(|policy| policy.mentioned_bot),
             Some(false)
         );
+    }
+
+    #[test]
+    fn gateway_runtime_drops_frames_when_disabled_without_mutating_session() {
+        let mut runtime = QqGatewayRuntime::new(QqGatewayRuntimeConfig {
+            enabled: false,
+            max_queue_depth: 4,
+            ..QqGatewayRuntimeConfig::default()
+        });
+
+        let hello = runtime
+            .project_event(QqGatewayEvent {
+                op: 10,
+                s: Some(1),
+                t: None,
+                d: Some(json!({"session_id": "disabled-session"})),
+                id: Some("evt-disabled-hello".into()),
+            })
+            .unwrap();
+        assert!(!hello.accepted);
+        assert_eq!(hello.reason_code, "gateway_disabled");
+        assert_eq!(hello.runtime.session_id, None);
+        assert_eq!(hello.runtime.last_sequence, 0);
+
+        let heartbeat = runtime
+            .project_event(QqGatewayEvent {
+                op: 11,
+                s: Some(2),
+                t: None,
+                d: None,
+                id: Some("evt-disabled-heartbeat".into()),
+            })
+            .unwrap();
+        assert_eq!(heartbeat.reason_code, "gateway_disabled");
+        assert_eq!(heartbeat.runtime.heartbeat_ack_count, 0);
+
+        let dispatch = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(3),
+                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-disabled",
+                    "content": "bot-openid should not authorize",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1"
+                })),
+                id: Some("evt-disabled-dispatch".into()),
+            })
+            .unwrap();
+        assert!(!dispatch.accepted);
+        assert_eq!(dispatch.reason_code, "gateway_disabled");
+        assert!(dispatch.normalized.is_none());
+        assert!(dispatch.policy.is_none());
+        assert_eq!(dispatch.runtime.last_sequence, 0);
+        assert_eq!(dispatch.runtime.accepted_events, 0);
+        assert_eq!(dispatch.runtime.queue_depth, 0);
     }
 
     #[test]

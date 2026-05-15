@@ -669,15 +669,17 @@ mod tests {
 
     #[test]
     fn issue_level_partial_ord_consistent() {
-        assert!(
-            IssueLevel::Fatal.partial_cmp(&IssueLevel::Error) == Some(std::cmp::Ordering::Less)
+        assert_eq!(
+            IssueLevel::Fatal.partial_cmp(&IssueLevel::Error),
+            Some(std::cmp::Ordering::Less)
         );
-        assert!(
-            IssueLevel::Debug.partial_cmp(&IssueLevel::Info) == Some(std::cmp::Ordering::Greater)
+        assert_eq!(
+            IssueLevel::Debug.partial_cmp(&IssueLevel::Info),
+            Some(std::cmp::Ordering::Greater)
         );
-        assert!(
-            IssueLevel::Warning.partial_cmp(&IssueLevel::Warning)
-                == Some(std::cmp::Ordering::Equal)
+        assert_eq!(
+            IssueLevel::Warning.partial_cmp(&IssueLevel::Warning),
+            Some(std::cmp::Ordering::Equal)
         );
     }
 

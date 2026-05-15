@@ -38,7 +38,9 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-wiremock.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }
+hex.workspace = true
+sha2.workspace = true
+wiremock.workspace = true

@@ -455,6 +455,18 @@ impl SentryClient {
             .await
     }
 
+    /// Delete a release.
+    pub async fn delete_release(
+        &self,
+        org: &str,
+        version: &str,
+    ) -> SentryResult<serde_json::Value> {
+        let org = sanitize_path_segment(org);
+        let encoded_version = urlencoded(version);
+        self.delete(&format!("/organizations/{org}/releases/{encoded_version}/"))
+            .await
+    }
+
     /// List deploys for a release.
     pub async fn list_release_deploys(
         &self,

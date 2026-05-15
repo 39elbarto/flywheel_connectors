@@ -8,9 +8,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod blake3;
 pub mod cpuid;
 pub mod dispatch;
 
+pub use blake3::{Blake3DispatchError, Blake3Hasher, Blake3Tier};
 pub use cpuid::{HwFeatureSet, detect};
 pub use dispatch::{
     AesGcmDispatch, Blake3Dispatch, DispatchTier, FunctionTable, NttDispatch, build_function_table,

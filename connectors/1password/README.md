@@ -179,6 +179,7 @@ The verification surface captures:
 - Use `credential_id` only when an egress proxy can materialize the secret at request time.
 - Use WireMock loopback fixtures for routine proof.
 - Decide whether live deployment targets local Connect Server, hosted Connect Server, or a policy-controlled proxy before enabling sandbox egress.
+- For the gated sandbox live suite, set `FCP_LIVE_SANDBOX=1`, `ONEPASSWORD_SANDBOX_CONNECT_URL`, `ONEPASSWORD_SANDBOX_CONNECT_TOKEN`, `ONEPASSWORD_SANDBOX_VAULT_ID`, and `FCP_SANDBOX_RUN_NAMESPACE`.
 
 **Dedicated environment**:
 
@@ -205,4 +206,5 @@ The verification surface captures:
 
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-onepassword-e2e cargo check -p fcp-onepassword --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-onepassword-e2e cargo test -p fcp-onepassword --tests -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-onepassword-e2e cargo test -p fcp-onepassword --test live_verification -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-onepassword-e2e cargo clippy -p fcp-onepassword --all-targets --no-deps -- -D warnings`

@@ -1,70 +1,161 @@
 //! Environment-gated live verification for the `1Password` connector.
 
-#![allow(clippy::missing_panics_doc)]
+#![allow(
+    clippy::expect_used,
+    clippy::future_not_send,
+    clippy::missing_panics_doc,
+    clippy::panic
+)]
 
 use fcp_onepassword::connector::OnePasswordConnector;
-use serde_json::json;
+use fcp_testkit::live_suite::{CleanupStrategy, EnvironmentManifest, LiveEnvironment, LiveGate};
+use serde_json::{Value, json};
 
 const LIVE_GATE_ENV: &str = "FCP_LIVE_SANDBOX";
-const TOKEN_ENV: &str = "ONEPASSWORD_CONNECT_TOKEN";
-const BASE_URL_ENV: &str = "ONEPASSWORD_CONNECT_BASE_URL";
-const VAULT_ENV: &str = "ONEPASSWORD_CONNECT_VAULT_ID";
+const TOKEN_ENV: &str = "ONEPASSWORD_SANDBOX_CONNECT_TOKEN";
+const BASE_URL_ENV: &str = "ONEPASSWORD_SANDBOX_CONNECT_URL";
+const VAULT_ENV: &str = "ONEPASSWORD_SANDBOX_VAULT_ID";
+const NAMESPACE_ENV: &str = "FCP_SANDBOX_RUN_NAMESPACE";
 const CONNECTOR_ID: &str = "1password";
+const OP_VAULTS_LIST: &str = "1password.vaults.list";
+const OP_ITEMS_LIST: &str = "1password.items.list";
+const BEAD_ID: &str = "flywheel_connectors-bky21.4.6.1";
+
+fn manifest() -> EnvironmentManifest {
+    EnvironmentManifest::sandbox(CONNECTOR_ID, "1Password Connect Server sandbox")
+        .with_env_secret(
+            "connect_token",
+            TOKEN_ENV,
+            "1Password Connect Server token scoped to a dedicated sandbox vault",
+        )
+        .with_env_var(BASE_URL_ENV, "1Password Connect Server sandbox base URL")
+        .with_env_var(
+            VAULT_ENV,
+            "1Password sandbox vault id used for bounded item-list proof",
+        )
+        .with_env_var(
+            NAMESPACE_ENV,
+            "Shared namespace recorded in evidence for sandbox-side artifacts",
+        )
+        .with_account_setup(
+            "Use a dedicated 1Password Connect Server instance and sandbox vault. This suite performs read-only vault and item listings; write-path proof belongs in a separate namespaced create/delete flow.",
+        )
+        .with_budget(0.01)
+        .with_cleanup(CleanupStrategy::PrefixDelete)
+        .with_rate_limits(0.5, true)
+}
+
+fn emit_live_jsonl(
+    status: &str,
+    reason: &str,
+    vault_count: usize,
+    item_count: usize,
+    evidence: &Value,
+) {
+    eprintln!(
+        "ONEPASSWORD_LIVE_SANDBOX_JSONL {}",
+        json!({
+            "event": "onepassword_live_sandbox_verification",
+            "fixture_mode": "live",
+            "suite_class": "sandbox_required",
+            "gate_env_var": LIVE_GATE_ENV,
+            "required_secret_env": TOKEN_ENV,
+            "required_env": [BASE_URL_ENV, VAULT_ENV, NAMESPACE_ENV],
+            "operation": [OP_VAULTS_LIST, OP_ITEMS_LIST],
+            "bead_id": BEAD_ID,
+            "status": status,
+            "provider": "1Password Connect Server sandbox",
+            "environment": "sandbox",
+            "resource_class": "vault_and_item_listing",
+            "vault_count": vault_count,
+            "item_count": item_count,
+            "call_ceiling": 2,
+            "rate_limit_guidance": "Performs one vault listing and one item listing against a sandbox vault.",
+            "mutation_expected": false,
+            "cleanup_strategy": "prefix_delete",
+            "provider_resource_ids_logged": false,
+            "secret_values_logged": false,
+            "base_url_logged": false,
+            "vault_id_logged": false,
+            "skip_reason": if status == "skipped" { Some(reason) } else { None },
+            "fcp_error_mapping": if status == "failed" { Some(reason) } else { None },
+            "evidence": evidence,
+        })
+    );
+}
+
+fn skip_reason(gate: &LiveGate, env: &LiveEnvironment) -> String {
+    if gate.is_enabled() {
+        env.problems().join("; ")
+    } else {
+        gate.skip_reason()
+    }
+}
 
 #[fcp_async_core::runtime::test]
-async fn live_verification_lists_vaults_when_enabled() {
-    if !live_gate_enabled() {
-        emit_live_jsonl("skipped", &format!("{LIVE_GATE_ENV} is not set to 1"), 0);
+async fn onepassword_live_sandbox_lists_vault_and_items_or_structured_skip_jsonl() {
+    let gate = LiveGate::sandbox();
+    let env = LiveEnvironment::from_manifest(manifest());
+    if !gate.is_enabled() || !env.is_ready() {
+        emit_live_jsonl(
+            "skipped",
+            &skip_reason(&gate, &env),
+            0,
+            0,
+            &env.evidence_summary(),
+        );
         return;
     }
 
-    let Some(token) = env_nonempty(TOKEN_ENV) else {
-        emit_live_jsonl("skipped", &format!("{TOKEN_ENV} is not set"), 0);
-        return;
-    };
-    let Some(base_url) = env_nonempty(BASE_URL_ENV) else {
-        emit_live_jsonl("skipped", &format!("{BASE_URL_ENV} is not set"), 0);
-        return;
-    };
-
-    let mut connector = OnePasswordConnector::new();
-    connector
-        .handle_configure(json!({
-            "access_token": token,
-            "base_url": base_url
-        }))
-        .await
-        .expect("configure live connector");
-    connector
-        .handle_handshake(json!({"session_id": "1password-live-verification"}))
-        .await
-        .expect("handshake live connector");
-
-    let vaults = connector
+    let mut connector = configured_connector(&env).await;
+    let vaults = match connector
         .handle_invoke(json!({
-            "operation_id": "1password.vaults.list",
+            "operation_id": OP_VAULTS_LIST,
             "input": {}
         }))
         .await
-        .expect("list live vaults");
+    {
+        Ok(value) => value,
+        Err(error) => {
+            emit_live_jsonl("failed", &error.to_string(), 0, 0, &env.evidence_summary());
+            panic!("1Password sandbox vault listing failed: {error}");
+        }
+    };
+    env.budget.record_api_call(OP_VAULTS_LIST, 0.0);
     let vault_count = vaults["vaults"].as_array().map_or(0, Vec::len);
 
-    if let Some(vault_id) = env_nonempty(VAULT_ENV) {
-        let items = connector
-            .handle_invoke(json!({
-                "operation_id": "1password.items.list",
-                "input": {"vault_id": vault_id}
-            }))
-            .await
-            .expect("list live vault items");
-        emit_live_jsonl(
-            "passed",
-            "vaults.list and items.list completed",
-            items["items"].as_array().map_or(vault_count, Vec::len),
-        );
-    } else {
-        emit_live_jsonl("passed", "vaults.list completed", vault_count);
-    }
+    let items = match connector
+        .handle_invoke(json!({
+            "operation_id": OP_ITEMS_LIST,
+            "input": {"vault_id": env.env_vars.get(VAULT_ENV).expect("vault env is ready")}
+        }))
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            emit_live_jsonl(
+                "failed",
+                &error.to_string(),
+                vault_count,
+                0,
+                &env.evidence_summary(),
+            );
+            panic!("1Password sandbox item listing failed: {error}");
+        }
+    };
+    env.budget.record_api_call(OP_ITEMS_LIST, 0.0);
+    let item_count = items["items"].as_array().map_or(0, Vec::len);
+
+    emit_live_jsonl(
+        "passed",
+        "",
+        vault_count,
+        item_count,
+        &json!({
+            "environment": env.evidence_summary(),
+            "operation_result": "vaults.list and items.list completed",
+        }),
+    );
 
     connector
         .handle_shutdown(json!({}))
@@ -72,30 +163,20 @@ async fn live_verification_lists_vaults_when_enabled() {
         .expect("shutdown live connector");
 }
 
-fn live_gate_enabled() -> bool {
-    std::env::var(LIVE_GATE_ENV).ok().as_deref() == Some("1")
-}
-
-fn env_nonempty(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn emit_live_jsonl(status: &str, reason: &str, observed_count: usize) {
-    eprintln!(
-        "ONEPASSWORD_LIVE_SANDBOX_JSONL {}",
-        json!({
-            "connector": CONNECTOR_ID,
-            "suite_class": "live",
-            "gate_env_var": LIVE_GATE_ENV,
-            "credential_env_vars": [TOKEN_ENV, BASE_URL_ENV],
-            "optional_env_vars": [VAULT_ENV],
-            "status": status,
-            "reason": reason,
-            "observed_count": observed_count,
-            "credential_material_logged": false
-        })
-    );
+async fn configured_connector(env: &LiveEnvironment) -> OnePasswordConnector {
+    let mut connector = OnePasswordConnector::new();
+    connector
+        .handle_configure(json!({
+            "access_token": env.secrets.require("connect_token"),
+            "base_url": env.env_vars.get(BASE_URL_ENV).expect("base URL env is ready")
+        }))
+        .await
+        .expect("configure live connector");
+    connector
+        .handle_handshake(json!({
+            "session_id": format!("1password-live-{}", env.tenant.run_prefix())
+        }))
+        .await
+        .expect("handshake live connector");
+    connector
 }

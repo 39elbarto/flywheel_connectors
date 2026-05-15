@@ -3616,12 +3616,15 @@ dependencies = [
  "fcp-prelude",
  "fcp-sdk",
  "fcp-testkit",
+ "hex",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "wiremock",
 ]
 

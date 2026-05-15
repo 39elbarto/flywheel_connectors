@@ -357,6 +357,27 @@ impl DocuSignClient {
             .await
     }
 
+    /// Move envelopes to the `DocuSign` recycle bin.
+    pub async fn move_envelopes_to_recycle_bin(
+        &self,
+        account_id: &str,
+        envelope_ids: &[&str],
+    ) -> DocuSignResult<serde_json::Value> {
+        let account_id = sanitize_path_segment(account_id, "account_id")?;
+        if envelope_ids.is_empty() {
+            return Err(DocuSignError::InvalidInput(
+                "envelope_ids must not be empty".into(),
+            ));
+        }
+        let sanitized = envelope_ids
+            .iter()
+            .map(|envelope_id| sanitize_path_segment(envelope_id, "envelope_id"))
+            .collect::<DocuSignResult<Vec<_>>>()?;
+        let body = serde_json::json!({ "envelopeIds": sanitized });
+        self.put(&format!("/{account_id}/folders/recyclebin"), &body)
+            .await
+    }
+
     /// Add recipients to an envelope.
     pub async fn add_recipients(
         &self,

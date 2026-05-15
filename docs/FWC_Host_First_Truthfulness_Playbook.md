@@ -693,6 +693,35 @@ How to read the bundle:
 - `environment.json`: the execution context needed to decide whether a mismatch is environmental or semantic, including whether replay is expected to stay offloaded through `rch`
 - `replay.sh`: the deterministic rerun entrypoint; cargo-backed verification steps should preserve `rch exec -- ...`, and if the script cannot reproduce the scenario, the evidence is incomplete
 
+### Proof freshness status
+
+Before closing a proof-bearing Bead or publishing a final go/no-go record, run
+the proof freshness gate over registry-backed rows:
+
+```bash
+fwc proof status --registry <proof-registry.json> --artifacts <observed-artifacts.json> --now-unix-ms <capture-ms>
+```
+
+Interpret the result mechanically:
+
+- `green`: the proof is live or host-backed, fresh under policy, has required
+  artifacts and matching digests, and its verifier passed.
+- `yellow`: the proof is reviewable but not a final PASS by itself. This covers
+  stale warn-mode rows, structured skips, replay-only evidence, offline
+  evidence, and static evidence that has not been promoted into a fresh registry
+  row.
+- `red`: the proof fails closed. Missing required artifacts, digest mismatches,
+  stale fail-closed rows, missing owner/source/rerun metadata, and verifier
+  failures block proof-bearing closeout.
+- `infra_blocked`: the verifier could not run because required infrastructure
+  was unavailable. Keep the proof state separate from code failure, record the
+  blocker in the Bead comment or review record, and rerun when the worker or
+  preflight is available.
+
+If `rch` or Agent Mail are unavailable, do not restart, repair, or kill shared
+services as part of this workflow. Preserve the evidence, record the
+`infra_blocked` status, and continue with Beads as the coordination surface.
+
 ### Fastest path from a failed run to a reproducible case
 
 Use the bundle in this order when a `fwc` scenario or host-backed workflow fails:

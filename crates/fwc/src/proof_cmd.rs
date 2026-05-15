@@ -2600,6 +2600,14 @@ output_schema = {{}}
         })
     }
 
+    fn proof_status_fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("proof_status")
+            .join(name)
+    }
+
     fn write_manifest(raw: &str) -> NamedTempFile {
         let file = NamedTempFile::new().expect("create temp manifest");
         std::fs::write(file.path(), raw).expect("write manifest");
@@ -2845,6 +2853,62 @@ related = []
             result.payload["proofs"][0]["reason_code"],
             "verifier_infra_blocked"
         );
+    }
+
+    #[test]
+    fn status_fixture_all_cases_pins_counts_and_failure_reasons() {
+        let result = run(&ProofArgs {
+            command: ProofCommand::Status(ProofStatusArgs {
+                registry: proof_status_fixture_path("all_cases_registry.json"),
+                artifacts: Some(proof_status_fixture_path("all_cases_artifacts.json")),
+                now_unix_ms: Some(NOW),
+            }),
+        })
+        .expect("run proof status fixture");
+
+        assert!(!result.success);
+        assert_eq!(result.payload["aggregate_counts"]["total"], 6);
+        assert_eq!(result.payload["aggregate_counts"]["green"], 1);
+        assert_eq!(result.payload["aggregate_counts"]["red"], 3);
+        assert_eq!(result.payload["aggregate_counts"]["yellow"], 2);
+        assert_eq!(result.payload["aggregate_counts"]["infra_blocked"], 0);
+
+        let proofs = result.payload["proofs"]
+            .as_array()
+            .expect("proof status rows should be an array");
+        let reason_for = |proof_id: &str| {
+            proofs
+                .iter()
+                .find(|row| row["proof_id"] == proof_id)
+                .map(|row| row["reason_code"].clone())
+                .expect("fixture proof id should exist")
+        };
+        assert_eq!(
+            reason_for("fixture.stale.red"),
+            serde_json::json!("stale_fail_closed")
+        );
+        assert_eq!(
+            reason_for("fixture.missing.red"),
+            serde_json::json!("missing_artifact")
+        );
+        assert_eq!(
+            reason_for("fixture.mismatch.red"),
+            serde_json::json!("digest_mismatch")
+        );
+        assert_eq!(
+            reason_for("fixture.structured-skip.yellow"),
+            serde_json::json!("structured_skip_non_green")
+        );
+        assert_eq!(
+            reason_for("fixture.replay-only.yellow"),
+            serde_json::json!("offline_evidence_non_live")
+        );
+        assert_ne!(
+            result.payload["aggregate_counts"]["green"],
+            result.payload["aggregate_counts"]["total"],
+            "stale, missing, mismatch, structured skip, and replay rows must not count toward a final PASS"
+        );
+        assert_redaction_safe(&result.payload);
     }
 
     #[test]

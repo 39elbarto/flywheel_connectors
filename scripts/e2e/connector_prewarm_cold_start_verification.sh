@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+OUT_ROOT="${OUT_ROOT:-}"
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/e2e/connector_prewarm_cold_start_verification.sh [options]
+
+Options:
+  --run-id <id>      Run identifier for artifact paths
+  --out-root <path>  Artifact root (default: artifacts/e2e/connector-prewarm-cold-start/<run-id>)
+  -h, --help         Show this help
+
+Runs the connector cold-start prewarm evidence lane through rch, extracts
+redaction-safe JSONL emitted by the fcp-e2e swarm gauntlet test, validates the
+required scenario coverage, and writes an operator replay bundle.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --run-id)
+      RUN_ID="$2"
+      shift 2
+      ;;
+    --out-root)
+      OUT_ROOT="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "${OUT_ROOT}" ]]; then
+  OUT_ROOT="${REPO_ROOT}/artifacts/e2e/connector-prewarm-cold-start/${RUN_ID}"
+fi
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required command: $1" >&2
+    exit 2
+  fi
+}
+
+now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+require_cmd jq
+require_cmd rch
+
+mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
+
+TEST_LOG="${OUT_ROOT}/logs/prewarm-cold-start-test.log"
+EVIDENCE_JSONL="${OUT_ROOT}/evidence/prewarm-cold-start.jsonl"
+VALIDATION_JSON="${OUT_ROOT}/evidence/validation.json"
+SKIP_JSONL="${OUT_ROOT}/evidence/prewarm-cold-start-skip.jsonl"
+SUMMARY_JSON="${OUT_ROOT}/summary.json"
+ENVIRONMENT_JSON="${OUT_ROOT}/environment.json"
+REPLAY_SH="${OUT_ROOT}/replay.sh"
+
+git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+target_dir="${PREWARM_CARGO_TARGET_DIR:-/tmp/fcp-prewarm-cold-start-${RUN_ID}}"
+test_status="passed"
+evidence_status="passed"
+validation_status="passed"
+overall_status="passed"
+skip_reason=""
+exit_code=0
+
+echo "[connector-prewarm-cold-start] running fcp-e2e prewarm evidence lane"
+if ! (
+  cd "${REPO_ROOT}"
+  env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
+    RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}" \
+    CARGO_TARGET_DIR="${target_dir}" \
+    CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}" \
+    CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
+    CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}" \
+    CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}" \
+    RUSTFLAGS="${RUSTFLAGS:--Cdebuginfo=0}" \
+    cargo test -p fcp-e2e --no-default-features --test swarm_gauntlet_e2e prewarm_cold_start -- --nocapture
+) >"${TEST_LOG}" 2>&1; then
+  test_status="failed"
+fi
+
+if [[ "${test_status}" == "failed" ]]; then
+  if grep -aE '(no workers passed|all workers failed preflight|failed to execute process|topology preflight|Permission denied|No such file or directory|refus(ed|ing) local fallback)' "${TEST_LOG}" >/dev/null; then
+    overall_status="skipped"
+    skip_reason="rch_remote_prerequisite_unavailable"
+    test_status="skipped"
+    evidence_status="skipped"
+    validation_status="skipped"
+    jq -c -n \
+      --arg record_type "swarm_prewarm_cold_start_skip" \
+      --arg schema_version "swarm-prewarm-cold-start/v2" \
+      --arg run_id "${RUN_ID}" \
+      --arg git_revision "${git_revision}" \
+      --arg worker_id "rch-unavailable" \
+      --arg target_dir "${target_dir}" \
+      --arg skip_reason "${skip_reason}" \
+      --arg log_path "${TEST_LOG}" \
+      '{
+        record_type: $record_type,
+        schema_version: $schema_version,
+        run_id: $run_id,
+        git_revision: $git_revision,
+        worker_id: $worker_id,
+        cargo_target_dir: $target_dir,
+        skip_reason: $skip_reason,
+        log_path: $log_path
+      }' > "${SKIP_JSONL}"
+  else
+    overall_status="failed"
+    exit_code=1
+  fi
+fi
+
+if [[ "${overall_status}" == "passed" ]]; then
+  if ! grep -a '^FCP_PREWARM_COLD_START_JSONL ' "${TEST_LOG}" \
+    | sed 's/^FCP_PREWARM_COLD_START_JSONL //' > "${EVIDENCE_JSONL}"
+  then
+    evidence_status="failed"
+  fi
+
+  if [[ ! -s "${EVIDENCE_JSONL}" ]] || ! jq -c . "${EVIDENCE_JSONL}" >/dev/null; then
+    evidence_status="failed"
+  fi
+
+  if [[ "${evidence_status}" == "passed" ]]; then
+    if ! jq -s -e '
+      def required:
+        [
+          "prewarm_empty_pool",
+          "prewarm_warm_hit",
+          "prewarm_stale_entry",
+          "prewarm_crash_before_checkout",
+          "prewarm_shutdown_cleanup",
+          "prewarm_concurrent_swarm_startup",
+          "prewarm_exhausted_under_burst",
+          "prewarm_sandbox_limits_unavailable",
+          "prewarm_checkout_cancelled_before_admit",
+          "prewarm_zygote_rejected_without_security_proof"
+        ];
+      def ids: map(.scenario_id);
+      def missing: required - (ids);
+      {
+        record_count: length,
+        missing_scenarios: missing,
+        schema_ok: all(.[]; .schema_version == "swarm-prewarm-cold-start/v2"),
+        record_type_ok: all(.[]; .record_type == "swarm_prewarm_cold_start_evidence"),
+        percentile_fields_ok: all(.[];
+          (.p50_activation_latency_ms | type) == "number"
+          and (.p95_activation_latency_ms | type) == "number"
+          and (.p99_activation_latency_ms | type) == "number"
+          and (.baseline_p50_activation_latency_ms | type) == "number"
+          and (.baseline_p95_activation_latency_ms | type) == "number"
+          and (.baseline_p99_activation_latency_ms | type) == "number"
+        ),
+        redaction_shape_ok: all(.[];
+          (.connector_id | type) == "string"
+          and (.worker_id | type) == "string"
+          and (.credential_mode | type) == "string"
+          and (.cleanup_result | type) == "string"
+        )
+      } as $v
+      | $v
+      | .status = (
+          if (($v.missing_scenarios | length) == 0 and $v.schema_ok and $v.record_type_ok and $v.percentile_fields_ok and $v.redaction_shape_ok)
+          then "passed"
+          else "failed"
+          end
+        )
+      | select(.status == "passed")
+    ' "${EVIDENCE_JSONL}" > "${VALIDATION_JSON}"; then
+      validation_status="failed"
+    fi
+  fi
+
+  if [[ "${evidence_status}" == "failed" || "${validation_status}" == "failed" ]]; then
+    overall_status="failed"
+    exit_code=1
+  fi
+fi
+
+if [[ "${overall_status}" == "passed" ]]; then
+  if grep -aE '(sk-live-|Bearer[[:space:]]+|super-secret-value|secret_seed|private_key)' "${EVIDENCE_JSONL}" >/dev/null; then
+    overall_status="failed"
+    validation_status="failed"
+    exit_code=1
+  fi
+fi
+
+jq -n \
+  --arg run_id "${RUN_ID}" \
+  --arg script "scripts/e2e/connector_prewarm_cold_start_verification.sh" \
+  --arg repo_root "${REPO_ROOT}" \
+  --arg artifact_root "${OUT_ROOT}" \
+  --arg git_revision "${git_revision}" \
+  --arg target_dir "${target_dir}" \
+  --arg rch_require_remote "${RCH_REQUIRE_REMOTE:-1}" \
+  --arg generated_at "$(now_iso)" \
+  '{
+    run_id: $run_id,
+    script: $script,
+    repo_root: $repo_root,
+    artifact_root: $artifact_root,
+    git_revision: $git_revision,
+    cargo_target_dir: $target_dir,
+    rch_require_remote: $rch_require_remote,
+    generated_at: $generated_at
+  }' > "${ENVIRONMENT_JSON}"
+
+evidence_count="0"
+if [[ -s "${EVIDENCE_JSONL}" ]]; then
+  evidence_count="$(wc -l < "${EVIDENCE_JSONL}" | tr -d ' ')"
+fi
+
+jq -n \
+  --arg run_id "${RUN_ID}" \
+  --arg status "${overall_status}" \
+  --arg test_status "${test_status}" \
+  --arg evidence_status "${evidence_status}" \
+  --arg validation_status "${validation_status}" \
+  --arg skip_reason "${skip_reason}" \
+  --argjson evidence_count "${evidence_count}" \
+  --arg test_log "${TEST_LOG}" \
+  --arg evidence_jsonl "${EVIDENCE_JSONL}" \
+  --arg validation_json "${VALIDATION_JSON}" \
+  --arg skip_jsonl "${SKIP_JSONL}" \
+  --arg environment_json "${ENVIRONMENT_JSON}" \
+  '{
+    run_id: $run_id,
+    status: $status,
+    test_status: $test_status,
+    evidence_status: $evidence_status,
+    validation_status: $validation_status,
+    skip_reason: (if ($skip_reason | length) > 0 then $skip_reason else null end),
+    evidence_count: $evidence_count,
+    artifacts: {
+      test_log: $test_log,
+      evidence_jsonl: $evidence_jsonl,
+      validation_json: $validation_json,
+      skip_jsonl: $skip_jsonl,
+      environment_json: $environment_json
+    }
+  }' > "${SUMMARY_JSON}"
+
+cat > "${REPLAY_SH}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cd "${REPO_ROOT}"
+RUN_ID="${RUN_ID}" OUT_ROOT="${OUT_ROOT}" RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" \\
+  bash scripts/e2e/connector_prewarm_cold_start_verification.sh \\
+  --run-id "${RUN_ID}" \\
+  --out-root "${OUT_ROOT}"
+EOF
+chmod +x "${REPLAY_SH}"
+
+echo "Connector prewarm cold-start artifacts written to ${OUT_ROOT}"
+exit "${exit_code}"

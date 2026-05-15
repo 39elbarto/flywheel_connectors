@@ -1033,6 +1033,12 @@ fn maybe_write_prewarm_jsonl_artifact(jsonl: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+fn emit_prewarm_jsonl_stdout(jsonl: &str) {
+    for line in jsonl.lines() {
+        println!("FCP_PREWARM_COLD_START_JSONL {line}");
+    }
+}
+
 fn statistical_baseline_snapshot() -> SwarmRegressionMetricSnapshot {
     SwarmRegressionMetricSnapshot {
         scenario_id: "host_batch_invoke_10000".to_string(),
@@ -1493,6 +1499,7 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
         .collect::<Result<Vec<_>, _>>()?
         .join("\n");
     maybe_write_prewarm_jsonl_artifact(&jsonl)?;
+    emit_prewarm_jsonl_stdout(&jsonl);
     let types = record_types(&records);
     let warm_hit = records
         .iter()

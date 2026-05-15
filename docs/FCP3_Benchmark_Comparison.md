@@ -55,6 +55,11 @@ The E2E JSONL bundle covers warm hit, empty pool, stale warm entry, crash before
 checkout, shutdown cleanup, concurrent swarm startup, burst exhaustion,
 sandbox-limit fallback, checkout cancellation before admit, and zygote rejection
 without a security proof.
+Run `scripts/e2e/connector_prewarm_cold_start_verification.sh` to produce the
+repeatable artifact bundle under `artifacts/e2e/connector-prewarm-cold-start/`.
+The script keeps Cargo execution behind `rch`, extracts the emitted JSONL proof,
+validates the required scenarios, and writes a structured skip artifact when a
+remote worker is unavailable.
 
 ## Environment Capture For Final Review
 

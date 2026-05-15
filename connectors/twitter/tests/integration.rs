@@ -595,6 +595,32 @@ async fn health_configured() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn self_check_ok_with_mock_api() {
+    let _ctx = AsyncTestContext::for_scenario("twitter.lifecycle.self_check_ok");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "id": "12345",
+                "name": "Test",
+                "username": "test"
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = TwitterConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let result = connector
+        .handle_self_check()
+        .await
+        .expect("self-check should succeed");
+    assert_eq!(result["status"], "ok");
+}
+
+#[fcp_async_core::runtime::test]
 async fn introspect_lists_all_operations() {
     let _ctx = AsyncTestContext::for_scenario("twitter.lifecycle.introspect");
     let connector = TwitterConnector::new();

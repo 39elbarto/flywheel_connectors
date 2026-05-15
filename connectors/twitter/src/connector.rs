@@ -2367,37 +2367,6 @@ mod tests {
         assert_eq!(report.reason_code.as_deref(), Some("health_check_failed"));
     }
 
-    #[fcp_async_core::runtime::test]
-    async fn test_self_check_ok_with_mock() {
-        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
-
-        let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": {
-                    "id": "12345",
-                    "name": "Test",
-                    "username": "test"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let mut connector = TwitterConnector::new();
-        let params = json!({
-            "consumer_key": "ck_test",
-            "consumer_secret": "cs_test",
-            "access_token": "at_test",
-            "access_token_secret": "ats_test",
-            "api_url": mock_server.uri()
-        });
-        connector.handle_configure(params).await.unwrap();
-
-        let result = connector.handle_self_check().await.unwrap();
-        let report: SelfCheckReport = serde_json::from_value(result).unwrap();
-        assert_eq!(report.status, SelfCheckStatus::Ok);
-    }
-
     // ───────────────────────── Multi-auth configure tests ─────────────────────────
 
     #[fcp_async_core::runtime::test]

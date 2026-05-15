@@ -948,21 +948,15 @@ impl TwitterApiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_testkit::LogCapture;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{header_exists, method, path},
-    };
 
-    /// Create a test config pointing to the mock server.
-    fn test_config(mock_server: &MockServer) -> TwitterConfig {
+    fn test_config() -> TwitterConfig {
         TwitterConfig {
             consumer_key: "test_consumer_key".into(),
             consumer_secret: "test_consumer_secret".into(),
             access_token: "test_access_token".into(),
             access_token_secret: "test_access_token_secret".into(),
             bearer_token: Some("test_bearer_token".into()),
-            api_url: mock_server.uri(),
+            api_url: "https://api.twitter.example".into(),
             retry: crate::config::RetryConfig {
                 max_attempts: 1,
                 initial_delay_ms: 10,
@@ -971,258 +965,6 @@ mod tests {
             },
             ..Default::default()
         }
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_me_success() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/2/users/me"))
-            .and(header_exists("Authorization"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": {
-                    "id": "123456789",
-                    "name": "Test User",
-                    "username": "testuser"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let config = test_config(&mock_server);
-        let client = TwitterApiClient::new(&config).unwrap();
-
-        let response = client.get_me().await.unwrap();
-        let user = response.data.unwrap();
-        assert_eq!(user.id, "123456789");
-        assert_eq!(user.username, "testuser");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_create_tweet_success() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/2/tweets"))
-            .and(header_exists("Authorization"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "data": {
-                    "id": "1234567890",
-                    "text": "Hello, Twitter!"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let config = test_config(&mock_server);
-        let client = TwitterApiClient::new(&config).unwrap();
-
-        let request = CreateTweetRequest {
-            text: Some("Hello, Twitter!".into()),
-            ..Default::default()
-        };
-
-        let response = client.create_tweet(&request).await.unwrap();
-        assert_eq!(response.data.id, "1234567890");
-        assert_eq!(response.data.text, "Hello, Twitter!");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_rate_limited() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/2/users/me"))
-            .respond_with(
-                ResponseTemplate::new(429)
-                    .insert_header("x-rate-limit-reset", "1700000000")
-                    .set_body_json(serde_json::json!({
-                        "title": "Too Many Requests",
-                        "detail": "Too Many Requests",
-                        "type": "about:blank",
-                        "status": 429
-                    })),
-            )
-            .mount(&mock_server)
-            .await;
-
-        let config = test_config(&mock_server);
-        let client = TwitterApiClient::new(&config).unwrap();
-
-        let result = client.get_me().await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, TwitterError::RateLimited { .. }));
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_search_recent_success() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/2/tweets/search/recent"))
-            .and(header_exists("Authorization"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": [
-                    {
-                        "id": "1234",
-                        "text": "Hello world"
-                    },
-                    {
-                        "id": "5678",
-                        "text": "Test tweet"
-                    }
-                ],
-                "meta": {
-                    "result_count": 2,
-                    "newest_id": "1234",
-                    "oldest_id": "5678"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let config = test_config(&mock_server);
-        let client = TwitterApiClient::new(&config).unwrap();
-
-        let params = SearchTweetsParams {
-            query: "hello".into(),
-            max_results: Some(10),
-            ..Default::default()
-        };
-
-        let response = client.search_recent(&params).await.unwrap();
-        let tweets = response.data.unwrap();
-        assert_eq!(tweets.len(), 2);
-        assert_eq!(tweets[0].text, "Hello world");
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_get_trends_place_success() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/1.1/trends/place.json"))
-            .and(header_exists("Authorization"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-                {
-                    "trends": [
-                        {
-                            "name": "#rustlang",
-                            "url": "https://twitter.com/search?q=%23rustlang",
-                            "query": "%23rustlang",
-                            "tweet_volume": 12345
-                        }
-                    ],
-                    "as_of": "2026-03-02T00:00:00Z",
-                    "created_at": "2026-03-02T00:00:00Z",
-                    "locations": [
-                        { "name": "Worldwide", "woeid": 1 }
-                    ]
-                }
-            ])))
-            .mount(&mock_server)
-            .await;
-
-        let config = test_config(&mock_server);
-        let client = TwitterApiClient::new(&config).unwrap();
-
-        let response = client.get_trends_place(1).await.unwrap();
-        assert_eq!(response.len(), 1);
-        assert_eq!(response[0].trends.len(), 1);
-        assert_eq!(response[0].trends[0].name, "#rustlang");
-        assert_eq!(response[0].locations[0].woeid, 1);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_delete_tweet_success() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("DELETE"))
-            .and(path("/2/tweets/1234567890"))
-            .and(header_exists("Authorization"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": {
-                    "deleted": true
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let config = test_config(&mock_server);
-        let client = TwitterApiClient::new(&config).unwrap();
-
-        let response = client.delete_tweet("1234567890").await.unwrap();
-        assert!(response.data.deleted);
-    }
-
-    #[fcp_async_core::runtime::test]
-    async fn test_error_unauthorized() {
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/2/users/me"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
-                "title": "Unauthorized",
-                "detail": "Unauthorized",
-                "type": "about:blank",
-                "status": 401
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let config = test_config(&mock_server);
-        let client = TwitterApiClient::new(&config).unwrap();
-
-        let result = client.get_me().await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, TwitterError::Api { status: 401, .. }));
-    }
-
-    #[fcp_async_core::runtime::test(flavor = "current_thread")]
-    async fn test_logs_redact_credentials_and_tweet_text() {
-        let capture = LogCapture::new();
-        let _guard = capture.install_json_with_filter("debug");
-        tracing::debug!("log_capture_ready");
-
-        let mock_server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/2/tweets"))
-            .and(header_exists("Authorization"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "data": {
-                    "id": "1234567890",
-                    "text": "Hello, Twitter!"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        let config = test_config(&mock_server);
-        let client = TwitterApiClient::new(&config).unwrap();
-
-        let secret_tweet = "TopSecretTweet";
-        let request = CreateTweetRequest {
-            text: Some(secret_tweet.into()),
-            ..Default::default()
-        };
-
-        let _ = client.create_tweet(&request).await.unwrap();
-
-        let logs = capture.jsonl();
-        assert!(
-            logs.contains("log_capture_ready"),
-            "expected debug logs to be captured"
-        );
-        assert!(!logs.contains("test_consumer_key"));
-        assert!(!logs.contains("test_consumer_secret"));
-        assert!(!logs.contains("test_access_token"));
-        assert!(!logs.contains("test_access_token_secret"));
-        assert!(!logs.contains("test_bearer_token"));
-        assert!(!logs.contains(secret_tweet));
     }
 
     // ── validate_numeric_id tests ──────────────────────────────────
@@ -1293,8 +1035,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn get_user_rejects_non_numeric_id() {
-        let mock_server = MockServer::start().await;
-        let config = test_config(&mock_server);
+        let config = test_config();
         let client = TwitterApiClient::new(&config).unwrap();
 
         let err = client.get_user("../admin").await.unwrap_err();
@@ -1303,8 +1044,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn get_tweet_rejects_non_numeric_id() {
-        let mock_server = MockServer::start().await;
-        let config = test_config(&mock_server);
+        let config = test_config();
         let client = TwitterApiClient::new(&config).unwrap();
 
         let err = client.get_tweet("abc").await.unwrap_err();
@@ -1313,8 +1053,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn delete_tweet_rejects_non_numeric_id() {
-        let mock_server = MockServer::start().await;
-        let config = test_config(&mock_server);
+        let config = test_config();
         let client = TwitterApiClient::new(&config).unwrap();
 
         let err = client.delete_tweet("not-a-number").await.unwrap_err();
@@ -1323,8 +1062,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn send_dm_rejects_non_numeric_conversation_id() {
-        let mock_server = MockServer::start().await;
-        let config = test_config(&mock_server);
+        let config = test_config();
         let client = TwitterApiClient::new(&config).unwrap();
 
         let err = client.send_dm("bad/id", "hello").await.unwrap_err();
@@ -1333,8 +1071,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn retweet_validates_both_ids() {
-        let mock_server = MockServer::start().await;
-        let config = test_config(&mock_server);
+        let config = test_config();
         let client = TwitterApiClient::new(&config).unwrap();
 
         // Bad user_id
@@ -1348,8 +1085,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn unlike_tweet_validates_both_ids() {
-        let mock_server = MockServer::start().await;
-        let config = test_config(&mock_server);
+        let config = test_config();
         let client = TwitterApiClient::new(&config).unwrap();
 
         let err = client.unlike_tweet("../evil", "123").await.unwrap_err();

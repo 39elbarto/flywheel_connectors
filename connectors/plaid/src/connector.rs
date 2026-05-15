@@ -1300,12 +1300,131 @@ mod tests {
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration as StdDuration, Instant};
     use uuid::Uuid;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
-    };
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        body: serde_json::Value,
+    }
+
+    struct TestHttpServer {
+        url: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestHttpResponse {
+        #[must_use]
+        fn json(method: &'static str, path: &'static str, body: serde_json::Value) -> Self {
+            Self { method, path, body }
+        }
+    }
+
+    impl TestHttpServer {
+        #[must_use]
+        fn respond(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let handle = thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                for response in responses {
+                    let stream = accept_test_connection(&listener);
+                    handle_test_request(stream, response);
+                }
+            });
+            Self {
+                url,
+                handle: Some(handle),
+            }
+        }
+
+        #[must_use]
+        fn uri(&self) -> &str {
+            &self.url
+        }
+    }
+
+    impl Drop for TestHttpServer {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                if thread::panicking() {
+                    let _ = handle.join();
+                } else {
+                    handle.join().unwrap();
+                }
+            }
+        }
+    }
+
+    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+        let deadline = Instant::now() + StdDuration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    return stream;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "test server did not receive expected request"
+                    );
+                    thread::sleep(StdDuration::from_millis(10));
+                }
+                Err(err) => panic!("test listener failed: {err}"),
+            }
+        }
+    }
+
+    fn handle_test_request(stream: TcpStream, response: TestHttpResponse) {
+        stream
+            .set_read_timeout(Some(StdDuration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        assert_eq!(request_parts.next(), Some(response.method));
+        let actual_path = request_parts
+            .next()
+            .and_then(|path| path.split('?').next())
+            .unwrap_or_default();
+        assert_eq!(actual_path, response.path);
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_length = value.trim().parse().unwrap();
+            }
+        }
+        let mut request_body = vec![0u8; content_length];
+        if content_length > 0 {
+            reader.read_exact(&mut request_body).unwrap();
+        }
+
+        let mut stream = reader.into_inner();
+        let body = response.body.to_string();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\ncontent-type: application/json\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        stream.flush().unwrap();
+    }
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
         let cap = match op {
@@ -1466,22 +1585,21 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_doctor_secret_mode_healthy() {
-        let mock_server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/link/token/create"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        let server = TestHttpServer::respond(vec![TestHttpResponse::json(
+            "POST",
+            "/link/token/create",
+            json!({
                 "link_token": "link-sandbox-test",
                 "expiration": "2026-03-02T00:00:00Z"
-            })))
-            .mount(&mock_server)
-            .await;
+            }),
+        )]);
 
         let mut connector = PlaidConnector::new();
         connector
             .handle_configure(json!({
                 "client_id": "test_client_id",
                 "secret": "test_secret",
-                "base_url": mock_server.uri(),
+                "base_url": server.uri(),
                 "environment": "sandbox"
             }))
             .await

@@ -34,6 +34,7 @@ const INTENT_DIRECT_MESSAGES: u64 = 1 << 12;
 const INTENT_MESSAGE_CONTENT: u64 = 1 << 15;
 const ALL_REQUIRED_INTENTS: u64 =
     INTENT_GUILDS | INTENT_GUILD_MESSAGES | INTENT_DIRECT_MESSAGES | INTENT_MESSAGE_CONTENT;
+const TEST_SLACK_BOT_CREDENTIAL_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
 struct BoundSigningKey {
     signing_key: Ed25519SigningKey,
@@ -547,7 +548,7 @@ async fn run_fail_open_degraded_fixture(
 async fn configure_slack(connector: &mut SlackConnector, base_url: &str) {
     connector
         .handle_configure(json!({
-            "token": "xoxb-test-token-xyz",
+            "credential_id": TEST_SLACK_BOT_CREDENTIAL_ID,
             "base_url": base_url,
             "chat_coordination": { "backend": "in_memory" }
         }))

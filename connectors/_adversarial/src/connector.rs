@@ -187,6 +187,12 @@ impl AdversarialConnector {
         Self::try_new_for_deploy_mode(&deploy_mode)
     }
 
+    /// Runtime instance identifier used for host-minted capability binding.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
     /// Return a structured error response for a single adversarial scenario.
     #[must_use]
     pub fn emit_scenario(

@@ -2019,10 +2019,10 @@ mod tests {
     use chrono::{Duration, Utc};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
     use fcp_prelude::{CapabilityConstraints, CapabilityToken, InstanceId, RequestId, ZoneId};
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{body_partial_json, method, path, query_param},
-    };
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration as StdDuration, Instant};
 
     const EXPECTED_MANIFEST_SCHEMA_OPS: &[(&str, &str)] = &[
         (OP_SEND_TEXT, "messages_send_text"),
@@ -2295,12 +2295,182 @@ mod tests {
         })
     }
 
-    async fn configured_connector(server: &MockServer) -> DingTalkConnector {
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        query_contains: Vec<&'static str>,
+        json_body_fields: Option<Value>,
+        body: Value,
+    }
+
+    struct TestHttpServer {
+        url: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestHttpResponse {
+        fn json(method: &'static str, path: &'static str, status: u16, body: Value) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                query_contains: Vec::new(),
+                json_body_fields: None,
+                body,
+            }
+        }
+
+        fn with_query_contains(mut self, fragment: &'static str) -> Self {
+            self.query_contains.push(fragment);
+            self
+        }
+
+        fn with_json_body_fields(mut self, fields: Value) -> Self {
+            self.json_body_fields = Some(fields);
+            self
+        }
+    }
+
+    impl TestHttpServer {
+        fn respond(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let handle = thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                for response in responses {
+                    let stream = accept_test_connection(&listener);
+                    handle_test_request(stream, response);
+                }
+            });
+            Self {
+                url,
+                handle: Some(handle),
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.url
+        }
+    }
+
+    impl Drop for TestHttpServer {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                if thread::panicking() {
+                    let _ = handle.join();
+                } else {
+                    handle.join().unwrap();
+                }
+            }
+        }
+    }
+
+    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+        let deadline = Instant::now() + StdDuration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    return stream;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "test listener did not receive expected request"
+                    );
+                    thread::sleep(StdDuration::from_millis(10));
+                }
+                Err(err) => panic!("test listener failed: {err}"),
+            }
+        }
+    }
+
+    fn handle_test_request(stream: TcpStream, response: TestHttpResponse) {
+        stream
+            .set_read_timeout(Some(StdDuration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        assert_eq!(request_parts.next(), Some(response.method));
+        let target = request_parts.next().unwrap_or_default();
+        let actual_path = target.split('?').next().unwrap_or_default();
+        assert_eq!(actual_path, response.path);
+        for fragment in &response.query_contains {
+            assert!(
+                target.contains(fragment),
+                "request target {target:?} did not contain query fragment {fragment:?}"
+            );
+        }
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_length = value.trim().parse().unwrap();
+            }
+        }
+
+        let mut request_body = vec![0u8; content_length];
+        if content_length > 0 {
+            reader.read_exact(&mut request_body).unwrap();
+        }
+        if let Some(expected_fields) = response.json_body_fields {
+            let actual_body: Value =
+                serde_json::from_slice(&request_body).expect("request body should be JSON");
+            assert_json_contains(&actual_body, &expected_fields);
+        }
+
+        let mut stream = reader.into_inner();
+        let body = response.body.to_string();
+        let reason = match response.status {
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            429 => "Too Many Requests",
+            _ => "OK",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-length: {}\r\nconnection: close\r\n",
+            response.status,
+            reason,
+            body.len()
+        )
+        .unwrap();
+        write!(stream, "content-type: application/json\r\n").unwrap();
+        write!(stream, "\r\n{body}").unwrap();
+        stream.flush().unwrap();
+    }
+
+    fn assert_json_contains(actual: &Value, expected: &Value) {
+        match (actual, expected) {
+            (Value::Object(actual_map), Value::Object(expected_map)) => {
+                for (key, expected_value) in expected_map {
+                    let actual_value = actual_map
+                        .get(key)
+                        .unwrap_or_else(|| panic!("request JSON should contain field {key:?}"));
+                    assert_json_contains(actual_value, expected_value);
+                }
+            }
+            _ => assert_eq!(actual, expected),
+        }
+    }
+
+    async fn configured_connector(base_url: &str) -> DingTalkConnector {
         let mut connector = DingTalkConnector::new();
         connector
             .configure(json!({
-                "base_url": server.uri(),
-                "media_base_url": server.uri(),
+                "base_url": base_url,
+                "media_base_url": base_url,
                 "client_id": "ding-app",
                 "client_secret": "secret"
             }))
@@ -2338,10 +2508,9 @@ mod tests {
     }
 
     async fn configured_handshaken_connector(
-        server: &MockServer,
         capabilities: Vec<CapabilityId>,
     ) -> (DingTalkConnector, Ed25519SigningKey) {
-        let mut connector = configured_connector(server).await;
+        let mut connector = configured_connector("http://localhost:9999").await;
         let signing_key = Ed25519SigningKey::generate();
         connector
             .handshake(HandshakeRequest {
@@ -2459,30 +2628,32 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn send_text_posts_expected_oto_payload() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1.0/oauth2/accessToken"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "accessToken": "token-123",
-                "expireIn": 7200
-            })))
-            .mount(&server)
-            .await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1.0/robot/oToMessages/batchSend"))
-            .and(body_partial_json(json!({
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1.0/oauth2/accessToken",
+                200,
+                json!({
+                    "accessToken": "token-123",
+                    "expireIn": 7200
+                }),
+            ),
+            TestHttpResponse::json(
+                "POST",
+                "/v1.0/robot/oToMessages/batchSend",
+                200,
+                json!({
+                    "processQueryKey": "msg-1"
+                }),
+            )
+            .with_json_body_fields(json!({
                 "robotCode": "ding-app",
                 "userIds": ["user-1"],
                 "msgKey": "sampleMarkdown"
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "processQueryKey": "msg-1"
-            })))
-            .mount(&server)
-            .await;
+            })),
+        ]);
 
-        let connector = configured_connector(&server).await;
+        let connector = configured_connector(server.uri()).await;
         let client = connector.client.as_ref().unwrap();
 
         let output = client
@@ -2503,29 +2674,31 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn upload_media_posts_expected_request() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1.0/oauth2/accessToken"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "accessToken": "token-123",
-                "expireIn": 7200
-            })))
-            .mount(&server)
-            .await;
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1.0/oauth2/accessToken",
+                200,
+                json!({
+                    "accessToken": "token-123",
+                    "expireIn": 7200
+                }),
+            ),
+            TestHttpResponse::json(
+                "POST",
+                "/media/upload",
+                200,
+                json!({
+                    "errcode": 0,
+                    "errmsg": "ok",
+                    "media_id": "MEDIA123"
+                }),
+            )
+            .with_query_contains("access_token=token-123")
+            .with_query_contains("type=image"),
+        ]);
 
-        Mock::given(method("POST"))
-            .and(path("/media/upload"))
-            .and(query_param("access_token", "token-123"))
-            .and(query_param("type", "image"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "errcode": 0,
-                "errmsg": "ok",
-                "media_id": "MEDIA123"
-            })))
-            .mount(&server)
-            .await;
-
-        let connector = configured_connector(&server).await;
+        let connector = configured_connector(server.uri()).await;
         let client = connector.client.as_ref().unwrap();
 
         let output = client
@@ -2538,8 +2711,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn health_returns_ready_after_configure() {
-        let server = MockServer::start().await;
-        let connector = configured_connector(&server).await;
+        let connector = configured_connector("http://localhost:9999").await;
         let health = connector.health().await;
         assert!(matches!(health.status, HealthState::Ready));
     }
@@ -2560,8 +2732,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn doctor_passes_after_configure() {
-        let server = MockServer::start().await;
-        let connector = configured_connector(&server).await;
+        let connector = configured_connector("http://localhost:9999").await;
         let report = connector.doctor();
         assert!(report.passed);
     }
@@ -2948,12 +3119,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn handshake_event_caps_track_stream_enablement() {
-        let server = MockServer::start().await;
         let mut connector = DingTalkConnector::new();
         connector
             .configure(json!({
-                "base_url": server.uri(),
-                "media_base_url": server.uri(),
+                "base_url": "http://localhost:9999",
+                "media_base_url": "http://localhost:9999",
                 "client_id": "ding-app",
                 "client_secret": "secret",
                 "stream_mode_enabled": true,
@@ -3133,12 +3303,9 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn simulate_denies_missing_send_text_content() {
-        let server = MockServer::start().await;
-        let (connector, signing_key) = configured_handshaken_connector(
-            &server,
-            vec![CapabilityId::from_static(CAP_MESSAGES_WRITE)],
-        )
-        .await;
+        let (connector, signing_key) =
+            configured_handshaken_connector(vec![CapabilityId::from_static(CAP_MESSAGES_WRITE)])
+                .await;
         let response = connector
             .simulate(simulate_request(
                 OP_SEND_TEXT,
@@ -3165,12 +3332,8 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn simulate_denies_invalid_upload_media_type() {
-        let server = MockServer::start().await;
-        let (connector, signing_key) = configured_handshaken_connector(
-            &server,
-            vec![CapabilityId::from_static(CAP_MEDIA_WRITE)],
-        )
-        .await;
+        let (connector, signing_key) =
+            configured_handshaken_connector(vec![CapabilityId::from_static(CAP_MEDIA_WRITE)]).await;
         let response = connector
             .simulate(simulate_request(
                 OP_UPLOAD_MEDIA,

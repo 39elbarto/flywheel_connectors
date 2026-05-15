@@ -561,10 +561,185 @@ pub fn extract_conversation_identity(
 mod tests {
     use super::*;
     use crate::types::DEFAULT_TIMEOUT_MS;
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path, query_param},
-    };
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
+
+    enum TestHttpBody {
+        Json(Value),
+        Text(&'static str),
+    }
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        headers: Vec<(&'static str, &'static str)>,
+        query_contains: Vec<&'static str>,
+        body: TestHttpBody,
+    }
+
+    struct TestHttpServer {
+        url: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestHttpResponse {
+        fn json(method: &'static str, path: &'static str, status: u16, body: Value) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                headers: Vec::new(),
+                query_contains: Vec::new(),
+                body: TestHttpBody::Json(body),
+            }
+        }
+
+        fn text(method: &'static str, path: &'static str, status: u16, body: &'static str) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                headers: Vec::new(),
+                query_contains: Vec::new(),
+                body: TestHttpBody::Text(body),
+            }
+        }
+
+        fn with_header(mut self, name: &'static str, value: &'static str) -> Self {
+            self.headers.push((name, value));
+            self
+        }
+
+        fn with_query_contains(mut self, fragment: &'static str) -> Self {
+            self.query_contains.push(fragment);
+            self
+        }
+    }
+
+    impl TestHttpServer {
+        fn respond(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let handle = thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                for response in responses {
+                    let stream = accept_test_connection(&listener);
+                    handle_test_request(stream, response);
+                }
+            });
+            Self {
+                url,
+                handle: Some(handle),
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.url
+        }
+    }
+
+    impl Drop for TestHttpServer {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                if thread::panicking() {
+                    let _ = handle.join();
+                } else {
+                    handle.join().unwrap();
+                }
+            }
+        }
+    }
+
+    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    return stream;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "test server did not receive expected request"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("test listener failed: {err}"),
+            }
+        }
+    }
+
+    fn handle_test_request(stream: TcpStream, response: TestHttpResponse) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        assert_eq!(request_parts.next(), Some(response.method));
+        let target = request_parts.next().unwrap_or_default();
+        let actual_path = target.split('?').next().unwrap_or_default();
+        assert_eq!(actual_path, response.path);
+        for fragment in &response.query_contains {
+            assert!(
+                target.contains(fragment),
+                "request target {target:?} did not contain query fragment {fragment:?}"
+            );
+        }
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_length = value.trim().parse().unwrap();
+            }
+        }
+
+        let mut request_body = vec![0u8; content_length];
+        if content_length > 0 {
+            reader.read_exact(&mut request_body).unwrap();
+        }
+
+        let mut stream = reader.into_inner();
+        let (body, is_json_body) = match response.body {
+            TestHttpBody::Json(body) => (body.to_string(), true),
+            TestHttpBody::Text(body) => (body.to_string(), false),
+        };
+        let reason = match response.status {
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            429 => "Too Many Requests",
+            _ => "OK",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-length: {}\r\nconnection: close\r\n",
+            response.status,
+            reason,
+            body.len()
+        )
+        .unwrap();
+        if is_json_body {
+            write!(stream, "content-type: application/json\r\n").unwrap();
+        }
+        for (name, value) in response.headers {
+            write!(stream, "{name}: {value}\r\n").unwrap();
+        }
+        write!(stream, "\r\n{body}").unwrap();
+        stream.flush().unwrap();
+    }
 
     fn test_config(base_url: &str) -> DingTalkConfig {
         DingTalkConfig {
@@ -688,25 +863,27 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn post_json_sends_with_token() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1.0/oauth2/accessToken"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "accessToken": "tok-1",
-                "expireIn": 7200
-            })))
-            .mount(&server)
-            .await;
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1.0/oauth2/accessToken",
+                200,
+                json!({
+                    "accessToken": "tok-1",
+                    "expireIn": 7200
+                }),
+            ),
+            TestHttpResponse::json(
+                "POST",
+                "/v1.0/robot/oToMessages/batchSend",
+                200,
+                json!({
+                    "processQueryKey": "msg-1"
+                }),
+            ),
+        ]);
 
-        Mock::given(method("POST"))
-            .and(path("/v1.0/robot/oToMessages/batchSend"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "processQueryKey": "msg-1"
-            })))
-            .mount(&server)
-            .await;
-
-        let client = DingTalkClient::new(test_config(&server.uri())).unwrap();
+        let client = DingTalkClient::new(test_config(server.uri())).unwrap();
         let result = client
             .post_json(
                 "/v1.0/robot/oToMessages/batchSend",
@@ -719,23 +896,25 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn post_json_returns_api_error_on_failure() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1.0/oauth2/accessToken"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "accessToken": "tok-1",
-                "expireIn": 7200
-            })))
-            .mount(&server)
-            .await;
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1.0/oauth2/accessToken",
+                200,
+                json!({
+                    "accessToken": "tok-1",
+                    "expireIn": 7200
+                }),
+            ),
+            TestHttpResponse::text(
+                "POST",
+                "/v1.0/robot/oToMessages/batchSend",
+                400,
+                "bad request",
+            ),
+        ]);
 
-        Mock::given(method("POST"))
-            .and(path("/v1.0/robot/oToMessages/batchSend"))
-            .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
-            .mount(&server)
-            .await;
-
-        let client = DingTalkClient::new(test_config(&server.uri())).unwrap();
+        let client = DingTalkClient::new(test_config(server.uri())).unwrap();
         let err = client
             .post_json(
                 "/v1.0/robot/oToMessages/batchSend",
@@ -748,29 +927,31 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn upload_media_with_valid_base64() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1.0/oauth2/accessToken"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "accessToken": "tok-1",
-                "expireIn": 7200
-            })))
-            .mount(&server)
-            .await;
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1.0/oauth2/accessToken",
+                200,
+                json!({
+                    "accessToken": "tok-1",
+                    "expireIn": 7200
+                }),
+            ),
+            TestHttpResponse::json(
+                "POST",
+                "/media/upload",
+                200,
+                json!({
+                    "errcode": 0,
+                    "errmsg": "ok",
+                    "media_id": "MEDIA-1"
+                }),
+            )
+            .with_query_contains("access_token=tok-1")
+            .with_query_contains("type=image"),
+        ]);
 
-        Mock::given(method("POST"))
-            .and(path("/media/upload"))
-            .and(query_param("access_token", "tok-1"))
-            .and(query_param("type", "image"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "errcode": 0,
-                "errmsg": "ok",
-                "media_id": "MEDIA-1"
-            })))
-            .mount(&server)
-            .await;
-
-        let client = DingTalkClient::new(test_config(&server.uri())).unwrap();
+        let client = DingTalkClient::new(test_config(server.uri())).unwrap();
         let result = client
             .upload_media("image", "test.png", "image/png", &BASE64.encode(b"png"))
             .await
@@ -780,26 +961,28 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn upload_media_returns_media_error() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1.0/oauth2/accessToken"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "accessToken": "tok-1",
-                "expireIn": 7200
-            })))
-            .mount(&server)
-            .await;
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1.0/oauth2/accessToken",
+                200,
+                json!({
+                    "accessToken": "tok-1",
+                    "expireIn": 7200
+                }),
+            ),
+            TestHttpResponse::json(
+                "POST",
+                "/media/upload",
+                200,
+                json!({
+                    "errcode": 400_001,
+                    "errmsg": "invalid media"
+                }),
+            ),
+        ]);
 
-        Mock::given(method("POST"))
-            .and(path("/media/upload"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "errcode": 400_001,
-                "errmsg": "invalid media"
-            })))
-            .mount(&server)
-            .await;
-
-        let client = DingTalkClient::new(test_config(&server.uri())).unwrap();
+        let client = DingTalkClient::new(test_config(server.uri())).unwrap();
         let err = client
             .upload_media("image", "test.png", "image/png", &BASE64.encode(b"png"))
             .await
@@ -828,14 +1011,14 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn access_token_maps_unauthorized_status() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1.0/oauth2/accessToken"))
-            .respond_with(ResponseTemplate::new(401).set_body_string("bad credentials"))
-            .mount(&server)
-            .await;
+        let server = TestHttpServer::respond(vec![TestHttpResponse::text(
+            "POST",
+            "/v1.0/oauth2/accessToken",
+            401,
+            "bad credentials",
+        )]);
 
-        let client = DingTalkClient::new(test_config(&server.uri())).unwrap();
+        let client = DingTalkClient::new(test_config(server.uri())).unwrap();
         let err = client.access_token().await.unwrap_err();
         assert!(matches!(
             err,
@@ -845,27 +1028,26 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn post_json_maps_retry_after_header_to_rate_limit() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1.0/oauth2/accessToken"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "accessToken": "tok-1",
-                "expireIn": 7200
-            })))
-            .mount(&server)
-            .await;
-
-        Mock::given(method("POST"))
-            .and(path("/v1.0/robot/oToMessages/batchSend"))
-            .respond_with(
-                ResponseTemplate::new(429)
-                    .insert_header("Retry-After", "2")
-                    .set_body_string("slow down"),
+        let server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/v1.0/oauth2/accessToken",
+                200,
+                json!({
+                    "accessToken": "tok-1",
+                    "expireIn": 7200
+                }),
+            ),
+            TestHttpResponse::text(
+                "POST",
+                "/v1.0/robot/oToMessages/batchSend",
+                429,
+                "slow down",
             )
-            .mount(&server)
-            .await;
+            .with_header("Retry-After", "2"),
+        ]);
 
-        let client = DingTalkClient::new(test_config(&server.uri())).unwrap();
+        let client = DingTalkClient::new(test_config(server.uri())).unwrap();
         let err = client
             .post_json(
                 "/v1.0/robot/oToMessages/batchSend",

@@ -23,7 +23,7 @@ const INVALID_OUTPUT_SCHEMA: &str = "invalid_output_schema";
 const EXPECTED_SCHEMA_GAPS: &[&str] = &[];
 const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[];
 const EXPECTED_AI_HINT_GAPS: &[&str] = &[];
-const EXPECTED_SANDBOX_GAPS: &[&str] = &["anthropic-vertex", "inworld"];
+const EXPECTED_SANDBOX_GAPS: &[&str] = &[];
 
 #[derive(Debug, Clone)]
 struct ManifestFieldCoverageRecord {

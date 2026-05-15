@@ -36,6 +36,12 @@ optional = [
 ]
 forbidden = ["network.listen", "system.exec", "filesystem.write"]
 
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+
 [provides.operations."inworld.realtime.text_turn"]
 description = "Run an Inworld Realtime text turn over the current WebSocket event protocol"
 capability = "inworld.realtime.invoke"

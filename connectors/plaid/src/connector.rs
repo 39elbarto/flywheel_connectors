@@ -1334,7 +1334,7 @@ mod tests {
                 listener.set_nonblocking(true).unwrap();
                 for response in responses {
                     let stream = accept_test_connection(&listener);
-                    handle_test_request(stream, response);
+                    handle_test_request(stream, &response);
                 }
             });
             Self {
@@ -1381,7 +1381,7 @@ mod tests {
         }
     }
 
-    fn handle_test_request(stream: TcpStream, response: TestHttpResponse) {
+    fn handle_test_request(stream: TcpStream, response: &TestHttpResponse) {
         stream
             .set_read_timeout(Some(StdDuration::from_secs(2)))
             .unwrap();
@@ -1452,7 +1452,8 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&cbor)
+            .try_constraints_cbor(&cbor)
+            .unwrap()
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)

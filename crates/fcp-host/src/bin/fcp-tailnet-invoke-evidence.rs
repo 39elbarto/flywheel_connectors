@@ -21,6 +21,7 @@ use fcp_host::{
     TailnetInvokeAttemptEvidence, TailnetInvokeAttemptOutcome, TailnetInvokeEvidenceRecord,
     TailnetInvokeHarnessObservation, TailnetInvokeLatencySummary, TailnetInvokeNodeEvidence,
     TailnetInvokePrerequisite, TailnetInvokeRealTransportInput, TailnetInvokeRouteMode,
+    TailnetInvokeStructuredSkipInput,
 };
 use fcp_sandbox::is_tailnet_range;
 use fcp_tailscale::TailscaleStatus;
@@ -822,6 +823,10 @@ fn evidence_record_from_probe(
         .iter()
         .all(|prerequisite| prerequisite.satisfied);
     let latency = TailnetInvokeLatencySummary::from_successful_attempts(&run.attempts);
+    let nodes = vec![
+        TailnetInvokeNodeEvidence::new("caller", &config.caller_node_id),
+        TailnetInvokeNodeEvidence::new("responder", &config.responder_node_id),
+    ];
 
     if prerequisites_satisfied && let Some(latency) = latency {
         return TailnetInvokeEvidenceRecord::real_transport(TailnetInvokeRealTransportInput {
@@ -829,10 +834,7 @@ fn evidence_record_from_probe(
             command_line,
             git_revision,
             topology,
-            nodes: vec![
-                TailnetInvokeNodeEvidence::new("caller", &config.caller_node_id),
-                TailnetInvokeNodeEvidence::new("responder", &config.responder_node_id),
-            ],
+            nodes,
             auth_result: run.auth_result(),
             retries: run.retries(),
             latency,
@@ -842,16 +844,18 @@ fn evidence_record_from_probe(
 
     let auth_result = run.auth_result();
     let retries = run.retries();
-    TailnetInvokeEvidenceRecord::structured_skip_with_attempts(
+    TailnetInvokeEvidenceRecord::structured_skip_with_probe(TailnetInvokeStructuredSkipInput {
         route_mode,
         command_line,
         git_revision,
         topology,
         prerequisites,
+        nodes,
         auth_result,
         retries,
-        run.attempts,
-    )
+        latency,
+        attempts: run.attempts,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1258,6 +1262,14 @@ mod tests {
         assert_eq!(record.auth_result, "capability_verified");
         assert_eq!(record.retries, 0);
         assert_eq!(record.attempts.len(), 1);
+        assert_eq!(record.nodes.len(), 2);
+        assert_eq!(record.latency.expect("latency").p99_ns, 100);
+        assert!(
+            record
+                .nodes
+                .iter()
+                .all(|node| node.redacted_node_id.starts_with("blake3:"))
+        );
         assert!(
             record
                 .missing_prerequisites
@@ -1309,6 +1321,7 @@ mod tests {
         assert_eq!(record.retries, 1);
         assert!(record.latency.is_none());
         assert_eq!(record.attempts.len(), 2);
+        assert_eq!(record.nodes.len(), 2);
         assert!(
             record
                 .missing_prerequisites

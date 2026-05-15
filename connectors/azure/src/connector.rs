@@ -33,6 +33,7 @@ const OP_BLOB_LIST_CONTAINERS: &str = "azure.storage.blob_list_containers";
 const OP_BLOB_LIST_BLOBS: &str = "azure.storage.blob_list_blobs";
 const OP_BLOB_GET: &str = "azure.storage.blob_get";
 const OP_BLOB_PUT: &str = "azure.storage.blob_put";
+const OP_BLOB_DELETE: &str = "azure.storage.blob_delete";
 const OP_KEYVAULT_LIST_SECRETS: &str = "azure.keyvault.list_secrets";
 const OP_KEYVAULT_READ_VALUE: &str = "azure.keyvault.get_secret";
 const OP_KEYVAULT_WRITE_VALUE: &str = "azure.keyvault.set_secret";
@@ -488,7 +489,7 @@ impl AzureConnector {
                 CAP_MANAGEMENT_READ
             }
             OP_BLOB_LIST_CONTAINERS | OP_BLOB_LIST_BLOBS | OP_BLOB_GET => CAP_STORAGE_READ,
-            OP_BLOB_PUT => CAP_STORAGE_WRITE,
+            OP_BLOB_PUT | OP_BLOB_DELETE => CAP_STORAGE_WRITE,
             OP_KEYVAULT_LIST_SECRETS | OP_KEYVAULT_READ_VALUE => CAP_KEYVAULT_READ,
             OP_KEYVAULT_WRITE_VALUE => CAP_KEYVAULT_WRITE,
             _ => return None,
@@ -837,6 +838,7 @@ fn operations_info() -> Vec<OperationInfo> {
                 "properties": {
                     "storage_account": string_schema("Azure Storage account name."),
                     "container": string_schema("Blob container name."),
+                    "prefix": string_schema("Optional blob name prefix for narrowing the listing."),
                     "blob_base_url": string_schema("Optional override for the blob endpoint root, for example https://account.blob.core.windows.net."),
                 },
             }),
@@ -855,7 +857,7 @@ fn operations_info() -> Vec<OperationInfo> {
             &[
                 "Forgetting that container names and blob names are evaluated by Azure exactly as provided.",
             ],
-            &[OP_BLOB_LIST_CONTAINERS, OP_BLOB_GET],
+            &[OP_BLOB_LIST_CONTAINERS, OP_BLOB_GET, OP_BLOB_DELETE],
             None,
         ),
         op(
@@ -926,7 +928,41 @@ fn operations_info() -> Vec<OperationInfo> {
                 "Sending raw bytes instead of base64-encoded content_base64.",
                 "Assuming the upload is preview-only when it can overwrite an existing blob.",
             ],
-            &[OP_BLOB_GET],
+            &[OP_BLOB_GET, OP_BLOB_DELETE],
+            None,
+        ),
+        op(
+            OP_BLOB_DELETE,
+            "Delete a blob",
+            "Delete a blob from Azure Storage.",
+            CAP_STORAGE_WRITE,
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            json!({
+                "type": "object",
+                "required": ["storage_account", "container", "blob_name"],
+                "properties": {
+                    "storage_account": string_schema("Azure Storage account name."),
+                    "container": string_schema("Blob container name."),
+                    "blob_name": string_schema("Blob name."),
+                    "blob_base_url": string_schema("Optional override for the blob endpoint root, for example https://account.blob.core.windows.net."),
+                },
+            }),
+            json!({
+                "type": "object",
+                "required": ["deleted"],
+                "properties": {
+                    "deleted": {
+                        "type": "boolean",
+                        "description": "Whether Azure Storage accepted the blob delete.",
+                    },
+                    "blob_name": nullable_string_schema("Blob name echoed back by the connector."),
+                },
+            }),
+            "Delete a blob from an Azure storage container",
+            &["Assuming delete is a dry-run operation; it removes the target blob."],
+            &[OP_BLOB_LIST_BLOBS],
             None,
         ),
         op(
@@ -1098,11 +1134,12 @@ impl AzureConnector {
             OP_BLOB_LIST_BLOBS => {
                 let storage_account = Self::require_str(&req.input, "storage_account")?;
                 let container = Self::require_str(&req.input, "container")?;
+                let prefix = req.input.get("prefix").and_then(|v| v.as_str());
                 let blob_base_url = req.input.get("blob_base_url").and_then(|v| v.as_str());
                 validate_optional_override(blob_base_url, "blob_base_url", validate_blob_base_url)?;
                 serde_json::to_value(
                     client
-                        .blob_list_blobs(storage_account, container, blob_base_url)
+                        .blob_list_blobs(storage_account, container, prefix, blob_base_url)
                         .await
                         .map_err(|e| e.to_fcp_error())?,
                 )
@@ -1146,6 +1183,23 @@ impl AzureConnector {
                             content_type,
                             blob_base_url,
                         )
+                        .await
+                        .map_err(|e| e.to_fcp_error())?,
+                )
+                .map_err(|e| FcpError::Internal {
+                    message: e.to_string(),
+                })?
+            }
+
+            OP_BLOB_DELETE => {
+                let storage_account = Self::require_str(&req.input, "storage_account")?;
+                let container = Self::require_str(&req.input, "container")?;
+                let blob_name = Self::require_str(&req.input, "blob_name")?;
+                let blob_base_url = req.input.get("blob_base_url").and_then(|v| v.as_str());
+                validate_optional_override(blob_base_url, "blob_base_url", validate_blob_base_url)?;
+                serde_json::to_value(
+                    client
+                        .blob_delete(storage_account, container, blob_name, blob_base_url)
                         .await
                         .map_err(|e| e.to_fcp_error())?,
                 )
@@ -1816,7 +1870,7 @@ mod tests {
     fn introspect_returns_all_operations() {
         let connector = AzureConnector::new();
         let introspection = connector.introspect();
-        assert_eq!(introspection.operations.len(), 10);
+        assert_eq!(introspection.operations.len(), 11);
 
         let op_ids: Vec<&str> = introspection
             .operations
@@ -1830,6 +1884,7 @@ mod tests {
         assert!(op_ids.contains(&OP_BLOB_LIST_BLOBS));
         assert!(op_ids.contains(&OP_BLOB_GET));
         assert!(op_ids.contains(&OP_BLOB_PUT));
+        assert!(op_ids.contains(&OP_BLOB_DELETE));
         assert!(op_ids.contains(&OP_KEYVAULT_LIST_SECRETS));
         assert!(op_ids.contains(&OP_KEYVAULT_READ_VALUE));
         assert!(op_ids.contains(&OP_KEYVAULT_WRITE_VALUE));
@@ -1938,6 +1993,7 @@ mod tests {
             OP_BLOB_LIST_BLOBS,
             OP_BLOB_GET,
             OP_BLOB_PUT,
+            OP_BLOB_DELETE,
             OP_KEYVAULT_LIST_SECRETS,
             OP_KEYVAULT_READ_VALUE,
             OP_KEYVAULT_WRITE_VALUE,

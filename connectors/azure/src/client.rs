@@ -15,8 +15,8 @@ use tracing::debug;
 use crate::{
     error::{AzureError, AzureResult},
     types::{
-        ApiErrorResponse, AzureAuth, BlobContainer, BlobContainerListResponse, BlobGetResponse,
-        BlobItem, BlobListResponse, BlobPutResponse, ResourceGroupListResponse,
+        ApiErrorResponse, AzureAuth, BlobContainer, BlobContainerListResponse, BlobDeleteResponse,
+        BlobGetResponse, BlobItem, BlobListResponse, BlobPutResponse, ResourceGroupListResponse,
         ResourceListResponse, SecretBundle, SecretListResponse, SetSecretRequest,
         SubscriptionListResponse,
     },
@@ -495,6 +495,7 @@ impl AzureClient {
         &self,
         storage_account: &str,
         container: &str,
+        prefix: Option<&str>,
         blob_base_url: Option<&str>,
     ) -> AzureResult<BlobListResponse> {
         let storage_account = validate_hostname_component(storage_account, "storage_account")?;
@@ -504,9 +505,11 @@ impl AzureClient {
         let safe_container =
             percent_encoding::utf8_percent_encode(container, AZURE_PATH_SAFE).to_string();
         let url = format!("{base}/{safe_container}");
-        let xml: BlobEnumerationResultsXml = self
-            .blob_get_xml(&url, &[("restype", "container"), ("comp", "list")])
-            .await?;
+        let mut query = vec![("restype", "container"), ("comp", "list")];
+        if let Some(prefix) = prefix {
+            query.push(("prefix", prefix));
+        }
+        let xml: BlobEnumerationResultsXml = self.blob_get_xml(&url, &query).await?;
         Ok(xml.into())
     }
 
@@ -635,6 +638,66 @@ impl AzureClient {
                         if status.is_success() {
                             AttemptOutcome::Success(BlobPutResponse {
                                 created: true,
+                                blob_name: Some(blob_name.to_string()),
+                            })
+                        } else {
+                            let body = response.text().await.unwrap_or_default();
+                            let err = parse_error_response(status, &body, None);
+                            if err.is_retryable() {
+                                AttemptOutcome::Retryable {
+                                    retry_after: err.retry_after(),
+                                    error: err,
+                                }
+                            } else {
+                                AttemptOutcome::Terminal(err)
+                            }
+                        }
+                    }
+                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
+                        error: AzureError::Http(e),
+                        retry_after: None,
+                    },
+                    Err(e) => AttemptOutcome::Terminal(AzureError::Http(e)),
+                }
+            }
+        })
+        .await
+    }
+
+    pub async fn blob_delete(
+        &self,
+        storage_account: &str,
+        container: &str,
+        blob_name: &str,
+        blob_base_url: Option<&str>,
+    ) -> AzureResult<BlobDeleteResponse> {
+        let storage_account = validate_hostname_component(storage_account, "storage_account")?;
+        let base = blob_base_url
+            .unwrap_or("https://{account}.blob.core.windows.net")
+            .replace("{account}", storage_account);
+        let safe_container =
+            percent_encoding::utf8_percent_encode(container, AZURE_PATH_SAFE).to_string();
+        let safe_blob =
+            percent_encoding::utf8_percent_encode(blob_name, AZURE_PATH_SAFE).to_string();
+        let url = format!("{base}/{safe_container}/{safe_blob}");
+
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            async move {
+                debug!(attempt, url = %redact_url(&url), "Azure Blob DELETE");
+                let builder = self
+                    .apply_auth(self.http.delete(&url))
+                    .header("x-ms-version", self.blob_api_version());
+
+                match builder.send().await {
+                    Ok(response) => {
+                        let status = response.status();
+                        if status.is_success() {
+                            AttemptOutcome::Success(BlobDeleteResponse {
+                                deleted: true,
                                 blob_name: Some(blob_name.to_string()),
                             })
                         } else {

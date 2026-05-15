@@ -169,6 +169,13 @@ pub struct BlobPutResponse {
     pub blob_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlobDeleteResponse {
+    pub deleted: bool,
+    #[serde(default)]
+    pub blob_name: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Key Vault responses
 // ---------------------------------------------------------------------------

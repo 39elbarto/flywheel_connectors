@@ -37,7 +37,9 @@ use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const OP_LIST_SUBSCRIPTIONS: &str = "azure.management.list_subscriptions";
+const OP_BLOB_LIST_BLOBS: &str = "azure.storage.blob_list_blobs";
 const OP_BLOB_PUT: &str = "azure.storage.blob_put";
+const OP_BLOB_DELETE: &str = "azure.storage.blob_delete";
 const OP_KEYVAULT_WRITE_VALUE: &str = "azure.keyvault.set_secret";
 
 fn test_client(base_url: &str) -> AzureClient {
@@ -62,6 +64,7 @@ fn handshake_req(host_public_key: [u8; 32], requested_instance_id: InstanceId) -
         nonce: [9u8; 32],
         capabilities_requested: vec![
             CapabilityId::from_static("azure.management.read"),
+            CapabilityId::from_static("azure.storage.read"),
             CapabilityId::from_static("azure.storage.write"),
             CapabilityId::from_static("azure.keyvault.write"),
         ],
@@ -78,7 +81,9 @@ fn generate_valid_token(
 ) -> CapabilityToken {
     let capability = [
         (OP_LIST_SUBSCRIPTIONS, "azure.management.read"),
+        (OP_BLOB_LIST_BLOBS, "azure.storage.read"),
         (OP_BLOB_PUT, "azure.storage.write"),
+        (OP_BLOB_DELETE, "azure.storage.write"),
         (OP_KEYVAULT_WRITE_VALUE, "azure.keyvault.write"),
     ]
     .into_iter()
@@ -315,7 +320,7 @@ async fn blob_list_blobs_parses_xml_response() {
 
     let client = test_client(&server.uri());
     let resp = client
-        .blob_list_blobs("acct", "docs", Some(&server.uri()))
+        .blob_list_blobs("acct", "docs", None, Some(&server.uri()))
         .await
         .unwrap();
     assert_eq!(resp.blobs.len(), 1);
@@ -327,6 +332,32 @@ async fn blob_list_blobs_parses_xml_response() {
         Some("Wed, 26 Oct 2016 20:39:39 GMT")
     );
     assert_eq!(resp.next_marker.as_deref(), Some("blob-next"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn blob_list_blobs_sends_prefix_filter() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/docs"))
+        .and(query_param("restype", "container"))
+        .and(query_param("comp", "list"))
+        .and(query_param("prefix", "fcp-live/"))
+        .and(header("x-ms-version", DEFAULT_BLOB_API_VERSION))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<EnumerationResults ServiceEndpoint="https://acct.blob.core.windows.net/" ContainerName="docs">
+  <Blobs />
+</EnumerationResults>"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let client = test_client(&server.uri());
+    let resp = client
+        .blob_list_blobs("acct", "docs", Some("fcp-live/"), Some(&server.uri()))
+        .await
+        .unwrap();
+    assert!(resp.blobs.is_empty());
 }
 
 #[fcp_async_core::runtime::test]
@@ -608,6 +639,41 @@ async fn invoke_blob_put_preserves_artifact_evidence() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn invoke_blob_delete_preserves_artifact_evidence() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/fixtures/hello.txt"))
+        .and(header("authorization", "Bearer test-token"))
+        .and(header("x-ms-version", DEFAULT_BLOB_API_VERSION))
+        .respond_with(ResponseTemplate::new(202))
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key, instance_id) = setup_connector(&server.uri()).await;
+    let response = connector
+        .invoke(invoke_req(
+            OP_BLOB_DELETE,
+            json!({
+                "storage_account": "fixtureacct",
+                "container": "fixtures",
+                "blob_name": "hello.txt",
+                "blob_base_url": server.uri()
+            }),
+            generate_valid_token(&signing_key, OP_BLOB_DELETE, &instance_id),
+        ))
+        .await
+        .unwrap();
+
+    let result = response.result.expect("blob delete result");
+    assert_eq!(result["deleted"], true);
+    assert_eq!(result["blob_name"], "hello.txt");
+    println!(
+        "azure_blob_delete_evidence={}",
+        serde_json::to_string_pretty(&result).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
 async fn invoke_keyvault_set_secret_preserves_artifact_evidence() {
     let server = MockServer::start().await;
     Mock::given(method("PUT"))
@@ -662,7 +728,7 @@ async fn invoke_keyvault_set_secret_preserves_artifact_evidence() {
 async fn introspection_emits_v3_compliance_evidence() {
     let connector = AzureConnector::new();
     let operations = connector.introspect().operations;
-    assert_eq!(operations.len(), 10);
+    assert_eq!(operations.len(), 11);
 
     let keyvault_write_op = operations
         .iter()

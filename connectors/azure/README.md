@@ -1,6 +1,6 @@
 # Azure Connector V3 Contract
 
-> **Status**: runtime contract documented; simulation gap documented
+> **Status**: runtime contract documented; live Blob lifecycle proof documented; simulation gap documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
 > **Verification script**: `scripts/e2e/azure_connector_verification.sh`
@@ -25,6 +25,7 @@ The current runtime exposes these operations:
 - `azure.storage.blob_list_blobs`
 - `azure.storage.blob_get`
 - `azure.storage.blob_put`
+- `azure.storage.blob_delete`
 - `azure.keyvault.list_secrets`
 - `azure.keyvault.get_secret`
 - `azure.keyvault.set_secret`
@@ -55,6 +56,7 @@ Important runtime truths the contract preserves:
 - Blob container/blob list responses are parsed as XML.
 - Blob get returns `content_base64`, `content_type`, and `content_length`.
 - Blob put decodes caller-supplied `content_base64`, sends `x-ms-blob-type: BlockBlob`, and can overwrite an existing blob.
+- Blob delete sends `DELETE /{container}/{blob}` and returns `deleted`.
 - Key Vault list returns secret metadata only; get and set return secret bundles that may include secret values.
 - `self_check` proves readiness by calling ARM `list_subscriptions`.
 - Handshake grants requested capabilities and installs a bound `CapabilityVerifier`.
@@ -82,6 +84,7 @@ The first Azure README slice documents the existing runtime surface:
 - blob listing through `GET /{container}?restype=container&comp=list`
 - blob download through `GET /{container}/{blob}`
 - block blob upload/overwrite through `PUT /{container}/{blob}`
+- blob delete through `DELETE /{container}/{blob}`
 - Key Vault secret listing through `GET {vaultBaseUrl}/secrets?api-version=...`
 - Key Vault secret get through `GET {vaultBaseUrl}/secrets/{secret-name}?api-version=...`
 - Key Vault secret set through `PUT {vaultBaseUrl}/secrets/{secret-name}?api-version=...`
@@ -99,12 +102,33 @@ The first Azure README slice documents the existing runtime surface:
 - Capability surface:
   - `azure.management.read` gates subscription, resource group, and resource listing.
   - `azure.storage.read` gates blob container listing, blob listing, and blob download.
-  - `azure.storage.write` gates blob upload/overwrite.
+  - `azure.storage.write` gates blob upload/overwrite and blob delete.
   - `azure.keyvault.read` gates Key Vault secret listing and secret value retrieval.
   - `azure.keyvault.write` gates Key Vault secret set/update.
 - The connector does not persist tokens, credential IDs, tenant IDs, subscription IDs, resource IDs, blob payloads, secret values, or provider responses beyond process memory.
 - Credential-id mode forwards a host credential reference header; host-side credential materialization remains outside this connector.
 - The manifest required capability list covers network primitives; operation entries and runtime introspection carry the operation-specific `azure.*` capability IDs.
+
+## Tier B Live Sandbox Verification
+
+The connector's gated sandbox proof is `rch exec -- cargo test -p fcp-azure --test live_verification -- --nocapture`. It is skipped unless `FCP_LIVE_SANDBOX=1` and the Azure sandbox environment is complete.
+
+Required live inputs:
+
+- `AZURE_SANDBOX_TENANT_ID`
+- `AZURE_SANDBOX_CLIENT_ID`
+- `AZURE_SANDBOX_CLIENT_SECRET`
+- `AZURE_SANDBOX_SUBSCRIPTION_ID`
+- `AZURE_SANDBOX_RESOURCE_GROUP`
+- `AZURE_SANDBOX_STORAGE_ACCOUNT`
+- `AZURE_SANDBOX_CONTAINER`
+- `FCP_SANDBOX_RUN_NAMESPACE`
+
+`AZURE_SANDBOX_AUTHORITY_HOST` defaults to `https://login.microsoftonline.com`.
+
+Use a dedicated Azure tenant, subscription, resource group, Storage account, and Blob container. The service principal must be scoped to list, read, write, and delete only synthetic blobs in the sandbox container. The live proof exchanges the service-principal secret for a storage-scoped bearer token, verifies an invalid-token denial path, then performs a reversible `blob_put` -> prefix `blob_list_blobs` -> `blob_delete` -> post-delete `blob_get` cleanup verification.
+
+The live test emits `AZURE_LIVE_SANDBOX_JSONL` evidence with the command, git revision when provided through `FCP_LIVE_GIT_REVISION`, sandbox class, call ceiling, cleanup result, hashed tenant/client/subscription/resource-group/storage/container/blob identifiers, and skip/failure reason. It never logs client secrets, bearer tokens, tenant IDs, client IDs, subscription IDs, resource group names, storage account names, container names, blob names, blob bodies, provider resource IDs, raw provider responses, or raw provider error bodies.
 
 ## Network And Runtime Invariants
 
@@ -127,7 +151,7 @@ The first Azure README slice documents the existing runtime surface:
 |-----------|---------|
 | `azure.management.read` | List subscriptions, resource groups, and resources. |
 | `azure.storage.read` | List containers, list blobs, and download blob content. |
-| `azure.storage.write` | Upload or overwrite blob content. |
+| `azure.storage.write` | Upload, overwrite, or delete blob content. |
 | `azure.keyvault.read` | List secret metadata and retrieve secret values. |
 | `azure.keyvault.write` | Create or update Key Vault secrets. |
 
@@ -142,6 +166,7 @@ The first Azure README slice documents the existing runtime surface:
 | `azure.storage.blob_list_blobs` | `GET /{container}?restype=container&comp=list` | `azure.storage.read` | `Safe` | `Low` | `Strict` | Reads blob names and metadata in one container. |
 | `azure.storage.blob_get` | `GET /{container}/{blob}` | `azure.storage.read` | `Safe` | `Low` | `Strict` | Downloads one blob and returns base64 content. |
 | `azure.storage.blob_put` | `PUT /{container}/{blob}` | `azure.storage.write` | `Risky` | `Medium` | `Strict` | Uploads or overwrites one block blob. |
+| `azure.storage.blob_delete` | `DELETE /{container}/{blob}` | `azure.storage.write` | `Risky` | `Medium` | `BestEffort` | Deletes one blob. |
 | `azure.keyvault.list_secrets` | `GET /secrets` | `azure.keyvault.read` | `Safe` | `Low` | `Strict` | Reads secret metadata without values. |
 | `azure.keyvault.get_secret` | `GET /secrets/{secret-name}` | `azure.keyvault.read` | `Risky` | `Medium` | `Strict` | Retrieves a secret value and metadata. |
 | `azure.keyvault.set_secret` | `PUT /secrets/{secret-name}` | `azure.keyvault.write` | `Dangerous` | `High` | `Strict` | Creates a new secret version and mutates sensitive vault state. |
@@ -152,7 +177,7 @@ The current implementation does not include:
 
 - OAuth authorization, token refresh, managed identity acquisition, or service principal provisioning
 - ARM create/update/delete operations, deployments, role assignments, policy, locks, tags, or tenant management
-- storage account creation, container creation/deletion, blob deletion, leases, snapshots, copy operations, append/page blobs, multipart/block-list uploads, or SAS issuance
+- storage account creation, container creation/deletion, leases, snapshots, copy operations, append/page blobs, multipart/block-list uploads, or SAS issuance
 - Key Vault vault creation, secret deletion/purge/recovery, certificates, keys, backup/restore, rotation policy, or RBAC management
 - durable inventory storage, local cache, blob sync, or secret replication
 - public-zone invocation or inbound callback listeners
@@ -182,6 +207,7 @@ The deterministic integration evidence is anchored on WireMock and connector-loc
 - bearer auth header behavior
 - local management URL readiness through `list_subscriptions`
 - Blob put dispatch with `x-ms-version` and `x-ms-blob-type: BlockBlob`
+- Blob delete dispatch with `x-ms-version`
 - Key Vault set secret dispatch and redacted evidence handling
 - risky and dangerous operation metadata
 - bound capability-token verification on invoke

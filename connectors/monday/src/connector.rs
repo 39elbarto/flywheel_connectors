@@ -449,7 +449,7 @@ impl MondayConnector {
 
     /// Handle the `simulate` method.
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let request = parse_simulate_params(params)?;
+        let request = parse_simulate_params(&params);
         let Some(capability) = monday_capability_for_operation(&request.operation) else {
             let response =
                 SimulateResponse::denied(request.id, "Unknown operation", "unknown_operation");
@@ -640,20 +640,19 @@ struct ParsedSimulateRequest {
     input: Value,
 }
 
-fn parse_simulate_params(params: Value) -> FcpResult<ParsedSimulateRequest> {
+fn parse_simulate_params(params: &Value) -> ParsedSimulateRequest {
     if let Ok(req) = serde_json::from_value::<SimulateRequest>(params.clone()) {
-        return Ok(ParsedSimulateRequest {
+        return ParsedSimulateRequest {
             id: req.id,
             operation: req.operation.as_str().to_string(),
             input: req.input,
-        });
+        };
     }
 
     let id = params
         .get("id")
         .and_then(Value::as_str)
-        .map(RequestId::new)
-        .unwrap_or_else(|| RequestId::new("monday-simulate"));
+        .map_or_else(|| RequestId::new("monday-simulate"), RequestId::new);
     let operation = params
         .get("operation_id")
         .or_else(|| params.get("operation"))
@@ -662,11 +661,11 @@ fn parse_simulate_params(params: Value) -> FcpResult<ParsedSimulateRequest> {
         .to_string();
     let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
 
-    Ok(ParsedSimulateRequest {
+    ParsedSimulateRequest {
         id,
         operation,
         input,
-    })
+    }
 }
 
 fn monday_capability_for_operation(operation: &str) -> Option<CapabilityId> {
@@ -1715,7 +1714,7 @@ mod tests {
         let recipe = provisioning_recipe();
         let v = serde_json::to_value(&recipe).unwrap();
         assert_eq!(v["id"], "monday.api_token");
-        assert!(v["steps"].as_array().unwrap().len() == 2);
+        assert_eq!(v["steps"].as_array().unwrap().len(), 2);
     }
 
     #[test]

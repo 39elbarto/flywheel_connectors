@@ -124,6 +124,7 @@ This slice is intentionally closer to "outbound bot message dispatch plus connec
 ```
 
 The projection operation does not log `client_secret`, access tokens, or raw transport credentials. It returns the normalized message payload already present in the incoming gateway frame, a policy decision, and a runtime snapshot with counters and bounded state sizes.
+When `policy.group_require_mention` is enabled, gateway projection treats `GROUP_AT_MESSAGE_CREATE` as an explicit bot mention and also recognizes the configured `bot_user_id` in message text or structured raw mention arrays such as `mentions`, `message`, `message_segments`, `segments`, and `content_segments`.
 When `policy.max_attachment_bytes` is set, gateway projection denies message events whose declared attachment byte total exceeds the cap or whose attachment size metadata is missing.
 
 ## Chat Coordination Configuration

@@ -613,13 +613,83 @@ fn mentions_bot(event: &NormalizedQqEvent, policy: &QqInboundPolicyConfig) -> bo
     if event.event_type == "GROUP_AT_MESSAGE_CREATE" {
         return true;
     }
-    let Some(bot_user_id) = policy.bot_user_id.as_deref() else {
+    let Some(bot_user_id) = policy
+        .bot_user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
         return false;
     };
     event
         .text
         .as_deref()
         .is_some_and(|text| text.contains(bot_user_id))
+        || structured_mentions_bot(&event.raw, bot_user_id)
+}
+
+fn structured_mentions_bot(raw: &Value, bot_user_id: &str) -> bool {
+    [
+        "mentions",
+        "message",
+        "message_segments",
+        "segments",
+        "content_segments",
+    ]
+    .iter()
+    .filter_map(|field| raw.get(*field))
+    .any(|value| mention_value_targets_bot(value, bot_user_id))
+}
+
+fn mention_value_targets_bot(value: &Value, bot_user_id: &str) -> bool {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .any(|item| mention_value_targets_bot(item, bot_user_id)),
+        Value::String(raw) => raw.trim() == bot_user_id,
+        Value::Object(object) => {
+            let mention_type = object
+                .get("type")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .map(str::to_ascii_lowercase);
+            let looks_like_mention = mention_type
+                .as_deref()
+                .is_none_or(|kind| matches!(kind, "at" | "mention" | "user_mention"));
+            if !looks_like_mention {
+                return false;
+            }
+
+            mention_candidate_fields_match(value, bot_user_id)
+                || object
+                    .get("data")
+                    .is_some_and(|data| mention_candidate_fields_match(data, bot_user_id))
+                || object
+                    .get("user")
+                    .is_some_and(|user| mention_candidate_fields_match(user, bot_user_id))
+        }
+        _ => false,
+    }
+}
+
+fn mention_candidate_fields_match(value: &Value, bot_user_id: &str) -> bool {
+    [
+        "id",
+        "user_id",
+        "user_openid",
+        "openid",
+        "member_openid",
+        "target",
+    ]
+    .iter()
+    .filter_map(|field| value.get(*field))
+    .any(|candidate| mention_candidate_matches(candidate, bot_user_id))
+}
+
+fn mention_candidate_matches(candidate: &Value, bot_user_id: &str) -> bool {
+    candidate
+        .as_str()
+        .is_some_and(|candidate| candidate.trim() == bot_user_id)
 }
 
 fn attachment_policy_denial(
@@ -2003,6 +2073,47 @@ mod tests {
             .unwrap();
         assert!(!overflow.accepted);
         assert_eq!(overflow.reason_code, "queue_full");
+    }
+
+    #[test]
+    fn gateway_runtime_accepts_structured_group_mentions() {
+        let mut config = QqGatewayRuntimeConfig {
+            enabled: true,
+            max_queue_depth: 4,
+            ..QqGatewayRuntimeConfig::default()
+        };
+        config.policy.bot_user_id = Some("bot-openid".into());
+        config.policy.group_require_mention = true;
+        let mut runtime = QqGatewayRuntime::new(config);
+
+        let projected = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-structured-mention",
+                    "content": "please check this",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1",
+                    "mentions": [
+                        {"type": "at", "user_openid": "bot-openid"}
+                    ]
+                })),
+                id: Some("evt-structured-mention".into()),
+            })
+            .unwrap();
+
+        assert!(projected.accepted);
+        assert_eq!(projected.reason_code, "accepted");
+        assert_eq!(
+            projected.policy.as_ref().map(|policy| policy.mentioned_bot),
+            Some(true)
+        );
+        assert_eq!(
+            projected.policy.as_ref().map(|policy| policy.reason_code),
+            Some("group_allowed")
+        );
     }
 
     #[test]

@@ -322,7 +322,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
             "client_secret": "test-secret",
             "gateway": {
                 "enabled": true,
-                "max_queue_depth": 2,
+                "max_queue_depth": 3,
                 "dedupe_window_size": 8,
                 "policy": {
                     "group_policy": "allowlist",
@@ -412,6 +412,38 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         &missing_mention,
     );
 
+    let structured_mention = invoke_projection(
+        &connector,
+        &signing_key,
+        &instance_id,
+        "qq-gateway-structured-mention",
+        json!({
+            "op": 0,
+            "s": 3,
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": "evt-structured-mention",
+            "d": {
+                "id": "msg-structured-mention",
+                "content": "please inspect this",
+                "group_openid": "group-allowed",
+                "group_member_openid": "member-1",
+                "mentions": [
+                    { "type": "at", "user_openid": "bot-openid" }
+                ]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(structured_mention["accepted"], true);
+    assert_eq!(structured_mention["topic"], "qq.message.authorized");
+    assert_eq!(structured_mention["policy"]["mentioned_bot"], true);
+    log_projection_step(
+        &mut logs,
+        "structured_group_mention",
+        "ok",
+        &structured_mention,
+    );
+
     let oversized_media = invoke_projection(
         &connector,
         &signing_key,
@@ -419,7 +451,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "qq-gateway-oversized-media",
         json!({
             "op": 0,
-            "s": 3,
+            "s": 4,
             "t": "GROUP_AT_MESSAGE_CREATE",
             "id": "evt-oversized-media",
             "d": {
@@ -459,7 +491,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "qq-gateway-reply-media",
         json!({
             "op": 0,
-            "s": 4,
+            "s": 5,
             "t": "GROUP_AT_MESSAGE_CREATE",
             "id": "evt-reply-media",
             "d": {
@@ -495,7 +527,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "qq-gateway-duplicate",
         json!({
             "op": 0,
-            "s": 5,
+            "s": 6,
             "t": "GROUP_AT_MESSAGE_CREATE",
             "id": "evt-accepted",
             "d": {
@@ -542,9 +574,11 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "session-1",
         "hello-1",
         "evt-accepted",
+        "evt-structured-mention",
         "evt-reply-media",
         "evt-oversized-media",
         "msg-accepted",
+        "msg-structured-mention",
         "msg-reply-media",
         "msg-oversized-media",
         "msg-root",
@@ -553,6 +587,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "member-1",
         "Alice",
         "deploy status",
+        "please inspect this",
         "see attached trace",
         "too large",
         "cdn.qq.example",

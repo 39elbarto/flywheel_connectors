@@ -109,10 +109,10 @@ use fcp_policy::{
 };
 use fcp_prelude::{
     ApprovalToken, CapabilityConstraints, CapabilityVerifier, ConnectorStateCanonicalStatus,
-    CorrelationId, CostEstimateConfidence, CredentialId, Decision, InstanceId,
+    CorrelationId, CostEstimateConfidence, CredentialId, Decision, InstanceId, Lease as CoreLease,
     LeasePurpose as CoreLeasePurpose, ObjectId, ObjectIdKey, PolicySimulationInput,
-    ResourceAvailability, RolloutPolicy, SafetyTier, TailscaleNodeId, TransportMode, UsageMetric,
-    UsageMetricKind, ZoneId, ZonePolicyObject, simulate_policy_decision,
+    ResourceAvailability, RolloutPolicy, SafetyTier, StoredObject, TailscaleNodeId, TransportMode,
+    UsageMetric, UsageMetricKind, ZoneId, ZonePolicyObject, simulate_policy_decision,
 };
 #[cfg(test)]
 use fcp_prelude::{
@@ -2501,6 +2501,168 @@ async fn connector_state_canonical_status_from_config(
         })
 }
 
+async fn connector_lease_durable_evidence_from_config(
+    config: &ConnectorConfig,
+    connector_id: &ConnectorId,
+    zone: &ZoneId,
+    state_root: &StdPath,
+) -> ConnectorLeaseDurableEvidence {
+    let mut evidence = ConnectorLeaseDurableEvidence::default();
+    if !connector_config_declares_singleton_writer(config) {
+        evidence.warnings.push(format!(
+            "Connector `{connector_id}` does not declare singleton_writer state, so no durable singleton-writer lease object is expected."
+        ));
+        return evidence;
+    }
+
+    let object_store_dir = connector_state_canonical_object_store_dir(state_root, connector_id);
+    if !object_store_dir.exists() {
+        evidence.warnings.push(format!(
+            "No canonical fcp-store object store exists at `{}`; durable signed lease expiry and quorum signatures are unavailable.",
+            object_store_dir.display()
+        ));
+        return evidence;
+    }
+
+    let object_id_key = match configured_connector_state_object_id_key(config) {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            evidence.warnings.push(format!(
+                "Canonical fcp-store object store exists at `{}`, but neither `{}` nor `{}` is configured; host lease status cannot verify durable lease object IDs.",
+                object_store_dir.display(),
+                FCP_HOST_CONNECTOR_STATE_OBJECT_ID_KEY_ENV,
+                CONNECTOR_STATE_OBJECT_ID_KEY_ENV
+            ));
+            return evidence;
+        }
+        Err(error) => {
+            evidence.warnings.push(format!(
+                "Canonical fcp-store object-id key for connector `{connector_id}` is invalid: {error}"
+            ));
+            return evidence;
+        }
+    };
+
+    let object_store = match fcp_store::DurableObjectStore::open(
+        fcp_store::DurableObjectStoreConfig::new(&object_store_dir),
+    ) {
+        Ok(store) => store,
+        Err(error) => {
+            evidence.warnings.push(format!(
+                "Canonical fcp-store object store at `{}` could not be opened for lease status: {error}",
+                object_store_dir.display()
+            ));
+            return evidence;
+        }
+    };
+    let object_store: Arc<dyn fcp_store::ObjectStore> = Arc::new(object_store);
+    let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+        Arc::clone(&object_store),
+        object_id_key,
+        connector_id.clone(),
+        zone.clone(),
+    );
+    let chain = match state_store.read_chain(None, usize::MAX).await {
+        Ok(chain) => chain,
+        Err(error) => {
+            evidence.warnings.push(format!(
+                "Canonical fcp-store state at `{}` could not be read for lease status: {error}",
+                object_store_dir.display()
+            ));
+            return evidence;
+        }
+    };
+    let Some((_head_object_id, head)) = chain.last() else {
+        evidence.warnings.push(format!(
+            "Canonical fcp-store state at `{}` has no head object; durable signed lease metadata is unavailable.",
+            object_store_dir.display()
+        ));
+        return evidence;
+    };
+
+    evidence.lease_object_id = Some(head.lease_object_id);
+    evidence.lease_seq = Some(head.lease_seq);
+
+    let stored = match object_store.get(&head.lease_object_id).await {
+        Ok(stored) => stored,
+        Err(error) => {
+            evidence.warnings.push(format!(
+                "Durable lease object `{}` referenced by canonical connector state could not be read: {error}",
+                head.lease_object_id
+            ));
+            return evidence;
+        }
+    };
+    match StoredObject::derive_id(&stored.header, &stored.body, &object_id_key) {
+        Ok(computed) if computed == head.lease_object_id => {}
+        Ok(computed) => {
+            evidence.warnings.push(format!(
+                "Durable lease object `{}` failed content-id verification; computed `{computed}`.",
+                head.lease_object_id
+            ));
+            return evidence;
+        }
+        Err(error) => {
+            evidence.warnings.push(format!(
+                "Durable lease object `{}` could not be content-id verified: {error}",
+                head.lease_object_id
+            ));
+            return evidence;
+        }
+    }
+
+    let lease = match fcp_cbor::CanonicalSerializer::deserialize::<CoreLease>(
+        &stored.body,
+        &stored.header.schema,
+    ) {
+        Ok(lease) => lease,
+        Err(error) => {
+            evidence.warnings.push(format!(
+                "Durable lease object `{}` could not be decoded as an fcp lease: {error}",
+                head.lease_object_id
+            ));
+            return evidence;
+        }
+    };
+    let expected_subject = singleton_writer_connector_lease_subject_id(connector_id, zone);
+    if lease.subject_object_id != expected_subject {
+        evidence.warnings.push(format!(
+            "Durable lease object `{}` is for subject `{}`, expected singleton-writer subject `{expected_subject}`.",
+            head.lease_object_id, lease.subject_object_id
+        ));
+        return evidence;
+    }
+    if lease.header.zone_id != *zone {
+        evidence.warnings.push(format!(
+            "Durable lease object `{}` is for zone `{}`, expected `{}`.",
+            head.lease_object_id,
+            lease.header.zone_id.as_str(),
+            zone.as_str()
+        ));
+        return evidence;
+    }
+    if lease.purpose != CoreLeasePurpose::ConnectorStateWrite {
+        evidence.warnings.push(format!(
+            "Durable lease object `{}` has purpose `{:?}`, expected connector-state write.",
+            head.lease_object_id, lease.purpose
+        ));
+        return evidence;
+    }
+    if lease.lease_seq != head.lease_seq {
+        evidence.warnings.push(format!(
+            "Durable lease object `{}` has lease_seq {}, but canonical connector state head references lease_seq {}.",
+            head.lease_object_id, lease.lease_seq, head.lease_seq
+        ));
+        return evidence;
+    }
+
+    evidence.lease_seq = Some(lease.lease_seq);
+    evidence.expiry_unix_secs = Some(lease.exp);
+    evidence.quorum_signers_count = Some(lease.quorum_signatures.len());
+    evidence.source = Some("canonical-fcp-store-lease-object");
+    evidence
+}
+
 struct HostConnectorLeaseYieldFlushContext {
     state_root: PathBuf,
     flush: fcp_store::ConnectorStateLeaseYieldFlush,
@@ -4437,6 +4599,16 @@ struct HrwLeaseRoutingConfig {
     current_lease_seq: Option<u64>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct ConnectorLeaseDurableEvidence {
+    lease_object_id: Option<ObjectId>,
+    lease_seq: Option<u64>,
+    expiry_unix_secs: Option<u64>,
+    quorum_signers_count: Option<usize>,
+    source: Option<&'static str>,
+    warnings: Vec<String>,
+}
+
 #[cfg(test)]
 static TEST_HRW_LEASE_ROUTING_OVERRIDE: std::sync::Mutex<Option<Option<HrwLeaseRoutingConfig>>> =
     std::sync::Mutex::new(None);
@@ -4625,20 +4797,36 @@ fn lease_node_id_hash(node: &TailscaleNodeId) -> String {
     )
 }
 
+fn lease_expiry_rfc3339(expiry_unix_secs: u64) -> Option<String> {
+    let secs = i64::try_from(expiry_unix_secs).ok()?;
+    DateTime::<Utc>::from_timestamp(secs, 0)
+        .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::Secs, true))
+}
+
 fn connector_lease_status_payload(
     connector_id: &ConnectorId,
     zone_id: &ZoneId,
     routing: Option<&HrwLeaseRoutingConfig>,
+    durable: &ConnectorLeaseDurableEvidence,
 ) -> Value {
     const SCHEMA_VERSION: &str = "1.0.0";
 
     let subject_id = singleton_writer_connector_lease_subject_id(connector_id, zone_id);
-    let mut warnings = Vec::new();
+    let mut warnings = durable.warnings.clone();
     let mut ranked_holders = Vec::new();
     let mut holder_node_id_hash = Value::Null;
     let mut local_node_id_hash = Value::Null;
     let mut local_is_holder = Value::Null;
-    let fencing_token = routing.and_then(|routing| routing.current_lease_seq);
+    let fencing_token = routing
+        .and_then(|routing| routing.current_lease_seq)
+        .or(durable.lease_seq);
+    let expiry = durable
+        .expiry_unix_secs
+        .and_then(lease_expiry_rfc3339)
+        .map_or(Value::Null, Value::String);
+    let expiry_unix_secs = durable.expiry_unix_secs.map_or(Value::Null, Value::from);
+    let quorum_signers_count =
+        u64::try_from(durable.quorum_signers_count.unwrap_or(0)).unwrap_or(u64::MAX);
 
     if let Some(routing) = routing {
         let ranked = fcp_mesh::planner::rank_lease_holders_by_hrw(
@@ -4676,11 +4864,6 @@ fn connector_lease_status_payload(
         );
     }
 
-    warnings.push(
-        "This route reports the host HRW routing/fencing view; durable signed lease expiry and quorum signatures are not yet exposed through fcp-host."
-            .to_owned(),
-    );
-
     json!({
         "status": "ok",
         "command": "fcp-host",
@@ -4693,8 +4876,11 @@ fn connector_lease_status_payload(
         "purpose": CoreLeasePurpose::ConnectorStateWrite,
         "holder_node_id_hash": holder_node_id_hash,
         "fencing_token": fencing_token,
-        "expiry": Value::Null,
-        "quorum_signers_count": 0_u64,
+        "expiry": expiry,
+        "expiry_unix_secs": expiry_unix_secs,
+        "quorum_signers_count": quorum_signers_count,
+        "lease_object_id": durable.lease_object_id.map(|object_id| object_id.to_string()),
+        "lease_evidence_source": durable.source.unwrap_or("unavailable"),
         "local_node_id_hash": local_node_id_hash,
         "local_is_holder": local_is_holder,
         "ranked_holders": ranked_holders,
@@ -8493,11 +8679,9 @@ async fn connector_lease_status_handler(
     Query(query): Query<ConnectorLeaseStatusQuery>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let connector_id = parse_connector_id(&connector_id)?;
-    if state.registry.get(&connector_id).await.is_none() {
-        return Err(map_host_error(HostError::ConnectorNotFound(
-            connector_id.to_string(),
-        )));
-    }
+    let inventory = state.registry.inventory().await;
+    let config = find_connector_inventory_entry(&inventory, &connector_id)
+        .ok_or_else(|| map_host_error(HostError::ConnectorNotFound(connector_id.to_string())))?;
     let zone = match query
         .zone
         .as_deref()
@@ -8519,7 +8703,12 @@ async fn connector_lease_status_handler(
         "processing connector lease status request"
     );
     let routing = current_hrw_lease_routing_config().map_err(map_host_error)?;
-    let payload = connector_lease_status_payload(&connector_id, &zone, routing.as_ref());
+    let state_root =
+        configured_connector_state_root(config).unwrap_or_else(connector_state_root_dir);
+    let durable =
+        connector_lease_durable_evidence_from_config(config, &connector_id, &zone, &state_root)
+            .await;
+    let payload = connector_lease_status_payload(&connector_id, &zone, routing.as_ref(), &durable);
     let holder_node_id_hash = payload
         .get("holder_node_id_hash")
         .and_then(serde_json::Value::as_str)
@@ -25291,6 +25480,68 @@ done"#;
         state
     }
 
+    fn test_signature_set(signers: &[&str]) -> fcp_core::SignatureSet {
+        let mut signatures = fcp_core::SignatureSet::new();
+        for (idx, signer) in signers.iter().enumerate() {
+            let signature_byte = u8::try_from(idx).unwrap_or(u8::MAX);
+            signatures.add(fcp_core::NodeSignature::new(
+                fcp_core::NodeId::new(*signer),
+                [signature_byte; 64],
+                1_800_200_000 + u64::try_from(idx).unwrap_or(u64::MAX),
+            ));
+        }
+        signatures
+    }
+
+    fn durable_core_lease_for_test(
+        zone_id: &ZoneId,
+        subject_object_id: ObjectId,
+        holder: TailscaleNodeId,
+        lease_seq: u64,
+        exp: u64,
+        quorum_signatures: fcp_core::SignatureSet,
+    ) -> CoreLease {
+        CoreLease {
+            header: ObjectHeader {
+                schema: fcp_cbor::SchemaId::new(
+                    "fcp.lease",
+                    "lease",
+                    semver::Version::new(1, 0, 0),
+                ),
+                zone_id: zone_id.clone(),
+                created_at: exp.saturating_sub(300),
+                provenance: Provenance::new(zone_id.clone()),
+                refs: vec![subject_object_id],
+                foreign_refs: Vec::new(),
+                ttl_secs: Some(300),
+                placement: None,
+            },
+            holder,
+            lease_seq,
+            exp,
+            subject_object_id,
+            purpose: CoreLeasePurpose::ConnectorStateWrite,
+            quorum_signatures,
+        }
+    }
+
+    fn stored_core_lease_for_test(lease: &CoreLease, object_id_key: &ObjectIdKey) -> StoredObject {
+        let body = fcp_cbor::CanonicalSerializer::serialize(lease, &lease.header.schema)
+            .expect("test core lease should serialize");
+        let object_id = StoredObject::derive_id(&lease.header, &body, object_id_key)
+            .expect("test core lease id should derive");
+        StoredObject {
+            object_id,
+            header: lease.header.clone(),
+            body,
+            storage: fcp_prelude::StorageMeta {
+                retention: fcp_prelude::RetentionClass::Lease {
+                    expires_at: lease.exp,
+                },
+            },
+        }
+    }
+
     #[fcp_async_core::runtime::test]
     async fn rpc_budget_report_rejects_unauthenticated_request() {
         let state = cancel_route_test_state();
@@ -25554,9 +25805,12 @@ done"#;
     #[fcp_async_core::runtime::test]
     async fn connector_lease_status_admin_route_reports_hrw_holder_and_fencing()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let state_root = tempdir.path().join("managed-state");
         let connector_id = "fcp.test.lease-status:utility:1.0.0";
         let connector_key = ConnectorId::from_static(connector_id);
         let zone_id = ZoneId::work();
+        let object_id_key = ObjectIdKey::from_bytes([0xD1; 32]);
         let subject_id = singleton_writer_connector_lease_subject_id(&connector_key, &zone_id);
         let eligible_nodes = vec![
             TailscaleNodeId::new("node-alpha"),
@@ -25565,20 +25819,93 @@ done"#;
         ];
         let holder = fcp_mesh::planner::select_lease_holder(&zone_id, &subject_id, &eligible_nodes)
             .expect("HRW holder should be selected");
+        let lease = durable_core_lease_for_test(
+            &zone_id,
+            subject_id,
+            holder.clone(),
+            10,
+            1_800_200_300,
+            test_signature_set(&["node-alpha", "node-beta"]),
+        );
+        let lease_object = stored_core_lease_for_test(&lease, &object_id_key);
+        let lease_object_id = lease_object.object_id;
+        let object_store_dir =
+            connector_state_canonical_object_store_dir(&state_root, &connector_key);
+        let object_store: Arc<dyn fcp_store::ObjectStore> = Arc::new(
+            fcp_store::DurableObjectStore::open(fcp_store::DurableObjectStoreConfig::new(
+                &object_store_dir,
+            ))
+            .expect("durable connector-state object store should open"),
+        );
+        object_store
+            .put(lease_object)
+            .await
+            .expect("durable lease object should be stored");
+        let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+            Arc::clone(&object_store),
+            object_id_key,
+            connector_key.clone(),
+            zone_id.clone(),
+        )
+        .with_snapshot_every_entries(0)
+        .with_snapshot_every_secs(0);
+        let (authorization, signing_key) =
+            connector_state_write_authorization_for_test_with_key(&connector_key, &zone_id);
+        let append = fcp_core::ConnectorStateStore::append_object(
+            &state_store,
+            &connector_key,
+            &authorization,
+            sign_durable_connector_state_object_for_test(
+                durable_connector_state_object_for_test(
+                    &connector_key,
+                    &zone_id,
+                    0,
+                    None,
+                    lease_object_id,
+                ),
+                &signing_key,
+            ),
+        )
+        .await
+        .expect("durable connector-state append should commit");
+        match append {
+            fcp_core::ConnectorStateAppendOutcome::Committed {
+                seq,
+                snapshot_object_id,
+                ..
+            } => {
+                assert_eq!(seq, 0);
+                assert_eq!(snapshot_object_id, None);
+            }
+            fcp_core::ConnectorStateAppendOutcome::Conflict { .. } => {
+                panic!("initial durable connector-state append should not conflict")
+            }
+        }
+        drop(state_store);
+        drop(object_store);
         let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
             local_node: holder.clone(),
             eligible_nodes: eligible_nodes.clone(),
-            current_lease_seq: Some(42),
+            current_lease_seq: Some(10),
         }));
 
         let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(1);
         let runner_task = task::spawn(async move { while runner_rx.recv().await.is_some() {} });
         let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
-        let registry = dispatcher_registry_with_connector(
-            connector_id,
-            connector,
-            dispatcher_test_config(connector_id),
+        let mut config = dispatcher_test_config(connector_id);
+        config.env.insert(
+            CONNECTOR_STATE_DIR_ENV.to_string(),
+            state_root.display().to_string(),
         );
+        config.env.insert(
+            CONNECTOR_STATE_OBJECT_ID_KEY_ENV.to_string(),
+            hex::encode(object_id_key.as_bytes()),
+        );
+        config.env.insert(
+            "FCP_CONNECTOR_STATE_MODEL".to_string(),
+            "singleton_writer".to_string(),
+        );
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
         let lifecycle = Arc::new(HostAdminStateStore::new());
         let state = dispatcher_app_state(registry, lifecycle, None, HashMap::new());
         let state = Arc::new(AppState {
@@ -25607,9 +25934,20 @@ done"#;
             payload["subject_id"],
             singleton_writer_connector_lease_subject_id(&connector_key, &zone_id).to_string()
         );
-        assert_eq!(payload["fencing_token"], 42);
-        assert_eq!(payload["expiry"], Value::Null);
-        assert_eq!(payload["quorum_signers_count"], 0);
+        assert_eq!(payload["fencing_token"], 10);
+        assert_eq!(payload["expiry_unix_secs"], lease.exp);
+        assert!(
+            payload["expiry"]
+                .as_str()
+                .is_some_and(|expiry| expiry.ends_with('Z')),
+            "lease expiry should be exposed as RFC3339 UTC: {payload}"
+        );
+        assert_eq!(payload["quorum_signers_count"], 2);
+        assert_eq!(payload["lease_object_id"], lease_object_id.to_string());
+        assert_eq!(
+            payload["lease_evidence_source"],
+            "canonical-fcp-store-lease-object"
+        );
         assert_eq!(payload["local_is_holder"], true);
         assert!(
             payload["holder_node_id_hash"]

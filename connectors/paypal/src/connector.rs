@@ -1127,10 +1127,10 @@ impl PayPalConnector {
 mod tests {
     use super::*;
     use fcp_prelude::{CapabilityToken, RequestId, ZoneId};
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path},
-    };
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration as StdDuration, Instant as StdInstant};
 
     fn tc() -> serde_json::Value {
         json!({
@@ -1176,6 +1176,177 @@ mod tests {
             provenance: None,
             approval_tokens: vec![],
         }
+    }
+
+    enum TestHttpBody {
+        Json(serde_json::Value),
+        Empty,
+    }
+
+    struct TestHttpResponse {
+        method: &'static str,
+        path: &'static str,
+        status: u16,
+        body: TestHttpBody,
+        required_header: Option<(&'static str, &'static str)>,
+    }
+
+    struct TestHttpServer {
+        url: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestHttpResponse {
+        fn json(
+            method: &'static str,
+            path: &'static str,
+            status: u16,
+            body: serde_json::Value,
+        ) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: TestHttpBody::Json(body),
+                required_header: None,
+            }
+        }
+
+        const fn empty(method: &'static str, path: &'static str, status: u16) -> Self {
+            Self {
+                method,
+                path,
+                status,
+                body: TestHttpBody::Empty,
+                required_header: None,
+            }
+        }
+
+        const fn with_required_header(mut self, name: &'static str, value: &'static str) -> Self {
+            self.required_header = Some((name, value));
+            self
+        }
+    }
+
+    impl TestHttpServer {
+        fn respond(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let handle = thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                for response in responses {
+                    let stream = accept_test_connection(&listener);
+                    handle_test_request(stream, response);
+                }
+            });
+            Self {
+                url,
+                handle: Some(handle),
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.url
+        }
+    }
+
+    impl Drop for TestHttpServer {
+        fn drop(&mut self) {
+            if let Some(handle) = self.handle.take() {
+                if thread::panicking() {
+                    let _ = handle.join();
+                } else {
+                    handle.join().unwrap();
+                }
+            }
+        }
+    }
+
+    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+        let deadline = StdInstant::now() + StdDuration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    return stream;
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        StdInstant::now() < deadline,
+                        "test server did not receive expected request"
+                    );
+                    thread::sleep(StdDuration::from_millis(10));
+                }
+                Err(err) => panic!("test listener failed: {err}"),
+            }
+        }
+    }
+
+    fn handle_test_request(stream: TcpStream, response: TestHttpResponse) {
+        stream
+            .set_read_timeout(Some(StdDuration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut request_parts = request_line.split_whitespace();
+        assert_eq!(request_parts.next(), Some(response.method));
+        let actual_path = request_parts
+            .next()
+            .and_then(|path| path.split('?').next())
+            .unwrap_or_default();
+        assert_eq!(actual_path, response.path);
+
+        let mut content_length = 0usize;
+        let mut saw_required_header = response.required_header.is_none();
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = trimmed.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse().unwrap();
+                }
+                if let Some((required_name, required_value)) = response.required_header
+                    && name.eq_ignore_ascii_case(required_name)
+                    && value.trim() == required_value
+                {
+                    saw_required_header = true;
+                }
+            }
+        }
+        assert!(saw_required_header, "required header was not sent");
+        if content_length > 0 {
+            let mut request_body = vec![0u8; content_length];
+            reader.read_exact(&mut request_body).unwrap();
+        }
+
+        let mut stream = reader.into_inner();
+        let (body, is_json_body) = match response.body {
+            TestHttpBody::Json(body) => (body.to_string(), true),
+            TestHttpBody::Empty => (String::new(), false),
+        };
+        let reason = match response.status {
+            200 => "OK",
+            204 => "No Content",
+            _ => "OK",
+        };
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-length: {}\r\nconnection: close\r\n",
+            response.status,
+            reason,
+            body.len()
+        )
+        .unwrap();
+        if is_json_body {
+            write!(stream, "content-type: application/json\r\n").unwrap();
+        }
+        write!(stream, "\r\n{body}").unwrap();
+        stream.flush().unwrap();
     }
 
     #[test]
@@ -1577,30 +1748,26 @@ mod tests {
     #[test]
     fn invoice_send_returns_contract_shape() {
         fcp_async_core::runtime::block_on_sync(async {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/v1/oauth2/token"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "access_token": "fresh-token",
-                    "token_type": "Bearer",
-                    "expires_in": 3600
-                })))
-                .expect(1)
-                .mount(&server)
-                .await;
-            Mock::given(method("POST"))
-                .and(path("/v2/invoicing/invoices/INV-123/send"))
-                .and(header("authorization", "Bearer fresh-token"))
-                .respond_with(ResponseTemplate::new(204))
-                .expect(1)
-                .mount(&server)
-                .await;
+            let server = TestHttpServer::respond(vec![
+                TestHttpResponse::json(
+                    "POST",
+                    "/v1/oauth2/token",
+                    200,
+                    json!({
+                        "access_token": "fresh-token",
+                        "token_type": "Bearer",
+                        "expires_in": 3600
+                    }),
+                ),
+                TestHttpResponse::empty("POST", "/v2/invoicing/invoices/INV-123/send", 204)
+                    .with_required_header("authorization", "Bearer fresh-token"),
+            ]);
 
             let mut connector = PayPalConnector::new();
             connector.configure(tc()).await.unwrap();
             connector.client = Some(
                 PayPalClient::new(
-                    &server.uri(),
+                    server.uri(),
                     "test_client_id".into(),
                     "test_client_secret".into(),
                     30_000,

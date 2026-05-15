@@ -210,10 +210,28 @@ fn matrix_lean_refs(rows: &[CoverageRow]) -> BTreeSet<LeanRef> {
 }
 
 fn theorem_names(source: &str) -> BTreeSet<String> {
+    let mut in_block_comment = false;
     source
         .lines()
         .filter_map(|line| {
-            let rest = line.trim_start().strip_prefix("theorem ")?;
+            let trimmed = line.trim_start();
+            if in_block_comment {
+                if trimmed.contains("-/") {
+                    in_block_comment = false;
+                }
+                return None;
+            }
+            if trimmed.starts_with("/-") {
+                if !trimmed.contains("-/") {
+                    in_block_comment = true;
+                }
+                return None;
+            }
+            if trimmed.starts_with("--") {
+                return None;
+            }
+
+            let rest = trimmed.strip_prefix("theorem ")?;
             let name = rest
                 .split(|character: char| {
                     character.is_whitespace() || matches!(character, ':' | '(' | '{')

@@ -9,6 +9,8 @@ use tracing::info;
 pub struct HwFeatureSet {
     /// x86 AVX2 vector support.
     pub has_avx2: bool,
+    /// x86 SSE3 vector support.
+    pub has_sse3: bool,
     /// x86 AVX-512 foundation support.
     pub has_avx512f: bool,
     /// x86 AVX-512 plus VAES support.
@@ -33,6 +35,7 @@ impl HwFeatureSet {
     pub const fn all_false() -> Self {
         Self {
             has_avx2: false,
+            has_sse3: false,
             has_avx512f: false,
             has_avx512_vaes: false,
             has_aes_ni: false,
@@ -49,6 +52,7 @@ impl HwFeatureSet {
     pub fn detected_feature_names(&self) -> Vec<&'static str> {
         let mut names = Vec::new();
         push_if(&mut names, self.has_avx2, "avx2");
+        push_if(&mut names, self.has_sse3, "sse3");
         push_if(&mut names, self.has_avx512f, "avx512f");
         push_if(&mut names, self.has_avx512_vaes, "avx512_vaes");
         push_if(&mut names, self.has_aes_ni, "aes_ni");
@@ -96,6 +100,7 @@ fn detect_without_logging() -> HwFeatureSet {
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn detect_x86(features: &mut HwFeatureSet) {
     features.has_avx2 = std::arch::is_x86_feature_detected!("avx2");
+    features.has_sse3 = std::arch::is_x86_feature_detected!("sse3");
     features.has_avx512f = std::arch::is_x86_feature_detected!("avx512f");
     features.has_aes_ni = std::arch::is_x86_feature_detected!("aes");
     features.has_clmul = std::arch::is_x86_feature_detected!("pclmulqdq");

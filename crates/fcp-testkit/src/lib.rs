@@ -54,6 +54,8 @@ mod async_harness;
 pub mod bridge_helpers;
 pub mod coverage_rules;
 pub mod database_helpers;
+pub mod differential;
+pub mod differential_scrub;
 pub mod evidence_helpers;
 pub mod fixtures;
 mod harness;
@@ -73,6 +75,8 @@ pub mod webhook_helpers;
 
 pub use assertions::*;
 pub use async_harness::*;
+pub use differential::*;
+pub use differential_scrub::*;
 pub use harness::*;
 pub use http_fixture::*;
 pub use log_scan::*;

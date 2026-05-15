@@ -30,6 +30,7 @@ const ACCEPTANCE_SUITE_CLASS: &str = "local_non_mock";
 const API_SECRET: &str = "ollama-local-non-mock-secret";
 
 const OP_CHAT: &str = "ollama.chat.completions";
+const OP_CHAT_STREAM: &str = "ollama.chat.completions_stream";
 const OP_EMBEDDINGS: &str = "ollama.embeddings.create";
 const OP_MODELS: &str = "ollama.models.list";
 const OP_HEALTH: &str = "ollama.health";
@@ -89,6 +90,12 @@ const MODELS_RESPONSE: &str = r#"{
   ]
 }"#;
 
+const STREAM_RESPONSE: &str = concat!(
+    "data: {\"id\":\"chunk-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"llama3.2\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"loc\"},\"finish_reason\":null}]}\n\n",
+    "data: {\"id\":\"chunk-2\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"llama3.2\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"al\"},\"finish_reason\":\"stop\"}]}\n\n",
+    "data: [DONE]\n\n"
+);
+
 #[derive(Debug)]
 struct CapturedRequest {
     head: String,
@@ -98,12 +105,25 @@ struct CapturedRequest {
 #[derive(Clone, Copy)]
 struct HttpResponse {
     status: &'static str,
+    content_type: &'static str,
     body: &'static str,
 }
 
 impl HttpResponse {
     const fn json(status: &'static str, body: &'static str) -> Self {
-        Self { status, body }
+        Self {
+            status,
+            content_type: "application/json",
+            body,
+        }
+    }
+
+    const fn sse(status: &'static str, body: &'static str) -> Self {
+        Self {
+            status,
+            content_type: "text/event-stream",
+            body,
+        }
     }
 }
 
@@ -277,6 +297,71 @@ async fn local_non_mock_chat_embeddings_models_and_health_use_openai_compat_loop
                     "status": 200
                 },
                 "health_reused_cached_models": true
+            },
+            "auth_gate": {
+                "mode": "bearer_api_key",
+                "authorization_header_verified": true
+            },
+            "redaction": {
+                "api_secret_redacted_from_output": true,
+                "input_payload_not_reflected_in_output": true
+            },
+            "cleanup": {
+                "fixture_requests_joined": requests.len()
+            },
+            "result": "passed"
+        }),
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn local_non_mock_streaming_chat_uses_sse_loopback() {
+    let server = LoopbackServer::start(vec![HttpResponse::sse("200 OK", STREAM_RESPONSE)]);
+    let configured = setup_connector(&server.base_url, &[CAP_CHAT]).await;
+
+    let stream = invoke(
+        &configured.connector,
+        &configured.signing_key,
+        OP_CHAT_STREAM,
+        CAP_CHAT,
+        json!({"messages": [{"role": "user", "content": "private streaming prompt"}]}),
+    )
+    .await
+    .expect("streaming chat should invoke the production SSE path");
+    assert_eq!(stream["content"], "local");
+    assert_eq!(stream["chunk_count"], 2);
+
+    let requests = server.join();
+    assert_eq!(requests.len(), 1);
+    assert_request(&requests[0], "POST /v1/chat/completions HTTP/1.1");
+    let stream_body = requests[0]
+        .body
+        .as_ref()
+        .expect("stream request sends JSON");
+    assert_eq!(stream_body["model"], DEFAULT_MODEL);
+    assert_eq!(stream_body["messages"][0]["role"], "user");
+    assert_eq!(
+        stream_body["messages"][0]["content"],
+        "private streaming prompt"
+    );
+    assert_eq!(stream_body["stream"], true);
+
+    let rendered = stream.to_string();
+    assert!(!rendered.contains(API_SECRET));
+    assert!(!rendered.contains("private streaming prompt"));
+
+    print_artifact(
+        "streaming_chat_sse",
+        &json!({
+            "request_response_boundary": {
+                "chat_completions_stream": {
+                    "method": "POST",
+                    "path": "/v1/chat/completions",
+                    "status": 200,
+                    "transport": "sse",
+                    "stream_chunk_count": stream["chunk_count"],
+                    "content_bytes": stream["content"].as_str().unwrap_or_default().len()
+                }
             },
             "auth_gate": {
                 "mode": "bearer_api_key",
@@ -544,7 +629,8 @@ fn read_complete_request(stream: &mut TcpStream) -> CapturedRequest {
 
 fn write_response(stream: &mut TcpStream, response: HttpResponse) {
     let mut raw = format!("HTTP/1.1 {}\r\n", response.status);
-    raw.push_str("content-type: application/json\r\n");
+    write!(&mut raw, "content-type: {}\r\n", response.content_type)
+        .expect("content-type should format");
     write!(&mut raw, "content-length: {}\r\n", response.body.len())
         .expect("content-length should format");
     raw.push_str("connection: close\r\n\r\n");

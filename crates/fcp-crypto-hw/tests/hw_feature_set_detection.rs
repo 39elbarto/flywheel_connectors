@@ -3,7 +3,7 @@ use fcp_crypto_hw::{DispatchTier, HwFeatureSet, build_function_table, detect, fu
 #[test]
 fn test_detect_does_not_crash_on_any_isa() {
     let features = detect();
-    assert!(features.detected_feature_names().len() <= 9);
+    assert!(features.detected_feature_names().len() <= 10);
 }
 
 #[test]

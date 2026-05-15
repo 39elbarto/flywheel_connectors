@@ -4,7 +4,10 @@ use std::sync::LazyLock;
 
 use tracing::info;
 
-use crate::cpuid::{HwFeatureSet, detect};
+use crate::{
+    blake3::{Blake3Hasher, Blake3Tier},
+    cpuid::{HwFeatureSet, detect},
+};
 
 /// BLAKE3 hash dispatch function.
 pub type Blake3Dispatch = fn(&[u8]) -> [u8; 32];
@@ -88,7 +91,7 @@ pub fn build_function_table(features: HwFeatureSet) -> FunctionTable {
     FunctionTable {
         features,
         tier,
-        blake3: portable_blake3,
+        blake3: blake3_dispatch_for(tier),
         aes_gcm: portable_aes_gcm_probe,
         ntt: portable_ntt_probe,
     }
@@ -110,8 +113,29 @@ const fn select_tier(features: HwFeatureSet) -> DispatchTier {
     }
 }
 
-fn portable_blake3(input: &[u8]) -> [u8; 32] {
-    *blake3::hash(input).as_bytes()
+const fn blake3_dispatch_for(tier: DispatchTier) -> Blake3Dispatch {
+    match tier {
+        DispatchTier::X86Avx512Vaes => blake3_x86_avx512,
+        DispatchTier::X86Avx2 | DispatchTier::X86AesNi => blake3_x86_avx2,
+        DispatchTier::Aarch64Crypto | DispatchTier::Aarch64Sve => blake3_neon,
+        DispatchTier::Portable => blake3_portable,
+    }
+}
+
+fn blake3_portable(input: &[u8]) -> [u8; 32] {
+    Blake3Hasher::with_tier(Blake3Tier::Portable).hash(input)
+}
+
+fn blake3_x86_avx2(input: &[u8]) -> [u8; 32] {
+    Blake3Hasher::with_tier(Blake3Tier::X86Avx2).hash(input)
+}
+
+fn blake3_x86_avx512(input: &[u8]) -> [u8; 32] {
+    Blake3Hasher::with_tier(Blake3Tier::X86Avx512).hash(input)
+}
+
+fn blake3_neon(input: &[u8]) -> [u8; 32] {
+    Blake3Hasher::with_tier(Blake3Tier::Neon).hash(input)
 }
 
 fn portable_aes_gcm_probe(input: &[u8]) -> [u8; 16] {

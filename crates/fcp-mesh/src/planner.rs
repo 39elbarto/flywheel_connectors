@@ -41,6 +41,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::device::{DeviceProfile, FitnessContext};
 
+pub mod bandit;
+pub use bandit::{
+    BetaPosterior, DeviceCostInput, DeviceCostModel, DeviceCostWeights, ThompsonChoice,
+    ThompsonScheduler,
+};
+
 // ============================================================================
 // Scoring Constants
 // ============================================================================

@@ -98,6 +98,14 @@ fn u64_field(object: &Value, field: &str) -> u64 {
         .unwrap_or_else(|| panic!("manifest object must include u64 field {field}"))
 }
 
+fn artifact_context(artifact: &Value) -> String {
+    format!(
+        "artifact_hint={}, operator_url_hint={}",
+        string_field(artifact, "artifact_hint"),
+        string_field(artifact, "operator_url_hint")
+    )
+}
+
 fn accepted_shas(feature: &Value) -> BTreeSet<&str> {
     feature
         .get("accepted_shas")
@@ -132,22 +140,23 @@ fn evaluate_feature_gate(
 
     for artifact in required_artifacts(feature) {
         let id = string_field(artifact, "id");
-        let record = by_obligation
-            .get(id)
-            .ok_or_else(|| format!("{id} artifact is missing for {gate_status} claim"))?;
+        let context = artifact_context(artifact);
+        let record = by_obligation.get(id).ok_or_else(|| {
+            format!("{id} artifact is missing for {gate_status} claim ({context})")
+        })?;
 
         if record.status != "green" {
             return Err(format!(
-                "{id} artifact is {} but {gate_status} requires green",
-                record.status
+                "{id} artifact is {} but {gate_status} requires green ({context})",
+                record.status,
             ));
         }
 
         let max_age_hours = u64_field(artifact, "max_age_hours");
         if record.generated_age_hours > max_age_hours {
             return Err(format!(
-                "{id} artifact is stale: {}h old exceeds {max_age_hours}h",
-                record.generated_age_hours
+                "{id} artifact is stale: {}h old exceeds {max_age_hours}h ({context})",
+                record.generated_age_hours,
             ));
         }
 
@@ -156,8 +165,8 @@ fn evaluate_feature_gate(
             && !accepted.contains(record.git_sha)
         {
             return Err(format!(
-                "{id} artifact SHA {} does not match current SHA {current_sha}",
-                record.git_sha
+                "{id} artifact SHA {} does not match current SHA {current_sha} ({context})",
+                record.git_sha,
             ));
         }
     }
@@ -284,6 +293,10 @@ fn proven_zone_isolation_rejects_missing_artifact() {
     let err = evaluate_feature_gate(feature, "PROVEN", &records, "abc123")
         .expect_err("PROVEN must fail when the E2E artifact is missing");
     assert!(err.contains("zone-isolation-full-e2e artifact is missing"));
+    assert!(
+        err.contains("artifact_hint=artifacts/e2e/zone_isolation_full_e2e/${GITHUB_SHA}.jsonl")
+    );
+    assert!(err.contains("operator_url_hint=crates/fcp-e2e/tests/zone_isolation_full_e2e.rs"));
 }
 
 #[test]
@@ -321,4 +334,18 @@ fn proven_zone_isolation_rejects_sha_mismatch() {
     let err = evaluate_feature_gate(feature, "PROVEN", &records, "def456")
         .expect_err("SHA mismatches must fail PROVEN");
     assert!(err.contains("does not match current SHA"));
+    assert!(err.contains("operator_url_hint="));
+}
+
+#[test]
+fn proven_zone_isolation_accepts_explicitly_accepted_sha() {
+    let manifest = load_manifest(&workspace_root());
+    let mut feature = zone_isolation_feature(&manifest).clone();
+    feature["accepted_shas"] = serde_json::json!(["abc123"]);
+
+    assert_eq!(
+        evaluate_feature_gate(&feature, "PROVEN", &green_zone_artifacts(), "def456")
+            .expect("accepted SHA must pin an explicitly reviewed artifact"),
+        GateVerdict::ProvenPinned
+    );
 }

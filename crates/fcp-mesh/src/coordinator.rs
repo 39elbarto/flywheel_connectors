@@ -1084,6 +1084,26 @@ mod tests {
         }
     }
 
+    fn issued_connector_state_lease(ttl_secs: u32, now_secs: u64) -> (LeaseCoordinator, CoreLease) {
+        let mut coord = LeaseCoordinator::with_defaults();
+        let request = SignedLeaseIssueRequest {
+            params: core_lease_params(
+                "node-a",
+                ttl_secs,
+                CoreLeasePurpose::ConnectorStateWrite,
+                signatures(&["node-a", "node-b"]),
+            ),
+            existing_leases: Vec::new(),
+            eligible_nodes: vec![node("node-a"), node("node-b"), node("node-c")],
+            now_secs,
+        };
+        let (outcome, _timeline) = coord.issue_signed_lease(request);
+        let SignedLeaseIssueOutcome::Granted { lease } = outcome else {
+            panic!("expected signed lease grant");
+        };
+        (coord, *lease)
+    }
+
     // ── Acquire ──────────────────────────────────────────────────
 
     #[test]
@@ -1272,6 +1292,120 @@ mod tests {
                 1,
             )
             .expect("one signature satisfies a one-signature quorum");
+    }
+
+    #[test]
+    fn validate_signed_lease_rejects_expired_lease() {
+        let (coord, lease) = issued_connector_state_lease(10, 1_000);
+
+        let err = coord
+            .validate_signed_lease(
+                &lease,
+                &subject(),
+                &zone(),
+                CoreLeasePurpose::ConnectorStateWrite,
+                lease.lease_seq,
+                1_010,
+                1,
+            )
+            .expect_err("lease at its expiry boundary must be rejected");
+
+        assert_eq!(
+            err,
+            CoreLeaseValidationError::Expired {
+                expired_at: 1_010,
+                now: 1_010,
+            }
+        );
+    }
+
+    #[test]
+    fn validate_signed_lease_rejects_mismatched_subject_zone_and_purpose() {
+        let (coord, lease) = issued_connector_state_lease(300, 1_000);
+        let wrong_subject = ObjectId::from_bytes([0xAB; 32]);
+        let wrong_zone: ZoneId = "z:wrong-lease-zone".parse().unwrap();
+
+        let subject_err = coord
+            .validate_signed_lease(
+                &lease,
+                &wrong_subject,
+                &zone(),
+                CoreLeasePurpose::ConnectorStateWrite,
+                lease.lease_seq,
+                1_001,
+                1,
+            )
+            .expect_err("wrong lease subject must be rejected");
+        assert_eq!(
+            subject_err,
+            CoreLeaseValidationError::SubjectMismatch {
+                expected: wrong_subject,
+                got: subject(),
+            }
+        );
+
+        let zone_err = coord
+            .validate_signed_lease(
+                &lease,
+                &subject(),
+                &wrong_zone,
+                CoreLeasePurpose::ConnectorStateWrite,
+                lease.lease_seq,
+                1_001,
+                1,
+            )
+            .expect_err("wrong lease zone must be rejected");
+        assert_eq!(
+            zone_err,
+            CoreLeaseValidationError::ZoneMismatch {
+                expected: wrong_zone,
+                got: zone(),
+            }
+        );
+
+        let purpose_err = coord
+            .validate_signed_lease(
+                &lease,
+                &subject(),
+                &zone(),
+                CoreLeasePurpose::OperationExecution,
+                lease.lease_seq,
+                1_001,
+                1,
+            )
+            .expect_err("wrong lease purpose must be rejected");
+        assert_eq!(
+            purpose_err,
+            CoreLeaseValidationError::PurposeMismatch {
+                expected: CoreLeasePurpose::OperationExecution,
+                got: CoreLeasePurpose::ConnectorStateWrite,
+            }
+        );
+    }
+
+    #[test]
+    fn validate_signed_lease_rejects_superseded_fencing_token() {
+        let (coord, lease) = issued_connector_state_lease(300, 1_000);
+
+        let err = coord
+            .validate_signed_lease(
+                &lease,
+                &subject(),
+                &zone(),
+                CoreLeasePurpose::ConnectorStateWrite,
+                lease.lease_seq + 1,
+                1_001,
+                1,
+            )
+            .expect_err("lease with a lower seq than current known seq must be fenced");
+
+        assert_eq!(
+            err,
+            CoreLeaseValidationError::Superseded {
+                held_seq: lease.lease_seq,
+                current_seq: lease.lease_seq + 1,
+            }
+        );
     }
 
     #[test]

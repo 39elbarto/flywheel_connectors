@@ -229,3 +229,11 @@ rch exec -- cargo check --workspace --all-targets
 rch exec -- cargo clippy --workspace --all-targets -- -D warnings
 rch exec -- cargo fmt --check
 ```
+
+The gated sandbox live suite uses `FCP_LIVE_SANDBOX=1` plus `VERCEL_SANDBOX_TOKEN`, `VERCEL_SANDBOX_TEAM_ID`, `VERCEL_SANDBOX_PROJECT_ID`, and `FCP_SANDBOX_RUN_NAMESPACE`. `VERCEL_SANDBOX_BASE_URL` defaults to `https://api.vercel.com`. The suite performs read-only `projects.list` and `projects.get` probes and does not log team or project ids.
+
+Focused live-suite rerun:
+
+```bash
+rch exec -- cargo test -p fcp-vercel --test live_verification -- --nocapture
+```

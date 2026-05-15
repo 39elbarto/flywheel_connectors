@@ -42,7 +42,7 @@ pub enum WolframBaseUrlMode {
     /// Production traffic to the manifest-pinned Wolfram Alpha host.
     Production,
     /// Debug/test traffic to an explicit loopback mock server.
-    MockLoopback,
+    LoopbackTest,
 }
 
 /// Canonicalized base URL policy decision.
@@ -143,7 +143,7 @@ fn validate_mock_base_url(
 
     Ok(WolframBaseUrlPolicy {
         canonical_url: canonical_origin(url),
-        mode: WolframBaseUrlMode::MockLoopback,
+        mode: WolframBaseUrlMode::LoopbackTest,
     })
 }
 
@@ -360,7 +360,7 @@ mod tests {
     fn base_url_policy_accepts_loopback_only_with_mock_seam() {
         let policy =
             validate_wolfram_base_url("http://127.0.0.1:1234", true).expect("loopback mock");
-        assert_eq!(policy.mode, WolframBaseUrlMode::MockLoopback);
+        assert_eq!(policy.mode, WolframBaseUrlMode::LoopbackTest);
         assert_eq!(policy.canonical_url, "http://127.0.0.1:1234");
 
         let error = validate_wolfram_base_url("http://192.168.1.12:1234", true)

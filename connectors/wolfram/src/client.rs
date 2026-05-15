@@ -390,10 +390,12 @@ impl std::fmt::Debug for WolframClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use wiremock::matchers::{method, path, query_param};
-    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::{TcpListener, TcpStream},
+        sync::{Arc, Mutex},
+        thread::{self, JoinHandle},
+    };
 
     /// Test helper: zero-retry config so terminal-on-first-failure
     /// tests don't sleep through retry backoff.
@@ -429,41 +431,176 @@ mod tests {
         }
     }
 
-    struct FlakyResponder {
-        counter: Arc<AtomicUsize>,
+    #[derive(Clone)]
+    struct TestHttpResponse {
+        status: u16,
+        body: String,
+        content_type: &'static str,
+        headers: Vec<(&'static str, &'static str)>,
+        delay: Duration,
     }
 
-    impl Respond for FlakyResponder {
-        fn respond(&self, _: &Request) -> ResponseTemplate {
-            let n = self.counter.fetch_add(1, Ordering::SeqCst);
-            if n == 0 {
-                ResponseTemplate::new(503).set_body_string("Service Unavailable")
-            } else {
-                ResponseTemplate::new(200).set_body_string("OK")
+    impl TestHttpResponse {
+        fn json(status: u16, body: &serde_json::Value) -> Self {
+            Self {
+                status,
+                body: body.to_string(),
+                content_type: "application/json",
+                headers: Vec::new(),
+                delay: Duration::ZERO,
             }
+        }
+
+        fn text(status: u16, body: impl Into<String>) -> Self {
+            Self {
+                status,
+                body: body.into(),
+                content_type: "text/plain; charset=utf-8",
+                headers: Vec::new(),
+                delay: Duration::ZERO,
+            }
+        }
+
+        fn with_header(mut self, name: &'static str, value: &'static str) -> Self {
+            self.headers.push((name, value));
+            self
+        }
+
+        fn with_delay(mut self, delay: Duration) -> Self {
+            self.delay = delay;
+            self
         }
     }
 
-    struct RateLimitResponder {
-        counter: Arc<AtomicUsize>,
+    #[derive(Clone, Debug)]
+    struct TestHttpRequest {
+        method: String,
+        target: String,
+        path: String,
     }
 
-    impl Respond for RateLimitResponder {
-        fn respond(&self, _: &Request) -> ResponseTemplate {
-            let n = self.counter.fetch_add(1, Ordering::SeqCst);
-            if n == 0 {
-                ResponseTemplate::new(429)
-                    .insert_header("retry-after", "0")
-                    .set_body_string("Too Many Requests")
-            } else {
-                ResponseTemplate::new(200).set_body_string("after backoff")
+    struct TestHttpServer {
+        base_url: String,
+        requests: Arc<Mutex<Vec<TestHttpRequest>>>,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestHttpServer {
+        fn respond(response: TestHttpResponse) -> Self {
+            Self::respond_sequence(vec![response])
+        }
+
+        fn respond_sequence(responses: Vec<TestHttpResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+            let base_url = format!("http://{}", listener.local_addr().expect("local address"));
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let thread_requests = Arc::clone(&requests);
+            let handle = thread::spawn(move || {
+                for response in responses {
+                    let (stream, _) = listener.accept().expect("accept Wolfram client request");
+                    handle_test_request(stream, response, &thread_requests);
+                }
+            });
+
+            Self {
+                base_url,
+                requests,
+                handle: Some(handle),
             }
+        }
+
+        fn uri(&self) -> String {
+            self.base_url.clone()
+        }
+
+        fn finish(mut self) -> Vec<TestHttpRequest> {
+            if let Some(handle) = self.handle.take() {
+                handle.join().expect("test server thread panicked");
+            }
+            self.requests.lock().expect("request log poisoned").clone()
+        }
+    }
+
+    fn handle_test_request(
+        mut stream: TcpStream,
+        response: TestHttpResponse,
+        requests: &Arc<Mutex<Vec<TestHttpRequest>>>,
+    ) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set read timeout");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .expect("read request line");
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().expect("request method").to_owned();
+        let target = parts.next().expect("request target").to_owned();
+        let path = target.split('?').next().expect("request path").to_owned();
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read header line");
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().expect("content-length parses");
+            }
+        }
+        if content_length > 0 {
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).expect("read request body");
+        }
+
+        requests
+            .lock()
+            .expect("request log poisoned")
+            .push(TestHttpRequest {
+                method,
+                target,
+                path,
+            });
+
+        if !response.delay.is_zero() {
+            thread::sleep(response.delay);
+        }
+
+        let status_text = match response.status {
+            403 => "Forbidden",
+            429 => "Too Many Requests",
+            503 => "Service Unavailable",
+            _ => "OK",
+        };
+        let mut response_head = format!(
+            "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n",
+            response.status,
+            status_text,
+            response.content_type,
+            response.body.len()
+        );
+        for (name, value) in response.headers {
+            response_head.push_str(name);
+            response_head.push_str(": ");
+            response_head.push_str(value);
+            response_head.push_str("\r\n");
+        }
+        response_head.push_str("\r\n");
+        response_head.push_str(&response.body);
+
+        if stream.write_all(response_head.as_bytes()).is_ok() {
+            let _ = stream.flush();
         }
     }
 
     #[fcp_async_core::runtime::test]
     async fn query_success() {
-        let server = MockServer::start().await;
         let body = serde_json::json!({
             "queryresult": {
                 "success": true,
@@ -477,16 +614,16 @@ mod tests {
                 "assumptions": []
             }
         });
-
-        Mock::given(method("GET"))
-            .and(path("/v2/query"))
-            .and(query_param("input", "2+2"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
-            .mount(&server)
-            .await;
-
+        let server = TestHttpServer::respond(TestHttpResponse::json(200, &body));
         let client = WolframClient::with_base_url(server.uri());
         let result = client.query("2+2", "test-app-id").await.expect("query");
+        let requests = server.finish();
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].path, "/v2/query");
+        assert!(requests[0].target.contains("input=2%2B2"));
+        assert!(requests[0].target.contains("appid=test-app-id"));
         assert!(result.success);
         assert_eq!(result.pods[0].subpods[0].plaintext.as_deref(), Some("4"));
     }
@@ -500,38 +637,32 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn short_answer_success() {
-        let server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/result"))
-            .and(query_param("i", "population of France"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("67.39 million people"))
-            .mount(&server)
-            .await;
-
+        let server = TestHttpServer::respond(TestHttpResponse::text(200, "67.39 million people"));
         let client = WolframClient::with_base_url(server.uri());
         let result = client
             .short_answer("population of France", "test-id")
             .await
             .expect("short answer");
+        let requests = server.finish();
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/v1/result");
+        assert!(requests[0].target.contains("i=population+of+France"));
         assert_eq!(result["answer"], "67.39 million people");
     }
 
     #[fcp_async_core::runtime::test]
     async fn spoken_result_success() {
-        let server = MockServer::start().await;
-
-        Mock::given(method("GET"))
-            .and(path("/v1/spoken"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("The answer is 4"))
-            .mount(&server)
-            .await;
-
+        let server = TestHttpServer::respond(TestHttpResponse::text(200, "The answer is 4"));
         let client = WolframClient::with_base_url(server.uri());
         let result = client
             .spoken_result("what is 2+2", "test-id")
             .await
             .expect("spoken");
+        let requests = server.finish();
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/v1/spoken");
         assert_eq!(result["spoken"], "The answer is 4");
     }
 
@@ -541,16 +672,13 @@ mod tests {
     async fn terminal_on_403_no_retry_consumed() {
         // 403 is terminal — must NOT consume retry budget. Use
         // no_retry() so we'd see if the loop tried to retry.
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v2/query"))
-            .respond_with(ResponseTemplate::new(403).set_body_string("Forbidden"))
-            .expect(1) // Pin: exactly one request, no retries.
-            .mount(&server)
-            .await;
-
+        let server = TestHttpServer::respond(TestHttpResponse::text(403, "Forbidden"));
         let client = WolframClient::with_base_url_and_retry(server.uri(), no_retry());
         let err = client.query("test", "bad-id").await.unwrap_err();
+        let requests = server.finish();
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/v2/query");
         assert!(
             matches!(
                 err,
@@ -568,48 +696,37 @@ mod tests {
         // 503 is retryable. First attempt 503, subsequent attempts
         // succeed. With max_retries=2 the budget allows up to 3
         // attempts total — the second one succeeds.
-        let server = MockServer::start().await;
-        let counter = Arc::new(AtomicUsize::new(0));
-
-        Mock::given(method("GET"))
-            .and(path("/v1/result"))
-            .respond_with(FlakyResponder {
-                counter: counter.clone(),
-            })
-            .expect(2) // 1 503 + 1 success.
-            .mount(&server)
-            .await;
-
+        let server = TestHttpServer::respond_sequence(vec![
+            TestHttpResponse::text(503, "Service Unavailable"),
+            TestHttpResponse::text(200, "OK"),
+        ]);
         let client = WolframClient::with_base_url_and_retry(server.uri(), fast_retry(2));
         let result = client
             .short_answer("test", "test-id")
             .await
             .expect("eventually succeeds");
+        let requests = server.finish();
+
+        assert_eq!(requests.len(), 2);
         assert_eq!(result["answer"], "OK");
-        assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
 
     #[fcp_async_core::runtime::test]
     async fn retries_on_429_then_succeeds_honoring_retry_after() {
         // 429 with a Retry-After header. First attempt 429,
         // second attempt 200.
-        let server = MockServer::start().await;
-        let counter = Arc::new(AtomicUsize::new(0));
-
-        Mock::given(method("GET"))
-            .and(path("/v1/result"))
-            .respond_with(RateLimitResponder {
-                counter: counter.clone(),
-            })
-            .expect(2)
-            .mount(&server)
-            .await;
-
+        let server = TestHttpServer::respond_sequence(vec![
+            TestHttpResponse::text(429, "Too Many Requests").with_header("retry-after", "0"),
+            TestHttpResponse::text(200, "after backoff"),
+        ]);
         let client = WolframClient::with_base_url_and_retry(server.uri(), fast_retry(2));
         let result = client
             .short_answer("rate-limited", "test-id")
             .await
             .expect("eventually succeeds");
+        let requests = server.finish();
+
+        assert_eq!(requests.len(), 2);
         assert_eq!(result["answer"], "after backoff");
     }
 
@@ -618,19 +735,15 @@ mod tests {
         // Mock always returns 429. RetryLoop exhausts max_retries,
         // returns the last error (WolframError::RateLimited per the
         // 429 mapping).
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/result"))
-            .respond_with(
-                ResponseTemplate::new(429)
-                    .insert_header("retry-after", "0")
-                    .set_body_string("Too Many Requests"),
-            )
-            .mount(&server)
-            .await;
-
+        let server = TestHttpServer::respond_sequence(vec![
+            TestHttpResponse::text(429, "Too Many Requests").with_header("retry-after", "0"),
+            TestHttpResponse::text(429, "Too Many Requests").with_header("retry-after", "0"),
+        ]);
         let client = WolframClient::with_base_url_and_retry(server.uri(), fast_retry(1));
         let err = client.short_answer("test", "test-id").await.unwrap_err();
+        let requests = server.finish();
+
+        assert_eq!(requests.len(), 2);
         assert!(
             matches!(err, WolframError::RateLimited { .. }),
             "expected RateLimited, got {err:?}"
@@ -639,15 +752,15 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn server_error_exhaustion_returns_api_error() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v2/query"))
-            .respond_with(ResponseTemplate::new(503).set_body_string("Service Unavailable"))
-            .mount(&server)
-            .await;
-
+        let server = TestHttpServer::respond_sequence(vec![
+            TestHttpResponse::text(503, "Service Unavailable"),
+            TestHttpResponse::text(503, "Service Unavailable"),
+        ]);
         let client = WolframClient::with_base_url_and_retry(server.uri(), fast_retry(1));
         let err = client.query("test", "id").await.unwrap_err();
+        let requests = server.finish();
+
+        assert_eq!(requests.len(), 2);
         assert!(
             matches!(
                 err,
@@ -664,16 +777,12 @@ mod tests {
     async fn no_retry_budget_terminal_on_first_failure() {
         // max_retries=0 ⇒ exactly 1 attempt, retryable error
         // surfaces as the final error.
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v2/query"))
-            .respond_with(ResponseTemplate::new(503).set_body_string("Service Unavailable"))
-            .expect(1)
-            .mount(&server)
-            .await;
-
+        let server = TestHttpServer::respond(TestHttpResponse::text(503, "Service Unavailable"));
         let client = WolframClient::with_base_url_and_retry(server.uri(), no_retry());
         let err = client.query("test", "id").await.unwrap_err();
+        let requests = server.finish();
+
+        assert_eq!(requests.len(), 1);
         assert!(matches!(
             err,
             WolframError::Api {
@@ -685,29 +794,21 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn retry_budget_connect_timeout_refuses_after_budget() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/result"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_delay(Duration::from_millis(150))
-                    .set_body_string("eventual answer"),
-            )
-            .expect(2)
-            .mount(&server)
-            .await;
-
+        let delayed_response =
+            TestHttpResponse::text(200, "eventual answer").with_delay(Duration::from_millis(150));
+        let server =
+            TestHttpServer::respond_sequence(vec![delayed_response.clone(), delayed_response]);
         let client = client_with_timeout(server.uri(), fast_retry(1), Duration::from_millis(25));
         let err = client
             .short_answer("slow upstream", "test-id")
             .await
             .unwrap_err();
+        let requests = server.finish();
 
         assert!(
             matches!(err, WolframError::Http(ref e) if e.is_timeout()),
             "expected timeout HTTP error, got {err:?}"
         );
-        let requests = server.received_requests().await.expect("request log");
         assert_eq!(
             requests.len(),
             2,

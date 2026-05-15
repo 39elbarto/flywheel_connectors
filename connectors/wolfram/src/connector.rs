@@ -647,8 +647,12 @@ mod tests {
     use fcp_prelude::{
         CapabilityConstraints, IdempotencyClass, InstanceId, RiskLevel, SafetyTier, ZoneId,
     };
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::{TcpListener, TcpStream},
+        thread::{self, JoinHandle},
+        time::Duration as StdDuration,
+    };
 
     fn generate_token(
         signing_key: &Ed25519SigningKey,
@@ -682,6 +686,114 @@ mod tests {
 
     fn fixture_app_id() -> String {
         ["fixture", "app"].join("-")
+    }
+
+    struct TestHttpResponse {
+        path: &'static str,
+        status: u16,
+        body: String,
+        content_type: &'static str,
+    }
+
+    impl TestHttpResponse {
+        fn json(path: &'static str, status: u16, body: &serde_json::Value) -> Self {
+            Self {
+                path,
+                status,
+                body: body.to_string(),
+                content_type: "application/json",
+            }
+        }
+
+        fn text(path: &'static str, status: u16, body: impl Into<String>) -> Self {
+            Self {
+                path,
+                status,
+                body: body.into(),
+                content_type: "text/plain; charset=utf-8",
+            }
+        }
+    }
+
+    struct TestHttpServer {
+        base_url: String,
+        handle: Option<JoinHandle<()>>,
+    }
+
+    impl TestHttpServer {
+        fn respond(response: TestHttpResponse) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+            let base_url = format!("http://{}", listener.local_addr().expect("local address"));
+            let handle = thread::spawn(move || {
+                let (stream, _) = listener.accept().expect("accept Wolfram client request");
+                handle_test_request(stream, &response);
+            });
+
+            Self {
+                base_url,
+                handle: Some(handle),
+            }
+        }
+
+        fn uri(&self) -> String {
+            self.base_url.clone()
+        }
+
+        fn finish(mut self) {
+            if let Some(handle) = self.handle.take() {
+                handle.join().expect("test server thread panicked");
+            }
+        }
+    }
+
+    fn handle_test_request(mut stream: TcpStream, response: &TestHttpResponse) {
+        stream
+            .set_read_timeout(Some(StdDuration::from_secs(5)))
+            .expect("set read timeout");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .expect("read request line");
+        let mut parts = request_line.split_whitespace();
+        let request_method = parts.next().expect("request method");
+        let raw_path = parts.next().expect("request target");
+        let request_path = raw_path.split('?').next().expect("request path");
+        assert_eq!(request_method, "GET");
+        assert_eq!(request_path, response.path);
+
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read header line");
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().expect("content-length parses");
+            }
+        }
+        if content_length > 0 {
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).expect("read request body");
+        }
+
+        let status_text = "OK";
+        write!(
+            stream,
+            "HTTP/1.1 {} {}\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            response.status,
+            status_text,
+            response.content_type,
+            response.body.len(),
+            response.body
+        )
+        .expect("write response");
+        stream.flush().expect("flush response");
     }
 
     fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
@@ -1012,7 +1124,6 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn invoke_query() {
-        let server = MockServer::start().await;
         let body = json!({
             "queryresult": {
                 "success": true,
@@ -1026,17 +1137,9 @@ mod tests {
                 "assumptions": []
             }
         });
-        Mock::given(method("GET"))
-            .and(path("/v2/query"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
-            .mount(&server)
-            .await;
+        let server = TestHttpServer::respond(TestHttpResponse::json("/v2/query", 200, &body));
+        let (connector, signing_key) = setup_connector(&server.uri(), &["wolfram.query"]).await;
 
-        // Use the server URI without the protocol for configure
-        let base_url = server.uri();
-        let (connector, signing_key) = setup_connector(&base_url, &["wolfram.query"]).await;
-
-        // Override the client to use the mock server with protocol
         let capability = generate_token(
             &signing_key,
             &connector.base.instance_id,
@@ -1051,20 +1154,14 @@ mod tests {
             }))
             .await
             .expect("invoke");
+        server.finish();
         assert_eq!(result["success"], true);
     }
 
     #[fcp_async_core::runtime::test]
     async fn invoke_short_answer() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/result"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("42"))
-            .mount(&server)
-            .await;
-
-        let base_url = server.uri();
-        let (connector, signing_key) = setup_connector(&base_url, &["wolfram.query"]).await;
+        let server = TestHttpServer::respond(TestHttpResponse::text("/v1/result", 200, "42"));
+        let (connector, signing_key) = setup_connector(&server.uri(), &["wolfram.query"]).await;
         let capability = generate_token(
             &signing_key,
             &connector.base.instance_id,
@@ -1079,20 +1176,15 @@ mod tests {
             }))
             .await
             .expect("invoke");
+        server.finish();
         assert_eq!(result["answer"], "42");
     }
 
     #[fcp_async_core::runtime::test]
     async fn invoke_spoken_result() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/spoken"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("The answer is 4"))
-            .mount(&server)
-            .await;
-
-        let base_url = server.uri();
-        let (connector, signing_key) = setup_connector(&base_url, &["wolfram.query"]).await;
+        let server =
+            TestHttpServer::respond(TestHttpResponse::text("/v1/spoken", 200, "The answer is 4"));
+        let (connector, signing_key) = setup_connector(&server.uri(), &["wolfram.query"]).await;
         let capability = generate_token(
             &signing_key,
             &connector.base.instance_id,
@@ -1107,6 +1199,7 @@ mod tests {
             }))
             .await
             .expect("invoke");
+        server.finish();
         assert_eq!(result["spoken"], "The answer is 4");
     }
 

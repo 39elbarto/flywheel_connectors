@@ -4762,6 +4762,8 @@ enum HrwLeaseRouteRefusal<'a> {
     NotSelectedCoordinator {
         #[serde(flatten)]
         reason: &'a fcp_mesh::planner::LeaseTransferReason,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        yield_flush: Option<HrwLeaseYieldFlushEvidence>,
     },
     LeaseFenced {
         zone_id: ZoneId,
@@ -4770,6 +4772,31 @@ enum HrwLeaseRouteRefusal<'a> {
         current_lease_seq: u64,
         provided_lease_seq: Option<u64>,
     },
+}
+
+#[derive(Debug, Serialize)]
+struct HrwLeaseYieldFlushEvidence {
+    status: &'static str,
+    root_present: bool,
+    root_object_id: Option<String>,
+    head_object_id: Option<String>,
+    last_canonical_seq: Option<u64>,
+    lease_seq: Option<u64>,
+    lease_object_id: Option<String>,
+}
+
+impl From<&fcp_store::ConnectorStateLeaseYieldFlush> for HrwLeaseYieldFlushEvidence {
+    fn from(flush: &fcp_store::ConnectorStateLeaseYieldFlush) -> Self {
+        Self {
+            status: "flushed",
+            root_present: flush.root_object_id.is_some(),
+            root_object_id: flush.root_object_id.as_ref().map(ToString::to_string),
+            head_object_id: flush.head_object_id.as_ref().map(ToString::to_string),
+            last_canonical_seq: flush.last_canonical_seq,
+            lease_seq: flush.lease_seq,
+            lease_object_id: flush.lease_object_id.as_ref().map(ToString::to_string),
+        }
+    }
 }
 
 fn hrw_lease_refusal_message(refusal: &HrwLeaseRouteRefusal<'_>) -> String {
@@ -4836,7 +4863,10 @@ fn enforce_hrw_singleton_writer_launch_route(
             reason = ?reason,
             "singleton_writer connector launch refused by HRW lease routing"
         );
-        let refusal = HrwLeaseRouteRefusal::NotSelectedCoordinator { reason: &reason };
+        let refusal = HrwLeaseRouteRefusal::NotSelectedCoordinator {
+            reason: &reason,
+            yield_flush: None,
+        };
         HostError::PreflightFailed(hrw_lease_refusal_message_for("launch", &refusal))
     })?;
 
@@ -4851,9 +4881,48 @@ fn enforce_hrw_singleton_writer_launch_route(
     Ok(())
 }
 
-fn enforce_hrw_lease_route(
+async fn flush_singleton_writer_before_hrw_yield(
+    state: &AppState,
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+    reason: &fcp_mesh::planner::LeaseTransferReason,
+) -> HostResult<HrwLeaseYieldFlushEvidence> {
+    connector_lease_yield_flush_context_for_registered_connector(state, connector_id, zone_id)
+        .await
+        .map(|context| {
+            tracing::warn!(
+                event = "hrw_lease_yield_flush_before_refusal",
+                connector_id = %connector_id,
+                zone_id = %zone_id,
+                root_object_id = context.flush.root_object_id.as_ref().map(ToString::to_string),
+                head_object_id = context.flush.head_object_id.as_ref().map(ToString::to_string),
+                last_canonical_seq = ?context.flush.last_canonical_seq,
+                lease_seq = ?context.flush.lease_seq,
+                "flushed singleton_writer connector state before HRW lease yield"
+            );
+            HrwLeaseYieldFlushEvidence::from(&context.flush)
+        })
+        .map_err(|error| {
+            metrics::record_lease_flushed_on_yield(
+                CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+                "error",
+            );
+            let refusal = HrwLeaseRouteRefusal::NotSelectedCoordinator {
+                reason,
+                yield_flush: None,
+            };
+            HostError::PreflightFailed(format!(
+                "{}; flush-before-yield failed: {error}",
+                hrw_lease_refusal_message(&refusal)
+            ))
+        })
+}
+
+async fn enforce_hrw_lease_route(
+    state: &AppState,
     request: &InvokeRequest,
     routing: Option<&HrwLeaseRoutingConfig>,
+    connector_declares_singleton_writer: bool,
 ) -> HostResult<()> {
     let subject_id = singleton_writer_lease_subject_id(request);
     let Some(routing) = routing else {
@@ -4866,7 +4935,10 @@ fn enforce_hrw_lease_route(
             CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
             "invoke_no_eligible_holder",
         );
-        let refusal = HrwLeaseRouteRefusal::NotSelectedCoordinator { reason: &reason };
+        let refusal = HrwLeaseRouteRefusal::NotSelectedCoordinator {
+            reason: &reason,
+            yield_flush: None,
+        };
         return Err(HostError::PreflightFailed(hrw_lease_refusal_message(
             &refusal,
         )));
@@ -4892,9 +4964,34 @@ fn enforce_hrw_lease_route(
             reason = ?reason,
             "singleton_writer invoke refused by HRW lease routing"
         );
-        let refusal = HrwLeaseRouteRefusal::NotSelectedCoordinator { reason: &reason };
-        HostError::PreflightFailed(hrw_lease_refusal_message(&refusal))
-    })?;
+        reason
+    });
+    let selection = match selection {
+        Ok(selection) => selection,
+        Err(reason) => {
+            let yield_flush =
+                if connector_declares_singleton_writer && routing.current_lease_seq.is_some() {
+                    Some(
+                        flush_singleton_writer_before_hrw_yield(
+                            state,
+                            &request.connector_id,
+                            &request.zone_id,
+                            &reason,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+            let refusal = HrwLeaseRouteRefusal::NotSelectedCoordinator {
+                reason: &reason,
+                yield_flush,
+            };
+            return Err(HostError::PreflightFailed(hrw_lease_refusal_message(
+                &refusal,
+            )));
+        }
+    };
 
     if let Some(current_lease_seq) = routing.current_lease_seq
         && request
@@ -5195,7 +5292,13 @@ async fn verify_live_request(
         .await;
     if operation_requires_hrw_lease(tool, request, connector_declares_singleton_writer) {
         let routing = current_hrw_lease_routing_config()?;
-        enforce_hrw_lease_route(request, routing.as_ref())?;
+        enforce_hrw_lease_route(
+            state,
+            request,
+            routing.as_ref(),
+            connector_declares_singleton_writer,
+        )
+        .await?;
     }
 
     // SECURITY: holder-bound tokens (`holder_node` claim present) must never
@@ -18908,6 +19011,202 @@ deny_ptrace = true
             invoke_count.load(Ordering::SeqCst),
             1,
             "Elected holder should reach connector dispatch"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn invoke_handler_hrw_not_selected_flushes_singleton_writer_state_before_yield() {
+        let connector_id = "fcp.test.hrw-yield-flush:utility:1.0.0";
+        let operation_id = "test.singleton";
+        let capability_id = "cap.test.singleton";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let invoke_count = Arc::new(AtomicU64::new(0));
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let state_root = tempdir.path().join("managed-state");
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id = ZoneId::work();
+        let object_id_key = ObjectIdKey::from_bytes([0xC7; 32]);
+        let object_store_dir =
+            connector_state_canonical_object_store_dir(&state_root, &connector_key);
+        let object_store: Arc<dyn fcp_store::ObjectStore> = Arc::new(
+            fcp_store::DurableObjectStore::open(fcp_store::DurableObjectStoreConfig::new(
+                &object_store_dir,
+            ))
+            .expect("durable connector-state object store should open"),
+        );
+        let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+            Arc::clone(&object_store),
+            object_id_key,
+            connector_key.clone(),
+            zone_id.clone(),
+        )
+        .with_snapshot_every_entries(0)
+        .with_snapshot_every_secs(0);
+        let (authorization, state_signing_key) =
+            connector_state_write_authorization_for_test_with_key(&connector_key, &zone_id);
+        let append = fcp_core::ConnectorStateStore::append_object(
+            &state_store,
+            &connector_key,
+            &authorization,
+            sign_durable_connector_state_object_for_test(
+                durable_connector_state_object_for_test(
+                    &connector_key,
+                    &zone_id,
+                    0,
+                    None,
+                    ObjectId::from_bytes([0x92; 32]),
+                ),
+                &state_signing_key,
+            ),
+        )
+        .await
+        .expect("durable connector-state append should commit");
+        let (head_object_id, root_object_id) = match append {
+            fcp_core::ConnectorStateAppendOutcome::Committed {
+                object_id,
+                root_object_id,
+                seq,
+                snapshot_object_id,
+            } => {
+                assert_eq!(seq, 0);
+                assert_eq!(snapshot_object_id, None);
+                (object_id, root_object_id)
+            }
+            fcp_core::ConnectorStateAppendOutcome::Conflict { .. } => {
+                panic!("initial durable connector-state append should not conflict")
+            }
+        };
+        drop(state_store);
+        drop(object_store);
+
+        let input_schema = json!({
+            "type": "object",
+            "required": ["lease_seq"],
+            "properties": {
+                "lease_seq": { "type": "integer" },
+                "message": { "type": "string" }
+            }
+        });
+        let introspection = serde_json::to_value(dispatcher_introspection_with_input_schema(
+            operation_id,
+            capability_id,
+            SafetyTier::Safe,
+            input_schema,
+        ))
+        .expect("test introspection should serialize");
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(8);
+        let runner_invoke_count = Arc::clone(&invoke_count);
+        let runner_task = task::spawn(async move {
+            while let Some(request) = runner_rx.recv().await {
+                match request.method.as_str() {
+                    "introspect" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": introspection.clone(),
+                        })));
+                    }
+                    "health" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": dispatcher_health_result(),
+                        })));
+                    }
+                    "invoke" => {
+                        runner_invoke_count.fetch_add(1, Ordering::SeqCst);
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": InvokeResponse::ok(
+                                RequestId::random(),
+                                json!({ "should_not_dispatch": true }),
+                            ),
+                        })));
+                    }
+                    method => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": { "message": format!("unexpected method {method}") },
+                        })));
+                    }
+                }
+            }
+        });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let mut config = dispatcher_test_config(connector_id);
+        config.allowed_zones = vec![zone_id.as_str().to_string()];
+        config.env.insert(
+            CONNECTOR_STATE_DIR_ENV.to_string(),
+            state_root.display().to_string(),
+        );
+        config.env.insert(
+            CONNECTOR_STATE_OBJECT_ID_KEY_ENV.to_string(),
+            hex::encode(object_id_key.as_bytes()),
+        );
+        config.env.insert(
+            "FCP_CONNECTOR_STATE_MODEL".to_string(),
+            "singleton_writer".to_string(),
+        );
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
+        let state = dispatcher_app_state(
+            registry,
+            Arc::new(HostAdminStateStore::new()),
+            Some(signing_key.verifying_key()),
+            HashMap::new(),
+        );
+
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_key.clone(),
+            operation: OperationId::from_static(operation_id),
+            zone_id: zone_id.clone(),
+            input: json!({ "message": "lost majority must flush before yield", "lease_seq": 10 }),
+            capability_token: test_capability_token(
+                &signing_key,
+                capability_id,
+                operation_id,
+                zone_id.as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: Some(10),
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+        let subject_id = singleton_writer_lease_subject_id(&request);
+        let eligible_nodes = vec![
+            TailscaleNodeId::new("node-a"),
+            TailscaleNodeId::new("node-b"),
+            TailscaleNodeId::new("node-c"),
+        ];
+        let expected =
+            fcp_mesh::planner::select_lease_holder(&request.zone_id, &subject_id, &eligible_nodes)
+                .expect("HRW holder selected");
+        let local_node = eligible_nodes
+            .iter()
+            .find(|node| *node != &expected)
+            .expect("test set includes non-holder")
+            .clone();
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: local_node.clone(),
+            eligible_nodes,
+            current_lease_seq: Some(10),
+        }));
+
+        let (status, message) = invoke_handler(State(state), HeaderMap::new(), Json(request))
+            .await
+            .expect_err("not-selected singleton_writer invoke must flush before refusing");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(message.contains(r#""code":"NotSelectedCoordinator""#));
+        assert!(message.contains(r#""yield_flush""#));
+        assert!(message.contains(r#""status":"flushed""#));
+        assert!(message.contains(&root_object_id.to_string()));
+        assert!(message.contains(&head_object_id.to_string()));
+        assert!(message.contains(r#""last_canonical_seq":0"#));
+        assert!(message.contains(r#""lease_seq":10"#));
+        assert_eq!(
+            invoke_count.load(Ordering::SeqCst),
+            0,
+            "lease-yield flush must happen before connector dispatch"
         );
     }
 

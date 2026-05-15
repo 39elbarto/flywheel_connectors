@@ -19200,6 +19200,31 @@ deny_ptrace = true
             approval_tokens: Vec::new(),
         };
         let subject_id = singleton_writer_lease_subject_id(&request);
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: TailscaleNodeId::new("node-a"),
+            eligible_nodes: vec![TailscaleNodeId::new("node-a")],
+            current_lease_seq: None,
+        }));
+        let (status, message) = invoke_handler(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Json(request.clone()),
+        )
+        .await
+        .expect_err("singleton_writer invoke must fail before dispatch without quorum");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(message.contains("HRW lease routing refused singleton_writer invoke"));
+        assert!(message.contains(r#""code":"LeaseQuorumConfigInvalid""#));
+        assert!(message.contains(r#""configured_eligible_nodes_count":1"#));
+        assert!(message.contains(r#""required_quorum_signers_count":2"#));
+        assert_eq!(
+            invoke_count.load(Ordering::SeqCst),
+            0,
+            "LeaseQuorumConfigInvalid refusal must happen before connector dispatch"
+        );
+        drop(_guard);
+
         let eligible_nodes = vec![
             TailscaleNodeId::new("node-a"),
             TailscaleNodeId::new("node-b"),

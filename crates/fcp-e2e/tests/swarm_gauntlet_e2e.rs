@@ -900,6 +900,17 @@ fn prewarm_observation(
     }
 }
 
+fn prewarm_sandbox_gap_observation() -> PrewarmCheckoutObservation {
+    let mut observation = prewarm_observation(
+        PrewarmPoolState::WarmHit,
+        PrewarmManifestState::Current,
+        PrewarmHealthState::Ready,
+        None,
+    );
+    observation.sandbox = PrewarmSandboxState::LimitsUnavailable;
+    observation
+}
+
 fn prewarm_latency(
     p50_ms: u64,
     p95_ms: u64,
@@ -1397,6 +1408,58 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
             shutdown_cleanup_verified: true,
         })?,
         prewarm_evidence(PrewarmEvidenceCase {
+            scenario_id: "prewarm_exhausted_under_burst",
+            config: &config,
+            observation: prewarm_observation(
+                PrewarmPoolState::Empty,
+                PrewarmManifestState::Current,
+                PrewarmHealthState::Ready,
+                None,
+            ),
+            activation_latency_ms: 128,
+            baseline_on_demand_latency_ms: 128,
+            latency: prewarm_latency(128, 128, 128, 128, 128, 128),
+            baseline_latency: prewarm_latency(128, 128, 128, 128, 128, 128),
+            process_count: 256,
+            concurrent_startups: 4_096,
+            restart_reason: None,
+            skip_reason: Some("pool_exhausted_by_burst"),
+            shutdown_cleanup_verified: true,
+        })?,
+        prewarm_evidence(PrewarmEvidenceCase {
+            scenario_id: "prewarm_sandbox_limits_unavailable",
+            config: &config,
+            observation: prewarm_sandbox_gap_observation(),
+            activation_latency_ms: 96,
+            baseline_on_demand_latency_ms: 96,
+            latency: prewarm_latency(96, 96, 96, 96, 96, 96),
+            baseline_latency: prewarm_latency(96, 96, 96, 96, 96, 96),
+            process_count: 1,
+            concurrent_startups: 1,
+            restart_reason: None,
+            skip_reason: Some("sandbox_limits_unverified"),
+            shutdown_cleanup_verified: true,
+        })?,
+        prewarm_evidence(PrewarmEvidenceCase {
+            scenario_id: "prewarm_checkout_cancelled_before_admit",
+            config: &config,
+            observation: prewarm_observation(
+                PrewarmPoolState::WarmHit,
+                PrewarmManifestState::Current,
+                PrewarmHealthState::Starting,
+                None,
+            ),
+            activation_latency_ms: 96,
+            baseline_on_demand_latency_ms: 96,
+            latency: prewarm_latency(96, 96, 96, 96, 96, 96),
+            baseline_latency: prewarm_latency(96, 96, 96, 96, 96, 96),
+            process_count: 1,
+            concurrent_startups: 1,
+            restart_reason: None,
+            skip_reason: Some("checkout_cancelled_before_admit"),
+            shutdown_cleanup_verified: true,
+        })?,
+        prewarm_evidence(PrewarmEvidenceCase {
             scenario_id: "prewarm_zygote_rejected_without_security_proof",
             config: &zygote_config,
             observation: prewarm_observation(
@@ -1455,6 +1518,18 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
         .iter()
         .find(|record| record["scenario_id"] == "prewarm_concurrent_swarm_startup")
         .ok_or("concurrent-swarm prewarm record should be present")?;
+    let exhausted = records
+        .iter()
+        .find(|record| record["scenario_id"] == "prewarm_exhausted_under_burst")
+        .ok_or("burst-exhaustion prewarm record should be present")?;
+    let sandbox_gap = records
+        .iter()
+        .find(|record| record["scenario_id"] == "prewarm_sandbox_limits_unavailable")
+        .ok_or("sandbox-gap prewarm record should be present")?;
+    let cancelled = records
+        .iter()
+        .find(|record| record["scenario_id"] == "prewarm_checkout_cancelled_before_admit")
+        .ok_or("cancelled-checkout prewarm record should be present")?;
     let zygote = records
         .iter()
         .find(|record| record["scenario_id"] == "prewarm_zygote_rejected_without_security_proof")
@@ -1604,6 +1679,26 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
             .as_u64()
             .is_some_and(|improvement| improvement > 0)
     );
+    assert_eq!(exhausted["fallback_reason"], "empty_pool");
+    assert_eq!(exhausted["error_mapping"], "fallback_on_demand:empty_pool");
+    assert_eq!(exhausted["skip_reason"], "pool_exhausted_by_burst");
+    assert_eq!(exhausted["warm_checkout"], false);
+    assert_eq!(exhausted["concurrent_startups"], 4_096);
+    assert_eq!(sandbox_gap["fallback_reason"], "sandbox_limits_unavailable");
+    assert_eq!(
+        sandbox_gap["error_mapping"],
+        "fallback_on_demand:sandbox_limits_unavailable"
+    );
+    assert_eq!(sandbox_gap["sandbox_layer"], "limits_unavailable");
+    assert_eq!(sandbox_gap["skip_reason"], "sandbox_limits_unverified");
+    assert_eq!(sandbox_gap["warm_checkout"], false);
+    assert_eq!(cancelled["fallback_reason"], "warm_entry_still_starting");
+    assert_eq!(
+        cancelled["error_mapping"],
+        "fallback_on_demand:warm_entry_still_starting"
+    );
+    assert_eq!(cancelled["skip_reason"], "checkout_cancelled_before_admit");
+    assert_eq!(cancelled["warm_checkout"], false);
     for line in jsonl.lines() {
         serde_json::from_str::<Value>(line)?;
     }

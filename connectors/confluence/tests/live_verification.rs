@@ -14,94 +14,179 @@ use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
     HandshakeRequest, InvokeRequest, InvokeStatus, OperationId, RequestId, ZoneId,
 };
+use fcp_testkit::live_suite::{CleanupStrategy, EnvironmentManifest, LiveEnvironment, LiveGate};
 use serde_json::{Value, json};
 
 const LIVE_GATE_ENV: &str = "FCP_LIVE_SANDBOX";
-const BASE_URL_ENV: &str = "CONFLUENCE_BASE_URL";
-const EMAIL_ENV: &str = "CONFLUENCE_EMAIL";
-const TOKEN_ENV: &str = "CONFLUENCE_API_TOKEN";
-const SPACE_KEY_ENV: &str = "CONFLUENCE_SPACE_KEY";
-const VERIFY_PAGES_ENV: &str = "CONFLUENCE_VERIFY_PAGES";
+const BASE_URL_ENV: &str = "CONFLUENCE_SANDBOX_BASE_URL";
+const EMAIL_ENV: &str = "CONFLUENCE_SANDBOX_EMAIL";
+const TOKEN_ENV: &str = "CONFLUENCE_SANDBOX_API_TOKEN";
+const SPACE_KEY_ENV: &str = "CONFLUENCE_SANDBOX_SPACE_KEY";
+const NAMESPACE_ENV: &str = "FCP_SANDBOX_RUN_NAMESPACE";
 const CONNECTOR_ID: &str = "fcp.confluence";
 const CAP_SPACES_READ: &str = "confluence.spaces.read";
 const CAP_PAGES_READ: &str = "confluence.pages.read";
 const CAP_PAGES_WRITE: &str = "confluence.pages.write";
 const OP_PAGES_LIST: &str = "confluence.pages.list";
 const OP_SPACES_LIST: &str = "confluence.spaces.list";
+const BEAD_ID: &str = "flywheel_connectors-bky21.4.6.1";
+
+fn manifest() -> EnvironmentManifest {
+    EnvironmentManifest::sandbox("confluence", "Confluence sandbox")
+        .with_env_secret(
+            "api_token",
+            TOKEN_ENV,
+            "Confluence API token scoped to a dedicated sandbox space",
+        )
+        .with_env_var(BASE_URL_ENV, "Confluence sandbox site base URL")
+        .with_env_var(EMAIL_ENV, "Confluence sandbox account email")
+        .with_env_var(
+            SPACE_KEY_ENV,
+            "Confluence sandbox space key used for bounded page-list proof",
+        )
+        .with_env_var(
+            NAMESPACE_ENV,
+            "Shared namespace recorded in evidence for sandbox-side artifacts",
+        )
+        .with_account_setup(
+            "Use a dedicated Confluence sandbox site and space. This suite performs read-only space and page listings; page create/update/delete belongs in a separate namespaced mutation flow.",
+        )
+        .with_budget(0.01)
+        .with_cleanup(CleanupStrategy::PrefixDelete)
+        .with_rate_limits(0.5, true)
+}
+
+fn emit_live_jsonl(
+    status: &str,
+    reason: &str,
+    space_count: usize,
+    page_count: usize,
+    evidence: &Value,
+) {
+    eprintln!(
+        "CONFLUENCE_LIVE_SANDBOX_JSONL {}",
+        json!({
+            "event": "confluence_live_sandbox_verification",
+            "fixture_mode": "live",
+            "suite_class": "sandbox_required",
+            "gate_env_var": LIVE_GATE_ENV,
+            "required_secret_env": TOKEN_ENV,
+            "required_env": [BASE_URL_ENV, EMAIL_ENV, SPACE_KEY_ENV, NAMESPACE_ENV],
+            "operation": [OP_SPACES_LIST, OP_PAGES_LIST],
+            "bead_id": BEAD_ID,
+            "status": status,
+            "provider": "Confluence sandbox",
+            "environment": "sandbox",
+            "resource_class": "space_and_page_listing",
+            "space_count": space_count,
+            "page_count": page_count,
+            "call_ceiling": 2,
+            "rate_limit_guidance": "Performs one space listing and one page listing against a sandbox space.",
+            "mutation_expected": false,
+            "cleanup_strategy": "prefix_delete",
+            "provider_resource_ids_logged": false,
+            "secret_values_logged": false,
+            "base_url_logged": false,
+            "email_logged": false,
+            "space_key_logged": false,
+            "skip_reason": if status == "skipped" { Some(reason) } else { None },
+            "fcp_error_mapping": if status == "failed" { Some(reason) } else { None },
+            "evidence": evidence,
+        })
+    );
+}
+
+fn skip_reason(gate: &LiveGate, env: &LiveEnvironment) -> String {
+    if gate.is_enabled() {
+        env.problems().join("; ")
+    } else {
+        gate.skip_reason()
+    }
+}
 
 #[fcp_async_core::runtime::test]
-async fn live_verification_lists_spaces_when_enabled() {
-    if !live_gate_enabled() {
-        emit_live_jsonl("skipped", &format!("{LIVE_GATE_ENV} is not set to 1"), 0);
+async fn confluence_live_sandbox_spaces_and_pages_or_structured_skip_jsonl() {
+    let gate = LiveGate::sandbox();
+    let env = LiveEnvironment::from_manifest(manifest());
+    if !gate.is_enabled() || !env.is_ready() {
+        emit_live_jsonl(
+            "skipped",
+            &skip_reason(&gate, &env),
+            0,
+            0,
+            &env.evidence_summary(),
+        );
         return;
     }
 
-    let Some(base_url) = env_nonempty(BASE_URL_ENV) else {
-        emit_live_jsonl("skipped", &format!("{BASE_URL_ENV} is not set"), 0);
-        return;
-    };
-    let Some(email) = env_nonempty(EMAIL_ENV) else {
-        emit_live_jsonl("skipped", &format!("{EMAIL_ENV} is not set"), 0);
-        return;
-    };
-    let Some(token) = env_nonempty(TOKEN_ENV) else {
-        emit_live_jsonl("skipped", &format!("{TOKEN_ENV} is not set"), 0);
-        return;
-    };
-
     let signing_key = Ed25519SigningKey::generate();
-    let connector = configured_connector(&base_url, &email, &token, &signing_key).await;
-    let spaces = invoke(
+    let connector = configured_connector(&env, &signing_key).await;
+    let spaces = match invoke(
         &connector,
         &signing_key,
         OP_SPACES_LIST,
         json!({"start": 0, "limit": 1}),
     )
     .await
-    .expect("list live Confluence spaces");
-    let mut observed_count = spaces["results"].as_array().map_or(0, Vec::len);
-    let mut reason = "spaces.list completed";
+    {
+        Ok(value) => value,
+        Err(error) => {
+            emit_live_jsonl("failed", &error.to_string(), 0, 0, &env.evidence_summary());
+            panic!("Confluence sandbox space listing failed: {error}");
+        }
+    };
+    env.budget.record_api_call(OP_SPACES_LIST, 0.0);
+    let space_count = spaces["results"].as_array().map_or(0, Vec::len);
 
-    if std::env::var(VERIFY_PAGES_ENV).ok().as_deref() == Some("1") {
-        let Some(space_key) = env_nonempty(SPACE_KEY_ENV) else {
+    let pages = match invoke(
+        &connector,
+        &signing_key,
+        OP_PAGES_LIST,
+        json!({
+            "space_key": env.env_vars.get(SPACE_KEY_ENV).expect("space key env is ready"),
+            "start": 0,
+            "limit": 1
+        }),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
             emit_live_jsonl(
-                "skipped",
-                &format!("{SPACE_KEY_ENV} is not set"),
-                observed_count,
+                "failed",
+                &error.to_string(),
+                space_count,
+                0,
+                &env.evidence_summary(),
             );
-            return;
-        };
-        let pages = invoke(
-            &connector,
-            &signing_key,
-            OP_PAGES_LIST,
-            json!({
-                "space_key": space_key,
-                "start": 0,
-                "limit": 1
-            }),
-        )
-        .await
-        .expect("list live Confluence pages");
-        observed_count = pages["results"].as_array().map_or(observed_count, Vec::len);
-        reason = "spaces.list and pages.list completed";
-    }
+            panic!("Confluence sandbox page listing failed: {error}");
+        }
+    };
+    env.budget.record_api_call(OP_PAGES_LIST, 0.0);
+    let page_count = pages["results"].as_array().map_or(0, Vec::len);
 
-    emit_live_jsonl("passed", reason, observed_count);
+    emit_live_jsonl(
+        "passed",
+        "",
+        space_count,
+        page_count,
+        &json!({
+            "environment": env.evidence_summary(),
+            "operation_result": "spaces.list and pages.list completed",
+        }),
+    );
 }
 
 async fn configured_connector(
-    base_url: &str,
-    email: &str,
-    token: &str,
+    env: &LiveEnvironment,
     signing_key: &Ed25519SigningKey,
 ) -> ConfluenceConnector {
     let mut connector = ConfluenceConnector::new();
     connector
         .configure(json!({
-            "base_url": base_url,
-            "email": email,
-            "api_token": token,
+            "base_url": env.env_vars.get(BASE_URL_ENV).expect("base URL env is ready"),
+            "email": env.env_vars.get(EMAIL_ENV).expect("email env is ready"),
+            "api_token": env.secrets.require("api_token"),
             "request_timeout_ms": 10_000,
             "retry": {
                 "max_retries": 1,
@@ -195,35 +280,4 @@ async fn invoke(
         .await?;
     assert_eq!(response.status, InvokeStatus::Ok);
     Ok(response.result.expect("successful response has result"))
-}
-
-fn live_gate_enabled() -> bool {
-    std::env::var(LIVE_GATE_ENV).ok().as_deref() == Some("1")
-}
-
-fn env_nonempty(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn emit_live_jsonl(status: &str, reason: &str, observed_count: usize) {
-    eprintln!(
-        "CONFLUENCE_LIVE_SANDBOX_JSONL {}",
-        json!({
-            "connector": "confluence",
-            "suite_class": "live",
-            "gate_env_var": LIVE_GATE_ENV,
-            "credential_env_vars": [BASE_URL_ENV, EMAIL_ENV, TOKEN_ENV],
-            "optional_env_vars": [SPACE_KEY_ENV, VERIFY_PAGES_ENV],
-            "status": status,
-            "reason": reason,
-            "observed_count": observed_count,
-            "credential_material_logged": false,
-            "base_url_logged": false,
-            "email_logged": false,
-            "space_key_logged": false
-        })
-    );
 }

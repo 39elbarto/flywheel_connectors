@@ -30,6 +30,7 @@ const CAP_JOBS_READ: &str = "circleci.jobs.read";
 const CAP_PROJECTS_READ: &str = "circleci.projects.read";
 const OP_PIPELINES_LIST: &str = "circleci.pipelines.list";
 const OP_PROJECTS_LIST: &str = "circleci.projects.list";
+const OP_HEALTH: &str = "circleci.health";
 
 fn manifest() -> EnvironmentManifest {
     EnvironmentManifest::sandbox("circleci", "CircleCI sandbox")
@@ -52,7 +53,10 @@ fn manifest() -> EnvironmentManifest {
         .with_budget(0.01)
         .with_cleanup(CleanupStrategy::None)
         .with_rate_limits(0.5, true)
-        .with_metadata("request_categories", json!(["projects.list", "pipelines.list"]))
+        .with_metadata(
+            "request_categories",
+            json!(["projects.list", "pipelines.list", "health"]),
+        )
         .with_metadata("pipeline_triggered", json!(false))
 }
 
@@ -72,6 +76,9 @@ async fn live_verification_lists_projects_when_enabled() {
 
     let signing_key = Ed25519SigningKey::generate();
     let connector = configured_connector(&env, &signing_key).await;
+    let _health = invoke(&connector, &signing_key, OP_HEALTH, json!({}))
+        .await
+        .expect("check live CircleCI health");
     let projects = invoke(&connector, &signing_key, OP_PROJECTS_LIST, json!({}))
         .await
         .expect("list live CircleCI projects");
@@ -101,7 +108,7 @@ async fn live_verification_lists_projects_when_enabled() {
             "environment": env.evidence_summary(),
             "project_count": project_count,
             "pipeline_count": pipeline_count,
-            "operation_result": "circleci.projects.list and circleci.pipelines.list completed",
+            "operation_result": "circleci.health, circleci.projects.list, and circleci.pipelines.list completed",
         }),
     );
 }
@@ -152,7 +159,7 @@ async fn configured_connector(
 fn capability_for_operation(operation: &'static str) -> &'static str {
     match operation {
         OP_PIPELINES_LIST => CAP_PIPELINES_READ,
-        OP_PROJECTS_LIST => CAP_PROJECTS_READ,
+        OP_PROJECTS_LIST | OP_HEALTH => CAP_PROJECTS_READ,
         _ => panic!("unsupported operation {operation}"),
     }
 }
@@ -231,19 +238,20 @@ fn emit_live_jsonl(status: &str, reason: &str, observed_count: usize, evidence: 
             "gate_env_var": LIVE_GATE_ENV,
             "required_secret_env": [TOKEN_ENV],
             "required_env": [PROJECT_SLUG_ENV, NAMESPACE_ENV],
-            "operation": [OP_PROJECTS_LIST, OP_PIPELINES_LIST],
+            "operation": [OP_HEALTH, OP_PROJECTS_LIST, OP_PIPELINES_LIST],
             "status": status,
             "provider": "CircleCI sandbox",
             "environment": "sandbox",
             "resource_class": "project_and_pipeline_inventory",
             "observed_count": observed_count,
-            "call_ceiling": 2,
-            "rate_limit_guidance": "Performs one project inventory call and one sandbox project pipeline list.",
+            "call_ceiling": 3,
+            "rate_limit_guidance": "Performs one auth health probe, one project inventory call, and one sandbox project pipeline list.",
             "mutation_expected": false,
             "cleanup_strategy": "noop_read_only",
             "cleanup_result": "not_required",
             "provider_project_class": "dedicated_sandbox",
-            "request_category": ["projects.list", "pipelines.list"],
+            "request_category": ["health", "projects.list", "pipelines.list"],
+            "idempotent_probe": OP_HEALTH,
             "pipeline_triggered": false,
             "dropped_or_budgeted_count": 0,
             "credential_material_logged": false,

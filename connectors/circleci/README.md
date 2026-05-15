@@ -146,8 +146,9 @@ rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-circleci-bky21 cargo test -p fcp-circl
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-circleci-bky21 cargo clippy -p fcp-circleci --all-targets -- -D warnings
 ```
 
-The current sandbox proof is intentionally read-only: it performs
-`circleci.projects.list` and `circleci.pipelines.list`, records a two-call
+The current sandbox proof is intentionally non-mutating: it performs the
+idempotent `circleci.health` auth/reachability probe plus
+`circleci.projects.list` and `circleci.pipelines.list`, records a three-call
 ceiling, and emits JSONL evidence with `pipeline_triggered=false`. It does not
 trigger, cancel, or rerun pipelines.
 

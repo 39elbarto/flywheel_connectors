@@ -19210,6 +19210,268 @@ deny_ptrace = true
         );
     }
 
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn hrw_three_node_handoff_flushes_old_holder_and_new_holder_reads_state()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let connector_id = "fcp.test.hrw-three-node-handoff:utility:1.0.0";
+        let operation_id = "test.singleton";
+        let capability_id = "cap.test.singleton";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let invoke_count = Arc::new(AtomicU64::new(0));
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let state_root = tempdir.path().join("managed-state");
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id = ZoneId::work();
+        let object_id_key = ObjectIdKey::from_bytes([0xC8; 32]);
+        let object_store_dir =
+            connector_state_canonical_object_store_dir(&state_root, &connector_key);
+        let object_store: Arc<dyn fcp_store::ObjectStore> = Arc::new(
+            fcp_store::DurableObjectStore::open(fcp_store::DurableObjectStoreConfig::new(
+                &object_store_dir,
+            ))
+            .expect("durable connector-state object store should open"),
+        );
+        let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+            Arc::clone(&object_store),
+            object_id_key,
+            connector_key.clone(),
+            zone_id.clone(),
+        )
+        .with_snapshot_every_entries(0)
+        .with_snapshot_every_secs(0);
+        let (authorization, state_signing_key) =
+            connector_state_write_authorization_for_test_with_key(&connector_key, &zone_id);
+        let append = fcp_core::ConnectorStateStore::append_object(
+            &state_store,
+            &connector_key,
+            &authorization,
+            sign_durable_connector_state_object_for_test(
+                durable_connector_state_object_for_test(
+                    &connector_key,
+                    &zone_id,
+                    0,
+                    None,
+                    ObjectId::from_bytes([0x93; 32]),
+                ),
+                &state_signing_key,
+            ),
+        )
+        .await
+        .expect("durable connector-state append should commit");
+        let (head_object_id, root_object_id) = match append {
+            fcp_core::ConnectorStateAppendOutcome::Committed {
+                object_id,
+                root_object_id,
+                seq,
+                snapshot_object_id,
+            } => {
+                assert_eq!(seq, 0);
+                assert_eq!(snapshot_object_id, None);
+                (object_id, root_object_id)
+            }
+            fcp_core::ConnectorStateAppendOutcome::Conflict { .. } => {
+                panic!("initial durable connector-state append should not conflict")
+            }
+        };
+        drop(state_store);
+        drop(object_store);
+
+        let input_schema = json!({
+            "type": "object",
+            "required": ["lease_seq"],
+            "properties": {
+                "lease_seq": { "type": "integer" },
+                "message": { "type": "string" }
+            }
+        });
+        let introspection = serde_json::to_value(dispatcher_introspection_with_input_schema(
+            operation_id,
+            capability_id,
+            SafetyTier::Safe,
+            input_schema,
+        ))
+        .expect("test introspection should serialize");
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(8);
+        let runner_invoke_count = Arc::clone(&invoke_count);
+        let runner_task = task::spawn(async move {
+            while let Some(request) = runner_rx.recv().await {
+                match request.method.as_str() {
+                    "introspect" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": introspection.clone(),
+                        })));
+                    }
+                    "health" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": dispatcher_health_result(),
+                        })));
+                    }
+                    "invoke" => {
+                        runner_invoke_count.fetch_add(1, Ordering::SeqCst);
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": InvokeResponse::ok(
+                                RequestId::random(),
+                                json!({ "should_not_dispatch": true }),
+                            ),
+                        })));
+                    }
+                    method => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": { "message": format!("unexpected method {method}") },
+                        })));
+                    }
+                }
+            }
+        });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let mut config = dispatcher_test_config(connector_id);
+        config.allowed_zones = vec![zone_id.as_str().to_string()];
+        config.env.insert(
+            CONNECTOR_STATE_DIR_ENV.to_string(),
+            state_root.display().to_string(),
+        );
+        config.env.insert(
+            CONNECTOR_STATE_OBJECT_ID_KEY_ENV.to_string(),
+            hex::encode(object_id_key.as_bytes()),
+        );
+        config.env.insert(
+            "FCP_CONNECTOR_STATE_MODEL".to_string(),
+            "singleton_writer".to_string(),
+        );
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
+        let state = dispatcher_app_state(
+            registry,
+            Arc::new(HostAdminStateStore::new()),
+            Some(signing_key.verifying_key()),
+            HashMap::new(),
+        );
+        let state = Arc::new(AppState {
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            ..(*state).clone()
+        });
+
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_key.clone(),
+            operation: OperationId::from_static(operation_id),
+            zone_id: zone_id.clone(),
+            input: json!({ "message": "partitioned holder must flush before handoff", "lease_seq": 10 }),
+            capability_token: test_capability_token(
+                &signing_key,
+                capability_id,
+                operation_id,
+                zone_id.as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: Some(10),
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+        let subject_id = singleton_writer_lease_subject_id(&request);
+        let full_node_set = vec![
+            TailscaleNodeId::new("node-a"),
+            TailscaleNodeId::new("node-b"),
+            TailscaleNodeId::new("node-c"),
+        ];
+        let old_holder =
+            fcp_mesh::planner::select_lease_holder(&request.zone_id, &subject_id, &full_node_set)
+                .expect("initial HRW holder selected");
+        let handoff_node_set = full_node_set
+            .iter()
+            .filter(|node| *node != &old_holder)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            handoff_node_set.len(),
+            2,
+            "handoff test must model a two-node majority after isolating old holder"
+        );
+        let new_holder = fcp_mesh::planner::select_lease_holder(
+            &request.zone_id,
+            &subject_id,
+            &handoff_node_set,
+        )
+        .expect("handoff HRW holder selected");
+        assert_ne!(
+            old_holder, new_holder,
+            "removing the old holder from the online set must force a deterministic handoff"
+        );
+        fcp_mesh::planner::admit_lease_holder(
+            &request.zone_id,
+            &subject_id,
+            CoreLeasePurpose::ConnectorStateWrite,
+            &handoff_node_set,
+            &new_holder,
+        )
+        .expect("new holder should be admitted after handoff");
+
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: old_holder.clone(),
+            eligible_nodes: handoff_node_set.clone(),
+            current_lease_seq: Some(10),
+        }));
+        let (status, message) = invoke_handler(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Json(request.clone()),
+        )
+        .await
+        .expect_err("isolated old holder must flush then yield to new HRW holder");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(message.contains(r#""code":"NotSelectedCoordinator""#));
+        assert!(message.contains(r#""yield_flush""#));
+        assert!(message.contains(old_holder.as_str()));
+        assert!(message.contains(new_holder.as_str()));
+        assert!(message.contains(&root_object_id.to_string()));
+        assert!(message.contains(&head_object_id.to_string()));
+        assert_eq!(
+            invoke_count.load(Ordering::SeqCst),
+            0,
+            "old holder must not dispatch after losing the HRW handoff"
+        );
+        drop(_guard);
+
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: new_holder,
+            eligible_nodes: handoff_node_set,
+            current_lease_seq: Some(10),
+        }));
+        let app = connector_state_explain_test_app(Arc::clone(&state));
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/connectors/fcp.test.hrw-three-node-handoff:utility:1.0.0/state/explain?zone=z%3Awork",
+            serde_json::json!({}),
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(payload["source"], "host-canonical-state");
+        assert_eq!(payload["canonical_state"]["root_present"], true);
+        assert_eq!(
+            payload["canonical_state"]["root_object_id"],
+            root_object_id.to_string()
+        );
+        assert_eq!(
+            payload["canonical_state"]["head_object_id"],
+            head_object_id.to_string()
+        );
+        assert_eq!(payload["last_canonical_seq"], 0);
+        assert_eq!(payload["canonical_state"]["model"], "singleton_writer");
+        Ok(())
+    }
+
     #[test]
     fn singleton_writer_hrw_lease_subject_is_connector_zone_scoped() {
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();

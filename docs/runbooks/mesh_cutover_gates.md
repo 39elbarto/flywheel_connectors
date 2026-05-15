@@ -43,6 +43,22 @@ default until every gate is green from live telemetry.
    `fwc policy distribution --json` and confirm peer distribution plus owner
    signature verification.
 
+## Three-Node Proof Harness
+
+Use the live harness when the mesh has three host endpoints that are expected to
+report green cutover telemetry:
+
+```bash
+FCP_CUTOVER_GATE_HOSTS="http://node-a:8787,http://node-b:8787,http://node-c:8787" \
+  bash scripts/e2e/mesh_cutover_gates_3node.sh
+```
+
+The harness calls `fwc --host <endpoint> mesh cutover-gates --json` for each
+host, stores one redaction-safe JSON payload per host, and fails unless every
+host reports the four stable gates as `green` with direct live telemetry and the
+same `data_hash`. Host endpoints are recorded only as SHA-256 hashes in the
+summary artifacts.
+
 ## Common Failures
 
 | Symptom | Likely cause | Fix |

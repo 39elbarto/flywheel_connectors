@@ -51,6 +51,8 @@ connector status, or sync/transfer logs without the required predicate fields.
 
 Configuration details: [Mesh Cutover Gates Configuration](configuration/cutover_gates.md).
 Operator recovery steps: [Mesh Cutover Gates Runbook](runbooks/mesh_cutover_gates.md).
+Three-node live proof harness:
+`bash scripts/e2e/mesh_cutover_gates_3node.sh --hosts <a>,<b>,<c>`.
 
 ---
 

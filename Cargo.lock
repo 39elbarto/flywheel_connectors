@@ -3408,6 +3408,8 @@ name = "fcp-crypto-hw"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "chacha20poly1305",
+ "criterion",
  "serde",
  "serde_json",
  "tracing",

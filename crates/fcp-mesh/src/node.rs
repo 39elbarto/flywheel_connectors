@@ -17,9 +17,10 @@ use fcp_cbor::CanonicalSerializer;
 use fcp_crypto::{CwtClaims, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_prelude::{
     CapabilityVerifier, ConnectorStateChange, EvictionPolicy, FcpError, InvokeRequest,
-    InvokeValidationError, Lease as CoreLease, ObjectId, ObjectIdKey, OperationIntent,
-    OperationReceipt, RevocationRegistry, StorageMeta, StoredObject, TailscaleNodeId, ZoneId,
-    ZoneKey, ZoneKeyAlgorithm, ZoneTransportPolicy,
+    InvokeValidationError, Lease as CoreLease, LeaseValidationError as CoreLeaseValidationError,
+    ObjectId, ObjectIdKey, OperationIntent, OperationReceipt, RevocationRegistry, StorageMeta,
+    StoredObject, TailscaleNodeId, ZoneId, ZoneKey, ZoneKeyAlgorithm, ZoneTransportPolicy,
+    validate_lease as validate_core_lease,
 };
 use fcp_protocol::{DecodeStatus, SymbolAck, SymbolRequest};
 use fcp_raptorq::RaptorQConfig;
@@ -64,6 +65,8 @@ use crate::symbol_request::{
     SymbolResponse, SymbolResponseBuilder, TargetedRepairEngine, TransferKey, ValidatedRequest,
 };
 use crate::transport::{RankedPath, TransportPath, TransportSelector};
+
+const DEFAULT_LEASE_PUBLICATION_REQUIRED_QUORUM_SIGNATURES: usize = 2;
 
 /// MeshNode configuration (builder-style).
 #[derive(Debug, Clone)]
@@ -185,6 +188,10 @@ pub enum MeshNodeError {
     /// Enforcement error.
     #[error("enforcement error: {0}")]
     Enforcement(#[from] MeshNodeEnforcementError),
+
+    /// Durable lease object failed validation before mesh publication.
+    #[error("lease validation error: {0}")]
+    LeaseValidation(#[from] CoreLeaseValidationError),
 
     /// Required peer signing key is not registered.
     #[error("missing peer signing key for {peer}")]
@@ -1615,9 +1622,9 @@ impl MeshNode {
     /// Store a durable core lease object locally and announce it for gossip.
     ///
     /// The lease coordinator owns admission and fencing-token selection. This
-    /// bridge turns an already-issued lease into a content-addressed mesh
-    /// object, so peers can fetch the authority object through the normal
-    /// gossip object path.
+    /// bridge validates the already-issued lease with the mesh default quorum
+    /// before turning it into a content-addressed mesh object, so peers only
+    /// fetch quorum-backed authority objects through the normal gossip path.
     ///
     /// # Errors
     /// Returns an error if canonical lease encoding or local object storage
@@ -1628,6 +1635,15 @@ impl MeshNode {
         object_id_key: &ObjectIdKey,
         now_ms: u64,
     ) -> Result<ObjectId, MeshNodeError> {
+        validate_core_lease(
+            lease,
+            &lease.subject_object_id,
+            lease.zone_id(),
+            lease.purpose,
+            lease.lease_seq,
+            now_ms / 1000,
+            DEFAULT_LEASE_PUBLICATION_REQUIRED_QUORUM_SIGNATURES,
+        )?;
         let body = CanonicalSerializer::serialize(lease, &lease.header.schema)?;
         let object_id = StoredObject::derive_id(&lease.header, &body, object_id_key)?;
         let stored = StoredObject {
@@ -3791,8 +3807,21 @@ mod tests {
             exp: 70,
             subject_object_id,
             purpose: fcp_prelude::LeasePurpose::ConnectorStateWrite,
-            quorum_signatures: fcp_core::SignatureSet::new(),
+            quorum_signatures: test_signature_set(&["node-1", "node-2"]),
         }
+    }
+
+    fn test_signature_set(signers: &[&str]) -> fcp_core::SignatureSet {
+        let mut signatures = fcp_core::SignatureSet::new();
+        for (idx, signer) in signers.iter().enumerate() {
+            let signature_byte = u8::try_from(idx).unwrap_or(u8::MAX);
+            signatures.add(fcp_core::NodeSignature::new(
+                fcp_core::NodeId::new(*signer),
+                [signature_byte; 64],
+                1_000 + u64::try_from(idx).unwrap_or(u64::MAX),
+            ));
+        }
+        signatures
     }
 
     fn test_object_symbol_meta(object_id: ObjectId, zone_id: &ZoneId) -> ObjectSymbolMeta {
@@ -4666,6 +4695,10 @@ mod tests {
             assert_eq!(decoded.holder, lease.holder);
             assert_eq!(decoded.lease_seq, lease.lease_seq);
             assert_eq!(decoded.subject_object_id, subject_object_id);
+            assert_eq!(
+                decoded.quorum_signatures.len(),
+                DEFAULT_LEASE_PUBLICATION_REQUIRED_QUORUM_SIGNATURES
+            );
             lease_object_id
         })
         .expect("runtime");
@@ -4691,6 +4724,32 @@ mod tests {
             .expect("gossip request");
         assert_eq!(response.have_objects, vec![lease_object_id]);
         assert_eq!(node.metrics().gossip_announcements, 1);
+    }
+
+    #[test]
+    fn publish_signed_lease_object_rejects_insufficient_quorum_before_gossip() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let subject_object_id = test_object_id("connector-state");
+        let object_id_key = ObjectIdKey::from_bytes([0x42; 32]);
+        let mut lease = test_core_lease(&zone_id, subject_object_id);
+        lease.quorum_signatures = fcp_core::SignatureSet::new();
+
+        let err = fcp_async_core::runtime::block_on_sync(async {
+            node.publish_signed_lease_object(&lease, &object_id_key, 50_000)
+                .await
+                .expect_err("quorum-deficient lease must not publish")
+        })
+        .expect("runtime");
+
+        assert!(matches!(
+            err,
+            MeshNodeError::LeaseValidation(CoreLeaseValidationError::InsufficientQuorum {
+                required: DEFAULT_LEASE_PUBLICATION_REQUIRED_QUORUM_SIGNATURES,
+                got: 0,
+            })
+        ));
+        assert_eq!(node.metrics().gossip_announcements, 0);
     }
 
     #[test]

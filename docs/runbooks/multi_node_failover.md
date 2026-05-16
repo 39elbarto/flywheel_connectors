@@ -140,11 +140,17 @@ phase-specific payload. The current phases are:
 - `replacement_holder_admitted`
 - `stale_write_fenced_after_handoff`
 - `canonical_state_exposed_after_handoff`
+- `invariant_summary`
 
 This replay is intentionally smaller than the local `LocalReplayBundle`
 because it records observable HTTP/binary-test evidence rather than in-memory
 per-node snapshots. It is useful when the host handoff test fails after a
 departure, replacement election, stale write, or state-explain regression.
+The final `invariant_summary` phase makes the written replay self-verifying:
+it records the initial and post-departure candidate/refusal counts, durable and
+replacement fencing tokens, replacement-holder change, stale-write fencing,
+canonical-state replay, and quorum satisfaction predicates asserted by the
+test.
 
 The writer renders and redaction-checks the JSONL before creating the artifact
 directory. Raw `node-a`/`node-b`/`node-c` labels and obvious credential-like
@@ -181,6 +187,8 @@ strings fail the preflight instead of leaving a partial replay on disk.
 | `orphaned_active_lease_count` is non-zero. | The selected singleton holder is offline or not in holder role after recovery. | Inspect the final node snapshots and the last holder promotion/recovery transition in `events.jsonl`. |
 | `orphaned_connector_state_count` is non-zero. | A receipt lost its request ref, outcome object, idempotency key, node binding, or signature validity. | Compare `receipt_hash` with `per_node_state_hashes` and verify the executing node key for the failing seed. |
 | `invalid_receipt_signature_count` is non-zero. | The `OperationReceipt` signature no longer verifies against the executing node's deterministic signing key. | Reproduce the seed and inspect holder changes before `execute_once`. |
+| Host replay phase order changes. | The real `fcp-host` handoff test no longer matches the documented replay contract. | Inspect `host_failover_replay.jsonl` and update the runbook only if the new phase is intentional and has assertions. |
+| Host `invariant_summary` contains a false predicate. | The real host handoff lost candidate/refusal, fencing, canonical-state, or quorum evidence. | Compare the preceding replay phases against the failed invariant field before changing test expectations. |
 | Redaction assertion fails. | A replay field contains raw node IDs or credential-like text. | Store hashed identifiers with `_hash` suffixes and keep credentials out of replay payloads. |
 | Snapshot CBOR fails to deserialize. | The snapshot schema changed without updating the replay writer or test. | Update the schema version and keep old fixture decoding explicit if old artifacts must remain readable. |
 | Raw `mesh-harness-node-` appears in an artifact. | Redaction regressed. | Hash the identifier before adding it to manifests, events, or snapshots. |

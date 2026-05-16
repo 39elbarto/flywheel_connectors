@@ -19,6 +19,15 @@ use serde_json::{Value, json};
 
 const HOST_FAILOVER_REPLAY_SCHEMA_VERSION: &str = "1.0.0";
 const HOST_FAILOVER_REPLAY_FILE_NAME: &str = "host_failover_replay.jsonl";
+const EXPECTED_HOST_FAILOVER_PHASES: &[&str] = &[
+    "initial_candidate_set",
+    "initial_holder_admitted",
+    "departing_holder_flushed_before_yield",
+    "replacement_holder_admitted",
+    "stale_write_fenced_after_handoff",
+    "canonical_state_exposed_after_handoff",
+    "invariant_summary",
+];
 
 #[derive(Debug, Serialize)]
 struct HostFailoverReplayEvent {
@@ -117,6 +126,107 @@ fn ensure_host_replay_redaction_safe(rendered: &str) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+fn parse_host_replay_jsonl(rendered: &str) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    rendered
+        .lines()
+        .map(|line| Ok(serde_json::from_str::<Value>(line)?))
+        .collect()
+}
+
+fn assert_host_replay_contract(events: &[Value]) -> Result<(), Box<dyn std::error::Error>> {
+    let phases = events
+        .iter()
+        .map(host_replay_phase)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        phases, EXPECTED_HOST_FAILOVER_PHASES,
+        "host replay should preserve the documented handoff phase order"
+    );
+    for event in events {
+        assert_eq!(
+            host_replay_schema_version(event)?,
+            HOST_FAILOVER_REPLAY_SCHEMA_VERSION,
+            "every host replay phase should carry the replay schema version"
+        );
+    }
+
+    let summary = events
+        .last()
+        .ok_or_else(|| invalid_host_replay_artifact("missing invariant summary phase"))?;
+    let payload = summary
+        .get("payload")
+        .ok_or_else(|| invalid_host_replay_artifact("invariant summary missing payload"))?;
+    assert_eq!(
+        payload
+            .get("initial_candidate_count")
+            .and_then(Value::as_u64),
+        Some(3)
+    );
+    assert_eq!(
+        payload.get("initial_refusal_count").and_then(Value::as_u64),
+        Some(2)
+    );
+    assert_eq!(
+        payload
+            .get("post_departure_candidate_count")
+            .and_then(Value::as_u64),
+        Some(2)
+    );
+    assert_eq!(
+        payload
+            .get("post_departure_refusal_count")
+            .and_then(Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        payload.get("durable_lease_seq").and_then(Value::as_u64),
+        Some(10)
+    );
+    assert_eq!(
+        payload.get("new_fencing_token").and_then(Value::as_u64),
+        Some(11)
+    );
+    assert_eq!(
+        payload
+            .get("replacement_holder_changed")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        payload.get("stale_write_fenced").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        payload
+            .get("canonical_state_replayed")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        payload.get("quorum_satisfied").and_then(Value::as_bool),
+        Some(true)
+    );
+    Ok(())
+}
+
+fn host_replay_phase(event: &Value) -> Result<&str, Box<dyn std::error::Error>> {
+    event
+        .get("phase")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_host_replay_artifact("host replay event missing phase"))
+}
+
+fn host_replay_schema_version(event: &Value) -> Result<&str, Box<dyn std::error::Error>> {
+    event
+        .get("schema_version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_host_replay_artifact("host replay event missing schema_version"))
+}
+
+fn invalid_host_replay_artifact(message: &'static str) -> Box<dyn std::error::Error> {
+    Box::new(io::Error::new(io::ErrorKind::InvalidData, message))
 }
 
 #[test]
@@ -468,17 +578,44 @@ async fn leader_departure_flushes_state_reselects_holder_and_fences_stale_writes
             "model": explain_payload["canonical_state"]["model"].clone(),
         }),
     );
+    let canonical_state_replayed = explain_payload
+        .get("canonical_state")
+        .and_then(|state| state.get("root_object_id"))
+        .and_then(Value::as_str)
+        == Some(seeded_state.root_object_id.to_string().as_str());
+    let quorum_satisfied = lease_status
+        .get("quorum_satisfied")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    replay.record(
+        "invariant_summary",
+        Some(&new_holder_node),
+        json!({
+            "initial_candidate_count": all_nodes.len(),
+            "initial_refusal_count": initial_refusals.len(),
+            "post_departure_candidate_count": remaining_nodes.len(),
+            "post_departure_refusal_count": new_refusals.len(),
+            "durable_lease_seq": seeded_state.lease_seq,
+            "new_fencing_token": 11,
+            "replacement_holder_changed": new_holder_node != departed_node,
+            "stale_write_fenced": stale_body.contains(r#""code":"LeaseFenced""#),
+            "canonical_state_replayed": canonical_state_replayed,
+            "quorum_satisfied": quorum_satisfied,
+        }),
+    );
     let replay_path = replay.write_jsonl(replay_dir.path())?;
     let rendered_replay = fs::read_to_string(replay_path)?;
     assert_no_raw_node_labels(&rendered_replay);
+    let parsed_replay = parse_host_replay_jsonl(&rendered_replay)?;
+    assert_host_replay_contract(&parsed_replay)?;
     assert!(
         rendered_replay.contains("canonical_state_exposed_after_handoff"),
         "host failover replay should include the post-handoff canonical-state proof: {rendered_replay}"
     );
     assert_eq!(
         rendered_replay.lines().count(),
-        6,
-        "host failover replay should include the candidate set plus five handoff phases"
+        EXPECTED_HOST_FAILOVER_PHASES.len(),
+        "host failover replay should include the candidate set, handoff phases, and invariant summary"
     );
 
     Ok(())

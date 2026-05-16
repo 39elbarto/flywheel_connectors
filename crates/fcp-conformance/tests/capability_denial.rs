@@ -1,6 +1,6 @@
 //! Conformance tests: host-layer default-deny for missing capability, per zone.
 //!
-//! Drives the full 11-check `EnforcementPipeline` for each of the four
+//! Drives the full 14-check `EnforcementPipeline` for each of the four
 //! canonical zones (`z:private`, `z:work`, `z:community`, `z:public`) and
 //! asserts that a request without a granting capability claim is denied at
 //! the `capability_verify` check with the correct FCP reason code.

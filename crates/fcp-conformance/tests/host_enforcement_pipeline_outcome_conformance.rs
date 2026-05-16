@@ -214,6 +214,16 @@ fn capability_verify_check_name_is_capability_verify() {
 }
 
 #[test]
+fn cascade_revocation_check_name_is_cascade_revocation() {
+    assert_eq!(CascadeRevocationCheck.name(), "cascade_revocation");
+}
+
+#[test]
+fn deployment_tier_check_name_is_deployment_tier() {
+    assert_eq!(DeploymentTierCheck::new().name(), "deployment_tier");
+}
+
+#[test]
 fn holder_proof_check_name_is_holder_proof() {
     assert_eq!(HolderProofCheck.name(), "holder_proof");
 }
@@ -231,6 +241,11 @@ fn taint_approval_check_name_is_taint_approval() {
 #[test]
 fn policy_ceiling_check_name_is_policy_ceiling() {
     assert_eq!(PolicyCeilingCheck.name(), "policy_ceiling");
+}
+
+#[test]
+fn capability_constraints_check_name_is_capability_constraints() {
+    assert_eq!(CapabilityConstraintsCheck.name(), "capability_constraints");
 }
 
 #[test]
@@ -292,10 +307,13 @@ fn check_names_use_snake_case_only() {
         CanonicalDecodeCheck.name(),
         ZoneMembershipCheck.name(),
         CapabilityVerifyCheck.name(),
+        CascadeRevocationCheck.name(),
+        DeploymentTierCheck::new().name(),
         HolderProofCheck.name(),
         CheckpointFreshnessCheck.name(),
         TaintApprovalCheck.name(),
         PolicyCeilingCheck.name(),
+        CapabilityConstraintsCheck.name(),
         ConnectorManifestCheck.name(),
         RateLimitCheck.name(),
         BudgetCheck.name(),

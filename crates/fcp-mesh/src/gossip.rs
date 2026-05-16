@@ -15,7 +15,8 @@
 //! # Design Notes
 //!
 //! XOR filters use `xorf::Xor8` for compact ≈1.23 bits/element membership queries.
-//! IBLT uses a placeholder change-tracking approach pending production upgrade.
+//! IBLT sketches mask object IDs with a deterministic zone mask before insertion,
+//! so wire sketches do not expose raw object-id XOR sums.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Mutex;
@@ -26,7 +27,9 @@ use tracing::{debug, info, warn};
 use xorf::Filter as _;
 
 use crate::admission::ObjectAdmissionClass;
-use crate::iblt::{Iblt, IbltDecodeResult};
+use crate::iblt::{
+    Iblt, IbltDecodeResult, IbltMask, LayeredFilterConfig, LayeredReconciliationFilter,
+};
 use fcp_crypto::{CryptoError, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_prelude::{EpochId, NodeSignature, ObjectId, TailscaleNodeId, ZoneId};
 
@@ -311,6 +314,10 @@ pub struct XorFilterPlaceholder {
     /// Skipped during serialization; rebuilt on demand after deserialization.
     #[serde(skip)]
     built: Mutex<Option<xorf::Xor8>>,
+    /// Cached layered Bloom+XOR filter for lower false-positive route hints.
+    /// Skipped during serialization; rebuilt on demand after deserialization.
+    #[serde(skip)]
+    layered: Mutex<Option<LayeredReconciliationFilter>>,
 }
 
 impl Clone for XorFilterPlaceholder {
@@ -320,6 +327,7 @@ impl Clone for XorFilterPlaceholder {
             seed: self.seed,
             // Cache is not cloned; will be rebuilt lazily
             built: Mutex::new(None),
+            layered: Mutex::new(None),
         }
     }
 }
@@ -338,6 +346,7 @@ impl XorFilterPlaceholder {
             keys: BTreeSet::new(),
             seed: 0,
             built: Mutex::new(None),
+            layered: Mutex::new(None),
         }
     }
 
@@ -348,6 +357,7 @@ impl XorFilterPlaceholder {
             keys: BTreeSet::new(),
             seed,
             built: Mutex::new(None),
+            layered: Mutex::new(None),
         }
     }
 
@@ -362,6 +372,9 @@ impl XorFilterPlaceholder {
             // Using get_mut() avoids locking since we have &mut self.
             if let Ok(built) = self.built.get_mut() {
                 *built = None;
+            }
+            if let Ok(layered) = self.layered.get_mut() {
+                *layered = None;
             }
         }
     }
@@ -382,6 +395,11 @@ impl XorFilterPlaceholder {
         }
         // Build the Xor8 filter if not yet built and query it
         self.ensure_built();
+        if let Ok(guard) = self.layered.lock() {
+            if let Some(ref filter) = *guard {
+                return filter.may_contain_key(key);
+            }
+        }
         if let Ok(guard) = self.built.lock() {
             if let Some(ref filter) = *guard {
                 return filter.contains(&key);
@@ -434,16 +452,33 @@ impl XorFilterPlaceholder {
 
     /// Ensure the `Xor8` filter is built from the current key set.
     fn ensure_built(&self) {
+        let key_vec: Vec<u64> = self.keys.iter().copied().collect();
+        if key_vec.is_empty() {
+            return;
+        }
+
         if let Ok(mut guard) = self.built.lock() {
-            if guard.is_some() {
-                return;
+            if guard.is_none() {
+                // xorf::Xor8::from requires no duplicate keys (guaranteed by BTreeSet)
+                *guard = Some(xorf::Xor8::from(key_vec.as_slice()));
             }
-            let key_vec: Vec<u64> = self.keys.iter().copied().collect();
-            if key_vec.is_empty() {
-                return;
+        }
+
+        if let Ok(mut guard) = self.layered.lock() {
+            if guard.is_none() {
+                *guard = Some(LayeredReconciliationFilter::from_keys(
+                    self.seed,
+                    LayeredFilterConfig::default(),
+                    self.keys.clone(),
+                ));
+                debug!(
+                    component = "mesh.gossip",
+                    event = "layered_filter_promoted",
+                    metric = "fcp.mesh.iblt.layer_promotions",
+                    key_count = self.keys.len(),
+                    target_fpr = LayeredFilterConfig::default().target_fpr
+                );
             }
-            // xorf::Xor8::from requires no duplicate keys (guaranteed by BTreeSet)
-            *guard = Some(xorf::Xor8::from(key_vec.as_slice()));
         }
     }
 }
@@ -473,6 +508,9 @@ impl XorFilterPlaceholder {
 /// not IBLT-compatible.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IbltPlaceholder {
+    /// Zone-derived object-id mask. The wire encoding remains the underlying
+    /// IBLT, but the cell key sums contain masked object IDs.
+    mask: IbltMask,
     /// Production IBLT sketch over admitted object IDs.
     iblt: Iblt,
     /// Cell-count budget used when constructing and validating sketches.
@@ -538,10 +576,22 @@ impl IbltPlaceholder {
     /// minimum-size contract.
     #[must_use]
     pub fn with_max_changes(max_changes: usize) -> Self {
+        Self::with_mask(max_changes, IbltMask::default())
+    }
+
+    /// Create with a custom expected-difference budget and object-id mask.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the recommended cell-count helper violates its own
+    /// minimum-size contract.
+    #[must_use]
+    pub fn with_mask(max_changes: usize, mask: IbltMask) -> Self {
         let cell_count = Iblt::recommended_cell_count(max_changes);
         let iblt = Iblt::with_cell_count(cell_count)
             .expect("recommended_cell_count always returns at least MIN_RECOMMENDED_IBLT_CELLS");
         Self {
+            mask,
             iblt,
             cell_count,
             change_seq: 0,
@@ -556,7 +606,13 @@ impl IbltPlaceholder {
     /// through the parallel `symbol_filter` / `symbol_availability`
     /// paths on `GossipState`.
     pub fn note_local_change(&mut self, object_id: &ObjectId, _esi: Option<u32>) {
-        self.iblt.insert(*object_id);
+        self.iblt.insert(self.mask.apply(*object_id));
+        self.change_seq += 1;
+    }
+
+    /// Record a local object deletion.
+    pub fn note_local_delete(&mut self, object_id: &ObjectId) {
+        self.iblt.delete(self.mask.apply(*object_id));
         self.change_seq += 1;
     }
 
@@ -573,6 +629,12 @@ impl IbltPlaceholder {
     #[must_use]
     pub const fn change_seq(&self) -> u64 {
         self.change_seq
+    }
+
+    /// Object-id mask used before inserting into the sketch.
+    #[must_use]
+    pub const fn mask(&self) -> IbltMask {
+        self.mask
     }
 
     /// Number of IBLT cells in the underlying sketch. Used by gossip
@@ -644,6 +706,7 @@ impl IbltPlaceholder {
 
         let cell_count = iblt.cell_count();
         Ok(Self {
+            mask: IbltMask::default(),
             iblt,
             cell_count,
             change_seq: 0,
@@ -685,6 +748,8 @@ pub struct GossipState {
 
     /// IBLT state for precise reconciliation.
     iblt_state: IbltPlaceholder,
+    /// Zone-derived mask used by both cached and summary IBLT sketches.
+    iblt_mask: IbltMask,
 
     /// Admitted object IDs (authoritative set).
     admitted_objects: BTreeSet<ObjectId>,
@@ -695,7 +760,7 @@ pub struct GossipState {
     /// Last update timestamp.
     last_updated: u64,
 
-    /// Incrementally-maintained IBLT over `admitted_objects` (br-m68xt).
+    /// Incrementally-maintained masked IBLT over `admitted_objects` (br-m68xt).
     /// Updated in O(1) by `announce_object` / `remove_object` so
     /// `build_iblt` / `reconcile_with_peer_iblt` can avoid the O(N)
     /// rebuild-every-peer cost. Sized at construction using
@@ -717,6 +782,7 @@ impl GossipState {
     /// cell count, which would violate [`Iblt::recommended_cell_count`].
     #[must_use]
     pub fn new(zone_id: ZoneId, config: &GossipConfig) -> Self {
+        let iblt_mask = IbltMask::for_zone(&zone_id);
         let cached_iblt_cell_count = Iblt::recommended_cell_count(config.reconciliation_batch_size);
         let cached_iblt = Iblt::with_cell_count(cached_iblt_cell_count)
             .expect("reconciliation_batch_size yields a valid cell count");
@@ -724,7 +790,8 @@ impl GossipState {
             zone_id,
             object_filter: XorFilterPlaceholder::new(),
             symbol_filter: XorFilterPlaceholder::new(),
-            iblt_state: IbltPlaceholder::with_max_changes(config.reconciliation_batch_size),
+            iblt_state: IbltPlaceholder::with_mask(config.reconciliation_batch_size, iblt_mask),
+            iblt_mask,
             admitted_objects: BTreeSet::new(),
             symbol_availability: BTreeMap::new(),
             last_updated: 0,
@@ -749,7 +816,7 @@ impl GossipState {
             self.iblt_state.note_local_change(object_id, None);
             // br-m68xt: maintain the reconciliation IBLT incrementally.
             // The BTreeSet::insert guard above ensures no double-inserts.
-            self.cached_iblt.insert(*object_id);
+            self.cached_iblt.insert(self.iblt_mask.apply(*object_id));
             self.last_updated = now;
         }
     }
@@ -771,7 +838,6 @@ impl GossipState {
         let symbols = self.symbol_availability.entry(*object_id).or_default();
         if symbols.insert(esi) {
             self.symbol_filter.insert(&symbol_key(object_id, esi));
-            self.iblt_state.note_local_change(object_id, Some(esi));
             self.last_updated = now;
         }
     }
@@ -846,7 +912,8 @@ impl GossipState {
         // deletes would push cell counters negative and corrupt
         // decode().
         if self.admitted_objects.remove(object_id) {
-            self.cached_iblt.delete(*object_id);
+            self.iblt_state.note_local_delete(object_id);
+            self.cached_iblt.delete(self.iblt_mask.apply(*object_id));
         }
         self.symbol_availability.remove(object_id);
         self.rebuild_filters();
@@ -909,7 +976,7 @@ impl GossipState {
 
         let mut iblt = Iblt::with_expected_difference(expected_difference);
         for object_id in &self.admitted_objects {
-            iblt.insert(*object_id);
+            iblt.insert(self.iblt_mask.apply(*object_id));
         }
         iblt
     }
@@ -931,7 +998,10 @@ impl GossipState {
             return None;
         }
         let diff = local_iblt.subtract(peer_iblt).ok()?;
-        Some(diff.decode())
+        Some(crate::iblt::masked::unmask_decode_result(
+            diff.decode(),
+            self.iblt_mask,
+        ))
     }
 }
 
@@ -2643,28 +2713,65 @@ impl MeshGossip {
         now: u64,
     ) -> Option<ReconcileResponse> {
         let state = self.zone_states.get(zone_id)?;
+        let decode_start = Instant::now();
         let result = state.reconcile_with_peer_iblt(peer_iblt, expected_difference)?;
+        let decode_us = u64::try_from(decode_start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let diff_decoded = result
+            .only_left
+            .len()
+            .saturating_add(result.only_right.len());
+        let diff_decoded = u64::try_from(diff_decoded).unwrap_or(u64::MAX);
+        let n_local = u64::try_from(state.object_count()).unwrap_or(u64::MAX);
+        let n_remote_summary = self
+            .peer_states
+            .get(peer_id)
+            .and_then(|peer_state| peer_state.last_summary.as_ref())
+            .filter(|summary| summary.zone_id == *zone_id)
+            .map(|summary| u64::from(summary.object_count));
+        let n_remote = n_remote_summary.unwrap_or(0);
+        let n_remote_known = n_remote_summary.is_some();
+        let remote_iblt_cells = u64::try_from(peer_iblt.cell_count()).unwrap_or(u64::MAX);
+        let complete = result.complete;
+        let remaining_nonzero_cells = result.remaining_nonzero_cells;
 
         let max_objects = MAX_OBJECT_IDS_PER_REQUEST;
         let peer_missing: Vec<ObjectId> = result.only_left.into_iter().take(max_objects).collect();
         let we_missing: Vec<ObjectId> = result.only_right.into_iter().take(max_objects).collect();
 
-        if result.complete {
+        if complete {
             debug!(
                 component = "mesh.gossip",
+                otlp = "fcp.mesh.iblt",
                 event = "iblt_reconciled",
+                scheme = "masked",
                 zone_id = %zone_id,
                 peer_id = %peer_id.as_str(),
+                n_local,
+                n_remote,
+                n_remote_known,
+                remote_iblt_cells,
+                diff_decoded,
+                decode_us,
+                overflow = false,
                 peer_missing_count = peer_missing.len(),
                 we_missing_count = we_missing.len()
             );
         } else {
             info!(
                 component = "mesh.gossip",
+                otlp = "fcp.mesh.iblt",
                 event = "iblt_partial_decode",
+                scheme = "masked",
                 zone_id = %zone_id,
                 peer_id = %peer_id.as_str(),
-                remaining_cells = result.remaining_nonzero_cells,
+                n_local,
+                n_remote,
+                n_remote_known,
+                remote_iblt_cells,
+                diff_decoded,
+                decode_us,
+                overflow = true,
+                remaining_cells = remaining_nonzero_cells,
                 peer_missing_count = peer_missing.len(),
                 we_missing_count = we_missing.len(),
                 "IBLT peel incomplete — caller should fall back to paginated list exchange"
@@ -4385,6 +4492,24 @@ mod tests {
     }
 
     #[test]
+    fn iblt_with_mask_encodes_masked_keys_on_wire() {
+        let mask = IbltMask::from_bytes([0xA5; 32]);
+        let mut iblt = IbltPlaceholder::with_mask(16, mask);
+        let object_id = test_object_id("masked-wire");
+        iblt.note_local_change(&object_id, None);
+
+        let encoded = iblt.encode();
+        let raw_wire_iblt: Iblt =
+            ciborium::from_reader(encoded.as_slice()).expect("summary IBLT is CBOR");
+        let empty = Iblt::with_cell_count(raw_wire_iblt.cell_count()).unwrap();
+        let raw_result = raw_wire_iblt.subtract(&empty).unwrap().decode();
+
+        assert!(raw_result.is_complete());
+        assert!(!raw_result.only_left.contains(&object_id));
+        assert!(raw_result.only_left.contains(&mask.apply(object_id)));
+    }
+
+    #[test]
     fn iblt_decode_empty_bytes_returns_empty() {
         let decoded = IbltPlaceholder::decode_with_limits(&[], 10, 4096).unwrap();
         // Empty payload yields a sketch sized for the requested budget
@@ -4616,6 +4741,35 @@ mod tests {
         assert_eq!(summary.symbol_count, 1);
         assert_eq!(summary.timestamp, 100);
         assert!(summary.signature.is_none());
+    }
+
+    #[test]
+    fn gossip_state_summary_iblt_is_masked_and_object_level() {
+        let config = GossipConfig::default();
+        let mut state = GossipState::new(test_zone(), &config);
+        let object_id = test_object_id("summary-mask");
+        for esi in 0..16 {
+            state.announce_symbol(&object_id, esi, 100);
+        }
+
+        let summary = state.create_summary(test_node("masked"), test_epoch());
+        let raw_wire_iblt: Iblt =
+            ciborium::from_reader(summary.iblt.as_slice()).expect("summary IBLT is CBOR");
+        let empty = Iblt::with_cell_count(raw_wire_iblt.cell_count()).unwrap();
+        let raw_result = raw_wire_iblt.subtract(&empty).unwrap().decode();
+
+        assert!(raw_result.is_complete());
+        assert_eq!(
+            raw_result.only_left.len(),
+            1,
+            "symbol announcements must not reinsert the object into the object-level IBLT"
+        );
+        assert!(!raw_result.only_left.contains(&object_id));
+        assert!(
+            raw_result
+                .only_left
+                .contains(&state.iblt_mask.apply(object_id))
+        );
     }
 
     // ── GossipSummary additional tests ─────────────────────────
@@ -4975,7 +5129,7 @@ mod tests {
             let cached = state.build_iblt(config.reconciliation_batch_size);
             let mut fresh = Iblt::with_cell_count(cached.cell_count()).unwrap();
             for admitted in state.admitted_objects_iter_for_test() {
-                fresh.insert(*admitted);
+                fresh.insert(state.iblt_mask.apply(*admitted));
             }
             assert_eq!(
                 cached.cells(),
@@ -4991,7 +5145,7 @@ mod tests {
             let cached = state.build_iblt(config.reconciliation_batch_size);
             let mut fresh = Iblt::with_cell_count(cached.cell_count()).unwrap();
             for admitted in state.admitted_objects_iter_for_test() {
-                fresh.insert(*admitted);
+                fresh.insert(state.iblt_mask.apply(*admitted));
             }
             assert_eq!(
                 cached.cells(),
@@ -5007,7 +5161,7 @@ mod tests {
         let cached = state.build_iblt(config.reconciliation_batch_size);
         let mut fresh = Iblt::with_cell_count(cached.cell_count()).unwrap();
         for admitted in state.admitted_objects_iter_for_test() {
-            fresh.insert(*admitted);
+            fresh.insert(state.iblt_mask.apply(*admitted));
         }
         assert_eq!(
             cached.cells(),
@@ -5042,7 +5196,7 @@ mod tests {
 
         let mut fresh = Iblt::with_cell_count(slow.cell_count()).unwrap();
         for admitted in state.admitted_objects_iter_for_test() {
-            fresh.insert(*admitted);
+            fresh.insert(state.iblt_mask.apply(*admitted));
         }
         assert_eq!(
             slow.cells(),

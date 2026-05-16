@@ -5,10 +5,16 @@
 //! (IBLT) provides O(d) communication in the common case where two nodes differ
 //! by only a handful of objects.
 
+pub mod layered_filter;
+pub mod masked;
+
 use std::collections::{BTreeSet, VecDeque};
 
 use fcp_prelude::ObjectId;
 use serde::{Deserialize, Serialize};
+
+pub use layered_filter::{LayeredFilterConfig, LayeredReconciliationFilter};
+pub use masked::{IbltMask, MaskedIblt, MaskedIbltError};
 
 /// The production IBLT uses three independent hash positions per key.
 pub const IBLT_HASH_COUNT: usize = 3;

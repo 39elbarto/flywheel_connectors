@@ -6440,8 +6440,10 @@ mod tests {
             node.announce_object(&zone_id, &local_only, ObjectAdmissionClass::Admitted, 1_000,)
         );
 
-        let mut peer_sketch =
-            IbltPlaceholder::with_max_changes(node.gossip.reconciliation_batch_size());
+        let mut peer_sketch = IbltPlaceholder::with_mask(
+            node.gossip.reconciliation_batch_size(),
+            crate::iblt::IbltMask::for_zone(&zone_id),
+        );
         peer_sketch.note_local_change(&shared, None);
         peer_sketch.note_local_change(&peer_only, None);
         let request = ReconcileRequest {

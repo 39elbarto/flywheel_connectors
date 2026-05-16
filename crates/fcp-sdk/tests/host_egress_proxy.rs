@@ -11,7 +11,8 @@ use fcp_manifest::{
     Base64Bytes, HostEgressContext, HostEgressDecisionMetadata, HostEgressHttpHeader,
     HostEgressHttpRequest, HostEgressHttpResponse, HostEgressTcpRequest, HostEgressTcpResponse,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HostEgressProxyError};
+use fcp_sdk::migration::HostEgressProxyError;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::{Value, json};
 
 const CONNECTOR_ID: &str = "fcp.test.b0qqv-sdk:utility:1.0.0";

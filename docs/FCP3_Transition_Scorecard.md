@@ -12,12 +12,12 @@
 | Category | Total Items | Migrated/Resolved | Pending | Blocked |
 |----------|------------|-------------------|---------|---------|
 | Legacy broad buckets | 3 | 3 | 0 | 0 |
-| Compatibility shims | 2 | 0 | 2 | 0 |
+| Compatibility shims | 2 | 1 | 1 | 0 |
 | Mesh-first cutover holdouts | 8 | 8 | 0 | 0 |
 | Forbidden overlap debt | 7 | 7 | 0 | 0 |
 | Type MOVE candidates | 9 | 9 | 0 | 0 |
 
-**Overall Progress**: 27 / 29 items migrated or resolved (93%)
+**Overall Progress**: 28 / 29 items migrated or resolved (97%)
 
 ---
 
@@ -71,14 +71,14 @@ Three-node live proof harness:
 Phase I.1 reconciliation: the bridge-plan guess that these were
 `fcp_core::compat::policy` and `fcp_core::compat::evidence` modules was false
 for the current checkout. No such `fcp-core` modules or callers exist. The two
-active scorecard shims are the SDK migration helpers below; see
+active scorecard shim is the SDK migration helper below; see
 [`docs/cleanup/shim_inventory.md`](cleanup/shim_inventory.md) for the
 machine-readable inventory.
 
 | Shim | Location | Purpose | Delete After | Status |
 |------|----------|---------|-------------|--------|
 | ConnectorErrorMapping | fcp-sdk/src/migration.rs | V2->V3 error mapping bridge | P4 convergence | ACTIVE (all 150 connectors use it) |
-| ConnectorRuntime | fcp-sdk/src/migration.rs | V2->V3 runtime bridge | P4 convergence | ACTIVE (all 150 connectors use it) |
+| ConnectorRuntime | fcp-sdk/src/runtime.rs | First-class SDK lifecycle helper | migrated out of migration namespace | MIGRATED (`flywheel_connectors-angoc.3.6`) |
 
 ---
 

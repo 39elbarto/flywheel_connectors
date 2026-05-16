@@ -283,6 +283,9 @@ pub use formatting::{
 /// Retry policy helpers.
 pub use retry::{RetryDecision, RetryPolicy};
 
+/// Connector lifecycle runtime helpers.
+pub use runtime::{ConnectorRuntime, ConnectorRuntimeConfig, ConnectorRuntimeConfigError};
+
 /// Streaming utilities for replay, acknowledgements, and per-key sequential processing.
 pub use streaming::{
     AckResult, BufferLimits, EventStreamManager, NackResult, ReplayError, SequentialEnqueueError,

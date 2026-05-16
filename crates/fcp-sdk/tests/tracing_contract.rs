@@ -15,11 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fcp_async_core::{AsyncError, ExecutionContext};
-use fcp_sdk::FcpError;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorErrorMapping, ConnectorRuntime, ConnectorRuntimeConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, ConnectorErrorMapping, RetryLoop};
 use fcp_sdk::retry::RetryPolicy;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig, FcpError};
 use tracing::Level;
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;

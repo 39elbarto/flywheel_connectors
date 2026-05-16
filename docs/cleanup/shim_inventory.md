@@ -8,11 +8,12 @@ checkout. The guessed `fcp_core::compat::policy` and
 `fcp_core::compat::evidence` modules do not exist, and there are no workspace
 callers to migrate for those paths.
 
-The two active compatibility shims in `docs/FCP3_Transition_Scorecard.md` are
-not `fcp_core::compat` modules. They are the `ConnectorRuntime` and
-`ConnectorErrorMapping` helpers in `crates/fcp-sdk/src/migration.rs`.
+The active compatibility shim in `docs/FCP3_Transition_Scorecard.md` is not an
+`fcp_core::compat` module. It is the `ConnectorErrorMapping` helper in
+`crates/fcp-sdk/src/migration.rs`. `ConnectorRuntime` has graduated to the
+first-class `crates/fcp-sdk/src/runtime.rs` SDK surface.
 
-<!-- compat-shim-inventory-summary: suspected_core_compat_modules=0 suspected_core_compat_callers=0 scorecard_active_shims=2 -->
+<!-- compat-shim-inventory-summary: suspected_core_compat_modules=0 suspected_core_compat_callers=0 scorecard_active_shims=1 -->
 
 ## Suspected Core Compat Paths
 
@@ -28,10 +29,10 @@ not `fcp_core::compat` modules. They are the `ConnectorRuntime` and
 
 | Shim | Location | Status | Boundary |
 |------|----------|--------|----------|
-| `ConnectorRuntime` | `crates/fcp-sdk/src/migration.rs` | active | Shared connector lifecycle helper for request/background contexts and shutdown. |
+| `ConnectorRuntime` | `crates/fcp-sdk/src/runtime.rs` | migrated | First-class SDK lifecycle helper for request/background contexts and shutdown. |
 | `ConnectorErrorMapping` | `crates/fcp-sdk/src/migration.rs` | active | Shared connector error-to-`FcpError` mapping contract. |
 
-<!-- scorecard-shim-row: id=FCP-SDK-CONNECTOR-RUNTIME symbol=ConnectorRuntime location=crates/fcp-sdk/src/migration.rs status=active -->
+<!-- scorecard-shim-row: id=FCP-SDK-CONNECTOR-RUNTIME symbol=ConnectorRuntime location=crates/fcp-sdk/src/runtime.rs status=migrated -->
 <!-- scorecard-shim-row: id=FCP-SDK-CONNECTOR-ERROR-MAPPING symbol=ConnectorErrorMapping location=crates/fcp-sdk/src/migration.rs status=active -->
 
 ## Verification Commands

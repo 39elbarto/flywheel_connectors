@@ -117,11 +117,12 @@ pub use crate::streaming::{
 
 // Runtime supervision helpers
 pub use crate::runtime::{
-    CursorLease, CursorStore, CursorStoreBackend, CursorStoreError, HealthTracker,
-    HealthTransition, InMemoryCursorStoreBackend, InMemoryPollingCursor, InMemoryStreamingSession,
-    PollResult, PollingCursor, PollingSupervisor, PollingSupervisorStats, StreamingConnection,
-    StreamingError, StreamingHealthState, StreamingSession, StreamingSupervisor,
-    StreamingSupervisorStats, SupervisorConfig, SupervisorOutcome,
+    ConnectorRuntime, ConnectorRuntimeConfig, ConnectorRuntimeConfigError, CursorLease,
+    CursorStore, CursorStoreBackend, CursorStoreError, HealthTracker, HealthTransition,
+    InMemoryCursorStoreBackend, InMemoryPollingCursor, InMemoryStreamingSession, PollResult,
+    PollingCursor, PollingSupervisor, PollingSupervisorStats, StreamingConnection, StreamingError,
+    StreamingHealthState, StreamingSession, StreamingSupervisor, StreamingSupervisorStats,
+    SupervisorConfig, SupervisorOutcome,
 };
 
 // Schema validation helpers

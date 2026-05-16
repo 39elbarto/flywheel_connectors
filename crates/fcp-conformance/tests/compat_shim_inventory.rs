@@ -2,7 +2,7 @@
 //!
 //! The bridge plan guessed that `fcp_core::compat::{policy,evidence}` were the
 //! remaining shims. The current checkout has no such modules or callers. The
-//! active scorecard shims are the SDK migration helpers instead.
+//! active scorecard shim is the SDK migration helper instead.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 const INVENTORY_DOC: &str = "docs/cleanup/shim_inventory.md";
 const FCP_CORE_LIB_RS: &str = include_str!("../../fcp-core/src/lib.rs");
 const FCP_SDK_MIGRATION_RS: &str = include_str!("../../fcp-sdk/src/migration.rs");
+const FCP_SDK_RUNTIME_RS: &str = include_str!("../../fcp-sdk/src/runtime.rs");
 const SCORECARD_MD: &str = include_str!("../../../docs/FCP3_Transition_Scorecard.md");
 
 const SUSPECTED_POLICY_PATH: &str = concat!("fcp_core::compat::", "policy");
@@ -129,11 +130,15 @@ fn suspected_core_compat_policy_and_evidence_shims_are_absent() {
 }
 
 #[test]
-fn scorecard_active_shims_are_sdk_migration_helpers() {
+fn scorecard_tracks_runtime_graduation_and_remaining_error_mapping_shim() {
     assert!(
-        FCP_SDK_MIGRATION_RS.contains("pub struct ConnectorRuntime"),
-        "ConnectorRuntime remains the active SDK migration helper until its \
-         own deletion/migration bead removes it"
+        !FCP_SDK_MIGRATION_RS.contains("pub struct ConnectorRuntime"),
+        "ConnectorRuntime must not be defined in fcp-sdk/src/migration.rs after \
+         flywheel_connectors-angoc.3.6"
+    );
+    assert!(
+        FCP_SDK_RUNTIME_RS.contains("pub struct ConnectorRuntime"),
+        "ConnectorRuntime must live in the first-class fcp-sdk runtime module"
     );
     assert!(
         FCP_SDK_MIGRATION_RS.contains("pub trait ConnectorErrorMapping"),
@@ -142,17 +147,25 @@ fn scorecard_active_shims_are_sdk_migration_helpers() {
     );
     assert!(
         SCORECARD_MD.contains("| ConnectorErrorMapping | fcp-sdk/src/migration.rs |")
-            && SCORECARD_MD.contains("| ConnectorRuntime | fcp-sdk/src/migration.rs |"),
-        "the FCP3 scorecard must identify the active shims as SDK migration \
-         helpers, not absent fcp_core::compat modules"
+            && SCORECARD_MD.contains("| ConnectorRuntime | fcp-sdk/src/runtime.rs |"),
+        "the FCP3 scorecard must identify the remaining active shim and the \
+         migrated ConnectorRuntime location"
     );
 
     let doc = inventory_doc();
-    assert_eq!(summary_value(&doc, "scorecard_active_shims"), 2);
+    assert_eq!(summary_value(&doc, "scorecard_active_shims"), 1);
     assert!(
         doc.contains("scorecard-shim-row: id=FCP-SDK-CONNECTOR-RUNTIME")
             && doc.contains("scorecard-shim-row: id=FCP-SDK-CONNECTOR-ERROR-MAPPING"),
-        "the inventory doc must carry machine-readable rows for both active \
-         scorecard shims"
+        "the inventory doc must carry machine-readable rows for runtime and \
+         the remaining active error-mapping shim"
+    );
+    assert_eq!(
+        row_value(&doc, "FCP-SDK-CONNECTOR-RUNTIME", "status"),
+        "migrated"
+    );
+    assert_eq!(
+        row_value(&doc, "FCP-SDK-CONNECTOR-ERROR-MAPPING", "status"),
+        "active"
     );
 }

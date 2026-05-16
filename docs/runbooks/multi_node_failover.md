@@ -107,6 +107,9 @@ written.
 `hashes.json` contains:
 
 - `final_state_hash`
+- `expected_hash_for_seed`
+- `per_node_state_hashes` with one `{node_id_hash, state_hash}` record per
+  final node snapshot
 - `receipt_hash`
 - `transition_hash`
 
@@ -152,8 +155,10 @@ strings fail the preflight instead of leaving a partial replay on disk.
    and `state_at_end.cbor` for the same node directory. Decode them with
    `CanonicalSerializer::deserialize::<LocalNodeSnapshot>` and the
    `fcp.testkit:LocalNodeSnapshot@1.0.0` schema.
-4. Compare `hashes.json` against a rerun with the same seed and mode. The same
-   inputs must produce the same `final_state_hash`.
+4. Compare `hashes.json` against a rerun with the same seed and mode.
+   `expected_hash_for_seed` must match `final_state_hash`, and the
+   `per_node_state_hashes` array identifies which final node snapshot diverged
+   first when the whole-state hash changes.
 5. For host-backed handoff failures, inspect `host_failover_replay.jsonl`.
    The first missing phase identifies whether the break happened before holder
    admission, during flush-before-yield, during replacement admission, while

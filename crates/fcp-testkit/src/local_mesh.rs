@@ -120,8 +120,16 @@ pub struct LocalReplayManifest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalReplayHashes {
     pub final_state_hash: String,
+    pub expected_hash_for_seed: String,
+    pub per_node_state_hashes: Vec<LocalNodeStateHash>,
     pub receipt_hash: String,
     pub transition_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalNodeStateHash {
+    pub node_id_hash: String,
+    pub state_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -705,6 +713,16 @@ impl LocalMeshHarness {
     ) -> Result<LocalReplayBundle, LocalMeshHarnessError> {
         let transition_hash = hash_json(&self.transitions)?;
         let receipt_hash = hash_json(&self.receipts_by_key)?;
+        let node_snapshots = self.node_snapshots();
+        let per_node_state_hashes = node_snapshots
+            .iter()
+            .map(|snapshot| {
+                Ok(LocalNodeStateHash {
+                    node_id_hash: snapshot.node_id_hash.clone(),
+                    state_hash: hash_json(snapshot)?,
+                })
+            })
+            .collect::<Result<Vec<_>, serde_json::Error>>()?;
         Ok(LocalReplayBundle {
             manifest: LocalReplayManifest {
                 schema_version: "1.0.0".to_string(),
@@ -715,10 +733,12 @@ impl LocalMeshHarness {
                 result: "pass".to_string(),
             },
             events: self.transitions.clone(),
-            node_snapshots: self.node_snapshots(),
+            node_snapshots,
             node_timelines,
             hashes: LocalReplayHashes {
                 final_state_hash: final_state_hash.to_string(),
+                expected_hash_for_seed: final_state_hash.to_string(),
+                per_node_state_hashes,
                 receipt_hash,
                 transition_hash,
             },

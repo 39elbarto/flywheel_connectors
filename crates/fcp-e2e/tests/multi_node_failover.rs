@@ -8,6 +8,7 @@ use fcp_testkit::local_mesh::{
     LocalChaosMode, LocalMeshHarness, LocalMeshHarnessError, LocalNodeSnapshot,
 };
 use semver::Version;
+use serde_json::Value;
 
 #[test]
 fn deterministic_local_mesh_failover_smoke_covers_all_a4_chaos_modes()
@@ -70,6 +71,29 @@ fn local_mesh_replay_bundle_writes_documented_artifacts() -> Result<(), Box<dyn 
     let events = fs::read_to_string(&paths.events)?;
     assert!(events.contains("\"node_id_hash\""));
     assert!(!events.contains("mesh-harness-node-"));
+
+    let hashes: Value = serde_json::from_str(&fs::read_to_string(&paths.hashes)?)?;
+    let final_hash = required_string_field(&hashes, "final_state_hash")?;
+    let expected_hash = required_string_field(&hashes, "expected_hash_for_seed")?;
+    assert_eq!(
+        final_hash, expected_hash,
+        "artifact should record the expected hash for deterministic seed reruns"
+    );
+    let per_node_state_hashes = hashes
+        .get("per_node_state_hashes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid_replay_artifact("hashes.json missing per_node_state_hashes"))?;
+    assert_eq!(
+        per_node_state_hashes.len(),
+        3,
+        "hashes.json should include one final state hash per node"
+    );
+    for entry in per_node_state_hashes {
+        let node_id_hash = required_string_field(entry, "node_id_hash")?;
+        let state_hash = required_string_field(entry, "state_hash")?;
+        assert!(!node_id_hash.is_empty());
+        assert_eq!(state_hash.len(), 64);
+    }
 
     let node_dirs = fs::read_dir(&paths.snapshot_root)?.collect::<Result<Vec<_>, _>>()?;
     assert_eq!(node_dirs.len(), 3);
@@ -168,4 +192,21 @@ fn failover_hash_matrix(
         );
     }
     Ok(matrix)
+}
+
+fn required_string_field<'a>(
+    value: &'a Value,
+    field: &str,
+) -> Result<&'a str, Box<dyn std::error::Error>> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid_replay_artifact(format!("missing string field {field}")))
+}
+
+fn invalid_replay_artifact(message: impl Into<String>) -> Box<dyn std::error::Error> {
+    Box::new(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message.into(),
+    ))
 }

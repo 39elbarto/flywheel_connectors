@@ -10,8 +10,14 @@ TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-lattice-formal-${RUN_ID}}"
 mkdir -p "${OUT_DIR}"
 : > "${ARTIFACT}"
 
-git_revision() {
+raw_git_revision() {
   git rev-parse HEAD 2>/dev/null || printf 'unknown'
+}
+
+FORMAL_GIT_REVISION="${FCP_LATTICE_GIT_REVISION:-$(raw_git_revision)}"
+
+git_revision() {
+  printf '%s' "${FORMAL_GIT_REVISION}"
 }
 
 append_json() {
@@ -36,6 +42,26 @@ fail_step() {
   exit 1
 }
 
+assert_stable_revision() {
+  local step="$1"
+  local current_revision
+  current_revision="$(raw_git_revision)"
+  if [ "${FORMAL_GIT_REVISION}" != "unknown" ] &&
+    [ "${current_revision}" != "unknown" ] &&
+    [ "${current_revision}" != "${FORMAL_GIT_REVISION}" ]; then
+    case "${current_revision}" in
+      "${FORMAL_GIT_REVISION}"*) return 0 ;;
+    esac
+    case "${FORMAL_GIT_REVISION}" in
+      "${current_revision}"*) return 0 ;;
+    esac
+    fail_step "${step}" "$(jq -cn \
+      --arg expected "${FORMAL_GIT_REVISION}" \
+      --arg actual "${current_revision}" \
+      '{expected_git_revision:$expected,actual_git_revision:$actual,cleanup_result:"not_applicable"}')"
+  fi
+}
+
 require_text() {
   local needle="$1"
   local path="$2"
@@ -50,9 +76,11 @@ run_and_capture() {
   local step="$1"
   shift
   local log="${OUT_DIR}/${RUN_ID}.${step}.log"
+  assert_stable_revision "stable_revision_before_${step}"
   if "$@" >"${log}" 2>&1; then
     local hash
     hash="$(shasum -a 256 "${log}" | awk '{print $1}')"
+    assert_stable_revision "stable_revision_after_${step}"
     append_json "${step}" "pass" "$(jq -cn \
       --arg log_hash "sha256:${hash}" \
       --arg log_artifact_class "relative-target-log" \
@@ -68,6 +96,8 @@ run_and_capture() {
       '{log_hash:$log_hash,log_artifact_class:$log_artifact_class,cleanup_result:$cleanup_result}')"
   fi
 }
+
+assert_stable_revision "preflight_stable_revision"
 
 LEAN_FILE="lean/Fcp/Invariants/LatticeDelegation.lean"
 for theorem in \
@@ -108,6 +138,7 @@ run_and_capture "rust_crypto_correspondence" \
     CARGO_PROFILE_TEST_DEBUG=0 \
     CARGO_INCREMENTAL=0 \
     RUSTFLAGS=-Cdebuginfo=0 \
+    FCP_LATTICE_GIT_REVISION="$(git_revision)" \
     FCP_CRYPTO_PQ_FORMAL_CORRESPONDENCE_COMMAND_LINE="cargo test -p fcp-crypto-pq --test representation_profile lean_sis_assumption_boundary_correspondence_fixture_jsonl_is_secret_free -- --nocapture" \
     cargo test -p fcp-crypto-pq --test representation_profile \
       lean_sis_assumption_boundary_correspondence_fixture_jsonl_is_secret_free -- --nocapture
@@ -119,6 +150,7 @@ run_and_capture "rust_policy_correspondence" \
     CARGO_PROFILE_TEST_DEBUG=0 \
     CARGO_INCREMENTAL=0 \
     RUSTFLAGS=-Cdebuginfo=0 \
+    FCP_LATTICE_GIT_REVISION="$(git_revision)" \
     FCP_POLICY_LATTICE_FORMAL_CORRESPONDENCE_COMMAND_LINE="cargo test -p fcp-policy --test lattice_delegation_proptest lattice_delegation_formal_correspondence_fixture_jsonl_is_secret_free -- --nocapture" \
     cargo test -p fcp-policy --test lattice_delegation_proptest \
       lattice_delegation_formal_correspondence_fixture_jsonl_is_secret_free -- --nocapture
@@ -130,6 +162,7 @@ run_and_capture "rust_crypto_existing_v4" \
     CARGO_PROFILE_TEST_DEBUG=0 \
     CARGO_INCREMENTAL=0 \
     RUSTFLAGS=-Cdebuginfo=0 \
+    FCP_LATTICE_GIT_REVISION="$(git_revision)" \
     cargo test -p fcp-crypto-pq --lib v4_ -- --nocapture
 
 run_and_capture "ubs_touched_files" \

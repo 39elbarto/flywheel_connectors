@@ -12,8 +12,14 @@ LOG_PREFIX="${OUT_DIR}/${RUN_ID}"
 mkdir -p "${OUT_DIR}" "${ARTIFACT_STAGE_ROOT}"
 : > "${ARTIFACT}"
 
-git_revision() {
+raw_git_revision() {
   git rev-parse HEAD 2>/dev/null || printf 'unknown'
+}
+
+GAUNTLET_GIT_REVISION="${FCP_LATTICE_GIT_REVISION:-$(raw_git_revision)}"
+
+git_revision() {
+  printf '%s' "${GAUNTLET_GIT_REVISION}"
 }
 
 sha256_file() {
@@ -87,6 +93,26 @@ fail_step() {
   exit 1
 }
 
+assert_stable_revision() {
+  local step="$1"
+  local current_revision
+  current_revision="$(raw_git_revision)"
+  if [ "${GAUNTLET_GIT_REVISION}" != "unknown" ] &&
+    [ "${current_revision}" != "unknown" ] &&
+    [ "${current_revision}" != "${GAUNTLET_GIT_REVISION}" ]; then
+    case "${current_revision}" in
+      "${GAUNTLET_GIT_REVISION}"*) return 0 ;;
+    esac
+    case "${GAUNTLET_GIT_REVISION}" in
+      "${current_revision}"*) return 0 ;;
+    esac
+    fail_step "${step}" "$(jq -cn \
+      --arg expected "${GAUNTLET_GIT_REVISION}" \
+      --arg actual "${current_revision}" \
+      '{expected_git_revision:$expected,actual_git_revision:$actual,cleanup_result:"not_applicable"}')"
+  fi
+}
+
 require_command() {
   local tool="$1"
   if ! command -v "${tool}" >/dev/null 2>&1; then
@@ -141,6 +167,7 @@ run_and_capture() {
   shift 2
   local log="${LOG_PREFIX}.${step}.log"
   local started
+  assert_stable_revision "stable_revision_before_${step}"
   started="$(date -u +%s)"
   if "$@" >"${log}" 2>&1; then
     local ended duration hash passed_tests passed_tests_json
@@ -149,6 +176,7 @@ run_and_capture() {
     hash="$(sha256_file "${log}")"
     passed_tests="$(extract_passed_tests "${log}")"
     passed_tests_json="$(json_string_or_null "${passed_tests}")"
+    assert_stable_revision "stable_revision_after_${step}"
     assert_clean_tree "clean_tree_after_${step}"
     append_json "${step}" "pass" "$(jq -cn \
       --arg command_line "${display_command}" \
@@ -238,13 +266,16 @@ artifact_log_path() {
 
 materialize_logged_artifact() {
   local path="$1"
-  local log
+  local log materialized
   log="$(artifact_log_path "${path}")" || return 0
   if [ ! -s "${path}" ] && [ -s "${log}" ]; then
     mkdir -p "$(dirname "${path}")"
-    jq -R -c --arg artifact "${path}" \
+    materialized="$(jq -R -c --arg artifact "${path}" \
       'fromjson? | select(.artifact_path == $artifact)' \
-      "${log}" > "${path}"
+      "${log}")"
+    if [ -n "${materialized}" ]; then
+      printf '%s\n' "${materialized}" > "${path}"
+    fi
   fi
 }
 
@@ -309,6 +340,7 @@ require_command ubs
 require_command shasum
 
 append_tool_versions
+assert_stable_revision "preflight_stable_revision"
 assert_clean_tree "preflight_clean_tree"
 
 LEAN_FILE="lean/Fcp/Invariants/LatticeDelegation.lean"

@@ -1959,7 +1959,7 @@ impl RegistryVerifier {
             .map_err(RegistryError::Canonical)?;
 
         let encoder = RaptorQEncoder::new(&binary_body, config)?;
-        let store_oti = ObjectTransmissionInfo::from(encoder.transmission_info());
+        let store_oti = encoder.transmission_info();
         let source_symbols = encoder.source_symbols();
         let total_symbols = encoder.total_symbols();
         let mirrored_at =

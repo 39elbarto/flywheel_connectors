@@ -55,7 +55,9 @@ use crate::planner::{
     BetaPosterior, CandidateNode, DecisionReason, ExecutionPlanner, HeldLease, LeasePurpose,
     NodeInfo, PlannerContext, PlannerInput, ResourcePoolClass, ThompsonChoice, ThompsonScheduler,
 };
-use crate::revocation::{RevocationFreshnessDecision, RevocationFreshnessFrontier};
+use crate::revocation::{
+    RevocationFreshnessDecision, RevocationFreshnessFrontier, VersionVectorOrder,
+};
 use crate::session::MeshSession;
 use crate::symbol_request::{
     SymbolRequestError, SymbolRequestHandler, SymbolRequestMetrics, SymbolRequestPolicy,
@@ -1159,6 +1161,19 @@ impl MeshNode {
         self.zone_owner_keys.remove(zone_id);
     }
 
+    /// Observe a registry owner's current revocation head for `zone_id`.
+    ///
+    /// This lets the revocation registry owner seed the HierVV freshness
+    /// frontier from its durable `RevocationRegistry` before mesh pushes or
+    /// reconciliation traffic are evaluated.
+    pub fn observe_revocation_registry_head(
+        &mut self,
+        zone_id: &ZoneId,
+        registry: &RevocationRegistry,
+    ) -> RevocationFreshnessDecision {
+        self.observe_revocation_frontier(zone_id, registry.head_seq)
+    }
+
     /// Observe a local revocation frontier update for `zone_id`.
     ///
     /// This lets registry/reconciliation callers seed the mesh node with the
@@ -1175,6 +1190,39 @@ impl MeshNode {
     #[must_use]
     pub fn revocation_frontier_counter(&self, zone_id: &ZoneId) -> u64 {
         self.revocation_frontier.counter_for(zone_id.as_str())
+    }
+
+    /// Serializable snapshot of the current local revocation freshness frontier.
+    ///
+    /// Callers that own durable registry state can persist this value with their
+    /// registry checkpoint and later pass it to
+    /// [`Self::reconcile_revocation_frontier`] after restart.
+    #[must_use]
+    pub fn revocation_frontier_snapshot(&self) -> RevocationFreshnessFrontier {
+        self.revocation_frontier.clone()
+    }
+
+    /// Reconcile a persisted or remote revocation freshness frontier.
+    ///
+    /// The merge is rollback-safe: if local state already dominates `frontier`,
+    /// the local frontier is left unchanged and `VersionVectorOrder::DominatedBy`
+    /// is returned. Equal, dominating, and concurrent frontiers are merged.
+    pub fn reconcile_revocation_frontier(
+        &mut self,
+        frontier: &RevocationFreshnessFrontier,
+    ) -> VersionVectorOrder {
+        let order = self.revocation_frontier.reconcile(frontier);
+        debug!(
+            target: "fcp.mesh.revocation.freshness",
+            hier_vv_status = order.as_str(),
+            decision = if matches!(order, VersionVectorOrder::DominatedBy) {
+                "reject_stale"
+            } else {
+                "accept"
+            },
+            "reconciled revocation freshness frontier"
+        );
+        order
     }
 
     /// Serialized size of the current local revocation freshness frontier.
@@ -5272,6 +5320,44 @@ mod tests {
         node.update_peer_protocol_capabilities(&peer, PeerProtocolCapabilities::v3_v4(), 2_000);
         node.require_peer_v4_capability(&peer)
             .expect("V3/V4 peer should satisfy V4-required policy");
+    }
+
+    #[test]
+    fn revocation_frontier_snapshot_reconciles_after_restart_without_downgrade() {
+        let mut original = test_node("node-1");
+        original.observe_revocation_frontier(&ZoneId::work(), 42);
+        let snapshot = original.revocation_frontier_snapshot();
+        let encoded = serde_json::to_vec(&snapshot).expect("frontier snapshot serializes");
+        let decoded: RevocationFreshnessFrontier =
+            serde_json::from_slice(&encoded).expect("frontier snapshot deserializes");
+
+        let mut restarted = test_node("node-2");
+        assert_eq!(
+            restarted.reconcile_revocation_frontier(&decoded),
+            VersionVectorOrder::Dominates
+        );
+        assert_eq!(restarted.revocation_frontier_counter(&ZoneId::work()), 42);
+
+        let stale = RevocationFreshnessFrontier::from_counter("z:work", 41);
+        assert_eq!(
+            restarted.reconcile_revocation_frontier(&stale),
+            VersionVectorOrder::DominatedBy
+        );
+        assert_eq!(restarted.revocation_frontier_counter(&ZoneId::work()), 42);
+    }
+
+    #[test]
+    fn observe_revocation_registry_head_seeds_hiervv_frontier() {
+        let mut registry = RevocationRegistry::new();
+        registry.update_head(ObjectId::from_bytes([0x77; 32]), 10, 1_000);
+
+        let mut node = test_node("node-1");
+        let decision = node.observe_revocation_registry_head(&ZoneId::work(), &registry);
+
+        assert_eq!(decision.order, VersionVectorOrder::Dominates);
+        assert_eq!(node.revocation_frontier_counter(&ZoneId::work()), 10);
+        let team_a: ZoneId = "z:work:team-a".parse().unwrap();
+        assert_eq!(node.revocation_frontier_counter(&team_a), 10);
     }
 
     #[test]

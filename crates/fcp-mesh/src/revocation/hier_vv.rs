@@ -257,6 +257,14 @@ impl RevocationFreshnessFrontier {
         }
     }
 
+    /// Create a frontier with one explicit scope counter.
+    #[must_use]
+    pub fn from_counter(scope: impl AsRef<str>, counter: u64) -> Self {
+        let mut vector = HierarchicalVersionVector::new();
+        vector.set(scope, counter);
+        Self { vector }
+    }
+
     /// Borrow the underlying hierarchical vector.
     #[must_use]
     pub const fn vector(&self) -> &HierarchicalVersionVector {
@@ -308,6 +316,20 @@ impl RevocationFreshnessFrontier {
                 .merge(&Self::incoming_vector(&decision.scope, incoming_counter));
         }
         decision
+    }
+
+    /// Merge a persisted or reconciled frontier without allowing rollback.
+    ///
+    /// Returns the relationship of `incoming` to the local frontier before any
+    /// merge. Incoming frontiers that local state already dominates are
+    /// rejected as stale; equal, dominating, and concurrent frontiers are
+    /// merged by keeping the freshest effective counter per scope.
+    pub fn reconcile(&mut self, incoming: &Self) -> VersionVectorOrder {
+        let order = incoming.vector.compare(&self.vector);
+        if !matches!(order, VersionVectorOrder::DominatedBy) {
+            self.vector.merge(&incoming.vector);
+        }
+        order
     }
 
     /// Canonical CBOR size of the stored frontier.

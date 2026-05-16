@@ -1,11 +1,10 @@
 # HLC Audit Entries and HierVV Revocation Freshness
 
-Status: partially implemented under `flywheel_connectors-angoc.17.3`.
+Status: implemented under `flywheel_connectors-angoc.17.3`.
 
 This note describes the shipped HLC and hierarchical version-vector behavior for
-audit chains and mesh revocation freshness. It is a design contract for the code
-in `fcp-audit`, `fcp-host`, and `fcp-mesh`; it is not a claim that the remaining
-mesh registry persistence item is complete.
+audit chains and mesh revocation freshness. It is a design contract for
+`fcp-audit`, `fcp-host`, and `fcp-mesh`.
 
 ## Goals
 
@@ -114,6 +113,20 @@ without relying on wall-clock freshness decisions.
 
 Structured runtime OTLP promotion for these mesh metrics remains follow-up work.
 
+## Frontier Persistence And Reconciliation
+
+`MeshNode::revocation_frontier_snapshot` returns a serializable
+`RevocationFreshnessFrontier` that registry owners can store beside their
+durable revocation checkpoint. After restart, callers restore it with
+`MeshNode::reconcile_revocation_frontier`; local state is not downgraded when a
+snapshot or remote reconciliation response is stale.
+
+Registry owners that already have a durable `fcp_core::RevocationRegistry` can
+seed the HierVV frontier with `MeshNode::observe_revocation_registry_head`,
+which observes the registry's current `head_seq` for a zone before priority
+pushes are evaluated. This covers freshness-frontier persistence and
+reconciliation; it does not replace the registry's full revocation-object log.
+
 ## Invariants
 
 - HLC values are part of the audit-entry canonical id and serialized payload.
@@ -121,6 +134,7 @@ Structured runtime OTLP promotion for these mesh metrics remains follow-up work.
   clamped.
 - A parent revocation frontier can dominate child frontiers.
 - A dominated revocation push cannot downgrade local frontier state.
+- A stale persisted or reconciled frontier cannot downgrade local HierVV state.
 - Equal revocation pushes are accepted as idempotent replays.
 - Concurrent revocation frontiers are accepted and merged instead of being
   rejected as stale by wall-clock order.
@@ -133,13 +147,9 @@ Focused proof lanes for the current implementation:
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-angoc173-hiervv-target-20260516 CARGO_INCREMENTAL=0 cargo test -p fcp-audit --test hlc_monotonic -- --nocapture
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-angoc173-hiervv-target-20260516 CARGO_INCREMENTAL=0 cargo test -p fcp-mesh --test hier_vv -- --nocapture
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-angoc173-hiervv-target-20260516 CARGO_INCREMENTAL=0 cargo test -p fcp-mesh --lib handle_revocation_push -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-angoc173-hiervv-target-20260516 CARGO_INCREMENTAL=0 cargo test -p fcp-mesh --lib revocation_frontier -- --nocapture
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-angoc173-clock-target-20260516 CARGO_INCREMENTAL=0 cargo test -p fcp-host --lib invoke_audit_chain_clock_step_back -- --nocapture
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-angoc173-hiervv-target-20260516 CARGO_INCREMENTAL=0 cargo test -p fcp-conformance --test hlc_hiervv_conformance -- --nocapture
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-angoc173-hiervv-target-20260516 CARGO_INCREMENTAL=0 cargo clippy -p fcp-mesh --lib --no-deps -- -D warnings
 rch exec -- cargo fmt -p fcp-audit -p fcp-mesh -p fcp-host -p fcp-conformance --check
 ```
-
-## Remaining Work
-
-- Persist or reconcile the mesh revocation frontier beyond the current
-  in-memory `MeshNode` priority-push path where the registry owner needs it.

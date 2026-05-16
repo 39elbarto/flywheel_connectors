@@ -93,3 +93,19 @@ fn revocation_frontier_rejects_dominated_update_without_downgrade() {
     assert_eq!(decision.order, VersionVectorOrder::DominatedBy);
     assert_eq!(frontier.counter_for("z:work:team-a"), 10);
 }
+
+#[test]
+fn revocation_frontier_reconciles_persisted_snapshot_without_downgrade() {
+    let persisted = RevocationFreshnessFrontier::from_counter("z:work", 42);
+    let encoded = serde_json::to_vec(&persisted).expect("frontier snapshot serializes");
+    let decoded: RevocationFreshnessFrontier =
+        serde_json::from_slice(&encoded).expect("frontier snapshot deserializes");
+
+    let mut live = RevocationFreshnessFrontier::new();
+    assert_eq!(live.reconcile(&decoded), VersionVectorOrder::Dominates);
+    assert_eq!(live.counter_for("z:work:team-a"), 42);
+
+    let stale = RevocationFreshnessFrontier::from_counter("z:work:team-a", 41);
+    assert_eq!(live.reconcile(&stale), VersionVectorOrder::DominatedBy);
+    assert_eq!(live.counter_for("z:work:team-a"), 42);
+}

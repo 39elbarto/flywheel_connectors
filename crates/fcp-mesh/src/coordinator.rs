@@ -1105,6 +1105,34 @@ fn signed_lease_issue_quorum_rejection(
     now_secs: u64,
     required_signatures: usize,
 ) -> Option<(SignedLeaseIssueOutcome, Vec<AuthorityTimelineEvent>)> {
+    if let Some(node_id) = params.quorum_signatures.duplicate_node_id() {
+        let reason =
+            format!("Lease issue rejected: duplicate quorum signer {node_id} is not allowed");
+        let purpose_label = planner_purpose.to_string();
+        metrics::record_lease_fenced(&purpose_label, "duplicate_quorum_signer");
+        return Some((
+            SignedLeaseIssueOutcome::Rejected {
+                reason: reason.clone(),
+            },
+            vec![AuthorityTimelineEvent {
+                observed_at_ms: now_secs * 1000,
+                operation: "lease.issue_rejected".into(),
+                subject_id: params.subject_object_id,
+                purpose: planner_purpose,
+                holder: Some(params.holder.clone()),
+                coordinator: select_coordinator(
+                    &params.zone_id,
+                    &params.subject_object_id,
+                    eligible_nodes,
+                ),
+                reason_code: AuthorityReasonCode::LeaseAcquisitionRejected,
+                fencing_token: None,
+                expires_at: None,
+                explanation: reason,
+            }],
+        ));
+    }
+
     let got = params.quorum_signatures.len();
     if got < required_signatures {
         let reason = format!(
@@ -1335,6 +1363,24 @@ mod tests {
         set
     }
 
+    fn duplicate_signature_set(node_id: &str) -> fcp_core::SignatureSet {
+        serde_json::from_value(serde_json::json!({
+            "signatures": [
+                {
+                    "node_id": node_id,
+                    "signature": "aa".repeat(64),
+                    "signed_at": 1_000
+                },
+                {
+                    "node_id": node_id,
+                    "signature": "bb".repeat(64),
+                    "signed_at": 1_001
+                }
+            ]
+        }))
+        .expect("duplicate signature JSON should deserialize")
+    }
+
     fn core_lease_params(
         holder: &str,
         ttl_secs: u32,
@@ -1520,6 +1566,62 @@ mod tests {
         let (grant, _timeline) = coord.issue_signed_lease(grant_request);
         let SignedLeaseIssueOutcome::Granted { lease } = grant else {
             panic!("expected valid quorum lease grant");
+        };
+        assert_eq!(lease.lease_seq, 1);
+    }
+
+    #[test]
+    fn issue_signed_lease_rejects_duplicate_quorum_signer_before_materialization() {
+        let mut coord = LeaseCoordinator::with_defaults();
+        let eligible = vec![node("node-a"), node("node-b"), node("node-c")];
+        let holder = selected_holder_for(&eligible);
+        let request = SignedLeaseIssueRequest {
+            params: core_lease_params(
+                holder.as_str(),
+                300,
+                CoreLeasePurpose::ConnectorStateWrite,
+                duplicate_signature_set("node-a"),
+            ),
+            existing_leases: Vec::new(),
+            eligible_nodes: eligible.clone(),
+            required_signatures: 2,
+            now_secs: 1_000,
+        };
+
+        let (outcome, timeline) = coord.issue_signed_lease(request);
+
+        match outcome {
+            SignedLeaseIssueOutcome::Rejected { reason } => {
+                assert!(
+                    reason.contains("duplicate quorum signer"),
+                    "expected duplicate-signer rejection, got: {reason}"
+                );
+                assert!(reason.contains("node-a"));
+            }
+            other => panic!("expected Rejected for duplicate quorum signer, got {other:?}"),
+        }
+        assert!(timeline.iter().any(|event| {
+            event.operation == "lease.issue_rejected"
+                && event.fencing_token.is_none()
+                && event.reason_code == AuthorityReasonCode::LeaseAcquisitionRejected
+                && event.explanation.contains("duplicate quorum signer")
+        }));
+
+        let grant_request = SignedLeaseIssueRequest {
+            params: core_lease_params(
+                holder.as_str(),
+                300,
+                CoreLeasePurpose::ConnectorStateWrite,
+                signatures(&["node-a", "node-b"]),
+            ),
+            existing_leases: Vec::new(),
+            eligible_nodes: eligible,
+            required_signatures: 2,
+            now_secs: 1_000,
+        };
+        let (grant, _timeline) = coord.issue_signed_lease(grant_request);
+        let SignedLeaseIssueOutcome::Granted { lease } = grant else {
+            panic!("expected valid duplicate-free lease grant");
         };
         assert_eq!(lease.lease_seq, 1);
     }

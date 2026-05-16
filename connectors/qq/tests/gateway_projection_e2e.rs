@@ -76,6 +76,10 @@ fn redacted_projection(projection: &Value) -> Value {
             .get("runtime")
             .filter(|value| !value.is_null())
             .map(redacted_runtime_snapshot),
+        "lifecycle": projection
+            .get("lifecycle")
+            .filter(|value| !value.is_null())
+            .map(redacted_lifecycle_directive),
     })
 }
 
@@ -165,6 +169,17 @@ fn redacted_runtime_snapshot(runtime: &Value) -> Value {
         "dropped_events": u64_field(runtime, "dropped_events"),
         "duplicate_events": u64_field(runtime, "duplicate_events"),
         "stale_sequence_events": u64_field(runtime, "stale_sequence_events"),
+    })
+}
+
+fn redacted_lifecycle_directive(lifecycle: &Value) -> Value {
+    json!({
+        "action": str_field(lifecycle, "action"),
+        "reason_code": str_field(lifecycle, "reason_code"),
+        "resume_session_id_hash": hash_field(lifecycle, "resume_session_id"),
+        "resume_sequence": u64_field(lifecycle, "resume_sequence"),
+        "heartbeat_interval_ms": u64_field(lifecycle, "heartbeat_interval_ms"),
+        "reconnect_after_ms": u64_field(lifecycle, "reconnect_after_ms"),
     })
 }
 
@@ -462,6 +477,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     .await;
     assert_eq!(disabled["accepted"], false);
     assert_eq!(disabled["reason_code"], "gateway_disabled");
+    assert_eq!(disabled["lifecycle"]["action"], "none");
     assert_eq!(disabled["normalized"], Value::Null);
     assert_eq!(disabled["policy"], Value::Null);
     assert_eq!(disabled["runtime"]["last_sequence"], 0);
@@ -608,6 +624,9 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     .await;
     assert_eq!(hello["reason_code"], "hello");
     assert_eq!(hello["runtime"]["session_id"], "session-1");
+    assert_eq!(hello["lifecycle"]["action"], "resume");
+    assert_eq!(hello["lifecycle"]["resume_session_id"], "session-1");
+    assert_eq!(hello["lifecycle"]["resume_sequence"], 0);
     log_projection_step(&mut logs, "hello_session_restore", "ok", &hello);
 
     let accepted = invoke_projection(
@@ -633,6 +652,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(accepted["accepted"], true);
     assert_eq!(accepted["topic"], "qq.message.authorized");
     assert_eq!(accepted["policy"]["reason_code"], "group_allowed");
+    assert_eq!(accepted["lifecycle"]["action"], "drain_events");
     log_projection_step(&mut logs, "allowed_group_mention", "ok", &accepted);
 
     let missing_mention = invoke_projection(
@@ -839,7 +859,23 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     .await;
     assert_eq!(heartbeat["reason_code"], "heartbeat_ack");
     assert_eq!(heartbeat["runtime"]["heartbeat_ack_count"], 1);
+    assert_eq!(heartbeat["lifecycle"]["action"], "none");
     log_projection_step(&mut logs, "heartbeat_ack", "ok", &heartbeat);
+
+    let heartbeat_request = invoke_projection(
+        &connector,
+        &signing_key,
+        &instance_id,
+        "qq-gateway-heartbeat-request",
+        json!({
+            "op": 1
+        }),
+    )
+    .await;
+    assert_eq!(heartbeat_request["reason_code"], "heartbeat_request");
+    assert_eq!(heartbeat_request["lifecycle"]["action"], "send_heartbeat");
+    assert_eq!(heartbeat_request["lifecycle"]["resume_sequence"], 6);
+    log_projection_step(&mut logs, "heartbeat_request", "ok", &heartbeat_request);
 
     let reconnect = invoke_projection(
         &connector,
@@ -855,6 +891,9 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(reconnect["accepted"], false);
     assert_eq!(reconnect["reason_code"], "reconnect_requested");
     assert_eq!(reconnect["runtime"]["reconnect_attempts"], 1);
+    assert_eq!(reconnect["lifecycle"]["action"], "reconnect_resume");
+    assert_eq!(reconnect["lifecycle"]["resume_session_id"], "session-1");
+    assert_eq!(reconnect["lifecycle"]["reconnect_after_ms"], 1000);
     log_projection_step(&mut logs, "reconnect_requested", "ok", &reconnect);
 
     let invalid_session = invoke_projection(
@@ -872,6 +911,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(invalid_session["accepted"], false);
     assert_eq!(invalid_session["reason_code"], "invalid_session_resumable");
     assert_eq!(invalid_session["runtime"]["reconnect_attempts"], 2);
+    assert_eq!(invalid_session["lifecycle"]["action"], "reconnect_resume");
     log_projection_step(
         &mut logs,
         "invalid_session_resumable",
@@ -915,6 +955,11 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     .await;
     assert_eq!(reconnect_cap_first["reason_code"], "reconnect_requested");
     assert_eq!(reconnect_cap_first["runtime"]["reconnect_attempts"], 1);
+    assert_eq!(
+        reconnect_cap_first["lifecycle"]["action"],
+        "reconnect_identify"
+    );
+    assert_eq!(reconnect_cap_first["lifecycle"]["reconnect_after_ms"], 250);
     let reconnect_exhausted = invoke_projection(
         &reconnect_cap_connector,
         &signing_key,
@@ -934,6 +979,11 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(reconnect_exhausted["runtime"]["reconnect_attempts"], 2);
     assert_eq!(reconnect_exhausted["runtime"]["max_reconnect_attempts"], 1);
     assert_eq!(reconnect_exhausted["runtime"]["reconnect_backoff_ms"], 250);
+    assert_eq!(reconnect_exhausted["lifecycle"]["action"], "stop_reconnect");
+    assert_eq!(
+        reconnect_exhausted["lifecycle"]["reconnect_after_ms"],
+        Value::Null
+    );
     log_projection_step(
         &mut logs,
         "reconnect_attempts_exhausted",

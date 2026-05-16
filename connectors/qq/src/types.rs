@@ -248,6 +248,16 @@ pub struct QqGatewayRuntimeSnapshot {
     pub stale_sequence_events: u64,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct QqGatewayLifecycleDirective {
+    pub action: &'static str,
+    pub reason_code: &'static str,
+    pub resume_session_id: Option<String>,
+    pub resume_sequence: u64,
+    pub heartbeat_interval_ms: u64,
+    pub reconnect_after_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct QqGatewayEventProjection {
     pub accepted: bool,
@@ -258,6 +268,7 @@ pub struct QqGatewayEventProjection {
     pub normalized: Option<NormalizedQqEvent>,
     pub policy: Option<QqInboundPolicyDecision>,
     pub runtime: QqGatewayRuntimeSnapshot,
+    pub lifecycle: QqGatewayLifecycleDirective,
 }
 
 #[derive(Debug, Clone, Serialize)]

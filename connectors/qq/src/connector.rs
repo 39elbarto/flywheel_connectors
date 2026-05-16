@@ -441,6 +441,41 @@ fn gateway_runtime_snapshot_schema() -> Value {
     })
 }
 
+fn gateway_lifecycle_directive_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": [
+            "action",
+            "reason_code",
+            "resume_session_id",
+            "resume_sequence",
+            "heartbeat_interval_ms",
+            "reconnect_after_ms"
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": [
+                    "none",
+                    "drain_events",
+                    "send_heartbeat",
+                    "identify",
+                    "resume",
+                    "reconnect_identify",
+                    "reconnect_resume",
+                    "stop_reconnect"
+                ]
+            },
+            "reason_code": { "type": "string" },
+            "resume_session_id": { "type": ["string", "null"] },
+            "resume_sequence": { "type": "integer", "minimum": 0 },
+            "heartbeat_interval_ms": { "type": "integer", "minimum": 0 },
+            "reconnect_after_ms": { "type": ["integer", "null"], "minimum": 0 }
+        }
+    })
+}
+
 fn gateway_projection_schema() -> Value {
     json!({
         "type": "object",
@@ -452,7 +487,8 @@ fn gateway_projection_schema() -> Value {
             "event_id",
             "normalized",
             "policy",
-            "runtime"
+            "runtime",
+            "lifecycle"
         ],
         "additionalProperties": false,
         "properties": {
@@ -476,7 +512,8 @@ fn gateway_projection_schema() -> Value {
                     { "type": "null" }
                 ]
             },
-            "runtime": gateway_runtime_snapshot_schema()
+            "runtime": gateway_runtime_snapshot_schema(),
+            "lifecycle": gateway_lifecycle_directive_schema()
         }
     })
 }
@@ -1627,6 +1664,17 @@ mod tests {
         })
     }
 
+    fn sample_lifecycle_directive(action: &str, reason_code: &str) -> Value {
+        json!({
+            "action": action,
+            "reason_code": reason_code,
+            "resume_session_id": null,
+            "resume_sequence": 1,
+            "heartbeat_interval_ms": 45_000,
+            "reconnect_after_ms": null
+        })
+    }
+
     fn sample_policy_decision() -> Value {
         json!({
             "allowed": true,
@@ -1851,7 +1899,8 @@ mod tests {
                 "event_id": "evt-1",
                 "normalized": sample_normalized_event(),
                 "policy": sample_policy_decision(),
-                "runtime": sample_runtime_snapshot()
+                "runtime": sample_runtime_snapshot(),
+                "lifecycle": sample_lifecycle_directive("drain_events", "accepted")
             }),
         )?;
         assert_schema_accepts(
@@ -1864,7 +1913,8 @@ mod tests {
                 "event_id": null,
                 "normalized": null,
                 "policy": null,
-                "runtime": sample_runtime_snapshot()
+                "runtime": sample_runtime_snapshot(),
+                "lifecycle": sample_lifecycle_directive("none", "heartbeat_ack")
             }),
         )?;
         assert_schema_rejects(
@@ -1877,7 +1927,8 @@ mod tests {
                 "event_id": null,
                 "normalized": null,
                 "policy": null,
-                "runtime": sample_runtime_snapshot()
+                "runtime": sample_runtime_snapshot(),
+                "lifecycle": sample_lifecycle_directive("none", "heartbeat_ack")
             }),
         )?;
 

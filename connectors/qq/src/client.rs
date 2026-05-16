@@ -14,9 +14,19 @@ use crate::error::{QqError, QqResult};
 use crate::types::{
     AccessTokenResponse, EVENT_QQ_EVENT_DROPPED, EVENT_QQ_MESSAGE_AUTHORIZED, NormalizedQqEvent,
     QqAccessPolicyMode, QqConfig, QqGatewayDrainResult, QqGatewayEvent, QqGatewayEventProjection,
-    QqGatewayQueuedEvent, QqGatewayRuntimeConfig, QqGatewayRuntimeSnapshot, QqInboundPolicyConfig,
-    QqInboundPolicyDecision, QqMessageEvent, QqRouting, TOKEN_REFRESH_SAFETY_MARGIN_SECS,
+    QqGatewayLifecycleDirective, QqGatewayQueuedEvent, QqGatewayRuntimeConfig,
+    QqGatewayRuntimeSnapshot, QqInboundPolicyConfig, QqInboundPolicyDecision, QqMessageEvent,
+    QqRouting, TOKEN_REFRESH_SAFETY_MARGIN_SECS,
 };
+
+const QQ_GATEWAY_ACTION_NONE: &str = "none";
+const QQ_GATEWAY_ACTION_DRAIN_EVENTS: &str = "drain_events";
+const QQ_GATEWAY_ACTION_SEND_HEARTBEAT: &str = "send_heartbeat";
+const QQ_GATEWAY_ACTION_IDENTIFY: &str = "identify";
+const QQ_GATEWAY_ACTION_RESUME: &str = "resume";
+const QQ_GATEWAY_ACTION_RECONNECT_IDENTIFY: &str = "reconnect_identify";
+const QQ_GATEWAY_ACTION_RECONNECT_RESUME: &str = "reconnect_resume";
+const QQ_GATEWAY_ACTION_STOP_RECONNECT: &str = "stop_reconnect";
 
 const QQ_GATEWAY_EVENT_TYPE_MAX_CHARS: usize = 64;
 const QQ_GATEWAY_ID_MAX_CHARS: usize = 256;
@@ -345,7 +355,12 @@ impl QqGatewayRuntime {
             1 => {
                 self.session.record_heartbeat_sent(Instant::now());
                 self.heartbeat_sent_count = self.heartbeat_sent_count.saturating_add(1);
-                Ok(self.dropped_projection(event.s, event.id, "heartbeat_request"))
+                Ok(self.dropped_projection_with_lifecycle(
+                    event.s,
+                    event.id,
+                    "heartbeat_request",
+                    QQ_GATEWAY_ACTION_SEND_HEARTBEAT,
+                ))
             }
             10 => {
                 if let Some(session_id) = event
@@ -358,16 +373,22 @@ impl QqGatewayRuntime {
                     self.session.set_resume_token(session_id.trim().to_string());
                 }
                 self.reconnect_attempts = 0;
-                Ok(self.dropped_projection(event.s, event.id, "hello"))
+                let action = if self.session.resume_token().is_some() {
+                    QQ_GATEWAY_ACTION_RESUME
+                } else {
+                    QQ_GATEWAY_ACTION_IDENTIFY
+                };
+                Ok(self.dropped_projection_with_lifecycle(event.s, event.id, "hello", action))
             }
-            7 => Ok(self.reconnect_projection(event.s, event.id, "reconnect_requested")),
+            7 => Ok(self.reconnect_projection(event.s, event.id, "reconnect_requested", true)),
             9 => {
-                let reason_code = if event.d.as_ref().and_then(Value::as_bool).unwrap_or(false) {
+                let resumable = event.d.as_ref().and_then(Value::as_bool).unwrap_or(false);
+                let reason_code = if resumable {
                     "invalid_session_resumable"
                 } else {
                     "invalid_session_identify_required"
                 };
-                Ok(self.reconnect_projection(event.s, event.id, reason_code))
+                Ok(self.reconnect_projection(event.s, event.id, reason_code, resumable))
             }
             11 => {
                 self.session.record_heartbeat_ack(Instant::now());
@@ -400,14 +421,21 @@ impl QqGatewayRuntime {
         sequence: Option<u64>,
         event_id: Option<String>,
         reason_code: &'static str,
+        resumable: bool,
     ) -> QqGatewayEventProjection {
         self.reconnect_attempts = self.reconnect_attempts.saturating_add(1);
-        let reason_code = if self.reconnect_attempts > self.config.max_reconnect_attempts {
-            "reconnect_attempts_exhausted"
+        let (reason_code, action) = if self.reconnect_attempts > self.config.max_reconnect_attempts
+        {
+            (
+                "reconnect_attempts_exhausted",
+                QQ_GATEWAY_ACTION_STOP_RECONNECT,
+            )
+        } else if resumable && self.session.resume_token().is_some() {
+            (reason_code, QQ_GATEWAY_ACTION_RECONNECT_RESUME)
         } else {
-            reason_code
+            (reason_code, QQ_GATEWAY_ACTION_RECONNECT_IDENTIFY)
         };
-        self.dropped_projection(sequence, event_id, reason_code)
+        self.dropped_projection_with_lifecycle(sequence, event_id, reason_code, action)
     }
 
     fn project_dispatch(&mut self, event: &QqGatewayEvent) -> QqResult<QqGatewayEventProjection> {
@@ -444,15 +472,17 @@ impl QqGatewayRuntime {
         let policy = evaluate_inbound_policy(&normalized, &self.config.policy);
         if !policy.allowed {
             self.dropped_events = self.dropped_events.saturating_add(1);
+            let reason_code = policy.reason_code;
             return Ok(QqGatewayEventProjection {
                 accepted: false,
                 topic: EVENT_QQ_EVENT_DROPPED,
-                reason_code: policy.reason_code,
+                reason_code,
                 sequence: event.s,
                 event_id,
                 normalized: Some(normalized),
                 policy: Some(policy),
                 runtime: self.snapshot(),
+                lifecycle: self.lifecycle_directive(QQ_GATEWAY_ACTION_NONE, reason_code),
             });
         }
 
@@ -473,6 +503,7 @@ impl QqGatewayRuntime {
             normalized: Some(normalized),
             policy: Some(policy),
             runtime: self.snapshot(),
+            lifecycle: self.lifecycle_directive(QQ_GATEWAY_ACTION_DRAIN_EVENTS, "accepted"),
         })
     }
 
@@ -492,6 +523,21 @@ impl QqGatewayRuntime {
         event_id: Option<String>,
         reason_code: &'static str,
     ) -> QqGatewayEventProjection {
+        self.dropped_projection_with_lifecycle(
+            sequence,
+            event_id,
+            reason_code,
+            QQ_GATEWAY_ACTION_NONE,
+        )
+    }
+
+    fn dropped_projection_with_lifecycle(
+        &mut self,
+        sequence: Option<u64>,
+        event_id: Option<String>,
+        reason_code: &'static str,
+        action: &'static str,
+    ) -> QqGatewayEventProjection {
         self.dropped_events = self.dropped_events.saturating_add(1);
         QqGatewayEventProjection {
             accepted: false,
@@ -502,6 +548,33 @@ impl QqGatewayRuntime {
             normalized: None,
             policy: None,
             runtime: self.snapshot(),
+            lifecycle: self.lifecycle_directive(action, reason_code),
+        }
+    }
+
+    fn lifecycle_directive(
+        &self,
+        action: &'static str,
+        reason_code: &'static str,
+    ) -> QqGatewayLifecycleDirective {
+        let resume_session_id = matches!(
+            action,
+            QQ_GATEWAY_ACTION_RESUME | QQ_GATEWAY_ACTION_RECONNECT_RESUME
+        )
+        .then(|| self.session.resume_token())
+        .flatten();
+        let reconnect_after_ms = matches!(
+            action,
+            QQ_GATEWAY_ACTION_RECONNECT_IDENTIFY | QQ_GATEWAY_ACTION_RECONNECT_RESUME
+        )
+        .then_some(self.config.reconnect_backoff_ms);
+        QqGatewayLifecycleDirective {
+            action,
+            reason_code,
+            resume_session_id,
+            resume_sequence: self.session.sequence(),
+            heartbeat_interval_ms: self.config.heartbeat_interval_ms,
+            reconnect_after_ms,
         }
     }
 }
@@ -2114,6 +2187,11 @@ mod tests {
             Some("session-1"),
             "hello should restore session token"
         );
+        assert_eq!(hello.lifecycle.action, QQ_GATEWAY_ACTION_RESUME);
+        assert_eq!(
+            hello.lifecycle.resume_session_id.as_deref(),
+            Some("session-1")
+        );
 
         let event = QqGatewayEvent {
             op: 0,
@@ -2132,6 +2210,7 @@ mod tests {
         assert!(projected.accepted);
         assert_eq!(projected.topic, EVENT_QQ_MESSAGE_AUTHORIZED);
         assert_eq!(projected.reason_code, "accepted");
+        assert_eq!(projected.lifecycle.action, QQ_GATEWAY_ACTION_DRAIN_EVENTS);
         assert_eq!(projected.runtime.last_sequence, 1);
         assert_eq!(projected.runtime.accepted_events, 1);
         assert_eq!(
@@ -2142,6 +2221,7 @@ mod tests {
         let duplicate = runtime.project_event(event).unwrap();
         assert!(!duplicate.accepted);
         assert_eq!(duplicate.reason_code, "duplicate_event");
+        assert_eq!(duplicate.lifecycle.action, QQ_GATEWAY_ACTION_NONE);
         assert_eq!(duplicate.runtime.duplicate_events, 1);
     }
 
@@ -2332,6 +2412,7 @@ mod tests {
             .unwrap();
         assert!(!hello.accepted);
         assert_eq!(hello.reason_code, "gateway_disabled");
+        assert_eq!(hello.lifecycle.action, QQ_GATEWAY_ACTION_NONE);
         assert_eq!(hello.runtime.session_id, None);
         assert_eq!(hello.runtime.last_sequence, 0);
 
@@ -2754,7 +2835,24 @@ mod tests {
             })
             .unwrap();
         assert_eq!(heartbeat.reason_code, "heartbeat_ack");
+        assert_eq!(heartbeat.lifecycle.action, QQ_GATEWAY_ACTION_NONE);
         assert_eq!(heartbeat.runtime.heartbeat_ack_count, 1);
+
+        let heartbeat_request = runtime
+            .project_event(QqGatewayEvent {
+                op: 1,
+                s: None,
+                t: None,
+                d: None,
+                id: None,
+            })
+            .unwrap();
+        assert_eq!(heartbeat_request.reason_code, "heartbeat_request");
+        assert_eq!(
+            heartbeat_request.lifecycle.action,
+            QQ_GATEWAY_ACTION_SEND_HEARTBEAT
+        );
+        assert_eq!(heartbeat_request.lifecycle.resume_sequence, 10);
     }
 
     #[test]
@@ -2777,6 +2875,15 @@ mod tests {
             })
             .unwrap();
         assert_eq!(reconnect.reason_code, "reconnect_requested");
+        assert_eq!(
+            reconnect.lifecycle.action,
+            QQ_GATEWAY_ACTION_RECONNECT_RESUME
+        );
+        assert_eq!(
+            reconnect.lifecycle.resume_session_id.as_deref(),
+            Some("session-before-reconnect")
+        );
+        assert_eq!(reconnect.lifecycle.reconnect_after_ms, Some(250));
         assert_eq!(reconnect.runtime.reconnect_attempts, 1);
         assert_eq!(reconnect.runtime.max_reconnect_attempts, 2);
         assert_eq!(reconnect.runtime.reconnect_backoff_ms, 250);
@@ -2798,6 +2905,10 @@ mod tests {
             resumable_invalid_session.reason_code,
             "invalid_session_resumable"
         );
+        assert_eq!(
+            resumable_invalid_session.lifecycle.action,
+            QQ_GATEWAY_ACTION_RECONNECT_RESUME
+        );
         assert_eq!(resumable_invalid_session.runtime.reconnect_attempts, 2);
 
         let exhausted = runtime
@@ -2810,6 +2921,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(exhausted.reason_code, "reconnect_attempts_exhausted");
+        assert_eq!(exhausted.lifecycle.action, QQ_GATEWAY_ACTION_STOP_RECONNECT);
+        assert_eq!(exhausted.lifecycle.reconnect_after_ms, None);
         assert_eq!(exhausted.runtime.reconnect_attempts, 3);
 
         let hello = runtime
@@ -2822,6 +2935,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(hello.reason_code, "hello");
+        assert_eq!(hello.lifecycle.action, QQ_GATEWAY_ACTION_RESUME);
         assert_eq!(hello.runtime.reconnect_attempts, 0);
         assert_eq!(
             hello.runtime.session_id.as_deref(),

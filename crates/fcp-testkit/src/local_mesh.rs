@@ -1018,6 +1018,47 @@ mod tests {
             .expect("scenario should leave one online active holder")
     }
 
+    fn resign_first_receipt_after(
+        harness: &mut LocalMeshHarness,
+        mutate: impl FnOnce(&mut OperationReceipt),
+    ) {
+        let receipt_key = harness
+            .receipts_by_key
+            .keys()
+            .next()
+            .cloned()
+            .expect("scenario should record one operation receipt");
+        let executed_by = harness
+            .receipts_by_key
+            .get(&receipt_key)
+            .expect("receipt key should remain present")
+            .executed_by
+            .clone();
+        let signing_key = harness
+            .node(&executed_by)
+            .expect("executing node should still exist")
+            .signing_key
+            .clone();
+        let receipt = harness
+            .receipts_by_key
+            .get_mut(&receipt_key)
+            .expect("receipt key should remain mutable");
+        mutate(receipt);
+        let signature = signing_key.sign(&receipt.signable_bytes());
+        receipt.signature = NodeSignature::new(
+            CoreNodeId::new(executed_by.as_str()),
+            signature.to_bytes(),
+            receipt.signature.signed_at,
+        );
+    }
+
+    #[test]
+    fn empty_harness_rejects_configuration_error() {
+        let result = LocalMeshHarness::new(0, 0);
+
+        assert!(matches!(result, Err(LocalMeshHarnessError::EmptyHarness)));
+    }
+
     #[test]
     fn invariant_report_detects_corrupted_receipt_signature() {
         let mut harness = LocalMeshHarness::new_three_node(11).expect("harness should build");
@@ -1050,6 +1091,76 @@ mod tests {
     }
 
     #[test]
+    fn invariant_report_detects_malformed_receipt_state() {
+        let mut harness = LocalMeshHarness::new_three_node(13).expect("harness should build");
+        harness
+            .run_failover_scenario(LocalChaosMode::KillFollowerMidRead)
+            .expect("scenario should produce a receipt");
+        let holder = active_holder(&harness);
+        let clean = harness.invariant_report(&holder);
+        assert_eq!(clean.invalid_receipt_signature_count, 0);
+        assert_eq!(clean.orphaned_connector_state_count, 0);
+
+        resign_first_receipt_after(&mut harness, |receipt| {
+            receipt.header.refs.clear();
+            receipt.idempotency_key = None;
+            receipt.outcome_object_ids.clear();
+        });
+
+        let malformed = harness.invariant_report(&holder);
+        assert_eq!(
+            malformed.invalid_receipt_signature_count, 0,
+            "malformed receipt state is re-signed so this test isolates state connectivity"
+        );
+        assert_eq!(
+            malformed.orphaned_connector_state_count, 1,
+            "missing request refs, idempotency key, or outcomes should orphan receipt state"
+        );
+    }
+
+    #[test]
+    fn invariant_report_detects_receipt_signer_mismatch() {
+        let mut harness = LocalMeshHarness::new_three_node(14).expect("harness should build");
+        harness
+            .run_failover_scenario(LocalChaosMode::NetworkPartitionThenHeal)
+            .expect("scenario should produce a receipt");
+        let holder = active_holder(&harness);
+        let clean = harness.invariant_report(&holder);
+        assert_eq!(clean.invalid_receipt_signature_count, 0);
+        assert_eq!(clean.orphaned_connector_state_count, 0);
+
+        let original_executor = harness
+            .receipts_by_key
+            .values()
+            .next()
+            .expect("scenario should record one operation receipt")
+            .executed_by
+            .clone();
+        let mismatched_executor = harness
+            .nodes
+            .values()
+            .map(|node| node.tailscale_id.clone())
+            .find(|node_id| *node_id != original_executor)
+            .expect("three-node harness should have another node");
+        harness
+            .receipts_by_key
+            .values_mut()
+            .next()
+            .expect("scenario should record one mutable operation receipt")
+            .executed_by = mismatched_executor;
+
+        let mismatched = harness.invariant_report(&holder);
+        assert_eq!(
+            mismatched.invalid_receipt_signature_count, 1,
+            "receipts attributed to a different executor should fail signature binding"
+        );
+        assert_eq!(
+            mismatched.orphaned_connector_state_count, 1,
+            "signer mismatch should make receipt state unreachable"
+        );
+    }
+
+    #[test]
     fn invariant_report_detects_offline_active_holder() {
         let mut harness = LocalMeshHarness::new_three_node(12).expect("harness should build");
         harness
@@ -1074,5 +1185,40 @@ mod tests {
             !orphaned.all_nodes_online_at_end,
             "offline holder should clear the all-nodes-online invariant"
         );
+    }
+
+    #[test]
+    fn restart_reforms_same_seed_failover_state_deterministically() {
+        let mut first = LocalMeshHarness::new_three_node(15).expect("first harness should build");
+        let first_outcome = first
+            .run_failover_scenario(LocalChaosMode::KillLeaderMidWrite)
+            .expect("first scenario should complete");
+
+        let mut restarted =
+            LocalMeshHarness::new_three_node(15).expect("restarted harness should build");
+        assert_eq!(
+            restarted.receipts_by_key.len(),
+            0,
+            "a restarted local mesh harness should begin from zero operation receipts"
+        );
+        let restarted_outcome = restarted
+            .run_failover_scenario(LocalChaosMode::KillLeaderMidWrite)
+            .expect("restarted scenario should complete");
+
+        assert_eq!(
+            first_outcome.final_state_hash, restarted_outcome.final_state_hash,
+            "same seed and chaos mode should reform the same final state after restart"
+        );
+        assert_eq!(
+            first_outcome.replay_bundle.hashes.receipt_hash,
+            restarted_outcome.replay_bundle.hashes.receipt_hash,
+            "receipt evidence should be deterministic across restart"
+        );
+        assert_eq!(
+            first_outcome.replay_bundle.hashes.transition_hash,
+            restarted_outcome.replay_bundle.hashes.transition_hash,
+            "transition evidence should be deterministic across restart"
+        );
+        assert_eq!(restarted_outcome.duplicate_receipt_count, 0);
     }
 }

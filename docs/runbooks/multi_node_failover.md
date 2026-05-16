@@ -99,6 +99,13 @@ offline and requires `orphaned_active_lease_count` to increment while
 `all_nodes_online_at_end` flips false. These tests make the invariant fields a
 real backstop instead of only a clean-path assertion.
 
+The local harness pins the other refinement failure categories with focused
+tests as well: zero-node harness construction fails as a typed configuration
+error, malformed receipt state is re-signed and still counted as orphaned
+connector state, receipt executor/signature mismatches are counted as invalid
+authorization evidence, and a restarted same-seed harness reforms the same
+final state, receipt hash, and transition hash from zero local receipts.
+
 ## Replay Bundle Layout
 
 `LocalReplayBundle::write_to_dir` runs the shared

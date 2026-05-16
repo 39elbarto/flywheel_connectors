@@ -77,6 +77,7 @@ Conformance coverage:
 - `masked_iblt_conformance.rs::summary_iblt_wire_contains_masked_keys_not_raw_object_ids`
 - `masked_iblt_conformance.rs::layered_filter_fpr_budget_conformance`
 - `masked_iblt_conformance.rs::corrupted_summary_iblt_is_structured_rejection_without_peer_mutation`
+- `masked_iblt_conformance.rs::overflow_fallback_is_audit_chain_verifiable`
 
 CLI doctor coverage:
 
@@ -85,10 +86,13 @@ CLI doctor coverage:
   `last_decode_p99_us`, `overflow_count_last_1h`, `fpr_observed`, threshold
   warnings, and remediation commands.
 
+Telemetry coverage:
+
+- Production reconciliation records
+  `fcp.mesh.iblt.decode_us{zone,peer,scheme,overflow}` for both complete
+  decodes and overflow-triggered fallback paths.
+
 ## Remaining Work
 
-The following acceptance items are still separate follow-up surfaces unless
-landed by the same bead closeout:
-
-- explicit audit-chain verification for overflow fallback;
-- production OTLP histogram aggregation for per-peer masked IBLT decode latency.
+The current slice lands the masked sketch, layered route-hint filter, doctor
+probe, overflow audit-chain verification, and per-peer decode-latency histogram.

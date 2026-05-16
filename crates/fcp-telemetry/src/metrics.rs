@@ -43,6 +43,8 @@ pub const LEASE_HANDOFFS_TOTAL_METRIC: &str = "fcp_lease_handoffs_total";
 pub const LEASE_HANDOFF_DURATION_SECONDS_METRIC: &str = "fcp_lease_handoff_duration_seconds";
 /// Histogram of serialized `HierVV` revocation-frontier size by zone.
 pub const REVOCATION_HIERVV_SIZE_BYTES_METRIC: &str = "fcp.mesh.revocation.hiervv_size_bytes";
+/// Histogram of masked IBLT decode latency, in microseconds, by zone and peer.
+pub const MESH_IBLT_DECODE_US_METRIC: &str = "fcp.mesh.iblt.decode_us";
 
 /// Stable public lease event metric names surfaced by operator status commands.
 pub const LEASE_EVENT_NAMES: [&str; 6] = [
@@ -110,6 +112,10 @@ pub fn init_metrics() {
     describe_histogram!(
         REVOCATION_HIERVV_SIZE_BYTES_METRIC,
         "Serialized Hierarchical Version Vector revocation frontier size in bytes"
+    );
+    describe_histogram!(
+        MESH_IBLT_DECODE_US_METRIC,
+        "Masked IBLT reconciliation decode latency in microseconds"
     );
 
     // Symbol coverage and diversity metrics
@@ -545,6 +551,28 @@ pub fn record_lease_flushed_on_yield(purpose: &str, outcome: &str) {
     );
 }
 
+/// Record masked IBLT reconciliation decode latency.
+pub fn record_mesh_iblt_decode_latency_us(
+    zone_id: &str,
+    peer_id: &str,
+    scheme: &str,
+    overflow: bool,
+    decode_us: u64,
+) {
+    let overflow_label = if overflow { "true" } else { "false" };
+    let histogram_value = f64::from(u32::try_from(decode_us).unwrap_or(u32::MAX));
+    record_histogram(
+        MESH_IBLT_DECODE_US_METRIC,
+        histogram_value,
+        &[
+            ("zone", zone_id),
+            ("peer", peer_id),
+            ("scheme", scheme),
+            ("overflow", overflow_label),
+        ],
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Symbol Coverage and Diversity Metrics
 // ─────────────────────────────────────────────────────────────────────────────
@@ -850,6 +878,13 @@ mod tests {
         record_lease_fenced("connector_state_write", "stale_lease_seq");
         record_lease_revoked("singleton_writer", "manual_revoke");
         record_lease_flushed_on_yield("singleton_writer", "success");
+    }
+
+    #[test]
+    fn test_mesh_iblt_decode_latency_metric_no_panic() {
+        assert_eq!(MESH_IBLT_DECODE_US_METRIC, "fcp.mesh.iblt.decode_us");
+        record_mesh_iblt_decode_latency_us("z:work", "node-a", "masked", false, 250);
+        record_mesh_iblt_decode_latency_us("z:work", "node-b", "masked", true, u64::MAX);
     }
 
     #[test]

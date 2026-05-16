@@ -8,10 +8,14 @@
 
 use std::collections::{BTreeSet, HashSet};
 
+use fcp_audit::{AuditEntryBuilder, Severity, verify_chain};
 use fcp_mesh::admission::ObjectAdmissionClass;
-use fcp_mesh::gossip::{GossipConfig, GossipSummary, MeshGossip};
-use fcp_mesh::iblt::{Iblt, IbltMask, LayeredFilterConfig, LayeredReconciliationFilter};
+use fcp_mesh::gossip::{GossipConfig, GossipSummary, MAX_OBJECT_IDS_PER_REQUEST, MeshGossip};
+use fcp_mesh::iblt::{
+    Iblt, IbltMask, LayeredFilterConfig, LayeredReconciliationFilter, MaskedIblt,
+};
 use fcp_prelude::{EpochId, ObjectId, TailscaleNodeId, ZoneId};
+use serde_json::json;
 
 fn obj(label: &str) -> ObjectId {
     ObjectId::from_unscoped_bytes(label.as_bytes())
@@ -210,4 +214,73 @@ fn corrupted_summary_iblt_is_structured_rejection_without_peer_mutation() {
 
     assert!(!gossip.handle_summary(summary, 1));
     assert_eq!(gossip.peer_count(), 0);
+}
+
+#[test]
+fn overflow_fallback_is_audit_chain_verifiable() {
+    let zone = ZoneId::work();
+    let local_peer = node("local-overflow");
+    let remote_peer = node("remote-overflow");
+    let mut gossip = MeshGossip::with_defaults(local_peer.clone());
+    gossip.announce_object(
+        &zone,
+        &obj("local-anchor"),
+        ObjectAdmissionClass::Admitted,
+        1,
+    );
+
+    let expected_difference = 1;
+    let mask = IbltMask::for_zone(&zone);
+    let mut overloaded_peer = MaskedIblt::with_expected_difference(mask, expected_difference);
+    for index in 0..(MAX_OBJECT_IDS_PER_REQUEST * 3) {
+        overloaded_peer.insert(obj(&format!("remote-overflow-{index:04}")));
+    }
+
+    let local_iblt = gossip
+        .build_zone_iblt(&zone, expected_difference)
+        .expect("local zone IBLT");
+    let raw_diff = local_iblt
+        .subtract(overloaded_peer.as_iblt())
+        .expect("matching cell count")
+        .decode();
+    assert!(
+        !raw_diff.is_complete(),
+        "overloaded peer sketch should require fallback"
+    );
+
+    let response = gossip
+        .reconcile_zone_iblt(
+            &zone,
+            &remote_peer,
+            overloaded_peer.as_iblt(),
+            expected_difference,
+            2,
+        )
+        .expect("overflow still returns bounded fallback response");
+    assert!(response.we_missing_objects.len() <= MAX_OBJECT_IDS_PER_REQUEST);
+
+    let audit_entry = AuditEntryBuilder::new()
+        .event_type("mesh.iblt.overflow_fallback")
+        .severity(Severity::Warning)
+        .actor(local_peer.as_str())
+        .zone_id(zone.as_str())
+        .seq(0)
+        .occurred_at(2)
+        .meta("scheme", json!("masked"))
+        .meta("peer_id", json!(remote_peer.as_str()))
+        .meta("overflow", json!(true))
+        .meta("fallback", json!("paginated_list_exchange"))
+        .meta(
+            "remaining_nonzero_cells",
+            json!(raw_diff.remaining_nonzero_cells),
+        )
+        .build_with_computed_id()
+        .expect("overflow fallback audit entry should build");
+    let report = verify_chain(&[audit_entry], None, Some(zone.as_str()));
+
+    assert!(
+        report.is_clean(),
+        "overflow fallback audit chain should verify cleanly: {:?}",
+        report.issues
+    );
 }

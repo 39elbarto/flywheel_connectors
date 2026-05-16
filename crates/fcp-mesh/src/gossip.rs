@@ -32,6 +32,7 @@ use crate::iblt::{
 };
 use fcp_crypto::{CryptoError, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_prelude::{EpochId, NodeSignature, ObjectId, TailscaleNodeId, ZoneId};
+use fcp_telemetry::metrics;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants (NORMATIVE defaults)
@@ -2733,6 +2734,13 @@ impl MeshGossip {
         let remote_iblt_cells = u64::try_from(peer_iblt.cell_count()).unwrap_or(u64::MAX);
         let complete = result.complete;
         let remaining_nonzero_cells = result.remaining_nonzero_cells;
+        metrics::record_mesh_iblt_decode_latency_us(
+            zone_id.as_str(),
+            peer_id.as_str(),
+            "masked",
+            !complete,
+            decode_us,
+        );
 
         let max_objects = MAX_OBJECT_IDS_PER_REQUEST;
         let peer_missing: Vec<ObjectId> = result.only_left.into_iter().take(max_objects).collect();

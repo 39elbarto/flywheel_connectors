@@ -141,6 +141,12 @@ if [[ "${overall_status}" == "passed" ]]; then
       def required:
         [
           "log_start",
+          "gateway_disabled_drop",
+          "missing_route_binding_drop",
+          "missing_message_identity_drop",
+          "missing_reply_target_drop",
+          "channel_policy_denied",
+          "channel_policy_allowed",
           "hello_session_restore",
           "allowed_group_mention",
           "missing_group_mention_drop",
@@ -148,11 +154,16 @@ if [[ "${overall_status}" == "passed" ]]; then
           "structured_group_mention",
           "oversized_media_policy_drop",
           "reply_media_projection",
+          "voice_asr_projection",
+          "slash_approval_projection",
           "duplicate_drop",
           "heartbeat_ack",
+          "heartbeat_request",
           "reconnect_requested",
           "invalid_session_resumable",
           "reconnect_attempts_exhausted",
+          "gateway_drain_first_batch",
+          "gateway_drain_final_batch",
           "shutdown"
         ];
       def steps: map(.step);
@@ -162,17 +173,44 @@ if [[ "${overall_status}" == "passed" ]]; then
         missing_steps: missing,
         status_ok: all(.[]; .status == "ok"),
         redaction_shape_ok: all(.[]; (.step | type) == "string" and (.details | type) == "object"),
+        disabled_shape_ok: any(.[]; .step == "gateway_disabled_drop" and .details.accepted == false and .details.reason_code == "gateway_disabled" and .details.normalized == null and .details.policy == null and .details.lifecycle.action == "none"),
+        binding_shape_ok: (
+          any(.[]; .step == "missing_route_binding_drop" and .details.reason_code == "group_sender_missing" and .details.policy.reason_code == "group_sender_missing")
+          and any(.[]; .step == "missing_message_identity_drop" and .details.reason_code == "message_id_missing" and .details.policy.reason_code == "message_id_missing")
+          and any(.[]; .step == "missing_reply_target_drop" and .details.reason_code == "reply_target_missing" and .details.policy.reason_code == "reply_target_missing")
+        ),
+        channel_shape_ok: (
+          any(.[]; .step == "channel_policy_denied" and .details.accepted == false and .details.reason_code == "channel_not_allowed")
+          and any(.[]; .step == "channel_policy_allowed" and .details.accepted == true and .details.policy.reason_code == "channel_allowed" and .details.policy.mentioned_bot == true)
+        ),
+        group_policy_shape_ok: (
+          any(.[]; .step == "allowed_group_mention" and .details.accepted == true and .details.policy.reason_code == "group_allowed")
+          and any(.[]; .step == "missing_group_mention_drop" and .details.reason_code == "missing_group_mention")
+          and any(.[]; .step == "untyped_message_id_not_mention" and .details.policy.mentioned_bot == false)
+          and any(.[]; .step == "structured_group_mention" and .details.accepted == true and .details.policy.mentioned_bot == true)
+        ),
         reply_shape_ok: any(.[]; .step == "reply_media_projection" and .details.normalized.is_reply == true and (.details.normalized.reply_to_hash | type) == "string"),
         media_shape_ok: any(.[]; .step == "oversized_media_policy_drop" and .details.reason_code == "attachment_bytes_exceeded"),
+        voice_shape_ok: any(.[]; .step == "voice_asr_projection" and .details.accepted == true and .details.normalized.has_attachments == true and (.details.normalized.text_len | type) == "number" and .details.normalized.text_len > 0),
+        slash_shape_ok: any(.[]; .step == "slash_approval_projection" and .details.accepted == true and .details.normalized.interaction_kind == "approval" and (.details.normalized.command_name_hash | type) == "string" and .details.normalized.approval_action == "approve"),
         replay_shape_ok: any(.[]; .step == "duplicate_drop" and .details.reason_code == "duplicate_event"),
-        heartbeat_shape_ok: any(.[]; .step == "heartbeat_ack" and .details.reason_code == "heartbeat_ack"),
-        reconnect_shape_ok: (any(.[]; .step == "reconnect_requested" and .details.reason_code == "reconnect_requested" and .details.runtime.reconnect_attempts == 1)
+        heartbeat_shape_ok: (
+          any(.[]; .step == "heartbeat_ack" and .details.reason_code == "heartbeat_ack")
+          and any(.[]; .step == "heartbeat_request" and .details.reason_code == "heartbeat_request" and .details.lifecycle.action == "send_heartbeat")
+        ),
+        reconnect_shape_ok: (any(.[]; .step == "reconnect_requested" and .details.reason_code == "reconnect_requested" and .details.runtime.reconnect_attempts == 1 and .details.runtime.terminal_reconnect_failures == 0)
           and any(.[]; .step == "invalid_session_resumable" and .details.reason_code == "invalid_session_resumable" and .details.runtime.reconnect_attempts == 2)
-          and any(.[]; .step == "reconnect_attempts_exhausted" and .details.reason_code == "reconnect_attempts_exhausted" and .details.runtime.max_reconnect_attempts == 1))
+          and any(.[]; .step == "reconnect_attempts_exhausted" and .details.reason_code == "reconnect_attempts_exhausted" and .details.runtime.max_reconnect_attempts == 1 and .details.runtime.terminal_reconnect_failures == 1 and .details.lifecycle.action == "stop_reconnect")
+        ),
+        drain_shape_ok: (
+          any(.[]; .step == "gateway_drain_first_batch" and .details.drained_count == 2 and .details.remaining_count == 1)
+          and any(.[]; .step == "gateway_drain_final_batch" and .details.drained_count == 1 and .details.remaining_count == 0 and .details.runtime.queue_depth == 0)
+        ),
+        shutdown_shape_ok: any(.[]; .step == "shutdown" and .status == "ok")
       } as $v
       | $v
       | .status = (
-          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok)
+          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.group_policy_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok)
           then "passed"
           else "failed"
           end
@@ -193,29 +231,58 @@ if [[ "${overall_status}" == "passed" ]]; then
   for forbidden in \
     "test-secret" \
     "session-1" \
+    "hello-1" \
     "evt-accepted" \
     "evt-untyped-message-id" \
     "evt-structured-mention" \
     "evt-reply-media" \
+    "evt-voice-asr" \
+    "evt-slash-approval" \
     "evt-oversized-media" \
+    "evt-disabled" \
+    "evt-missing-binding" \
+    "evt-missing-message-id" \
+    "evt-missing-reply-target" \
+    "evt-reconnect-requested" \
+    "evt-invalid-session" \
+    "evt-reconnect-cap-first" \
+    "evt-reconnect-exhausted" \
     "msg-accepted" \
     "msg-untyped-message-id" \
     "msg-structured-mention" \
     "msg-reply-media" \
+    "msg-voice-asr" \
+    "msg-slash-approval" \
     "msg-oversized-media" \
-    "msg-root" \
+    "msg-disabled" \
+    "msg-missing-binding" \
+    "msg-missing-message-id" \
+    "msg-missing-reply-target" \
     "bot-openid" \
     "group-allowed" \
+    "group-slash" \
+    "group-disabled" \
+    "group-binding" \
     "member-1" \
+    "member-slash" \
+    "member-disabled" \
     "Alice" \
+    "gateway disabled should not authorize" \
+    "event missing sender binding" \
+    "event missing message id" \
+    "blank reply target" \
     "deploy status" \
     "plain message" \
     "not a mention segment" \
     "please inspect this" \
     "see attached trace" \
     "too large" \
+    "approve deployment from voice" \
+    "/approve rollout-42" \
+    "rollout-42" \
     "cdn.qq.example" \
     "trace.png" \
+    "voice.amr" \
     "oversized.bin"
   do
     if grep -aF "${forbidden}" "${EVIDENCE_JSONL}" >/dev/null; then

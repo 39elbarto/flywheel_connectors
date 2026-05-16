@@ -333,6 +333,240 @@ append_redaction_scan() {
     '{scanned_jsonl_artifacts:$scanned,trapdoor_payload:"absent",preimage_payload:"absent",rng_seed_payload:"absent",operation_plaintext:"absent",principal_plaintext:"absent",zone_label_plaintext:"absent",auth_header_values:"absent",local_private_paths:"absent",provider_payloads:"absent",reviewer_private_data:"absent",cleanup_result:"not_applicable"}')"
 }
 
+validate_jsonl_contract() {
+  local step="$1"
+  local path="$2"
+  local filter="$3"
+  local diagnostic
+  require_artifact "${step}" "${path}"
+  if ! diagnostic="$(jq -e -s "${filter}" "${path}" 2>&1 >/dev/null)"; then
+    if [ -z "${diagnostic}" ]; then
+      diagnostic="contract_filter_returned_false"
+    fi
+    fail_step "${step}" "$(jq -cn \
+      --arg artifact "${path}" \
+      --arg validation_error "${diagnostic}" \
+      '{artifact_path:$artifact,validation_error:$validation_error,cleanup_result:"not_applicable"}')"
+  fi
+}
+
+validate_artifact_contracts() {
+  validate_jsonl_contract "validate_crypto_representation_contract" \
+    "target/fcp-crypto-pq/representation-profile-evidence.jsonl" '
+      length > 0 and
+      all(.[]; type == "object" and
+        (.command_line | type == "string") and
+        (.git_revision | type == "string") and
+        .artifact_path == "target/fcp-crypto-pq/representation-profile-evidence.jsonl" and
+        (.fixture_id | type == "string") and
+        (.profile | type == "string") and
+        (.representation_version | type == "number") and
+        (.params | type == "object") and
+        (.matrix_dimensions | type == "object") and
+        (.relation_check_result | type == "object") and
+        (.trapdoor_norm_quality_bucket | type == "object") and
+        (.secret_storage_len_bucket | type == "object") and
+        (.redaction | type == "object") and
+        (.timing_ms | type == "number") and
+        (.result | type == "string") and
+        has("skip_reason"))
+    '
+
+  validate_jsonl_contract "validate_crypto_route_contract" \
+    "target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl" '
+      length > 0 and
+      all(.[]; type == "object" and
+        (.command_line | type == "string") and
+        (.git_revision | type == "string") and
+        (.primitive_route_id | type == "string") and
+        (.primitive_route_revision | type == "number") and
+        (.representation_version | type == "number") and
+        (.parameter_profile | type == "string") and
+        (.fixture_id | type == "string") and
+        (.zone_id_hash | type == "string") and
+        (.period_id_hash | type == "string") and
+        (.matrix_dimensions | type == "object") and
+        (.primitive_timings_ms | type == "object") and
+        (.timing_ms | type == "number") and
+        (.cleanup | type == "string") and
+        (.result | type == "string") and
+        has("skip_reason"))
+    '
+
+  validate_jsonl_contract "validate_crypto_public_matrix_contract" \
+    "target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl" '
+      length > 0 and
+      all(.[]; type == "object" and
+        (.command_line | type == "string") and
+        (.git_revision | type == "string") and
+        (.primitive_route_id | type == "string") and
+        (.primitive_route_revision | type == "number") and
+        (.representation_version | type == "number") and
+        (.public_matrix_material_version | type == "number") and
+        (.parameter_profile | type == "string") and
+        (.fixture_id | type == "string") and
+        (.zone_id_hash | type == "string") and
+        (.period_id_hash | type == "string") and
+        (.public_material_summary | type == "object") and
+        (.matrix_dimensions | type == "object") and
+        (.reconstruction_result | type == "string") and
+        (.allocation_summary | type == "object") and
+        (.timing_ms | type == "number") and
+        (.result | type == "string") and
+        has("skip_reason"))
+    '
+
+  validate_jsonl_contract "validate_crypto_sample_pre_contract" \
+    "target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl" '
+      length > 0 and
+      all(.[]; type == "object" and
+        (.command_line | type == "string") and
+        (.git_revision | type == "string") and
+        (.primitive_route_id | type == "string") and
+        (.primitive_route_revision | type == "number") and
+        (.representation_version | type == "number") and
+        (.parameter_profile | type == "string") and
+        (.fixture_id | type == "string") and
+        (.zone_id_hash | type == "string") and
+        (.period_id_hash | type == "string") and
+        (.h_fixture_id | type == "string") and
+        (.matrix_dimensions | type == "object") and
+        (.norm_bound_squared | type == "number") and
+        (.observed_norm_squared | type == "number") and
+        (.observed_norm_bucket | type == "string") and
+        (.primitive_timings_ms | type == "object") and
+        (.verify_outcome | type == "string") and
+        has("error_mapping") and
+        (.timeout_cancel_result | type == "string") and
+        (.cleanup | type == "string") and
+        (.result | type == "string") and
+        has("skip_reason"))
+    '
+
+  validate_jsonl_contract "validate_crypto_formal_contract" \
+    "target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl" '
+      length > 0 and
+      all(.[]; type == "object" and
+        (.schema | type == "string") and
+        (.command_line | type == "string") and
+        (.git_revision | type == "string") and
+        (.theorem_names | type == "array" and length > 0) and
+        (.assumption_ids | type == "array" and length > 0) and
+        (.fixture_id_hash | type == "string") and
+        (.fixture_category | type == "string") and
+        (.parameter_profile | type == "string") and
+        (.primitive_route_id | type == "string") and
+        (.primitive_route_revision | type == "number") and
+        (.representation_version | type == "number") and
+        (.public_matrix_material_version | type == "number") and
+        (.zone_id_hash | type == "string") and
+        (.period_id_hash | type == "string") and
+        (.public_material_summary | type == "object") and
+        (.matrix_dimensions | type == "object") and
+        (.checks | type == "object") and
+        (.artifact_hashes | type == "object") and
+        (.duration_ms | type == "number") and
+        (.result | type == "string") and
+        has("skip_reason")) and
+      any(.[]; (.theorem_names | index("Fcp.Invariants.LatticeDelegation.lattice_delegation_sis_assumption_boundary_complete")) != null) and
+      any(.[]; (.assumption_ids | index("FCP-PQ-SIS-HARDNESS-V1")) != null)
+    '
+
+  validate_jsonl_contract "validate_policy_formal_contract" \
+    "target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl" '
+      length > 0 and
+      all(.[]; type == "object" and
+        (.schema | type == "string") and
+        (.command_line | type == "string") and
+        (.git_revision | type == "string") and
+        (.theorem_names | type == "array" and length > 0) and
+        (.assumption_ids | type == "array" and length > 0) and
+        (.fixture_id_hash | type == "string") and
+        (.parameter_profile | type == "string") and
+        (.route_revision | type == "number") and
+        (.representation_version | type == "number") and
+        (.public_matrix_material_version | type == "number") and
+        (.zone_id_hash | type == "string") and
+        (.period_id_hash | type == "string") and
+        (.certificate_id_hash | type == "string") and
+        (.trust_set_id_hash | type == "string") and
+        (.request_descriptor_hash | type == "string") and
+        (.checks | type == "object") and
+        (.duration_ms | type == "number") and
+        (.result | type == "string") and
+        has("skip_reason")) and
+      any(.[]; (.assumption_ids | index("FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1")) != null) and
+      any(.[]; .checks.dispatcher_enforcement_checks == true and .checks.trust_set_replay_denied == true)
+    '
+
+  validate_jsonl_contract "validate_host_dispatcher_contract" \
+    "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl" '
+      length > 0 and
+      all(.[]; type == "object" and
+        (.command_line | type == "string") and
+        (.git_revision | type == "string") and
+        (.build_profile | type == "string") and
+        (.cargo_target_dir_hash | type == "string") and
+        (.cargo_target_dir_class | type == "string") and
+        (.worker_host_class | type == "string") and
+        (.timing_sample_count | type == "number") and
+        .artifact_path == "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl" and
+        (.parameter_profile | type == "string") and
+        (.fixture_id_hash | type == "string") and
+        (.scenario | type == "string") and
+        (.zone_id_hash | type == "string") and
+        (.period_id_hash | type == "string") and
+        (.cert_id_hash | type == "string") and
+        (.trust_set_id_hash | type == "string") and
+        (.trust_set_source_hash | type == "string") and
+        (.operation_id_hash | type == "string") and
+        (.principal_id_hash | type == "string") and
+        (.request_binding_result | type == "string") and
+        (.matrix_dimensions | type == "object") and
+        (.primitive_timings | type == "object") and
+        (.pipeline_checks | type == "array") and
+        (.norm_bound_bucket | type == "string") and
+        (.verifier_result | type == "string") and
+        has("receipt_id_hash") and
+        (.dispatcher_decision | type == "string") and
+        has("error_mapping") and
+        (.benchmark_summary | type == "string") and
+        (.cleanup_result | type == "string") and
+        has("skip_reason")) and
+      any(.[]; .scenario == "allow_v4_reference" and .dispatcher_decision == "allow" and .verifier_result == "ok") and
+      any(.[]; .scenario == "deny_forged_v4_reference" and .dispatcher_decision == "deny" and .error_mapping == "LATTICE_VERIFICATION_EQUATION_FAILED") and
+      any(.[]; .scenario == "deny_trust_set_replay_v4_reference" and .dispatcher_decision == "deny" and .error_mapping == "LATTICE_REQUEST_BINDING_MISMATCH") and
+      any(.[]; .scenario == "deny_mismatched_operation" and .dispatcher_decision == "deny" and .error_mapping == "LATTICE_OPERATION_MISMATCH") and
+      any(.[]; .scenario == "deny_mismatched_principal" and .dispatcher_decision == "deny" and .error_mapping == "LATTICE_PRINCIPAL_MISMATCH")
+    '
+
+  append_json "jsonl_contract_validation" "pass" "$(jq -cn \
+    '{validated_artifacts:["target/fcp-crypto-pq/representation-profile-evidence.jsonl","target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl","target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl","target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl","target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl","target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl","target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"],required_host_scenarios:["allow_v4_reference","deny_forged_v4_reference","deny_trust_set_replay_v4_reference","deny_mismatched_operation","deny_mismatched_principal"],required_assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1"],cleanup_result:"not_applicable"}')"
+}
+
+validate_gauntlet_contract() {
+  validate_jsonl_contract "validate_gauntlet_contract" "${ARTIFACT}" '
+    length > 0 and
+    all(.[]; type == "object" and
+      .schema == "fcp.lattice_delegation.assurance_gauntlet.v1" and
+      .script == "scripts/e2e/lattice_delegation_assurance_gauntlet.sh" and
+      (.run_id | type == "string") and
+      (.step | type == "string") and
+      (.result == "pass" or .result == "fail" or .result == "skip") and
+      (.git_revision | type == "string") and
+      (.cargo_target_dir_class | type == "string") and
+      (.cargo_target_dir_hash | type == "string") and
+      (.build_profile | type == "string") and
+      (.worker_host_class | type == "string") and
+      (.details | type == "object") and
+      (if .result == "skip" then (.details.skip_reason | type == "string") else true end)) and
+    any(.[]; .step == "tool_versions" and .result == "pass") and
+    any(.[]; .step == "validate_lean_ids" and .result == "pass") and
+    any(.[]; .step == "jsonl_contract_validation" and .result == "pass") and
+    any(.[]; .step == "redaction_scan" and .result == "pass")
+  '
+}
+
 require_command jq
 require_command git
 require_command rch
@@ -447,6 +681,8 @@ append_materialized_artifact_hash "crypto_formal_artifact" "target/fcp-crypto-pq
 append_materialized_artifact_hash "policy_formal_artifact" "target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl"
 append_materialized_artifact_hash "host_dispatcher_artifact" "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"
 
+validate_artifact_contracts
+
 append_redaction_scan \
   "${ARTIFACT}" \
   "target/fcp-crypto-pq/representation-profile-evidence.jsonl" \
@@ -456,6 +692,8 @@ append_redaction_scan \
   "target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl" \
   "target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl" \
   "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"
+
+validate_gauntlet_contract
 
 artifact_hash="$(sha256_file "${ARTIFACT}")"
 append_json "summary" "pass" "$(jq -cn \

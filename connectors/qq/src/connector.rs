@@ -342,6 +342,9 @@ fn normalized_event_schema() -> Value {
             "reply_to",
             "has_attachments",
             "routing",
+            "interaction_kind",
+            "command_name",
+            "approval_action",
             "raw"
         ],
         "additionalProperties": false,
@@ -361,6 +364,23 @@ fn normalized_event_schema() -> Value {
             "routing": {
                 "type": "string",
                 "enum": ["channel", "group", "c2c"]
+            },
+            "interaction_kind": {
+                "type": "string",
+                "enum": ["plain", "slash_command", "approval"]
+            },
+            "command_name": {
+                "type": ["string", "null"],
+                "maxLength": 64
+            },
+            "approval_action": {
+                "anyOf": [
+                    {
+                        "type": "string",
+                        "enum": ["approve", "reject", "deny"]
+                    },
+                    { "type": "null" }
+                ]
             },
             "raw": {
                 "type": ["object", "null"],
@@ -1643,6 +1663,9 @@ mod tests {
             "reply_to": null,
             "has_attachments": false,
             "routing": "group",
+            "interaction_kind": "plain",
+            "command_name": null,
+            "approval_action": null,
             "raw": {
                 "id": "msg-1",
                 "content": "bot-openid deploy status?"

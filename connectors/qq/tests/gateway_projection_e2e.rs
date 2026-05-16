@@ -132,6 +132,9 @@ fn redacted_normalized_event(event: &Value) -> Value {
         "is_reply": bool_field(event, "is_reply"),
         "reply_to_hash": hash_field(event, "reply_to"),
         "has_attachments": bool_field(event, "has_attachments"),
+        "interaction_kind": str_field(event, "interaction_kind"),
+        "command_name_hash": hash_field(event, "command_name"),
+        "approval_action": str_field(event, "approval_action"),
         "attachment_count": attachment_count(event),
         "attachment_total_bytes": attachment_total_bytes(event),
         "attachment_content_types": attachment_content_types(event),
@@ -982,6 +985,65 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(voice_asr["policy"]["reason_code"], "group_allowed");
     log_projection_step(&mut logs, "voice_asr_projection", "ok", &voice_asr);
 
+    let slash_instance_id = InstanceId::new();
+    let mut slash_connector = QqConnector::new();
+    slash_connector
+        .configure(json!({
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999",
+            "app_id": "qq-app",
+            "client_secret": "test-secret",
+            "gateway": {
+                "enabled": true,
+                "policy": {
+                    "group_policy": "allowlist",
+                    "group_allow_from": ["group-slash"],
+                    "group_require_mention": true,
+                    "bot_user_id": "bot-openid"
+                }
+            }
+        }))
+        .await
+        .expect("configure slash QQ connector");
+    slash_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            slash_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake slash QQ connector");
+    let slash_approval = invoke_projection(
+        &slash_connector,
+        &signing_key,
+        &slash_instance_id,
+        "qq-gateway-slash-approval",
+        json!({
+            "op": 0,
+            "s": 1,
+            "t": "GROUP_AT_MESSAGE_CREATE",
+            "id": "evt-slash-approval",
+            "d": {
+                "id": "msg-slash-approval",
+                "content": "/approve rollout-42",
+                "group_openid": "group-slash",
+                "group_member_openid": "member-slash"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(slash_approval["accepted"], true);
+    assert_eq!(slash_approval["topic"], "qq.message.authorized");
+    assert_eq!(slash_approval["normalized"]["interaction_kind"], "approval");
+    assert_eq!(slash_approval["normalized"]["command_name"], "approve");
+    assert_eq!(slash_approval["normalized"]["approval_action"], "approve");
+    assert_eq!(slash_approval["policy"]["reason_code"], "group_allowed");
+    log_projection_step(
+        &mut logs,
+        "slash_approval_projection",
+        "ok",
+        &slash_approval,
+    );
+
     let duplicate = invoke_projection(
         &connector,
         &signing_key,
@@ -1215,6 +1277,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-structured-mention",
         "evt-reply-media",
         "evt-voice-asr",
+        "evt-slash-approval",
         "evt-oversized-media",
         "evt-disabled",
         "evt-missing-binding",
@@ -1229,15 +1292,18 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "msg-structured-mention",
         "msg-reply-media",
         "msg-voice-asr",
+        "msg-slash-approval",
         "msg-oversized-media",
         "msg-disabled",
         "msg-missing-binding",
         "msg-missing-reply-target",
         "bot-openid",
         "group-allowed",
+        "group-slash",
         "group-disabled",
         "group-binding",
         "member-1",
+        "member-slash",
         "member-disabled",
         "Alice",
         "gateway disabled should not authorize",
@@ -1251,6 +1317,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "see attached trace",
         "too large",
         "approve deployment from voice",
+        "/approve rollout-42",
+        "rollout-42",
         "cdn.qq.example",
         "trace.png",
         "voice.amr",
@@ -1265,6 +1333,10 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert!(log_contents.contains("reply_to_hash"));
     assert!(log_contents.contains("known_reply_references"));
     assert!(log_contents.contains("reply_reference_count"));
+    assert!(log_contents.contains("interaction_kind"));
+    assert!(log_contents.contains("command_name_hash"));
+    assert!(log_contents.contains("approval_action"));
+    assert!(log_contents.contains("slash_approval_projection"));
     assert!(log_contents.contains("attachment_count"));
     assert!(log_contents.contains("attachment_total_bytes"));
     assert!(log_contents.contains("attachment_url_hashes"));

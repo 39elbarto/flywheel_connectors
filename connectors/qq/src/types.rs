@@ -399,7 +399,64 @@ impl std::fmt::Display for QqRouting {
     }
 }
 
-/// Normalized QQ event with routing, quote context, and attachment detection.
+/// Coarse interaction classification for a normalized QQ message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QqInteractionKind {
+    /// Regular message text with no command or approval routing hint.
+    Plain,
+    /// Slash-style command text, such as `/deploy`.
+    SlashCommand,
+    /// Approval-style command text, such as `/approve`.
+    Approval,
+}
+
+impl QqInteractionKind {
+    /// String representation for serialization.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Plain => "plain",
+            Self::SlashCommand => "slash_command",
+            Self::Approval => "approval",
+        }
+    }
+}
+
+impl std::fmt::Display for QqInteractionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Approval action extracted from command-like QQ message text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QqApprovalAction {
+    Approve,
+    Reject,
+    Deny,
+}
+
+impl QqApprovalAction {
+    /// String representation for serialization.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Approve => "approve",
+            Self::Reject => "reject",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+impl std::fmt::Display for QqApprovalAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Normalized QQ event with routing, quote context, attachment detection, and command metadata.
 #[derive(Debug, Clone, Serialize)]
 pub struct NormalizedQqEvent {
     /// The original gateway event type (e.g., `"AT_MESSAGE_CREATE"`)
@@ -428,6 +485,12 @@ pub struct NormalizedQqEvent {
     pub has_attachments: bool,
     /// Routing classification
     pub routing: QqRouting,
+    /// Interaction classification used by supervised gateway routing.
+    pub interaction_kind: QqInteractionKind,
+    /// Slash command name without the leading slash, if present.
+    pub command_name: Option<String>,
+    /// Approval action inferred from command-like text, if present.
+    pub approval_action: Option<QqApprovalAction>,
     /// Raw event data for pass-through
     pub raw: serde_json::Value,
 }
@@ -721,11 +784,17 @@ mod tests {
             reply_to: None,
             has_attachments: false,
             routing: QqRouting::Channel,
+            interaction_kind: QqInteractionKind::Plain,
+            command_name: None,
+            approval_action: None,
             raw: serde_json::json!({}),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["event_type"], "AT_MESSAGE_CREATE");
         assert_eq!(json["routing"], "channel");
+        assert_eq!(json["interaction_kind"], "plain");
+        assert_eq!(json["command_name"], serde_json::Value::Null);
+        assert_eq!(json["approval_action"], serde_json::Value::Null);
         assert_eq!(json["is_reply"], false);
         assert_eq!(json["has_attachments"], false);
         assert_eq!(json["sender_name"], "Alice");
@@ -747,11 +816,16 @@ mod tests {
             reply_to: Some("msg-1".into()),
             has_attachments: true,
             routing: QqRouting::Channel,
+            interaction_kind: QqInteractionKind::SlashCommand,
+            command_name: Some("reply".into()),
+            approval_action: None,
             raw: serde_json::json!({"id": "msg-2"}),
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["is_reply"], true);
         assert_eq!(json["reply_to"], "msg-1");
         assert_eq!(json["has_attachments"], true);
+        assert_eq!(json["interaction_kind"], "slash_command");
+        assert_eq!(json["command_name"], "reply");
     }
 }

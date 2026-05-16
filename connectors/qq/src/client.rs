@@ -13,10 +13,11 @@ use serde_json::{Value, json};
 use crate::error::{QqError, QqResult};
 use crate::types::{
     AccessTokenResponse, EVENT_QQ_EVENT_DROPPED, EVENT_QQ_MESSAGE_AUTHORIZED, NormalizedQqEvent,
-    QqAccessPolicyMode, QqConfig, QqGatewayDrainResult, QqGatewayEvent, QqGatewayEventProjection,
-    QqGatewayLifecycleDirective, QqGatewayQueuedEvent, QqGatewayRuntimeConfig,
-    QqGatewayRuntimeSnapshot, QqInboundPolicyConfig, QqInboundPolicyDecision, QqMessageEvent,
-    QqRouting, TOKEN_REFRESH_SAFETY_MARGIN_SECS,
+    QqAccessPolicyMode, QqApprovalAction, QqConfig, QqGatewayDrainResult, QqGatewayEvent,
+    QqGatewayEventProjection, QqGatewayLifecycleDirective, QqGatewayQueuedEvent,
+    QqGatewayRuntimeConfig, QqGatewayRuntimeSnapshot, QqInboundPolicyConfig,
+    QqInboundPolicyDecision, QqInteractionKind, QqMessageEvent, QqRouting,
+    TOKEN_REFRESH_SAFETY_MARGIN_SECS,
 };
 
 const QQ_GATEWAY_ACTION_NONE: &str = "none";
@@ -33,6 +34,7 @@ const QQ_GATEWAY_ID_MAX_CHARS: usize = 256;
 const QQ_GATEWAY_TEXT_MAX_CHARS: usize = 8_192;
 const QQ_GATEWAY_ATTACHMENT_FIELD_MAX_CHARS: usize = 1_024;
 const QQ_GATEWAY_ATTACHMENTS_MAX_COUNT: usize = 32;
+const QQ_GATEWAY_COMMAND_NAME_MAX_CHARS: usize = 64;
 
 #[derive(Clone)]
 struct CachedAccessToken {
@@ -1175,6 +1177,7 @@ pub fn normalize_message_event(event: &QqGatewayEvent) -> QqResult<NormalizedQqE
         _ => None,
     };
     let text = effective_message_text(&msg);
+    let (interaction_kind, command_name, approval_action) = classify_interaction(text.as_deref());
 
     Ok(NormalizedQqEvent {
         event_type: event_type.to_string(),
@@ -1190,6 +1193,9 @@ pub fn normalize_message_event(event: &QqGatewayEvent) -> QqResult<NormalizedQqE
         reply_to,
         has_attachments,
         routing,
+        interaction_kind,
+        command_name,
+        approval_action,
         raw: raw_data,
     })
 }
@@ -1304,6 +1310,70 @@ fn effective_message_text(msg: &QqMessageEvent) -> Option<String> {
     }
 
     msg.content.clone()
+}
+
+fn classify_interaction(
+    text: Option<&str>,
+) -> (QqInteractionKind, Option<String>, Option<QqApprovalAction>) {
+    let command_name = text.and_then(extract_slash_command_name);
+    let approval_action = command_name
+        .as_deref()
+        .and_then(approval_action_for_token)
+        .or_else(|| {
+            text.and_then(first_text_token)
+                .and_then(approval_action_for_token)
+        });
+    let interaction_kind = if approval_action.is_some() {
+        QqInteractionKind::Approval
+    } else if command_name.is_some() {
+        QqInteractionKind::SlashCommand
+    } else {
+        QqInteractionKind::Plain
+    };
+
+    (interaction_kind, command_name, approval_action)
+}
+
+fn extract_slash_command_name(text: &str) -> Option<String> {
+    let command_text = text.trim_start().strip_prefix('/')?;
+    let token = command_text.split_whitespace().next()?;
+    let mut command_name = String::new();
+    for character in token.chars() {
+        if !is_command_name_char(character)
+            || command_name.len() >= QQ_GATEWAY_COMMAND_NAME_MAX_CHARS
+        {
+            break;
+        }
+        command_name.push(character.to_ascii_lowercase());
+    }
+    (!command_name.is_empty()).then_some(command_name)
+}
+
+fn first_text_token(text: &str) -> Option<&str> {
+    text.split_whitespace()
+        .next()
+        .map(|token| token.strip_prefix('/').unwrap_or(token))
+        .filter(|token| !token.is_empty())
+}
+
+const fn is_command_name_char(character: char) -> bool {
+    character.is_ascii_alphanumeric()
+        || character == '_'
+        || character == '-'
+        || character == '.'
+        || character == ':'
+}
+
+fn approval_action_for_token(token: &str) -> Option<QqApprovalAction> {
+    let lower = token
+        .trim_matches(|character: char| !is_command_name_char(character))
+        .to_ascii_lowercase();
+    match lower.as_str() {
+        "approve" | "approved" | "allow" | "accept" => Some(QqApprovalAction::Approve),
+        "reject" | "rejected" => Some(QqApprovalAction::Reject),
+        "deny" | "denied" => Some(QqApprovalAction::Deny),
+        _ => None,
+    }
 }
 
 fn validate_optional_chars(label: &str, value: Option<&str>, limit: usize) -> QqResult<()> {
@@ -2171,6 +2241,66 @@ mod tests {
             Some("transcribed voice command")
         );
         assert!(normalized.has_attachments);
+    }
+
+    #[test]
+    fn normalize_slash_command_routes_command_name() {
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(6),
+            t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+            d: Some(json!({
+                "id": "msg-slash",
+                "content": " /Deploy status",
+                "group_openid": "group-1",
+                "group_member_openid": "member-1"
+            })),
+            id: None,
+        };
+        let normalized = normalize_message_event(&event).unwrap();
+        assert_eq!(normalized.interaction_kind, QqInteractionKind::SlashCommand);
+        assert_eq!(normalized.command_name.as_deref(), Some("deploy"));
+        assert_eq!(normalized.approval_action, None);
+    }
+
+    #[test]
+    fn normalize_approval_slash_command_routes_action() {
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(6),
+            t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+            d: Some(json!({
+                "id": "msg-approval",
+                "content": "/approve rollout-42",
+                "group_openid": "group-1",
+                "group_member_openid": "member-1"
+            })),
+            id: None,
+        };
+        let normalized = normalize_message_event(&event).unwrap();
+        assert_eq!(normalized.interaction_kind, QqInteractionKind::Approval);
+        assert_eq!(normalized.command_name.as_deref(), Some("approve"));
+        assert_eq!(normalized.approval_action, Some(QqApprovalAction::Approve));
+    }
+
+    #[test]
+    fn normalize_plain_approval_word_routes_action() {
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(6),
+            t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+            d: Some(json!({
+                "id": "msg-plain-approval",
+                "content": "reject rollout-42",
+                "group_openid": "group-1",
+                "group_member_openid": "member-1"
+            })),
+            id: None,
+        };
+        let normalized = normalize_message_event(&event).unwrap();
+        assert_eq!(normalized.interaction_kind, QqInteractionKind::Approval);
+        assert_eq!(normalized.command_name, None);
+        assert_eq!(normalized.approval_action, Some(QqApprovalAction::Reject));
     }
 
     #[test]

@@ -36,9 +36,7 @@
 //!    - ConnectorManifestCheck → "connector_manifest"
 //!    - RateLimitCheck → "rate_limit"
 //!    - BudgetCheck → "budget"
-//!    - RevocationCheck → "revocation" (NOT "revocation_freshness"
-//!      — the host's RevocationCheck does both freshness AND
-//!      membership; the name reflects the combined check)
+//!    - RevocationCheck → "revocation_freshness"
 
 use fcp_host::{
     BudgetCheck, CanonicalDecodeCheck, CapabilityVerifyCheck, CheckOutcome, CheckRecord,

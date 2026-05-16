@@ -126,7 +126,7 @@ Each phase produces a **proof bundle** containing:
 | Script | Purpose |
 |--------|---------|
 | `e2e/test_full_invoke_migrated_connector.sh` | Configure → handshake → invoke → verify through migrated connector |
-| `e2e/test_enforcement_pipeline_order.sh` | Verify 11-check enforcement order matches specification |
+| `e2e/test_enforcement_pipeline_order.sh` | Verify 14-check enforcement order matches specification |
 
 ### Structured Logging Fields
 ```json
@@ -134,7 +134,7 @@ Each phase produces a **proof bundle** containing:
   "phase": "convergence",
   "connector_id": "fcp.example",
   "invoke_type_source": "fcp-kernel",
-  "enforcement_check_count": 11,
+  "enforcement_check_count": 14,
   "enforcement_order_canonical": true
 }
 ```

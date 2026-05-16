@@ -868,7 +868,8 @@ async fn http_get_status(
     client: reqwest::Client,
     url: String,
 ) -> Result<reqwest::StatusCode, Box<dyn std::error::Error>> {
-    let status = client.get(url).send().await?.status();
+    let headers = with_admin_auth_if_needed(&reqwest::Method::GET, &url, None).unwrap_or_default();
+    let status = client.get(url).headers(headers).send().await?.status();
     Ok(status)
 }
 
@@ -1135,8 +1136,9 @@ async fn wait_for_host_readiness(
     stderr_logs: &StderrLogs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut last_error = None;
+    let deadline = Instant::now() + Duration::from_secs(15);
 
-    for _ in 0..40 {
+    while Instant::now() < deadline {
         if let Some(status) = child.try_wait()? {
             let raw_stderr = stderr_logs
                 .lock()
@@ -1153,7 +1155,9 @@ async fn wait_for_host_readiness(
         )
         .await
         {
-            Ok(Ok(status)) if status.is_success() => return Ok(()),
+            Ok(Ok(status)) if status.is_success() || status == reqwest::StatusCode::FORBIDDEN => {
+                return Ok(());
+            }
             Ok(Ok(status)) => {
                 last_error = Some(format!("health returned {status}"));
                 fcp_async_core::time::sleep(Duration::from_millis(50)).await;
@@ -1821,6 +1825,7 @@ fn test_connector_config_with_env(
         "description": "Binary-level host integration test connector",
         "config": {},
         "categories": categories,
+        "allowed_zones": [ZoneId::work().as_str()],
         "env": env,
     })
 }
@@ -1835,6 +1840,25 @@ fn test_connector_config(
         .map(|category| (*category).to_string())
         .collect::<Vec<_>>();
     test_connector_config_with_env(connector_id, name, &categories, &[])
+}
+
+fn singleton_writer_test_connector_config(
+    connector_id: &ConnectorId,
+    name: &str,
+) -> serde_json::Value {
+    let mut config = test_connector_config(connector_id, name, &["test", "hrw"]);
+    let config_object = config
+        .as_object_mut()
+        .expect("test connector config should be a JSON object");
+    config_object.insert(
+        "config".to_string(),
+        json!({ "state": { "model": "singleton_writer" } }),
+    );
+    config_object.insert(
+        "allowed_zones".to_string(),
+        json!([ZoneId::work().as_str()]),
+    );
+    config
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2436,6 +2460,99 @@ async fn fcp_host_binary_webhook_fixture_rejects_fake_artifact_input()
 
     assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
     assert!(body.contains("fake artifact provenance rejected"));
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_hrw_lease_coordination_allows_one_singleton_writer_launch()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.hrw-binary-launch:utility:1.0.0");
+    let connector_config =
+        singleton_writer_test_connector_config(&connector_id, "HRW Binary Launch");
+    let eligible_nodes = "node-a,node-b";
+    let mut admitted_host: Option<(String, HttpHostProcess)> = None;
+    let mut refusal_messages = Vec::new();
+
+    for local_node in ["node-a", "node-b"] {
+        match HttpHostProcess::spawn_with_env(
+            vec![connector_config.clone()],
+            &[
+                ("FCP_HOST_HRW_LEASE_LOCAL_NODE", local_node),
+                ("FCP_HOST_HRW_LEASE_NODES", eligible_nodes),
+            ],
+        )
+        .await
+        {
+            Ok(host) => {
+                assert!(
+                    admitted_host.is_none(),
+                    "HRW admitted more than one singleton_writer host launch"
+                );
+                admitted_host = Some((local_node.to_string(), host));
+            }
+            Err(error) => refusal_messages.push((local_node.to_string(), error.to_string())),
+        }
+    }
+
+    assert!(
+        admitted_host.is_some(),
+        "HRW should admit exactly one singleton_writer host launch; refusals: {refusal_messages:?}"
+    );
+    assert_eq!(
+        refusal_messages.len(),
+        1,
+        "HRW should refuse exactly one competing singleton_writer host launch"
+    );
+
+    let (refused_node, refusal) = &refusal_messages[0];
+    assert!(
+        refusal.contains("HRW lease routing refused singleton_writer launch"),
+        "refusal for {refused_node} should identify the HRW launch gate: {refusal}"
+    );
+    assert!(
+        refusal.contains("NotSelectedCoordinator"),
+        "refusal for {refused_node} should preserve the typed HRW error: {refusal}"
+    );
+    assert!(
+        refusal.contains("wrong_holder"),
+        "refusal for {refused_node} should report the wrong-holder transfer reason: {refusal}"
+    );
+    assert!(
+        refusal.contains(refused_node),
+        "refusal should name the refused local node {refused_node}: {refusal}"
+    );
+
+    let (admitted_node, host) = admitted_host.expect("one HRW host should be admitted");
+    let url = |path: &str| format!("{}{path}", host.base_url);
+    let discovery: DiscoveryResponse =
+        http_post_json(host.client.clone(), url("/rpc/discover"), json!({})).await?;
+    assert!(
+        discovery
+            .connectors
+            .iter()
+            .any(|connector| connector.id == connector_id),
+        "admitted HRW host {admitted_node} should serve the singleton_writer connector"
+    );
+
+    let lease_status: serde_json::Value = http_get_json(
+        host.client.clone(),
+        url(&format!(
+            "/rpc/admin/connectors/{}/lease/status?zone=z%3Awork",
+            connector_id.as_str()
+        )),
+    )
+    .await?;
+    assert_eq!(lease_status["source"], "host-hrw-routing");
+    assert_eq!(lease_status["local_is_holder"], true);
+    assert!(lease_status["holder_node_id_hash"].as_str().is_some());
+    assert_eq!(
+        lease_status["ranked_holders"]
+            .as_array()
+            .expect("lease status should include ranked holders")
+            .len(),
+        2
+    );
 
     Ok(())
 }

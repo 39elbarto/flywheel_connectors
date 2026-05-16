@@ -6315,6 +6315,7 @@ dependencies = [
  "fcp-core",
  "fcp-prelude",
  "fcp-sdk",
+ "fcp-testkit",
  "hex",
  "reqwest 0.13.2",
  "serde",

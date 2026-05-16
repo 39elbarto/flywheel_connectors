@@ -13,6 +13,7 @@
 use std::{env, fs, path::PathBuf, process::Command};
 
 use fcp_pulumi::connector::PulumiConnector;
+use fcp_testkit::live_suite::{CleanupStrategy, EnvironmentManifest, LiveEnvironment, LiveGate};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -27,13 +28,6 @@ const CLI_ENV: &str = "PULUMI_SANDBOX_CLI";
 const DEFAULT_BASE_URL: &str = "https://api.pulumi.com/api";
 const LIVE_COMMAND: &str =
     "rch exec -- cargo test -p fcp-pulumi --test live_verification -- --nocapture";
-const REQUIRED_ENV: [&str; 5] = [
-    ACCESS_TOKEN_ENV,
-    ORGANIZATION_ENV,
-    PROJECT_ENV,
-    STACK_ENV,
-    RUN_NAMESPACE_ENV,
-];
 const CALL_CEILING: usize = 4;
 
 fn env_value(name: &str) -> Option<String> {
@@ -43,13 +37,48 @@ fn env_value(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn live_gate_enabled() -> bool {
-    env_value(LIVE_GATE_ENV).is_some_and(|value| {
-        matches!(
-            value.to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
+fn manifest() -> EnvironmentManifest {
+    EnvironmentManifest::sandbox("pulumi", "Pulumi Cloud sandbox")
+        .with_env_secret(
+            "access_token",
+            ACCESS_TOKEN_ENV,
+            "Pulumi access token scoped to the dedicated sandbox organization",
         )
-    })
+        .with_env_var(
+            ORGANIZATION_ENV,
+            "Pulumi organization that owns the sandbox stack",
+        )
+        .with_env_var(PROJECT_ENV, "Pulumi project used for the sandbox preview")
+        .with_env_var(STACK_ENV, "Pulumi stack used for the sandbox preview")
+        .with_env_var(
+            RUN_NAMESPACE_ENV,
+            "Shared namespace embedded in local preview evidence for this run",
+        )
+        .with_env_var_default(BASE_URL_ENV, DEFAULT_BASE_URL, "Pulumi Cloud API endpoint")
+        .with_env_var_default(CLI_ENV, "pulumi", "Pulumi CLI executable used for preview")
+        .with_account_setup(
+            "Use a dedicated Pulumi organization/project/stack with no provider resource mutation. The live suite reads stack metadata and runs preview with --expect-no-changes.",
+        )
+        .with_budget(0.01)
+        .with_cleanup(CleanupStrategy::PrefixDelete)
+        .with_rate_limits(0.5, true)
+        .with_metadata(
+            "request_categories",
+            json!([
+                "auth-denial",
+                "stack.metadata_read",
+                "stack.update_history_read",
+                "cli.preview"
+            ]),
+        )
+}
+
+fn skip_reason(gate: &LiveGate, env: &LiveEnvironment) -> String {
+    if gate.is_enabled() {
+        env.problems().join("; ")
+    } else {
+        gate.skip_reason()
+    }
 }
 
 fn emit_live_jsonl(
@@ -68,7 +97,7 @@ fn emit_live_jsonl(
             "gate_env_var": LIVE_GATE_ENV,
             "required_secret_env": [ACCESS_TOKEN_ENV],
             "required_env": [ORGANIZATION_ENV, PROJECT_ENV, STACK_ENV, RUN_NAMESPACE_ENV],
-            "defaulted_env": BASE_URL_ENV,
+            "defaulted_env": [BASE_URL_ENV, CLI_ENV],
             "command": LIVE_COMMAND,
             "git_revision": option_env!("FCP_LIVE_GIT_REVISION").unwrap_or("unknown"),
             "operation": [
@@ -103,19 +132,6 @@ fn emit_live_jsonl(
             "fcp_error_mapping": if status == "failed" { Some(reason) } else { None },
             "evidence": evidence,
         })
-    );
-}
-
-fn print_skip(reason: &str, missing_env: &[&str]) {
-    emit_live_jsonl(
-        "skipped",
-        reason,
-        0,
-        false,
-        &json!({
-            "missing_env": missing_env,
-            "live_gate_enabled": live_gate_enabled(),
-        }),
     );
 }
 
@@ -238,59 +254,66 @@ fn run_pulumi_preview(
 
 #[fcp_async_core::runtime::test]
 async fn gated_sandbox_stack_read_and_auth_denial() {
-    if !live_gate_enabled() {
-        print_skip("live gate disabled", &[LIVE_GATE_ENV]);
+    let gate = LiveGate::sandbox();
+    let env = LiveEnvironment::from_manifest(manifest());
+    if !gate.is_enabled() || !env.is_ready() {
+        emit_live_jsonl(
+            "skipped",
+            &skip_reason(&gate, &env),
+            0,
+            false,
+            &env.evidence_summary(),
+        );
         return;
     }
 
-    let missing_env = REQUIRED_ENV
-        .iter()
-        .copied()
-        .filter(|name| env_value(name).is_none())
-        .collect::<Vec<_>>();
-    if !missing_env.is_empty() {
-        print_skip("required sandbox environment missing", &missing_env);
-        return;
-    }
+    let access_token = env.secrets.require("access_token");
+    let organization = env
+        .env_vars
+        .get(ORGANIZATION_ENV)
+        .expect("organization env is ready");
+    let project = env.env_vars.get(PROJECT_ENV).expect("project env is ready");
+    let stack = env.env_vars.get(STACK_ENV).expect("stack env is ready");
+    let run_namespace = env
+        .env_vars
+        .get(RUN_NAMESPACE_ENV)
+        .expect("namespace env is ready");
+    let base_url = env
+        .env_vars
+        .get(BASE_URL_ENV)
+        .expect("base URL env is ready");
+    let cli = env.env_vars.get(CLI_ENV).expect("CLI env is ready");
 
-    let access_token = env_value(ACCESS_TOKEN_ENV).expect("checked access token env");
-    let organization = env_value(ORGANIZATION_ENV).expect("checked organization env");
-    let project = env_value(PROJECT_ENV).expect("checked project env");
-    let stack = env_value(STACK_ENV).expect("checked stack env");
-    let run_namespace = env_value(RUN_NAMESPACE_ENV).expect("checked namespace env");
-    let base_url = env_value(BASE_URL_ENV).unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-    let cli = env_value(CLI_ENV).unwrap_or_else(|| "pulumi".to_string());
-
-    if !pulumi_cli_available(&cli) {
+    if !pulumi_cli_available(cli) {
         emit_live_jsonl(
             "skipped",
             "pulumi_cli_not_available",
             0,
             false,
             &json!({
+                "environment": env.evidence_summary(),
                 "missing_prerequisite": "pulumi_cli",
-                "cli_path_hash": redacted_hash(&cli),
-                "live_gate_enabled": true,
+                "cli_path_hash": redacted_hash(cli),
             }),
         );
         return;
     }
 
     let auth_denial_verified =
-        invalid_token_is_denied(&base_url, &organization, &project, &stack).await;
+        invalid_token_is_denied(base_url, organization, project, stack).await;
     assert!(
         auth_denial_verified,
         "Pulumi invalid-token stack read must be denied"
     );
 
-    let connector = configured_connector(&access_token, &base_url).await;
+    let connector = configured_connector(access_token, base_url).await;
     let result = connector
         .handle_invoke(json!({
             "operation_id": "pulumi.stacks.get",
             "input": {
-                "organization": &organization,
-                "project": &project,
-                "stack": &stack
+                "organization": organization,
+                "project": project,
+                "stack": stack
             }
         }))
         .await
@@ -300,9 +323,9 @@ async fn gated_sandbox_stack_read_and_auth_denial() {
         .handle_invoke(json!({
             "operation_id": "pulumi.deployments.list",
             "input": {
-                "organization": &organization,
-                "project": &project,
-                "stack": &stack
+                "organization": organization,
+                "project": project,
+                "stack": stack
             }
         }))
         .await
@@ -312,12 +335,12 @@ async fn gated_sandbox_stack_read_and_auth_denial() {
         .and_then(Value::as_array)
         .map_or(2, |updates| updates.len().saturating_add(2));
     let preview_evidence = run_pulumi_preview(
-        &cli,
-        &access_token,
-        &organization,
-        &project,
-        &stack,
-        &run_namespace,
+        cli,
+        access_token,
+        organization,
+        project,
+        stack,
+        run_namespace,
     )
     .expect("run Pulumi sandbox preview without provider mutation");
 
@@ -327,11 +350,12 @@ async fn gated_sandbox_stack_read_and_auth_denial() {
         observed_count,
         auth_denial_verified,
         &json!({
-            "organization_hash": redacted_hash(&organization),
-            "project_hash": redacted_hash(&project),
-            "stack_hash": redacted_hash(&stack),
-            "namespace_hash": redacted_hash(&run_namespace),
-            "base_url_hash": redacted_hash(&base_url),
+            "environment": env.evidence_summary(),
+            "organization_hash": redacted_hash(organization),
+            "project_hash": redacted_hash(project),
+            "stack_hash": redacted_hash(stack),
+            "namespace_hash": redacted_hash(run_namespace),
+            "base_url_hash": redacted_hash(base_url),
             "base_url_env_present": env_value(BASE_URL_ENV).is_some(),
             "stack_metadata_shape": {
                 "object": result.is_object(),

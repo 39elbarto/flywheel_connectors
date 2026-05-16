@@ -1,10 +1,18 @@
 //! Conformance coverage for HLC audit ordering and `HierVV` freshness frontiers.
 
+use std::hint::black_box;
+use std::time::Instant;
+
 use fcp_audit::{HybridLogicalClock, HybridLogicalTimestamp};
 use fcp_mesh::{
     HierarchicalVersionVector, RevocationFreshnessAction, RevocationFreshnessFrontier,
     VersionVectorOrder,
 };
+
+const HLC_TICK_P99_BUDGET_NANOS: u128 = 2_000;
+const HIERVV_MERGE_P99_BUDGET_NANOS: u128 = 50_000;
+const PERF_SAMPLE_COUNT: usize = 128;
+const HLC_BATCH_SIZE: u128 = 256;
 
 #[test]
 fn audit_cross_zone_order_survives_one_second_clock_skew() {
@@ -59,4 +67,70 @@ fn hlc_timestamp_order_tie_breaks_by_logical_counter() {
     let newer = HybridLogicalTimestamp::new(42, 2, "node-a");
 
     assert!(newer > older);
+}
+
+#[test]
+fn hlc_tick_p99_stays_under_two_microseconds() {
+    let mut clock = HybridLogicalClock::new("zone-a-node");
+
+    for physical_ms in 1..=1024 {
+        black_box(clock.tick(physical_ms));
+    }
+
+    let mut samples = Vec::with_capacity(PERF_SAMPLE_COUNT);
+    for sample in 0..PERF_SAMPLE_COUNT {
+        let base_physical_ms = 10_000_u64 + u64::try_from(sample).unwrap() * 1_000;
+        let started_at = Instant::now();
+        for offset in 0..HLC_BATCH_SIZE {
+            black_box(clock.tick(base_physical_ms + u64::try_from(offset).unwrap()));
+        }
+        samples.push(started_at.elapsed().as_nanos() / HLC_BATCH_SIZE);
+    }
+
+    let p99_nanos = p99(&mut samples);
+    assert!(
+        p99_nanos <= HLC_TICK_P99_BUDGET_NANOS,
+        "HLC tick p99 {p99_nanos}ns exceeded {HLC_TICK_P99_BUDGET_NANOS}ns budget"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "strict HierVV p99 budget is asserted in release-mode proof lanes"
+)]
+fn hiervv_merge_1024_zone_p99_stays_under_fifty_microseconds() {
+    let right = explicit_1024_zone_vector(10);
+    let mut samples = Vec::with_capacity(PERF_SAMPLE_COUNT);
+    let lefts = (0..PERF_SAMPLE_COUNT)
+        .map(|_| explicit_1024_zone_vector(7))
+        .collect::<Vec<_>>();
+
+    for mut left in lefts {
+        let started_at = Instant::now();
+        left.merge(black_box(&right));
+        let elapsed_nanos = started_at.elapsed().as_nanos();
+        assert_eq!(black_box(left.counter_for("z:tenant:prod:zone-1023")), 10);
+        samples.push(elapsed_nanos);
+    }
+
+    let p99_nanos = p99(&mut samples);
+    assert!(
+        p99_nanos <= HIERVV_MERGE_P99_BUDGET_NANOS,
+        "HierVV 1024-zone merge p99 {p99_nanos}ns exceeded {HIERVV_MERGE_P99_BUDGET_NANOS}ns budget"
+    );
+}
+
+fn explicit_1024_zone_vector(counter: u64) -> HierarchicalVersionVector {
+    let mut vector = HierarchicalVersionVector::new();
+    for zone in 0..1024 {
+        vector.set(format!("z:tenant:prod:zone-{zone:04}"), counter);
+    }
+    vector
+}
+
+fn p99(samples: &mut [u128]) -> u128 {
+    samples.sort_unstable();
+    let rank = (samples.len() * 99).div_ceil(100).saturating_sub(1);
+    samples[rank]
 }

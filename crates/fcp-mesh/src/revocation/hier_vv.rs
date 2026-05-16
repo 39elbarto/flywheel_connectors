@@ -136,16 +136,40 @@ impl HierarchicalVersionVector {
     #[must_use]
     pub fn counter_for(&self, scope: &str) -> u64 {
         let scope = scope.trim();
-        self.entries
-            .iter()
-            .filter(|(candidate, _)| is_scope_prefix(candidate, scope))
-            .max_by_key(|(candidate, _)| candidate.len())
-            .map_or(0, |(_, counter)| *counter)
+        if scope.is_empty() {
+            return 0;
+        }
+
+        if let Some(counter) = self.entries.get(scope) {
+            return *counter;
+        }
+
+        for (index, separator) in scope.char_indices().rev() {
+            if matches!(separator, ':' | '/') {
+                let candidate = &scope[..index];
+                if candidate.is_empty() {
+                    continue;
+                }
+                if let Some(counter) = self.entries.get(candidate) {
+                    return *counter;
+                }
+            }
+        }
+
+        0
     }
 
     /// Merge another vector into this one, keeping the freshest effective
     /// counter for every explicit scope present in either vector.
     pub fn merge(&mut self, other: &Self) {
+        if self.entries.len() == other.entries.len() && self.entries.keys().eq(other.entries.keys())
+        {
+            for (counter, other_counter) in self.entries.values_mut().zip(other.entries.values()) {
+                *counter = (*counter).max(*other_counter);
+            }
+            return;
+        }
+
         let scopes = self.comparison_scopes(other);
         for scope in scopes {
             let counter = self.counter_for(&scope).max(other.counter_for(&scope));
@@ -309,11 +333,4 @@ fn normalize_scope(scope: &str) -> String {
     } else {
         trimmed.to_string()
     }
-}
-
-fn is_scope_prefix(candidate: &str, scope: &str) -> bool {
-    candidate == scope
-        || scope
-            .strip_prefix(candidate)
-            .is_some_and(|suffix| suffix.starts_with(':') || suffix.starts_with('/'))
 }

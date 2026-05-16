@@ -260,6 +260,24 @@ rch exec -- cargo clippy -p fcp-monday --all-targets -- -D warnings
 rch exec -- cargo fmt --check
 ```
 
+Live sandbox verification is gated by `FCP_LIVE_SANDBOX=1`; default CI must emit
+a structured skip. The live suite expects `MONDAY_SANDBOX_TOKEN`,
+`MONDAY_SANDBOX_BOARD_ID`, and `FCP_SANDBOX_RUN_NAMESPACE`. It accepts optional
+`MONDAY_SANDBOX_BASE_URL`, defaulting to `https://api.monday.com/v2`. The
+focused lane is:
+
+```bash
+rch exec -- cargo test -p fcp-monday --test live_verification -- --nocapture
+```
+
+The live suite emits `MONDAY_LIVE_SANDBOX_JSONL` evidence for
+`monday.boards.list`, `monday.boards.get`, `monday.items.create`, and
+`monday.items.delete`. It creates one synthetic item named with the shared
+`FCP_SANDBOX_RUN_NAMESPACE`, deletes that same item before passing, and performs
+a bad-token denial check. Evidence redacts the token, base URL, configured board
+ID, synthetic item name, and provider item ID while recording cleanup and auth
+denial status.
+
 ## Operator Guidance
 
 - Prefer `credential_id` for production so host policy owns secret injection.

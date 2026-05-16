@@ -32,6 +32,7 @@ use thiserror::Error;
 pub mod conformal;
 pub mod explain;
 pub mod hlc;
+pub mod otlp_export;
 pub mod replay;
 
 pub use conformal::{ConformalScore, ConformalScoreEstimator};

@@ -39,6 +39,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use fcp_audit::{
     AuditEntry, AuditEntryIdFields, AuditError, HybridLogicalClock, HybridLogicalTimestamp,
     Severity, audit_entry_hlc_from_occurred_at, compute_audit_entry_id,
+    otlp_export::{AuditOtlpExporterStatus, FireAndForgetExporter},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -402,6 +403,9 @@ pub struct InvokeAuditChain {
     /// hot path; write-locked only when a new zone is first
     /// observed.
     chains: RwLock<HashMap<String, Arc<Mutex<ZoneChain>>>>,
+    /// Optional fire-and-forget OTLP exporter. The audit chain remains
+    /// canonical; exporter failure never affects append success.
+    otlp_exporter: Option<Arc<FireAndForgetExporter>>,
 }
 
 impl InvokeAuditChain {
@@ -409,6 +413,29 @@ impl InvokeAuditChain {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct an empty chain with audit OTLP export enabled.
+    #[must_use]
+    pub fn new_with_otlp_exporter(exporter: Arc<FireAndForgetExporter>) -> Self {
+        Self {
+            chains: RwLock::new(HashMap::new()),
+            otlp_exporter: Some(exporter),
+        }
+    }
+
+    /// Return the attached exporter, if any.
+    #[must_use]
+    pub fn otlp_exporter(&self) -> Option<Arc<FireAndForgetExporter>> {
+        self.otlp_exporter.as_ref().map(Arc::clone)
+    }
+
+    /// Snapshot the attached exporter status.
+    #[must_use]
+    pub fn otlp_status(&self) -> Option<AuditOtlpExporterStatus> {
+        self.otlp_exporter
+            .as_ref()
+            .map(|exporter| exporter.status())
     }
 
     /// Get-or-insert the per-zone handle. Optimised for the
@@ -450,12 +477,14 @@ impl InvokeAuditChain {
         ctx: &InvokeAuditContext,
         phase: InvokePhase,
     ) -> Result<AuditEntry, AuditError> {
-        self.append_with_contention_policy(
+        let entry = self.append_with_contention_policy(
             ctx,
             phase,
             CAS_RETRY_BUDGET,
             Some(SERIALIZED_COMMIT_FALLBACK_ATTEMPTS),
-        )
+        )?;
+        self.emit_otlp(&entry);
+        Ok(entry)
     }
 
     /// Same as [`Self::append`] but with a caller-supplied CAS retry
@@ -478,7 +507,15 @@ impl InvokeAuditChain {
         phase: InvokePhase,
         retry_budget: usize,
     ) -> Result<AuditEntry, AuditError> {
-        self.append_with_contention_policy(ctx, phase, retry_budget, None)
+        let entry = self.append_with_contention_policy(ctx, phase, retry_budget, None)?;
+        self.emit_otlp(&entry);
+        Ok(entry)
+    }
+
+    fn emit_otlp(&self, entry: &AuditEntry) {
+        if let Some(exporter) = &self.otlp_exporter {
+            let _ = exporter.try_export_entry(entry);
+        }
     }
 
     fn append_with_contention_policy(

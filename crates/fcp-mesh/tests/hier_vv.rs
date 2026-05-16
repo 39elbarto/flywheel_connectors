@@ -1,4 +1,7 @@
-use fcp_mesh::{HierarchicalVersionVector, VersionVectorOrder};
+use fcp_mesh::{
+    HierarchicalVersionVector, RevocationFreshnessAction, RevocationFreshnessFrontier,
+    VersionVectorOrder,
+};
 
 #[test]
 fn hier_vv_dominates_child_scopes_from_parent_counter() {
@@ -63,4 +66,30 @@ fn hier_vv_compresses_uniform_large_zone_subtree() {
         vector.canonical_len().expect("canonical encode") <= 2_048,
         "uniform 1024-zone subtree should remain compact"
     );
+}
+
+#[test]
+fn revocation_frontier_accepts_parent_update_over_child_scopes() {
+    let mut frontier = RevocationFreshnessFrontier::new();
+    frontier.observe("z:work:team-a", 7);
+    frontier.observe("z:work:team-b", 9);
+
+    let decision = frontier.observe("z:work", 10);
+
+    assert_eq!(decision.action, RevocationFreshnessAction::Accept);
+    assert_eq!(decision.order, VersionVectorOrder::Dominates);
+    assert_eq!(frontier.counter_for("z:work:team-a"), 10);
+    assert_eq!(frontier.counter_for("z:work:team-b"), 10);
+}
+
+#[test]
+fn revocation_frontier_rejects_dominated_update_without_downgrade() {
+    let mut frontier = RevocationFreshnessFrontier::new();
+    frontier.observe("z:work", 10);
+
+    let decision = frontier.observe("z:work:team-a", 9);
+
+    assert_eq!(decision.action, RevocationFreshnessAction::RejectStale);
+    assert_eq!(decision.order, VersionVectorOrder::DominatedBy);
+    assert_eq!(frontier.counter_for("z:work:team-a"), 10);
 }

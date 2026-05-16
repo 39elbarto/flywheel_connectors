@@ -55,6 +55,7 @@ use crate::planner::{
     BetaPosterior, CandidateNode, DecisionReason, ExecutionPlanner, HeldLease, LeasePurpose,
     NodeInfo, PlannerContext, PlannerInput, ResourcePoolClass, ThompsonChoice, ThompsonScheduler,
 };
+use crate::revocation::{RevocationFreshnessDecision, RevocationFreshnessFrontier};
 use crate::session::MeshSession;
 use crate::symbol_request::{
     SymbolRequestError, SymbolRequestHandler, SymbolRequestMetrics, SymbolRequestPolicy,
@@ -260,6 +261,21 @@ pub enum MeshNodeError {
     #[error("revocation push from {peer} has invalid owner signature for zone {zone_id}")]
     InvalidOwnerSignature { peer: String, zone_id: String },
 
+    /// Revocation push advertises a frontier already dominated by local state.
+    #[error(
+        "stale revocation frontier from {peer} for zone {zone_id}: incoming seq {incoming_seq} is behind local seq {local_seq}"
+    )]
+    StaleRevocationFrontier {
+        /// Peer that forwarded the stale push.
+        peer: String,
+        /// Zone the push targeted.
+        zone_id: String,
+        /// Incoming revocation sequence from the push.
+        incoming_seq: u64,
+        /// Local effective sequence for the same zone.
+        local_seq: u64,
+    },
+
     /// Trace capture not enabled.
     #[error("trace capture not enabled")]
     TraceNotEnabled,
@@ -373,6 +389,8 @@ pub struct VerifiedRevocationPush {
     pub new_rev_seq: u64,
     /// Push timestamp.
     pub timestamp: u64,
+    /// Hierarchical-vector freshness decision used before accepting the push.
+    pub freshness: RevocationFreshnessDecision,
 }
 
 /// Outbound gossip request produced while handling an inbound control-plane message.
@@ -603,6 +621,7 @@ pub struct MeshNode {
     /// are rejected fail-closed rather than accepted on peer signature
     /// alone.
     zone_owner_keys: HashMap<ZoneId, Ed25519VerifyingKey>,
+    revocation_frontier: RevocationFreshnessFrontier,
     peers: HashMap<NodeId, PeerState>,
     local_profile: Option<DeviceProfile>,
     /// Zones this node is authorized for, sourced from enrollment /
@@ -657,6 +676,7 @@ impl MeshNode {
             sessions: HashMap::new(),
             peer_signing_keys: HashMap::new(),
             zone_owner_keys: HashMap::new(),
+            revocation_frontier: RevocationFreshnessFrontier::new(),
             local_node,
             local_node_ts,
             peers: HashMap::new(),
@@ -1133,6 +1153,24 @@ impl MeshNode {
     /// `MeshNodeError::UnknownZoneOwner` until a new key is registered.
     pub fn remove_zone_owner_key(&mut self, zone_id: &ZoneId) {
         self.zone_owner_keys.remove(zone_id);
+    }
+
+    /// Observe a local revocation frontier update for `zone_id`.
+    ///
+    /// This lets registry/reconciliation callers seed the mesh node with the
+    /// current effective revocation frontier before handling priority pushes.
+    pub fn observe_revocation_frontier(
+        &mut self,
+        zone_id: &ZoneId,
+        rev_seq: u64,
+    ) -> RevocationFreshnessDecision {
+        self.revocation_frontier.observe(zone_id.as_str(), rev_seq)
+    }
+
+    /// Effective local revocation frontier counter for `zone_id`.
+    #[must_use]
+    pub fn revocation_frontier_counter(&self, zone_id: &ZoneId) -> u64 {
+        self.revocation_frontier.counter_for(zone_id.as_str())
     }
 
     /// Current peer count (excluding local).
@@ -2377,6 +2415,27 @@ impl MeshNode {
             }
         })?;
 
+        let freshness = self
+            .revocation_frontier
+            .evaluate(push.zone_id.as_str(), push.new_rev_seq);
+        debug!(
+            target: "fcp.mesh.revocation.freshness",
+            hier_vv_status = freshness.hier_vv_status(),
+            decision = freshness.decision_label(),
+            zone_id = %push.zone_id,
+            incoming_seq = freshness.incoming_counter,
+            local_seq = freshness.local_counter,
+            "evaluated revocation push freshness"
+        );
+        if !freshness.is_accepted() {
+            return Err(MeshNodeError::StaleRevocationFrontier {
+                peer: push.from.as_str().to_string(),
+                zone_id: push.zone_id.to_string(),
+                incoming_seq: freshness.incoming_counter,
+                local_seq: freshness.local_counter,
+            });
+        }
+
         if crate::gossip::is_outside_freshness_window(
             push.timestamp,
             now_secs,
@@ -2388,6 +2447,9 @@ impl MeshNode {
                 message_kind: "revocation push",
             });
         }
+        let freshness = self
+            .revocation_frontier
+            .observe(push.zone_id.as_str(), push.new_rev_seq);
         self.metrics.gossip_updates = self.metrics.gossip_updates.saturating_add(1);
         Ok(VerifiedRevocationPush {
             from: NodeId::new(push.from.as_str()),
@@ -2395,6 +2457,7 @@ impl MeshNode {
             revoked_ids: push.revoked_ids,
             new_rev_seq: push.new_rev_seq,
             timestamp: push.timestamp,
+            freshness,
         })
     }
 
@@ -5182,6 +5245,11 @@ mod tests {
             .expect("push should verify");
         assert_eq!(verified.new_rev_seq, 42);
         assert_eq!(verified.revoked_ids.len(), 1);
+        assert_eq!(
+            verified.freshness.action,
+            crate::RevocationFreshnessAction::Accept
+        );
+        assert_eq!(node.revocation_frontier_counter(&ZoneId::work()), 42);
     }
 
     #[test]
@@ -5399,6 +5467,92 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn handle_revocation_push_accepts_hiervv_parent_frontier_over_child_scopes() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        let owner_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.register_zone_owner_key(ZoneId::work(), owner_key.verifying_key());
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
+
+        let team_a: ZoneId = "z:work:team-a".parse().unwrap();
+        let team_b: ZoneId = "z:work:team-b".parse().unwrap();
+        node.observe_revocation_frontier(&team_a, 7);
+        node.observe_revocation_frontier(&team_b, 9);
+
+        let mut push = RevocationPushMessage::new(
+            TailscaleNodeId::new("peer-1"),
+            ZoneId::work(),
+            vec![ObjectId::from_bytes([0xCE; 32])],
+            10,
+            1_000,
+        );
+        sign_push_with_owner(&mut push, &signing_key, &owner_key, 1_000);
+
+        let verified = node
+            .handle_revocation_push(push, 1_001)
+            .expect("parent frontier should dominate child scopes despite receiver clock skew");
+
+        assert_eq!(
+            verified.freshness.order,
+            crate::VersionVectorOrder::Dominates
+        );
+        assert_eq!(node.revocation_frontier_counter(&team_a), 10);
+        assert_eq!(node.revocation_frontier_counter(&team_b), 10);
+    }
+
+    #[test]
+    fn handle_revocation_push_rejects_dominated_hiervv_frontier() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        let owner_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.register_zone_owner_key(ZoneId::work(), owner_key.verifying_key());
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
+        node.observe_revocation_frontier(&ZoneId::work(), 10);
+
+        let mut push = RevocationPushMessage::new(
+            TailscaleNodeId::new("peer-1"),
+            ZoneId::work(),
+            vec![ObjectId::from_bytes([0xCF; 32])],
+            9,
+            1_000,
+        );
+        sign_push_with_owner(&mut push, &signing_key, &owner_key, 1_000);
+
+        let err = node
+            .handle_revocation_push(push, 1_000)
+            .expect_err("dominated revocation frontier must be rejected");
+
+        assert!(matches!(
+            err,
+            MeshNodeError::StaleRevocationFrontier {
+                incoming_seq: 9,
+                local_seq: 10,
+                ..
+            }
+        ));
+        assert_eq!(node.revocation_frontier_counter(&ZoneId::work()), 10);
+        assert_eq!(node.metrics().gossip_updates, 0);
     }
 
     #[test]

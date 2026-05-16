@@ -1,7 +1,10 @@
 //! Conformance coverage for HLC audit ordering and `HierVV` freshness frontiers.
 
 use fcp_audit::{HybridLogicalClock, HybridLogicalTimestamp};
-use fcp_mesh::{HierarchicalVersionVector, VersionVectorOrder};
+use fcp_mesh::{
+    HierarchicalVersionVector, RevocationFreshnessAction, RevocationFreshnessFrontier,
+    VersionVectorOrder,
+};
 
 #[test]
 fn audit_cross_zone_order_survives_one_second_clock_skew() {
@@ -34,6 +37,20 @@ fn revocation_freshness_uses_hiervv_dominance_not_wall_clock_order() {
         "freshness must be based on vector dominance, not receiver wall-clock skew"
     );
     assert!(source.dominates(&ahead_clock_receiver));
+}
+
+#[test]
+fn revocation_frontier_accepts_dominating_push_instead_of_clock_stale_order() {
+    let mut receiver = RevocationFreshnessFrontier::new();
+    receiver.observe("z:work:team-a", 7);
+    receiver.observe("z:work:team-b", 9);
+
+    let decision = receiver.observe("z:work", 10);
+
+    assert_eq!(decision.order, VersionVectorOrder::Dominates);
+    assert_eq!(decision.action, RevocationFreshnessAction::Accept);
+    assert_eq!(receiver.counter_for("z:work:team-a"), 10);
+    assert_eq!(receiver.counter_for("z:work:team-b"), 10);
 }
 
 #[test]

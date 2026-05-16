@@ -23,6 +23,75 @@ pub enum VersionVectorOrder {
     Concurrent,
 }
 
+impl VersionVectorOrder {
+    /// Stable observability label for this partial-order relationship.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Equal => "equal",
+            Self::Dominates => "dominates",
+            Self::DominatedBy => "dominated_by",
+            Self::Concurrent => "concurrent",
+        }
+    }
+}
+
+/// Freshness action for a revocation frontier update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevocationFreshnessAction {
+    /// Apply or replay the update.
+    Accept,
+    /// Reject because the local frontier already dominates the update.
+    RejectStale,
+}
+
+impl RevocationFreshnessAction {
+    /// Stable observability label for this decision.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accept => "accept",
+            Self::RejectStale => "reject_stale",
+        }
+    }
+}
+
+/// Result of comparing an incoming revocation frontier with local state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevocationFreshnessDecision {
+    /// Scope the incoming update advances.
+    pub scope: String,
+    /// Local effective counter for `scope` before the update.
+    pub local_counter: u64,
+    /// Incoming counter advertised by the push.
+    pub incoming_counter: u64,
+    /// Hierarchical-vector partial order.
+    pub order: VersionVectorOrder,
+    /// Decision derived from the partial order.
+    pub action: RevocationFreshnessAction,
+}
+
+impl RevocationFreshnessDecision {
+    /// Whether the incoming update should be applied.
+    #[must_use]
+    pub const fn is_accepted(&self) -> bool {
+        matches!(self.action, RevocationFreshnessAction::Accept)
+    }
+
+    /// Stable label for `fcp.mesh.revocation.freshness` telemetry.
+    #[must_use]
+    pub const fn hier_vv_status(&self) -> &'static str {
+        self.order.as_str()
+    }
+
+    /// Stable decision label for `fcp.mesh.revocation.freshness` telemetry.
+    #[must_use]
+    pub const fn decision_label(&self) -> &'static str {
+        self.action.as_str()
+    }
+}
+
 /// Sparse hierarchical vector keyed by zone/subtree path.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HierarchicalVersionVector {
@@ -146,6 +215,90 @@ impl HierarchicalVersionVector {
         scopes.sort();
         scopes.dedup();
         scopes
+    }
+}
+
+/// Local revocation freshness frontier for mesh priority pushes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevocationFreshnessFrontier {
+    vector: HierarchicalVersionVector,
+}
+
+impl RevocationFreshnessFrontier {
+    /// Create an empty freshness frontier.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            vector: HierarchicalVersionVector::new(),
+        }
+    }
+
+    /// Borrow the underlying hierarchical vector.
+    #[must_use]
+    pub const fn vector(&self) -> &HierarchicalVersionVector {
+        &self.vector
+    }
+
+    /// Effective local counter for a scope after ancestor inheritance.
+    #[must_use]
+    pub fn counter_for(&self, scope: &str) -> u64 {
+        self.vector.counter_for(scope)
+    }
+
+    /// Evaluate an incoming revocation counter without mutating local state.
+    #[must_use]
+    pub fn evaluate(
+        &self,
+        scope: impl AsRef<str>,
+        incoming_counter: u64,
+    ) -> RevocationFreshnessDecision {
+        let scope = normalize_scope(scope.as_ref());
+        let local_counter = self.vector.counter_for(&scope);
+        let incoming = Self::incoming_vector(&scope, incoming_counter);
+        let order = incoming.compare(&self.vector);
+        let action = match order {
+            VersionVectorOrder::DominatedBy => RevocationFreshnessAction::RejectStale,
+            VersionVectorOrder::Equal
+            | VersionVectorOrder::Dominates
+            | VersionVectorOrder::Concurrent => RevocationFreshnessAction::Accept,
+        };
+
+        RevocationFreshnessDecision {
+            scope,
+            local_counter,
+            incoming_counter,
+            order,
+            action,
+        }
+    }
+
+    /// Evaluate and apply an incoming revocation counter if it is not stale.
+    pub fn observe(
+        &mut self,
+        scope: impl AsRef<str>,
+        incoming_counter: u64,
+    ) -> RevocationFreshnessDecision {
+        let decision = self.evaluate(scope, incoming_counter);
+        if decision.is_accepted() {
+            self.vector
+                .merge(&Self::incoming_vector(&decision.scope, incoming_counter));
+        }
+        decision
+    }
+
+    /// Canonical CBOR size of the stored frontier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if canonical serialization fails.
+    pub fn canonical_len(&self) -> Result<usize, String> {
+        self.vector.canonical_len()
+    }
+
+    fn incoming_vector(scope: &str, counter: u64) -> HierarchicalVersionVector {
+        let mut incoming = HierarchicalVersionVector::new();
+        incoming.set(scope, counter);
+        incoming
     }
 }
 

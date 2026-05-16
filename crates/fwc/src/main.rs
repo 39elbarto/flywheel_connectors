@@ -8881,6 +8881,7 @@ const CUTOVER_GATE_TELEMETRY_BEAD_ID: &str = "flywheel_connectors-hr0rr.2.1";
 const CUTOVER_GATE_TELEMETRY_ACTOR: &str = "fwc";
 const CUTOVER_GATE_TELEMETRY_REDACTION_SCOPE: &str = "public";
 const CUTOVER_GATE_STATUS_METRIC_NAME: &str = "fcp_cutover_gate_status";
+const HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION: &str = "fcp-host-cutover-gates/v1";
 const MESH_CUTOVER_GATE_IDS: [&str; 4] = [
     "mesh-inventory-placement",
     "mesh-lifecycle-state-replication",
@@ -9141,6 +9142,20 @@ fn annotate_cutover_gates_with_live_telemetry(
 fn parse_direct_cutover_gate_snapshot(
     snapshot: &Value,
 ) -> std::result::Result<Vec<mesh_cmd::MeshCutoverGate>, String> {
+    let schema_version = snapshot
+        .get("schema_version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            format!(
+                "direct cutover-gate snapshot is missing `schema_version`; expected `{HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION}`"
+            )
+        })?;
+    if schema_version != HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION {
+        return Err(format!(
+            "direct cutover-gate snapshot schema_version `{schema_version}` does not match expected `{HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION}`"
+        ));
+    }
+
     let gates_value = snapshot
         .get("gates")
         .cloned()
@@ -29353,6 +29368,12 @@ mod tests {
     }
 
     fn mock_direct_green_cutover_gate_snapshot() -> Value {
+        mock_direct_green_cutover_gate_snapshot_with_schema(
+            super::HOST_MESH_CUTOVER_GATES_SCHEMA_VERSION,
+        )
+    }
+
+    fn mock_direct_green_cutover_gate_snapshot_with_schema(schema_version: &str) -> Value {
         let mut gates =
             super::mesh_cmd::mesh_cutover_gates(&super::mesh_cmd::MeshCutoverGateArgs::default());
         for gate in &mut gates {
@@ -29386,12 +29407,16 @@ mod tests {
                     "verified_owner_signatures": true,
                     "node_count": 3,
                 }),
-                unknown => panic!("unexpected cutover gate id {unknown}"),
+                unknown => json!({
+                    "telemetry_state": "unexpected-test-gate-id",
+                    "unexpected_gate_id": unknown,
+                    "node_count": 3,
+                }),
             };
         }
 
         json!({
-            "schema_version": "fcp-host-cutover-gates/v1",
+            "schema_version": schema_version,
             "catalog_connector_count": 3,
             "node_count": 3,
             "gates": gates,
@@ -29561,6 +29586,53 @@ mod tests {
             4
         );
         assert_eq!(payload["red_gate_ids"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn mesh_cutover_gates_rejects_wrong_direct_snapshot_schema() -> std::result::Result<(), String>
+    {
+        let mut routes = StdBTreeMap::new();
+        routes.insert(
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(),
+        );
+        routes.insert(
+            "GET /rpc/mesh/cutover-gates".to_owned(),
+            mock_direct_green_cutover_gate_snapshot_with_schema("fcp-host-cutover-gates/v0"),
+        );
+        let (host, server) = spawn_mock_host(routes, 2);
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "mesh", "cutover-gates"]);
+
+        server
+            .join()
+            .map_err(|_| "mock host should complete".to_owned())?;
+        assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
+        assert_eq!(payload["schema_version"], "1.2.0");
+        assert_eq!(payload["overall_status"], "skip");
+        assert_eq!(
+            payload["live_telemetry"]["reason_code"],
+            "direct-cutover-telemetry-invalid"
+        );
+        assert_eq!(
+            payload["live_telemetry"]["direct_gate_telemetry_available"],
+            false
+        );
+        let missing_routes = payload["live_telemetry"]["missing_routes"]
+            .as_array()
+            .ok_or_else(|| "missing_routes must be an array".to_owned())?;
+        assert!(
+            missing_routes
+                .iter()
+                .any(|route| route.as_str() == Some("valid-cutover-gate-snapshot"))
+        );
+        let gates = payload["gates"]
+            .as_array()
+            .ok_or_else(|| "gates must be an array".to_owned())?;
+        assert!(gates.iter().all(|gate| gate["status"] == "skip"
+            && gate["measured_value"]["skip_reason"] == "direct-cutover-telemetry-invalid"));
+        Ok(())
     }
 
     #[test]

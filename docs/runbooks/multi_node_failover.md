@@ -294,3 +294,8 @@ Likewise, a live `fwc mesh explain-availability --host` payload can be
 still not enough to green the `mesh-inventory-placement` cutover gate. That gate
 needs live replica telemetry: `placement.has_mesh_replica=true` and
 `placement.replica_count` meeting the target for the placed connector set.
+`fwc mesh cutover-gates --host` only treats a direct host snapshot as live gate
+telemetry when the host payload advertises `schema_version:
+fcp-host-cutover-gates/v1`; a missing or older schema stays `skip` with
+`direct-cutover-telemetry-invalid` instead of green-lighting cutover from a
+stale or foreign route.

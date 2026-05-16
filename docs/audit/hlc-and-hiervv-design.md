@@ -5,7 +5,7 @@ Status: partially implemented under `flywheel_connectors-angoc.17.3`.
 This note describes the shipped HLC and hierarchical version-vector behavior for
 audit chains and mesh revocation freshness. It is a design contract for the code
 in `fcp-audit`, `fcp-host`, and `fcp-mesh`; it is not a claim that the remaining
-doctor, failure-injection, or perf acceptance items are complete.
+mesh registry persistence item is complete.
 
 ## Goals
 
@@ -45,6 +45,20 @@ side-channel attribute.
 
 This means equal or backwards wall-clock samples still produce strictly
 advancing HLCs in same-zone commit order.
+
+When the requested wall-clock timestamp moves backwards for a same-zone audit
+chain, `fcp-host::invoke_audit` keeps the append valid by clamping the entry's
+`occurred_at` to the previous chain timestamp and advancing the HLC logical
+counter. The entry metadata is annotated with:
+
+- `alert = "clock_anomaly"`
+- `clock_anomaly = true`
+- `clock_anomaly_kind = "wall_clock_regressed"`
+- requested, previous, clamped, and skew second fields
+
+The chain metrics increment `clock_anomalies`, and a structured warning is
+emitted under target `fcp.audit.clock_anomaly` with the same timing fields plus
+the entry id, zone id, and actor.
 
 ## HierVV Revocation Freshness
 
@@ -119,6 +133,7 @@ Focused proof lanes for the current implementation:
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-angoc173-hiervv-target-20260516 CARGO_INCREMENTAL=0 cargo test -p fcp-audit --test hlc_monotonic -- --nocapture
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-angoc173-hiervv-target-20260516 CARGO_INCREMENTAL=0 cargo test -p fcp-mesh --test hier_vv -- --nocapture
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-angoc173-hiervv-target-20260516 CARGO_INCREMENTAL=0 cargo test -p fcp-mesh --lib handle_revocation_push -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-angoc173-clock-target-20260516 CARGO_INCREMENTAL=0 cargo test -p fcp-host --lib invoke_audit_chain_clock_step_back -- --nocapture
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-angoc173-hiervv-target-20260516 CARGO_INCREMENTAL=0 cargo test -p fcp-conformance --test hlc_hiervv_conformance -- --nocapture
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-angoc173-hiervv-target-20260516 CARGO_INCREMENTAL=0 cargo clippy -p fcp-mesh --lib --no-deps -- -D warnings
 rch exec -- cargo fmt -p fcp-audit -p fcp-mesh -p fcp-host -p fcp-conformance --check
@@ -126,7 +141,5 @@ rch exec -- cargo fmt -p fcp-audit -p fcp-mesh -p fcp-host -p fcp-conformance --
 
 ## Remaining Work
 
-- Add clock-step-back failure injection and a `clock_anomaly` audit/telemetry
-  path.
 - Persist or reconcile the mesh revocation frontier beyond the current
   in-memory `MeshNode` priority-push path where the registry owner needs it.

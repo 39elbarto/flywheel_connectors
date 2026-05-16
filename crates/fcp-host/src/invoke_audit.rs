@@ -42,6 +42,7 @@ use fcp_audit::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tracing::warn;
 
 /// Defence-in-depth bound on the optimistic-CAS retry loop.
 ///
@@ -195,6 +196,28 @@ struct InvokeAuditEntryTemplate {
     metadata: BTreeMap<String, serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClockAnomaly {
+    requested: u64,
+    previous: u64,
+    clamped: u64,
+}
+
+impl ClockAnomaly {
+    fn detect(requested_occurred_at: u64, previous_occurred_at: Option<u64>) -> Option<Self> {
+        let previous_occurred_at = previous_occurred_at?;
+        (requested_occurred_at < previous_occurred_at).then_some(Self {
+            requested: requested_occurred_at,
+            previous: previous_occurred_at,
+            clamped: previous_occurred_at,
+        })
+    }
+
+    const fn skew_secs(self) -> u64 {
+        self.previous.saturating_sub(self.requested)
+    }
+}
+
 impl InvokeAuditEntryTemplate {
     fn new(ctx: &InvokeAuditContext, phase: InvokePhase) -> Self {
         let event_type = phase.event_type();
@@ -221,6 +244,7 @@ impl InvokeAuditEntryTemplate {
         occurred_at: u64,
         hlc: &HybridLogicalTimestamp,
         prev: Option<&str>,
+        metadata: &BTreeMap<String, serde_json::Value>,
     ) -> Result<String, AuditError> {
         compute_audit_entry_id(AuditEntryIdFields {
             event_type: self.event_type,
@@ -235,7 +259,7 @@ impl InvokeAuditEntryTemplate {
             trace_context: None,
             connector_id: Some(&self.connector_id),
             operation_id: Some(&self.operation_id),
-            metadata: &self.metadata,
+            metadata,
         })
         .map_err(|e| AuditError::SerializationError(format!("invoke audit build: {e}")))
     }
@@ -247,6 +271,7 @@ impl InvokeAuditEntryTemplate {
         hlc: HybridLogicalTimestamp,
         prev: Option<String>,
         id: String,
+        metadata: Option<BTreeMap<String, serde_json::Value>>,
     ) -> AuditEntry {
         AuditEntry {
             id,
@@ -262,10 +287,40 @@ impl InvokeAuditEntryTemplate {
             trace_context: None,
             connector_id: Some(self.connector_id.clone()),
             operation_id: Some(self.operation_id.clone()),
-            metadata: self.metadata.clone(),
+            metadata: metadata.unwrap_or_else(|| self.metadata.clone()),
             issuer_kid: None,
             signature: None,
         }
+    }
+
+    fn metadata_with_clock_anomaly(
+        &self,
+        anomaly: ClockAnomaly,
+    ) -> BTreeMap<String, serde_json::Value> {
+        let mut metadata = self.metadata.clone();
+        metadata.insert("alert".to_string(), json!("clock_anomaly"));
+        metadata.insert("clock_anomaly".to_string(), json!(true));
+        metadata.insert(
+            "clock_anomaly_kind".to_string(),
+            json!("wall_clock_regressed"),
+        );
+        metadata.insert(
+            "clock_anomaly_requested_occurred_at".to_string(),
+            json!(anomaly.requested),
+        );
+        metadata.insert(
+            "clock_anomaly_previous_occurred_at".to_string(),
+            json!(anomaly.previous),
+        );
+        metadata.insert(
+            "clock_anomaly_clamped_occurred_at".to_string(),
+            json!(anomaly.clamped),
+        );
+        metadata.insert(
+            "clock_anomaly_skew_secs".to_string(),
+            json!(anomaly.skew_secs()),
+        );
+        metadata
     }
 }
 
@@ -297,6 +352,8 @@ pub struct InvokeAuditChainMetrics {
     pub serialized_fallbacks: usize,
     /// Retry-budget exhaustions surfaced as typed contention errors.
     pub contention_exhaustions: usize,
+    /// Entries that detected and annotated wall-clock rollback.
+    pub clock_anomalies: usize,
 }
 
 impl InvokeAuditChainMetrics {
@@ -454,14 +511,23 @@ impl InvokeAuditChain {
             };
             let occurred_at = monotonic_occurred_at(ctx.occurred_at, last_occurred_at);
             let hlc = next_audit_hlc(&template.actor, occurred_at, last_hlc.as_ref());
+            let clock_anomaly = ClockAnomaly::detect(ctx.occurred_at, last_occurred_at);
+            let metadata_override =
+                clock_anomaly.map(|anomaly| template.metadata_with_clock_anomaly(anomaly));
+            let metadata = metadata_override.as_ref().unwrap_or(&template.metadata);
 
             // 2. Encode canonical + hash OUTSIDE any lock. This is the
             //    dominant cost; running it lock-free is the load-bearing
             //    perf win. On failed CAS attempts, keep this path borrowed:
             //    the full owned AuditEntry is only materialized after the
             //    snapshot wins the commit race.
-            let real_id =
-                template.compute_id(next_seq, occurred_at, &hlc, prev_snapshot.as_deref())?;
+            let real_id = template.compute_id(
+                next_seq,
+                occurred_at,
+                &hlc,
+                prev_snapshot.as_deref(),
+                metadata,
+            )?;
 
             // 3. Re-lock + CAS commit. If another append landed
             //    on this zone between (1) and (3), our prev /
@@ -471,8 +537,14 @@ impl InvokeAuditChain {
             {
                 let mut z = zone.lock().expect("InvokeAuditChain zone mutex poisoned");
                 if z.last_id.as_deref() == prev_snapshot.as_deref() {
-                    let entry =
-                        template.materialize(next_seq, occurred_at, hlc, prev_snapshot, real_id);
+                    let entry = template.materialize(
+                        next_seq,
+                        occurred_at,
+                        hlc,
+                        prev_snapshot,
+                        real_id,
+                        metadata_override,
+                    );
                     z.last_seq = Some(next_seq);
                     z.last_id = Some(entry.id.clone());
                     z.last_occurred_at = Some(occurred_at);
@@ -480,7 +552,13 @@ impl InvokeAuditChain {
                     z.entries.push(entry.clone());
                     z.metrics.entries = z.entries.len();
                     z.metrics.optimistic_commits = z.metrics.optimistic_commits.saturating_add(1);
+                    if clock_anomaly.is_some() {
+                        z.metrics.clock_anomalies = z.metrics.clock_anomalies.saturating_add(1);
+                    }
                     drop(z);
+                    if let Some(anomaly) = clock_anomaly {
+                        emit_clock_anomaly(&entry, anomaly);
+                    }
                     return Ok(entry);
                 }
                 z.metrics.stale_head_retries = z.metrics.stale_head_retries.saturating_add(1);
@@ -533,9 +611,13 @@ impl InvokeAuditChain {
         let next_seq = z.last_seq.map_or(0u64, |s| s.saturating_add(1));
         let occurred_at = monotonic_occurred_at(requested_occurred_at, z.last_occurred_at);
         let hlc = next_audit_hlc(&template.actor, occurred_at, z.last_hlc.as_ref());
+        let clock_anomaly = ClockAnomaly::detect(requested_occurred_at, z.last_occurred_at);
+        let metadata_override =
+            clock_anomaly.map(|anomaly| template.metadata_with_clock_anomaly(anomaly));
+        let metadata = metadata_override.as_ref().unwrap_or(&template.metadata);
         let prev = z.last_id.clone();
-        let id = template.compute_id(next_seq, occurred_at, &hlc, prev.as_deref())?;
-        let entry = template.materialize(next_seq, occurred_at, hlc, prev, id);
+        let id = template.compute_id(next_seq, occurred_at, &hlc, prev.as_deref(), metadata)?;
+        let entry = template.materialize(next_seq, occurred_at, hlc, prev, id, metadata_override);
         z.last_seq = Some(next_seq);
         z.last_id = Some(entry.id.clone());
         z.last_occurred_at = Some(occurred_at);
@@ -543,7 +625,13 @@ impl InvokeAuditChain {
         z.entries.push(entry.clone());
         z.metrics.entries = z.entries.len();
         z.metrics.serialized_fallbacks = z.metrics.serialized_fallbacks.saturating_add(1);
+        if clock_anomaly.is_some() {
+            z.metrics.clock_anomalies = z.metrics.clock_anomalies.saturating_add(1);
+        }
         drop(z);
+        if let Some(anomaly) = clock_anomaly {
+            emit_clock_anomaly(&entry, anomaly);
+        }
         Ok(entry)
     }
 
@@ -636,6 +724,20 @@ fn next_audit_hlc(
     )
 }
 
+fn emit_clock_anomaly(entry: &AuditEntry, anomaly: ClockAnomaly) {
+    warn!(
+        target: "fcp.audit.clock_anomaly",
+        entry_id = %entry.id,
+        zone_id = %entry.zone_id,
+        actor = %entry.actor,
+        requested_occurred_at = anomaly.requested,
+        previous_occurred_at = anomaly.previous,
+        clamped_occurred_at = anomaly.clamped,
+        skew_secs = anomaly.skew_secs(),
+        "audit append detected wall-clock rollback and advanced HLC logical counter"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -704,6 +806,76 @@ mod tests {
             second.hlc > first.hlc,
             "second entry HLC must advance even when wall-clock seconds are equal"
         );
+    }
+
+    #[test]
+    fn invoke_audit_chain_clock_step_back_marks_anomaly_without_hlc_regression() {
+        let chain = InvokeAuditChain::new();
+        let mut first_ctx = ctx("z:work", "op-rollback-1");
+        first_ctx.occurred_at = 1_700_000_010;
+        let first = chain
+            .append(&first_ctx, InvokePhase::PreflightAllow)
+            .unwrap();
+
+        let mut second_ctx = ctx("z:work", "op-rollback-2");
+        second_ctx.occurred_at = 1_700_000_000;
+        let second = chain
+            .append(&second_ctx, InvokePhase::PreflightAllow)
+            .unwrap();
+
+        assert_eq!(second.occurred_at, first.occurred_at);
+        assert_eq!(second.hlc.physical_ms, first.hlc.physical_ms);
+        assert!(
+            second.hlc > first.hlc,
+            "clock rollback must advance the logical counter instead of regressing HLC"
+        );
+        assert_eq!(
+            second.metadata.get("alert").and_then(|v| v.as_str()),
+            Some("clock_anomaly")
+        );
+        assert_eq!(
+            second
+                .metadata
+                .get("clock_anomaly")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            second
+                .metadata
+                .get("clock_anomaly_kind")
+                .and_then(|v| v.as_str()),
+            Some("wall_clock_regressed")
+        );
+        assert_eq!(
+            second
+                .metadata
+                .get("clock_anomaly_requested_occurred_at")
+                .and_then(serde_json::Value::as_u64),
+            Some(second_ctx.occurred_at)
+        );
+        assert_eq!(
+            second
+                .metadata
+                .get("clock_anomaly_previous_occurred_at")
+                .and_then(serde_json::Value::as_u64),
+            Some(first.occurred_at)
+        );
+        assert_eq!(
+            second
+                .metadata
+                .get("clock_anomaly_clamped_occurred_at")
+                .and_then(serde_json::Value::as_u64),
+            Some(first.occurred_at)
+        );
+        assert_eq!(
+            second
+                .metadata
+                .get("clock_anomaly_skew_secs")
+                .and_then(serde_json::Value::as_u64),
+            Some(10)
+        );
+        assert_eq!(chain.metrics_for_zone("z:work").clock_anomalies, 1);
     }
 
     #[test]

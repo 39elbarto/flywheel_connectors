@@ -373,7 +373,8 @@ dispatcher scenarios, and stable `LATTICE_*` error mappings. A skipped Lean
 build is recorded as a skip record; Cargo-backed lanes still run through `rch`.
 For each `rch exec` lane the JSONL records include the observed `[RCH]` summary,
 worker execution class, and fallback decision so local fallback is visible in
-the artifact instead of being mistaken for remote proof.
+the artifact instead of being mistaken for remote proof. Remote worker failures
+are classified separately from successful remote execution.
 The script prints both the JSONL path and final JSONL SHA-256 on stdout. The
 summary record's embedded `pre_summary_artifact_hash` intentionally covers only
 the records before the summary, avoiding a misleading self-referential hash.

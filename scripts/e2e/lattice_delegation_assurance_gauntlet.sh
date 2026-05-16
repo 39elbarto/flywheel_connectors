@@ -176,12 +176,12 @@ fallback_decision_for_log() {
       *"rch exec"*) printf 'rch_summary_unobserved' ;;
       *) printf 'not_needed' ;;
     esac
+  elif printf '%s' "${summary}" | grep -Fq 'failed'; then
+    printf 'rch_remote_failed'
   elif printf '%s' "${summary}" | grep -Fq '[RCH] local'; then
     printf 'rch_local_fallback'
   elif printf '%s' "${summary}" | grep -Fq '[RCH] remote'; then
     printf 'not_needed'
-  elif printf '%s' "${summary}" | grep -Fq '[RCH] failed'; then
-    printf 'rch_remote_failed'
   else
     printf 'rch_summary_unclassified'
   fi
@@ -197,12 +197,12 @@ worker_execution_class_for_log() {
       *"rch exec"*) printf 'unknown' ;;
       *) printf 'not_applicable' ;;
     esac
+  elif printf '%s' "${summary}" | grep -Fq 'failed'; then
+    printf 'remote_failed'
   elif printf '%s' "${summary}" | grep -Fq '[RCH] local'; then
     printf 'local'
   elif printf '%s' "${summary}" | grep -Fq '[RCH] remote'; then
     printf 'remote'
-  elif printf '%s' "${summary}" | grep -Fq '[RCH] failed'; then
-    printf 'remote_failed'
   else
     printf 'unknown'
   fi

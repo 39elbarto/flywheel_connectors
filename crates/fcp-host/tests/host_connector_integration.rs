@@ -2558,6 +2558,145 @@ async fn fcp_host_binary_hrw_lease_coordination_allows_one_singleton_writer_laun
 }
 
 #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_hrw_lease_fence_rejects_stale_singleton_writer_invoke()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.hrw-binary-fence:utility:1.0.0");
+    let connector_config =
+        singleton_writer_test_connector_config(&connector_id, "HRW Binary Fence");
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
+    let eligible_nodes = "node-a,node-b,node-c";
+    let current_lease_seq = "11";
+    let mut admitted_host: Option<(String, HttpHostProcess)> = None;
+    let mut refusal_messages = Vec::new();
+
+    for local_node in ["node-a", "node-b", "node-c"] {
+        match HttpHostProcess::spawn_with_env(
+            vec![connector_config.clone()],
+            &[
+                ("FCP_HOST_HRW_LEASE_LOCAL_NODE", local_node),
+                ("FCP_HOST_HRW_LEASE_NODES", eligible_nodes),
+                ("FCP_HOST_HRW_LEASE_CURRENT_SEQ", current_lease_seq),
+                (
+                    "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+                    capability_public_key.as_str(),
+                ),
+            ],
+        )
+        .await
+        {
+            Ok(host) => {
+                assert!(
+                    admitted_host.is_none(),
+                    "HRW admitted more than one singleton_writer host launch"
+                );
+                admitted_host = Some((local_node.to_string(), host));
+            }
+            Err(error) => refusal_messages.push((local_node.to_string(), error.to_string())),
+        }
+    }
+
+    assert!(
+        admitted_host.is_some(),
+        "HRW should admit exactly one singleton_writer host launch; refusals: {refusal_messages:?}"
+    );
+    assert_eq!(
+        refusal_messages.len(),
+        2,
+        "three-node HRW routing should refuse both non-holder launches"
+    );
+    for (refused_node, refusal) in &refusal_messages {
+        assert!(
+            refusal.contains("NotSelectedCoordinator"),
+            "refusal for {refused_node} should preserve the typed HRW error: {refusal}"
+        );
+    }
+
+    let (admitted_node, host) = admitted_host.expect("one HRW host should be admitted");
+    let url = |path: &str| format!("{}{path}", host.base_url);
+    let mut stale_request = build_invoke_request(connector_id.clone(), &capability_signing_key).0;
+    stale_request.input = json!({
+        "message": "stale write must be fenced before dispatch",
+        "lease_seq": 10_u64,
+    });
+    stale_request.lease_seq = Some(10);
+
+    let stale_response = host
+        .client
+        .post(url("/rpc/invoke"))
+        .json(&stale_request)
+        .send()
+        .await?;
+    let stale_status = stale_response.status();
+    let stale_body = stale_response.text().await?;
+    assert_eq!(stale_status, reqwest::StatusCode::FORBIDDEN);
+    assert!(
+        stale_body.contains(r#""code":"LeaseFenced""#),
+        "stale invoke should be fenced with typed HRW evidence: {stale_body}"
+    );
+    assert!(
+        stale_body.contains(r#""current_lease_seq":11"#),
+        "stale invoke should report the current fence: {stale_body}"
+    );
+    assert!(
+        stale_body.contains(r#""provided_lease_seq":10"#),
+        "stale invoke should report the provided stale fence: {stale_body}"
+    );
+    assert!(
+        !stale_body.contains("stale write must be fenced before dispatch"),
+        "stale invoke body should not include connector echo output: {stale_body}"
+    );
+
+    let mut current_request = build_invoke_request(connector_id.clone(), &capability_signing_key).0;
+    current_request.input = json!({
+        "message": "current fence may dispatch",
+        "lease_seq": 11_u64,
+    });
+    current_request.lease_seq = Some(11);
+    let current_response: InvokeResponse =
+        http_post_json(host.client.clone(), url("/rpc/invoke"), current_request).await?;
+    assert_eq!(current_response.status, InvokeStatus::Ok);
+    assert_eq!(
+        current_response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("echo"))
+            .and_then(|echo| echo.get("message"))
+            .and_then(Value::as_str),
+        Some("current fence may dispatch")
+    );
+
+    let lease_status: serde_json::Value = http_get_json(
+        host.client.clone(),
+        url(&format!(
+            "/rpc/admin/connectors/{}/lease/status?zone=z%3Awork",
+            connector_id.as_str()
+        )),
+    )
+    .await?;
+    assert_eq!(lease_status["source"], "host-hrw-routing");
+    assert_eq!(lease_status["local_is_holder"], true);
+    assert_eq!(lease_status["fencing_token"], 11);
+    assert_eq!(
+        lease_status["ranked_holders"]
+            .as_array()
+            .expect("lease status should include ranked holders")
+            .len(),
+        3
+    );
+    assert!(
+        lease_status["ranked_holders"]
+            .as_array()
+            .expect("lease status should include ranked holders")
+            .iter()
+            .any(|holder| holder["is_local_node"].as_bool() == Some(true)),
+        "admitted HRW host {admitted_node} should appear in the holder ladder"
+    );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn fcp_host_binary_config_routes_are_live_revision_aware()
 -> Result<(), Box<dyn std::error::Error>> {
     let connector_id = ConnectorId::from_static("fcp.test.config-http:utility:1.0.0");

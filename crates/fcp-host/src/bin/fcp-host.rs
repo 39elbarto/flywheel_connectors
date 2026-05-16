@@ -4806,24 +4806,6 @@ fn json_schema_declares_singleton_writer(value: &Value) -> bool {
             if state_model == Some("singleton_writer") {
                 return true;
             }
-            if map
-                .get("properties")
-                .and_then(Value::as_object)
-                .is_some_and(|properties| properties.contains_key("lease_seq"))
-            {
-                return true;
-            }
-            if map
-                .get("required")
-                .and_then(Value::as_array)
-                .is_some_and(|required| {
-                    required
-                        .iter()
-                        .any(|field| field.as_str() == Some("lease_seq"))
-                })
-            {
-                return true;
-            }
             map.values().any(json_schema_declares_singleton_writer)
         }
         Value::Array(values) => values.iter().any(json_schema_declares_singleton_writer),
@@ -4833,12 +4815,9 @@ fn json_schema_declares_singleton_writer(value: &Value) -> bool {
 
 fn operation_requires_hrw_lease(
     tool: &ToolDescriptor,
-    request: &InvokeRequest,
     connector_declares_singleton_writer: bool,
 ) -> bool {
-    connector_declares_singleton_writer
-        || request.lease_seq.is_some()
-        || json_schema_declares_singleton_writer(&tool.input_schema)
+    connector_declares_singleton_writer || json_schema_declares_singleton_writer(&tool.input_schema)
 }
 
 fn update_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
@@ -5637,7 +5616,7 @@ async fn verify_live_request(
         .registry
         .connector_requires_singleton_writer(&request.connector_id)
         .await;
-    if operation_requires_hrw_lease(tool, request, connector_declares_singleton_writer) {
+    if operation_requires_hrw_lease(tool, connector_declares_singleton_writer) {
         let routing = current_hrw_lease_routing_config()?;
         enforce_hrw_lease_route(
             state,
@@ -19239,7 +19218,7 @@ deny_ptrace = true
                 description: None,
                 args: Vec::new(),
                 env: BTreeMap::new(),
-                config: None,
+                config: Some(json!({ "state": { "model": "singleton_writer" } })),
                 categories: vec!["test".to_string()],
                 version: None,
                 allowed_zones: vec![ZoneId::work().as_str().to_string()],
@@ -19392,6 +19371,121 @@ deny_ptrace = true
             invoke_count.load(Ordering::SeqCst),
             1,
             "Elected holder should reach connector dispatch"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn invoke_handler_hrw_skips_non_singleton_connector_even_with_lease_seq_input() {
+        let connector_id = "fcp.test.hrw-non-singleton-skip:utility:1.0.0";
+        let operation_id = "test.non_singleton";
+        let capability_id = "cap.test.non_singleton";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let invoke_count = Arc::new(AtomicU64::new(0));
+        let input_schema = json!({
+            "type": "object",
+            "required": ["lease_seq"],
+            "properties": {
+                "lease_seq": { "type": "integer" },
+                "message": { "type": "string" }
+            }
+        });
+        let introspection = serde_json::to_value(dispatcher_introspection_with_input_schema(
+            operation_id,
+            capability_id,
+            SafetyTier::Safe,
+            input_schema,
+        ))
+        .expect("test introspection should serialize");
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(8);
+        let runner_invoke_count = Arc::clone(&invoke_count);
+        let runner_task = task::spawn(async move {
+            while let Some(request) = runner_rx.recv().await {
+                match request.method.as_str() {
+                    "introspect" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": introspection.clone(),
+                        })));
+                    }
+                    "health" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": dispatcher_health_result(),
+                        })));
+                    }
+                    "invoke" => {
+                        runner_invoke_count.fetch_add(1, Ordering::SeqCst);
+                        let invoke_request: InvokeRequest =
+                            serde_json::from_value(request.params.clone())
+                                .expect("invoke params decode");
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": InvokeResponse::ok(
+                                invoke_request.id,
+                                json!({ "hrw_skipped_for_non_singleton": true }),
+                            ),
+                        })));
+                    }
+                    method => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": { "message": format!("unexpected method {method}") },
+                        })));
+                    }
+                }
+            }
+        });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let registry = dispatcher_registry_with_connector(
+            connector_id,
+            connector,
+            dispatcher_test_config(connector_id),
+        );
+        let mut policies: HashMap<ZoneId, ZonePolicyObject> = HashMap::new();
+        policies.insert(ZoneId::work(), host_runtime_policy(ZoneId::work()));
+        let state = dispatcher_app_state(
+            registry,
+            Arc::new(HostAdminStateStore::new()),
+            Some(signing_key.verifying_key()),
+            policies,
+        );
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: ConnectorId::from_static(connector_id),
+            operation: OperationId::from_static(operation_id),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "lease_seq alone must not trigger HRW", "lease_seq": 99 }),
+            capability_token: test_capability_token(
+                &signing_key,
+                capability_id,
+                operation_id,
+                ZoneId::work().as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: Some(99),
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: TailscaleNodeId::new("node-a"),
+            eligible_nodes: vec![TailscaleNodeId::new("node-a")],
+            current_lease_seq: Some(100),
+        }));
+
+        let Json(response) = invoke_handler(State(state), HeaderMap::new(), Json(request))
+            .await
+            .expect("non-singleton connector must skip HRW even when lease_seq is present");
+
+        assert_eq!(response.status, InvokeStatus::Ok);
+        assert_eq!(
+            response.result,
+            Some(json!({ "hrw_skipped_for_non_singleton": true }))
+        );
+        assert_eq!(
+            invoke_count.load(Ordering::SeqCst),
+            1,
+            "non-singleton connector should reach dispatch instead of HRW preflight"
         );
     }
 

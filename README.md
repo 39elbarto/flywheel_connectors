@@ -1478,9 +1478,14 @@ noise. `scripts/e2e/slack_connector_verification.sh` is the first verifier wired
 through the fail-closed `rch` proof governor: Cargo-backed steps emit
 `*.rch_remote_proof.jsonl` records under the verifier artifact `proof/`
 directory. Only `accepted_remote_proof` counts as green closeout evidence.
-`refused_local_fallback`, `infra_blocked`, `failed_closed`, `not_proof`, and
-missing or malformed `rch` summaries keep the bead open and should be cited as
-blocker evidence instead.
+`remote_command_failed` is a real remote Cargo failure and belongs in the
+Beads/final-review record as code or test failure evidence, not as green
+closeout. `refused_local_fallback`, `infra_blocked` with blockers such as
+`active_project_exclusion` or `topology_preflight_failure`, `failed_closed`,
+`not_proof`, and missing or malformed `rch` summaries keep the bead open and
+should be cited as blocker evidence instead. `rch` transfer/sync chatter, a
+dry-run worker-selection plan, or `fwc proof run` without `--execute` is not
+remote proof.
 
 ## Production Mesh Deployment Runbook
 

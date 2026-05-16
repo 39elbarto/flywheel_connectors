@@ -844,6 +844,58 @@ missing/malformed summary are not closeout evidence; keep the bead open and cite
 the blocker JSONL instead. Set `PROOF_GOVERNOR=0` only for legacy comparison
 runs, not for bead closeout.
 
+### Proof-Governor Closeout Template
+
+Use this vocabulary in final-review notes, Beads comments, and connector README
+verification sections. Do not invent a second status taxonomy.
+
+- Green closeout: cite each `accepted_remote_proof` JSONL row with command,
+  worker id, target dir, git revision, and artifact path.
+- Remote code/test failure: cite `remote_command_failed` with the preserved
+  Cargo exit code and keep or reopen the bead as an implementation failure.
+- Local fallback refused: cite `refused_local_fallback` with
+  `local_fallback_refused`; this is proof that the guard worked, not proof that
+  the code passed.
+- Infrastructure blocker: cite `infra_blocked` with the blocker reason such as
+  `active_project_exclusion`, `no_admissible_workers`,
+  `topology_preflight_failure`, or `worker_pressure`.
+- Failed closed: cite `failed_closed` when the summary is missing, malformed, or
+  ambiguous.
+- Not proof: cite `not_proof` for dry-run-only plans, static docs, offline
+  artifacts, and non-Cargo rows that did not execute the governed payload.
+
+Final response template:
+
+```text
+Proof:
+- accepted_remote_proof: <command>, worker=<worker_id>, target_dir=<path>, artifact=<*.rch_remote_proof.jsonl>
+
+Blocked proof:
+- <status>: blocker=<reason>, artifact=<*.rch_remote_proof.jsonl>, action=<keep bead open|fix code|fix proof infra>
+```
+
+Beads closeout template:
+
+```text
+Completed in <commit>. Green proof rows: accepted_remote_proof for <lanes>, artifacts under <path>.
+Blocked/non-green rows: <none|status + blocker + artifact>. rch sync logs, dry-run worker selection, and proof plans without --execute were not counted as proof.
+```
+
+The examples below are parsed by `fwc` proof-governor tests; update the test
+with this table when the taxonomy changes.
+
+<!-- proof-governor-closeout-examples:start -->
+| Closeout status | Fixture kind | Example input | Blocker reason |
+|---|---|---|---|
+| `accepted_remote_proof` | `rch_summary` | `[RCH] remote worker-7 (cargo test passed)` | `` |
+| `remote_command_failed` | `rch_summary` | `[RCH] remote worker-7 failed [RCH-E101]` | `` |
+| `refused_local_fallback` | `rch_summary` | `[RCH] local (remote execution failed)` | `local_fallback_refused` |
+| `infra_blocked` | `rch_summary` | `[RCH] local (active_project_exclusion=1 no admissible workers)` | `active_project_exclusion` |
+| `infra_blocked` | `rch_summary` | `[RCH] local (remote topology preflight failed: ln: Already exists)` | `topology_preflight_failure` |
+| `failed_closed` | `missing_rch_summary` | `cargo test passed without an RCH summary` | `missing_rch_summary` |
+| `not_proof` | `non_cargo_non_proof` | `fwc proof run claim:slack-verifier --corpus proof.json` | `non_cargo_non_proof` |
+<!-- proof-governor-closeout-examples:end -->
+
 If you add scripted transcript or scenario runners, the replay instructions and playbooks should preserve the `rch exec -- ...` prefix for any cargo-backed step.
 
 ## Migration Guidance

@@ -117,6 +117,16 @@ The deterministic integration evidence is anchored on localhost mock-server runs
 
 The closeout bundle is anchored on `scripts/e2e/<name>_connector_verification.sh`. It writes replayable artifacts under `artifacts/e2e/<name>_connector/<timestamp>` and runs `rch`-offloaded Cargo commands so validation does not contend with local multi-agent sessions.
 
+For Cargo-backed verifier steps, prefer the fail-closed `fwc proof run`
+governor when the verifier supports it. The README must state where the
+`*.rch_remote_proof.jsonl` records are written and which governor
+classification was observed. Only `accepted_remote_proof` is green closeout
+evidence. `remote_command_failed` is a real remote code/test failure.
+`refused_local_fallback`, `infra_blocked`, `failed_closed`, and `not_proof`
+are blocker evidence and keep the bead open. `rch` sync logs, dry-run worker
+selection, and any proof plan that did not execute the Cargo payload are not
+accepted evidence.
+
 The bundle captures:
 
 - Manifest validation for `connectors/<name>/manifest.toml`.

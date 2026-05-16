@@ -11520,7 +11520,8 @@ fn agent_bootstrap_dispatch(args: &AgentBootstrapArgs) -> Result<DispatchOutcome
                     args.name
                 ),
                 "After selecting a bead, send a start message with thread_id=<bead-id> when Agent Mail is reachable.",
-                "On closeout, run `br close <id> --reason <reason>` and `br sync --flush-only` when the Beads write path is available.",
+                "On closeout, cite accepted_remote_proof rows in the Beads reason; keep the bead open for refused_local_fallback, infra_blocked, failed_closed, not_proof, or dry-run-only proof plans.",
+                "Run `br close <id> --reason <reason>` and `br sync --flush-only` only when the Beads write path is available.",
             ]);
             Ok(DispatchOutcome { payload, exit_code })
         }

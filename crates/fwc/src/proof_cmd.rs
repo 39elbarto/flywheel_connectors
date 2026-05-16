@@ -3476,6 +3476,155 @@ related = []
     }
 
     #[test]
+    fn proof_governor_closeout_template_examples_parse_under_classifier() {
+        let playbook = include_str!("../../../docs/FWC_Host_First_Truthfulness_Playbook.md");
+        let rows = proof_governor_closeout_examples(playbook);
+        assert!(
+            !rows.is_empty(),
+            "playbook proof-governor closeout table was not found"
+        );
+
+        for row in rows {
+            let proof = match row.fixture_kind.as_str() {
+                "rch_summary" => {
+                    let status_success = row.status == "accepted_remote_proof"
+                        || row.status == "refused_local_fallback";
+                    let status_code = if row.status == "remote_command_failed" {
+                        Some(101)
+                    } else if status_success {
+                        Some(0)
+                    } else {
+                        Some(1)
+                    };
+                    classify_rch_execution(
+                        &remote_rch_plan(),
+                        row.example_input.as_bytes(),
+                        b"",
+                        status_code,
+                        status_success,
+                        NOW,
+                        NOW + 1_000,
+                    )
+                    .expect("classify documented rch example")
+                }
+                "missing_rch_summary" => classify_rch_execution(
+                    &remote_rch_plan(),
+                    b"cargo test passed without an RCH summary\n",
+                    b"",
+                    Some(0),
+                    true,
+                    NOW,
+                    NOW + 1_000,
+                )
+                .expect("classify documented missing-summary example"),
+                "non_cargo_non_proof" => {
+                    let evidence = RchRemoteProofEvidence {
+                        schema: RCH_REMOTE_PROOF_EVIDENCE_SCHEMA.to_owned(),
+                        command: vec![
+                            "fwc".to_owned(),
+                            "proof".to_owned(),
+                            "run".to_owned(),
+                            "claim:slack-verifier".to_owned(),
+                            "--corpus".to_owned(),
+                            "proof.json".to_owned(),
+                        ],
+                        cwd: ".".to_owned(),
+                        git_revision: "abc1234".to_owned(),
+                        worker_id: None,
+                        rch_summary_line: None,
+                        selector_reason: None,
+                        preflight_reason: None,
+                        target_dir: None,
+                        started_at_unix_ms: NOW,
+                        finished_at_unix_ms: Some(NOW + 1_000),
+                        exit_kind: RchRemoteProofExitKind::NonProof,
+                        blocker_reason: Some(RchRemoteProofBlockerReason::NonCargoNonProof),
+                        redaction: RchRemoteProofRedaction {
+                            flags: BTreeSet::from([
+                                RchRemoteProofRedactionFlag::CommandChecked,
+                                RchRemoteProofRedactionFlag::CwdRedacted,
+                                RchRemoteProofRedactionFlag::SecretValuesRemoved,
+                            ]),
+                        },
+                    };
+                    let classification = evidence
+                        .classify()
+                        .expect("classify documented non-proof example");
+                    ExecutedRchProof {
+                        classification,
+                        classification_label: classification.as_str(),
+                        proof_relevant: rch_classification_is_proof_relevant(classification),
+                        accepted_remote_proof: false,
+                        preserved_exit_code: Some(0),
+                        jsonl_record: evidence.to_jsonl_record().expect("non-proof jsonl record"),
+                        evidence,
+                    }
+                }
+                other => panic!("unknown proof-governor fixture kind `{other}`"),
+            };
+
+            assert_eq!(
+                proof.classification_label, row.status,
+                "example `{}` classified unexpectedly",
+                row.example_input
+            );
+            assert_eq!(
+                proof
+                    .evidence
+                    .blocker_reason
+                    .map(RchRemoteProofBlockerReason::as_str)
+                    .unwrap_or(""),
+                row.blocker_reason,
+                "example `{}` had unexpected blocker",
+                row.example_input
+            );
+        }
+    }
+
+    struct CloseoutExampleRow {
+        status: String,
+        fixture_kind: String,
+        example_input: String,
+        blocker_reason: String,
+    }
+
+    fn proof_governor_closeout_examples(playbook: &str) -> Vec<CloseoutExampleRow> {
+        let mut in_table = false;
+        let mut rows = Vec::new();
+        for line in playbook.lines() {
+            if line.trim() == "<!-- proof-governor-closeout-examples:start -->" {
+                in_table = true;
+                continue;
+            }
+            if line.trim() == "<!-- proof-governor-closeout-examples:end -->" {
+                break;
+            }
+            if !in_table || !line.starts_with('|') || line.contains("---") {
+                continue;
+            }
+            let columns = line
+                .trim_matches('|')
+                .split('|')
+                .map(markdown_cell_value)
+                .collect::<Vec<_>>();
+            if columns.len() != 4 || columns[0] == "Closeout status" {
+                continue;
+            }
+            rows.push(CloseoutExampleRow {
+                status: columns[0].clone(),
+                fixture_kind: columns[1].clone(),
+                example_input: columns[2].clone(),
+                blocker_reason: columns[3].clone(),
+            });
+        }
+        rows
+    }
+
+    fn markdown_cell_value(value: &str) -> String {
+        value.trim().trim_matches('`').to_owned()
+    }
+
+    #[test]
     fn proof_graph_e2e_fixture_replays_contract_and_emits_redaction_safe_jsonl() {
         let corpus = write_corpus(&proofgraph_e2e_corpus());
         let schema_gap_manifest = write_manifest(&schema_gap_manifest());

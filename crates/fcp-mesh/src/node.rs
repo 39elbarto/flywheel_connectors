@@ -3603,6 +3603,7 @@ fn current_time_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::TransportPathKind;
+    use crate::coordinator::{LeaseCoordinator, SignedLeaseIssueOutcome, SignedLeaseIssueRequest};
     use crate::device::DeviceProfileBuilder;
     use crate::planner::{LeasePurpose, PlannerContext};
     use bytes::Bytes;
@@ -4750,6 +4751,140 @@ mod tests {
             })
         ));
         assert_eq!(node.metrics().gossip_announcements, 0);
+    }
+
+    #[test]
+    fn issued_signed_lease_gossips_fetches_and_validates_authority_object() {
+        let zone_id = ZoneId::work();
+        let subject_object_id = test_object_id("connector-state-lease-authority");
+        let object_id_key = ObjectIdKey::from_bytes([0x9A; 32]);
+        let eligible_nodes = vec![
+            TailscaleNodeId::new("node-a"),
+            TailscaleNodeId::new("node-b"),
+            TailscaleNodeId::new("node-c"),
+        ];
+        let holder = fcp_prelude::select_coordinator(&zone_id, &subject_object_id, &eligible_nodes)
+            .expect("three eligible nodes should produce an HRW holder");
+        let mut coordinator = LeaseCoordinator::with_defaults();
+        let request = SignedLeaseIssueRequest {
+            params: fcp_core::LeaseParams {
+                schema: fcp_cbor::SchemaId::new(
+                    "fcp.lease",
+                    "lease",
+                    semver::Version::new(1, 0, 0),
+                ),
+                zone_id: zone_id.clone(),
+                holder: holder.clone(),
+                lease_seq: 0,
+                ttl_secs: 300,
+                subject_object_id,
+                provenance: Provenance::new(zone_id.clone()),
+                purpose: fcp_prelude::LeasePurpose::ConnectorStateWrite,
+                quorum_signatures: test_signature_set(&["node-a", "node-b"]),
+            },
+            existing_leases: Vec::new(),
+            eligible_nodes,
+            required_signatures: DEFAULT_LEASE_PUBLICATION_REQUIRED_QUORUM_SIGNATURES,
+            now_secs: 1_000,
+        };
+        let (outcome, timeline) = coordinator.issue_signed_lease(request);
+        assert!(
+            matches!(outcome, SignedLeaseIssueOutcome::Granted { .. }),
+            "HRW-selected holder should issue a durable signed lease: {outcome:?}"
+        );
+        let SignedLeaseIssueOutcome::Granted { lease } = outcome else {
+            return;
+        };
+        assert_eq!(lease.holder, holder);
+        assert_eq!(lease.lease_seq, 1);
+        assert_eq!(
+            lease.quorum_signatures.len(),
+            DEFAULT_LEASE_PUBLICATION_REQUIRED_QUORUM_SIGNATURES
+        );
+        assert!(
+            timeline
+                .iter()
+                .any(|event| event.operation == "lease.acquired")
+        );
+
+        let mut issuer = test_node(holder.as_str());
+        let mut receiver = test_node("node-receiver");
+        let receiver_peer = NodeId::new("node-receiver");
+        let issuer_peer = NodeId::new(holder.as_str());
+        issuer.update_peer_state(
+            receiver_peer.clone(),
+            test_device_profile("node-receiver"),
+            HashSet::new(),
+            Vec::new(),
+            50_000,
+        );
+        issuer.update_peer_zones(&receiver_peer, zone_set(zone_id.clone()));
+        receiver.update_peer_state(
+            issuer_peer.clone(),
+            test_device_profile(holder.as_str()),
+            HashSet::new(),
+            Vec::new(),
+            50_000,
+        );
+        receiver.update_peer_zones(&issuer_peer, zone_set(zone_id.clone()));
+
+        fcp_async_core::runtime::block_on_sync(async {
+            let lease_object_id = issuer
+                .publish_signed_lease_object(&lease, &object_id_key, 50_000)
+                .await
+                .expect("publisher stores and announces issued lease");
+
+            let fetch_reply = issuer
+                .prepare_gossip_fetch_reply(
+                    GossipRequest::for_objects(
+                        TailscaleNodeId::new("node-receiver"),
+                        zone_id.clone(),
+                        vec![lease_object_id],
+                        50,
+                    ),
+                    50,
+                )
+                .await
+                .expect("issuer prepares lease fetch payload");
+            assert_eq!(fetch_reply.response.have_objects, vec![lease_object_id]);
+            assert_eq!(fetch_reply.payload.objects.len(), 1);
+
+            let plan = receiver
+                .handle_gossip_response(fetch_reply.response, 50)
+                .expect("receiver verifies gossip response")
+                .expect("receiver should fetch missing lease object");
+            assert_eq!(plan.object_ids, vec![lease_object_id]);
+            let apply = receiver
+                .apply_gossip_fetch_payload(&plan, fetch_reply.payload.objects, Vec::new(), 50_001)
+                .await
+                .expect("receiver applies fetched lease object");
+            assert_eq!(apply.objects_applied, vec![lease_object_id]);
+
+            let stored_lease = receiver
+                .object_store()
+                .get(&lease_object_id)
+                .await
+                .expect("receiver stored fetched lease object");
+            let decoded: fcp_prelude::Lease =
+                CanonicalSerializer::deserialize(&stored_lease.body, &stored_lease.header.schema)
+                    .expect("decode fetched lease");
+            assert_eq!(decoded.holder, holder);
+            assert_eq!(decoded.lease_seq, 1);
+            assert_eq!(decoded.subject_object_id, subject_object_id);
+            coordinator
+                .validate_signed_lease(
+                    &decoded,
+                    &subject_object_id,
+                    &zone_id,
+                    fcp_prelude::LeasePurpose::ConnectorStateWrite,
+                    1,
+                    1_001,
+                    DEFAULT_LEASE_PUBLICATION_REQUIRED_QUORUM_SIGNATURES,
+                )
+                .expect("fetched lease should validate quorum and fencing authority");
+            assert_eq!(receiver.metrics().gossip_announcements, 1);
+        })
+        .expect("runtime");
     }
 
     #[test]

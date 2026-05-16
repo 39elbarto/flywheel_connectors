@@ -21,7 +21,8 @@ use fcp_email_generic::client::EmailGenericClient;
 use fcp_email_generic::types::{EmailGenericConfig, EmailInboundPolicyDecision, EmailSeenUidCache};
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, FcpConnector, HealthState, InstanceId,
-    OperationId, SelfCheckStatus, ShutdownRequest, SimulateRequest, ZoneId,
+    OperationId, RequestId, SelfCheckStatus, ShutdownRequest, SimulateRequest, SubscribeRequest,
+    ZoneId,
 };
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -76,6 +77,10 @@ fn imap_loopback_lists_mailboxes_searches_uids_and_emits_redacted_jsonl() {
         account_id_hash: hash_id("user@example.com"),
         folder_id_hash: hash_id("INBOX"),
         message_id_hash: hash_id("uid:2,5,8"),
+        sender_policy_decision: "not_exercised",
+        event_topic: "email.mailbox.search",
+        attachment_byte_count: None,
+        fcp_error_mapping: "none",
         lifecycle_phase: "client_search",
         latency_ms: elapsed_ms(started_at),
         result: "ok",
@@ -211,6 +216,10 @@ fn imap_loopback_fetches_unseen_inbound_previews_with_policy_and_uid_cache() {
         account_id_hash: hash_id("user@example.com"),
         folder_id_hash: hash_id("Alerts"),
         message_id_hash: hash_id("uid:11,12,13"),
+        sender_policy_decision: "accept+drop_sender_not_allowed+drop_automated",
+        event_topic: "email.inbound.preview",
+        attachment_byte_count: Some(4),
+        fcp_error_mapping: "none",
         lifecycle_phase: "client_inbound_poll_once",
         latency_ms: elapsed_ms(started_at),
         result: "ok",
@@ -265,6 +274,10 @@ fn smtp_loopback_sends_message_and_classifies_permanent_failure() {
         account_id_hash: hash_id("user@example.com"),
         folder_id_hash: hash_id("outbox"),
         message_id_hash: hash_id("subject:deploy-status"),
+        sender_policy_decision: "not_exercised",
+        event_topic: "email.smtp.send",
+        attachment_byte_count: None,
+        fcp_error_mapping: "none",
         lifecycle_phase: "client_send",
         latency_ms: elapsed_ms(started_at),
         result: "ok",
@@ -389,6 +402,163 @@ async fn connector_lifecycle_self_check_and_capability_denial() {
     ));
 
     let _ = imap_fixture.join();
+}
+
+#[fcp_async_core::runtime::test]
+async fn inbound_monitor_supervises_polling_fanout_and_shutdown() {
+    let fixture = ImapFixture::start(ImapMode::InboundFetch);
+    let mut connector = EmailGenericConnector::new();
+    let mut events = connector.subscribe_events();
+    let started_at = Instant::now();
+    connector
+        .configure(json!({
+            "imap": {
+                "host": "127.0.0.1",
+                "port": fixture.port(),
+                "username": "user@example.com",
+                "password": "secret",
+                "tls": false
+            },
+            "smtp": {
+                "host": "127.0.0.1",
+                "port": 2525,
+                "username": "user@example.com",
+                "password": "secret",
+                "from_address": "user@example.com",
+                "starttls": false
+            },
+            "request_timeout_ms": 2_000,
+            "monitor_policy": {
+                "mailbox": "Alerts",
+                "allowed_senders": ["human@example.com"],
+                "allow_attachments": false,
+                "seen_uid_cap": 8,
+                "max_body_chars": 128,
+                "poll_interval_secs": 60
+            }
+        }))
+        .await
+        .expect("configure should accept loopback config");
+
+    let signing_key = Ed25519SigningKey::generate();
+    let handshake = connector
+        .handshake(handshake_request(signing_key.verifying_key().to_bytes()))
+        .await
+        .expect("handshake should accept read/write capability request");
+    let handshake_caps = handshake.event_caps.expect("handshake event caps");
+    assert!(handshake_caps.streaming);
+    assert!(!handshake_caps.replay);
+
+    let introspection = connector.introspect();
+    assert_eq!(introspection.events.len(), 1);
+    assert_eq!(introspection.events[0].topic, "email.inbound.preview");
+    let introspection_caps = introspection.event_caps.expect("introspection event caps");
+    assert!(introspection_caps.streaming);
+    assert_eq!(introspection_caps.min_buffer_events, 128);
+
+    let subscribe = connector
+        .subscribe(SubscribeRequest {
+            r#type: "subscribe".into(),
+            id: RequestId::new("email-generic-supervised-monitor"),
+            topics: vec!["email.inbound.preview".into()],
+            since: None,
+            max_events_per_sec: Some(1),
+            batch_ms: Some(100),
+            window_size: Some(1),
+            capability_token: None,
+        })
+        .await
+        .expect("subscribe should start supervised inbound monitor");
+    assert_eq!(
+        subscribe.result.confirmed_topics,
+        vec!["email.inbound.preview"]
+    );
+    assert!(!subscribe.result.replay_supported);
+
+    let envelope = fcp_async_core::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .expect("supervised monitor should emit within timeout")
+        .expect("broadcast receive should succeed")
+        .expect("event should be ok");
+    assert_eq!(envelope.topic, "email.inbound.preview");
+    assert_eq!(envelope.seq, 1);
+    assert_eq!(envelope.cursor, "Alerts:11");
+    assert_eq!(envelope.stream_key.as_deref(), Some("Alerts"));
+    assert_eq!(envelope.data.zone_id, ZoneId::private());
+    assert_eq!(envelope.data.payload["mailbox"], "Alerts");
+    assert_eq!(envelope.data.payload["uid"], "11");
+    assert_eq!(envelope.data.payload["policy_decision"], "accept");
+    assert_eq!(envelope.data.payload["preview"]["decision"], "accept");
+    assert_eq!(
+        envelope.data.payload["preview"]["thread"]["reply_subject"],
+        "Re: Deploy ready"
+    );
+    assert_eq!(
+        envelope.data.payload["preview"]["attachments"][0]["reason"],
+        "attachments_disabled"
+    );
+    assert!(
+        !serde_json::to_string(&envelope.data.payload)
+            .expect("event JSON")
+            .contains("cGxhbg"),
+        "event payload must not expose attachment bytes"
+    );
+
+    let health = connector.health().await;
+    let details = health.details.expect("health details");
+    assert_eq!(details["inbound_monitor"]["streaming"], true);
+    assert_eq!(
+        details["inbound_monitor"]["event_topic"],
+        "email.inbound.preview"
+    );
+    assert_eq!(details["inbound_monitor"]["emitted_events"], 1);
+    assert_eq!(details["inbound_monitor"]["dropped_events"], 2);
+
+    connector
+        .shutdown(ShutdownRequest {
+            r#type: "shutdown".into(),
+            deadline_ms: 1_000,
+            drain: true,
+            reason: Some("email-generic supervised monitor proof complete".into()),
+        })
+        .await
+        .expect("shutdown should stop monitor and clear connector state");
+    assert!(matches!(
+        connector.health().await.status,
+        HealthState::Degraded { .. }
+    ));
+
+    let commands = fixture.join();
+    assert!(
+        commands
+            .iter()
+            .filter(|line| line.contains("UID FETCH"))
+            .count()
+            == 3,
+        "supervised monitor should fetch unseen UIDs once"
+    );
+
+    emit_fixture_log(&ProofLog {
+        event: "inbound_monitor_supervised",
+        operation: OP_HEALTH,
+        capability: CAP_READ,
+        zone: "z:private",
+        fixture_id: "supervised-inbound-fetch",
+        account_id_hash: hash_id("user@example.com"),
+        folder_id_hash: hash_id("Alerts"),
+        message_id_hash: hash_id("uid:11,12,13"),
+        sender_policy_decision: "emitted_accept+dropped_sender_not_allowed+dropped_automated",
+        event_topic: "email.inbound.preview",
+        attachment_byte_count: Some(4),
+        fcp_error_mapping: "none",
+        lifecycle_phase: "runtime_supervised_fanout_shutdown",
+        latency_ms: elapsed_ms(started_at),
+        result: "ok",
+        error_code: None,
+        retry_decision: "none",
+        cleanup_result: "shutdown_cleared_state",
+        skip_reason: None,
+    });
 }
 
 fn config_with_ports(
@@ -802,6 +972,10 @@ struct ProofLog<'a> {
     account_id_hash: String,
     folder_id_hash: String,
     message_id_hash: String,
+    sender_policy_decision: &'a str,
+    event_topic: &'a str,
+    attachment_byte_count: Option<usize>,
+    fcp_error_mapping: &'a str,
     lifecycle_phase: &'a str,
     latency_ms: u128,
     result: &'a str,
@@ -812,7 +986,10 @@ struct ProofLog<'a> {
 }
 
 fn emit_fixture_log(log: &ProofLog<'_>) {
+    let artifact_path =
+        std::env::var("EMAIL_GENERIC_FIXTURE_JSONL_ARTIFACT").unwrap_or_else(|_| "stdout".into());
     let payload = json!({
+        "log_version": "v1",
         "event": log.event,
         "command": "cargo test -p fcp-email-generic --test integration -- --nocapture",
         "git_revision": option_env!("GIT_COMMIT").unwrap_or("unknown"),
@@ -825,12 +1002,17 @@ fn emit_fixture_log(log: &ProofLog<'_>) {
         "account_id_hash": log.account_id_hash,
         "folder_id_hash": log.folder_id_hash,
         "message_id_hash": log.message_id_hash,
+        "sender_policy_decision": log.sender_policy_decision,
+        "event_topic": log.event_topic,
+        "attachment_byte_count": log.attachment_byte_count,
+        "retry_decision": log.retry_decision,
+        "fcp_error_mapping": log.fcp_error_mapping,
         "lifecycle_phase": log.lifecycle_phase,
         "latency_ms": log.latency_ms,
         "result": log.result,
         "error_code": log.error_code,
-        "retry_decision": log.retry_decision,
         "audit_receipt_id": "not_emitted",
+        "artifact_path": artifact_path,
         "cleanup_result": log.cleanup_result,
         "skip_reason": log.skip_reason,
     });

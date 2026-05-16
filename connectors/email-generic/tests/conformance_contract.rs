@@ -122,7 +122,11 @@ fn operation_schemas_are_strict_and_cover_required_fields() {
     }
     assert_eq!(
         health_output["properties"]["inbound_monitor"]["properties"]["status"]["enum"][0],
-        "deferred"
+        "idle"
+    );
+    assert_eq!(
+        health_output["properties"]["inbound_monitor"]["properties"]["streaming"]["enum"][0],
+        true
     );
 
     let list_output = &by_id[OP_LIST_MAILBOXES].output_schema;

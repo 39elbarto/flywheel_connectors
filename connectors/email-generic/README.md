@@ -1,18 +1,18 @@
 # Generic Email Connector V1 Contract
 
-> **Status**: IMAP/SMTP runtime contract with tested inbound poll-once parsing and supervised event fan-out deferral
+> **Status**: IMAP/SMTP runtime contract with supervised inbound polling and tested loopback fan-out
 > **Bead**: `flywheel_connectors-4kw5f.4.2`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/email_generic_connector_verification.sh`
 > **IMAP upstream**: https://datatracker.ietf.org/doc/html/rfc3501
 > **SMTP upstream**: https://datatracker.ietf.org/doc/html/rfc5321
 > **SMTP STARTTLS upstream**: https://datatracker.ietf.org/doc/html/rfc3207
 
 ## Purpose
 
-This document fixes the operator-facing contract for `fcp.email-generic`. The connector exposes the generic email surface currently implemented in this crate: local connector health metadata, IMAP mailbox listing, IMAP UID search, bounded IMAP RFC822 poll-once parsing for inbound previews, SMTP message sending, and redacted inbound-monitor policy configuration for one configured IMAP account and one configured SMTP identity.
+This document fixes the operator-facing contract for `fcp.email-generic`. The connector exposes the generic email surface currently implemented in this crate: local connector health metadata, IMAP mailbox listing, IMAP UID search, supervised IMAP RFC822 polling for inbound preview events, SMTP message sending, and redacted inbound-monitor policy configuration for one configured IMAP account and one configured SMTP identity.
 
-The connector is intentionally a minimal IMAP/SMTP adapter. It is not a Gmail or Microsoft Graph client, OAuth client, mailbox synchronization engine, general-purpose MIME rendering engine, arbitrary attachment fetcher, delivery-status tracker, inbound event stream, spam classifier, rules engine, address book client, calendar client, or generic mail-admin tool.
+The connector is intentionally a minimal IMAP/SMTP adapter. It is not a Gmail or Microsoft Graph client, OAuth client, mailbox synchronization engine, general-purpose MIME rendering engine, arbitrary attachment fetcher, delivery-status tracker, replay-buffered event system, spam classifier, rules engine, address book client, calendar client, or generic mail-admin tool.
 
 ## Current Runtime Snapshot
 
@@ -23,7 +23,7 @@ The current crate exposes these runtime operation IDs:
 - `email_generic.search_messages`
 - `email_generic.send_message`
 
-The inbound poll-once helper is a client-level primitive used by tests and future event work. It is not yet exposed as an FCP invoke operation or subscription stream.
+Subscribing to `email.inbound.preview` starts a supervised poller over the configured `monitor_policy.mailbox` on the IMAP account. Accepted messages are emitted through a bounded event fan-out channel after sender allowlist, automated-message suppression, UID dedupe, body bounding, attachment classification, and thread metadata shaping.
 
 Important runtime truths the contract preserves:
 
@@ -41,12 +41,12 @@ Important runtime truths the contract preserves:
 - Inbound RFC822 parsing uses `mailparse`, prefers `text/plain`, falls back to stripped `text/html`, records thread headers, and extracts attachment metadata without exposing attachment bytes.
 - The SMTP client uses `lettre`, configured credentials, optional STARTTLS relay mode, and plain message bodies.
 - `health()` is local readiness state and does not prove IMAP reachability.
-- The `email_generic.health` invoke operation returns local metadata, redacted monitor policy, and inbound monitor deferral state.
+- The `email_generic.health` invoke operation returns local metadata, redacted monitor policy, and supervised inbound monitor state.
 - `self_check()` calls the client health path, which logs in to IMAP and lists mailboxes.
 - Runtime computes `manifest_hash` from `manifest.toml`.
 - Runtime `invoke` verifies a bound capability token before provider dispatch.
 - Runtime `simulate` uses the same capability verifier and reports missing capabilities when appropriate.
-- Runtime `subscribe()` and `unsubscribe()` return `StreamingNotSupported`.
+- Runtime `subscribe()` starts supervised `email.inbound.preview` fan-out; `unsubscribe()` and `shutdown()` signal and await the monitor task.
 
 ## Drift Visible In This Checkout
 
@@ -56,11 +56,11 @@ This README documents runtime truth and keeps current drift visible:
 - Runtime `health()` and `email_generic.health` report local state; `self_check()` is the IMAP reachability probe.
 - The manifest defers exact host constraints to runtime configuration because IMAP and SMTP hosts may be public, private, or tailnet infrastructure.
 - The manifest requires `network.outbound`, while many newer connector contracts use `network.egress`; this README documents the current manifest as-is.
-- The supervised inbound monitor is deferred. A tested poll-once primitive now covers sender allowlists, automated sender suppression, body bounds, UID cache, RFC822 literal fetch, attachment classification, and thread metadata, but no supervised poller emits FCP events today.
-- There is connector-local IMAP/SMTP loopback fixture coverage, but no tracked acceptance shell script for this connector.
+- The supervised inbound monitor uses in-memory UID state today; durable UID ownership and replay buffers remain out of scope.
+- There is connector-local IMAP/SMTP loopback fixture coverage plus a tracked acceptance shell script for this connector.
 - IMAP parsing is intentionally narrow and does not implement full RFC 3501 mailbox, BODYSTRUCTURE, multipart rendering, flag mutation, or durable mailbox synchronization.
 
-A follow-up parity bead should add supervised event fan-out or a dedicated invoke surface for inbound polling, decide durable UID-state ownership, and add a tracked verification bundle.
+A follow-up parity bead should decide durable UID-state ownership and replay/ack behavior if this connector graduates beyond bounded live fan-out.
 
 ## First-Slice Scope
 
@@ -69,10 +69,10 @@ The current Generic Email README slice documents the existing runtime surface:
 - IMAP and SMTP credential configuration
 - local health metadata and IMAP-backed self-check behavior
 - mailbox listing, message UID search, bounded inbound RFC822 preview parsing, and SMTP send operations
-- redacted inbound monitor policy helpers, tested poll-once parsing, and deferred event stream
+- redacted inbound monitor policy helpers, tested poll-once parsing, and supervised `email.inbound.preview` event stream
 - bound capability-token enforcement for read and write operations
-- doctor, health, self-check, introspect, simulate, shutdown, and non-streaming posture
-- drift around host constraints, health wording, supervised inbound monitor deferral, and missing acceptance script verification
+- doctor, health, self-check, introspect, simulate, subscribe, unsubscribe, and shutdown
+- drift around host constraints, durable UID state, replay/ack semantics, and provider-specific auth
 
 ## Auth And Scope Boundary
 
@@ -100,7 +100,7 @@ The current Generic Email README slice documents the existing runtime surface:
 - `list_mailboxes` sends `LIST "" "*"`.
 - `search_messages` sends `SELECT "<mailbox>"` followed by `UID SEARCH TEXT "<query>"`.
 - `search_messages` rejects blank mailbox or query before sending IMAP commands.
-- `fetch_unseen_inbound_messages` sends `SELECT "<mailbox>"`, `UID SEARCH UNSEEN`, and per-UID `UID FETCH <uid> (RFC822)`.
+- `fetch_unseen_inbound_messages` sends `SELECT "<mailbox>"`, `UID SEARCH UNSEEN`, and per-UID `UID FETCH <uid> (RFC822)` for the explicit `monitor_policy.mailbox` binding when used by the monitor.
 - RFC822 literals are capped at `1048576` bytes before MIME parsing.
 - `send_message` requires at least one `to` recipient.
 - `send_message` parses `smtp.from_address`, `to`, and `cc` through `lettre` address parsing before dispatch.
@@ -112,8 +112,9 @@ The current Generic Email README slice documents the existing runtime surface:
 
 ## Inbound Monitor Policy Helpers
 
-The supervised inbound monitor is not active, but these poll-once and policy helpers are implemented and documented for future event work:
+The supervised inbound monitor uses these poll-once and policy helpers before event emission:
 
+- `mailbox` defaults to `INBOX`, rejects blanks, and is quoted through the same IMAP escaping path as message search.
 - `allowed_senders` accepts an array or comma-separated string and is normalized before use.
 - `require_allowed_sender` defaults to `true`.
 - `drop_automated` defaults to `true`.
@@ -150,7 +151,7 @@ The current implementation does not include:
 - OAuth, XOAUTH2, SASL mechanism negotiation, app-password provisioning, password vault integration, or secret rotation
 - full MIME rendering, arbitrary attachment fetch, attachment send, inline image handling, DKIM signing, S/MIME, PGP, or spam/phishing analysis
 - public message fetch by UID, full mailbox synchronization, flag mutation, folder creation, folder deletion, move/copy/delete, draft handling, or delivery status tracking
-- supervised inbound polling, streaming events, webhook delivery, replay buffers, acknowledgements, or durable UID state
+- webhook delivery, replay buffers, acknowledgements, durable UID state, or cross-process monitor recovery
 - address book lookup, contact dedupe, calendar invite parsing, unsubscribe handling, or auto-reply generation
 
 These are excluded on purpose:
@@ -163,12 +164,12 @@ These are excluded on purpose:
 
 `doctor()`, `health()`, `self_check()`, `simulate()`, and `introspect()` are part of the public closeout contract. They surface:
 
-- configured state, IMAP host, SMTP host, manifest hash, uptime, monitor policy redacted state, tested poll-once availability, and supervised inbound monitor deferral state
+- configured state, IMAP host, SMTP host, manifest hash, uptime, monitor policy redacted state, redacted mailbox-binding presence, supervised monitor status, event topic, buffer size, poll counters, emitted/dropped event counters, blocking-boundary cancellation counter, and last error
 - operation catalog, schemas, capabilities, risk levels, safety tiers, idempotency classes, examples, and AI hints
 - IMAP mailbox-list reachability through `self_check()`
 - bound capability-token acceptance and denial in both `invoke` and `simulate`
 - specific degraded state when the connector is not configured
-- non-streaming event capabilities and unsupported subscribe/unsubscribe behavior
+- streaming event capabilities for `email.inbound.preview` and clean subscribe/unsubscribe behavior
 
 The deterministic evidence currently covers:
 
@@ -177,19 +178,19 @@ The deterministic evidence currently covers:
 - IMAP quoted-string escaping, mailbox parsing, and UID parsing
 - monitor policy normalization, duplicate rejection, sender evaluation, automated sender dropping, body bounding, attachment classification, and seen-UID cache bounds
 - RFC822 parsing for text/plain, text/html fallback, message/thread headers, attachment metadata, and IMAP literal length bounds
-- IMAP/SMTP loopback tests for mailbox listing, UID search, inbound RFC822 poll-once previews, UID-cache duplicate suppression, SMTP success/failure, STARTTLS downgrade denial, capability enforcement, and redacted JSONL evidence
+- IMAP/SMTP loopback tests for mailbox listing, UID search, inbound RFC822 poll-once previews, UID-cache duplicate suppression, supervised inbound event fan-out, sender-policy drops before emission, SMTP success/failure, STARTTLS downgrade denial, capability enforcement, shutdown cleanup, and redacted JSONL evidence
 - operation inventory, manifest/introspection shape, capability assignment, handshake grants, doctor/health/self-check/shutdown behavior, and invoke health behavior
 - error mapping for configuration, IMAP, SMTP, IO, TLS, and address errors
 
-The remaining acceptance gap is supervised event fan-out plus a checked-in shell verification bundle; the connector now has local loopback fixture tests for the current poll-once boundary.
+The remaining design gap is durable UID/replay ownership; the connector now has local loopback fixture tests plus a checked-in shell verification bundle for the supervised poll/fan-out boundary.
 
 ## Source Notes
 
 - `connectors/email-generic/src/types.rs` defines configuration, monitor policy, inbound preview policy, redacted state, attachment classification, and seen-UID cache behavior.
 - `connectors/email-generic/src/client.rs` defines IMAP command construction, bounded RFC822 fetch/parsing, SMTP message submission, TLS/STARTTLS behavior, and address parsing.
-- `connectors/email-generic/src/connector.rs` defines lifecycle handlers, capability-token enforcement, operation metadata, diagnostics, simulate behavior, and non-streaming posture.
+- `connectors/email-generic/src/connector.rs` defines lifecycle handlers, capability-token enforcement, operation metadata, diagnostics, simulate behavior, supervised inbound monitor task ownership, event fan-out, and shutdown cleanup.
 - `connectors/email-generic/src/error.rs` defines provider/FCP error mapping and retry classification.
-- `connectors/email-generic/manifest.toml` defines the operation catalog, capability families, zone policy, sandbox boundary, and runtime-host deferral note.
+- `connectors/email-generic/manifest.toml` defines the operation catalog, event catalog, capability families, zone policy, sandbox boundary, and runtime host constraints.
 - Inline `#[cfg(test)]` coverage in the source files is the current local proof surface.
 
 ## Verification Bundle
@@ -214,7 +215,11 @@ rch exec -- cargo test -p fcp-email-generic -- --nocapture
 rch exec -- cargo clippy -p fcp-email-generic --all-targets -- -D warnings
 ```
 
-There is no tracked `scripts/e2e/email_generic_connector_verification.sh` in this checkout. Add one around the local IMAP/SMTP fixtures before claiming a full acceptance bundle.
+For the checked-in loopback verification bundle, run:
+
+```bash
+bash scripts/e2e/email_generic_connector_verification.sh
+```
 
 ## Operator Guidance
 

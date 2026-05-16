@@ -21,19 +21,31 @@ required = ["network.dns", "network.outbound"]
 optional = []
 forbidden = ["system.exec", "system.privileged", "network.listen"]
 
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 128
+
+[provides.events.inbound_preview]
+description = "Accepted inbound email preview emitted after IMAP polling, sender policy, automated-mail suppression, UID dedupe, body bounding, attachment classification, and threading metadata shaping"
+streaming = true
+replay = false
+topic = "email.inbound.preview"
+requires_ack = false
+
 # IMAP and SMTP hosts are operator-configured and may point at public, private,
 # or tailnet infrastructure, so per-operation egress policy uses runtime-resolved
 # host placeholders while still limiting each operation to the relevant mail
 # protocol host and common protocol ports.
 
 [provides.operations.health]
-summary = "Report connector configuration, local health, and inbound monitor policy plus poll-once deferral state"
+summary = "Report connector configuration, local health, and supervised inbound monitor policy state"
 capability = "email_generic.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
 input_schema = { type = "object", additionalProperties = false }
-output_schema = { type = "object", required = ["status", "imap_host", "smtp_host", "manifest_hash", "monitor_policy", "inbound_monitor"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, imap_host = { type = "string", minLength = 1 }, smtp_host = { type = "string", minLength = 1 }, manifest_hash = { type = "string", pattern = "^sha256:[0-9a-f]{64}$" }, monitor_policy = { type = "object", required = ["allowed_senders_configured", "allowed_senders_count", "require_allowed_sender", "drop_automated", "allow_attachments", "poll_interval_secs", "max_body_chars", "seen_uid_cap"], additionalProperties = false, properties = { allowed_senders_configured = { type = "boolean" }, allowed_senders_count = { type = "integer", minimum = 0 }, require_allowed_sender = { type = "boolean" }, drop_automated = { type = "boolean" }, allow_attachments = { type = "boolean" }, poll_interval_secs = { type = "integer", minimum = 1 }, max_body_chars = { type = "integer", minimum = 1 }, seen_uid_cap = { type = "integer", minimum = 1 } } }, inbound_monitor = { type = "object", required = ["status", "streaming", "reason", "pre_emission_policy"], additionalProperties = false, properties = { status = { type = "string", enum = ["deferred"] }, streaming = { type = "boolean", enum = [false] }, reason = { type = "string", minLength = 1 }, pre_emission_policy = { type = "object", required = ["sender_allowlist", "automated_sender_suppression", "bounded_uid_cache", "body_length_bound", "attachment_classification", "thread_metadata"], additionalProperties = false, properties = { sender_allowlist = { type = "boolean" }, automated_sender_suppression = { type = "boolean" }, bounded_uid_cache = { type = "boolean" }, body_length_bound = { type = "boolean" }, attachment_classification = { type = "boolean" }, thread_metadata = { type = "boolean" } } } } } } }
+output_schema = { type = "object", required = ["status", "imap_host", "smtp_host", "manifest_hash", "monitor_policy", "inbound_monitor"], additionalProperties = false, properties = { status = { type = "string", enum = ["ok"] }, imap_host = { type = "string", minLength = 1 }, smtp_host = { type = "string", minLength = 1 }, manifest_hash = { type = "string", pattern = "^sha256:[0-9a-f]{64}$" }, monitor_policy = { type = "object", required = ["allowed_senders_configured", "allowed_senders_count", "mailbox_configured", "require_allowed_sender", "drop_automated", "allow_attachments", "poll_interval_secs", "max_body_chars", "seen_uid_cap"], additionalProperties = false, properties = { allowed_senders_configured = { type = "boolean" }, allowed_senders_count = { type = "integer", minimum = 0 }, mailbox_configured = { type = "boolean" }, require_allowed_sender = { type = "boolean" }, drop_automated = { type = "boolean" }, allow_attachments = { type = "boolean" }, poll_interval_secs = { type = "integer", minimum = 1 }, max_body_chars = { type = "integer", minimum = 1 }, seen_uid_cap = { type = "integer", minimum = 1 } } }, inbound_monitor = { type = "object", required = ["status", "streaming", "reason", "event_topic", "buffer_events", "poll_mailbox_configured", "polls_started", "polls_completed", "emitted_events", "dropped_events", "blocking_polls_cancelled", "last_error", "pre_emission_policy"], additionalProperties = false, properties = { status = { type = "string", enum = ["idle", "running", "stopping", "stopped", "error"] }, streaming = { type = "boolean", enum = [true] }, reason = { type = "string", minLength = 1 }, event_topic = { type = "string", enum = ["email.inbound.preview"] }, buffer_events = { type = "integer", minimum = 1 }, poll_mailbox_configured = { type = "boolean" }, polls_started = { type = "integer", minimum = 0 }, polls_completed = { type = "integer", minimum = 0 }, emitted_events = { type = "integer", minimum = 0 }, dropped_events = { type = "integer", minimum = 0 }, blocking_polls_cancelled = { type = "integer", minimum = 0 }, last_error = { type = ["string", "null"] }, pre_emission_policy = { type = "object", required = ["sender_allowlist", "automated_sender_suppression", "bounded_uid_cache", "body_length_bound", "attachment_classification", "thread_metadata"], additionalProperties = false, properties = { sender_allowlist = { type = "boolean" }, automated_sender_suppression = { type = "boolean" }, bounded_uid_cache = { type = "boolean" }, body_length_bound = { type = "boolean" }, attachment_classification = { type = "boolean" }, thread_metadata = { type = "boolean" } } } } } } }
 
 [provides.operations.health.network_constraints]
 host_allow = ["${email_imap_host}"]

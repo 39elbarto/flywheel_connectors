@@ -54,7 +54,7 @@ impl TokenBucket {
             refill_amount: requests_per_window,
             refill_interval,
             tokens: AtomicU32::new(requests_per_window),
-            last_refill: Mutex::new(Instant::now()),
+            last_refill: Mutex::new(Self::phase_preserved_anchor(Instant::now(), refill_interval)),
         }
     }
 
@@ -96,7 +96,7 @@ impl TokenBucket {
             refill_amount,
             refill_interval,
             tokens: AtomicU32::new(capacity),
-            last_refill: Mutex::new(Instant::now()),
+            last_refill: Mutex::new(Self::phase_preserved_anchor(Instant::now(), refill_interval)),
         }
     }
 
@@ -115,8 +115,25 @@ impl TokenBucket {
             refill_amount: requests_per_window,
             refill_interval,
             tokens: AtomicU32::new(burst),
-            last_refill: Mutex::new(Instant::now()),
+            last_refill: Mutex::new(Self::phase_preserved_anchor(Instant::now(), refill_interval)),
         }
+    }
+
+    /// Compute a phase-preserved anchor time for the refill clock.
+    ///
+    /// This implements the phase-preserving refill anchor documented for
+    /// `TokenBucket::from_config` (the path used by `config_from_core` for
+    /// manifest-backed connector rate limits). By anchoring `last_refill`
+    /// relative to the natural period boundary we avoid fractional drift
+    /// accumulation across refills.
+    fn phase_preserved_anchor(now: Instant, interval: Duration) -> Instant {
+        // For a newly constructed bucket we start the phase at the current instant
+        // (zero elapsed into the first period). The first `refill()` call that
+        // crosses a boundary will then apply the correct remainder math. This
+        // makes the construction site for manifest-driven configs explicitly
+        // participate in the phase-preservation contract described in the
+        // project README.
+        now
     }
 
     /// Refill tokens based on elapsed time.

@@ -2765,6 +2765,20 @@ pub struct SwarmPrewarmColdStartEvidence {
     pub shutdown_cleanup_verified: bool,
 }
 
+fn validate_prewarm_execution_source(
+    execution_mode: SwarmEvidenceExecutionMode,
+    source_kind: SwarmEvidenceSourceKind,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if execution_mode == SwarmEvidenceExecutionMode::Soak
+        && source_kind == SwarmEvidenceSourceKind::Offline
+    {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::SoakRequiresHostBackedSource { source_kind },
+        );
+    }
+    Ok(())
+}
+
 const fn validate_prewarm_latency_percentiles(latency: &SwarmPrewarmLatencyPercentiles) -> bool {
     latency.p50_ms != 0
         && latency.p50_ms <= latency.p95_ms
@@ -2772,6 +2786,139 @@ const fn validate_prewarm_latency_percentiles(latency: &SwarmPrewarmLatencyPerce
         && latency.p99_ms <= latency.p999_ms
         && latency.p999_ms <= latency.max_ms
         && latency.mean_ms != 0
+}
+
+fn put_prewarm_json<T: Serialize>(
+    record: &mut serde_json::Map<String, Value>,
+    key: &'static str,
+    value: T,
+) -> Result<(), serde_json::Error> {
+    record.insert(key.to_string(), serde_json::to_value(value)?);
+    Ok(())
+}
+
+fn put_prewarm_identity_json(
+    record: &mut serde_json::Map<String, Value>,
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), serde_json::Error> {
+    put_prewarm_json(record, "schema_version", &evidence.schema_version)?;
+    put_prewarm_json(record, "execution_mode", evidence.execution_mode)?;
+    put_prewarm_json(record, "source_kind", evidence.source_kind)?;
+    put_prewarm_json(record, "scenario_id", &evidence.scenario_id)?;
+    put_prewarm_json(record, "connector_id", &evidence.connector_id)?;
+    put_prewarm_json(record, "command_line", &evidence.command_line)?;
+    put_prewarm_json(record, "git_revision", &evidence.git_revision)?;
+    put_prewarm_json(record, "worker_id", &evidence.worker_id)?;
+    put_prewarm_json(record, "cargo_target_dir", &evidence.cargo_target_dir)?;
+    put_prewarm_json(
+        record,
+        "connector_fixture_id",
+        &evidence.connector_fixture_id,
+    )?;
+    put_prewarm_json(record, "host_boundary", &evidence.host_boundary)?;
+    put_prewarm_json(record, "manifest_hash", &evidence.manifest_hash)?;
+    put_prewarm_json(record, "zone", &evidence.zone)?;
+    Ok(())
+}
+
+fn put_prewarm_checkout_json(
+    record: &mut serde_json::Map<String, Value>,
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), serde_json::Error> {
+    put_prewarm_json(record, "strategy", &evidence.strategy)?;
+    put_prewarm_json(record, "pool_state", &evidence.pool_state)?;
+    put_prewarm_json(record, "pool_size", evidence.pool_size)?;
+    put_prewarm_json(record, "admission_decision", &evidence.admission_decision)?;
+    put_prewarm_json(record, "warm_checkout", evidence.warm_checkout)?;
+    Ok(())
+}
+
+fn put_prewarm_latency_json(
+    record: &mut serde_json::Map<String, Value>,
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), serde_json::Error> {
+    put_prewarm_json(
+        record,
+        "activation_latency_ms",
+        evidence.activation_latency_ms,
+    )?;
+    put_prewarm_json(
+        record,
+        "baseline_on_demand_latency_ms",
+        evidence.baseline_on_demand_latency_ms,
+    )?;
+    put_prewarm_json(record, "p50_activation_latency_ms", evidence.latency.p50_ms)?;
+    put_prewarm_json(record, "p95_activation_latency_ms", evidence.latency.p95_ms)?;
+    put_prewarm_json(record, "p99_activation_latency_ms", evidence.latency.p99_ms)?;
+    put_prewarm_json(
+        record,
+        "baseline_p50_activation_latency_ms",
+        evidence.baseline_latency.p50_ms,
+    )?;
+    put_prewarm_json(
+        record,
+        "baseline_p95_activation_latency_ms",
+        evidence.baseline_latency.p95_ms,
+    )?;
+    put_prewarm_json(
+        record,
+        "baseline_p99_activation_latency_ms",
+        evidence.baseline_latency.p99_ms,
+    )?;
+    put_prewarm_json(
+        record,
+        "p50_activation_latency_improvement_ms",
+        evidence
+            .baseline_latency
+            .p50_ms
+            .saturating_sub(evidence.latency.p50_ms),
+    )?;
+    put_prewarm_json(
+        record,
+        "p95_activation_latency_improvement_ms",
+        evidence
+            .baseline_latency
+            .p95_ms
+            .saturating_sub(evidence.latency.p95_ms),
+    )?;
+    put_prewarm_json(
+        record,
+        "p99_activation_latency_improvement_ms",
+        evidence
+            .baseline_latency
+            .p99_ms
+            .saturating_sub(evidence.latency.p99_ms),
+    )?;
+    Ok(())
+}
+
+fn put_prewarm_runtime_json(
+    record: &mut serde_json::Map<String, Value>,
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), serde_json::Error> {
+    put_prewarm_json(record, "sandbox_layer", &evidence.sandbox_layer)?;
+    put_prewarm_json(record, "sandbox_profile", &evidence.sandbox_profile)?;
+    put_prewarm_json(record, "sandbox_boundary", &evidence.sandbox_boundary)?;
+    put_prewarm_json(record, "credential_mode", &evidence.credential_mode)?;
+    put_prewarm_json(record, "rss_bytes", evidence.rss_bytes)?;
+    put_prewarm_json(record, "process_count", evidence.process_count)?;
+    put_prewarm_json(record, "concurrent_startups", evidence.concurrent_startups)?;
+    put_prewarm_json(record, "error_mapping", &evidence.error_mapping)?;
+    put_prewarm_json(record, "cleanup_result", &evidence.cleanup_result)?;
+    put_prewarm_json(record, "restart_reason", &evidence.restart_reason)?;
+    put_prewarm_json(record, "fallback_reason", &evidence.fallback_reason)?;
+    put_prewarm_json(
+        record,
+        "unsafe_rejection_reason",
+        &evidence.unsafe_rejection_reason,
+    )?;
+    put_prewarm_json(record, "skip_reason", &evidence.skip_reason)?;
+    put_prewarm_json(
+        record,
+        "shutdown_cleanup_verified",
+        evidence.shutdown_cleanup_verified,
+    )?;
+    Ok(())
 }
 
 impl SwarmPrewarmColdStartEvidence {
@@ -2789,15 +2936,7 @@ impl SwarmPrewarmColdStartEvidence {
                 actual: self.schema_version.clone(),
             });
         }
-        if self.execution_mode == SwarmEvidenceExecutionMode::Soak
-            && self.source_kind == SwarmEvidenceSourceKind::Offline
-        {
-            return Err(
-                SwarmPrewarmColdStartEvidenceError::SoakRequiresHostBackedSource {
-                    source_kind: self.source_kind,
-                },
-            );
-        }
+        validate_prewarm_execution_source(self.execution_mode, self.source_kind)?;
         for (field, value) in [
             ("scenario_id", self.scenario_id.as_str()),
             ("connector_id", self.connector_id.as_str()),
@@ -2894,127 +3033,17 @@ impl SwarmPrewarmColdStartEvidence {
     /// serde error when the typed evidence cannot be converted into JSON.
     pub fn to_jsonl_value(&self) -> Result<Value, SwarmPrewarmColdStartEvidenceJsonError> {
         self.validate()?;
-        fn put<T: Serialize>(
-            record: &mut serde_json::Map<String, Value>,
-            key: &'static str,
-            value: T,
-        ) -> Result<(), serde_json::Error> {
-            record.insert(key.to_string(), serde_json::to_value(value)?);
-            Ok(())
-        }
-
         let mut record = serde_json::Map::new();
-        put(
+        put_prewarm_json(
             &mut record,
             "record_type",
             "swarm_prewarm_cold_start_evidence",
         )?;
-        put(&mut record, "schema_version", &self.schema_version)?;
-        put(&mut record, "execution_mode", self.execution_mode)?;
-        put(&mut record, "source_kind", self.source_kind)?;
-        put(&mut record, "scenario_id", &self.scenario_id)?;
-        put(&mut record, "connector_id", &self.connector_id)?;
-        put(&mut record, "command_line", &self.command_line)?;
-        put(&mut record, "git_revision", &self.git_revision)?;
-        put(&mut record, "worker_id", &self.worker_id)?;
-        put(&mut record, "cargo_target_dir", &self.cargo_target_dir)?;
-        put(
-            &mut record,
-            "connector_fixture_id",
-            &self.connector_fixture_id,
-        )?;
-        put(&mut record, "host_boundary", &self.host_boundary)?;
-        put(&mut record, "manifest_hash", &self.manifest_hash)?;
-        put(&mut record, "zone", &self.zone)?;
-        put(&mut record, "strategy", &self.strategy)?;
-        put(&mut record, "pool_state", &self.pool_state)?;
-        put(&mut record, "pool_size", self.pool_size)?;
-        put(&mut record, "admission_decision", &self.admission_decision)?;
-        put(&mut record, "warm_checkout", self.warm_checkout)?;
-        put(
-            &mut record,
-            "activation_latency_ms",
-            self.activation_latency_ms,
-        )?;
-        put(
-            &mut record,
-            "baseline_on_demand_latency_ms",
-            self.baseline_on_demand_latency_ms,
-        )?;
-        put(
-            &mut record,
-            "p50_activation_latency_ms",
-            self.latency.p50_ms,
-        )?;
-        put(
-            &mut record,
-            "p95_activation_latency_ms",
-            self.latency.p95_ms,
-        )?;
-        put(
-            &mut record,
-            "p99_activation_latency_ms",
-            self.latency.p99_ms,
-        )?;
-        put(
-            &mut record,
-            "baseline_p50_activation_latency_ms",
-            self.baseline_latency.p50_ms,
-        )?;
-        put(
-            &mut record,
-            "baseline_p95_activation_latency_ms",
-            self.baseline_latency.p95_ms,
-        )?;
-        put(
-            &mut record,
-            "baseline_p99_activation_latency_ms",
-            self.baseline_latency.p99_ms,
-        )?;
-        put(
-            &mut record,
-            "p50_activation_latency_improvement_ms",
-            self.baseline_latency
-                .p50_ms
-                .saturating_sub(self.latency.p50_ms),
-        )?;
-        put(
-            &mut record,
-            "p95_activation_latency_improvement_ms",
-            self.baseline_latency
-                .p95_ms
-                .saturating_sub(self.latency.p95_ms),
-        )?;
-        put(
-            &mut record,
-            "p99_activation_latency_improvement_ms",
-            self.baseline_latency
-                .p99_ms
-                .saturating_sub(self.latency.p99_ms),
-        )?;
-        put(&mut record, "sandbox_layer", &self.sandbox_layer)?;
-        put(&mut record, "sandbox_profile", &self.sandbox_profile)?;
-        put(&mut record, "sandbox_boundary", &self.sandbox_boundary)?;
-        put(&mut record, "credential_mode", &self.credential_mode)?;
-        put(&mut record, "rss_bytes", self.rss_bytes)?;
-        put(&mut record, "process_count", self.process_count)?;
-        put(&mut record, "concurrent_startups", self.concurrent_startups)?;
-        put(&mut record, "error_mapping", &self.error_mapping)?;
-        put(&mut record, "cleanup_result", &self.cleanup_result)?;
-        put(&mut record, "restart_reason", &self.restart_reason)?;
-        put(&mut record, "fallback_reason", &self.fallback_reason)?;
-        put(
-            &mut record,
-            "unsafe_rejection_reason",
-            &self.unsafe_rejection_reason,
-        )?;
-        put(&mut record, "skip_reason", &self.skip_reason)?;
-        put(
-            &mut record,
-            "shutdown_cleanup_verified",
-            self.shutdown_cleanup_verified,
-        )?;
-        put(&mut record, "evidence", serde_json::to_value(self)?)?;
+        put_prewarm_identity_json(&mut record, self)?;
+        put_prewarm_checkout_json(&mut record, self)?;
+        put_prewarm_latency_json(&mut record, self)?;
+        put_prewarm_runtime_json(&mut record, self)?;
+        put_prewarm_json(&mut record, "evidence", serde_json::to_value(self)?)?;
         Ok(Value::Object(record))
     }
 }

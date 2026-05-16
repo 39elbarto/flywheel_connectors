@@ -5129,15 +5129,16 @@ fn parse_hrw_launch_zone_id(
     }
 }
 
-fn connector_lease_status_zone_id(
+fn connector_lease_query_zone_id(
     connector_id: &ConnectorId,
     config: &ConnectorConfig,
     query_zone: Option<&str>,
+    action: &str,
 ) -> HostResult<ZoneId> {
     if let Some(zone) = query_zone.map(str::trim).filter(|zone| !zone.is_empty()) {
         return zone.parse::<ZoneId>().map_err(|error| {
             HostError::InvalidFilter(format!(
-                "invalid connector lease status zone `{zone}`: {error}"
+                "invalid connector lease {action} zone `{zone}`: {error}"
             ))
         });
     }
@@ -5149,15 +5150,31 @@ fn connector_lease_status_zone_id(
     match config.allowed_zones.as_slice() {
         [zone] => zone.parse::<ZoneId>().map_err(|error| {
             HostError::InvalidFilter(format!(
-                "invalid singleton_writer lease status zone `{zone}` for connector `{connector_id}`: {error}"
+                "invalid singleton_writer lease {action} zone `{zone}` for connector `{connector_id}`: {error}"
             ))
         }),
         [] => Err(zone_envelope_required_error(connector_id)),
         zones => Err(HostError::InvalidFilter(format!(
-            "singleton_writer lease status for connector `{connector_id}` requires an explicit zone query because allowed_zones has {} entries",
+            "singleton_writer lease {action} for connector `{connector_id}` requires an explicit zone query because allowed_zones has {} entries",
             zones.len()
         ))),
     }
+}
+
+fn connector_lease_status_zone_id(
+    connector_id: &ConnectorId,
+    config: &ConnectorConfig,
+    query_zone: Option<&str>,
+) -> HostResult<ZoneId> {
+    connector_lease_query_zone_id(connector_id, config, query_zone, "status")
+}
+
+fn connector_lease_flush_before_yield_zone_id(
+    connector_id: &ConnectorId,
+    config: &ConnectorConfig,
+    query_zone: Option<&str>,
+) -> HostResult<ZoneId> {
+    connector_lease_query_zone_id(connector_id, config, query_zone, "flush-before-yield")
 }
 
 fn enforce_hrw_singleton_writer_launch_route(
@@ -8852,24 +8869,12 @@ async fn connector_lease_flush_before_yield_handler(
     Query(query): Query<ConnectorLeaseFlushBeforeYieldQuery>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let connector_id = parse_connector_id(&connector_id)?;
-    if state.registry.get(&connector_id).await.is_none() {
-        return Err(map_host_error(HostError::ConnectorNotFound(
-            connector_id.to_string(),
-        )));
-    }
-    let zone = match query
-        .zone
-        .as_deref()
-        .map(str::trim)
-        .filter(|zone| !zone.is_empty())
-    {
-        Some(zone) => zone.parse::<ZoneId>().map_err(|error| {
-            map_host_error(HostError::InvalidFilter(format!(
-                "invalid connector lease flush-before-yield zone `{zone}`: {error}"
-            )))
-        })?,
-        None => ZoneId::work(),
-    };
+    let inventory = state.registry.inventory().await;
+    let config = find_connector_inventory_entry(&inventory, &connector_id)
+        .ok_or_else(|| map_host_error(HostError::ConnectorNotFound(connector_id.to_string())))?;
+    let zone =
+        connector_lease_flush_before_yield_zone_id(&connector_id, config, query.zone.as_deref())
+            .map_err(map_host_error)?;
     let started_at = Instant::now();
     tracing::debug!(
         event = "connector_lease_flush_before_yield_request",
@@ -26674,6 +26679,126 @@ done"#;
         assert_eq!(
             payload["telemetry"]["event_name"],
             "fcp.lease.flushed_on_yield"
+        );
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_lease_flush_before_yield_admin_route_defaults_to_singleton_allowed_zone()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let tempdir = tempfile::tempdir().expect("connector state tempdir");
+        let state_root = tempdir.path().join("managed-state");
+        let connector_id = "fcp.test.lease-flush-default-zone:utility:1.0.0";
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id: ZoneId = "z:community".parse().expect("test zone should parse");
+        let object_id_key = ObjectIdKey::from_bytes([0xCE; 32]);
+        let object_store_dir =
+            connector_state_canonical_object_store_dir(&state_root, &connector_key);
+        let object_store: Arc<dyn fcp_store::ObjectStore> = Arc::new(
+            fcp_store::DurableObjectStore::open(fcp_store::DurableObjectStoreConfig::new(
+                &object_store_dir,
+            ))
+            .expect("durable connector-state object store should open"),
+        );
+        let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+            Arc::clone(&object_store),
+            object_id_key,
+            connector_key.clone(),
+            zone_id.clone(),
+        )
+        .with_snapshot_every_entries(0)
+        .with_snapshot_every_secs(0);
+        let (authorization, signing_key) =
+            connector_state_write_authorization_for_test_with_key(&connector_key, &zone_id);
+        let append = fcp_core::ConnectorStateStore::append_object(
+            &state_store,
+            &connector_key,
+            &authorization,
+            sign_durable_connector_state_object_for_test(
+                durable_connector_state_object_for_test(
+                    &connector_key,
+                    &zone_id,
+                    0,
+                    None,
+                    ObjectId::from_bytes([0x92; 32]),
+                ),
+                &signing_key,
+            ),
+        )
+        .await
+        .expect("durable connector-state append should commit");
+        let (head_object_id, root_object_id) = match append {
+            fcp_core::ConnectorStateAppendOutcome::Committed {
+                object_id,
+                root_object_id,
+                seq,
+                snapshot_object_id,
+            } => {
+                assert_eq!(seq, 0);
+                assert_eq!(snapshot_object_id, None);
+                (object_id, root_object_id)
+            }
+            fcp_core::ConnectorStateAppendOutcome::Conflict { .. } => {
+                panic!("initial durable connector-state append should not conflict")
+            }
+        };
+        drop(state_store);
+        drop(object_store);
+
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(1);
+        let runner_task = task::spawn(async move { while runner_rx.recv().await.is_some() {} });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let mut config = dispatcher_test_config(connector_id);
+        config.allowed_zones = vec![zone_id.as_str().to_owned()];
+        config.env.insert(
+            CONNECTOR_STATE_DIR_ENV.to_string(),
+            state_root.display().to_string(),
+        );
+        config.env.insert(
+            CONNECTOR_STATE_OBJECT_ID_KEY_ENV.to_string(),
+            hex::encode(object_id_key.as_bytes()),
+        );
+        config.env.insert(
+            "FCP_CONNECTOR_STATE_MODEL".to_string(),
+            "singleton_writer".to_string(),
+        );
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = dispatcher_app_state(registry, lifecycle, None, HashMap::new());
+        let state = Arc::new(AppState {
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            ..(*state).clone()
+        });
+        let app = connector_lease_flush_before_yield_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::POST,
+            "/rpc/admin/connectors/fcp.test.lease-flush-default-zone:utility:1.0.0/lease/flush-before-yield",
+            serde_json::json!({}),
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(payload["zone_id"], zone_id.as_str());
+        assert_eq!(payload["flush"]["zone_id"], zone_id.as_str());
+        assert_eq!(payload["flush"]["root_present"], true);
+        assert_eq!(
+            payload["flush"]["root_object_id"],
+            root_object_id.to_string()
+        );
+        assert_eq!(
+            payload["flush"]["head_object_id"],
+            head_object_id.to_string()
+        );
+        assert_eq!(
+            payload["flush"]["lease_object_id"],
+            ObjectId::from_bytes([0x92; 32]).to_string()
         );
         Ok(())
     }

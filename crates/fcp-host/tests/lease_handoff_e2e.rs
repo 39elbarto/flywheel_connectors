@@ -145,11 +145,14 @@ fn assert_host_replay_contract(events: &[Value]) -> Result<(), Box<dyn std::erro
         "host replay should preserve the documented handoff phase order"
     );
     for event in events {
+        let phase = host_replay_phase(event)?;
         assert_eq!(
             host_replay_schema_version(event)?,
             HOST_FAILOVER_REPLAY_SCHEMA_VERSION,
             "every host replay phase should carry the replay schema version"
         );
+        assert_host_replay_local_node_hash_contract(phase, event)?;
+        assert_host_replay_payload_contract(phase, host_replay_payload(event)?)?;
     }
 
     let summary = events
@@ -211,6 +214,198 @@ fn assert_host_replay_contract(events: &[Value]) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+fn assert_host_replay_local_node_hash_contract(
+    phase: &str,
+    event: &Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match (phase, event.get("local_node_hash")) {
+        ("initial_candidate_set", Some(Value::Null)) => Ok(()),
+        (_, Some(Value::String(local_node_hash))) => {
+            assert_host_hash_value("local_node_hash", local_node_hash);
+            Ok(())
+        }
+        (_, Some(Value::Null)) => Err(invalid_host_replay_artifact(format!(
+            "{phase} should identify the local node with local_node_hash"
+        ))),
+        (_, Some(_)) => Err(invalid_host_replay_artifact(format!(
+            "{phase} local_node_hash must be a 64-hex hash or null"
+        ))),
+        (_, None) => Err(invalid_host_replay_artifact(format!(
+            "{phase} missing local_node_hash"
+        ))),
+    }
+}
+
+fn assert_host_replay_payload_contract(
+    phase: &str,
+    payload: &Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match phase {
+        "initial_candidate_set" => {
+            assert_host_hash_array(payload, "eligible_node_hashes", 3)?;
+            assert_eq!(
+                payload.get("durable_lease_seq").and_then(Value::as_u64),
+                Some(10)
+            );
+        }
+        "initial_holder_admitted" => {
+            assert_host_payload_hash(payload, "expected_holder_hash")?;
+            assert_host_refusal_values(payload, "refusals", 2)?;
+            assert_eq!(
+                payload.get("lease_evidence_source").and_then(Value::as_str),
+                Some("canonical-fcp-store-lease-object")
+            );
+            assert_eq!(
+                payload.get("fencing_token").and_then(Value::as_u64),
+                Some(10)
+            );
+            assert_eq!(
+                payload.get("quorum_satisfied").and_then(Value::as_bool),
+                Some(true)
+            );
+        }
+        "departing_holder_flushed_before_yield" => {
+            assert_host_nonempty_string(payload, "root_object_id")?;
+            assert_eq!(payload.get("lease_seq").and_then(Value::as_u64), Some(10));
+        }
+        "replacement_holder_admitted" => {
+            assert_host_payload_hash(payload, "departed_node_hash")?;
+            assert_host_hash_array(payload, "remaining_node_hashes", 2)?;
+            assert_host_refusal_values(payload, "refusals", 1)?;
+            assert_eq!(
+                payload.get("new_fencing_token").and_then(Value::as_u64),
+                Some(11)
+            );
+        }
+        "stale_write_fenced_after_handoff" => {
+            assert_eq!(
+                payload.get("http_status").and_then(Value::as_u64),
+                Some(403)
+            );
+            assert_eq!(
+                payload.get("provided_lease_seq").and_then(Value::as_u64),
+                Some(10)
+            );
+            assert_eq!(
+                payload.get("current_lease_seq").and_then(Value::as_u64),
+                Some(11)
+            );
+            assert_eq!(
+                payload.get("lease_fenced").and_then(Value::as_bool),
+                Some(true)
+            );
+        }
+        "canonical_state_exposed_after_handoff" => {
+            assert_host_nonempty_string(payload, "root_object_id")?;
+            assert_host_nonempty_string(payload, "head_object_id")?;
+            assert_eq!(
+                payload.get("model").and_then(Value::as_str),
+                Some("singleton_writer")
+            );
+        }
+        "invariant_summary" => {}
+        _ => {
+            return Err(invalid_host_replay_artifact(format!(
+                "unexpected host replay phase {phase}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn assert_host_payload_hash(
+    payload: &Value,
+    field: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let value = payload.get(field).and_then(Value::as_str).ok_or_else(|| {
+        invalid_host_replay_artifact(format!("payload missing hash field {field}"))
+    })?;
+    assert_host_hash_value(field, value);
+    Ok(())
+}
+
+fn assert_host_hash_array(
+    payload: &Value,
+    field: &str,
+    expected_len: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let values = payload
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            invalid_host_replay_artifact(format!("payload missing array field {field}"))
+        })?;
+    assert_eq!(
+        values.len(),
+        expected_len,
+        "{field} should include the expected number of node hashes"
+    );
+    for value in values {
+        let hash = value.as_str().ok_or_else(|| {
+            invalid_host_replay_artifact(format!("{field} entry must be a string"))
+        })?;
+        assert_host_hash_value(field, hash);
+    }
+    Ok(())
+}
+
+fn assert_host_refusal_values(
+    payload: &Value,
+    field: &str,
+    expected_len: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let refusals = payload
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            invalid_host_replay_artifact(format!("payload missing refusal field {field}"))
+        })?;
+    assert_eq!(
+        refusals.len(),
+        expected_len,
+        "{field} should include the expected refused node count"
+    );
+    for refusal in refusals {
+        assert_host_payload_hash(refusal, "node_id_hash")?;
+        assert_eq!(
+            refusal
+                .get("not_selected_coordinator")
+                .and_then(Value::as_bool),
+            Some(true),
+            "host replay refusals should preserve the typed coordinator rejection"
+        );
+    }
+    Ok(())
+}
+
+fn assert_host_nonempty_string(
+    payload: &Value,
+    field: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let value = payload.get(field).and_then(Value::as_str).ok_or_else(|| {
+        invalid_host_replay_artifact(format!("payload missing string field {field}"))
+    })?;
+    assert!(
+        !value.is_empty(),
+        "host replay payload field {field} should be non-empty"
+    );
+    Ok(())
+}
+
+fn assert_host_hash_value(field: &str, value: &str) {
+    assert_eq!(value.len(), 64, "{field} should be a 64-character hash");
+    assert!(
+        value.chars().all(|character| character.is_ascii_hexdigit()),
+        "{field} should be hex-encoded"
+    );
+}
+
+fn host_replay_payload(event: &Value) -> Result<&Value, Box<dyn std::error::Error>> {
+    event
+        .get("payload")
+        .ok_or_else(|| invalid_host_replay_artifact("host replay event missing payload"))
+}
+
 fn host_replay_phase(event: &Value) -> Result<&str, Box<dyn std::error::Error>> {
     event
         .get("phase")
@@ -225,8 +420,8 @@ fn host_replay_schema_version(event: &Value) -> Result<&str, Box<dyn std::error:
         .ok_or_else(|| invalid_host_replay_artifact("host replay event missing schema_version"))
 }
 
-fn invalid_host_replay_artifact(message: &'static str) -> Box<dyn std::error::Error> {
-    Box::new(io::Error::new(io::ErrorKind::InvalidData, message))
+fn invalid_host_replay_artifact(message: impl Into<String>) -> Box<dyn std::error::Error> {
+    Box::new(io::Error::new(io::ErrorKind::InvalidData, message.into()))
 }
 
 #[test]

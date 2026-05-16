@@ -159,6 +159,14 @@ phase-specific payload. The current phases are:
 - `canonical_state_exposed_after_handoff`
 - `invariant_summary`
 
+The host replay contract treats `local_node_hash` as null only for the global
+`initial_candidate_set` phase. Every node-specific phase must carry a 64-hex
+`local_node_hash`, and payload fields that identify nodes must use 64-hex hash
+values: `eligible_node_hashes`, `expected_holder_hash`, refusal
+`node_id_hash` entries, `departed_node_hash`, and `remaining_node_hashes`.
+Refusal payloads also assert the typed `not_selected_coordinator` predicate so
+the replay proves non-holders were rejected for the expected HRW reason.
+
 This replay is intentionally smaller than the local `LocalReplayBundle`
 because it records observable HTTP/binary-test evidence rather than in-memory
 per-node snapshots. It is useful when the host handoff test fails after a
@@ -214,6 +222,8 @@ strings fail the preflight instead of leaving a partial replay on disk.
 | `orphaned_connector_state_count` is non-zero. | A receipt lost its request ref, outcome object, idempotency key, node binding, or signature validity. | Compare `receipt_hash` with `per_node_state_hashes` and verify the executing node key for the failing seed. |
 | `invalid_receipt_signature_count` is non-zero. | The `OperationReceipt` signature no longer verifies against the executing node's deterministic signing key. | Reproduce the seed and inspect holder changes before `execute_once`. |
 | Host replay phase order changes. | The real `fcp-host` handoff test no longer matches the documented replay contract. | Inspect `host_failover_replay.jsonl` and update the runbook only if the new phase is intentional and has assertions. |
+| Host replay node hash contract fails. | A host replay phase omitted `local_node_hash`, emitted a non-hex node hash, or leaked node identity into a payload. | Keep global phases hash-free, require 64-hex hashes on node-specific phases, and store node sets in `*_hashes` arrays. |
+| Host replay refusal predicate is false. | A non-holder was refused for an unexpected reason or the typed HRW rejection was lost. | Inspect the process spawn error and preserve `NotSelectedCoordinator` as the redacted `not_selected_coordinator` predicate. |
 | Host `invariant_summary` contains a false predicate. | The real host handoff lost candidate/refusal, fencing, canonical-state, or quorum evidence. | Compare the preceding replay phases against the failed invariant field before changing test expectations. |
 | Redaction assertion fails. | A replay field contains raw node IDs or credential-like text. | Store hashed identifiers with `_hash` suffixes and keep credentials out of replay payloads. |
 | Snapshot CBOR fails to deserialize. | The snapshot schema changed without updating the replay writer or test. | Update the schema version and keep old fixture decoding explicit if old artifacts must remain readable. |

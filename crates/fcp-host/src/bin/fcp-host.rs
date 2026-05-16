@@ -5129,6 +5129,37 @@ fn parse_hrw_launch_zone_id(
     }
 }
 
+fn connector_lease_status_zone_id(
+    connector_id: &ConnectorId,
+    config: &ConnectorConfig,
+    query_zone: Option<&str>,
+) -> HostResult<ZoneId> {
+    if let Some(zone) = query_zone.map(str::trim).filter(|zone| !zone.is_empty()) {
+        return zone.parse::<ZoneId>().map_err(|error| {
+            HostError::InvalidFilter(format!(
+                "invalid connector lease status zone `{zone}`: {error}"
+            ))
+        });
+    }
+
+    if !connector_config_declares_singleton_writer(config) {
+        return Ok(ZoneId::work());
+    }
+
+    match config.allowed_zones.as_slice() {
+        [zone] => zone.parse::<ZoneId>().map_err(|error| {
+            HostError::InvalidFilter(format!(
+                "invalid singleton_writer lease status zone `{zone}` for connector `{connector_id}`: {error}"
+            ))
+        }),
+        [] => Err(zone_envelope_required_error(connector_id)),
+        zones => Err(HostError::InvalidFilter(format!(
+            "singleton_writer lease status for connector `{connector_id}` requires an explicit zone query because allowed_zones has {} entries",
+            zones.len()
+        ))),
+    }
+}
+
 fn enforce_hrw_singleton_writer_launch_route(
     config: &ConnectorConfig,
     routing: Option<&HrwLeaseRoutingConfig>,
@@ -8784,19 +8815,8 @@ async fn connector_lease_status_handler(
     let inventory = state.registry.inventory().await;
     let config = find_connector_inventory_entry(&inventory, &connector_id)
         .ok_or_else(|| map_host_error(HostError::ConnectorNotFound(connector_id.to_string())))?;
-    let zone = match query
-        .zone
-        .as_deref()
-        .map(str::trim)
-        .filter(|zone| !zone.is_empty())
-    {
-        Some(zone) => zone.parse::<ZoneId>().map_err(|error| {
-            map_host_error(HostError::InvalidFilter(format!(
-                "invalid connector lease status zone `{zone}`: {error}"
-            )))
-        })?,
-        None => ZoneId::work(),
-    };
+    let zone = connector_lease_status_zone_id(&connector_id, config, query.zone.as_deref())
+        .map_err(map_host_error)?;
     let started_at = Instant::now();
     tracing::debug!(
         event = "connector_lease_status_request",
@@ -26030,6 +26050,24 @@ done"#;
         );
     }
 
+    #[test]
+    fn connector_lease_status_zone_requires_explicit_query_for_multi_zone_singleton_writer() {
+        let connector_id = ConnectorId::from_static("fcp.test.lease-status-zone:utility:1.0.0");
+        let mut config = dispatcher_test_config("fcp.test.lease-status-zone:utility:1.0.0");
+        config.config = Some(json!({ "state": { "model": "singleton_writer" } }));
+        config.allowed_zones = vec!["z:work".to_owned(), "z:community".to_owned()];
+
+        let error = connector_lease_status_zone_id(&connector_id, &config, None)
+            .expect_err("multi-zone singleton_writer status should require explicit zone");
+
+        assert!(
+            error
+                .to_string()
+                .contains("requires an explicit zone query"),
+            "unexpected error: {error}"
+        );
+    }
+
     #[fcp_async_core::runtime::test]
     async fn rpc_budget_report_rejects_unauthenticated_request() {
         let state = cancel_route_test_state();
@@ -26287,6 +26325,63 @@ done"#;
                     .is_some_and(|text| text.contains("mesh replica count is not proven")))),
             "payload should explain missing symbol-distribution evidence: {payload}"
         );
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn connector_lease_status_admin_route_defaults_to_singleton_allowed_zone()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let connector_id = "fcp.test.lease-status-default-zone:utility:1.0.0";
+        let connector_key = ConnectorId::from_static(connector_id);
+        let zone_id: ZoneId = "z:community".parse().expect("test zone should parse");
+        let subject_id = singleton_writer_connector_lease_subject_id(&connector_key, &zone_id);
+        let eligible_nodes = vec![
+            TailscaleNodeId::new("node-alpha"),
+            TailscaleNodeId::new("node-beta"),
+            TailscaleNodeId::new("node-gamma"),
+        ];
+        let holder = fcp_mesh::planner::select_lease_holder(&zone_id, &subject_id, &eligible_nodes)
+            .expect("HRW holder should be selected");
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: holder,
+            eligible_nodes,
+            current_lease_seq: Some(17),
+        }));
+
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(1);
+        let runner_task = task::spawn(async move { while runner_rx.recv().await.is_some() {} });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let mut config = dispatcher_test_config(connector_id);
+        config.config = Some(json!({ "state": { "model": "singleton_writer" } }));
+        config.allowed_zones = vec![zone_id.as_str().to_owned()];
+        let registry = dispatcher_registry_with_connector(connector_id, connector, config);
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = dispatcher_app_state(registry, lifecycle, None, HashMap::new());
+        let state = Arc::new(AppState {
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            ..(*state).clone()
+        });
+        let app = connector_lease_status_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::GET,
+            "/rpc/admin/connectors/fcp.test.lease-status-default-zone:utility:1.0.0/lease/status",
+            serde_json::json!({}),
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let payload = response_body_json(response).await?;
+        assert_eq!(payload["zone_id"], zone_id.as_str());
+        assert_eq!(payload["subject_id"], subject_id.to_string());
+        assert_eq!(payload["source"], "host-hrw-routing");
+        assert_eq!(payload["fencing_token"], 17);
+        assert_eq!(payload["local_is_holder"], true);
         Ok(())
     }
 

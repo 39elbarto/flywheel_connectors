@@ -2773,6 +2773,56 @@ async fn fcp_host_binary_hrw_lease_coordination_allows_one_singleton_writer_laun
 }
 
 #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_hrw_lease_rejects_launch_without_quorum_config()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.hrw-binary-quorum:utility:1.0.0");
+    let connector_config =
+        singleton_writer_test_connector_config(&connector_id, "HRW Binary Quorum");
+    let launch_error = match HttpHostProcess::spawn_with_env(
+        vec![connector_config],
+        &[
+            ("FCP_HOST_HRW_LEASE_LOCAL_NODE", "node-solo"),
+            ("FCP_HOST_HRW_LEASE_NODES", "node-solo"),
+            ("FCP_HOST_HRW_LEASE_CURRENT_SEQ", "1"),
+        ],
+    )
+    .await
+    {
+        Ok(_) => {
+            return Err(
+                "singleton_writer launch must refuse HRW configs below lease quorum".into(),
+            );
+        }
+        Err(error) => error,
+    };
+    let message = launch_error.to_string();
+    let unescaped_message = message.replace('\\', "");
+
+    assert!(
+        message.contains("HRW lease routing refused singleton_writer launch"),
+        "quorum refusal should identify the HRW launch gate: {message}"
+    );
+    assert!(
+        unescaped_message.contains(r#""code":"LeaseQuorumConfigInvalid""#),
+        "quorum refusal should preserve the typed HRW configuration error: {message}"
+    );
+    assert!(
+        unescaped_message.contains(r#""configured_eligible_nodes_count":1"#),
+        "quorum refusal should report the configured node count: {message}"
+    );
+    assert!(
+        unescaped_message.contains(r#""required_quorum_signers_count":2"#),
+        "quorum refusal should report the required signer count: {message}"
+    );
+    assert!(
+        message.contains("FCP_HOST_HRW_LEASE_NODES"),
+        "quorum refusal should point operators at the node-set env var: {message}"
+    );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn fcp_host_binary_hrw_lease_fence_rejects_stale_singleton_writer_invoke()
 -> Result<(), Box<dyn std::error::Error>> {
     let connector_id = ConnectorId::from_static("fcp.test.hrw-binary-fence:utility:1.0.0");

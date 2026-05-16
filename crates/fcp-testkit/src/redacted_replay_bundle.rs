@@ -67,6 +67,17 @@ pub enum RedactedReplayBundleError {
     EmptyEvents,
     #[error("replay event {index} in `{artifact}` has an empty node_id_hash")]
     EmptyEventNodeHash { artifact: String, index: usize },
+    #[error("replay artifact `{artifact}` field `{field}` had length {actual}; expected 64")]
+    HashLengthMismatch {
+        artifact: String,
+        field: &'static str,
+        actual: usize,
+    },
+    #[error("replay artifact `{artifact}` field `{field}` is not lowercase hex")]
+    HashNotHex {
+        artifact: String,
+        field: &'static str,
+    },
     #[error("replay bundle had {actual} node snapshots; expected {expected}")]
     NodeSnapshotCountMismatch { expected: usize, actual: usize },
     #[error("replay bundle had {actual} node timelines; expected {expected}")]
@@ -86,8 +97,6 @@ pub enum RedactedReplayBundleError {
     PerNodeStateHashCountMismatch { expected: usize, actual: usize },
     #[error("per-node state hash `{artifact}` has an empty node_id_hash")]
     EmptyPerNodeStateHash { artifact: String },
-    #[error("per-node state hash `{artifact}` has state_hash length {actual}; expected 64")]
-    StateHashLengthMismatch { artifact: String, actual: usize },
     #[error("replay invariants `{artifact}` has an empty active_holder_hash")]
     EmptyActiveHolderHash { artifact: String },
     #[error("replay invariants online node count {actual} did not match expected {expected}")]
@@ -268,6 +277,10 @@ fn ensure_events_shape(
                 index,
             });
         }
+        ensure_hash_field(artifact, "event.node_id_hash", &event.node_id_hash)?;
+        if let Some(target_hash) = &event.lease_handoff_target_hash {
+            ensure_hash_field(artifact, "event.lease_handoff_target_hash", target_hash)?;
+        }
     }
 
     Ok(())
@@ -310,7 +323,7 @@ fn ensure_timelines_shape(
                 artifact: artifact.to_string(),
             });
         }
-        ensure_text_redacted(artifact, &timeline.node_id_hash)?;
+        ensure_hash_field(artifact, "timeline.node_id_hash", &timeline.node_id_hash)?;
         ensure_snapshot_redacted(artifact, &timeline.state_at_t0)?;
         ensure_snapshot_redacted(artifact, &timeline.state_at_chaos)?;
         ensure_snapshot_redacted(artifact, &timeline.state_at_heal)?;
@@ -325,6 +338,14 @@ fn ensure_hashes_shape(
     hashes: &LocalReplayHashes,
     expected_node_count: usize,
 ) -> Result<(), RedactedReplayBundleError> {
+    ensure_hash_field(artifact, "final_state_hash", &hashes.final_state_hash)?;
+    ensure_hash_field(
+        artifact,
+        "expected_hash_for_seed",
+        &hashes.expected_hash_for_seed,
+    )?;
+    ensure_hash_field(artifact, "receipt_hash", &hashes.receipt_hash)?;
+    ensure_hash_field(artifact, "transition_hash", &hashes.transition_hash)?;
     if hashes.final_state_hash != hashes.expected_hash_for_seed {
         return Err(RedactedReplayBundleError::ExpectedHashMismatch {
             final_state_hash: hashes.final_state_hash.clone(),
@@ -355,7 +376,11 @@ fn ensure_invariants_shape(
             artifact: artifact.to_string(),
         });
     }
-    ensure_text_redacted(artifact, &invariants.active_holder_hash)?;
+    ensure_hash_field(
+        artifact,
+        "active_holder_hash",
+        &invariants.active_holder_hash,
+    )?;
     if invariants.online_node_count != expected_node_count {
         return Err(RedactedReplayBundleError::OnlineNodeCountMismatch {
             expected: expected_node_count,
@@ -392,14 +417,16 @@ fn ensure_state_hash_redacted(
             artifact: artifact.to_string(),
         });
     }
-    ensure_text_redacted(artifact, &state_hash.node_id_hash)?;
-    if state_hash.state_hash.len() != 64 {
-        return Err(RedactedReplayBundleError::StateHashLengthMismatch {
-            artifact: artifact.to_string(),
-            actual: state_hash.state_hash.len(),
-        });
-    }
-    ensure_text_redacted(artifact, &state_hash.state_hash)
+    ensure_hash_field(
+        artifact,
+        "per_node_state_hash.node_id_hash",
+        &state_hash.node_id_hash,
+    )?;
+    ensure_hash_field(
+        artifact,
+        "per_node_state_hash.state_hash",
+        &state_hash.state_hash,
+    )
 }
 
 fn verify_snapshot_tree(
@@ -479,7 +506,7 @@ fn ensure_snapshot_redacted(
             artifact: artifact.to_string(),
         });
     }
-    ensure_text_redacted(artifact, &snapshot.node_id_hash)
+    ensure_hash_field(artifact, "snapshot.node_id_hash", &snapshot.node_id_hash)
 }
 
 fn read_text_artifact(path: &Path) -> Result<String, RedactedReplayBundleError> {
@@ -510,6 +537,31 @@ fn ensure_text_redacted(artifact: &str, text: &str) -> Result<(), RedactedReplay
     assert_redaction_safe_str(artifact, text)
 }
 
+fn ensure_hash_field(
+    artifact: &str,
+    field: &'static str,
+    value: &str,
+) -> Result<(), RedactedReplayBundleError> {
+    ensure_text_redacted(artifact, value)?;
+    if value.len() != 64 {
+        return Err(RedactedReplayBundleError::HashLengthMismatch {
+            artifact: artifact.to_string(),
+            field,
+            actual: value.len(),
+        });
+    }
+    if !value
+        .bytes()
+        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(RedactedReplayBundleError::HashNotHex {
+            artifact: artifact.to_string(),
+            field,
+        });
+    }
+    Ok(())
+}
+
 fn ensure_bytes_redacted(artifact: &str, bytes: &[u8]) -> Result<(), RedactedReplayBundleError> {
     let lowercase = bytes.iter().map(u8::to_ascii_lowercase).collect::<Vec<_>>();
     for marker in FORBIDDEN_REPLAY_MARKERS {
@@ -528,4 +580,75 @@ fn ensure_bytes_redacted(artifact: &str, bytes: &[u8]) -> Result<(), RedactedRep
 
 fn artifact_name(path: &Path) -> String {
     path.display().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::local_mesh::{LocalChaosMode, LocalMeshHarness};
+
+    fn replay_bundle() -> LocalReplayBundle {
+        let mut harness = LocalMeshHarness::new_three_node(23).expect("harness should build");
+        harness
+            .run_failover_scenario(LocalChaosMode::KillLeaderMidWrite)
+            .expect("scenario should complete")
+            .replay_bundle
+    }
+
+    #[test]
+    fn verifier_rejects_short_event_node_hash() {
+        let mut bundle = replay_bundle();
+        bundle
+            .events
+            .first_mut()
+            .expect("scenario should emit replay events")
+            .node_id_hash = "abc123".to_string();
+
+        let error = verify_in_memory_replay_bundle(&bundle, 3)
+            .expect_err("short event node hashes should fail the replay verifier");
+        assert!(matches!(
+            error,
+            RedactedReplayBundleError::HashLengthMismatch {
+                field: "event.node_id_hash",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn verifier_rejects_non_hex_snapshot_node_hash() {
+        let mut bundle = replay_bundle();
+        bundle
+            .node_timelines
+            .first_mut()
+            .expect("scenario should emit node timelines")
+            .state_at_end
+            .node_id_hash = "g".repeat(64);
+
+        let error = verify_in_memory_replay_bundle(&bundle, 3)
+            .expect_err("non-hex snapshot node hashes should fail the replay verifier");
+        assert!(matches!(
+            error,
+            RedactedReplayBundleError::HashNotHex {
+                field: "snapshot.node_id_hash",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn verifier_rejects_non_hex_receipt_hash() {
+        let mut bundle = replay_bundle();
+        bundle.hashes.receipt_hash = "z".repeat(64);
+
+        let error = verify_in_memory_replay_bundle(&bundle, 3)
+            .expect_err("non-hex receipt hashes should fail the replay verifier");
+        assert!(matches!(
+            error,
+            RedactedReplayBundleError::HashNotHex {
+                field: "receipt_hash",
+                ..
+            }
+        ));
+    }
 }

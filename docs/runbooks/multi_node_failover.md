@@ -160,9 +160,9 @@ it against another run. The helper decodes `manifest.json`, `events.jsonl`,
 `hashes.json`, `invariants.json`, and every per-node CBOR snapshot, then fails
 if any artifact contains raw harness node labels or credential-like markers
 (`authorization`, `bearer`, `cookie`, `password`, `secret`, `token`), empty
-node hashes, missing transition events, a mismatch between `final_state_hash`
-and `expected_hash_for_seed`, a non-green invariant summary, or a
-node/timeline/hash count mismatch.
+node hashes, non-64-hex hash fields, missing transition events, a mismatch
+between `final_state_hash` and `expected_hash_for_seed`, a non-green invariant
+summary, or a node/timeline/hash count mismatch.
 
 ## Host Handoff Replay
 
@@ -269,7 +269,11 @@ and deterministic scenario IDs. They must not contain:
 
 Fields that identify a node or handoff target use a `_hash` suffix. Keep that
 convention for future host-backed replay artifacts so operators can compare
-timelines without leaking deployment identifiers.
+timelines without leaking deployment identifiers. Every replay hash field must
+be lowercase 64-hex, including event node hashes, handoff target hashes,
+snapshot node hashes, per-node state hashes, active-holder hashes,
+`final_state_hash`, `expected_hash_for_seed`, `receipt_hash`, and
+`transition_hash`.
 
 ## Graduation Path
 

@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use fcp_cbor::CanonicalSerializer;
-use fcp_crypto::{CwtClaims, Ed25519Signature, Ed25519VerifyingKey};
+use fcp_crypto::{CryptoError, CwtClaims, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_prelude::{
     CapabilityVerifier, ConnectorStateChange, EvictionPolicy, FcpError, InvokeRequest,
     InvokeValidationError, Lease as CoreLease, LeaseValidationError as CoreLeaseValidationError,
@@ -192,6 +192,10 @@ pub enum MeshNodeError {
     /// Durable lease object failed validation before mesh publication.
     #[error("lease validation error: {0}")]
     LeaseValidation(#[from] CoreLeaseValidationError),
+
+    /// Durable lease quorum signing bytes could not be canonicalized.
+    #[error("lease quorum signing bytes error: {0}")]
+    LeaseQuorumSigningBytes(#[from] CryptoError),
 
     /// Required peer signing key is not registered.
     #[error("missing peer signing key for {peer}")]
@@ -1644,6 +1648,8 @@ impl MeshNode {
             now_ms / 1000,
             DEFAULT_LEASE_PUBLICATION_REQUIRED_QUORUM_SIGNATURES,
         )?;
+        self.verify_lease_quorum_signatures(lease)?;
+
         let body = CanonicalSerializer::serialize(lease, &lease.header.schema)?;
         let object_id = StoredObject::derive_id(&lease.header, &body, object_id_key)?;
         let stored = StoredObject {
@@ -2030,6 +2036,22 @@ impl MeshNode {
             .ok_or_else(|| MeshNodeError::PeerSigningKeyMissing {
                 peer: peer.as_str().to_string(),
             })
+    }
+
+    fn verify_lease_quorum_signatures(&self, lease: &CoreLease) -> Result<(), MeshNodeError> {
+        let signing_bytes = lease.quorum_signing_bytes()?;
+        for signature in lease.quorum_signatures.iter() {
+            let peer = NodeId::new(signature.node_id.as_str());
+            let key = self.peer_signing_key(&peer)?;
+            let signature_bytes = Ed25519Signature::from_bytes(&signature.signature);
+            key.verify(&signing_bytes, &signature_bytes).map_err(|_| {
+                MeshNodeError::PeerSignatureInvalid {
+                    peer: signature.node_id.as_str().to_string(),
+                    message_kind: "lease quorum",
+                }
+            })?;
+        }
+        Ok(())
     }
 
     fn verify_summary_signature(&self, summary: &GossipSummary) -> Result<NodeId, MeshNodeError> {
@@ -3825,6 +3847,28 @@ mod tests {
         signatures
     }
 
+    fn sign_lease_quorum(lease: &mut fcp_prelude::Lease, signers: &[(&str, &Ed25519SigningKey)]) {
+        lease.quorum_signatures = fcp_core::SignatureSet::new();
+        let signing_bytes = lease
+            .quorum_signing_bytes()
+            .expect("lease quorum signing bytes");
+        let mut signatures = fcp_core::SignatureSet::new();
+        for (idx, (node_id, signing_key)) in signers.iter().enumerate() {
+            signatures.add(fcp_core::NodeSignature::new(
+                fcp_core::NodeId::new(*node_id),
+                signing_key.sign(&signing_bytes).to_bytes(),
+                1_000 + u64::try_from(idx).unwrap_or(u64::MAX),
+            ));
+        }
+        lease.quorum_signatures = signatures;
+    }
+
+    fn register_lease_signer_keys(node: &mut MeshNode, signers: &[(&str, &Ed25519SigningKey)]) {
+        for (node_id, signing_key) in signers {
+            node.register_peer_signing_key(NodeId::new(*node_id), signing_key.verifying_key());
+        }
+    }
+
     fn test_object_symbol_meta(object_id: ObjectId, zone_id: &ZoneId) -> ObjectSymbolMeta {
         let oti = ObjectTransmissionInformation::new(256, 64, 1, 1, 1);
         ObjectSymbolMeta {
@@ -4671,7 +4715,11 @@ mod tests {
         let zone_id = ZoneId::work();
         let subject_object_id = test_object_id("connector-state");
         let object_id_key = ObjectIdKey::from_bytes([0x42; 32]);
-        let lease = test_core_lease(&zone_id, subject_object_id);
+        let signer_a = Ed25519SigningKey::generate();
+        let signer_b = Ed25519SigningKey::generate();
+        let mut lease = test_core_lease(&zone_id, subject_object_id);
+        sign_lease_quorum(&mut lease, &[("node-1", &signer_a), ("node-2", &signer_b)]);
+        register_lease_signer_keys(&mut node, &[("node-1", &signer_a), ("node-2", &signer_b)]);
 
         let lease_object_id = fcp_async_core::runtime::block_on_sync(async {
             let lease_object_id = node
@@ -4725,6 +4773,36 @@ mod tests {
             .expect("gossip request");
         assert_eq!(response.have_objects, vec![lease_object_id]);
         assert_eq!(node.metrics().gossip_announcements, 1);
+    }
+
+    #[test]
+    fn publish_signed_lease_object_rejects_invalid_quorum_signature_before_gossip() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let subject_object_id = test_object_id("connector-state");
+        let object_id_key = ObjectIdKey::from_bytes([0x42; 32]);
+        let signer_a = Ed25519SigningKey::generate();
+        let signer_b = Ed25519SigningKey::generate();
+        let attacker = Ed25519SigningKey::generate();
+        let mut lease = test_core_lease(&zone_id, subject_object_id);
+        sign_lease_quorum(&mut lease, &[("node-1", &signer_a), ("node-2", &attacker)]);
+        register_lease_signer_keys(&mut node, &[("node-1", &signer_a), ("node-2", &signer_b)]);
+
+        let err = fcp_async_core::runtime::block_on_sync(async {
+            node.publish_signed_lease_object(&lease, &object_id_key, 50_000)
+                .await
+                .expect_err("forged quorum signature must not publish")
+        })
+        .expect("runtime");
+
+        assert!(matches!(
+            err,
+            MeshNodeError::PeerSignatureInvalid {
+                peer,
+                message_kind: "lease quorum",
+            } if peer == "node-2"
+        ));
+        assert_eq!(node.metrics().gossip_announcements, 0);
     }
 
     #[test]
@@ -4806,8 +4884,13 @@ mod tests {
                 .iter()
                 .any(|event| event.operation == "lease.acquired")
         );
+        let signer_a = Ed25519SigningKey::generate();
+        let signer_b = Ed25519SigningKey::generate();
+        let mut lease = *lease;
+        sign_lease_quorum(&mut lease, &[("node-a", &signer_a), ("node-b", &signer_b)]);
 
         let mut issuer = test_node(holder.as_str());
+        register_lease_signer_keys(&mut issuer, &[("node-a", &signer_a), ("node-b", &signer_b)]);
         let mut receiver = test_node("node-receiver");
         let receiver_peer = NodeId::new("node-receiver");
         let issuer_peer = NodeId::new(holder.as_str());

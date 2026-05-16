@@ -14,10 +14,14 @@
 //! - `ZoneCheckpoint` advancement (coordinator election)
 //! - Exclusive resource access (e.g., specific hardware)
 use fcp_cbor::SchemaId;
+use fcp_crypto::{canonical_signing_bytes, canonicalize::to_deterministic_cbor};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{ObjectHeader, ObjectId, SignatureSet, TailscaleNodeId, ZoneId};
+
+/// Domain-separated schema ID for quorum signatures over durable lease authority.
+pub const LEASE_QUORUM_SIGNING_SCHEMA_ID: &str = "fcp.lease.quorum-signing.v1";
 
 /// Get current Unix timestamp in seconds.
 ///
@@ -144,6 +148,16 @@ pub struct LeaseParams {
     pub provenance: crate::Provenance,
     pub purpose: LeasePurpose,
     pub quorum_signatures: SignatureSet,
+}
+
+#[derive(Debug, Serialize)]
+struct LeaseQuorumSignable<'a> {
+    header: &'a ObjectHeader,
+    holder: &'a TailscaleNodeId,
+    lease_seq: u64,
+    exp: u64,
+    subject_object_id: &'a ObjectId,
+    purpose: LeasePurpose,
 }
 
 /// Canonical identifier for a lease object referenced elsewhere in the mesh.
@@ -357,6 +371,32 @@ impl Lease {
     #[must_use]
     pub const fn zone_id(&self) -> &ZoneId {
         &self.header.zone_id
+    }
+
+    /// Compute canonical bytes that quorum signers must sign for this lease.
+    ///
+    /// The signable view intentionally excludes `quorum_signatures`; otherwise
+    /// each signer would need to sign a payload that already contains its own
+    /// signature. The signed fields bind the lease authority context:
+    /// header/zone/provenance/refs, holder, fence, expiry, subject, and purpose.
+    ///
+    /// # Errors
+    ///
+    /// Returns a crypto serialization error if deterministic CBOR encoding fails.
+    pub fn quorum_signing_bytes(&self) -> fcp_crypto::CryptoResult<Vec<u8>> {
+        let signable = LeaseQuorumSignable {
+            header: &self.header,
+            holder: &self.holder,
+            lease_seq: self.lease_seq,
+            exp: self.exp,
+            subject_object_id: &self.subject_object_id,
+            purpose: self.purpose,
+        };
+        let cbor = to_deterministic_cbor(&signable)?;
+        Ok(canonical_signing_bytes(
+            LEASE_QUORUM_SIGNING_SCHEMA_ID,
+            &cbor,
+        ))
     }
 }
 
@@ -1919,6 +1959,28 @@ mod tests {
         let cloned = params.clone();
         assert_eq!(cloned.lease_seq, params.lease_seq);
         assert_eq!(cloned.purpose, params.purpose);
+    }
+
+    #[test]
+    fn quorum_signing_bytes_exclude_quorum_signatures() {
+        let lease_a = create_test_lease(7);
+        let mut lease_b = lease_a.clone();
+        let mut signatures = SignatureSet::new();
+        signatures.add(crate::NodeSignature::new(
+            crate::NodeId::new("node-a"),
+            [0xA5; 64],
+            1_000,
+        ));
+        lease_b.quorum_signatures = signatures;
+
+        let bytes_a = lease_a.quorum_signing_bytes().expect("signing bytes");
+        let bytes_b = lease_b.quorum_signing_bytes().expect("signing bytes");
+
+        assert_eq!(bytes_a, bytes_b);
+
+        lease_b.lease_seq += 1;
+        let bytes_c = lease_b.quorum_signing_bytes().expect("signing bytes");
+        assert_ne!(bytes_a, bytes_c);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

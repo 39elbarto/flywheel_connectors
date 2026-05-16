@@ -1106,36 +1106,70 @@ fn signed_lease_issue_quorum_rejection(
     required_signatures: usize,
 ) -> Option<(SignedLeaseIssueOutcome, Vec<AuthorityTimelineEvent>)> {
     let got = params.quorum_signatures.len();
-    if got >= required_signatures {
-        return None;
+    if got < required_signatures {
+        let reason = format!(
+            "Lease issue rejected: insufficient quorum signatures (required={required_signatures}, got={got})"
+        );
+        let purpose_label = planner_purpose.to_string();
+        metrics::record_lease_fenced(&purpose_label, "insufficient_quorum");
+        return Some((
+            SignedLeaseIssueOutcome::Rejected {
+                reason: reason.clone(),
+            },
+            vec![AuthorityTimelineEvent {
+                observed_at_ms: now_secs * 1000,
+                operation: "lease.issue_rejected".into(),
+                subject_id: params.subject_object_id,
+                purpose: planner_purpose,
+                holder: Some(params.holder.clone()),
+                coordinator: select_coordinator(
+                    &params.zone_id,
+                    &params.subject_object_id,
+                    eligible_nodes,
+                ),
+                reason_code: AuthorityReasonCode::LeaseAcquisitionRejected,
+                fencing_token: None,
+                expires_at: None,
+                explanation: reason,
+            }],
+        ));
     }
 
-    let reason = format!(
-        "Lease issue rejected: insufficient quorum signatures (required={required_signatures}, got={got})"
-    );
-    let purpose_label = planner_purpose.to_string();
-    metrics::record_lease_fenced(&purpose_label, "insufficient_quorum");
-    Some((
-        SignedLeaseIssueOutcome::Rejected {
-            reason: reason.clone(),
-        },
-        vec![AuthorityTimelineEvent {
-            observed_at_ms: now_secs * 1000,
-            operation: "lease.issue_rejected".into(),
-            subject_id: params.subject_object_id,
-            purpose: planner_purpose,
-            holder: Some(params.holder.clone()),
-            coordinator: select_coordinator(
-                &params.zone_id,
-                &params.subject_object_id,
-                eligible_nodes,
-            ),
-            reason_code: AuthorityReasonCode::LeaseAcquisitionRejected,
-            fencing_token: None,
-            expires_at: None,
-            explanation: reason,
-        }],
-    ))
+    if let Some(signature) = params.quorum_signatures.iter().find(|signature| {
+        !eligible_nodes
+            .iter()
+            .any(|node| node.as_str() == signature.node_id.as_str())
+    }) {
+        let reason = format!(
+            "Lease issue rejected: quorum signer {} is not in the eligible signer set",
+            signature.node_id
+        );
+        let purpose_label = planner_purpose.to_string();
+        metrics::record_lease_fenced(&purpose_label, "unknown_quorum_signer");
+        return Some((
+            SignedLeaseIssueOutcome::Rejected {
+                reason: reason.clone(),
+            },
+            vec![AuthorityTimelineEvent {
+                observed_at_ms: now_secs * 1000,
+                operation: "lease.issue_rejected".into(),
+                subject_id: params.subject_object_id,
+                purpose: planner_purpose,
+                holder: Some(params.holder.clone()),
+                coordinator: select_coordinator(
+                    &params.zone_id,
+                    &params.subject_object_id,
+                    eligible_nodes,
+                ),
+                reason_code: AuthorityReasonCode::LeaseAcquisitionRejected,
+                fencing_token: None,
+                expires_at: None,
+                explanation: reason,
+            }],
+        ));
+    }
+
+    None
 }
 
 /// Convert a durable core lease into the compact planner observation format.
@@ -1486,6 +1520,62 @@ mod tests {
         let (grant, _timeline) = coord.issue_signed_lease(grant_request);
         let SignedLeaseIssueOutcome::Granted { lease } = grant else {
             panic!("expected valid quorum lease grant");
+        };
+        assert_eq!(lease.lease_seq, 1);
+    }
+
+    #[test]
+    fn issue_signed_lease_rejects_unknown_quorum_signer_before_materialization() {
+        let mut coord = LeaseCoordinator::with_defaults();
+        let eligible = vec![node("node-a"), node("node-b"), node("node-c")];
+        let holder = selected_holder_for(&eligible);
+        let request = SignedLeaseIssueRequest {
+            params: core_lease_params(
+                holder.as_str(),
+                300,
+                CoreLeasePurpose::ConnectorStateWrite,
+                signatures(&["node-a", "node-z"]),
+            ),
+            existing_leases: Vec::new(),
+            eligible_nodes: eligible.clone(),
+            required_signatures: 2,
+            now_secs: 1_000,
+        };
+
+        let (outcome, timeline) = coord.issue_signed_lease(request);
+
+        match outcome {
+            SignedLeaseIssueOutcome::Rejected { reason } => {
+                assert!(
+                    reason.contains("not in the eligible signer set"),
+                    "expected signer-set rejection, got: {reason}"
+                );
+                assert!(reason.contains("node-z"));
+            }
+            other => panic!("expected Rejected for unknown quorum signer, got {other:?}"),
+        }
+        assert!(timeline.iter().any(|event| {
+            event.operation == "lease.issue_rejected"
+                && event.fencing_token.is_none()
+                && event.reason_code == AuthorityReasonCode::LeaseAcquisitionRejected
+                && event.explanation.contains("node-z")
+        }));
+
+        let grant_request = SignedLeaseIssueRequest {
+            params: core_lease_params(
+                holder.as_str(),
+                300,
+                CoreLeasePurpose::ConnectorStateWrite,
+                signatures(&["node-a", "node-b"]),
+            ),
+            existing_leases: Vec::new(),
+            eligible_nodes: eligible,
+            required_signatures: 2,
+            now_secs: 1_000,
+        };
+        let (grant, _timeline) = coord.issue_signed_lease(grant_request);
+        let SignedLeaseIssueOutcome::Granted { lease } = grant else {
+            panic!("expected valid signer-set lease grant");
         };
         assert_eq!(lease.lease_seq, 1);
     }

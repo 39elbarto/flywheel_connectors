@@ -5,6 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener as StdTcpListener;
+use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -22,10 +23,11 @@ use fcp_async_core::sync::Mutex;
 use fcp_async_core::task::JoinHandle as AsyncJoinHandle;
 use fcp_core::{
     AttestationMaterial, AttestationMetadata, AttestationPredicateType, CapabilityConstraints,
-    CapabilityToken, CorrelationId, DecisionReceiptPolicy, ObjectHeader, Provenance, RollbackRules,
-    RolloutPolicy, SBOM_SIGNED_FIELDS, SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent,
-    SbomDependency, SuccessThresholds, TransitionReason, ZoneId, ZonePolicyObject,
-    ZoneTransportPolicy,
+    CapabilityToken, CapabilityVerifier, ConnectorStateAppendOutcome, ConnectorStateStore,
+    CorrelationId, DecisionReceiptPolicy, InstanceId, ObjectHeader, ObjectId, ObjectIdKey,
+    Provenance, RollbackRules, RolloutPolicy, SBOM_SIGNED_FIELDS,
+    SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent, SbomDependency, SuccessThresholds,
+    TransitionReason, ZoneId, ZonePolicyObject, ZoneTransportPolicy,
 };
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
@@ -116,6 +118,8 @@ const TEST_CAPABILITY_ID: &str = "cap.test.echo";
 const TEST_ADMIN_BEARER_TOKEN: &str = "host-test-admin-bearer";
 const TRUSTED_CAPABILITY_SIGNING_KEY_HEX: &str =
     "1111111111111111111111111111111111111111111111111111111111111111";
+const CONNECTOR_STATE_DIR_ENV: &str = "FCP_CONNECTOR_STATE";
+const CONNECTOR_STATE_OBJECT_ID_KEY_ENV: &str = "FCP_CONNECTOR_STATE_OBJECT_ID_KEY";
 
 fn test_zone_policy(zone_id: ZoneId) -> ZonePolicyObject {
     ZonePolicyObject {
@@ -1861,6 +1865,217 @@ fn singleton_writer_test_connector_config(
     config
 }
 
+fn singleton_writer_test_connector_config_with_state(
+    connector_id: &ConnectorId,
+    name: &str,
+    state_root: &Path,
+    object_id_key: &ObjectIdKey,
+) -> serde_json::Value {
+    let mut config = singleton_writer_test_connector_config(connector_id, name);
+    let config_object = config
+        .as_object_mut()
+        .expect("test connector config should be a JSON object");
+    let env = config_object
+        .entry("env")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .expect("test connector env should be a JSON object");
+    env.insert(
+        CONNECTOR_STATE_DIR_ENV.to_string(),
+        json!(state_root.display().to_string()),
+    );
+    env.insert(
+        CONNECTOR_STATE_OBJECT_ID_KEY_ENV.to_string(),
+        json!(hex::encode(object_id_key.as_bytes())),
+    );
+    env.insert(
+        "FCP_CONNECTOR_STATE_MODEL".to_string(),
+        json!("singleton_writer"),
+    );
+    config
+}
+
+fn sanitize_connector_state_path_segment(value: &str) -> String {
+    let segment = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if segment.is_empty() || segment == "." || segment == ".." {
+        "_".to_string()
+    } else {
+        segment
+    }
+}
+
+fn connector_state_canonical_object_store_dir(
+    root: &Path,
+    connector_id: &ConnectorId,
+) -> std::path::PathBuf {
+    root.join(sanitize_connector_state_path_segment(connector_id.as_str()))
+        .join("store")
+        .join("objects")
+}
+
+fn connector_state_write_authorization_for_test_with_key(
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+) -> (
+    fcp_core::ConnectorStateWriteAuthorization,
+    Ed25519SigningKey,
+) {
+    let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
+    let constraints = CapabilityConstraints {
+        resource_allow: vec![fcp_core::connector_state_resource_uri(connector_id)],
+        ..Default::default()
+    };
+    let mut constraints_cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut constraints_cbor)
+        .expect("test connector-state constraints should serialize");
+    let now = Utc::now();
+    let token = CapabilityToken::from_raw(
+        CapabilityTokenBuilder::new()
+            .capability_id(fcp_core::CONNECTOR_STATE_WRITE_CAPABILITY_ID)
+            .zone_id(zone_id.as_str())
+            .target_instance(instance_id.as_str())
+            .principal("principal:test")
+            .operations(&[fcp_core::CONNECTOR_STATE_APPEND_OPERATION_ID])
+            .issuer("node:test")
+            .validity(now, now + ChronoDuration::hours(1))
+            .try_constraints_cbor(&constraints_cbor)
+            .expect("test connector-state constraints should be accepted")
+            .sign(&signing_key)
+            .expect("test connector-state token should sign"),
+    );
+    let verifier = CapabilityVerifier::new(
+        signing_key.verifying_key().to_bytes(),
+        zone_id.clone(),
+        instance_id,
+    );
+
+    let authorization = fcp_core::ConnectorStateWriteAuthorization::verify_append_token(
+        &verifier,
+        token,
+        connector_id,
+        zone_id,
+    )
+    .expect("test connector-state write token should authorize append");
+    (authorization, signing_key)
+}
+
+fn durable_connector_state_object_for_test(
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+    seq: u64,
+    prev: Option<ObjectId>,
+    lease_object_id: ObjectId,
+) -> fcp_core::ConnectorStateObject {
+    let seq_byte = u8::try_from(seq).expect("test sequence should fit in CBOR byte");
+    fcp_core::ConnectorStateObject {
+        header: ObjectHeader {
+            schema: fcp_store::FcpStoreConnectorStateStore::state_object_schema_id(),
+            zone_id: zone_id.clone(),
+            created_at: 1_800_200_000 + seq,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![lease_object_id],
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        },
+        connector_id: connector_id.clone(),
+        instance_id: None,
+        zone_id: zone_id.clone(),
+        prev,
+        seq,
+        state_cbor: vec![0xa1, 0x61, b'n', seq_byte],
+        updated_at: 1_800_200_000 + seq,
+        lease_seq: seq + 10,
+        lease_object_id,
+        writer_public_key: [0u8; 32],
+        signature: fcp_core::Signature::zero(),
+    }
+}
+
+fn sign_durable_connector_state_object_for_test(
+    mut state: fcp_core::ConnectorStateObject,
+    signing_key: &Ed25519SigningKey,
+) -> fcp_core::ConnectorStateObject {
+    state
+        .sign_with(signing_key)
+        .expect("test connector state should sign");
+    state
+}
+
+struct SeededConnectorState {
+    root_object_id: ObjectId,
+    head_object_id: ObjectId,
+    lease_object_id: ObjectId,
+    lease_seq: u64,
+}
+
+async fn seed_singleton_writer_connector_state(
+    state_root: &Path,
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+    object_id_key: ObjectIdKey,
+    lease_object_id: ObjectId,
+) -> Result<SeededConnectorState, Box<dyn std::error::Error>> {
+    let object_store_dir = connector_state_canonical_object_store_dir(state_root, connector_id);
+    let object_store: Arc<dyn fcp_store::ObjectStore> =
+        Arc::new(fcp_store::DurableObjectStore::open(
+            fcp_store::DurableObjectStoreConfig::new(&object_store_dir),
+        )?);
+    let state_store = fcp_store::FcpStoreConnectorStateStore::new(
+        Arc::clone(&object_store),
+        object_id_key,
+        connector_id.clone(),
+        zone_id.clone(),
+    )
+    .with_snapshot_every_entries(0)
+    .with_snapshot_every_secs(0);
+    let (authorization, signing_key) =
+        connector_state_write_authorization_for_test_with_key(connector_id, zone_id);
+    let state_object = sign_durable_connector_state_object_for_test(
+        durable_connector_state_object_for_test(connector_id, zone_id, 0, None, lease_object_id),
+        &signing_key,
+    );
+    let lease_seq = state_object.lease_seq;
+    let append = ConnectorStateStore::append_object(
+        &state_store,
+        connector_id,
+        &authorization,
+        state_object,
+    )
+    .await?;
+
+    match append {
+        ConnectorStateAppendOutcome::Committed {
+            object_id,
+            root_object_id,
+            seq,
+            snapshot_object_id,
+        } => {
+            assert_eq!(seq, 0);
+            assert_eq!(snapshot_object_id, None);
+            Ok(SeededConnectorState {
+                root_object_id,
+                head_object_id: object_id,
+                lease_object_id,
+                lease_seq,
+            })
+        }
+        ConnectorStateAppendOutcome::Conflict { .. } => {
+            Err("initial durable connector-state append should not conflict".into())
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MatrixFixtureFlavor {
     RequestResponse,
@@ -2691,6 +2906,167 @@ async fn fcp_host_binary_hrw_lease_fence_rejects_stale_singleton_writer_invoke()
             .iter()
             .any(|holder| holder["is_local_node"].as_bool() == Some(true)),
         "admitted HRW host {admitted_node} should appear in the holder ladder"
+    );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_hrw_lease_flush_before_yield_reports_durable_state_barrier()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.hrw-binary-flush:utility:1.0.0");
+    let zone_id = ZoneId::work();
+    let state_dir = tempfile::tempdir()?;
+    let state_root = state_dir.path().join("managed-state");
+    let object_id_key = ObjectIdKey::from_bytes([0xB5; 32]);
+    let seeded_state = seed_singleton_writer_connector_state(
+        &state_root,
+        &connector_id,
+        &zone_id,
+        object_id_key,
+        ObjectId::from_bytes([0x92; 32]),
+    )
+    .await?;
+    let connector_config = singleton_writer_test_connector_config_with_state(
+        &connector_id,
+        "HRW Binary Flush",
+        &state_root,
+        &object_id_key,
+    );
+    let eligible_nodes = "node-a,node-b,node-c";
+    let mut admitted_host: Option<(String, HttpHostProcess)> = None;
+    let mut refusal_messages = Vec::new();
+
+    for local_node in ["node-a", "node-b", "node-c"] {
+        match HttpHostProcess::spawn_with_env(
+            vec![connector_config.clone()],
+            &[
+                ("FCP_HOST_HRW_LEASE_LOCAL_NODE", local_node),
+                ("FCP_HOST_HRW_LEASE_NODES", eligible_nodes),
+                ("FCP_HOST_HRW_LEASE_CURRENT_SEQ", "10"),
+            ],
+        )
+        .await
+        {
+            Ok(host) => {
+                assert!(
+                    admitted_host.is_none(),
+                    "HRW admitted more than one singleton_writer host launch"
+                );
+                admitted_host = Some((local_node.to_string(), host));
+            }
+            Err(error) => refusal_messages.push((local_node.to_string(), error.to_string())),
+        }
+    }
+
+    assert!(
+        admitted_host.is_some(),
+        "HRW should admit exactly one singleton_writer host launch; refusals: {refusal_messages:?}"
+    );
+    assert_eq!(
+        refusal_messages.len(),
+        2,
+        "three-node HRW routing should refuse both non-holder launches"
+    );
+    for (refused_node, refusal) in &refusal_messages {
+        assert!(
+            refusal.contains("NotSelectedCoordinator"),
+            "refusal for {refused_node} should preserve the typed HRW error: {refusal}"
+        );
+    }
+
+    let (admitted_node, host) = admitted_host.expect("one HRW host should be admitted");
+    let url = |path: &str| format!("{}{path}", host.base_url);
+    let flush_response = host
+        .client
+        .post(url(&format!(
+            "/rpc/admin/connectors/{}/lease/flush-before-yield?zone=z%3Awork",
+            connector_id.as_str()
+        )))
+        .bearer_auth(TEST_ADMIN_BEARER_TOKEN)
+        .header("x-fcp-zone", "z:owner")
+        .json(&json!({}))
+        .send()
+        .await?;
+    let flush_status = flush_response.status();
+    let flush_body = flush_response.text().await?;
+    let flush_payload: Value = serde_json::from_str(&flush_body).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "flush-before-yield response should be JSON, got {flush_status}: {flush_body}: {error}"
+            ),
+        )
+    })?;
+
+    assert_eq!(
+        flush_status,
+        reqwest::StatusCode::OK,
+        "admitted HRW host {admitted_node} should expose live flush-before-yield payload: {flush_payload}"
+    );
+    assert_eq!(flush_payload["schema_version"], "1.0.0");
+    assert_eq!(flush_payload["source"], "host-canonical-state-flush");
+    assert_eq!(flush_payload["connector_id"], connector_id.to_string());
+    assert_eq!(flush_payload["zone_id"], zone_id.as_str());
+    assert_eq!(flush_payload["flush"]["root_present"], true);
+    assert_eq!(
+        flush_payload["flush"]["root_object_id"],
+        seeded_state.root_object_id.to_string()
+    );
+    assert_eq!(
+        flush_payload["flush"]["head_object_id"],
+        seeded_state.head_object_id.to_string()
+    );
+    assert_eq!(flush_payload["flush"]["last_canonical_seq"], 0);
+    assert_eq!(flush_payload["flush"]["lease_seq"], seeded_state.lease_seq);
+    assert_eq!(
+        flush_payload["flush"]["lease_object_id"],
+        seeded_state.lease_object_id.to_string()
+    );
+    assert_eq!(
+        flush_payload["telemetry"]["event_name"],
+        "fcp.lease.flushed_on_yield"
+    );
+
+    let explain_response = host
+        .client
+        .get(url(&format!(
+            "/rpc/admin/connectors/{}/state/explain?zone=z%3Awork",
+            connector_id.as_str()
+        )))
+        .bearer_auth(TEST_ADMIN_BEARER_TOKEN)
+        .header("x-fcp-zone", "z:owner")
+        .send()
+        .await?;
+    let explain_status = explain_response.status();
+    let explain_body = explain_response.text().await?;
+    let explain_payload: Value = serde_json::from_str(&explain_body).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "state explain response should be JSON, got {explain_status}: {explain_body}: {error}"
+            ),
+        )
+    })?;
+    assert_eq!(
+        explain_status,
+        reqwest::StatusCode::OK,
+        "admitted HRW host {admitted_node} should expose canonical state after flush: {explain_payload}"
+    );
+    assert_eq!(explain_payload["source"], "host-canonical-state");
+    assert_eq!(explain_payload["canonical_state"]["root_present"], true);
+    assert_eq!(
+        explain_payload["canonical_state"]["root_object_id"],
+        seeded_state.root_object_id.to_string()
+    );
+    assert_eq!(
+        explain_payload["canonical_state"]["head_object_id"],
+        seeded_state.head_object_id.to_string()
+    );
+    assert_eq!(explain_payload["last_canonical_seq"], 0);
+    assert_eq!(
+        explain_payload["canonical_state"]["model"],
+        "singleton_writer"
     );
 
     Ok(())

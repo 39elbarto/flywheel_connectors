@@ -150,7 +150,7 @@ impl fmt::Debug for ObjectIdKey {
 }
 
 /// Typed device selector for placement policies (NORMATIVE).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceSelector {
     Tag(String),
     Class(String),
@@ -196,7 +196,7 @@ impl fmt::Display for MeshPlacementHint {
 }
 
 /// Object placement policy (NORMATIVE when used).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectPlacementPolicy {
     pub min_nodes: u8,
     pub max_node_fraction_bps: u16,
@@ -213,8 +213,7 @@ pub struct ObjectPlacementPolicy {
 }
 
 /// Universal object header (NORMATIVE).
-// TODO(review): This and other core types (Provenance) should derive PartialEq to avoid brittle serialization-based comparisons in the SDK.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectHeader {
     pub schema: SchemaId,
     pub zone_id: ZoneId,
@@ -252,13 +251,13 @@ impl fmt::Display for EvictionPolicy {
 pub type RetentionClass = EvictionPolicy;
 
 /// Node-local storage metadata (NOT content-addressed).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageMeta {
     pub retention: RetentionClass,
 }
 
 /// Stored object record (NORMATIVE).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredObject {
     pub object_id: ObjectId,
     pub header: ObjectHeader,

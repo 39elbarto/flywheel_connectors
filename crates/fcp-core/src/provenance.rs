@@ -383,7 +383,7 @@ pub struct ZoneCrossing {
 ///
 /// This is the authoritative source of trust metadata for any object
 /// flowing through the FCP mesh.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProvenanceRecord {
     /// Zone where the data originally entered the mesh
     pub origin_zone: ZoneId,

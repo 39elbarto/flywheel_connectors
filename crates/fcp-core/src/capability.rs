@@ -3413,7 +3413,7 @@ pub enum TaintLevel {
 /// A step in the provenance chain.
 ///
 /// Per FCP Specification Section 7.2.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProvenanceStep {
     /// Timestamp in milliseconds since epoch
     pub timestamp_ms: u64,
@@ -3439,7 +3439,7 @@ pub struct ProvenanceStep {
 /// - `taint`: Highest taint severity observed in the chain
 /// - `elevated`: Whether explicit elevation has been granted
 /// - `elevation_token`: Token proving elevation (if elevated)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provenance {
     /// The zone where the request/data originated
     pub origin_zone: ZoneId,

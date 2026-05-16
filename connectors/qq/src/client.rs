@@ -316,6 +316,7 @@ pub struct QqGatewayRuntime {
     heartbeat_sent_count: u64,
     heartbeat_ack_count: u64,
     reconnect_attempts: u32,
+    terminal_reconnect_failures: u64,
     known_reply_references: u64,
     unknown_reply_references: u64,
     accepted_events: u64,
@@ -343,6 +344,7 @@ impl QqGatewayRuntime {
             heartbeat_sent_count: 0,
             heartbeat_ack_count: 0,
             reconnect_attempts: 0,
+            terminal_reconnect_failures: 0,
             known_reply_references: 0,
             unknown_reply_references: 0,
             accepted_events: 0,
@@ -363,6 +365,7 @@ impl QqGatewayRuntime {
             heartbeat_ack_count: self.heartbeat_ack_count,
             reconnect_attempts: self.reconnect_attempts,
             max_reconnect_attempts: self.config.max_reconnect_attempts,
+            terminal_reconnect_failures: self.terminal_reconnect_failures,
             reconnect_backoff_ms: self.config.reconnect_backoff_ms,
             max_reconnect_backoff_ms: self.config.max_reconnect_backoff_ms,
             queue_depth: self.pending_events.len(),
@@ -467,6 +470,7 @@ impl QqGatewayRuntime {
         self.reconnect_attempts = self.reconnect_attempts.saturating_add(1);
         let (reason_code, action) = if self.reconnect_attempts > self.config.max_reconnect_attempts
         {
+            self.terminal_reconnect_failures = self.terminal_reconnect_failures.saturating_add(1);
             (
                 "reconnect_attempts_exhausted",
                 QQ_GATEWAY_ACTION_STOP_RECONNECT,
@@ -1364,9 +1368,9 @@ fn classify_interaction(
 
 fn extract_slash_command_name(text: &str) -> Option<String> {
     let command_text = text.trim_start().strip_prefix('/')?;
-    let token = command_text.split_whitespace().next()?;
+    let command_word = command_text.split_whitespace().next()?;
     let mut command_name = String::new();
-    for character in token.chars() {
+    for character in command_word.chars() {
         if !is_command_name_char(character)
             || command_name.len() >= QQ_GATEWAY_COMMAND_NAME_MAX_CHARS
         {
@@ -3454,6 +3458,7 @@ mod tests {
         assert_eq!(reconnect.lifecycle.reconnect_after_ms, Some(250));
         assert_eq!(reconnect.runtime.reconnect_attempts, 1);
         assert_eq!(reconnect.runtime.max_reconnect_attempts, 2);
+        assert_eq!(reconnect.runtime.terminal_reconnect_failures, 0);
         assert_eq!(reconnect.runtime.reconnect_backoff_ms, 250);
         assert_eq!(reconnect.runtime.max_reconnect_backoff_ms, 30_000);
         assert_eq!(
@@ -3497,6 +3502,7 @@ mod tests {
         assert_eq!(exhausted.lifecycle.action, QQ_GATEWAY_ACTION_STOP_RECONNECT);
         assert_eq!(exhausted.lifecycle.reconnect_after_ms, None);
         assert_eq!(exhausted.runtime.reconnect_attempts, 3);
+        assert_eq!(exhausted.runtime.terminal_reconnect_failures, 1);
 
         let hello = runtime
             .project_event(QqGatewayEvent {
@@ -3510,6 +3516,7 @@ mod tests {
         assert_eq!(hello.reason_code, "hello");
         assert_eq!(hello.lifecycle.action, QQ_GATEWAY_ACTION_RESUME);
         assert_eq!(hello.runtime.reconnect_attempts, 0);
+        assert_eq!(hello.runtime.terminal_reconnect_failures, 1);
         assert_eq!(
             hello.runtime.session_id.as_deref(),
             Some("session-after-reconnect")

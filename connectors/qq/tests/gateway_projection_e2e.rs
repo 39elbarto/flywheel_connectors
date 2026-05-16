@@ -163,6 +163,7 @@ fn redacted_runtime_snapshot(runtime: &Value) -> Value {
         "heartbeat_ack_count": u64_field(runtime, "heartbeat_ack_count"),
         "reconnect_attempts": u64_field(runtime, "reconnect_attempts"),
         "max_reconnect_attempts": u64_field(runtime, "max_reconnect_attempts"),
+        "terminal_reconnect_failures": u64_field(runtime, "terminal_reconnect_failures"),
         "reconnect_backoff_ms": u64_field(runtime, "reconnect_backoff_ms"),
         "max_reconnect_backoff_ms": u64_field(runtime, "max_reconnect_backoff_ms"),
         "queue_depth": u64_field(runtime, "queue_depth"),
@@ -1202,6 +1203,10 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     );
     assert_eq!(reconnect_exhausted["runtime"]["reconnect_attempts"], 2);
     assert_eq!(reconnect_exhausted["runtime"]["max_reconnect_attempts"], 1);
+    assert_eq!(
+        reconnect_exhausted["runtime"]["terminal_reconnect_failures"],
+        1
+    );
     assert_eq!(reconnect_exhausted["runtime"]["reconnect_backoff_ms"], 250);
     assert_eq!(
         reconnect_exhausted["runtime"]["max_reconnect_backoff_ms"],
@@ -1352,4 +1357,5 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert!(log_contents.contains("reconnect_requested"));
     assert!(log_contents.contains("invalid_session_resumable"));
     assert!(log_contents.contains("reconnect_attempts_exhausted"));
+    assert!(log_contents.contains("terminal_reconnect_failures"));
 }

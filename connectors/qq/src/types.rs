@@ -244,6 +244,7 @@ pub struct QqGatewayRuntimeSnapshot {
     pub heartbeat_ack_count: u64,
     pub reconnect_attempts: u32,
     pub max_reconnect_attempts: u32,
+    pub terminal_reconnect_failures: u64,
     pub reconnect_backoff_ms: u64,
     pub max_reconnect_backoff_ms: u64,
     pub queue_depth: usize,

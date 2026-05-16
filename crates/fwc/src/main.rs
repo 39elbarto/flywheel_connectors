@@ -9428,6 +9428,11 @@ fn mesh_live_availability_fact(status: &HostConnectorAdminStatus) -> Value {
         .as_ref()
         .and_then(|artifact| artifact.placement.as_ref())
         .is_some();
+    let mesh_placement_explanation = if placement_tracked {
+        "A placement policy was recorded with the artifact, but the host route does not yet expose live replica coverage telemetry for the mesh-inventory-placement cutover gate."
+    } else {
+        "No placement policy was recorded, and the host route does not expose live replica coverage telemetry for the mesh-inventory-placement cutover gate."
+    };
     let source_state = status.artifact.as_ref().map_or(Value::Null, |artifact| {
         Value::String(artifact_source_kind_tag(artifact.provenance.source_kind.clone()).to_owned())
     });
@@ -9438,6 +9443,15 @@ fn mesh_live_availability_fact(status: &HostConnectorAdminStatus) -> Value {
         "observed_state": status.observed_state,
         "artifact_recorded": status.artifact.is_some(),
         "placement_tracked": placement_tracked,
+        "mesh_placement": {
+            "policy_recorded": placement_tracked,
+            "replica_telemetry_available": false,
+            "has_mesh_replica": null,
+            "replica_count": null,
+            "cutover_gate_eligible": false,
+            "cutover_gate_id": "mesh-inventory-placement",
+            "explanation": mesh_placement_explanation,
+        },
         "source_state": source_state,
         "silent_fallback": false,
         "explanation": match status.observed_state {
@@ -36814,6 +36828,22 @@ deny_ptrace = true
         );
         assert_eq!(payload["availability_fact"]["state"], "available");
         assert_eq!(payload["availability_fact"]["silent_fallback"], false);
+        assert_eq!(
+            payload["availability_fact"]["mesh_placement"]["policy_recorded"],
+            true
+        );
+        assert_eq!(
+            payload["availability_fact"]["mesh_placement"]["replica_telemetry_available"],
+            false
+        );
+        assert_eq!(
+            payload["availability_fact"]["mesh_placement"]["cutover_gate_eligible"],
+            false
+        );
+        assert_eq!(
+            payload["availability_fact"]["mesh_placement"]["replica_count"],
+            Value::Null
+        );
         assert_eq!(payload["source_selection"]["source_kind"], "registry");
         assert_eq!(payload["source_selection"]["silent_fallback"], false);
         assert_eq!(
@@ -36880,6 +36910,18 @@ deny_ptrace = true
         assert_eq!(
             payload["offline_readiness"]["state"],
             "artifact-recorded-without-placement-policy"
+        );
+        assert_eq!(
+            payload["availability_fact"]["mesh_placement"]["policy_recorded"],
+            false
+        );
+        assert_eq!(
+            payload["availability_fact"]["mesh_placement"]["replica_telemetry_available"],
+            false
+        );
+        assert_eq!(
+            payload["availability_fact"]["mesh_placement"]["cutover_gate_eligible"],
+            false
         );
         assert_live_truth_resolution(
             &payload,

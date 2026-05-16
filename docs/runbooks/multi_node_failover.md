@@ -284,3 +284,9 @@ That deferred cutover gate is operator-facing: `fwc mesh explain-availability`
 must consume live per-zone mesh inventory and return `mesh-backed` truth for at
 least one placed connector. Keep the distinction explicit so local deterministic
 failover proof is not mistaken for the final `fwc` availability proof.
+
+Likewise, a live `fwc mesh explain-availability --host` payload can be
+`mesh-backed` when the host recorded artifact placement policy, but that is
+still not enough to green the `mesh-inventory-placement` cutover gate. That gate
+needs live replica telemetry: `placement.has_mesh_replica=true` and
+`placement.replica_count` meeting the target for the placed connector set.

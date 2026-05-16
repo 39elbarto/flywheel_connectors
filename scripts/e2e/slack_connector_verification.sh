@@ -6,8 +6,10 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-/tmp/fcp-slack-e2e/${RUN_ID}}"
 TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-slack-e2e-target}"
+PROOF_GOVERNOR="${PROOF_GOVERNOR:-1}"
+FWC_BIN="${FWC_BIN:-fwc}"
 
-mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
+mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence" "${OUT_ROOT}/proof"
 
 OVERALL_STATUS="ok"
 EXIT_CODE=0
@@ -42,6 +44,13 @@ classify_failure() {
   fi
 }
 
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required command: $1" >&2
+    return 1
+  fi
+}
+
 run_logged() {
   local name="$1"
   shift
@@ -70,10 +79,114 @@ run_step() {
 run_rch_cargo_step() {
   local name="$1"
   shift
+  if [[ "${PROOF_GOVERNOR}" == "1" ]]; then
+    run_governed_rch_cargo_step "${name}" "$@"
+    return
+  fi
+  run_legacy_rch_cargo_step "${name}" "$@"
+}
+
+run_legacy_rch_cargo_step() {
+  local name="$1"
+  shift
   run_step "${name}" env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
     CARGO_TARGET_DIR="${TARGET_DIR}" \
     CARGO_INCREMENTAL=0 \
     "$@"
+}
+
+json_array_from_args() {
+  if [[ $# -eq 0 ]]; then
+    printf '[]'
+    return
+  fi
+  printf '%s\n' "$@" | jq -R . | jq -s .
+}
+
+write_proof_corpus() {
+  local name="$1"
+  local corpus_path="$2"
+  shift 2
+  local claim_key="slack-connector-verifier-${name}"
+  local argv_json
+  argv_json="$(json_array_from_args "$@")"
+  jq -n \
+    --arg claim_key "${claim_key}" \
+    --arg purpose "Run Slack connector verifier step ${name} through the fail-closed rch proof governor." \
+    --argjson rerun_argv "${argv_json}" \
+    '{
+      schema: "fcp.proof-graph-indexer-corpus.v1",
+      verification_scripts: [
+        {
+          claim_key: $claim_key,
+          script_path: "scripts/e2e/slack_connector_verification.sh",
+          purpose: $purpose,
+          rerun_argv: $rerun_argv,
+          required_env_keys: [],
+          source: {
+            source_id: "slack.connector.verifier",
+            path: "scripts/e2e/slack_connector_verification.sh",
+            line: 1
+          }
+        }
+      ]
+    }' >"${corpus_path}"
+}
+
+governor_step_status() {
+  local classification="$1"
+  case "${classification}" in
+    accepted_remote_proof)
+      echo "passed"
+      ;;
+    infra_blocked|refused_local_fallback)
+      echo "infra_blocked"
+      ;;
+    remote_command_failed|not_proof|failed_closed|missing)
+      echo "failed"
+      ;;
+    *)
+      echo "failed"
+      ;;
+  esac
+}
+
+run_governed_rch_cargo_step() {
+  local name="$1"
+  shift
+  local corpus_path="${OUT_ROOT}/proof/${name}.corpus.json"
+  local proof_json="${OUT_ROOT}/proof/${name}.proof.json"
+  local proof_jsonl="${OUT_ROOT}/proof/${name}.rch_remote_proof.jsonl"
+  local log_path="${OUT_ROOT}/logs/${name}.log"
+  local claim_key="slack-connector-verifier-${name}"
+  local classification status
+
+  echo "[slack-verification] ${name}: fwc proof run ${claim_key} --execute" >&2
+  if ! require_cmd jq >"${log_path}" 2>&1; then
+    LAST_STEP_STATUS="infra_blocked"
+    promote_status infra_blocked
+    return
+  fi
+  if ! require_cmd "${FWC_BIN}" >>"${log_path}" 2>&1; then
+    LAST_STEP_STATUS="infra_blocked"
+    promote_status infra_blocked
+    return
+  fi
+
+  write_proof_corpus "${name}" "${corpus_path}" "$@" >>"${log_path}" 2>&1
+  (
+    cd "${REPO_ROOT}" || exit
+    "${FWC_BIN}" --json proof run "${claim_key}" --corpus "${corpus_path}" --execute
+  ) >"${proof_json}" 2>>"${log_path}"
+
+  cat "${proof_json}" >>"${log_path}"
+  classification="$(jq -r '.execution.rch_remote_proof.classification_label // "missing"' "${proof_json}" 2>>"${log_path}" || echo missing)"
+  jq -r '.execution.rch_remote_proof.jsonl_record // empty' "${proof_json}" >"${proof_jsonl}" 2>>"${log_path}" || true
+  status="$(governor_step_status "${classification}")"
+  if [[ "${status}" != "passed" ]]; then
+    promote_status "${status}"
+  fi
+  LAST_STEP_STATUS="${status}"
 }
 
 git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -136,6 +249,9 @@ cat >"${OUT_ROOT}/environment.json" <<EOF
   "artifact_root": "${OUT_ROOT}",
   "git_revision": "${git_revision}",
   "target_dir": "${TARGET_DIR}",
+  "proof_governor_enabled": "${PROOF_GOVERNOR}",
+  "proof_governor": "Cargo-backed verifier steps run through fwc proof run; accepted_remote_proof is the only passing rch proof classification. refused_local_fallback and infra_blocked keep the verifier non-green.",
+  "proof_artifacts": "${OUT_ROOT}/proof",
   "fixture_mode": "no-live-credential Slack Socket Mode/Web API loopback",
   "live_mode": "side-effect-gated live Slack smoke emits structured skips unless operator credentials and explicit write approval are provided",
   "redaction": "no Slack bearer token, app token, channel id, user id, team id, event id, thread timestamp, message text, or provider payload is emitted; evidence carries hashes, route classes, outcome enums, and skip reasons"
@@ -161,6 +277,8 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
     "loopback_stdout_jsonl": "${OUT_ROOT}/evidence/loopback_stdout.jsonl",
     "live_smoke_skip_jsonl": "${OUT_ROOT}/evidence/live_smoke_skip.jsonl",
     "live_smoke_skip_stdout_jsonl": "${OUT_ROOT}/evidence/live_smoke_skip_stdout.jsonl",
+    "proof_governor_json": "${OUT_ROOT}/proof/*.proof.json",
+    "proof_governor_jsonl": "${OUT_ROOT}/proof/*.rch_remote_proof.jsonl",
     "environment": "${OUT_ROOT}/environment.json"
   }
 }

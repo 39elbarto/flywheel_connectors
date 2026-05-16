@@ -828,6 +828,22 @@ Those tests cover transcript classification, blocked/local-fallback evidence,
 golden JSONL records, and the guard that local fallback must not invoke the
 Cargo payload.
 
+The first connector verifier wired to the governor is:
+
+```bash
+scripts/e2e/slack_connector_verification.sh
+```
+
+Its Cargo-backed steps are executed through `fwc proof run`, which in turn
+wraps Cargo with remote-required `rch` and emits per-step
+`*.rch_remote_proof.jsonl` records under the verifier's `proof/` artifact
+directory. A verifier step is green only when the governor classifies the row as
+`accepted_remote_proof`. `remote_command_failed` is a real code/test failure.
+`refused_local_fallback`, `infra_blocked`, `failed_closed`, `not_proof`, or a
+missing/malformed summary are not closeout evidence; keep the bead open and cite
+the blocker JSONL instead. Set `PROOF_GOVERNOR=0` only for legacy comparison
+runs, not for bead closeout.
+
 If you add scripted transcript or scenario runners, the replay instructions and playbooks should preserve the `rch exec -- ...` prefix for any cargo-backed step.
 
 ## Migration Guidance

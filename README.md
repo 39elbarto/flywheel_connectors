@@ -1473,6 +1473,15 @@ Template expansion failures, context/preset/bookmark activation drift, pinned-pr
 
 For operator and agent workflows, migration guidance, and evidence-bundle expectations, see [docs/FWC_Host_First_Truthfulness_Playbook.md](docs/FWC_Host_First_Truthfulness_Playbook.md). That playbook is intentionally transition-specific; the steady-state architectural target remains the mesh/object model described in `FCP_Specification_V3.md` and the surrounding mesh/data-plane crates.
 
+Connector verifier closeout must distinguish remote proof from infrastructure
+noise. `scripts/e2e/slack_connector_verification.sh` is the first verifier wired
+through the fail-closed `rch` proof governor: Cargo-backed steps emit
+`*.rch_remote_proof.jsonl` records under the verifier artifact `proof/`
+directory. Only `accepted_remote_proof` counts as green closeout evidence.
+`refused_local_fallback`, `infra_blocked`, `failed_closed`, `not_proof`, and
+missing or malformed `rch` summaries keep the bead open and should be cited as
+blocker evidence instead.
+
 ## Production Mesh Deployment Runbook
 
 This repository has a truthful deployment/runbook surface for the current

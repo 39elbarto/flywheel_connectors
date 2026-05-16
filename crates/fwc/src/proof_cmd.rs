@@ -3216,6 +3216,68 @@ related = []
         );
     }
 
+    #[test]
+    fn slack_connector_verifier_cargo_lane_plans_governed_remote_rch() {
+        let mut corpus = fixture_corpus();
+        corpus.verification_scripts = vec![VerificationScriptRecord {
+            claim_key: "slack-connector-verifier-live_smoke_skip_jsonl".to_owned(),
+            script_path: "scripts/e2e/slack_connector_verification.sh".to_owned(),
+            purpose:
+                "Run Slack connector live-smoke skip lane through the fail-closed rch governor."
+                    .to_owned(),
+            rerun_argv: vec![
+                "FCP_SLACK_E2E_GIT_REVISION=abc1234".to_owned(),
+                "SLACK_LIVE_E2E_ARTIFACT=/tmp/fcp-slack-e2e/live_smoke_skip.jsonl".to_owned(),
+                "cargo".to_owned(),
+                "test".to_owned(),
+                "-p".to_owned(),
+                "fcp-slack".to_owned(),
+                "--test".to_owned(),
+                "live_verification".to_owned(),
+                "slack_live_smoke_structured_skip_jsonl".to_owned(),
+                "--".to_owned(),
+                "--nocapture".to_owned(),
+            ],
+            required_env_keys: BTreeSet::new(),
+            source: source("scripts/e2e/slack_connector_verification.sh", 1),
+        }];
+        let file = write_corpus(&corpus);
+        let result = run(&ProofArgs {
+            command: ProofCommand::Run(ProofRunArgs {
+                target: "slack-connector-verifier-live_smoke_skip_jsonl".to_owned(),
+                corpus: corpus_args(file.path()),
+                execute: false,
+                max_output_bytes: DEFAULT_OUTPUT_PREVIEW_BYTES,
+            }),
+        })
+        .expect("plan slack verifier proof run");
+
+        assert!(result.success);
+        assert_eq!(result.payload["plan"]["requires_remote"], true);
+        assert!(
+            result.payload["plan"]["command_id"]
+                .as_str()
+                .expect("command id")
+                .contains("slack_connector_verification.sh")
+        );
+        let argv = result.payload["plan"]["argv"]
+            .as_array()
+            .expect("argv array")
+            .iter()
+            .map(|value| value.as_str().expect("argv string"))
+            .collect::<Vec<_>>();
+        assert!(argv.contains(&"RCH_REQUIRE_REMOTE=1"));
+        assert!(argv.contains(&"rch"));
+        assert!(argv.contains(&"cargo"));
+        assert!(argv.contains(&"fcp-slack"));
+        assert!(argv.contains(&"live_verification"));
+        assert!(argv.iter().any(|arg| {
+            arg.starts_with(
+                "CARGO_TARGET_DIR=/tmp/fwc-proof-claim-slack-connector-verifier-live-smoke",
+            )
+        }));
+    }
+
     fn remote_rch_plan() -> PlannedRerunCommand {
         PlannedRerunCommand {
             target: "claim:test-proof".to_owned(),

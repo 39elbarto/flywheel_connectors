@@ -1,6 +1,7 @@
 mod lease_e2e_support;
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use fcp_core::{ObjectIdKey, TailscaleNodeId, ZoneId};
@@ -43,8 +44,16 @@ impl HostFailoverReplay {
     }
 
     fn write_jsonl(&self, root: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let rendered = self.rendered_jsonl()?;
+        ensure_host_replay_redaction_safe(&rendered)?;
+
         fs::create_dir_all(root)?;
         let path = root.join(HOST_FAILOVER_REPLAY_FILE_NAME);
+        fs::write(&path, rendered)?;
+        Ok(path)
+    }
+
+    fn rendered_jsonl(&self) -> Result<String, serde_json::Error> {
         let lines = self
             .events
             .iter()
@@ -52,8 +61,7 @@ impl HostFailoverReplay {
             .collect::<Result<Vec<_>, _>>()?;
         let mut rendered = lines.join("\n");
         rendered.push('\n');
-        fs::write(&path, rendered)?;
-        Ok(path)
+        Ok(rendered)
     }
 }
 
@@ -87,6 +95,56 @@ fn assert_no_raw_node_labels(rendered: &str) {
             "host failover replay must not expose raw node label {raw_node}: {rendered}"
         );
     }
+}
+
+fn ensure_host_replay_redaction_safe(rendered: &str) -> io::Result<()> {
+    let forbidden_markers = [
+        "node-a",
+        "node-b",
+        "node-c",
+        "Bearer ",
+        "bearer ",
+        "cookie",
+        "private_signing_key",
+    ];
+    if forbidden_markers
+        .iter()
+        .any(|marker| rendered.contains(marker))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "host failover replay contains non-redacted material",
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn host_failover_replay_refuses_raw_node_labels_before_creating_artifacts()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tempdir = tempfile::tempdir()?;
+    let blocked_root = tempdir.path().join("blocked-host-replay");
+    let mut replay = HostFailoverReplay::default();
+    replay.record(
+        "bad_raw_node_label",
+        None,
+        json!({
+            "leaked_node": "node-a",
+        }),
+    );
+
+    let error = replay
+        .write_jsonl(&blocked_root)
+        .expect_err("raw node labels should fail host replay preflight");
+    assert!(
+        error.to_string().contains("non-redacted material"),
+        "host replay preflight error should be redaction-specific: {error}"
+    );
+    assert!(
+        !blocked_root.exists(),
+        "host replay writer should fail before creating artifact directories"
+    );
+    Ok(())
 }
 
 #[fcp_async_core::runtime::test(flavor = "multi_thread")]

@@ -2767,6 +2767,7 @@ impl MeshNode {
 
         for object in objects {
             Self::validate_fetched_object(plan, &requested_objects, &object)?;
+            self.validate_fetched_lease_object(&object, now_ms)?;
             let object_id = object.object_id;
             let is_connector_state_root =
                 object.header.schema == fcp_store::FcpStoreConnectorStateStore::root_schema_id();
@@ -2926,6 +2927,29 @@ impl MeshNode {
                 err
             ))
         })
+    }
+
+    fn validate_fetched_lease_object(
+        &self,
+        object: &StoredObject,
+        now_ms: u64,
+    ) -> Result<(), MeshNodeError> {
+        if object.header.schema != CoreLease::schema_id() {
+            return Ok(());
+        }
+
+        let lease: CoreLease =
+            CanonicalSerializer::deserialize(&object.body, &object.header.schema)?;
+        validate_core_lease(
+            &lease,
+            &lease.subject_object_id,
+            lease.zone_id(),
+            lease.purpose,
+            lease.lease_seq,
+            now_ms / 1000,
+            DEFAULT_LEASE_PUBLICATION_REQUIRED_QUORUM_SIGNATURES,
+        )?;
+        self.verify_lease_quorum_signatures(&lease)
     }
 
     fn validate_fetched_symbol(
@@ -3867,6 +3891,27 @@ mod tests {
         for (node_id, signing_key) in signers {
             node.register_peer_signing_key(NodeId::new(*node_id), signing_key.verifying_key());
         }
+    }
+
+    fn stored_lease_object(
+        lease: &fcp_prelude::Lease,
+        object_id_key: &ObjectIdKey,
+    ) -> (ObjectId, StoredObject) {
+        let body =
+            CanonicalSerializer::serialize(lease, &lease.header.schema).expect("serialize lease");
+        let object_id =
+            StoredObject::derive_id(&lease.header, &body, object_id_key).expect("derive lease id");
+        let stored = StoredObject {
+            object_id,
+            header: lease.header.clone(),
+            body,
+            storage: StorageMeta {
+                retention: EvictionPolicy::Lease {
+                    expires_at: lease.exp,
+                },
+            },
+        };
+        (object_id, stored)
     }
 
     fn test_object_symbol_meta(object_id: ObjectId, zone_id: &ZoneId) -> ObjectSymbolMeta {
@@ -4832,6 +4877,62 @@ mod tests {
     }
 
     #[test]
+    fn apply_gossip_fetch_payload_rejects_invalid_lease_quorum_signature_before_admission() {
+        let zone_id = ZoneId::work();
+        let subject_object_id = test_object_id("connector-state-forged-lease");
+        let object_id_key = ObjectIdKey::from_bytes([0x72; 32]);
+        let signer_a = Ed25519SigningKey::generate();
+        let signer_b = Ed25519SigningKey::generate();
+        let attacker = Ed25519SigningKey::generate();
+        let mut lease = test_core_lease(&zone_id, subject_object_id);
+        sign_lease_quorum(&mut lease, &[("node-1", &signer_a), ("node-2", &attacker)]);
+        let (lease_object_id, stored) = stored_lease_object(&lease, &object_id_key);
+
+        let mut receiver = test_node("node-receiver");
+        let issuer_peer = NodeId::new("node-issuer");
+        receiver.update_peer_state(
+            issuer_peer.clone(),
+            test_device_profile("node-issuer"),
+            HashSet::new(),
+            Vec::new(),
+            50_000,
+        );
+        receiver.update_peer_zones(&issuer_peer, zone_set(zone_id.clone()));
+        register_lease_signer_keys(
+            &mut receiver,
+            &[("node-1", &signer_a), ("node-2", &signer_b)],
+        );
+
+        let plan = GossipFetchPlan {
+            peer: TailscaleNodeId::new("node-issuer"),
+            zone_id,
+            object_ids: vec![lease_object_id],
+            symbols: Vec::new(),
+        };
+
+        let err = fcp_async_core::runtime::block_on_sync(async {
+            let err = receiver
+                .apply_gossip_fetch_payload(&plan, vec![stored], Vec::new(), 50_001)
+                .await
+                .expect_err("forged fetched lease must not be admitted");
+            assert!(
+                receiver.object_store().get(&lease_object_id).await.is_err(),
+                "forged lease object must not be stored before signature rejection"
+            );
+            err
+        })
+        .expect("runtime");
+
+        assert!(matches!(
+            err,
+            MeshNodeError::PeerSignatureInvalid {
+                peer,
+                message_kind: "lease quorum",
+            } if peer == "node-2"
+        ));
+    }
+
+    #[test]
     fn issued_signed_lease_gossips_fetches_and_validates_authority_object() {
         let zone_id = ZoneId::work();
         let subject_object_id = test_object_id("connector-state-lease-authority");
@@ -4892,6 +4993,10 @@ mod tests {
         let mut issuer = test_node(holder.as_str());
         register_lease_signer_keys(&mut issuer, &[("node-a", &signer_a), ("node-b", &signer_b)]);
         let mut receiver = test_node("node-receiver");
+        register_lease_signer_keys(
+            &mut receiver,
+            &[("node-a", &signer_a), ("node-b", &signer_b)],
+        );
         let receiver_peer = NodeId::new("node-receiver");
         let issuer_peer = NodeId::new(holder.as_str());
         issuer.update_peer_state(

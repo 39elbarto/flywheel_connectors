@@ -329,6 +329,12 @@ pub struct LeaseHandoff {
 }
 
 impl Lease {
+    /// Canonical schema identifier for durable lease authority objects.
+    #[must_use]
+    pub fn schema_id() -> SchemaId {
+        SchemaId::new("fcp.lease", "lease", semver::Version::new(1, 0, 0))
+    }
+
     /// Create a new lease.
     #[must_use]
     pub fn new(params: LeaseParams) -> Self {

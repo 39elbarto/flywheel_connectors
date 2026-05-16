@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::redacted_replay_bundle::assert_redaction_safe_str;
 use fcp_cbor::{CanonicalSerializer, SchemaId, SerializationError};
 use fcp_core::{ConnectorId, ObjectHeader, OperationReceipt, Provenance};
 use fcp_crypto::{CryptoError, Ed25519SigningKey, Ed25519VerifyingKey};
@@ -161,10 +162,7 @@ impl LocalReplayBundle {
 
     pub fn is_redaction_safe(&self) -> Result<bool, LocalMeshHarnessError> {
         let bundle = serde_json::to_string(self)?;
-        Ok(!bundle.contains("mesh-harness-node-")
-            && !bundle.contains("bearer")
-            && !bundle.contains("token")
-            && !bundle.contains("cookie"))
+        Ok(assert_redaction_safe_str("local_mesh_replay_bundle", &bundle).is_ok())
     }
 
     pub fn write_to_dir(

@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use fcp_cbor::{CanonicalSerializer, SchemaId};
 use fcp_testkit::local_mesh::{
@@ -54,10 +56,9 @@ fn local_mesh_replay_bundle_writes_documented_artifacts() -> Result<(), Box<dyn 
 {
     let mut harness = LocalMeshHarness::new_three_node(7)?;
     let outcome = harness.run_failover_scenario(LocalChaosMode::NetworkPartitionThenHeal)?;
-    let tempdir = tempfile::tempdir()?;
     let paths = outcome
         .replay_bundle
-        .write_to_dir(tempdir.path().join(&outcome.scenario_id))?;
+        .write_to_dir(replay_artifact_root(&outcome.scenario_id))?;
 
     assert!(paths.manifest.exists());
     assert!(paths.events.exists());
@@ -122,8 +123,7 @@ fn local_mesh_replay_bundle_refuses_unredacted_artifact_writes()
     let outcome = harness.run_failover_scenario(LocalChaosMode::KillLeaderMidWrite)?;
     let mut bundle = outcome.replay_bundle.clone();
     bundle.manifest.scenario_id = "mesh-harness-node-raw".to_owned();
-    let tempdir = tempfile::tempdir()?;
-    let unsafe_dir = tempdir.path().join("unsafe");
+    let unsafe_dir = replay_artifact_root("unsafe");
 
     assert!(matches!(
         bundle.write_to_dir(&unsafe_dir),
@@ -208,5 +208,15 @@ fn invalid_replay_artifact(message: impl Into<String>) -> Box<dyn std::error::Er
     Box::new(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
         message.into(),
+    ))
+}
+
+fn replay_artifact_root(label: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    std::env::temp_dir().join(format!(
+        "fcp-multi-node-failover-replay-{}-{nanos}-{label}",
+        std::process::id()
     ))
 }

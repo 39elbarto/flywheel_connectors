@@ -81,7 +81,8 @@ stream does not contain raw node IDs.
 
 ## Replay Bundle Layout
 
-`LocalReplayBundle::write_to_dir` writes this layout:
+`LocalReplayBundle::write_to_dir` runs the shared
+`redacted_replay_bundle` scan before writing and then emits this layout:
 
 ```text
 <replay-root>/

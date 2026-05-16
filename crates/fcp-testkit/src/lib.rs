@@ -68,6 +68,7 @@ pub mod mutation;
 pub mod mutation_kinds;
 pub mod provider_contract;
 pub mod readiness_helpers;
+pub mod redacted_replay_bundle;
 pub mod secret_taint;
 pub mod secretless_replay;
 pub mod session_script;

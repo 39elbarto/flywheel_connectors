@@ -277,3 +277,10 @@ This harness is the reusable deterministic substrate for the full A.4 proof.
 The full closeout should add a host-backed variant that exercises real
 `fcp-host` and `fcp-mesh` state transfer while preserving the same seed matrix,
 chaos modes, replay-bundle shape, and redaction checks.
+
+This local harness landing is not enough to unignore
+`v2_cutover_mechanism_fwc_mesh_explain_availability_returns_mesh_backed`.
+That deferred cutover gate is operator-facing: `fwc mesh explain-availability`
+must consume live per-zone mesh inventory and return `mesh-backed` truth for at
+least one placed connector. Keep the distinction explicit so local deterministic
+failover proof is not mistaken for the final `fwc` availability proof.

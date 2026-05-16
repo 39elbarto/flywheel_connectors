@@ -3,7 +3,9 @@
 use std::fs;
 
 use fcp_cbor::{CanonicalSerializer, SchemaId};
-use fcp_testkit::local_mesh::{LocalChaosMode, LocalMeshHarness, LocalNodeSnapshot};
+use fcp_testkit::local_mesh::{
+    LocalChaosMode, LocalMeshHarness, LocalMeshHarnessError, LocalNodeSnapshot,
+};
 use semver::Version;
 
 #[test]
@@ -118,5 +120,26 @@ fn local_mesh_replay_bundle_writes_documented_artifacts() -> Result<(), Box<dyn 
         }
     }
 
+    Ok(())
+}
+
+#[test]
+fn local_mesh_replay_bundle_refuses_unredacted_artifact_writes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut harness = LocalMeshHarness::new_three_node(7)?;
+    let outcome = harness.run_failover_scenario(LocalChaosMode::KillLeaderMidWrite)?;
+    let mut bundle = outcome.replay_bundle.clone();
+    bundle.manifest.scenario_id = "mesh-harness-node-raw".to_owned();
+    let tempdir = tempfile::tempdir()?;
+    let unsafe_dir = tempdir.path().join("unsafe");
+
+    assert!(matches!(
+        bundle.write_to_dir(&unsafe_dir),
+        Err(LocalMeshHarnessError::ReplayArtifactRedaction)
+    ));
+    assert!(
+        !unsafe_dir.exists(),
+        "redaction failure must happen before artifact directories are created"
+    );
     Ok(())
 }

@@ -163,6 +163,10 @@ impl LocalReplayBundle {
         &self,
         root: impl AsRef<Path>,
     ) -> Result<LocalReplayBundlePaths, LocalMeshHarnessError> {
+        if !self.is_redaction_safe()? {
+            return Err(LocalMeshHarnessError::ReplayArtifactRedaction);
+        }
+
         let root = root.as_ref();
         let manifest = root.join("manifest.json");
         let events = root.join("events.jsonl");
@@ -223,6 +227,8 @@ pub enum LocalMeshHarnessError {
     UnknownNode(String),
     #[error("failed to serialize deterministic harness state: {0}")]
     StateSerialization(#[from] serde_json::Error),
+    #[error("replay bundle failed redaction scan before artifact write")]
+    ReplayArtifactRedaction,
     #[error("failed to write replay bundle artifact: {0}")]
     ReplayArtifactIo(#[from] std::io::Error),
     #[error("failed to serialize replay snapshot as canonical CBOR: {0}")]

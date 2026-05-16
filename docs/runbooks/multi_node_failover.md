@@ -12,19 +12,19 @@ The focused CI lane is intentionally narrow and avoids the connector feature
 fan-out:
 
 ```bash
-TMPDIR=/Volumes/trj-data/tmp \
-CARGO_INCREMENTAL=0 \
-CARGO_TARGET_DIR=/Volumes/trj-data/tmp/fcp-hr0rr-a4-local-mesh-target \
-  rch exec -- cargo test -j 1 -p fcp-e2e --no-default-features --test multi_node_failover -- --nocapture
+rch exec -- env TMPDIR=/Volumes/trj-data/tmp \
+  CARGO_INCREMENTAL=0 \
+  CARGO_TARGET_DIR=/Volumes/trj-data/tmp/fcp-hr0rr-a4-local-mesh-target \
+  cargo test -j 1 -p fcp-e2e --no-default-features --test multi_node_failover -- --nocapture
 ```
 
 For the reusable testkit harness compile/lint proof:
 
 ```bash
-TMPDIR=/Volumes/trj-data/tmp \
-CARGO_INCREMENTAL=0 \
-CARGO_TARGET_DIR=/Volumes/trj-data/tmp/fcp-hr0rr-a4-local-mesh-target \
-  rch exec -- cargo clippy -j 1 -p fcp-testkit --lib --no-deps -- -D warnings
+rch exec -- env TMPDIR=/Volumes/trj-data/tmp \
+  CARGO_INCREMENTAL=0 \
+  CARGO_TARGET_DIR=/Volumes/trj-data/tmp/fcp-hr0rr-a4-local-mesh-target \
+  cargo clippy -j 1 -p fcp-testkit --lib --no-deps -- -D warnings
 ```
 
 ## Current Proof Surface

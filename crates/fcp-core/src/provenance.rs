@@ -290,7 +290,7 @@ impl FromIterator<TaintFlag> for TaintFlags {
 ///
 /// Any elevation or declassification must be reflected by appending a
 /// [`LabelAdjustment`] entry that references the authorizing [`ApprovalToken`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LabelAdjustment {
     /// Timestamp when the adjustment was made (Unix epoch ms)
     pub timestamp_ms: u64,
@@ -336,7 +336,7 @@ pub enum AdjustmentKind {
 ///
 /// Taint can ONLY be reduced by referencing a valid `SanitizerReceipt`
 /// that covers the inputs being sanitized.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaintReduction {
     /// Timestamp when the reduction was applied (Unix epoch ms)
     pub timestamp_ms: u64,
@@ -356,7 +356,7 @@ pub struct TaintReduction {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Record of a zone crossing (NORMATIVE).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZoneCrossing {
     /// Timestamp of the crossing (Unix epoch ms)
     pub timestamp_ms: u64,

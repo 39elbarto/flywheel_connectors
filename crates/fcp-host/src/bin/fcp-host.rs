@@ -2650,35 +2650,51 @@ async fn connector_lease_durable_evidence_from_config(
             return evidence;
         }
     };
+    evidence.lease_seq = Some(lease.lease_seq);
+    evidence.expiry_unix_secs = Some(lease.exp);
+    evidence.quorum_signers_count = Some(lease.quorum_signatures.len());
+    evidence.source = Some("canonical-fcp-store-lease-object");
+
     let expected_subject = singleton_writer_connector_lease_subject_id(connector_id, zone);
     if lease.subject_object_id != expected_subject {
-        evidence.warnings.push(format!(
-            "Durable lease object `{}` is for subject `{}`, expected singleton-writer subject `{expected_subject}`.",
-            head.lease_object_id, lease.subject_object_id
-        ));
+        evidence.mark_invalid_lease(
+            head.lease_object_id,
+            format!(
+                "subject mismatch: got `{}`, expected singleton-writer subject `{expected_subject}`",
+                lease.subject_object_id
+            ),
+        );
         return evidence;
     }
     if lease.header.zone_id != *zone {
-        evidence.warnings.push(format!(
-            "Durable lease object `{}` is for zone `{}`, expected `{}`.",
+        evidence.mark_invalid_lease(
             head.lease_object_id,
-            lease.header.zone_id.as_str(),
-            zone.as_str()
-        ));
+            format!(
+                "zone mismatch: got `{}`, expected `{}`",
+                lease.header.zone_id.as_str(),
+                zone.as_str()
+            ),
+        );
         return evidence;
     }
     if lease.purpose != CoreLeasePurpose::ConnectorStateWrite {
-        evidence.warnings.push(format!(
-            "Durable lease object `{}` has purpose `{:?}`, expected connector-state write.",
-            head.lease_object_id, lease.purpose
-        ));
+        evidence.mark_invalid_lease(
+            head.lease_object_id,
+            format!(
+                "purpose mismatch: got `{:?}`, expected connector-state write",
+                lease.purpose
+            ),
+        );
         return evidence;
     }
     if lease.lease_seq != head.lease_seq {
-        evidence.warnings.push(format!(
-            "Durable lease object `{}` has lease_seq {}, but canonical connector state head references lease_seq {}.",
-            head.lease_object_id, lease.lease_seq, head.lease_seq
-        ));
+        evidence.mark_invalid_lease(
+            head.lease_object_id,
+            format!(
+                "lease sequence mismatch: durable lease has lease_seq {}, but canonical connector state head references lease_seq {}",
+                lease.lease_seq, head.lease_seq
+            ),
+        );
         return evidence;
     }
 
@@ -2701,10 +2717,6 @@ async fn connector_lease_durable_evidence_from_config(
             ));
         }
     }
-    evidence.lease_seq = Some(lease.lease_seq);
-    evidence.expiry_unix_secs = Some(lease.exp);
-    evidence.quorum_signers_count = Some(lease.quorum_signatures.len());
-    evidence.source = Some("canonical-fcp-store-lease-object");
     evidence
 }
 
@@ -4678,6 +4690,17 @@ struct ConnectorLeaseDurableEvidence {
     validated_at_unix_secs: Option<u64>,
     source: Option<&'static str>,
     warnings: Vec<String>,
+}
+
+impl ConnectorLeaseDurableEvidence {
+    fn mark_invalid_lease(&mut self, lease_object_id: ObjectId, error: String) {
+        self.validation_status = Some("invalid");
+        self.validation_error = Some(error.clone());
+        self.validated_at_unix_secs = Some(current_unix_secs_u64());
+        self.warnings.push(format!(
+            "Durable lease object `{lease_object_id}` failed live lease validation: {error}"
+        ));
+    }
 }
 
 #[cfg(test)]

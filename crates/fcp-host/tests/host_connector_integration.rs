@@ -2180,11 +2180,6 @@ async fn seed_singleton_writer_connector_state_with_durable_lease_signers(
     holder: TailscaleNodeId,
     quorum_signers: &[&str],
 ) -> Result<SeededConnectorState, Box<dyn std::error::Error>> {
-    let object_store_dir = connector_state_canonical_object_store_dir(state_root, connector_id);
-    let object_store: Arc<dyn fcp_store::ObjectStore> =
-        Arc::new(fcp_store::DurableObjectStore::open(
-            fcp_store::DurableObjectStoreConfig::new(&object_store_dir),
-        )?);
     let subject_object_id =
         singleton_writer_connector_lease_subject_id_for_test(connector_id, zone_id);
     let lease = durable_core_lease_for_test(
@@ -2195,6 +2190,28 @@ async fn seed_singleton_writer_connector_state_with_durable_lease_signers(
         1_800_200_300,
         host_integration_signature_set(quorum_signers),
     );
+    seed_singleton_writer_connector_state_with_durable_core_lease(
+        state_root,
+        connector_id,
+        zone_id,
+        object_id_key,
+        lease,
+    )
+    .await
+}
+
+async fn seed_singleton_writer_connector_state_with_durable_core_lease(
+    state_root: &Path,
+    connector_id: &ConnectorId,
+    zone_id: &ZoneId,
+    object_id_key: ObjectIdKey,
+    lease: CoreLease,
+) -> Result<SeededConnectorState, Box<dyn std::error::Error>> {
+    let object_store_dir = connector_state_canonical_object_store_dir(state_root, connector_id);
+    let object_store: Arc<dyn fcp_store::ObjectStore> =
+        Arc::new(fcp_store::DurableObjectStore::open(
+            fcp_store::DurableObjectStoreConfig::new(&object_store_dir),
+        )?);
     let lease_expiry_unix_secs = lease.exp;
     let lease_object = stored_core_lease_for_test(&lease, &object_id_key);
     let lease_object_id = lease_object.object_id;
@@ -3125,6 +3142,154 @@ async fn fcp_host_binary_hrw_lease_status_reports_invalid_below_quorum_durable_l
             .as_str()
             .is_some_and(|warning| warning.contains("failed live lease validation"))),
         "operator status should retain the durable validation failure warning: {lease_status}"
+    );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_hrw_lease_status_reports_invalid_wrong_subject_durable_lease()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id =
+        ConnectorId::from_static("fcp.test.hrw-binary-wrong-subject-lease-status:utility:1.0.0");
+    let zone_id = ZoneId::work();
+    let state_dir = tempfile::tempdir()?;
+    let state_root = state_dir.path().join("managed-state");
+    let object_id_key = ObjectIdKey::from_bytes([0xD8; 32]);
+    let all_nodes = ["node-a", "node-b", "node-c"];
+    let eligible_nodes = all_nodes.join(",");
+    let eligible_node_ids = all_nodes
+        .iter()
+        .map(|node| TailscaleNodeId::new(*node))
+        .collect::<Vec<_>>();
+    let expected_subject =
+        singleton_writer_connector_lease_subject_id_for_test(&connector_id, &zone_id);
+    let wrong_subject = ObjectId::from_bytes([0xE1; 32]);
+    assert_ne!(wrong_subject, expected_subject);
+    let expected_holder =
+        fcp_mesh::planner::select_lease_holder(&zone_id, &expected_subject, &eligible_node_ids)
+            .expect("HRW holder should be selected");
+    let lease = durable_core_lease_for_test(
+        &zone_id,
+        wrong_subject,
+        expected_holder.clone(),
+        10,
+        1_800_200_300,
+        host_integration_signature_set(&["node-a", "node-b"]),
+    );
+    let seeded_state = seed_singleton_writer_connector_state_with_durable_core_lease(
+        &state_root,
+        &connector_id,
+        &zone_id,
+        object_id_key,
+        lease,
+    )
+    .await?;
+    let connector_config = singleton_writer_test_connector_config_with_state(
+        &connector_id,
+        "HRW Binary Wrong Subject Lease Status",
+        &state_root,
+        &object_id_key,
+    );
+    let mut admitted_host: Option<(String, HttpHostProcess)> = None;
+    let mut refusal_messages = Vec::new();
+
+    for local_node in all_nodes {
+        match HttpHostProcess::spawn_with_env(
+            vec![connector_config.clone()],
+            &[
+                ("FCP_HOST_HRW_LEASE_LOCAL_NODE", local_node),
+                ("FCP_HOST_HRW_LEASE_NODES", eligible_nodes.as_str()),
+                ("FCP_HOST_HRW_LEASE_CURRENT_SEQ", "10"),
+            ],
+        )
+        .await
+        {
+            Ok(host) => {
+                assert!(
+                    admitted_host.is_none(),
+                    "HRW admitted more than one singleton_writer host launch"
+                );
+                admitted_host = Some((local_node.to_string(), host));
+            }
+            Err(error) => refusal_messages.push((local_node.to_string(), error.to_string())),
+        }
+    }
+
+    assert!(
+        admitted_host.is_some(),
+        "HRW should admit one holder even when durable lease evidence has the wrong subject; refusals: {refusal_messages:?}"
+    );
+    assert_eq!(
+        refusal_messages.len(),
+        2,
+        "three-node HRW routing should refuse both non-holder launches"
+    );
+    let (admitted_node, host) = admitted_host.expect("one HRW host should be admitted");
+    assert_eq!(
+        admitted_node,
+        expected_holder.as_str(),
+        "real fcp-host launch should admit the HRW-selected holder"
+    );
+
+    let lease_status: Value = http_get_json(
+        host.client.clone(),
+        format!(
+            "{}/rpc/admin/connectors/{}/lease/status?zone=z%3Awork",
+            host.base_url,
+            connector_id.as_str()
+        ),
+    )
+    .await?;
+    assert_eq!(lease_status["source"], "host-hrw-routing");
+    assert_eq!(lease_status["local_is_holder"], true);
+    assert_eq!(
+        lease_status["lease_evidence_source"],
+        "canonical-fcp-store-lease-object"
+    );
+    assert_eq!(
+        lease_status["lease_object_id"],
+        seeded_state.lease_object_id.to_string()
+    );
+    assert_eq!(lease_status["fencing_token"], seeded_state.lease_seq);
+    assert_eq!(lease_status["durable_lease_seq"], seeded_state.lease_seq);
+    assert_eq!(lease_status["quorum_signers_count"], 2);
+    assert_eq!(lease_status["required_quorum_signers_count"], 2);
+    assert_eq!(lease_status["quorum_satisfied"], true);
+    assert_eq!(lease_status["durable_validation"]["status"], "invalid");
+    assert!(
+        lease_status["durable_validation"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("subject mismatch")),
+        "wrong-subject durable lease should expose validation error: {lease_status}"
+    );
+    assert!(
+        lease_status["durable_validation"]["validated_at_unix_secs"]
+            .as_u64()
+            .is_some()
+    );
+    assert_eq!(
+        lease_status["ranked_holders"]
+            .as_array()
+            .expect("lease status should include ranked holders")
+            .len(),
+        3
+    );
+    let warnings = lease_status
+        .get("warnings")
+        .and_then(Value::as_array)
+        .expect("lease status warnings should be an array");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|warning| warning.contains("failed live lease validation"))),
+        "operator status should warn on wrong-subject durable lease evidence: {lease_status}"
+    );
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|warning| warning.contains("subject mismatch"))),
+        "operator status should retain the subject mismatch reason: {lease_status}"
     );
 
     Ok(())

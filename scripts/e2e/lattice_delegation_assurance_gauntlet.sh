@@ -384,7 +384,11 @@ scan_jsonl_artifact() {
   for forbidden in \
     "authorization:" \
     "bearer" \
+    "agent:" \
+    "op:" \
+    "principal:" \
     "token=" \
+    "z:" \
     "access_token" \
     "refresh_token"; do
     if grep -Fqi "${forbidden}" "${path}"; then

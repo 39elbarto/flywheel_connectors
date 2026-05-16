@@ -361,6 +361,7 @@ append_materialized_artifact_hash() {
 
 scan_jsonl_artifact() {
   local path="$1"
+  local forbidden
   for forbidden in \
     "/Users/" \
     "/tmp/" \
@@ -373,13 +374,22 @@ scan_jsonl_artifact() {
     "preimage_bytes" \
     "raw_operation" \
     "raw_principal" \
-    "token=" \
-    "bearer" \
     "provider_body" \
     "reviewer_contact"; do
     if grep -Fq "${forbidden}" "${path}"; then
       fail_step "redaction_scan" "$(jq -cn --arg artifact "${path}" --arg forbidden "${forbidden}" \
         '{artifact_path:$artifact,forbidden:$forbidden,cleanup_result:"not_applicable"}')"
+    fi
+  done
+  for forbidden in \
+    "authorization:" \
+    "bearer" \
+    "token=" \
+    "access_token" \
+    "refresh_token"; do
+    if grep -Fqi "${forbidden}" "${path}"; then
+      fail_step "redaction_scan" "$(jq -cn --arg artifact "${path}" --arg forbidden "${forbidden}" \
+        '{artifact_path:$artifact,forbidden_case_insensitive:$forbidden,cleanup_result:"not_applicable"}')"
     fi
   done
 }

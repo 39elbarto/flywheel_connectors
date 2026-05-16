@@ -291,11 +291,11 @@ pub struct TailnetInvokeStructuredSkipInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct TailnetInvokeHarnessObservation {
-    /// Whether a Tailscale `LocalAPI` endpoint was configured for the run.
-    pub localapi_configured: bool,
-    /// Whether `LocalAPI` reported the local node connected to the tailnet.
+    /// Whether a live Tailscale status source was available for the run.
+    pub tailscale_status_available: bool,
+    /// Whether live Tailscale status reported the local node connected to the tailnet.
     pub tailscale_connected: bool,
-    /// Count of online peers visible from `LocalAPI`.
+    /// Count of online peers visible from live Tailscale status.
     pub online_peer_count: usize,
     /// Whether the runner can prove the requested route mode from live telemetry.
     pub route_telemetry_available: bool,
@@ -305,24 +305,24 @@ pub struct TailnetInvokeHarnessObservation {
     pub production_mesh_invoke_transport_available: bool,
     /// Redaction-safe detail explaining the production transport decision.
     pub production_mesh_invoke_transport_detail: String,
-    /// Redaction-safe detail from the `LocalAPI` probe.
-    pub localapi_detail: String,
+    /// Redaction-safe detail from the live Tailscale status probe.
+    pub tailscale_status_detail: String,
 }
 
 impl TailnetInvokeHarnessObservation {
-    /// Build a conservative observation for environments without `LocalAPI`.
+    /// Build a conservative observation for environments without live Tailscale status.
     #[must_use]
-    pub fn localapi_not_configured() -> Self {
+    pub fn tailscale_status_unavailable(detail: impl Into<String>) -> Self {
         Self {
-            localapi_configured: false,
+            tailscale_status_available: false,
             tailscale_connected: false,
             online_peer_count: 0,
             route_telemetry_available: false,
-            route_telemetry_detail: "LocalAPI status unavailable".to_string(),
+            route_telemetry_detail: "Tailscale status unavailable".to_string(),
             production_mesh_invoke_transport_available: false,
             production_mesh_invoke_transport_detail:
                 "no production tailnet invoke endpoint configured".to_string(),
-            localapi_detail: "set --localapi-url or FCP_TAILSCALE_LOCALAPI_URL".to_string(),
+            tailscale_status_detail: detail.into(),
         }
     }
 
@@ -339,9 +339,9 @@ impl TailnetInvokeHarnessObservation {
 
         vec![
             TailnetInvokePrerequisite::new(
-                "tailscale-localapi-url",
-                self.localapi_configured,
-                self.localapi_detail.clone(),
+                "tailscale-status-source",
+                self.tailscale_status_available,
+                self.tailscale_status_detail.clone(),
             ),
             TailnetInvokePrerequisite::new(
                 "tailscale-connected",
@@ -845,7 +845,7 @@ mod tests {
     #[test]
     fn harness_observation_builds_truthful_structured_skip() {
         let observation = TailnetInvokeHarnessObservation {
-            localapi_configured: true,
+            tailscale_status_available: true,
             tailscale_connected: true,
             online_peer_count: 1,
             route_telemetry_available: false,
@@ -853,7 +853,7 @@ mod tests {
             production_mesh_invoke_transport_available: false,
             production_mesh_invoke_transport_detail:
                 "no production tailnet invoke endpoint configured".to_string(),
-            localapi_detail: "backend_state=Running".to_string(),
+            tailscale_status_detail: "status_source=localapi,backend_state=Running".to_string(),
         };
 
         let record = observation.structured_skip_record(

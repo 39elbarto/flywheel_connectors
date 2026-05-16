@@ -288,10 +288,10 @@ cargo test -p fcp-e2e --no-default-features --test swarm_gauntlet_e2e swarm_stat
 
 `fcp-tailnet-invoke-evidence` emits the `tailnet-invoke-evidence/v1`
 JSONL contract for direct-LAN and DERP/fallback invoke proof attempts. The
-runner probes configured Tailscale LocalAPI state, records online-peer and route
+runner probes live Tailscale status, records online-peer and route
 prerequisites, and can POST a caller-supplied `InvokeRequest` JSON body to a
 tailnet-reachable `fcp-host` `/rpc/invoke` endpoint. It emits `real_transport`
-records only when the invoke succeeds and LocalAPI route telemetry proves the
+records only when the invoke succeeds and live route telemetry proves the
 requested direct-LAN or DERP/fallback path; otherwise it emits a structured skip.
 The fully automatic two-node `fcp-mesh` / `fcp-tailscale` transport harness is
 still pending.
@@ -307,7 +307,8 @@ URLs, raw tailnet hostnames, and local user paths before JSONL serialization.
 cargo run -p fcp-host --bin fcp-tailnet-invoke-evidence -- --route direct-lan
 ```
 
-Operators with an HTTP-exposed Tailscale LocalAPI can pass
+By default the runner reads live telemetry from `tailscale status --json`.
+Operators with an HTTP-exposed Tailscale LocalAPI can instead pass
 `--localapi-url <url>` or set `FCP_TAILSCALE_LOCALAPI_URL`; missing
 prerequisites remain machine-readable in `missing_prerequisites` and the full
 redacted `prerequisites` list. If a configured real invoke probe runs but cannot
@@ -322,8 +323,8 @@ and one of `--invoke-request-json <json>` or `--invoke-request-file <path>`.
 The invoke URL must be an explicit tailnet-class `http`/`https` endpoint at
 `/rpc/invoke`: a MagicDNS `.ts.net` host, `.tailnet.` host, or tailnet IP. This
 prevents a public or localhost HTTP endpoint from combining with unrelated
-LocalAPI route telemetry to produce misleading `real_transport` evidence.
-LocalAPI route telemetry is also scoped to the responder peer identified by the
+Tailscale route telemetry to produce misleading `real_transport` evidence.
+Route telemetry is also scoped to the responder peer identified by the
 invoke URL host/IP or `--responder-node-id`; direct/DERP evidence from a
 different active peer does not satisfy the route prerequisite. Use
 `--invoke-attempts <n>` to collect multiple samples for percentile output.

@@ -145,6 +145,8 @@ impl QqAccessPolicyMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct QqInboundPolicyConfig {
+    pub channel_policy: QqAccessPolicyMode,
+    pub channel_allow_from: Vec<String>,
     pub dm_policy: QqAccessPolicyMode,
     pub dm_allow_from: Vec<String>,
     pub group_policy: QqAccessPolicyMode,
@@ -157,6 +159,8 @@ pub struct QqInboundPolicyConfig {
 impl Default for QqInboundPolicyConfig {
     fn default() -> Self {
         Self {
+            channel_policy: QqAccessPolicyMode::Open,
+            channel_allow_from: Vec::new(),
             dm_policy: QqAccessPolicyMode::Open,
             dm_allow_from: Vec::new(),
             group_policy: QqAccessPolicyMode::Open,
@@ -171,6 +175,7 @@ impl Default for QqInboundPolicyConfig {
 impl QqInboundPolicyConfig {
     #[must_use]
     pub fn normalized(mut self) -> Self {
+        normalize_string_vec(&mut self.channel_allow_from);
         normalize_string_vec(&mut self.dm_allow_from);
         normalize_string_vec(&mut self.group_allow_from);
         trim_optional_string(&mut self.bot_user_id);

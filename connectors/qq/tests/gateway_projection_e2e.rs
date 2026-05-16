@@ -614,6 +614,91 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         &missing_reply_target,
     );
 
+    let channel_policy_instance_id = InstanceId::new();
+    let mut channel_policy_connector = QqConnector::new();
+    channel_policy_connector
+        .configure(json!({
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999",
+            "app_id": "qq-app",
+            "client_secret": "test-secret",
+            "gateway": {
+                "enabled": true,
+                "policy": {
+                    "channel_policy": "allowlist",
+                    "channel_allow_from": ["channel-allowed"],
+                    "group_require_mention": false
+                }
+            }
+        }))
+        .await
+        .expect("configure channel policy QQ connector");
+    channel_policy_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            channel_policy_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake channel policy QQ connector");
+    let channel_denied = invoke_projection(
+        &channel_policy_connector,
+        &signing_key,
+        &channel_policy_instance_id,
+        "qq-gateway-channel-denied",
+        json!({
+            "op": 0,
+            "s": 1,
+            "t": "MESSAGE_CREATE",
+            "id": "evt-channel-denied",
+            "d": {
+                "id": "msg-channel-denied",
+                "channel_id": "channel-denied",
+                "guild_id": "guild-denied",
+                "author": {"id": "sender-denied"},
+                "content": "channel allowlist should deny"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(channel_denied["accepted"], false);
+    assert_eq!(channel_denied["reason_code"], "channel_not_allowed");
+    assert_eq!(
+        channel_denied["policy"]["reason_code"],
+        "channel_not_allowed"
+    );
+    assert_eq!(channel_denied["runtime"]["accepted_events"], 0);
+    assert_eq!(channel_denied["runtime"]["queue_depth"], 0);
+    log_projection_step(&mut logs, "channel_policy_denied", "ok", &channel_denied);
+
+    let channel_allowed = invoke_projection(
+        &channel_policy_connector,
+        &signing_key,
+        &channel_policy_instance_id,
+        "qq-gateway-channel-allowed",
+        json!({
+            "op": 0,
+            "s": 2,
+            "t": "AT_MESSAGE_CREATE",
+            "id": "evt-channel-allowed",
+            "d": {
+                "id": "msg-channel-allowed",
+                "channel_id": "channel-allowed",
+                "guild_id": "guild-denied",
+                "author": {"id": "sender-denied"},
+                "content": "channel allowlist should authorize"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(channel_allowed["accepted"], true);
+    assert_eq!(channel_allowed["topic"], "qq.message.authorized");
+    assert_eq!(channel_allowed["policy"]["reason_code"], "channel_allowed");
+    assert_eq!(channel_allowed["policy"]["target_id"], "channel-allowed");
+    assert_eq!(channel_allowed["policy"]["mentioned_bot"], true);
+    assert_eq!(channel_allowed["runtime"]["accepted_events"], 1);
+    assert_eq!(channel_allowed["runtime"]["queue_depth"], 1);
+    log_projection_step(&mut logs, "channel_policy_allowed", "ok", &channel_allowed);
+
     let hello = invoke_projection(
         &connector,
         &signing_key,

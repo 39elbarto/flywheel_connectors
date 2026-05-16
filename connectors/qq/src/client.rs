@@ -827,14 +827,34 @@ fn evaluate_group_policy(
 
 fn evaluate_channel_policy(
     event: &NormalizedQqEvent,
-    _policy: &QqInboundPolicyConfig,
+    policy: &QqInboundPolicyConfig,
 ) -> QqInboundPolicyDecision {
+    let sender_id = event.sender_id.clone();
+    let channel_id = event.channel_id.clone();
+    let guild_id = event.guild_id.clone();
+    let channel_or_sender_allowed =
+        channel_id.as_deref().is_some_and(|id| {
+            mode_allows(policy.channel_policy, Some(id), &policy.channel_allow_from)
+        }) || guild_id.as_deref().is_some_and(|id| {
+            mode_allows(policy.channel_policy, Some(id), &policy.channel_allow_from)
+        }) || sender_id.as_deref().is_some_and(|id| {
+            mode_allows(policy.channel_policy, Some(id), &policy.channel_allow_from)
+        });
+    let allowed = match policy.channel_policy {
+        QqAccessPolicyMode::Open => true,
+        QqAccessPolicyMode::Allowlist => channel_or_sender_allowed,
+        QqAccessPolicyMode::Disabled => false,
+    };
     QqInboundPolicyDecision {
-        allowed: true,
-        reason_code: "channel_allowed",
+        allowed,
+        reason_code: if allowed {
+            "channel_allowed"
+        } else {
+            denied_reason(policy.channel_policy, "channel")
+        },
         routing: event.routing,
-        sender_id: event.sender_id.clone(),
-        target_id: event.channel_id.clone(),
+        sender_id,
+        target_id: channel_id,
         mentioned_bot: event.event_type == "AT_MESSAGE_CREATE",
     }
 }
@@ -851,8 +871,10 @@ fn mode_allows(mode: QqAccessPolicyMode, candidate: Option<&str>, allowlist: &[S
 
 fn denied_reason(mode: QqAccessPolicyMode, prefix: &'static str) -> &'static str {
     match (mode, prefix) {
+        (QqAccessPolicyMode::Disabled, "channel") => "channel_disabled",
         (QqAccessPolicyMode::Disabled, "c2c") => "c2c_disabled",
         (QqAccessPolicyMode::Disabled, "group") => "group_disabled",
+        (QqAccessPolicyMode::Allowlist, "channel") => "channel_not_allowed",
         (QqAccessPolicyMode::Allowlist, "c2c") => "c2c_sender_not_allowed",
         (QqAccessPolicyMode::Allowlist, "group") => "group_not_allowed",
         _ => "policy_denied",
@@ -2339,6 +2361,123 @@ mod tests {
             .unwrap();
         assert!(!overflow.accepted);
         assert_eq!(overflow.reason_code, "queue_full");
+    }
+
+    #[test]
+    fn gateway_runtime_enforces_channel_allowlist_policy() {
+        let mut config = QqGatewayRuntimeConfig {
+            enabled: true,
+            max_queue_depth: 4,
+            ..QqGatewayRuntimeConfig::default()
+        };
+        config.policy.channel_policy = QqAccessPolicyMode::Allowlist;
+        config.policy.channel_allow_from = vec!["channel-allowed".into(), "guild-allowed".into()];
+        let mut runtime = QqGatewayRuntime::new(config);
+
+        let denied = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some("MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-channel-denied",
+                    "content": "channel should be denied",
+                    "channel_id": "channel-denied",
+                    "guild_id": "guild-denied",
+                    "author": {"id": "sender-denied"}
+                })),
+                id: Some("evt-channel-denied".into()),
+            })
+            .unwrap();
+        assert!(!denied.accepted);
+        assert_eq!(denied.reason_code, "channel_not_allowed");
+        assert_eq!(
+            denied.policy.as_ref().map(|policy| policy.reason_code),
+            Some("channel_not_allowed")
+        );
+        assert_eq!(denied.runtime.accepted_events, 0);
+        assert_eq!(denied.runtime.queue_depth, 0);
+
+        let allowed_by_channel = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(2),
+                t: Some("MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-channel-allowed",
+                    "content": "channel should be allowed",
+                    "channel_id": "channel-allowed",
+                    "guild_id": "guild-denied",
+                    "author": {"id": "sender-denied"}
+                })),
+                id: Some("evt-channel-allowed".into()),
+            })
+            .unwrap();
+        assert!(allowed_by_channel.accepted);
+        assert_eq!(
+            allowed_by_channel
+                .policy
+                .as_ref()
+                .map(|policy| policy.reason_code),
+            Some("channel_allowed")
+        );
+        assert_eq!(
+            allowed_by_channel
+                .policy
+                .as_ref()
+                .and_then(|policy| policy.target_id.as_deref()),
+            Some("channel-allowed")
+        );
+
+        let allowed_by_guild = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(3),
+                t: Some("MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-guild-allowed",
+                    "content": "guild should be allowed",
+                    "channel_id": "channel-other",
+                    "guild_id": "guild-allowed",
+                    "author": {"id": "sender-denied"}
+                })),
+                id: Some("evt-guild-allowed".into()),
+            })
+            .unwrap();
+        assert!(allowed_by_guild.accepted);
+        assert_eq!(allowed_by_guild.reason_code, "accepted");
+    }
+
+    #[test]
+    fn gateway_runtime_enforces_channel_disabled_policy() {
+        let mut disabled_config = QqGatewayRuntimeConfig {
+            enabled: true,
+            max_queue_depth: 4,
+            ..QqGatewayRuntimeConfig::default()
+        };
+        disabled_config.policy.channel_policy = QqAccessPolicyMode::Disabled;
+        let mut disabled_runtime = QqGatewayRuntime::new(disabled_config);
+        let disabled = disabled_runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some("AT_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-channel-disabled",
+                    "content": "bot was mentioned but channel policy is disabled",
+                    "channel_id": "channel-allowed",
+                    "guild_id": "guild-allowed",
+                    "author": {"id": "sender-allowed"}
+                })),
+                id: Some("evt-channel-disabled".into()),
+            })
+            .unwrap();
+        assert!(!disabled.accepted);
+        assert_eq!(disabled.reason_code, "channel_disabled");
+        assert_eq!(
+            disabled.policy.as_ref().map(|policy| policy.mentioned_bot),
+            Some(true)
+        );
     }
 
     #[test]

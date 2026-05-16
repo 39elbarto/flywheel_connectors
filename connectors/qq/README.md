@@ -113,6 +113,8 @@ This slice is intentionally closer to "outbound bot message dispatch plus connec
     "dedupe_window_size": 1024,
     "max_queue_depth": 128,
     "policy": {
+      "channel_policy": "open",
+      "channel_allow_from": [],
       "dm_policy": "open",
       "dm_allow_from": [],
       "group_policy": "allowlist",
@@ -126,6 +128,7 @@ This slice is intentionally closer to "outbound bot message dispatch plus connec
 ```
 
 The projection operation does not log `client_secret`, access tokens, or raw transport credentials. It returns the normalized message payload already present in the incoming gateway frame, a policy decision, a runtime snapshot with counters and bounded state sizes, and a lifecycle directive that tells the host-owned socket loop which next action is expected without handing socket ownership to the connector. Accepted events are queued in memory until the host calls `qq.gateway.drain_events`; the drain response includes `drained_count`, `remaining_count`, queued authorized event records, and a fresh runtime snapshot. The snapshot also exposes redaction-safe reply-reference counters (`reply_reference_count`, `max_reply_references`, `known_reply_references`, and `unknown_reply_references`) so host fan-out can prove whether accepted reply events targeted messages the gateway had already authorized without surfacing raw QQ message IDs. The optional drain `limit` is bounded to `1..=10000`; omitting it drains the available queue.
+Channel gateway events apply `policy.channel_policy` before fan-out. `allowlist` may name a `channel_id`, `guild_id`, or sender id; `disabled` drops channel events with `channel_disabled`.
 When `policy.group_require_mention` is enabled, gateway projection treats `GROUP_AT_MESSAGE_CREATE` as an explicit bot mention and also recognizes the configured `bot_user_id` in message text or structured raw mention arrays such as `mentions`, `message`, `message_segments`, `segments`, and `content_segments`.
 When `policy.max_attachment_bytes` is set, gateway projection denies message events whose declared attachment byte total exceeds the cap or whose attachment size metadata is missing.
 When `gateway.enabled` is false, `qq.gateway.project_event` fails closed with `gateway_disabled` and does not update session, sequence, heartbeat, policy, or queue state.

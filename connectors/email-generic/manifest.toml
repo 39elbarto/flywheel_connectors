@@ -147,6 +147,43 @@ common_mistakes = [
 examples = ['{"mailbox":"INBOX","query":"FROM \"alerts@example.com\" SINCE 01-May-2026"}']
 related = ["list_mailboxes", "health"]
 
+[provides.operations.poll_inbound_once]
+summary = "Poll unseen inbound messages once"
+capability = "email_generic.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+input_schema = { type = "object", required = ["mailbox"], additionalProperties = false, properties = { mailbox = { type = "string", minLength = 1 }, seen_uids = { type = "array", items = { type = "string", minLength = 1 } } } }
+output_schema = { type = "object", required = ["mailbox", "fetched_count", "accepted_count", "dropped_count", "seen_uids", "messages"], additionalProperties = false, properties = { mailbox = { type = "string", minLength = 1 }, fetched_count = { type = "integer", minimum = 0 }, accepted_count = { type = "integer", minimum = 0 }, dropped_count = { type = "integer", minimum = 0 }, seen_uids = { type = "array", items = { type = "string", minLength = 1 } }, messages = { type = "array", items = { type = "object", required = ["uid", "decision", "tainted", "text", "attachments", "thread"], additionalProperties = false, properties = { uid = { type = "string", minLength = 1 }, decision = { type = "string", enum = ["accept", "drop_automated", "drop_sender_not_allowed"] }, tainted = { type = "boolean" }, text = { anyOf = [{ type = "object", required = ["text", "original_chars", "truncated"], additionalProperties = false, properties = { text = { type = "string" }, original_chars = { type = "integer", minimum = 0 }, truncated = { type = "boolean" } } }, { type = "null" }] }, attachments = { type = "array", items = { type = "object", required = ["filename", "media_type", "size_bytes", "class", "exposed", "reason"], additionalProperties = false, properties = { filename = { type = "string" }, media_type = { type = "string" }, size_bytes = { type = "integer", minimum = 0 }, class = { type = "string", enum = ["image", "document"] }, exposed = { type = "boolean" }, reason = { anyOf = [{ type = "string" }, { type = "null" }] } } } }, thread = { anyOf = [{ type = "object", required = ["subject", "message_id", "in_reply_to", "references", "reply_subject"], additionalProperties = false, properties = { subject = { type = "string" }, message_id = { anyOf = [{ type = "string" }, { type = "null" }] }, in_reply_to = { anyOf = [{ type = "string" }, { type = "null" }] }, references = { anyOf = [{ type = "string" }, { type = "null" }] }, reply_subject = { type = "string" } } }, { type = "null" }] } } } } } }
+
+[provides.operations.poll_inbound_once.network_constraints]
+host_allow = ["${email_imap_host}"]
+port_allow = [143, 993]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = true
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations.poll_inbound_once.ai_hints]
+when_to_use = "Use this to perform one bounded inbound mailbox check without starting a subscription; pass returned seen_uids into the next call to suppress duplicates."
+common_mistakes = [
+    "Treating this operation as a durable subscription or replay buffer; it is a one-shot IMAP read.",
+    "Discarding returned seen_uids before the next poll, which can repeat previews for already-observed messages.",
+    "Logging returned text, sender-derived thread data, or message IDs in shared evidence without redaction.",
+]
+examples = ['{"mailbox":"INBOX","seen_uids":["101","102"]}']
+related = ["search_messages", "health"]
+
 [provides.operations.send_message]
 summary = "Send an email through SMTP"
 capability = "email_generic.write"

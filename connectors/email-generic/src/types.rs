@@ -365,6 +365,11 @@ impl EmailSeenUidCache {
         self.seen.contains(uid)
     }
 
+    #[must_use]
+    pub fn uids(&self) -> Vec<String> {
+        self.seen.iter().cloned().collect()
+    }
+
     pub fn observe(&mut self, uid: impl Into<String>) -> bool {
         let uid = uid.into();
         if self.seen.contains(&uid) {

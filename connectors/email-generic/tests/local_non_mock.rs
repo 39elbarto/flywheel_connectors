@@ -33,6 +33,7 @@ const BEAD_ID: &str = "flywheel_connectors-bky21.3.6.16";
 const ACCEPTANCE_SUITE_CLASS: &str = "local_non_mock";
 const OP_LIST_MAILBOXES: &str = "email_generic.list_mailboxes";
 const OP_SEARCH_MESSAGES: &str = "email_generic.search_messages";
+const OP_POLL_INBOUND_ONCE: &str = "email_generic.poll_inbound_once";
 const OP_SEND_MESSAGE: &str = "email_generic.send_message";
 const CAP_READ: &str = "email_generic.read";
 const CAP_WRITE: &str = "email_generic.write";
@@ -41,7 +42,7 @@ const LOOPBACK_AUTH_VALUE: &str = "loopback-auth-marker";
 
 #[fcp_async_core::runtime::test]
 async fn local_non_mock_invokes_imap_read_and_smtp_write_paths() {
-    let imap = ImapFixture::start(2);
+    let imap = ImapFixture::start(3);
     let smtp = SmtpFixture::start();
     let (mut connector, signing_key) = setup_connector(imap.port(), smtp.port()).await;
 
@@ -78,6 +79,39 @@ async fn local_non_mock_invokes_imap_read_and_smtp_write_paths() {
     assert_eq!(search_result["mailbox"], "INBOX");
     assert_eq!(search_result["query"], "deploy");
     assert_eq!(search_result["uids"], json!([2, 5, 8]));
+
+    let poll = connector
+        .invoke(invoke_request(
+            &connector,
+            &signing_key,
+            CAP_READ,
+            OP_POLL_INBOUND_ONCE,
+            json!({"mailbox": "Alerts"}),
+            "email-generic-poll-inbound-once",
+        ))
+        .await
+        .expect("poll inbound once should invoke through connector");
+    assert_eq!(poll.status, InvokeStatus::Ok);
+    let poll_result = poll.result.as_ref().expect("poll result");
+    assert_eq!(poll_result["mailbox"], "Alerts");
+    assert_eq!(poll_result["fetched_count"], 3);
+    assert_eq!(poll_result["accepted_count"], 1);
+    assert_eq!(poll_result["dropped_count"], 2);
+    assert_eq!(poll_result["seen_uids"], json!(["11", "12", "13"]));
+    let messages = poll_result["messages"].as_array().expect("poll messages");
+    assert_eq!(messages[0]["uid"], "11");
+    assert_eq!(messages[0]["decision"], "accept");
+    assert_eq!(messages[0]["thread"]["reply_subject"], "Re: Deploy ready");
+    assert_eq!(messages[0]["attachments"][0]["filename"], "plan.pdf");
+    assert_eq!(messages[0]["attachments"][0]["exposed"], false);
+    assert_eq!(messages[1]["decision"], "drop_sender_not_allowed");
+    assert_eq!(messages[2]["decision"], "drop_automated");
+    assert!(
+        !serde_json::to_string(poll_result)
+            .expect("poll result JSON")
+            .contains(LOOPBACK_AUTH_VALUE),
+        "poll result must not leak credentials"
+    );
 
     let sent = connector
         .invoke(invoke_request(
@@ -151,7 +185,15 @@ async fn local_non_mock_invokes_imap_read_and_smtp_write_paths() {
             "imap": {
                 "commands_seen": ["LOGIN", "LIST", "SELECT", "UID SEARCH", "LOGOUT"],
                 "mailboxes": ["INBOX", "Archive"],
-                "uids": [2, 5, 8]
+                "uids": [2, 5, 8],
+                "inbound_poll_once": {
+                    "mailbox_hash": hash_id("Alerts"),
+                    "fetched_count": 3,
+                    "accepted_count": 1,
+                    "dropped_count": 2,
+                    "seen_uid_count": 3,
+                    "attachment_bytes_exposed": false
+                }
             },
             "smtp": {
                 "commands_seen": ["EHLO", "AUTH", "MAIL FROM", "RCPT TO", "DATA"],
@@ -171,7 +213,7 @@ async fn local_non_mock_invokes_imap_read_and_smtp_write_paths() {
         },
         "cleanup": {
             "connector_shutdown": true,
-            "imap_fixture_connections_joined": 2,
+            "imap_fixture_connections_joined": 3,
             "smtp_fixture_joined": true
         },
         "result": "passed"
@@ -263,7 +305,13 @@ fn config_json(imap_port: u16, smtp_port: u16) -> Value {
             "from_address": LOOPBACK_ACCOUNT,
             "starttls": false
         },
-        "request_timeout_ms": 2_000
+        "request_timeout_ms": 2_000,
+        "monitor_policy": {
+            "allowed_senders": ["human@example.com"],
+            "allow_attachments": false,
+            "seen_uid_cap": 8,
+            "max_body_chars": 128
+        }
     })
 }
 
@@ -419,6 +467,21 @@ fn handle_imap(mut stream: TcpStream, commands: &Arc<Mutex<Vec<String>>>) {
         } else if command.contains("UID SEARCH TEXT") {
             write_response(&mut stream, "* SEARCH 2 5 8");
             write_response(&mut stream, &format!("{tag} OK SEARCH completed"));
+        } else if command.contains("UID SEARCH UNSEEN") {
+            write_response(&mut stream, "* SEARCH 11 12 13");
+            write_response(&mut stream, &format!("{tag} OK SEARCH completed"));
+        } else if command.contains("UID FETCH") {
+            let uid = command
+                .split_whitespace()
+                .find(|part| part.chars().all(|ch| ch.is_ascii_digit()))
+                .unwrap_or("11");
+            let raw = inbound_message(uid);
+            write_response(&mut stream, &format!("* 1 FETCH (RFC822 {{{}}}", raw.len()));
+            stream
+                .write_all(raw.as_bytes())
+                .expect("write IMAP RFC822 literal");
+            write_response(&mut stream, ")");
+            write_response(&mut stream, &format!("{tag} OK FETCH completed"));
         } else if command.contains("LOGOUT") {
             write_response(&mut stream, "* BYE fixture closing");
             write_response(&mut stream, &format!("{tag} OK LOGOUT completed"));
@@ -426,6 +489,47 @@ fn handle_imap(mut stream: TcpStream, commands: &Arc<Mutex<Vec<String>>>) {
         } else {
             write_response(&mut stream, &format!("{tag} BAD unsupported command"));
         }
+    }
+}
+
+fn inbound_message(uid: &str) -> String {
+    match uid {
+        "11" => concat!(
+            "From: Human <human@example.com>\r\n",
+            "Subject: Deploy ready\r\n",
+            "Message-ID: <msg-11@example.com>\r\n",
+            "Content-Type: multipart/mixed; boundary=\"b\"\r\n",
+            "\r\n",
+            "--b\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "green\r\n",
+            "--b\r\n",
+            "Content-Type: application/pdf; name=\"plan.pdf\"\r\n",
+            "Content-Disposition: attachment; filename=\"plan.pdf\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "\r\n",
+            "cGxhbg==\r\n",
+            "--b--\r\n",
+        )
+        .to_owned(),
+        "12" => concat!(
+            "From: Stranger <stranger@example.com>\r\n",
+            "Subject: Denied\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "ignore\r\n",
+        )
+        .to_owned(),
+        _ => concat!(
+            "From: no-reply@example.com\r\n",
+            "Auto-Submitted: auto-generated\r\n",
+            "Subject: Automated\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "ignore\r\n",
+        )
+        .to_owned(),
     }
 }
 

@@ -10,7 +10,7 @@
 
 ## Purpose
 
-This document fixes the operator-facing contract for `fcp.email-generic`. The connector exposes the generic email surface currently implemented in this crate: local connector health metadata, IMAP mailbox listing, IMAP UID search, supervised IMAP RFC822 polling for inbound preview events, SMTP message sending, and redacted inbound-monitor policy configuration for one configured IMAP account and one configured SMTP identity.
+This document fixes the operator-facing contract for `fcp.email-generic`. The connector exposes the generic email surface currently implemented in this crate: local connector health metadata, IMAP mailbox listing, IMAP UID search, bounded IMAP RFC822 poll-once invocation for inbound previews, supervised IMAP RFC822 polling for inbound preview events, SMTP message sending, and redacted inbound-monitor policy configuration for one configured IMAP account and one configured SMTP identity.
 
 The connector is intentionally a minimal IMAP/SMTP adapter. It is not a Gmail or Microsoft Graph client, OAuth client, mailbox synchronization engine, general-purpose MIME rendering engine, arbitrary attachment fetcher, delivery-status tracker, replay-buffered event system, spam classifier, rules engine, address book client, calendar client, or generic mail-admin tool.
 
@@ -21,9 +21,12 @@ The current crate exposes these runtime operation IDs:
 - `email_generic.health`
 - `email_generic.list_mailboxes`
 - `email_generic.search_messages`
+- `email_generic.poll_inbound_once`
 - `email_generic.send_message`
 
 Subscribing to `email.inbound.preview` starts a supervised poller over the configured `monitor_policy.mailbox` on the IMAP account. Accepted messages are emitted through a bounded event fan-out channel after sender allowlist, automated-message suppression, UID dedupe, body bounding, attachment classification, and thread metadata shaping.
+
+The inbound poll-once surface is a read-only FCP invoke operation over the same bounded RFC822 parsing and monitor-policy preparation path. It is not a subscription stream, does not own durable UID state, and requires callers to pass the returned `seen_uids` into later polls when duplicate suppression matters.
 
 Important runtime truths the contract preserves:
 
@@ -38,6 +41,7 @@ Important runtime truths the contract preserves:
 - `request_timeout_ms` defaults to `15000` and must be greater than zero.
 - Debug output redacts IMAP and SMTP passwords.
 - The IMAP client uses a direct TCP stream, optional TLS, explicit read/write timeouts, `LOGIN`, `LIST`, `SELECT`, `UID SEARCH TEXT`, `UID SEARCH UNSEEN`, bounded `UID FETCH <uid> (RFC822)`, and `LOGOUT`.
+- `email_generic.poll_inbound_once` applies the configured monitor policy and returns bounded message previews, sender-policy decisions, attachment metadata only, thread reply metadata, and updated seen UID state.
 - Inbound RFC822 parsing uses `mailparse`, prefers `text/plain`, falls back to stripped `text/html`, records thread headers, and extracts attachment metadata without exposing attachment bytes.
 - The SMTP client uses `lettre`, configured credentials, optional STARTTLS relay mode, and plain message bodies.
 - `health()` is local readiness state and does not prove IMAP reachability.
@@ -68,7 +72,7 @@ The current Generic Email README slice documents the existing runtime surface:
 
 - IMAP and SMTP credential configuration
 - local health metadata and IMAP-backed self-check behavior
-- mailbox listing, message UID search, bounded inbound RFC822 preview parsing, and SMTP send operations
+- mailbox listing, message UID search, bounded inbound RFC822 poll-once invocation, and SMTP send operations
 - redacted inbound monitor policy helpers, tested poll-once parsing, and supervised `email.inbound.preview` event stream
 - bound capability-token enforcement for read and write operations
 - doctor, health, self-check, introspect, simulate, subscribe, unsubscribe, and shutdown
@@ -83,7 +87,7 @@ The current Generic Email README slice documents the existing runtime surface:
 - Allowed target zones: `z:private` and `z:work`.
 - Tailscale tag hint: `tag:fcp-private`.
 - Capability families:
-  - `email_generic.read` gates health metadata, mailbox listing, and message search.
+  - `email_generic.read` gates health metadata, mailbox listing, message search, and one-shot inbound polling.
   - `email_generic.write` gates SMTP sends.
 - Required capabilities: `network.dns` and `network.outbound`.
 - Forbidden capabilities: `system.exec`, `system.privileged`, and `network.listen`.
@@ -101,6 +105,7 @@ The current Generic Email README slice documents the existing runtime surface:
 - `search_messages` sends `SELECT "<mailbox>"` followed by `UID SEARCH TEXT "<query>"`.
 - `search_messages` rejects blank mailbox or query before sending IMAP commands.
 - `fetch_unseen_inbound_messages` sends `SELECT "<mailbox>"`, `UID SEARCH UNSEEN`, and per-UID `UID FETCH <uid> (RFC822)` for the explicit `monitor_policy.mailbox` binding when used by the monitor.
+- `poll_inbound_once` sends `SELECT "<mailbox>"`, `UID SEARCH UNSEEN`, and per-UID `UID FETCH <uid> (RFC822)` for UIDs not present in the caller-provided `seen_uids`.
 - RFC822 literals are capped at `1048576` bytes before MIME parsing.
 - `send_message` requires at least one `to` recipient.
 - `send_message` parses `smtp.from_address`, `to`, and `cc` through `lettre` address parsing before dispatch.
@@ -125,13 +130,13 @@ The supervised inbound monitor uses these poll-once and policy helpers before ev
 - `allowed_senders` is capped at `512` entries and rejects duplicates after normalization.
 - Automated sender detection checks sender patterns and common automated-message headers.
 - Prepared inbound previews are marked `tainted`, bound body length, classify attachments, and carry thread reply metadata only when policy accepts the message.
-- Poll-once fetches are idempotent for a provided in-memory seen-UID cache and skip duplicate UID fetches once observed.
+- Poll-once fetches are idempotent for caller-carried `seen_uids` and return an updated `seen_uids` list for the next call.
 
 ## Capability Families
 
 | Capability | Purpose |
 |-----------|---------|
-| `email_generic.read` | Read local health metadata, list IMAP mailboxes, and search messages by UID. |
+| `email_generic.read` | Read local health metadata, list IMAP mailboxes, search messages by UID, and run one-shot inbound polls. |
 | `email_generic.write` | Send email through the configured SMTP identity. |
 
 ## Operation Inventory
@@ -141,6 +146,7 @@ The supervised inbound monitor uses these poll-once and policy helpers before ev
 | `email_generic.health` | local readiness plus monitor policy metadata | `email_generic.read` | `Safe` | `Low` | `Strict` | None. |
 | `email_generic.list_mailboxes` | IMAP `LIST "" "*"` | `email_generic.read` | `Safe` | `Low` | `Strict` | None. |
 | `email_generic.search_messages` | IMAP `SELECT` plus `UID SEARCH TEXT` | `email_generic.read` | `Safe` | `Low` | `Strict` | `mailbox`, `query`. |
+| `email_generic.poll_inbound_once` | IMAP `SELECT`, `UID SEARCH UNSEEN`, bounded `UID FETCH`, monitor-policy preview | `email_generic.read` | `Safe` | `Low` | `Strict` | `mailbox`; optional `seen_uids`. |
 | `email_generic.send_message` | SMTP message submission | `email_generic.write` | `Risky` | `Medium` | `None` | `to`, `subject`, `body`; optional `cc`. |
 
 ## Explicit Non-Goals
@@ -178,7 +184,7 @@ The deterministic evidence currently covers:
 - IMAP quoted-string escaping, mailbox parsing, and UID parsing
 - monitor policy normalization, duplicate rejection, sender evaluation, automated sender dropping, body bounding, attachment classification, and seen-UID cache bounds
 - RFC822 parsing for text/plain, text/html fallback, message/thread headers, attachment metadata, and IMAP literal length bounds
-- IMAP/SMTP loopback tests for mailbox listing, UID search, inbound RFC822 poll-once previews, UID-cache duplicate suppression, supervised inbound event fan-out, sender-policy drops before emission, SMTP success/failure, STARTTLS downgrade denial, capability enforcement, shutdown cleanup, and redacted JSONL evidence
+- IMAP/SMTP loopback tests for mailbox listing, UID search, FCP-invoked inbound RFC822 poll-once previews, UID-cache duplicate suppression, supervised inbound event fan-out, sender-policy drops before emission, SMTP success/failure, STARTTLS downgrade denial, capability enforcement, shutdown cleanup, and redacted JSONL evidence
 - operation inventory, manifest/introspection shape, capability assignment, handshake grants, doctor/health/self-check/shutdown behavior, and invoke health behavior
 - error mapping for configuration, IMAP, SMTP, IO, TLS, and address errors
 

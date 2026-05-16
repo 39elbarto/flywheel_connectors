@@ -18,7 +18,7 @@ use fcp_prelude::{
     SubscribeResult, TrustLevel, UnsubscribeRequest, ZoneId,
 };
 use fcp_sdk::runtime::SupervisorConfig;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::client::EmailGenericClient;
@@ -33,6 +33,7 @@ const CAP_WRITE: &str = "email_generic.write";
 const OP_HEALTH: &str = "email_generic.health";
 const OP_LIST_MAILBOXES: &str = "email_generic.list_mailboxes";
 const OP_SEARCH_MESSAGES: &str = "email_generic.search_messages";
+const OP_POLL_INBOUND_ONCE: &str = "email_generic.poll_inbound_once";
 const OP_SEND_MESSAGE: &str = "email_generic.send_message";
 const EVENT_INBOUND_PREVIEW: &str = "email.inbound.preview";
 const INBOUND_EVENT_BUFFER_CAPACITY: usize = 128;
@@ -469,6 +470,142 @@ impl EmailGenericConnector {
         })
     }
 
+    fn poll_inbound_once_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["mailbox"],
+            "additionalProperties": false,
+            "properties": {
+                "mailbox": { "type": "string", "minLength": 1 },
+                "seen_uids": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                }
+            }
+        })
+    }
+
+    fn nullable_bounded_text_schema() -> serde_json::Value {
+        json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "required": ["text", "original_chars", "truncated"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "text": { "type": "string" },
+                        "original_chars": { "type": "integer", "minimum": 0 },
+                        "truncated": { "type": "boolean" }
+                    }
+                },
+                { "type": "null" }
+            ]
+        })
+    }
+
+    fn attachment_summary_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": ["filename", "media_type", "size_bytes", "class", "exposed", "reason"],
+            "additionalProperties": false,
+            "properties": {
+                "filename": { "type": "string" },
+                "media_type": { "type": "string" },
+                "size_bytes": { "type": "integer", "minimum": 0 },
+                "class": { "type": "string", "enum": ["image", "document"] },
+                "exposed": { "type": "boolean" },
+                "reason": {
+                    "anyOf": [
+                        { "type": "string" },
+                        { "type": "null" }
+                    ]
+                }
+            }
+        })
+    }
+
+    fn nullable_thread_schema() -> serde_json::Value {
+        json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "required": ["subject", "message_id", "in_reply_to", "references", "reply_subject"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "subject": { "type": "string" },
+                        "message_id": {
+                            "anyOf": [
+                                { "type": "string" },
+                                { "type": "null" }
+                            ]
+                        },
+                        "in_reply_to": {
+                            "anyOf": [
+                                { "type": "string" },
+                                { "type": "null" }
+                            ]
+                        },
+                        "references": {
+                            "anyOf": [
+                                { "type": "string" },
+                                { "type": "null" }
+                            ]
+                        },
+                        "reply_subject": { "type": "string" }
+                    }
+                },
+                { "type": "null" }
+            ]
+        })
+    }
+
+    fn poll_inbound_once_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "required": [
+                "mailbox",
+                "fetched_count",
+                "accepted_count",
+                "dropped_count",
+                "seen_uids",
+                "messages"
+            ],
+            "additionalProperties": false,
+            "properties": {
+                "mailbox": { "type": "string", "minLength": 1 },
+                "fetched_count": { "type": "integer", "minimum": 0 },
+                "accepted_count": { "type": "integer", "minimum": 0 },
+                "dropped_count": { "type": "integer", "minimum": 0 },
+                "seen_uids": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 }
+                },
+                "messages": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["uid", "decision", "tainted", "text", "attachments", "thread"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "uid": { "type": "string", "minLength": 1 },
+                            "decision": {
+                                "type": "string",
+                                "enum": ["accept", "drop_automated", "drop_sender_not_allowed"]
+                            },
+                            "tainted": { "type": "boolean" },
+                            "text": Self::nullable_bounded_text_schema(),
+                            "attachments": {
+                                "type": "array",
+                                "items": Self::attachment_summary_schema()
+                            },
+                            "thread": Self::nullable_thread_schema()
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     fn send_message_input_schema() -> serde_json::Value {
         json!({
             "type": "object",
@@ -623,6 +760,33 @@ impl EmailGenericConnector {
                 requires_approval: Some(ApprovalMode::None),
             },
             OperationInfo {
+                id: OperationId::from_static(OP_POLL_INBOUND_ONCE),
+                summary: "Poll unseen inbound messages once".into(),
+                description: Some(
+                    "Fetch unseen IMAP messages once, apply inbound monitor policy, and return bounded previews plus updated seen UID state."
+                        .into(),
+                ),
+                input_schema: Self::poll_inbound_once_input_schema(),
+                output_schema: Self::poll_inbound_once_output_schema(),
+                capability: CapabilityId::from_static(CAP_READ),
+                risk_level: RiskLevel::Low,
+                safety_tier: SafetyTier::Safe,
+                idempotency: IdempotencyClass::Strict,
+                ai_hints: AgentHint {
+                    when_to_use: "Use this to run one bounded inbound mailbox check without starting a subscription.".into(),
+                    common_mistakes: vec![
+                        "Treating this one-shot read operation as a durable subscription or replay buffer.".into(),
+                        "Dropping the returned seen_uids state before the next poll, which can repeat message previews.".into(),
+                    ],
+                    examples: vec![
+                        "{\"mailbox\":\"INBOX\",\"seen_uids\":[\"101\",\"102\"]}".into(),
+                    ],
+                    related: vec![CapabilityId::from_static(OP_SEARCH_MESSAGES)],
+                },
+                rate_limit: None,
+                requires_approval: Some(ApprovalMode::None),
+            },
+            OperationInfo {
                 id: OperationId::from_static(OP_SEND_MESSAGE),
                 summary: "Send an email".into(),
                 description: Some("Send an email through SMTP.".into()),
@@ -647,11 +811,47 @@ impl EmailGenericConnector {
         ]
     }
 
+    fn required_string_input<'a>(input: &'a Value, field: &str) -> FcpResult<&'a str> {
+        input
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Missing {field}"),
+            })
+    }
+
+    fn seen_uid_cache_from_input(input: &Value, cap: usize) -> FcpResult<EmailSeenUidCache> {
+        let mut seen_uids = EmailSeenUidCache::new(cap)?;
+        let Some(value) = input.get("seen_uids") else {
+            return Ok(seen_uids);
+        };
+        let values = value.as_array().ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: "seen_uids must be an array of strings".into(),
+        })?;
+        for value in values {
+            let uid = value.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: "seen_uids entries must be strings".into(),
+            })?;
+            if uid.trim().is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1005,
+                    message: "seen_uids entries must not be empty".into(),
+                });
+            }
+            seen_uids.observe(uid.to_owned());
+        }
+        Ok(seen_uids)
+    }
+
     fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         self.base.check_ready()?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         let required_cap = match req.operation.as_str() {
-            OP_HEALTH | OP_LIST_MAILBOXES | OP_SEARCH_MESSAGES => {
+            OP_HEALTH | OP_LIST_MAILBOXES | OP_SEARCH_MESSAGES | OP_POLL_INBOUND_ONCE => {
                 CapabilityId::from_static(CAP_READ)
             }
             OP_SEND_MESSAGE => CapabilityId::from_static(CAP_WRITE),
@@ -697,6 +897,45 @@ impl EmailGenericConnector {
                 client
                     .search_messages(mailbox, query)
                     .map_err(|error| error.to_fcp_error())?
+            }
+            OP_POLL_INBOUND_ONCE => {
+                let mailbox = Self::required_string_input(&req.input, "mailbox")?;
+                let mut seen_uids = Self::seen_uid_cache_from_input(
+                    &req.input,
+                    config.monitor_policy.seen_uid_cap,
+                )?;
+                let messages = client
+                    .fetch_unseen_inbound_messages(mailbox, &mut seen_uids)
+                    .map_err(|error| error.to_fcp_error())?;
+                let mut accepted_count = 0_usize;
+                let mut dropped_count = 0_usize;
+                let messages = messages
+                    .iter()
+                    .map(|message| {
+                        let preview = config.monitor_policy.prepare_inbound_message(message);
+                        if preview.decision == EmailInboundPolicyDecision::Accept {
+                            accepted_count += 1;
+                        } else {
+                            dropped_count += 1;
+                        }
+                        json!({
+                            "uid": &message.uid,
+                            "decision": preview.decision,
+                            "tainted": preview.tainted,
+                            "text": preview.text,
+                            "attachments": preview.attachments,
+                            "thread": preview.thread,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                json!({
+                    "mailbox": mailbox,
+                    "fetched_count": messages.len(),
+                    "accepted_count": accepted_count,
+                    "dropped_count": dropped_count,
+                    "seen_uids": seen_uids.uids(),
+                    "messages": messages,
+                })
             }
             OP_SEND_MESSAGE => {
                 let to = req
@@ -978,7 +1217,7 @@ fn confirm_inbound_topics(topics: &[String]) -> FcpResult<Vec<String>> {
 
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
     match operation {
-        OP_HEALTH | OP_LIST_MAILBOXES | OP_SEARCH_MESSAGES => {
+        OP_HEALTH | OP_LIST_MAILBOXES | OP_SEARCH_MESSAGES | OP_POLL_INBOUND_ONCE => {
             Ok(CapabilityId::from_static(CAP_READ))
         }
         OP_SEND_MESSAGE => Ok(CapabilityId::from_static(CAP_WRITE)),
@@ -1290,6 +1529,7 @@ mod tests {
         (OP_HEALTH, "health"),
         (OP_LIST_MAILBOXES, "list_mailboxes"),
         (OP_SEARCH_MESSAGES, "search_messages"),
+        (OP_POLL_INBOUND_ONCE, "poll_inbound_once"),
         (OP_SEND_MESSAGE, "send_message"),
     ];
 
@@ -1388,6 +1628,53 @@ mod tests {
         })
     }
 
+    fn sample_poll_inbound_once_output() -> serde_json::Value {
+        json!({
+            "mailbox": "INBOX",
+            "fetched_count": 2,
+            "accepted_count": 1,
+            "dropped_count": 1,
+            "seen_uids": ["11", "12"],
+            "messages": [
+                {
+                    "uid": "11",
+                    "decision": "accept",
+                    "tainted": true,
+                    "text": {
+                        "text": "[Subject: Deploy ready]\n\ngreen",
+                        "original_chars": 31,
+                        "truncated": false
+                    },
+                    "attachments": [
+                        {
+                            "filename": "plan.pdf",
+                            "media_type": "application/pdf",
+                            "size_bytes": 4,
+                            "class": "document",
+                            "exposed": false,
+                            "reason": "attachments_disabled"
+                        }
+                    ],
+                    "thread": {
+                        "subject": "Deploy ready",
+                        "message_id": "<msg-11@example.com>",
+                        "in_reply_to": null,
+                        "references": null,
+                        "reply_subject": "Re: Deploy ready"
+                    }
+                },
+                {
+                    "uid": "12",
+                    "decision": "drop_sender_not_allowed",
+                    "tainted": true,
+                    "text": null,
+                    "attachments": [],
+                    "thread": null
+                }
+            ]
+        })
+    }
+
     #[test]
     fn connector_id_is_correct() {
         let connector = EmailGenericConnector::new();
@@ -1404,7 +1691,7 @@ mod tests {
     #[test]
     fn operations_catalog_contains_expected_entries() {
         let operations = EmailGenericConnector::operations_info();
-        assert_eq!(operations.len(), 4);
+        assert_eq!(operations.len(), 5);
         assert!(
             operations
                 .iter()
@@ -1413,12 +1700,13 @@ mod tests {
     }
 
     #[test]
-    fn operations_catalog_contains_all_four_ops() {
+    fn operations_catalog_contains_all_read_and_write_ops() {
         let ops = EmailGenericConnector::operations_info();
         let ids: Vec<&str> = ops.iter().map(|o| o.id.as_str()).collect();
         assert!(ids.contains(&OP_HEALTH));
         assert!(ids.contains(&OP_LIST_MAILBOXES));
         assert!(ids.contains(&OP_SEARCH_MESSAGES));
+        assert!(ids.contains(&OP_POLL_INBOUND_ONCE));
         assert!(ids.contains(&OP_SEND_MESSAGE));
     }
 
@@ -1528,6 +1816,33 @@ mod tests {
             &json!({"mailbox": "INBOX", "query": "deploy", "uids": [], "extra": true}),
         )?;
 
+        let poll_input = operation_schema(&manifest, "poll_inbound_once", "input_schema")?;
+        assert_schema_accepts(&poll_input, &json!({"mailbox": "INBOX"}))?;
+        assert_schema_accepts(
+            &poll_input,
+            &json!({"mailbox": "INBOX", "seen_uids": ["1", "2"]}),
+        )?;
+        assert_schema_rejects(&poll_input, &json!({}))?;
+        assert_schema_rejects(&poll_input, &json!({"mailbox": ""}))?;
+        assert_schema_rejects(&poll_input, &json!({"mailbox": "INBOX", "seen_uids": [1]}))?;
+        assert_schema_rejects(
+            &poll_input,
+            &json!({"mailbox": "INBOX", "seen_uids": [], "extra": true}),
+        )?;
+
+        let poll_output = operation_schema(&manifest, "poll_inbound_once", "output_schema")?;
+        assert_schema_accepts(&poll_output, &sample_poll_inbound_once_output())?;
+        assert_schema_rejects(
+            &poll_output,
+            &json!({
+                "mailbox": "INBOX",
+                "fetched_count": 1,
+                "accepted_count": 1,
+                "seen_uids": ["11"],
+                "messages": []
+            }),
+        )?;
+
         let send_input = operation_schema(&manifest, "send_message", "input_schema")?;
         assert_schema_accepts(
             &send_input,
@@ -1605,7 +1920,12 @@ mod tests {
     #[test]
     fn read_operations_are_safe() {
         let ops = EmailGenericConnector::operations_info();
-        for op_id in [OP_HEALTH, OP_LIST_MAILBOXES, OP_SEARCH_MESSAGES] {
+        for op_id in [
+            OP_HEALTH,
+            OP_LIST_MAILBOXES,
+            OP_SEARCH_MESSAGES,
+            OP_POLL_INBOUND_ONCE,
+        ] {
             let op = ops.iter().find(|o| o.id.as_str() == op_id).unwrap();
             assert_eq!(op.safety_tier, SafetyTier::Safe, "{op_id} should be Safe");
             assert_eq!(
@@ -1619,7 +1939,12 @@ mod tests {
     #[test]
     fn read_operations_use_read_capability() {
         let ops = EmailGenericConnector::operations_info();
-        for op_id in [OP_HEALTH, OP_LIST_MAILBOXES, OP_SEARCH_MESSAGES] {
+        for op_id in [
+            OP_HEALTH,
+            OP_LIST_MAILBOXES,
+            OP_SEARCH_MESSAGES,
+            OP_POLL_INBOUND_ONCE,
+        ] {
             let op = ops.iter().find(|o| o.id.as_str() == op_id).unwrap();
             assert_eq!(op.capability.as_str(), CAP_READ);
         }
@@ -1677,6 +2002,7 @@ mod tests {
             "health",
             "list_mailboxes",
             "search_messages",
+            "poll_inbound_once",
             "send_message",
         ] {
             let marker = format!("[provides.operations.{operation}.ai_hints]");
@@ -1710,7 +2036,7 @@ mod tests {
     fn introspect_returns_all_operations() {
         let connector = EmailGenericConnector::new();
         let intro = connector.introspect();
-        assert_eq!(intro.operations.len(), 4);
+        assert_eq!(intro.operations.len(), 5);
     }
 
     #[test]
@@ -1756,6 +2082,10 @@ mod tests {
         );
         assert_eq!(
             required_capability(OP_SEARCH_MESSAGES).unwrap().as_str(),
+            CAP_READ
+        );
+        assert_eq!(
+            required_capability(OP_POLL_INBOUND_ONCE).unwrap().as_str(),
             CAP_READ
         );
     }

@@ -109,6 +109,7 @@ This slice is intentionally closer to "outbound bot message dispatch plus connec
     "restore_sequence": 42,
     "heartbeat_interval_ms": 45000,
     "reconnect_backoff_ms": 1000,
+    "max_reconnect_backoff_ms": 30000,
     "max_reconnect_attempts": 5,
     "dedupe_window_size": 1024,
     "max_queue_depth": 128,
@@ -136,7 +137,7 @@ Gateway normalization also classifies command-like text for supervised routing: 
 When `gateway.enabled` is false, `qq.gateway.project_event` fails closed with `gateway_disabled` and does not update session, sequence, heartbeat, policy, or queue state.
 Gateway projection also fails closed before authorization when the normalized event is missing the route binding required for its QQ delivery mode: `channel_id` and sender for channel events, `group_openid` and sender for group events, and sender for C2C events.
 Events without a stable QQ message id, or replies whose `message_reference` does not carry a usable target message id, are dropped before authorization so fan-out and reply tracking never rely on unbound message identity.
-Gateway reconnect (`op=7`) and invalid-session (`op=9`) frames are projected as dropped control records with bounded reconnect attempt accounting and a lifecycle action of `reconnect_resume`, `reconnect_identify`, or `stop_reconnect`; once `max_reconnect_attempts` is exceeded, the reason becomes `reconnect_attempts_exhausted`. A subsequent hello frame resets the attempt counter and returns `identify` or `resume` depending on whether a session token is available.
+Gateway reconnect (`op=7`) and invalid-session (`op=9`) frames are projected as dropped control records with bounded reconnect attempt accounting and a lifecycle action of `reconnect_resume`, `reconnect_identify`, or `stop_reconnect`; `reconnect_after_ms` scales by reconnect attempt and is capped by `max_reconnect_backoff_ms`, and once `max_reconnect_attempts` is exceeded the reason becomes `reconnect_attempts_exhausted`. A subsequent hello frame resets the attempt counter and returns `identify` or `resume` depending on whether a session token is available.
 
 ## Chat Coordination Configuration
 

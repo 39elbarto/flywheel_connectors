@@ -164,6 +164,7 @@ fn redacted_runtime_snapshot(runtime: &Value) -> Value {
         "reconnect_attempts": u64_field(runtime, "reconnect_attempts"),
         "max_reconnect_attempts": u64_field(runtime, "max_reconnect_attempts"),
         "reconnect_backoff_ms": u64_field(runtime, "reconnect_backoff_ms"),
+        "max_reconnect_backoff_ms": u64_field(runtime, "max_reconnect_backoff_ms"),
         "queue_depth": u64_field(runtime, "queue_depth"),
         "max_queue_depth": u64_field(runtime, "max_queue_depth"),
         "dedupe_size": u64_field(runtime, "dedupe_size"),
@@ -1111,6 +1112,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(reconnect["accepted"], false);
     assert_eq!(reconnect["reason_code"], "reconnect_requested");
     assert_eq!(reconnect["runtime"]["reconnect_attempts"], 1);
+    assert_eq!(reconnect["runtime"]["max_reconnect_backoff_ms"], 30000);
     assert_eq!(reconnect["lifecycle"]["action"], "reconnect_resume");
     assert_eq!(reconnect["lifecycle"]["resume_session_id"], "session-1");
     assert_eq!(reconnect["lifecycle"]["reconnect_after_ms"], 1000);
@@ -1132,6 +1134,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(invalid_session["reason_code"], "invalid_session_resumable");
     assert_eq!(invalid_session["runtime"]["reconnect_attempts"], 2);
     assert_eq!(invalid_session["lifecycle"]["action"], "reconnect_resume");
+    assert_eq!(invalid_session["lifecycle"]["reconnect_after_ms"], 2000);
     log_projection_step(
         &mut logs,
         "invalid_session_resumable",
@@ -1150,7 +1153,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
             "gateway": {
                 "enabled": true,
                 "max_reconnect_attempts": 1,
-                "reconnect_backoff_ms": 250
+                "reconnect_backoff_ms": 250,
+                "max_reconnect_backoff_ms": 300
             }
         }))
         .await
@@ -1199,6 +1203,10 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(reconnect_exhausted["runtime"]["reconnect_attempts"], 2);
     assert_eq!(reconnect_exhausted["runtime"]["max_reconnect_attempts"], 1);
     assert_eq!(reconnect_exhausted["runtime"]["reconnect_backoff_ms"], 250);
+    assert_eq!(
+        reconnect_exhausted["runtime"]["max_reconnect_backoff_ms"],
+        300
+    );
     assert_eq!(reconnect_exhausted["lifecycle"]["action"], "stop_reconnect");
     assert_eq!(
         reconnect_exhausted["lifecycle"]["reconnect_after_ms"],

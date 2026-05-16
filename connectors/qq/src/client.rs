@@ -364,6 +364,7 @@ impl QqGatewayRuntime {
             reconnect_attempts: self.reconnect_attempts,
             max_reconnect_attempts: self.config.max_reconnect_attempts,
             reconnect_backoff_ms: self.config.reconnect_backoff_ms,
+            max_reconnect_backoff_ms: self.config.max_reconnect_backoff_ms,
             queue_depth: self.pending_events.len(),
             max_queue_depth: self.config.max_queue_depth,
             dedupe_size: self.seen_event_ids.len(),
@@ -641,7 +642,7 @@ impl QqGatewayRuntime {
             action,
             QQ_GATEWAY_ACTION_RECONNECT_IDENTIFY | QQ_GATEWAY_ACTION_RECONNECT_RESUME
         )
-        .then_some(self.config.reconnect_backoff_ms);
+        .then(|| self.reconnect_backoff_delay_ms());
         QqGatewayLifecycleDirective {
             action,
             reason_code,
@@ -649,6 +650,23 @@ impl QqGatewayRuntime {
             resume_sequence: self.session.sequence(),
             heartbeat_interval_ms: self.config.heartbeat_interval_ms,
             reconnect_after_ms,
+        }
+    }
+
+    const fn reconnect_backoff_delay_ms(&self) -> u64 {
+        let attempt = if self.reconnect_attempts == 0 {
+            1
+        } else {
+            self.reconnect_attempts
+        };
+        let delay = self
+            .config
+            .reconnect_backoff_ms
+            .saturating_mul(attempt as u64);
+        if delay > self.config.max_reconnect_backoff_ms {
+            self.config.max_reconnect_backoff_ms
+        } else {
+            delay
         }
     }
 }
@@ -662,6 +680,16 @@ fn validate_gateway_config(config: &QqGatewayRuntimeConfig) -> QqResult<()> {
     if config.reconnect_backoff_ms == 0 {
         return Err(QqError::Config(
             "gateway.reconnect_backoff_ms must be greater than zero".into(),
+        ));
+    }
+    if config.max_reconnect_backoff_ms == 0 {
+        return Err(QqError::Config(
+            "gateway.max_reconnect_backoff_ms must be greater than zero".into(),
+        ));
+    }
+    if config.max_reconnect_backoff_ms < config.reconnect_backoff_ms {
+        return Err(QqError::Config(
+            "gateway.max_reconnect_backoff_ms must be >= gateway.reconnect_backoff_ms".into(),
         ));
     }
     if config.dedupe_window_size == 0 {
@@ -1676,6 +1704,15 @@ mod tests {
         let mut config = localhost_config();
         config.request_timeout_ms = 0;
         assert!(QqClient::new(config).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_reconnect_backoff_cap() {
+        let mut config = localhost_config();
+        config.gateway.reconnect_backoff_ms = 1_000;
+        config.gateway.max_reconnect_backoff_ms = 500;
+        let error = QqClient::new(config).expect_err("invalid backoff cap should fail");
+        assert!(error.to_string().contains("max_reconnect_backoff_ms"));
     }
 
     #[test]
@@ -3418,6 +3455,7 @@ mod tests {
         assert_eq!(reconnect.runtime.reconnect_attempts, 1);
         assert_eq!(reconnect.runtime.max_reconnect_attempts, 2);
         assert_eq!(reconnect.runtime.reconnect_backoff_ms, 250);
+        assert_eq!(reconnect.runtime.max_reconnect_backoff_ms, 30_000);
         assert_eq!(
             reconnect.runtime.session_id.as_deref(),
             Some("session-before-reconnect")
@@ -3439,6 +3477,10 @@ mod tests {
         assert_eq!(
             resumable_invalid_session.lifecycle.action,
             QQ_GATEWAY_ACTION_RECONNECT_RESUME
+        );
+        assert_eq!(
+            resumable_invalid_session.lifecycle.reconnect_after_ms,
+            Some(500)
         );
         assert_eq!(resumable_invalid_session.runtime.reconnect_attempts, 2);
 
@@ -3472,5 +3514,55 @@ mod tests {
             hello.runtime.session_id.as_deref(),
             Some("session-after-reconnect")
         );
+    }
+
+    #[test]
+    fn gateway_runtime_caps_reconnect_backoff_delay() {
+        let mut runtime = QqGatewayRuntime::new(QqGatewayRuntimeConfig {
+            enabled: true,
+            max_reconnect_attempts: 4,
+            reconnect_backoff_ms: 400,
+            max_reconnect_backoff_ms: 700,
+            restore_session_id: Some("session-before-reconnect".into()),
+            ..QqGatewayRuntimeConfig::default()
+        });
+
+        let first = runtime
+            .project_event(QqGatewayEvent {
+                op: 7,
+                s: None,
+                t: None,
+                d: None,
+                id: Some("evt-reconnect-1".into()),
+            })
+            .unwrap();
+        assert_eq!(first.lifecycle.action, QQ_GATEWAY_ACTION_RECONNECT_RESUME);
+        assert_eq!(first.lifecycle.reconnect_after_ms, Some(400));
+
+        let second = runtime
+            .project_event(QqGatewayEvent {
+                op: 7,
+                s: None,
+                t: None,
+                d: None,
+                id: Some("evt-reconnect-2".into()),
+            })
+            .unwrap();
+        assert_eq!(second.lifecycle.action, QQ_GATEWAY_ACTION_RECONNECT_RESUME);
+        assert_eq!(second.lifecycle.reconnect_after_ms, Some(700));
+
+        let third = runtime
+            .project_event(QqGatewayEvent {
+                op: 9,
+                s: None,
+                t: None,
+                d: Some(json!(false)),
+                id: Some("evt-reconnect-3".into()),
+            })
+            .unwrap();
+        assert_eq!(third.lifecycle.action, QQ_GATEWAY_ACTION_RECONNECT_IDENTIFY);
+        assert_eq!(third.lifecycle.reconnect_after_ms, Some(700));
+        assert_eq!(third.runtime.reconnect_attempts, 3);
+        assert_eq!(third.runtime.max_reconnect_backoff_ms, 700);
     }
 }

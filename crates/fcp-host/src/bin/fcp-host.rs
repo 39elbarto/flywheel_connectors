@@ -5013,6 +5013,7 @@ fn connector_lease_flush_before_yield_payload(
         "telemetry": {
             "event_name": metrics::LEASE_FLUSHED_ON_YIELD_METRIC,
             "purpose_label": CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+            "outcome_label": "success",
             "redaction_scope": "public",
         },
         "warnings": warnings,
@@ -5240,6 +5241,10 @@ async fn flush_singleton_writer_before_hrw_yield(
     connector_lease_yield_flush_context_for_registered_connector(state, connector_id, zone_id)
         .await
         .map(|context| {
+            metrics::record_lease_flushed_on_yield(
+                CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+                "success",
+            );
             tracing::warn!(
                 event = "hrw_lease_yield_flush_before_refusal",
                 connector_id = %connector_id,
@@ -8886,9 +8891,23 @@ async fn connector_lease_flush_before_yield_handler(
         state_root,
         flush,
         warnings,
-    } = connector_lease_yield_flush_context_for_registered_connector(&state, &connector_id, &zone)
-        .await
-        .map_err(|error| map_host_error(HostError::PreflightFailed(error)))?;
+    } = match connector_lease_yield_flush_context_for_registered_connector(
+        &state,
+        &connector_id,
+        &zone,
+    )
+    .await
+    {
+        Ok(context) => context,
+        Err(error) => {
+            metrics::record_lease_flushed_on_yield(
+                CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
+                "error",
+            );
+            return Err(map_host_error(HostError::PreflightFailed(error)));
+        }
+    };
+    metrics::record_lease_flushed_on_yield(CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL, "success");
     let payload = connector_lease_flush_before_yield_payload(
         &connector_id,
         &zone,
@@ -26680,6 +26699,7 @@ done"#;
             payload["telemetry"]["event_name"],
             "fcp.lease.flushed_on_yield"
         );
+        assert_eq!(payload["telemetry"]["outcome_label"], "success");
         Ok(())
     }
 
@@ -26800,6 +26820,7 @@ done"#;
             payload["flush"]["lease_object_id"],
             ObjectId::from_bytes([0x92; 32]).to_string()
         );
+        assert_eq!(payload["telemetry"]["outcome_label"], "success");
         Ok(())
     }
 

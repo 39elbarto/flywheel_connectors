@@ -152,16 +152,16 @@ impl EmailInboundMonitorRuntime {
         connector_id: ConnectorId,
         instance_id: InstanceId,
     ) -> FcpResult<bool> {
-        let mut state = self.state.lock().map_err(|_| FcpError::Internal {
+        let mut task_state = self.state.lock().map_err(|_| FcpError::Internal {
             message: "email inbound monitor state lock poisoned".into(),
         })?;
-        if state.task.is_some() {
+        if task_state.task.is_some() {
             return Ok(false);
         }
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let event_tx = self.event_tx.clone();
-        let stats = Arc::clone(&self.stats);
+        let monitor_stats = Arc::clone(&self.stats);
         let next_event_seq = Arc::clone(&self.next_event_seq);
         let task = fcp_async_core::task::spawn(async move {
             run_email_inbound_monitor(
@@ -172,19 +172,21 @@ impl EmailInboundMonitorRuntime {
                 instance_id,
                 event_tx,
                 next_event_seq,
-                stats,
+                monitor_stats,
                 shutdown_rx,
             )
             .await;
         });
+
+        task_state.shutdown_tx = Some(shutdown_tx);
+        task_state.task = Some(task);
+        drop(task_state);
 
         self.update_stats(|stats| {
             stats.status = "running".into();
             stats.reason = "supervised IMAP RFC822 polling is running".into();
             stats.last_error = None;
         });
-        state.shutdown_tx = Some(shutdown_tx);
-        state.task = Some(task);
         Ok(true)
     }
 
@@ -1070,13 +1072,15 @@ async fn run_email_inbound_monitor(
             Ok(messages) => {
                 consecutive_failures = 0;
                 let (emitted, dropped) = emit_inbound_preview_events(
-                    &config,
-                    &zone,
-                    &connector_id,
-                    &instance_id,
-                    &event_tx,
-                    &next_event_seq,
-                    &mailbox,
+                    &InboundEventEmitContext {
+                        config: &config,
+                        zone: &zone,
+                        connector_id: &connector_id,
+                        instance_id: &instance_id,
+                        event_tx: &event_tx,
+                        next_event_seq: &next_event_seq,
+                        mailbox: &mailbox,
+                    },
                     messages,
                 );
                 update_monitor_stats(&stats, |stats| {
@@ -1166,29 +1170,36 @@ async fn poll_inbound_on_blocking_thread(
         .map_err(|_| "blocking IMAP poll worker dropped result".to_owned())?
 }
 
+struct InboundEventEmitContext<'a> {
+    config: &'a EmailGenericConfig,
+    zone: &'a ZoneId,
+    connector_id: &'a ConnectorId,
+    instance_id: &'a InstanceId,
+    event_tx: &'a broadcast::Sender<FcpResult<EventEnvelope>>,
+    next_event_seq: &'a AtomicU64,
+    mailbox: &'a str,
+}
+
 fn emit_inbound_preview_events(
-    config: &EmailGenericConfig,
-    zone: &ZoneId,
-    connector_id: &ConnectorId,
-    instance_id: &InstanceId,
-    event_tx: &broadcast::Sender<FcpResult<EventEnvelope>>,
-    next_event_seq: &AtomicU64,
-    mailbox: &str,
+    context: &InboundEventEmitContext<'_>,
     messages: Vec<EmailInboundMessage>,
 ) -> (usize, usize) {
     let mut emitted = 0_usize;
     let mut dropped = 0_usize;
     for message in messages {
-        let preview = config.monitor_policy.prepare_inbound_message(&message);
+        let preview = context
+            .config
+            .monitor_policy
+            .prepare_inbound_message(&message);
         if preview.decision != EmailInboundPolicyDecision::Accept {
             dropped = dropped.saturating_add(1);
             continue;
         }
-        let seq = next_event_seq.fetch_add(1, Ordering::SeqCst);
-        let cursor = format!("{mailbox}:{}", message.uid);
+        let seq = context.next_event_seq.fetch_add(1, Ordering::SeqCst);
+        let cursor = format!("{}:{}", context.mailbox, message.uid);
         let sender = normalize_sender_address(&message.sender);
         let payload = json!({
-            "mailbox": mailbox,
+            "mailbox": context.mailbox,
             "uid": message.uid,
             "sender": sender.clone(),
             "policy_decision": "accept",
@@ -1201,18 +1212,18 @@ fn emit_inbound_preview_events(
             display: None,
         };
         let data = EventData::new(
-            connector_id.clone(),
-            instance_id.clone(),
-            zone.clone(),
+            context.connector_id.clone(),
+            context.instance_id.clone(),
+            context.zone.clone(),
             principal,
             payload,
         );
         let envelope = EventEnvelope::new(EVENT_INBOUND_PREVIEW, data)
             .with_seq(seq)
             .with_cursor(cursor)
-            .with_stream_key(mailbox)
+            .with_stream_key(context.mailbox)
             .with_ordering(OrderingPolicy::PerKey);
-        let _ = event_tx.send(Ok(envelope));
+        let _ = context.event_tx.send(Ok(envelope));
         emitted = emitted.saturating_add(1);
     }
     (emitted, dropped)

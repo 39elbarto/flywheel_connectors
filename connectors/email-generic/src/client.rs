@@ -73,9 +73,26 @@ impl EmailGenericClient {
         Duration::from_millis(self.config.request_timeout_ms)
     }
 
-    fn quote_imap(value: &str) -> String {
+    /// Quote a value for inclusion in an IMAP command as an RFC 3501
+    /// `quoted` string.
+    ///
+    /// RFC 3501 Section 4.3 prohibits CR (`\r`), LF (`\n`), and NUL inside the
+    /// `quoted` production; those bytes are protocol terminators and
+    /// have no legal escape sequence. A permissive server that
+    /// tokenizes bytes before validating quoting could otherwise be
+    /// driven into running attacker-controlled commands embedded in the
+    /// supposed quoted value (CRLF injection). Reject those bytes
+    /// fail-closed rather than emit a malformed quoted string.
+    fn quote_imap(value: &str) -> EmailGenericResult<String> {
+        for &byte in value.as_bytes() {
+            if matches!(byte, b'\r' | b'\n' | 0) {
+                return Err(EmailGenericError::Config(
+                    "IMAP argument must not contain CR, LF, or NUL bytes".into(),
+                ));
+            }
+        }
         let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-        format!("\"{escaped}\"")
+        Ok(format!("\"{escaped}\""))
     }
 
     fn connect_imap(&self) -> EmailGenericResult<BufReader<ImapStream>> {
@@ -197,8 +214,8 @@ impl EmailGenericClient {
         }
         let login = format!(
             "LOGIN {} {}",
-            Self::quote_imap(&self.config.imap.username),
-            Self::quote_imap(&self.config.imap.password)
+            Self::quote_imap(&self.config.imap.username)?,
+            Self::quote_imap(&self.config.imap.password)?
         );
         let login_lines = Self::run_imap_command(&mut reader, "a1", &login)?;
         if !login_lines.last().is_some_and(|line| line.contains(" OK")) {
@@ -264,12 +281,12 @@ impl EmailGenericClient {
             ));
         }
         self.imap_login_and_read(|reader| {
-            let select = format!("SELECT {}", Self::quote_imap(mailbox));
+            let select = format!("SELECT {}", Self::quote_imap(mailbox)?);
             let select_lines = Self::run_imap_command(reader, "a2", &select)?;
             if !select_lines.last().is_some_and(|line| line.contains(" OK")) {
                 return Err(EmailGenericError::Imap(select_lines.join("\n")));
             }
-            let search = format!("UID SEARCH TEXT {}", Self::quote_imap(query));
+            let search = format!("UID SEARCH TEXT {}", Self::quote_imap(query)?);
             let lines = Self::run_imap_command(reader, "a3", &search)?;
             if !lines.last().is_some_and(|line| line.contains(" OK")) {
                 return Err(EmailGenericError::Imap(lines.join("\n")));
@@ -293,7 +310,7 @@ impl EmailGenericClient {
             ));
         }
         self.imap_login_and_read(|reader| {
-            let select = format!("SELECT {}", Self::quote_imap(mailbox));
+            let select = format!("SELECT {}", Self::quote_imap(mailbox)?);
             let select_lines = Self::run_imap_command(reader, "a2", &select)?;
             if !select_lines.last().is_some_and(|line| line.contains(" OK")) {
                 return Err(EmailGenericError::Imap(select_lines.join("\n")));
@@ -542,9 +559,38 @@ mod tests {
     fn quote_imap_escapes_backslashes_and_quotes() {
         let _ = config();
         assert_eq!(
-            EmailGenericClient::quote_imap("ab\\\"cd"),
+            EmailGenericClient::quote_imap("ab\\\"cd").unwrap(),
             "\"ab\\\\\\\"cd\""
         );
+    }
+
+    /// RFC 3501 Section 4.3 forbids CR, LF, and NUL inside a `quoted` IMAP
+    /// string. A permissive server that tokenizes bytes before
+    /// validating quoting could let an attacker who controls the
+    /// `mailbox` or `query` argument inject extra IMAP commands via
+    /// `\r\n<command>`. The fail-closed variant rejects those bytes.
+    #[test]
+    fn quote_imap_rejects_crlf_and_nul() {
+        for inject in [
+            "INBOX\r\na999 LOGOUT",
+            "INBOX\nfoo",
+            "INBOX\rfoo",
+            "INBOX\0LOGOUT",
+        ] {
+            let err =
+                EmailGenericClient::quote_imap(inject).expect_err("CR/LF/NUL must be rejected");
+            assert!(
+                matches!(err, EmailGenericError::Config(_)),
+                "unexpected error variant for {inject:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn quote_imap_accepts_non_control_characters() {
+        assert!(EmailGenericClient::quote_imap("INBOX").is_ok());
+        assert!(EmailGenericClient::quote_imap("Important/Travel").is_ok());
+        assert!(EmailGenericClient::quote_imap("Special Folder").is_ok());
     }
 
     #[test]

@@ -548,6 +548,8 @@ pub enum NoNetworkProbeScenario {
     RchSlotPressure,
     /// rch fell back or would fall back to local execution, which must be refused.
     RchLocalFallbackDetected,
+    /// rch selected a worker but failed project-root topology preflight before Cargo.
+    RchTopologyPreflightFailure,
     /// rch status reports stale cancellation cleanup residue.
     RchStaleCancellationResidue,
     /// rch ran the proof remotely and the command failed.
@@ -638,6 +640,7 @@ struct FixtureScenarioState {
     rch_active_project_exclusion: bool,
     rch_slot_pressure: bool,
     rch_local_fallback_detected: bool,
+    rch_topology_preflight_failure: bool,
     rch_stale_cancellation_residue: bool,
     rch_remote_build_failure: bool,
     rch_source_only: bool,
@@ -656,6 +659,7 @@ impl From<NoNetworkProbeScenario> for FixtureScenarioState {
                     | NoNetworkProbeScenario::RchActiveProjectExclusion
                     | NoNetworkProbeScenario::RchSlotPressure
                     | NoNetworkProbeScenario::RchLocalFallbackDetected
+                    | NoNetworkProbeScenario::RchTopologyPreflightFailure
                     | NoNetworkProbeScenario::RchStaleCancellationResidue
                     | NoNetworkProbeScenario::RchRemoteBuildFailure
                     | NoNetworkProbeScenario::RchSourceOnly
@@ -665,6 +669,8 @@ impl From<NoNetworkProbeScenario> for FixtureScenarioState {
             rch_slot_pressure: scenario == NoNetworkProbeScenario::RchSlotPressure,
             rch_local_fallback_detected: scenario
                 == NoNetworkProbeScenario::RchLocalFallbackDetected,
+            rch_topology_preflight_failure: scenario
+                == NoNetworkProbeScenario::RchTopologyPreflightFailure,
             rch_stale_cancellation_residue: scenario
                 == NoNetworkProbeScenario::RchStaleCancellationResidue,
             rch_remote_build_failure: scenario == NoNetworkProbeScenario::RchRemoteBuildFailure,
@@ -863,6 +869,7 @@ const fn rch_fixture_probe_statuses(
             reason_code,
             RchAdmissionReasonCode::WorkersUnavailable
                 | RchAdmissionReasonCode::StaleCancellationResidue
+                | RchAdmissionReasonCode::TopologyPreflightFailure
         ),
         diagnose_blocks: matches!(
             reason_code,
@@ -870,6 +877,7 @@ const fn rch_fixture_probe_statuses(
                 | RchAdmissionReasonCode::SlotPressure
                 | RchAdmissionReasonCode::WorkersUnavailable
                 | RchAdmissionReasonCode::LocalFallbackDetected
+                | RchAdmissionReasonCode::TopologyPreflightFailure
         ),
         queue_warns: matches!(
             reason_code,
@@ -879,6 +887,7 @@ const fn rch_fixture_probe_statuses(
             reason_code,
             RchAdmissionReasonCode::LocalFallbackDetected
                 | RchAdmissionReasonCode::RemoteBuildFailed
+                | RchAdmissionReasonCode::TopologyPreflightFailure
         ),
     }
 }
@@ -917,6 +926,14 @@ fn rch_fixture_observation(scenario: FixtureScenarioState) -> RchAdmissionObserv
             location: RchProofSummaryLocation::Local,
             worker_id: None,
             exit_code: Some(0),
+        });
+    } else if scenario.rch_topology_preflight_failure {
+        observation.worker_selection_reason =
+            Some("remote topology preflight failed: ln: Already exists".to_owned());
+        observation.proof_summary = Some(RchProofSummaryLine {
+            location: RchProofSummaryLocation::Local,
+            worker_id: None,
+            exit_code: Some(1),
         });
     } else if scenario.rch_stale_cancellation_residue {
         observation.stale_cancellation_residue = true;
@@ -969,6 +986,10 @@ fn rch_fixture_admission(observation: &RchAdmissionObservation) -> RchFixtureAdm
         RchAdmissionReasonCode::LocalFallbackDetected => (
             "rch-local-fallback-detected",
             "refuse local fallback and retry only when remote rch admission is available",
+        ),
+        RchAdmissionReasonCode::TopologyPreflightFailure => (
+            "rch-topology-preflight-failure",
+            "fix or override the rch project-root topology before retrying Cargo proof",
         ),
         RchAdmissionReasonCode::RemoteBuildFailed => (
             "rch-remote-build-failed",
@@ -1443,6 +1464,12 @@ mod tests {
                 RchAdmissionDecision::RefuseLocalFallback,
                 RchAdmissionReasonCode::LocalFallbackDetected,
                 "proof-blocked-rch-local-fallback-refused",
+            ),
+            (
+                NoNetworkProbeScenario::RchTopologyPreflightFailure,
+                RchAdmissionDecision::RchInfraFailure,
+                RchAdmissionReasonCode::TopologyPreflightFailure,
+                "proof-blocked-rch-topology-preflight",
             ),
             (
                 NoNetworkProbeScenario::RchStaleCancellationResidue,

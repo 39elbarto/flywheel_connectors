@@ -94,6 +94,8 @@ pub enum FixtureScenarioArg {
     RchActiveProjectExclusion,
     /// rch fell back or would fall back to local execution.
     RchLocalFallbackDetected,
+    /// rch selected a worker but failed project-root topology preflight before Cargo.
+    RchTopologyPreflightFailure,
     /// The remote branch mirror does not match the primary branch.
     BranchMirrorMismatch,
     /// The shared checkout has unrelated dirty files.
@@ -108,6 +110,7 @@ impl From<FixtureScenarioArg> for NoNetworkProbeScenario {
             FixtureScenarioArg::RchUnavailable => Self::RchUnavailable,
             FixtureScenarioArg::RchActiveProjectExclusion => Self::RchActiveProjectExclusion,
             FixtureScenarioArg::RchLocalFallbackDetected => Self::RchLocalFallbackDetected,
+            FixtureScenarioArg::RchTopologyPreflightFailure => Self::RchTopologyPreflightFailure,
             FixtureScenarioArg::BranchMirrorMismatch => Self::BranchMirrorMismatch,
             FixtureScenarioArg::DirtySharedTree => Self::DirtySharedTree,
         }
@@ -1464,6 +1467,34 @@ mod tests {
         assert_eq!(
             report["probes"]["rch"]["admission_reason_code"],
             "local_fallback_detected"
+        );
+    }
+
+    #[test]
+    fn fixture_command_preserves_rch_topology_preflight_failure() {
+        let tmp = TempDir::new().expect("tempdir");
+        let result = run(&fixture_args_for_scenario(
+            tmp.path().to_path_buf(),
+            FixtureScenarioArg::RchTopologyPreflightFailure,
+        ))
+        .expect("fixture run");
+
+        assert!(result.success);
+        assert_eq!(
+            result.payload["handoff"]["decision"]["primary_reason_code"],
+            "proof-blocked-rch-topology-preflight"
+        );
+
+        let report_text =
+            fs::read_to_string(tmp.path().join(REPORT_FILENAME)).expect("report json");
+        let report: Value = serde_json::from_str(&report_text).expect("report parses");
+        assert_eq!(
+            report["probes"]["rch"]["admission_decision"],
+            "rch_infra_failure"
+        );
+        assert_eq!(
+            report["probes"]["rch"]["admission_reason_code"],
+            "topology_preflight_failure"
         );
     }
 

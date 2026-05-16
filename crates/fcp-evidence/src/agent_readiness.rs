@@ -844,6 +844,8 @@ pub enum RchAdmissionReasonCode {
     WorkersUnavailable,
     /// Stale cancellation or cleanup residue prevented admission.
     StaleCancellationResidue,
+    /// Remote topology preflight failed before Cargo started.
+    TopologyPreflightFailure,
     /// The command fell back or would fall back to local execution.
     LocalFallbackDetected,
     /// Remote execution completed and failed as a real build/test failure.
@@ -906,28 +908,36 @@ impl RchAdmissionObservation {
     /// Classify the observed RCH admission state.
     #[must_use]
     pub fn classify(&self) -> (RchAdmissionDecision, Option<RchAdmissionReasonCode>) {
-        if let Some(summary) = &self.proof_summary {
-            match (summary.location, summary.exit_code) {
-                (RchProofSummaryLocation::Local, _) => {
-                    return (
-                        RchAdmissionDecision::RefuseLocalFallback,
-                        Some(RchAdmissionReasonCode::LocalFallbackDetected),
-                    );
-                }
-                (RchProofSummaryLocation::Remote, Some(code)) if code != 0 => {
-                    return (
-                        RchAdmissionDecision::RealBuildFailure,
-                        Some(RchAdmissionReasonCode::RemoteBuildFailed),
-                    );
-                }
-                _ => {}
-            }
+        if let Some(classification) = self.proof_summary_classification() {
+            return classification;
         }
 
         if self.stale_cancellation_residue {
             return (
                 RchAdmissionDecision::RchInfraFailure,
                 Some(RchAdmissionReasonCode::StaleCancellationResidue),
+            );
+        }
+
+        if self
+            .worker_selection_reason
+            .as_deref()
+            .is_some_and(selection_reason_is_active_project_exclusion)
+        {
+            return (
+                RchAdmissionDecision::WaitForProjectSlot,
+                Some(RchAdmissionReasonCode::ActiveProjectExclusion),
+            );
+        }
+
+        if self
+            .worker_selection_reason
+            .as_deref()
+            .is_some_and(selection_reason_is_topology_preflight_failure)
+        {
+            return (
+                RchAdmissionDecision::RchInfraFailure,
+                Some(RchAdmissionReasonCode::TopologyPreflightFailure),
             );
         }
 
@@ -988,6 +998,35 @@ impl RchAdmissionObservation {
             RchAdmissionDecision::RunRemoteNow,
             Some(RchAdmissionReasonCode::Healthy),
         )
+    }
+
+    fn proof_summary_classification(
+        &self,
+    ) -> Option<(RchAdmissionDecision, Option<RchAdmissionReasonCode>)> {
+        let summary = self.proof_summary.as_ref()?;
+        if self
+            .worker_selection_reason
+            .as_deref()
+            .is_some_and(selection_reason_is_topology_preflight_failure)
+            && summary.location == RchProofSummaryLocation::Local
+        {
+            return Some((
+                RchAdmissionDecision::RchInfraFailure,
+                Some(RchAdmissionReasonCode::TopologyPreflightFailure),
+            ));
+        }
+
+        match (summary.location, summary.exit_code) {
+            (RchProofSummaryLocation::Local, _) => Some((
+                RchAdmissionDecision::RefuseLocalFallback,
+                Some(RchAdmissionReasonCode::LocalFallbackDetected),
+            )),
+            (RchProofSummaryLocation::Remote, Some(code)) if code != 0 => Some((
+                RchAdmissionDecision::RealBuildFailure,
+                Some(RchAdmissionReasonCode::RemoteBuildFailed),
+            )),
+            _ => None,
+        }
     }
 
     /// Observed unallocated worker slots.
@@ -1067,6 +1106,18 @@ fn selection_reason_is_worker_unavailable(reason: &str) -> bool {
             | "no_matching_workers"
     ) || reason.contains("no_workers_with_runtime")
         || reason.contains("selection_error")
+}
+
+fn selection_reason_is_active_project_exclusion(reason: &str) -> bool {
+    reason.contains("active_project_exclusion")
+}
+
+fn selection_reason_is_topology_preflight_failure(reason: &str) -> bool {
+    let lower = reason.to_ascii_lowercase();
+    lower.contains("topology_preflight")
+        || lower.contains("topology preflight")
+        || lower.contains("remote topology")
+        || lower.contains("ln: already exists")
 }
 
 fn selection_reason_is_slot_pressure(reason: &str) -> bool {
@@ -1697,6 +1748,13 @@ const fn rch_blocked_reason(rch: &RchReadiness) -> (&'static str, &'static str) 
         ) => (
             "proof-blocked-rch-stale-cancellation",
             "wait for rch cleanup or operator action; do not repair workers from readiness handling",
+        ),
+        (
+            RchAdmissionDecision::RchInfraFailure,
+            Some(RchAdmissionReasonCode::TopologyPreflightFailure),
+        ) => (
+            "proof-blocked-rch-topology-preflight",
+            "fix or override the rch project-root topology before claiming remote Cargo proof",
         ),
         (
             RchAdmissionDecision::RchInfraFailure,
@@ -2412,6 +2470,27 @@ mod tests {
         );
 
         observation.active_same_project_count = 0;
+        observation.worker_selection_reason =
+            Some("no_admissible_workers: active_project_exclusion=1".to_owned());
+        assert_eq!(
+            observation.classify(),
+            (
+                RchAdmissionDecision::WaitForProjectSlot,
+                Some(RchAdmissionReasonCode::ActiveProjectExclusion)
+            )
+        );
+
+        observation.worker_selection_reason =
+            Some("remote topology preflight failed: ln: Already exists".to_owned());
+        assert_eq!(
+            observation.classify(),
+            (
+                RchAdmissionDecision::RchInfraFailure,
+                Some(RchAdmissionReasonCode::TopologyPreflightFailure)
+            )
+        );
+
+        observation.worker_selection_reason = Some("success".to_owned());
         observation.used_slots = 32;
         assert_eq!(
             observation.classify(),

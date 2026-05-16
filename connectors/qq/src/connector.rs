@@ -26,8 +26,9 @@ use crate::client::{
 use crate::error::QqError;
 use crate::types::{
     CAP_EVENTS_READ, CAP_GATEWAY_READ, CAP_HEALTH_READ, CAP_MESSAGES_WRITE, EVENT_QQ_EVENT_DROPPED,
-    EVENT_QQ_MESSAGE_AUTHORIZED, OP_EVENTS_NORMALIZE, OP_GATEWAY_PROJECT_EVENT, OP_GET_GATEWAY,
-    OP_HEALTH, OP_SEND_C2C, OP_SEND_CHANNEL, OP_SEND_GROUP, QqConfig, QqGatewayEvent,
+    EVENT_QQ_MESSAGE_AUTHORIZED, OP_EVENTS_NORMALIZE, OP_GATEWAY_DRAIN_EVENTS,
+    OP_GATEWAY_PROJECT_EVENT, OP_GET_GATEWAY, OP_HEALTH, OP_SEND_C2C, OP_SEND_CHANNEL,
+    OP_SEND_GROUP, QqConfig, QqGatewayEvent,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -310,6 +311,20 @@ fn gateway_event_input_schema() -> Value {
     })
 }
 
+fn gateway_drain_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10000
+            }
+        }
+    })
+}
+
 fn normalized_event_schema() -> Value {
     json!({
         "type": "object",
@@ -466,6 +481,44 @@ fn gateway_projection_schema() -> Value {
     })
 }
 
+fn gateway_queued_event_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["topic", "sequence", "event_id", "normalized", "policy"],
+        "additionalProperties": false,
+        "properties": {
+            "topic": { "const": EVENT_QQ_MESSAGE_AUTHORIZED },
+            "sequence": { "type": ["integer", "null"], "minimum": 0 },
+            "event_id": { "type": ["string", "null"] },
+            "normalized": {
+                "type": "object",
+                "additionalProperties": true
+            },
+            "policy": {
+                "type": "object",
+                "additionalProperties": true
+            }
+        }
+    })
+}
+
+fn gateway_drain_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["drained_count", "remaining_count", "events", "runtime"],
+        "additionalProperties": false,
+        "properties": {
+            "drained_count": { "type": "integer", "minimum": 0 },
+            "remaining_count": { "type": "integer", "minimum": 0 },
+            "events": {
+                "type": "array",
+                "items": gateway_queued_event_schema()
+            },
+            "runtime": gateway_runtime_snapshot_schema()
+        }
+    })
+}
+
 #[allow(clippy::too_many_lines)]
 fn output_schema_for(operation_id: &str) -> Value {
     match operation_id {
@@ -506,6 +559,7 @@ fn output_schema_for(operation_id: &str) -> Value {
         }),
         OP_EVENTS_NORMALIZE => normalized_event_schema(),
         OP_GATEWAY_PROJECT_EVENT => gateway_projection_schema(),
+        OP_GATEWAY_DRAIN_EVENTS => gateway_drain_schema(),
         _ => json!({ "type": "object" }),
     }
 }
@@ -721,6 +775,16 @@ impl QqConnector {
                 gateway_event_input_schema(),
                 "Use when a host-owned QQ WebSocket loop needs connector-side sequence, duplicate, and inbound-policy projection before agent-visible event fanout.",
             ),
+            operation(
+                OP_GATEWAY_DRAIN_EVENTS,
+                "Drain accepted QQ gateway events from the bounded runtime queue",
+                CAP_EVENTS_READ,
+                RiskLevel::Low,
+                SafetyTier::Safe,
+                IdempotencyClass::Strict,
+                gateway_drain_input_schema(),
+                "Use after projecting host-fed QQ gateway frames to atomically dequeue authorized events for downstream fanout.",
+            ),
         ]
     }
 
@@ -774,6 +838,11 @@ impl QqConnector {
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 serialize_output(&projection, "projected gateway event")?
+            }
+            OP_GATEWAY_DRAIN_EVENTS => {
+                let limit = parse_gateway_drain_limit(&req.input)?;
+                let drained = client.drain_gateway_events(limit).await;
+                serialize_output(&drained, "drained gateway events")?
             }
             _ => {
                 return Err(FcpError::InvalidRequest {
@@ -1061,7 +1130,7 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
         OP_SEND_CHANNEL | OP_SEND_GROUP | OP_SEND_C2C => CAP_MESSAGES_WRITE,
         OP_GET_GATEWAY => CAP_GATEWAY_READ,
         OP_HEALTH => CAP_HEALTH_READ,
-        OP_EVENTS_NORMALIZE | OP_GATEWAY_PROJECT_EVENT => CAP_EVENTS_READ,
+        OP_EVENTS_NORMALIZE | OP_GATEWAY_PROJECT_EVENT | OP_GATEWAY_DRAIN_EVENTS => CAP_EVENTS_READ,
         _ => {
             return Err(FcpError::InvalidRequest {
                 code: 1004,
@@ -1106,6 +1175,9 @@ fn validate_simulate_input(operation: &str, input: &Value) -> FcpResult<()> {
             normalize_message_event(&gateway_event).map_err(|e| e.to_fcp_error())?;
         }
         OP_GATEWAY_PROJECT_EVENT => validate_gateway_project_input(input)?,
+        OP_GATEWAY_DRAIN_EVENTS => {
+            let _limit = parse_gateway_drain_limit(input)?;
+        }
         _ => {
             return Err(FcpError::InvalidRequest {
                 code: 1004,
@@ -1126,6 +1198,26 @@ fn validate_gateway_project_input(input: &Value) -> FcpResult<()> {
         Err(QqError::InvalidInput(message)) if message.contains("not a normalizable") => Ok(()),
         Err(error) => Err(error.to_fcp_error()),
     }
+}
+
+fn parse_gateway_drain_limit(input: &Value) -> FcpResult<usize> {
+    let Some(limit) = input.get("limit") else {
+        return Ok(usize::MAX);
+    };
+    let limit = limit.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "gateway drain limit must be an integer".into(),
+    })?;
+    if limit == 0 || limit > 10_000 {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "gateway drain limit must be between 1 and 10000".into(),
+        });
+    }
+    usize::try_from(limit).map_err(|_| FcpError::InvalidRequest {
+        code: 1003,
+        message: "gateway drain limit is too large for this platform".into(),
+    })
 }
 
 fn parse_gateway_event(input: &Value) -> FcpResult<QqGatewayEvent> {
@@ -1355,6 +1447,7 @@ mod tests {
         (OP_GET_GATEWAY, "gateway_get"),
         (OP_EVENTS_NORMALIZE, "events_normalize"),
         (OP_GATEWAY_PROJECT_EVENT, "gateway_project_event"),
+        (OP_GATEWAY_DRAIN_EVENTS, "gateway_drain_events"),
         (OP_HEALTH, "health"),
     ];
 
@@ -1545,6 +1638,16 @@ mod tests {
         })
     }
 
+    fn sample_queued_gateway_event() -> Value {
+        json!({
+            "topic": EVENT_QQ_MESSAGE_AUTHORIZED,
+            "sequence": 1,
+            "event_id": "evt-1",
+            "normalized": sample_normalized_event(),
+            "policy": sample_policy_decision()
+        })
+    }
+
     async fn ready_connector(signing_key: &Ed25519SigningKey) -> QqConnector {
         let instance_id = InstanceId::new();
         let mut connector = QqConnector::new();
@@ -1581,10 +1684,10 @@ mod tests {
     }
 
     #[test]
-    fn introspect_returns_seven_operations() {
+    fn introspect_returns_eight_operations() {
         let connector = QqConnector::new();
         let introspection = connector.introspect();
-        assert_eq!(introspection.operations.len(), 7);
+        assert_eq!(introspection.operations.len(), 8);
         assert_eq!(introspection.events.len(), 2);
     }
 
@@ -1604,6 +1707,7 @@ mod tests {
         assert!(ids.contains(&"qq.health"));
         assert!(ids.contains(&"qq.events.normalize"));
         assert!(ids.contains(&"qq.gateway.project_event"));
+        assert!(ids.contains(&"qq.gateway.drain_events"));
     }
 
     #[test]
@@ -1686,6 +1790,13 @@ mod tests {
             assert_schema_rejects(&input, &json!({"event": {"op": 0, "t": "lowercase_event"}}))?;
             assert_schema_rejects(&input, &json!({"event": {"op": 0}, "unexpected": true}))?;
         }
+
+        let drain_input = operation_schema(&manifest, "gateway_drain_events", "input_schema")?;
+        assert_schema_accepts(&drain_input, &json!({}))?;
+        assert_schema_accepts(&drain_input, &json!({"limit": 1}))?;
+        assert_schema_rejects(&drain_input, &json!({"limit": 0}))?;
+        assert_schema_rejects(&drain_input, &json!({"limit": 10001}))?;
+        assert_schema_rejects(&drain_input, &json!({"unexpected": true}))?;
 
         for operation_key in [
             "messages_send_channel",
@@ -1770,6 +1881,26 @@ mod tests {
             }),
         )?;
 
+        let drain_output = operation_schema(&manifest, "gateway_drain_events", "output_schema")?;
+        assert_schema_accepts(
+            &drain_output,
+            &json!({
+                "drained_count": 1,
+                "remaining_count": 0,
+                "events": [sample_queued_gateway_event()],
+                "runtime": sample_runtime_snapshot()
+            }),
+        )?;
+        assert_schema_rejects(
+            &drain_output,
+            &json!({
+                "drained_count": 1,
+                "remaining_count": 0,
+                "events": [{"topic": EVENT_QQ_EVENT_DROPPED}],
+                "runtime": sample_runtime_snapshot()
+            }),
+        )?;
+
         Ok(())
     }
 
@@ -1784,7 +1915,11 @@ mod tests {
             "gateway_get",
             "health",
         ];
-        let local_only_operations = ["events_normalize", "gateway_project_event"];
+        let local_only_operations = [
+            "events_normalize",
+            "gateway_project_event",
+            "gateway_drain_events",
+        ];
 
         for operation_key in api_operations {
             let constraints = operation_network_constraints(&manifest, operation_key)?;
@@ -2019,6 +2154,7 @@ mod tests {
         assert!(required_capability(OP_HEALTH).is_ok());
         assert!(required_capability(OP_EVENTS_NORMALIZE).is_ok());
         assert!(required_capability(OP_GATEWAY_PROJECT_EVENT).is_ok());
+        assert!(required_capability(OP_GATEWAY_DRAIN_EVENTS).is_ok());
     }
 
     #[test]
@@ -2143,6 +2279,36 @@ mod tests {
             .unwrap();
 
         assert!(response.would_succeed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_gateway_drain_events_validates_limit() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = ready_connector(&signing_key).await;
+        let allowed = connector
+            .simulate(simulate_request(
+                &signing_key,
+                &connector.base.instance_id,
+                CAP_EVENTS_READ,
+                OP_GATEWAY_DRAIN_EVENTS,
+                json!({"limit": 10}),
+            ))
+            .await
+            .unwrap();
+        assert!(allowed.would_succeed);
+
+        let denied = connector
+            .simulate(simulate_request(
+                &signing_key,
+                &connector.base.instance_id,
+                CAP_EVENTS_READ,
+                OP_GATEWAY_DRAIN_EVENTS,
+                json!({"limit": 0}),
+            ))
+            .await
+            .unwrap();
+        assert!(!denied.would_succeed);
+        assert_eq!(denied.denial_code.as_deref(), Some("FCP-1003"));
     }
 
     #[fcp_async_core::runtime::test]

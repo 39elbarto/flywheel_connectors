@@ -13,9 +13,9 @@ use serde_json::{Value, json};
 use crate::error::{QqError, QqResult};
 use crate::types::{
     AccessTokenResponse, EVENT_QQ_EVENT_DROPPED, EVENT_QQ_MESSAGE_AUTHORIZED, NormalizedQqEvent,
-    QqAccessPolicyMode, QqConfig, QqGatewayEvent, QqGatewayEventProjection, QqGatewayRuntimeConfig,
-    QqGatewayRuntimeSnapshot, QqInboundPolicyConfig, QqInboundPolicyDecision, QqMessageEvent,
-    QqRouting, TOKEN_REFRESH_SAFETY_MARGIN_SECS,
+    QqAccessPolicyMode, QqConfig, QqGatewayDrainResult, QqGatewayEvent, QqGatewayEventProjection,
+    QqGatewayQueuedEvent, QqGatewayRuntimeConfig, QqGatewayRuntimeSnapshot, QqInboundPolicyConfig,
+    QqInboundPolicyDecision, QqMessageEvent, QqRouting, TOKEN_REFRESH_SAFETY_MARGIN_SECS,
 };
 
 const QQ_GATEWAY_EVENT_TYPE_MAX_CHARS: usize = 64;
@@ -135,6 +135,13 @@ impl QqClient {
         event: QqGatewayEvent,
     ) -> QqResult<QqGatewayEventProjection> {
         self.gateway_runtime.lock().await.project_event(event)
+    }
+
+    pub async fn drain_gateway_events(&self, limit: usize) -> QqGatewayDrainResult {
+        self.gateway_runtime
+            .lock()
+            .await
+            .drain_accepted_events(limit)
     }
 
     pub fn shutdown(&self) {
@@ -264,10 +271,10 @@ pub struct QqGatewayRuntime {
     config: QqGatewayRuntimeConfig,
     session: InMemoryStreamingSession,
     seen_event_ids: VecDeque<String>,
+    pending_events: VecDeque<QqGatewayQueuedEvent>,
     heartbeat_sent_count: u64,
     heartbeat_ack_count: u64,
     reconnect_attempts: u32,
-    queue_depth: usize,
     accepted_events: u64,
     dropped_events: u64,
     duplicate_events: u64,
@@ -288,10 +295,10 @@ impl QqGatewayRuntime {
             config,
             session,
             seen_event_ids: VecDeque::new(),
+            pending_events: VecDeque::new(),
             heartbeat_sent_count: 0,
             heartbeat_ack_count: 0,
             reconnect_attempts: 0,
-            queue_depth: 0,
             accepted_events: 0,
             dropped_events: 0,
             duplicate_events: 0,
@@ -311,7 +318,7 @@ impl QqGatewayRuntime {
             reconnect_attempts: self.reconnect_attempts,
             max_reconnect_attempts: self.config.max_reconnect_attempts,
             reconnect_backoff_ms: self.config.reconnect_backoff_ms,
-            queue_depth: self.queue_depth,
+            queue_depth: self.pending_events.len(),
             max_queue_depth: self.config.max_queue_depth,
             dedupe_size: self.seen_event_ids.len(),
             dedupe_window_size: self.config.dedupe_window_size,
@@ -371,6 +378,23 @@ impl QqGatewayRuntime {
         }
     }
 
+    #[must_use]
+    pub fn drain_accepted_events(&mut self, limit: usize) -> QqGatewayDrainResult {
+        let drain_count = limit.min(self.pending_events.len());
+        let mut events = Vec::with_capacity(drain_count);
+        for _ in 0..drain_count {
+            if let Some(event) = self.pending_events.pop_front() {
+                events.push(event);
+            }
+        }
+        QqGatewayDrainResult {
+            drained_count: events.len(),
+            remaining_count: self.pending_events.len(),
+            events,
+            runtime: self.snapshot(),
+        }
+    }
+
     fn reconnect_projection(
         &mut self,
         sequence: Option<u64>,
@@ -413,7 +437,7 @@ impl QqGatewayRuntime {
         };
         self.remember_event_id(event_id.as_deref());
 
-        if self.queue_depth >= self.config.max_queue_depth {
+        if self.pending_events.len() >= self.config.max_queue_depth {
             return Ok(self.dropped_projection(event.s, event_id, "queue_full"));
         }
 
@@ -432,7 +456,13 @@ impl QqGatewayRuntime {
             });
         }
 
-        self.queue_depth = self.queue_depth.saturating_add(1);
+        self.pending_events.push_back(QqGatewayQueuedEvent {
+            topic: EVENT_QQ_MESSAGE_AUTHORIZED,
+            sequence: event.s,
+            event_id: event_id.clone(),
+            normalized: normalized.clone(),
+            policy: policy.clone(),
+        });
         self.accepted_events = self.accepted_events.saturating_add(1);
         Ok(QqGatewayEventProjection {
             accepted: true,
@@ -2570,6 +2600,128 @@ mod tests {
             })
             .unwrap();
         assert!(uncapped.accepted);
+    }
+
+    #[test]
+    fn gateway_runtime_drains_accepted_events_and_restores_queue_capacity() {
+        let mut config = QqGatewayRuntimeConfig {
+            enabled: true,
+            max_queue_depth: 2,
+            ..QqGatewayRuntimeConfig::default()
+        };
+        config.policy.group_require_mention = false;
+        let mut runtime = QqGatewayRuntime::new(config);
+
+        for sequence in 1..=2 {
+            let projected = runtime
+                .project_event(QqGatewayEvent {
+                    op: 0,
+                    s: Some(sequence),
+                    t: Some("GROUP_MESSAGE_CREATE".into()),
+                    d: Some(json!({
+                        "id": format!("msg-{sequence}"),
+                        "content": format!("queued message {sequence}"),
+                        "group_openid": "group-1",
+                        "group_member_openid": format!("member-{sequence}")
+                    })),
+                    id: Some(format!("evt-{sequence}")),
+                })
+                .unwrap();
+            assert!(projected.accepted);
+            assert_eq!(
+                projected.runtime.queue_depth,
+                usize::try_from(sequence).expect("test sequence fits usize")
+            );
+        }
+
+        let queue_full = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(3),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-3",
+                    "content": "queue should be full",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-3"
+                })),
+                id: Some("evt-3".into()),
+            })
+            .unwrap();
+        assert!(!queue_full.accepted);
+        assert_eq!(queue_full.reason_code, "queue_full");
+        assert_eq!(queue_full.runtime.queue_depth, 2);
+
+        let drained_one = runtime.drain_accepted_events(1);
+        assert_eq!(drained_one.drained_count, 1);
+        assert_eq!(drained_one.remaining_count, 1);
+        assert_eq!(drained_one.runtime.queue_depth, 1);
+        assert_eq!(drained_one.events[0].event_id.as_deref(), Some("evt-1"));
+        assert_eq!(
+            drained_one.events[0].normalized.message_id.as_deref(),
+            Some("msg-1")
+        );
+
+        let accepted_after_drain = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(4),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-4",
+                    "content": "capacity restored",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-4"
+                })),
+                id: Some("evt-4".into()),
+            })
+            .unwrap();
+        assert!(accepted_after_drain.accepted);
+        assert_eq!(accepted_after_drain.runtime.queue_depth, 2);
+
+        let drained_remaining = runtime.drain_accepted_events(usize::MAX);
+        assert_eq!(drained_remaining.drained_count, 2);
+        assert_eq!(drained_remaining.remaining_count, 0);
+        assert_eq!(drained_remaining.runtime.queue_depth, 0);
+        assert_eq!(
+            drained_remaining
+                .events
+                .iter()
+                .map(|event| event.event_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("evt-2"), Some("evt-4")]
+        );
+    }
+
+    #[test]
+    fn gateway_runtime_zero_drain_is_noop() {
+        let mut config = QqGatewayRuntimeConfig {
+            enabled: true,
+            max_queue_depth: 2,
+            ..QqGatewayRuntimeConfig::default()
+        };
+        config.policy.group_require_mention = false;
+        let mut runtime = QqGatewayRuntime::new(config);
+        let accepted = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-1",
+                    "content": "queued message",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1"
+                })),
+                id: Some("evt-1".into()),
+            })
+            .unwrap();
+        assert!(accepted.accepted);
+        let drained = runtime.drain_accepted_events(0);
+        assert_eq!(drained.drained_count, 0);
+        assert_eq!(drained.remaining_count, 1);
+        assert!(drained.events.is_empty());
+        assert_eq!(drained.runtime.queue_depth, 1);
     }
 
     #[test]

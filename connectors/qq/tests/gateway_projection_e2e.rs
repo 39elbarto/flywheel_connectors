@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const OP_GATEWAY_PROJECT_EVENT: &str = "qq.gateway.project_event";
+const OP_GATEWAY_DRAIN_EVENTS: &str = "qq.gateway.drain_events";
 const CAP_EVENTS_READ: &str = "qq.events.read";
 
 fn open_jsonl_log() -> (File, PathBuf) {
@@ -52,6 +53,10 @@ fn log_projection_step(logs: &mut File, step: &str, status: &str, projection: &V
     log_step(logs, step, status, &redacted_projection(projection));
 }
 
+fn log_drain_step(logs: &mut File, step: &str, status: &str, drain: &Value) {
+    log_step(logs, step, status, &redacted_drain_result(drain));
+}
+
 fn redacted_projection(projection: &Value) -> Value {
     json!({
         "accepted": bool_field(projection, "accepted"),
@@ -71,6 +76,39 @@ fn redacted_projection(projection: &Value) -> Value {
             .get("runtime")
             .filter(|value| !value.is_null())
             .map(redacted_runtime_snapshot),
+    })
+}
+
+fn redacted_drain_result(drain: &Value) -> Value {
+    let events = drain
+        .get("events")
+        .and_then(Value::as_array)
+        .map(|events| events.iter().map(redacted_queued_event).collect::<Vec<_>>())
+        .unwrap_or_default();
+    json!({
+        "drained_count": u64_field(drain, "drained_count"),
+        "remaining_count": u64_field(drain, "remaining_count"),
+        "events": events,
+        "runtime": drain
+            .get("runtime")
+            .filter(|value| !value.is_null())
+            .map(redacted_runtime_snapshot),
+    })
+}
+
+fn redacted_queued_event(event: &Value) -> Value {
+    json!({
+        "topic": str_field(event, "topic"),
+        "sequence": u64_field(event, "sequence"),
+        "event_id_hash": hash_field(event, "event_id"),
+        "normalized": event
+            .get("normalized")
+            .filter(|value| !value.is_null())
+            .map(redacted_normalized_event),
+        "policy": event
+            .get("policy")
+            .filter(|value| !value.is_null())
+            .map(redacted_policy_decision),
     })
 }
 
@@ -243,7 +281,11 @@ fn handshake_request(host_public_key: [u8; 32], instance_id: InstanceId) -> Hand
     }
 }
 
-fn build_token(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -> CapabilityToken {
+fn build_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
+    operation: &'static str,
+) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec!["*".into()],
@@ -256,7 +298,7 @@ fn build_token(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -> Cap
         .capability_id(CAP_EVENTS_READ)
         .zone_id("z:community")
         .principal("agent:test")
-        .operations(&[OP_GATEWAY_PROJECT_EVENT])
+        .operations(&[operation])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
@@ -282,7 +324,7 @@ async fn invoke_projection(
             operation: OperationId::from_static(OP_GATEWAY_PROJECT_EVENT),
             zone_id: ZoneId::community(),
             input: json!({ "event": event }),
-            capability_token: build_token(signing_key, instance_id),
+            capability_token: build_token(signing_key, instance_id, OP_GATEWAY_PROJECT_EVENT),
             holder_proof: None,
             context: None,
             idempotency_key: None,
@@ -295,6 +337,36 @@ async fn invoke_projection(
         .await
         .expect("project QQ gateway event");
     response.result.expect("projection result")
+}
+
+async fn invoke_drain(
+    connector: &QqConnector,
+    signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
+    id: &str,
+    input: Value,
+) -> Value {
+    let response = connector
+        .invoke(InvokeRequest {
+            r#type: "invoke".into(),
+            id: RequestId::new(id),
+            connector_id: ConnectorId::from_static("fcp.qq"),
+            operation: OperationId::from_static(OP_GATEWAY_DRAIN_EVENTS),
+            zone_id: ZoneId::community(),
+            input,
+            capability_token: build_token(signing_key, instance_id, OP_GATEWAY_DRAIN_EVENTS),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        })
+        .await
+        .expect("drain QQ gateway events");
+    response.result.expect("drain result")
 }
 
 #[fcp_async_core::runtime::test]
@@ -868,6 +940,46 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "ok",
         &reconnect_exhausted,
     );
+
+    let first_drain = invoke_drain(
+        &connector,
+        &signing_key,
+        &instance_id,
+        "qq-gateway-drain-first",
+        json!({"limit": 2}),
+    )
+    .await;
+    assert_eq!(first_drain["drained_count"], 2);
+    assert_eq!(first_drain["remaining_count"], 1);
+    assert_eq!(first_drain["runtime"]["queue_depth"], 1);
+    let first_drain_events = first_drain["events"]
+        .as_array()
+        .expect("first drain events array");
+    assert_eq!(first_drain_events[0]["event_id"], "evt-accepted");
+    assert_eq!(first_drain_events[1]["event_id"], "evt-structured-mention");
+    assert_eq!(
+        first_drain_events[0]["normalized"]["message_id"],
+        "msg-accepted"
+    );
+    log_drain_step(&mut logs, "gateway_drain_first_batch", "ok", &first_drain);
+
+    let final_drain = invoke_drain(
+        &connector,
+        &signing_key,
+        &instance_id,
+        "qq-gateway-drain-final",
+        json!({}),
+    )
+    .await;
+    assert_eq!(final_drain["drained_count"], 1);
+    assert_eq!(final_drain["remaining_count"], 0);
+    assert_eq!(final_drain["runtime"]["queue_depth"], 0);
+    let final_drain_events = final_drain["events"]
+        .as_array()
+        .expect("final drain events array");
+    assert_eq!(final_drain_events[0]["event_id"], "evt-reply-media");
+    assert_eq!(final_drain_events[0]["normalized"]["reply_to"], "msg-root");
+    log_drain_step(&mut logs, "gateway_drain_final_batch", "ok", &final_drain);
 
     connector
         .shutdown(ShutdownRequest {

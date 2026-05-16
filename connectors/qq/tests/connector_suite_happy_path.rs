@@ -43,6 +43,7 @@ fn expected_qq_manifest_operations() -> BTreeSet<String> {
         "gateway_get",
         "events_normalize",
         "gateway_project_event",
+        "gateway_drain_events",
         "health",
     ]
     .into_iter()

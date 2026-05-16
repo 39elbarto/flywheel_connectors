@@ -34,6 +34,7 @@ The current crate exposes these operations:
 - `qq.health`
 - `qq.events.normalize`
 - `qq.gateway.project_event`
+- `qq.gateway.drain_events`
 
 Important implementation truths from `connector.rs`, `main.rs`, and `manifest.toml`:
 
@@ -49,7 +50,7 @@ Important implementation truths from `connector.rs`, `main.rs`, and `manifest.to
 - Direct and group sends currently hard-code `msg_type = 0` and `msg_seq = 1`, and only optionally thread through `msg_id`.
 - `qq.gateway.get` is a plain `GET /gateway` discovery call. The connector does not actually open the websocket session yet.
 - `qq.events.normalize` decodes a raw gateway message dispatch into channel/group/C2C routing, quote context, sender metadata, and attachment presence.
-- `qq.gateway.project_event` is the stateful gateway-runtime core: it tracks restored session ID, sequence cursor, heartbeat acknowledgements, duplicate event IDs, queue bounds, group/C2C access policy, and group mention gating before returning `qq.message.authorized` or `qq.event.dropped` projection records. This lets a host-supervised WebSocket worker keep the socket ownership while reusing connector-side security and redaction decisions.
+- `qq.gateway.project_event` is the stateful gateway-runtime core: it tracks restored session ID, sequence cursor, heartbeat acknowledgements, duplicate event IDs, queue bounds, group/C2C access policy, and group mention gating before returning `qq.message.authorized` or `qq.event.dropped` projection records. Accepted records are retained in a bounded in-memory queue until `qq.gateway.drain_events` dequeues them for host fan-out. This lets a host-supervised WebSocket worker keep the socket ownership while reusing connector-side security and redaction decisions.
 - `qq.health` verifies both token issuance and gateway discovery; `self_check()` is narrower and only validates token issuance.
 - `simulate()` validates configuration, handshake, capability, path, and event payload shape; `subscribe()` / `unsubscribe()` still return `StreamingNotSupported`.
 - The current crate has inline unit tests for channel-send payload shape, gateway auth-header behavior, and gateway projection state, plus crate-local connector-suite and gateway-projection e2e tests.
@@ -75,6 +76,7 @@ This slice is intentionally closer to "outbound bot message dispatch plus connec
 | Credential and reachability probe | In scope | `qq.health` issues a token and checks gateway discovery. |
 | Websocket connection ownership | Out of scope | No connect/identify/read loop is spawned by this connector slice yet. |
 | Gateway event projection | In scope | `qq.gateway.project_event` tracks sequence, session, heartbeat ack, duplicate IDs, bounded queue state, access policy, and group mention gating for host-fed gateway frames. |
+| Gateway event draining | In scope | `qq.gateway.drain_events` dequeues accepted projection records from the bounded queue so the host can fan out only authorized events and observe remaining backlog. |
 | Passive reply policy and event-linked sends | Out of scope | The QQ docs distinguish active vs passive messaging, but the connector does not model `event_id`-driven semantics or policy enforcement. |
 | Channel private messages | Out of scope | The upstream `POST /dms/{guild_id}/messages` surface is not implemented. |
 | Rich payloads and media | Out of scope | No markdown, ark, embed, keyboard, media upload, voice, or file-send support is exposed in the first slice. |
@@ -123,7 +125,7 @@ This slice is intentionally closer to "outbound bot message dispatch plus connec
 }
 ```
 
-The projection operation does not log `client_secret`, access tokens, or raw transport credentials. It returns the normalized message payload already present in the incoming gateway frame, a policy decision, and a runtime snapshot with counters and bounded state sizes.
+The projection operation does not log `client_secret`, access tokens, or raw transport credentials. It returns the normalized message payload already present in the incoming gateway frame, a policy decision, and a runtime snapshot with counters and bounded state sizes. Accepted events are queued in memory until the host calls `qq.gateway.drain_events`; the drain response includes `drained_count`, `remaining_count`, queued authorized event records, and a fresh runtime snapshot. The optional drain `limit` is bounded to `1..=10000`; omitting it drains the available queue.
 When `policy.group_require_mention` is enabled, gateway projection treats `GROUP_AT_MESSAGE_CREATE` as an explicit bot mention and also recognizes the configured `bot_user_id` in message text or structured raw mention arrays such as `mentions`, `message`, `message_segments`, `segments`, and `content_segments`.
 When `policy.max_attachment_bytes` is set, gateway projection denies message events whose declared attachment byte total exceeds the cap or whose attachment size metadata is missing.
 When `gateway.enabled` is false, `qq.gateway.project_event` fails closed with `gateway_disabled` and does not update session, sequence, heartbeat, policy, or queue state.
@@ -184,6 +186,7 @@ The connector coordinates before network dispatch. Claim targets are namespaced 
 | `qq.gateway.get` | `GET /gateway` | `qq.gateway.read` | `Safe` | `Low` | `Strict` | Returns the official gateway URL for later websocket ingestion work. |
 | `qq.events.normalize` | local decode | `qq.events.read` | `Safe` | `Low` | `Strict` | Normalizes raw QQ Bot gateway message events without mutating runtime state. |
 | `qq.gateway.project_event` | local projection | `qq.events.read` | `Safe` | `Low` | `Strict` | Stateful host-fed gateway projection with sequence/replay/policy decisions and redaction-safe runtime snapshot. |
+| `qq.gateway.drain_events` | local dequeue | `qq.events.read` | `Safe` | `Low` | `Strict` | Drains accepted gateway projections from the bounded queue after host-fed projection, preserving runtime backlog visibility. |
 | `qq.health` | `POST /app/getAppAccessToken` then `GET /gateway` | `qq.health.read` | `Safe` | `Low` | `Strict` | Safe auth and reachability probe backed by access-token issuance and gateway discovery. |
 
 ## Explicit Non-Goals

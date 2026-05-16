@@ -12,6 +12,7 @@ pub const OP_SEND_GROUP: &str = "qq.messages.send_group";
 pub const OP_SEND_C2C: &str = "qq.messages.send_c2c";
 pub const OP_GET_GATEWAY: &str = "qq.gateway.get";
 pub const OP_GATEWAY_PROJECT_EVENT: &str = "qq.gateway.project_event";
+pub const OP_GATEWAY_DRAIN_EVENTS: &str = "qq.gateway.drain_events";
 pub const OP_HEALTH: &str = "qq.health";
 pub const OP_EVENTS_NORMALIZE: &str = "qq.events.normalize";
 
@@ -259,6 +260,23 @@ pub struct QqGatewayEventProjection {
     pub runtime: QqGatewayRuntimeSnapshot,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct QqGatewayQueuedEvent {
+    pub topic: &'static str,
+    pub sequence: Option<u64>,
+    pub event_id: Option<String>,
+    pub normalized: NormalizedQqEvent,
+    pub policy: QqInboundPolicyDecision,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QqGatewayDrainResult {
+    pub drained_count: usize,
+    pub remaining_count: usize,
+    pub events: Vec<QqGatewayQueuedEvent>,
+    pub runtime: QqGatewayRuntimeSnapshot,
+}
+
 // ─────────────────────────────────────────────────────────────────
 // Gateway event types (WebSocket event delivery)
 // ─────────────────────────────────────────────────────────────────
@@ -474,6 +492,7 @@ mod tests {
         assert_eq!(OP_SEND_C2C, "qq.messages.send_c2c");
         assert_eq!(OP_GET_GATEWAY, "qq.gateway.get");
         assert_eq!(OP_GATEWAY_PROJECT_EVENT, "qq.gateway.project_event");
+        assert_eq!(OP_GATEWAY_DRAIN_EVENTS, "qq.gateway.drain_events");
         assert_eq!(OP_HEALTH, "qq.health");
         assert_eq!(OP_EVENTS_NORMALIZE, "qq.events.normalize");
         assert_eq!(CAP_MESSAGES_WRITE, "qq.messages.write");

@@ -1,5 +1,5 @@
 //! Pin `UsageMetric` + `UsageMetricKind` JSON+CBOR serde matrix — the closest
-//! analogue to "ConnectorBudgetUsage serde"
+//! analogue to "`ConnectorBudgetUsage` serde"
 //! (flywheel_connectors-bwkas).
 //!
 //! Bead asks for `ConnectorBudgetUsage` JSON+CBOR roundtrip pinning. No type
@@ -17,15 +17,15 @@
 //! empty. This pin closes that gap.
 //!
 //! Coverage:
-//!   * UsageMetric 4-field JSON shape (kind, amount, unit, custom_id),
-//!   * skip-when-None for unit + custom_id,
-//!   * UsageMetricKind 6-variant snake_case serde + as_str pinning,
-//!   * UsageMetricKind PascalCase rejection sentinel,
+//!   * `UsageMetric` 4-field JSON shape (`kind`, `amount`, `unit`, `custom_id`),
+//!   * skip-when-`None` for `unit` + `custom_id`,
+//!   * `UsageMetricKind` 6-variant `snake_case` serde + `as_str` pinning,
+//!   * `UsageMetricKind` `PascalCase` rejection sentinel,
 //!   * Constructor helpers produce expected variants
-//!     (api_credits/tokens/bytes/duration_ms/requests/custom),
+//!     (`api_credits`/`tokens`/`bytes`/`duration_ms`/`requests`/`custom`),
 //!   * `with_unit` builder attaches unit field,
-//!   * UsageMetric JSON + CBOR round-trip preserves all fields,
-//!   * Custom metric requires custom_id; round-trip preserves it,
+//!   * `UsageMetric` JSON + CBOR round-trip preserves all fields,
+//!   * Custom metric requires `custom_id`; round-trip preserves it,
 //!   * Distinct kinds + distinct amounts produce distinct JSON.
 
 use ciborium::Value as CborValue;
@@ -101,7 +101,7 @@ fn usage_metric_kind_distinct_variants_serialize_distinctly() {
 #[test]
 fn usage_metric_full_json_shape_pinned_when_unit_and_custom_id_present() {
     let metric = UsageMetric::custom("openai.gpt4.tokens", 1500, Some("tokens".to_string()));
-    let v = serde_json::to_value(&metric).unwrap();
+    let v = serde_json::to_value(metric).unwrap();
     let obj = v.as_object().expect("must be object");
 
     let expected: std::collections::BTreeSet<&str> = ["kind", "amount", "unit", "custom_id"]
@@ -121,7 +121,7 @@ fn usage_metric_minimal_omits_unit_and_custom_id_when_none() {
     // unit + custom_id use skip_serializing_if = "Option::is_none". When
     // both None, the wire form is exactly 2 fields.
     let metric = UsageMetric::tokens(42);
-    let v = serde_json::to_value(&metric).unwrap();
+    let v = serde_json::to_value(metric).unwrap();
     let obj = v.as_object().expect("must be object");
 
     let expected: std::collections::BTreeSet<&str> = ["kind", "amount"].into_iter().collect();
@@ -169,7 +169,7 @@ fn usage_metric_with_unit_attaches_unit_field() {
     let metric = UsageMetric::tokens(500).with_unit("token");
     assert_eq!(metric.unit.as_deref(), Some("token"));
 
-    let v = serde_json::to_value(&metric).unwrap();
+    let v = serde_json::to_value(metric).unwrap();
     assert_eq!(v.get("unit"), Some(&json!("token")));
 }
 
@@ -235,8 +235,8 @@ fn usage_metric_json_and_cbor_decode_to_equivalent_metric() {
 fn distinct_kinds_produce_distinct_json() {
     let a = UsageMetric::tokens(100);
     let b = UsageMetric::api_credits(100);
-    let av = serde_json::to_value(&a).unwrap();
-    let bv = serde_json::to_value(&b).unwrap();
+    let av = serde_json::to_value(a).unwrap();
+    let bv = serde_json::to_value(b).unwrap();
     assert_ne!(av, bv, "distinct kinds with same amount must differ");
 }
 
@@ -244,8 +244,8 @@ fn distinct_kinds_produce_distinct_json() {
 fn distinct_amounts_produce_distinct_json() {
     let a = UsageMetric::tokens(100);
     let b = UsageMetric::tokens(200);
-    let av = serde_json::to_value(&a).unwrap();
-    let bv = serde_json::to_value(&b).unwrap();
+    let av = serde_json::to_value(a).unwrap();
+    let bv = serde_json::to_value(b).unwrap();
     assert_ne!(av, bv, "distinct amounts with same kind must differ");
 }
 
@@ -253,8 +253,8 @@ fn distinct_amounts_produce_distinct_json() {
 fn distinct_custom_ids_produce_distinct_json() {
     let a = UsageMetric::custom("vendor.a", 100, None);
     let b = UsageMetric::custom("vendor.b", 100, None);
-    let av = serde_json::to_value(&a).unwrap();
-    let bv = serde_json::to_value(&b).unwrap();
+    let av = serde_json::to_value(a).unwrap();
+    let bv = serde_json::to_value(b).unwrap();
     assert_ne!(av, bv, "distinct custom_id must differ");
 }
 

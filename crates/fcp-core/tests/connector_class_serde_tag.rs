@@ -1,55 +1,55 @@
 //! Pin connector-classifier serde tags on the closest analogues to
-//! "ConnectorClass" (flywheel_connectors-p7lst).
+//! "`ConnectorClass`" (flywheel_connectors-p7lst).
 //!
 //! Bead asks for `ConnectorClass serde tag JSON+CBOR roundtrip`. No
 //! type literally named `ConnectorClass` exists in fcp-core. The
 //! connector-classification surface splits across several enums:
 //!
-//!  - `ConnectorRoute` (connector.rs:199) — 10-variant interaction
+//!  - `ConnectorRoute` (`connector.rs:199`) — 10-variant interaction
 //!    pattern classifier (already pinned by tcox6's
-//!    connector_route_serde_tags.rs).
-//!  - `ConnectorLifecycleState` (connector.rs:180) — 5-variant
+//!    `connector_route_serde_tags.rs`).
+//!  - `ConnectorLifecycleState` (`connector.rs:180`) — 5-variant
 //!    runtime state (already pinned by
-//!    connector_lifecycle_state_display.rs).
-//!  - `ConnectorStateModel` (connector_state.rs:171) — 3-variant
-//!    state-persistence classifier (Stateless / SingletonWriter /
-//!    Crdt) with internal `type` tag and snake_case rename. NOT yet
+//!    `connector_lifecycle_state_display.rs`).
+//!  - `ConnectorStateModel` (`connector_state.rs:171`) — 3-variant
+//!    state-persistence classifier (`Stateless` / `SingletonWriter` /
+//!    `Crdt`) with internal `type` tag and `snake_case` rename. NOT yet
 //!    covered for serde tag matrix.
-//!  - `ConnectorHealth` (health.rs:216) — 3-variant operational
-//!    classifier (Healthy / Degraded / Unavailable) with internal
+//!  - `ConnectorHealth` (`health.rs:216`) — 3-variant operational
+//!    classifier (`Healthy` / `Degraded` / `Unavailable`) with internal
 //!    `status` tag and lowercase rename. NOT yet pinned for serde.
-//!  - `CrdtType` (connector_state.rs:117) — 4-variant CRDT
-//!    classifier nested inside ConnectorStateModel::Crdt.
+//!  - `CrdtType` (`connector_state.rs:117`) — 4-variant CRDT
+//!    classifier nested inside `ConnectorStateModel::Crdt`.
 //!
-//! This test pins ConnectorStateModel + ConnectorHealth + CrdtType
+//! This test pins `ConnectorStateModel` + `ConnectorHealth` + `CrdtType`
 //! since they're the unpinned classifier surface; the bead's
-//! "ConnectorClass" maps best to ConnectorStateModel (the canonical
+//! "`ConnectorClass`" maps best to `ConnectorStateModel` (the canonical
 //! "what kind of connector is this from a state-model standpoint?"
 //! discriminant).
 //!
 //! Targets:
 //!
-//!   1. **ConnectorStateModel per-variant serde tag** (snake_case
+//!   1. **`ConnectorStateModel` per-variant serde tag** (`snake_case`
 //!      via internal `type` tag): `stateless` / `singleton_writer`
 //!      / `crdt`.
-//!   2. **ConnectorStateModel Display per variant** including
-//!      Crdt's parametrized form `crdt(<inner>)`.
-//!   3. **ConnectorStateModel JSON round-trip** preserves variant +
-//!      nested CrdtType.
-//!   4. **ConnectorStateModel default is Stateless** — operator
+//!   2. **`ConnectorStateModel` `Display` per variant** including
+//!      `Crdt`'s parametrized form `crdt(<inner>)`.
+//!   3. **`ConnectorStateModel` JSON round-trip** preserves variant +
+//!      nested `CrdtType`.
+//!   4. **`ConnectorStateModel` default is `Stateless`** — operator
 //!      visible default posture.
-//!   5. **ConnectorStateModel predicates truth table**
-//!      (is_stateless / is_singleton_writer / is_crdt /
-//!      crdt_type()).
-//!   6. **CrdtType per-variant serde tag** (snake_case:
-//!      lww_map / or_set / g_counter / pn_counter).
-//!   7. **CrdtType Display agrees with serde tag**.
-//!   8. **ConnectorHealth per-variant `status` tag** (lowercase:
-//!      healthy / degraded / unavailable).
-//!   9. **ConnectorHealth nested fields** preserved through JSON
-//!      round-trip for Degraded and Unavailable.
-//!  10. **PascalCase rejected** for all three classifiers (drift
-//!      sentinel for any future rename_all swap).
+//!   5. **`ConnectorStateModel` predicates truth table**
+//!      (`is_stateless` / `is_singleton_writer` / `is_crdt` /
+//!      `crdt_type()`).
+//!   6. **`CrdtType` per-variant serde tag** (`snake_case`:
+//!      `lww_map` / `or_set` / `g_counter` / `pn_counter`).
+//!   7. **`CrdtType` `Display` agrees with serde tag**.
+//!   8. **`ConnectorHealth` per-variant `status` tag** (lowercase:
+//!      `healthy` / `degraded` / `unavailable`).
+//!   9. **`ConnectorHealth` nested fields** preserved through JSON
+//!      round-trip for `Degraded` and `Unavailable`.
+//!  10. **`PascalCase` rejected** for all three classifiers (drift
+//!      sentinel for any future `rename_all` swap).
 
 use ciborium::value::Value as CborValue;
 use fcp_core::{ConnectorHealth, ConnectorStateModel, CrdtType};

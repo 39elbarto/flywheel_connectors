@@ -7,11 +7,11 @@ fn test_error(message: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, message.into())
 }
 
-fn object_id(byte: u8) -> ObjectId {
+const fn object_id(byte: u8) -> ObjectId {
     ObjectId::from_bytes([byte; 32])
 }
 
-fn correlation_id() -> CorrelationId {
+const fn correlation_id() -> CorrelationId {
     CorrelationId(Uuid::from_u128(0x1234_5678_9abc_def0_1234_5678_9abc_def0))
 }
 

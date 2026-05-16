@@ -1,5 +1,5 @@
 //! Pin `OperationIntent` JSON shape + `IntentStatus` / `OperationStatus`
-//! cross-enum casing divergence — the closest analogue to "IntentManifest
+//! cross-enum casing divergence — the closest analogue to "`IntentManifest`
 //! serde tag matrix" (flywheel_connectors-myiwt).
 //!
 //! Bead asks for `IntentManifest` serde tag JSON+CBOR roundtrip pinning. No
@@ -8,22 +8,23 @@
 //! `crates/fcp-core/src/operation.rs:110`. The serde "tag" surface is the
 //! discriminator-style `header.schema` + the related status enums:
 //!   * [`IntentStatus`] (5 variants, `rename_all = "snake_case"`),
-//!   * [`OperationStatus`] (4 variants, NO rename_all — defaults to PascalCase).
+//!   * [`OperationStatus`] (4 variants, NO `rename_all` — defaults to
+//!     `PascalCase`).
 //!
-//! Existing `operation_golden_vectors.rs` covers OperationIntent CBOR
-//! round-trip + signable_bytes determinism. This pin adds:
-//!   * OperationIntent JSON shape with explicit field-set pinning,
-//!   * OperationIntent JSON ↔ CBOR cross-format consistency,
-//!   * OperationIntent skip-when-None / skip-when-Some shape rules,
-//!   * IntentStatus 5-variant Display + snake_case serde matrix,
-//!   * OperationStatus 4-variant DEFAULT PascalCase serde matrix (NO
-//!     rename_all),
-//!   * **Cross-enum casing-divergence sentinel:** IntentStatus::InProgress
-//!     serializes `"in_progress"` while OperationStatus::Pending serializes
-//!     `"Pending"` (PascalCase). Operator dashboards filter on both — pin
+//! Existing `operation_golden_vectors.rs` covers `OperationIntent` CBOR
+//! round-trip + `signable_bytes` determinism. This pin adds:
+//!   * `OperationIntent` JSON shape with explicit field-set pinning,
+//!   * `OperationIntent` JSON ↔ CBOR cross-format consistency,
+//!   * `OperationIntent` skip-when-None / skip-when-Some shape rules,
+//!   * `IntentStatus` 5-variant Display + `snake_case` serde matrix,
+//!   * `OperationStatus` 4-variant DEFAULT `PascalCase` serde matrix (NO
+//!     `rename_all`),
+//!   * **Cross-enum casing-divergence sentinel:** `IntentStatus::InProgress`
+//!     serializes `"in_progress"` while `OperationStatus::Pending` serializes
+//!     `"Pending"` (`PascalCase`). Operator dashboards filter on both — pin
 //!     this loud divergence so accidentally renaming one to match the other
 //!     is caught at the integration boundary.
-//!   * IdempotencyEntry serde round-trip with embedded IntentStatus.
+//!   * `IdempotencyEntry` serde round-trip with embedded `IntentStatus`.
 
 use fcp_cbor::SchemaId;
 use fcp_core::{

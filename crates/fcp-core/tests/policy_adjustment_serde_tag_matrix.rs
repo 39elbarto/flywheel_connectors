@@ -14,7 +14,7 @@ const CASES: &[(AdjustmentKind, &str)] = &[
     (AdjustmentKind::Declassification, "declassification"),
 ];
 
-fn elevation_adjustment() -> LabelAdjustment {
+const fn elevation_adjustment() -> LabelAdjustment {
     LabelAdjustment {
         timestamp_ms: 1_775_000_001,
         kind: AdjustmentKind::Elevation,
@@ -26,7 +26,7 @@ fn elevation_adjustment() -> LabelAdjustment {
     }
 }
 
-fn declassification_adjustment() -> LabelAdjustment {
+const fn declassification_adjustment() -> LabelAdjustment {
     LabelAdjustment {
         timestamp_ms: 1_775_000_002,
         kind: AdjustmentKind::Declassification,

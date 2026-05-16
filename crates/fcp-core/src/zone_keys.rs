@@ -1615,10 +1615,11 @@ mod tests {
     /// recipient had a valid V4 wrap in `wrapped_keys_v4`. The fix
     /// resolves through `resolved_wrapped_key_for` and dispatches
     /// HPKE-X25519 vs X-Wing wraps. This test constructs a V4-only
-    /// multi-recipient manifest with mixed promoted-V3 (HpkeX25519)
-    /// and pure-V4 (XWing) wraps and verifies every recipient can
+    /// multi-recipient manifest with mixed promoted-V3 (`HpkeX25519`)
+    /// and pure-V4 (`XWing`) wraps and verifies every recipient can
     /// successfully apply via `apply_manifest_v4`.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn apply_manifest_v4_resolves_v4_only_multi_recipient_manifest_for_every_recipient() {
         let zone_id = ZoneId::work();
         let issued_at = 1_700_010_500;
@@ -1653,12 +1654,12 @@ mod tests {
         // X-Wing secret + provider.
         let bob = TailscaleNodeId::new("bob-pure-v4");
         let bob_x25519 = X25519SecretKey::generate();
-        let (bob_xwing_pk, bob_xwing_sk) = xwing.generate().expect("bob xwing keypair");
+        let (bob_wrap_public, bob_open_secret) = xwing.generate().expect("bob xwing keypair");
         let bob_aad = Fcp4Aad::for_zone_key(zone_id.as_bytes(), bob.as_str().as_bytes(), issued_at)
             .encode()
             .expect("bob aad");
         let bob_xwing_sealed = xwing
-            .seal(&bob_xwing_pk, zone_key.as_bytes(), &bob_aad)
+            .seal(&bob_wrap_public, zone_key.as_bytes(), &bob_aad)
             .expect("bob xwing wrap");
         // Bob still needs an HPKE-wrapped object_id_key entry: the
         // ObjectIdKey list was not promoted to V4.
@@ -1675,13 +1676,13 @@ mod tests {
         // X-Wing key, so we exercise per-recipient AAD binding.
         let carol = TailscaleNodeId::new("carol-pure-v4");
         let carol_x25519 = X25519SecretKey::generate();
-        let (carol_xwing_pk, carol_xwing_sk) = xwing.generate().expect("carol xwing keypair");
+        let (carol_wrap_public, carol_open_secret) = xwing.generate().expect("carol xwing keypair");
         let carol_aad =
             Fcp4Aad::for_zone_key(zone_id.as_bytes(), carol.as_str().as_bytes(), issued_at)
                 .encode()
                 .expect("carol aad");
         let carol_xwing_sealed = xwing
-            .seal(&carol_xwing_pk, zone_key.as_bytes(), &carol_aad)
+            .seal(&carol_wrap_public, zone_key.as_bytes(), &carol_aad)
             .expect("carol xwing wrap");
         let carol_object = wrap_object_id_key(
             &carol_x25519.public_key(),
@@ -1714,7 +1715,7 @@ mod tests {
                 WrappedZoneKeyV4 {
                     recipient: alice.clone(),
                     issued_at,
-                    sealed: WrappedKey::from_hpke(alice_v3.sealed.clone()),
+                    sealed: WrappedKey::from_hpke(alice_v3.sealed),
                 },
                 WrappedZoneKeyV4 {
                     recipient: bob.clone(),
@@ -1779,21 +1780,21 @@ mod tests {
 
         let mut bob_ring = ZoneKeyRing::new(zone_id.clone());
         bob_ring
-            .apply_manifest_v4(&manifest, &bob, &bob_x25519, &bob_xwing_sk, &xwing)
+            .apply_manifest_v4(&manifest, &bob, &bob_x25519, &bob_open_secret, &xwing)
             .expect("bob (X-Wing V4 wrap) applies via apply_manifest_v4");
         assert_eq!(bob_ring.active_zone_key(), Some(&zone_key));
         assert_eq!(bob_ring.active_object_id_key(), Some(&object_id_key));
 
         let mut carol_ring = ZoneKeyRing::new(zone_id);
         carol_ring
-            .apply_manifest_v4(&manifest, &carol, &carol_x25519, &carol_xwing_sk, &xwing)
+            .apply_manifest_v4(&manifest, &carol, &carol_x25519, &carol_open_secret, &xwing)
             .expect("carol (X-Wing V4 wrap) applies via apply_manifest_v4");
         assert_eq!(carol_ring.active_zone_key(), Some(&zone_key));
     }
 
     /// br-f69kn: a recipient with a V4 X-Wing wrap whose
     /// `apply_manifest_v4` call passes the WRONG X-Wing secret must
-    /// surface a CryptoError-derived ZoneKeyError, not a silent
+    /// surface a CryptoError-derived `ZoneKeyError`, not a silent
     /// wrong-key zone-key install.
     #[test]
     fn apply_manifest_v4_wrong_xwing_secret_fails_loudly() {
@@ -1805,14 +1806,14 @@ mod tests {
         let xwing = XWingProvider::new();
         let bob = TailscaleNodeId::new("bob-wrong-key");
         let bob_x25519 = X25519SecretKey::generate();
-        let (bob_xwing_pk, _bob_xwing_sk) = xwing.generate().expect("bob xwing keypair");
+        let (bob_wrap_public, _bob_open_secret) = xwing.generate().expect("bob xwing keypair");
         let (_other_pk, attacker_sk) = xwing.generate().expect("attacker xwing keypair");
 
         let aad = Fcp4Aad::for_zone_key(zone_id.as_bytes(), bob.as_str().as_bytes(), issued_at)
             .encode()
             .expect("aad");
         let sealed = xwing
-            .seal(&bob_xwing_pk, zone_key.as_bytes(), &aad)
+            .seal(&bob_wrap_public, zone_key.as_bytes(), &aad)
             .expect("seal");
         let bob_object = wrap_object_id_key(
             &bob_x25519.public_key(),
@@ -1898,6 +1899,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn zone_key_manifest_multi_recipient_v3_v4_wraps_resolve_same_zone_key() {
         let zone_id = ZoneId::work();
         let issued_at = 1_700_010_000;
@@ -1916,12 +1918,12 @@ mod tests {
 
         let bob = TailscaleNodeId::new("bob-v4");
         let xwing = XWingProvider::new();
-        let (bob_pk, bob_sk) = xwing.generate().expect("bob xwing keypair");
+        let (bob_wrap_public, bob_open_secret) = xwing.generate().expect("bob xwing keypair");
         let bob_aad = Fcp4Aad::for_zone_key(zone_id.as_bytes(), bob.as_str().as_bytes(), issued_at)
             .encode()
             .expect("bob aad");
         let bob_v4 = xwing
-            .seal(&bob_pk, zone_key.as_bytes(), &bob_aad)
+            .seal(&bob_wrap_public, zone_key.as_bytes(), &bob_aad)
             .expect("bob v4 wrap");
 
         let carol = TailscaleNodeId::new("carol-promoted");
@@ -1944,7 +1946,7 @@ mod tests {
             valid_from: issued_at,
             valid_until: None,
             prev_zone_key_id: None,
-            wrapped_keys: vec![alice_v3.clone(), carol_v3.clone()],
+            wrapped_keys: vec![alice_v3, carol_v3],
             wrapped_object_id_keys: vec![],
             rekey_policy: None,
             signature: test_signature(),
@@ -1975,7 +1977,7 @@ mod tests {
             .expect("bob v4 wrap resolves");
         let bob_opened = xwing
             .open(
-                &bob_sk,
+                &bob_open_secret,
                 bob_resolved.xwing_sealed().expect("bob xwing sealed"),
                 &bob_aad,
             )
@@ -1995,7 +1997,7 @@ mod tests {
             panic!("carol promoted wrap must stay HPKE");
         };
         let carol_v4 = WrappedZoneKey {
-            recipient: carol.clone(),
+            recipient: carol,
             issued_at,
             sealed,
         };
@@ -4483,7 +4485,7 @@ mod tests {
         assert_eq!(found.issued_at, issued_at_a);
     }
 
-    /// br-vzn2p: duplicate V3 recipients (different issued_at, so
+    /// br-vzn2p: duplicate V3 recipients (different `issued_at`, so
     /// distinct wrap material) are rejected fail-closed by
     /// `IndexedZoneKeyManifest::new`. Without this guard the linear
     /// scan returns the FIRST entry while the indexed lookup returns
@@ -4800,7 +4802,7 @@ mod tests {
             valid_from: issued_at,
             valid_until: None,
             prev_zone_key_id: None,
-            wrapped_keys: vec![v3_wrap.clone()],
+            wrapped_keys: vec![v3_wrap],
             wrapped_object_id_keys: vec![],
             rekey_policy: None,
             signature: test_signature(),
@@ -4864,12 +4866,12 @@ mod tests {
         // Recipient B: V4-only X-Wing — must surface as V4.
         let bob = TailscaleNodeId::new("bob-v4-only");
         let xwing = XWingProvider::new();
-        let (bob_pk, _bob_sk) = xwing.generate().expect("bob xwing keypair");
+        let (bob_wrap_public, _bob_open_secret) = xwing.generate().expect("bob xwing keypair");
         let bob_aad = Fcp4Aad::for_zone_key(zone_id.as_bytes(), bob.as_str().as_bytes(), issued_at)
             .encode()
             .expect("bob aad");
         let bob_v4_sealed = xwing
-            .seal(&bob_pk, zone_key.as_bytes(), &bob_aad)
+            .seal(&bob_wrap_public, zone_key.as_bytes(), &bob_aad)
             .expect("bob v4 wrap");
         let bob_v4 = WrappedZoneKeyV4 {
             recipient: bob.clone(),

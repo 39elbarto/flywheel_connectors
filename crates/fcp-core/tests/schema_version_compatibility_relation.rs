@@ -1,10 +1,10 @@
 //! Pin `ManifestVersion::is_compatible_with` relation properties +
-//! serde / Display / FromStr round-trip (flywheel_connectors-3xfmr).
+//! serde / `Display` / `FromStr` round-trip (flywheel_connectors-3xfmr).
 //!
-//! Bead asks for "SchemaVersion compatibility check across major
+//! Bead asks for "`SchemaVersion` compatibility check across major
 //! boundaries". No type literally named `SchemaVersion` exists in
 //! fcp-core. The compatibility relation is on `ManifestVersion`
-//! (connector_artifacts.rs:17, also re-exported as `ConnectorVersion`)
+//! (`connector_artifacts.rs:17`, also re-exported as `ConnectorVersion`)
 //! via `is_compatible_with`. Existing
 //! `tests/manifest_version_compatibility.rs` already pins the broad
 //! same-major / cross-major / pre-release / sort behavior. This test
@@ -26,7 +26,7 @@
 //!      Pin the reality so any future swap to a spec-compliant
 //!      comparator fails this test deliberately.
 //!   6. **Display agrees with semver Display**.
-//!   7. **FromStr ⇄ Display round-trip** preserves equality.
+//!   7. **`FromStr` ⇄ `Display` round-trip** preserves equality.
 //!   8. **Serde JSON is transparent** — `#[serde(transparent)]` so
 //!      JSON form is the bare quoted semver string.
 //!   9. **Serde CBOR round-trip** preserves equality.

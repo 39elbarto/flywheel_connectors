@@ -1,6 +1,6 @@
 //! Pin `ForkResolution` ↔ `ConnectorStateModel` validity truth table +
 //! `ForkResolutionOutcome` + `StateForkDetectionResult` + `resolve_by_lease`
-//! ordering — the closest analogue to "PolicyConflictResolution variant
+//! ordering — the closest analogue to "`PolicyConflictResolution` variant
 //! Display" (flywheel_connectors-w4b4c).
 //!
 //! Bead asks for `PolicyConflictResolution` Display + serde tag pinning. No
@@ -10,20 +10,20 @@
 //! used to resolve fork conflicts (competing writes) in connector state. A
 //! state fork IS a conflict; choosing a strategy IS the resolution.
 //!
-//! Existing `recovery_strategy_variant_matrix.rs` covers ForkResolution
+//! Existing `recovery_strategy_variant_matrix.rs` covers `ForkResolution`
 //! Display tokens, JSON tag stability, CBOR tag bytes, and noncanonical
 //! rejection. This pin adds the orthogonal invariants:
 //!   * `ForkResolution::is_valid_for(model)` full truth table —
-//!     ChooseByLease only valid for SingletonWriter, CrdtMerge only for
-//!     Crdt models, ManualResolution always valid (a critical safety
-//!     contract: ManualResolution is the universal fallback),
-//!   * `ForkResolutionOutcome` JSON shape with embedded ForkResolution
-//!     `strategy` round-trip + nested ForkEvent + Optional `winning_head`,
-//!   * `StateForkDetectionResult` externally-tagged enum (NoFork variant
-//!     carries `head` + `seq`; ForkDetected carries a tuple ForkEvent),
+//!     `ChooseByLease` only valid for `SingletonWriter`, `CrdtMerge` only for
+//!     `Crdt` models, `ManualResolution` always valid (a critical safety
+//!     contract: `ManualResolution` is the universal fallback),
+//!   * `ForkResolutionOutcome` JSON shape with embedded `ForkResolution`
+//!     `strategy` round-trip + nested `ForkEvent` + Optional `winning_head`,
+//!   * `StateForkDetectionResult` externally-tagged enum (`NoFork` variant
+//!     carries `head` + `seq`; `ForkDetected` carries a tuple `ForkEvent`),
 //!   * `ForkEvent::resolve_by_lease` ordered truth table: `a > b → branch_a`,
 //!     `a < b → branch_b`, `a == b → None` (the canonical tie-rule that
-//!     escalates to ManualResolution).
+//!     escalates to `ManualResolution`).
 
 use ciborium::Value as CborValue;
 use fcp_core::{
@@ -32,7 +32,7 @@ use fcp_core::{
 };
 use serde_json::json;
 
-fn obj(byte: u8) -> ObjectId {
+const fn obj(byte: u8) -> ObjectId {
     ObjectId::from_bytes([byte; 32])
 }
 

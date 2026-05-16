@@ -1,5 +1,5 @@
 //! Pin `IntentStatus` (the crash-recovery state machine) — the
-//! closest fcp-core analogue to "SymbolStoreState transitions"
+//! closest fcp-core analogue to "`SymbolStoreState` transitions"
 //! (flywheel_connectors-epymi).
 //!
 //! Bead asks for `SymbolStoreState transitions per documented state
@@ -9,12 +9,12 @@
 //! crash recovery to determine the state of an operation. Its 5
 //! variants form a clear lifecycle:
 //!
-//!   Pending → InProgress → {Completed, Failed}   (terminal)
+//!   Pending → `InProgress` → {Completed, Failed}   (terminal)
 //!                       └→ Orphaned              (timeout, terminal)
 //!
 //! `IntentStatus` carries `#[serde(rename_all = "snake_case")]`,
 //! has a hand-written `Display` impl (operation.rs:369) returning
-//! the same snake_case tokens, and is the type operators see in
+//! the same `snake_case` tokens, and is the type operators see in
 //! crash-recovery audit logs.
 //!
 //! Existing `operation_golden_vectors.rs` uses `IntentStatus` in
@@ -25,14 +25,14 @@
 //!   2. **Display token per variant** (`pending`, `in_progress`,
 //!      `completed`, `failed`, `orphaned`).
 //!   3. **Display agrees with serde JSON tag** byte-for-byte (the
-//!      hand-written Display matches the rename_all output).
+//!      hand-written Display matches the `rename_all` output).
 //!   4. **JSON + CBOR round-trip** preserves variant identity.
-//!   5. **PascalCase + unknown rejected** (drift sentinel for any
-//!      future rename_all swap or variant addition).
+//!   5. **`PascalCase` + unknown rejected** (drift sentinel for any
+//!      future `rename_all` swap or variant addition).
 //!   6. **Pairwise distinct variants + Display tokens**.
 //!   7. **Terminal vs non-terminal classification** — Completed,
 //!      Failed, and Orphaned are terminal (no further transitions);
-//!      Pending and InProgress are non-terminal (live work). Pin
+//!      Pending and `InProgress` are non-terminal (live work). Pin
 //!      via documented contract as a discriminator-based truth
 //!      table — drift in lifecycle semantics surfaces here.
 //!   8. **Multi-word variant uses underscore** (`in_progress`
@@ -49,7 +49,7 @@ const ALL_STATUSES: &[(IntentStatus, &str)] = &[
     (IntentStatus::Orphaned, "orphaned"),
 ];
 
-fn is_terminal(status: IntentStatus) -> bool {
+const fn is_terminal(status: IntentStatus) -> bool {
     // Documented contract: Pending and InProgress are non-terminal
     // (live work); Completed, Failed, and Orphaned are terminal
     // (no further transitions).
@@ -199,12 +199,11 @@ fn intent_status_display_tokens_pairwise_distinct() {
 
 #[test]
 fn intent_status_variants_pairwise_unequal() {
-    for i in 0..ALL_STATUSES.len() {
-        for j in (i + 1)..ALL_STATUSES.len() {
+    for (i, (left, _)) in ALL_STATUSES.iter().enumerate() {
+        for (right, _) in ALL_STATUSES.iter().skip(i + 1) {
             assert_ne!(
-                ALL_STATUSES[i].0, ALL_STATUSES[j].0,
-                "{:?} and {:?} MUST be distinct variants",
-                ALL_STATUSES[i].0, ALL_STATUSES[j].0
+                *left, *right,
+                "{left:?} and {right:?} MUST be distinct variants"
             );
         }
     }

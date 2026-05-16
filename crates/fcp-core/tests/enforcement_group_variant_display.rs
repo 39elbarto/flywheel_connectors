@@ -1,5 +1,5 @@
 //! Pin enforcement-mode + scope classifier serde tags — the closest
-//! analogues to "EnforcementGroup variant Display"
+//! analogues to "`EnforcementGroup` variant Display"
 //! (flywheel_connectors-b6x37).
 //!
 //! Bead asks for `EnforcementGroup variant Display + serde tag`. No
@@ -30,12 +30,12 @@
 //!      `credential` / `global`).
 //!   6. **`RateLimitScope` JSON + CBOR round-trip**.
 //!   7. **CBOR encodes as Text** (cross-language consumers).
-//!   8. **PascalCase + unknown rejected** for all three.
+//!   8. **`PascalCase` + unknown rejected** for all three.
 //!   9. **Pairwise distinctness** within each enum.
 //!  10. **Cross-enum: `deny` token shared** by intentional design
-//!      across BudgetEnforcement::Deny + (already-pinned
-//!      VerificationDecision::Deny / PolicyPreviewDecision::Deny /
-//!      ResumeDisposition::Deny) — pin the collision is intentional
+//!      across `BudgetEnforcement::Deny` + (already-pinned
+//!      `VerificationDecision::Deny` / `PolicyPreviewDecision::Deny` /
+//!      `ResumeDisposition::Deny`) — pin the collision is intentional
 //!      since each lives in its own field.
 
 use ciborium::value::Value as CborValue;

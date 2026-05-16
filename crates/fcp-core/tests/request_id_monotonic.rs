@@ -33,15 +33,13 @@ fn concurrent_generated_request_ids_do_not_duplicate() {
     const THREADS: usize = 8;
     const IDS_PER_THREAD: usize = 64;
 
-    let handles = (0..THREADS)
-        .map(|_| {
-            thread::spawn(|| {
-                (0..IDS_PER_THREAD)
-                    .map(|_| RequestId::random())
-                    .collect::<Vec<_>>()
-            })
+    let handles: [_; THREADS] = std::array::from_fn(|_| {
+        thread::spawn(|| {
+            (0..IDS_PER_THREAD)
+                .map(|_| RequestId::random())
+                .collect::<Vec<_>>()
         })
-        .collect::<Vec<_>>();
+    });
 
     let ids = handles
         .into_iter()

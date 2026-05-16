@@ -1,5 +1,5 @@
 //! Pin `PcsMode` + `KeyManagementMode` zone-routing variant Display + serde —
-//! the closest analogue to "ZoneRouteHint variant Display"
+//! the closest analogue to "`ZoneRouteHint` variant Display"
 //! (flywheel_connectors-vrcyi).
 //!
 //! Bead asks for `ZoneRouteHint` Display + serde tag pinning. No type literally
@@ -12,31 +12,30 @@
 //!     tagged on `mode`,
 //!   * `KeyManagementMode::StandardRotation | PcsGroupManaged { commit_ref, epoch }`
 //!     — internally tagged on `type`.
-//! Existing `mesh_placement_hint_serde_ordering.rs`, `connector_topology_serde.rs`,
-//! and `zone_route_display_serde.rs` already cover MeshPlacementHint /
-//! DeviceSelector / TransportMode + ZoneTransportPolicy. PcsMode +
-//! KeyManagementMode are the residual unpinned zone-routing-mode pair.
+//!     Existing `mesh_placement_hint_serde_ordering.rs`, `connector_topology_serde.rs`,
+//!     and `zone_route_display_serde.rs` already cover `MeshPlacementHint` /
+//!     `DeviceSelector` / `TransportMode` + `ZoneTransportPolicy`. `PcsMode` +
+//!     `KeyManagementMode` are the residual unpinned zone-routing-mode pair.
 //!
 //! Coverage:
-//!   * Internal-tag key (`mode` for PcsMode, `type` for KeyManagementMode)
+//!   * Internal-tag key (`mode` for `PcsMode`, `type` for `KeyManagementMode`)
 //!     — wrong key would loudly break wire compatibility,
-//!   * Variant serde tag value (snake_case),
-//!   * Default = first listed variant (Disabled / StandardRotation),
+//!   * Variant serde tag value (`snake_case`),
+//!   * Default = first listed variant (Disabled / `StandardRotation`),
 //!   * JSON round-trip for unit + payload variants,
 //!   * CBOR Value-inspection workaround for the
-//!     internally-tagged + hex_or_bytes Content-shim quirk: pin the tag on the
+//!     internally-tagged + `hex_or_bytes` Content-shim quirk: pin the tag on the
 //!     encoded CBOR map without going through full deserialize,
 //!   * Distinct discriminants → distinct JSON,
-//!   * PascalCase outer-tag rejection sentinel.
+//!   * `PascalCase` outer-tag rejection sentinel.
 
 use ciborium::Value as CborValue;
 use fcp_core::pcs::{KeyManagementMode, PcsMode};
 use serde_json::json;
 
 fn cbor_tag(value: &CborValue, key: &str) -> Option<String> {
-    let map = match value {
-        CborValue::Map(m) => m,
-        _ => return None,
+    let CborValue::Map(map) = value else {
+        return None;
     };
     for (k, v) in map {
         if let (CborValue::Text(name), CborValue::Text(tag)) = (k, v) {

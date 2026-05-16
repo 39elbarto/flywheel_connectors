@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use fcp_core::{BackoffPolicy, BackoffSchedule};
 
-fn schedule() -> BackoffSchedule {
+const fn schedule() -> BackoffSchedule {
     BackoffPolicy::new(
         4,
         Duration::from_millis(75),

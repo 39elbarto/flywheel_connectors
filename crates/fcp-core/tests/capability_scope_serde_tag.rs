@@ -17,9 +17,10 @@ fn err(message: impl Into<String>) -> Box<dyn Error> {
     std::io::Error::other(message.into()).into()
 }
 
-fn ensure_eq<T>(actual: T, expected: T, context: &str) -> TestResult
+fn ensure_eq<T, U>(actual: &T, expected: &U, context: &str) -> TestResult
 where
-    T: PartialEq + Debug,
+    T: PartialEq<U> + Debug + ?Sized,
+    U: Debug + ?Sized,
 {
     if actual == expected {
         Ok(())
@@ -44,10 +45,10 @@ const CAPABILITY_SCOPE_CASES: &[(OperationRateLimitScope, &str)] = &[
 fn capability_scope_json_tags_roundtrip_per_variant() -> TestResult {
     for &(scope, tag) in CAPABILITY_SCOPE_CASES {
         let value = serde_json::to_value(scope)?;
-        ensure_eq(value, json!(tag), &format!("{scope:?} JSON tag"))?;
+        ensure_eq(&value, &json!(tag), &format!("{scope:?} JSON tag"))?;
 
         let decoded: OperationRateLimitScope = serde_json::from_value(json!(tag))?;
-        ensure_eq(decoded, scope, &format!("{scope:?} JSON roundtrip"))?;
+        ensure_eq(&decoded, &scope, &format!("{scope:?} JSON roundtrip"))?;
     }
 
     Ok(())
@@ -60,11 +61,11 @@ fn capability_scope_cbor_tags_roundtrip_per_variant() -> TestResult {
         ciborium::ser::into_writer(&scope, &mut bytes)?;
 
         let decoded: OperationRateLimitScope = ciborium::de::from_reader(bytes.as_slice())?;
-        ensure_eq(decoded, scope, &format!("{scope:?} CBOR roundtrip"))?;
+        ensure_eq(&decoded, &scope, &format!("{scope:?} CBOR roundtrip"))?;
 
         let value: CborValue = ciborium::de::from_reader(bytes.as_slice())?;
         match value {
-            CborValue::Text(text) => ensure_eq(text, tag.to_string(), "CBOR text tag")?,
+            CborValue::Text(text) => ensure_eq(&text, tag, "CBOR text tag")?,
             other => {
                 return Err(err(format!(
                     "{scope:?} must encode as a CBOR text tag, got {other:?}"
@@ -87,8 +88,8 @@ fn capability_scope_tags_are_complete_and_distinct() -> TestResult {
     }
 
     ensure_eq(
-        tags,
-        std::collections::BTreeSet::from(["per_connector", "per_zone", "per_principal"]),
+        &tags,
+        &std::collections::BTreeSet::from(["per_connector", "per_zone", "per_principal"]),
         "capability-scope tag set",
     )
 }

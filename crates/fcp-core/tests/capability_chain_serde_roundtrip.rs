@@ -7,24 +7,18 @@ use fcp_core::{CapabilityChain, ObjectId};
 fn expect_cbor_array(value: CborValue) -> Vec<CborValue> {
     match value {
         CborValue::Array(items) => items,
-        other => Err::<Vec<CborValue>, _>(format!(
-            "CapabilityChain MUST encode as a CBOR array, got {other:?}"
-        ))
-        .expect("CapabilityChain CBOR array"),
+        other => panic!("CapabilityChain MUST encode as a CBOR array, got {other:?}"),
     }
 }
 
 fn expect_cbor_bytes(value: &CborValue) -> &[u8] {
     match value {
         CborValue::Bytes(bytes) => bytes.as_slice(),
-        other => Err::<&[u8], _>(format!(
-            "CapabilityChain item MUST encode as bytes, got {other:?}"
-        ))
-        .expect("CapabilityChain CBOR item bytes"),
+        other => panic!("CapabilityChain item MUST encode as bytes, got {other:?}"),
     }
 }
 
-fn object_id(byte: u8) -> ObjectId {
+const fn object_id(byte: u8) -> ObjectId {
     ObjectId::from_bytes([byte; 32])
 }
 
@@ -39,7 +33,7 @@ fn capability_chain_step_order_is_positional_not_lexicographic() {
 
     assert_eq!(chain.as_slice(), original_steps.as_slice());
 
-    let mut sorted_steps = original_steps.clone();
+    let mut sorted_steps = original_steps;
     sorted_steps.sort();
     assert_eq!(
         sorted_steps,

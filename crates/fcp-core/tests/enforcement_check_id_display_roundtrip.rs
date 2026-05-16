@@ -1,4 +1,4 @@
-//! Pin `EnforcementCheckId` Display label stability + serde round-trip
+//! Pin `EnforcementCheckId` `Display` label stability + serde round-trip
 //! (flywheel_connectors-tt7js).
 //!
 //! `EnforcementCheckId` (enforcement.rs:34) is the canonical
@@ -12,13 +12,13 @@
 //! Drift in any label fragments audit-log compatibility and breaks
 //! operator tooling that filters on those tokens.
 //!
-//! Bead asks for "Display+FromStr roundtrip"; the type does NOT
-//! implement `FromStr` (only Display via `as_str()`). The test
+//! Bead asks for "`Display`+`FromStr` roundtrip"; the type does NOT
+//! implement `FromStr` (only `Display` via `as_str()`). The test
 //! covers what exists:
 //!
 //!   1. **Per-variant label pinning** — the exact `as_str()` /
 //!      `Display` form for every one of the 12 variants.
-//!   2. **Display agrees with `as_str()`** — both implementations
+//!   2. **`Display` agrees with `as_str()`** — both implementations
 //!      MUST emit the same bytes.
 //!   3. **All 12 labels pairwise distinct** — required so audit
 //!      logs can unambiguously discriminate checks.
@@ -154,25 +154,24 @@ fn copy_and_clone_preserve_equality_and_hash() {
     for (variant, _) in VARIANTS {
         let copied: EnforcementCheckId = *variant; // Copy
         let cloned: EnforcementCheckId = copied; // Copy via assignment
-        let cloned_explicit = (*variant).clone();
+        let copied_explicit = *variant;
         assert_eq!(*variant, copied);
         assert_eq!(*variant, cloned);
-        assert_eq!(*variant, cloned_explicit);
+        assert_eq!(*variant, copied_explicit);
         let h = hash_of(variant);
         assert_eq!(h, hash_of(&copied));
         assert_eq!(h, hash_of(&cloned));
-        assert_eq!(h, hash_of(&cloned_explicit));
+        assert_eq!(h, hash_of(&copied_explicit));
     }
 }
 
 #[test]
 fn distinct_variants_pairwise_unequal() {
-    for i in 0..VARIANTS.len() {
-        for j in (i + 1)..VARIANTS.len() {
+    for (index, (left, _)) in VARIANTS.iter().enumerate() {
+        for (right, _) in VARIANTS.iter().skip(index + 1) {
             assert_ne!(
-                VARIANTS[i].0, VARIANTS[j].0,
-                "{:?} and {:?} MUST be distinct variants",
-                VARIANTS[i].0, VARIANTS[j].0
+                *left, *right,
+                "{left:?} and {right:?} MUST be distinct variants"
             );
         }
     }

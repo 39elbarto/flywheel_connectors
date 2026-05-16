@@ -3,8 +3,8 @@
 //!
 //! `SchemaId` is the structural type-discriminator that sits inside
 //! every canonical CBOR payload, every `ObjectId` derivation, and
-//! every signing transcript that needs to distinguish "AuditEvent"
-//! from "RevocationEvent". Drift in any of its hash or canonical-form
+//! every signing transcript that needs to distinguish "`AuditEvent`"
+//! from "`RevocationEvent`". Drift in any of its hash or canonical-form
 //! semantics fragments content addressing across implementations.
 //!
 //! Bead asks for "Display+FromStr roundtrip stability". `SchemaId`
@@ -18,7 +18,7 @@
 //!   2. **`as_bytes()` canonical form** — exact byte format
 //!      `"{namespace}:{name}@{version}"` and stability under
 //!      repeated calls.
-//!   3. **`hash()` SchemaHash determinism** — BLAKE3-based, fixed
+//!   3. **`hash()` `SchemaHash` determinism** — BLAKE3-based, fixed
 //!      32 bytes, deterministic.
 //!   4. **`hash()` injectivity** — the length-prefixed encoding
 //!      defeats the historical collision class
@@ -252,7 +252,7 @@ fn schema_hash_distinguishes_empty_namespace_from_short_name() {
     // non-length-prefixed encoding could collide. Length-prefixing
     // MUST distinguish them.
     let a = SchemaId {
-        namespace: "".to_string(),
+        namespace: String::new(),
         name: "ab".to_string(),
         version: Version::new(1, 0, 0),
     };
@@ -384,8 +384,8 @@ fn schema_id_serves_as_hashmap_key_correctly() {
     let mut map: HashMap<SchemaId, &'static str> = HashMap::new();
     let key_a = SchemaId::new("fcp.core", "AuditEvent", Version::new(1, 0, 0));
     let key_b = SchemaId::new("fcp.core", "RevocationEvent", Version::new(1, 0, 0));
-    map.insert(key_a.clone(), "audit");
-    map.insert(key_b.clone(), "revocation");
+    map.insert(key_a, "audit");
+    map.insert(key_b, "revocation");
 
     // Look up via fresh constructions — Hash-Eq contract MUST find
     // them.

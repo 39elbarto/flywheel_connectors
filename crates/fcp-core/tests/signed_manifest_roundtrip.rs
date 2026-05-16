@@ -103,7 +103,7 @@ fn full_payload(operation_order: &[&str], metadata_order: &[&str]) -> FullManife
     }
 }
 
-fn assert_signed_manifest_roundtrip<T>(schema: SchemaId, payload: T)
+fn assert_signed_manifest_roundtrip<T>(schema: &SchemaId, payload: &T)
 where
     T: Clone + DeserializeOwned + Eq + std::fmt::Debug + Serialize,
 {
@@ -121,7 +121,7 @@ where
     );
 
     let expected_payload_bytes =
-        CanonicalSerializer::serialize(&payload, &schema).expect("canonical payload bytes");
+        CanonicalSerializer::serialize(payload, schema).expect("canonical payload bytes");
     assert_eq!(
         signed
             .canonical_payload_bytes()
@@ -129,9 +129,9 @@ where
         expected_payload_bytes
     );
 
-    let decoded_payload: T = CanonicalSerializer::deserialize(&expected_payload_bytes, &schema)
+    let decoded_payload: T = CanonicalSerializer::deserialize(&expected_payload_bytes, schema)
         .expect("payload bytes must be canonical");
-    assert_eq!(decoded_payload, payload);
+    assert_eq!(&decoded_payload, payload);
 
     signed
         .verify(&verifying_key)
@@ -163,14 +163,17 @@ where
 
 #[test]
 fn signed_manifest_minimal_payload_roundtrips_with_deterministic_signature() {
-    assert_signed_manifest_roundtrip(manifest_schema("MinimalManifestPayload"), minimal_payload());
+    assert_signed_manifest_roundtrip(
+        &manifest_schema("MinimalManifestPayload"),
+        &minimal_payload(),
+    );
 }
 
 #[test]
 fn signed_manifest_full_payload_roundtrips_with_deterministic_signature() {
     assert_signed_manifest_roundtrip(
-        manifest_schema("FullManifestPayload"),
-        full_payload(
+        &manifest_schema("FullManifestPayload"),
+        &full_payload(
             &["messages.send", "messages.read"],
             &["zone", "release_channel"],
         ),

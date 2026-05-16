@@ -62,7 +62,7 @@ fn valid_spec(signing_key: &Ed25519SigningKey) -> TokenSpec<'_> {
     }
 }
 
-fn token_from_spec(spec: TokenSpec<'_>) -> CapabilityToken {
+fn token_from_spec(spec: &TokenSpec<'_>) -> CapabilityToken {
     let constraints = constraints_cbor(&spec.constraints);
     let mut builder = CapabilityTokenBuilder::new()
         .capability_id(spec.capability)
@@ -95,7 +95,7 @@ fn capability_verifier_accepts_documented_entrypoint_matrix() {
 
     let mut spec = valid_spec(&key);
     spec.target_instance = Some(instance.as_str());
-    let signed_capability = token_from_spec(spec);
+    let signed_capability = token_from_spec(&spec);
 
     let bound_verifier = CapabilityVerifier::new(pub_key, ZoneId::work(), instance.clone());
     let bound = bound_verifier
@@ -187,6 +187,7 @@ struct MatrixCase {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn capability_verifier_rejects_documented_predicate_matrix() {
     let key = signing_key(21);
     let pub_key = key.verifying_key().to_bytes();
@@ -247,7 +248,7 @@ fn capability_verifier_rejects_documented_predicate_matrix() {
     let cases = vec![
         MatrixCase {
             name: "invalid_signature",
-            token: token_from_spec(bad_signature),
+            token: token_from_spec(&bad_signature),
             verifier: CapabilityVerifier::new(pub_key, ZoneId::work(), expected_instance.clone()),
             capability: capability.clone(),
             operation: operation.clone(),
@@ -256,7 +257,7 @@ fn capability_verifier_rejects_documented_predicate_matrix() {
         },
         MatrixCase {
             name: "wrong_audience",
-            token: token_from_spec(wrong_audience),
+            token: token_from_spec(&wrong_audience),
             verifier: CapabilityVerifier::new(pub_key, ZoneId::work(), expected_instance.clone()),
             capability: capability.clone(),
             operation: operation.clone(),
@@ -265,7 +266,7 @@ fn capability_verifier_rejects_documented_predicate_matrix() {
         },
         MatrixCase {
             name: "wrong_zone",
-            token: token_from_spec(wrong_zone),
+            token: token_from_spec(&wrong_zone),
             verifier: CapabilityVerifier::new(pub_key, ZoneId::work(), expected_instance.clone()),
             capability: capability.clone(),
             operation: operation.clone(),
@@ -274,7 +275,7 @@ fn capability_verifier_rejects_documented_predicate_matrix() {
         },
         MatrixCase {
             name: "expired",
-            token: token_from_spec(expired),
+            token: token_from_spec(&expired),
             verifier: CapabilityVerifier::new(pub_key, ZoneId::work(), expected_instance.clone()),
             capability: capability.clone(),
             operation: operation.clone(),
@@ -283,7 +284,7 @@ fn capability_verifier_rejects_documented_predicate_matrix() {
         },
         MatrixCase {
             name: "not_yet_valid",
-            token: token_from_spec(not_yet_valid),
+            token: token_from_spec(&not_yet_valid),
             verifier: CapabilityVerifier::new(pub_key, ZoneId::work(), expected_instance.clone()),
             capability: capability.clone(),
             operation: operation.clone(),
@@ -292,7 +293,7 @@ fn capability_verifier_rejects_documented_predicate_matrix() {
         },
         MatrixCase {
             name: "instance_mismatch",
-            token: token_from_spec(instance_mismatch),
+            token: token_from_spec(&instance_mismatch),
             verifier: CapabilityVerifier::new(pub_key, ZoneId::work(), expected_instance.clone()),
             capability: capability.clone(),
             operation: operation.clone(),
@@ -301,7 +302,7 @@ fn capability_verifier_rejects_documented_predicate_matrix() {
         },
         MatrixCase {
             name: "missing_instance",
-            token: token_from_spec(missing_instance),
+            token: token_from_spec(&missing_instance),
             verifier: CapabilityVerifier::new(pub_key, ZoneId::work(), expected_instance.clone()),
             capability: capability.clone(),
             operation: operation.clone(),
@@ -310,7 +311,7 @@ fn capability_verifier_rejects_documented_predicate_matrix() {
         },
         MatrixCase {
             name: "capability_mismatch",
-            token: token_from_spec(capability_mismatch),
+            token: token_from_spec(&capability_mismatch),
             verifier: CapabilityVerifier::new(pub_key, ZoneId::work(), expected_instance.clone()),
             capability: capability.clone(),
             operation: operation.clone(),
@@ -319,7 +320,7 @@ fn capability_verifier_rejects_documented_predicate_matrix() {
         },
         MatrixCase {
             name: "operation_mismatch",
-            token: token_from_spec(operation_mismatch),
+            token: token_from_spec(&operation_mismatch),
             verifier: CapabilityVerifier::new(pub_key, ZoneId::work(), expected_instance.clone()),
             capability: capability.clone(),
             operation: operation.clone(),
@@ -328,7 +329,7 @@ fn capability_verifier_rejects_documented_predicate_matrix() {
         },
         MatrixCase {
             name: "empty_constraints",
-            token: token_from_spec(empty_constraints),
+            token: token_from_spec(&empty_constraints),
             verifier: CapabilityVerifier::new(pub_key, ZoneId::work(), expected_instance.clone()),
             capability: capability.clone(),
             operation: operation.clone(),
@@ -337,7 +338,7 @@ fn capability_verifier_rejects_documented_predicate_matrix() {
         },
         MatrixCase {
             name: "resource_mismatch",
-            token: token_from_spec(resource_mismatch),
+            token: token_from_spec(&resource_mismatch),
             verifier: CapabilityVerifier::new(pub_key, ZoneId::work(), expected_instance),
             capability,
             operation,
@@ -358,7 +359,7 @@ fn capability_verifier_rejects_documented_predicate_matrix() {
             "{}: expected verifier predicate to reject",
             case.name
         );
-        let err = result.err().expect("asserted verifier result is err");
+        let err = result.expect_err("asserted verifier result is err");
         assert!(
             case.expected.matches(&err),
             "{}: expected verifier predicate to reject with documented error, got {err:?}",
@@ -408,42 +409,42 @@ fn capability_verifier_unbound_entrypoint_rejects_gateway_roundtrip_matrix() {
     let cases = vec![
         UnboundMatrixCase {
             name: "invalid_signature",
-            capability_token: token_from_spec(bad_signature),
+            capability_token: token_from_spec(&bad_signature),
             capability: capability.clone(),
             operation: operation.clone(),
             expected: ExpectedReject::InvalidSignature,
         },
         UnboundMatrixCase {
             name: "wrong_zone",
-            capability_token: token_from_spec(wrong_zone),
+            capability_token: token_from_spec(&wrong_zone),
             capability: capability.clone(),
             operation: operation.clone(),
             expected: ExpectedReject::ZoneMismatch,
         },
         UnboundMatrixCase {
             name: "expired",
-            capability_token: token_from_spec(expired),
+            capability_token: token_from_spec(&expired),
             capability: capability.clone(),
             operation: operation.clone(),
             expected: ExpectedReject::TokenExpired,
         },
         UnboundMatrixCase {
             name: "not_yet_valid",
-            capability_token: token_from_spec(not_yet_valid),
+            capability_token: token_from_spec(&not_yet_valid),
             capability: capability.clone(),
             operation: operation.clone(),
             expected: ExpectedReject::TokenNotYetValid,
         },
         UnboundMatrixCase {
             name: "capability_mismatch",
-            capability_token: token_from_spec(capability_mismatch),
+            capability_token: token_from_spec(&capability_mismatch),
             capability: capability.clone(),
             operation: operation.clone(),
             expected: ExpectedReject::OperationNotGranted,
         },
         UnboundMatrixCase {
             name: "operation_mismatch",
-            capability_token: token_from_spec(operation_mismatch),
+            capability_token: token_from_spec(&operation_mismatch),
             capability,
             operation,
             expected: ExpectedReject::OperationNotGranted,
@@ -476,9 +477,7 @@ fn capability_verifier_unbound_entrypoint_rejects_gateway_roundtrip_matrix() {
             "{}: expected unbound verifier roundtrip to reject",
             case.name
         );
-        let err = result
-            .err()
-            .expect("asserted unbound verifier result is err");
+        let err = result.expect_err("asserted unbound verifier result is err");
         assert!(
             case.expected.matches(&err),
             "{}: expected unbound verifier roundtrip to reject with documented error, got {err:?}",

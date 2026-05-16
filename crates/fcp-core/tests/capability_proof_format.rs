@@ -1,17 +1,17 @@
-//! Pin format invariants for the closest analogue of "CapabilityProof"
+//! Pin format invariants for the closest analogue of "`CapabilityProof`"
 //! (flywheel_connectors-bc6x4).
 //!
-//! Bead asks for "CapabilityProof Display formatting + roundtrip".
+//! Bead asks for "`CapabilityProof` `Display` formatting + roundtrip".
 //! No type literally named `CapabilityProof` exists in fcp-core. The
 //! capability-binding proof in this codebase is `HolderProof`
-//! (protocol.rs:307) — the Ed25519 signature that proves the
+//! (`protocol.rs:307`) — the Ed25519 signature that proves the
 //! requesting node holds the capability token (when the token has a
 //! `holder_node` claim). `HolderProof` does NOT implement `Display`,
-//! so the bead's "Display formatting" ask has no direct analogue.
+//! so the bead's "`Display` formatting" ask has no direct analogue.
 //!
 //! Existing `tests/invoke_golden_vectors.rs::holder_proof` pins the
 //! basic surface: domain-separator presence, determinism, and that
-//! request_id / operation_id / jti each affect the bytes. This test
+//! `request_id` / `operation_id` / `jti` each affect the bytes. This test
 //! pins the format-contract gaps:
 //!
 //!   1. **Domain separator at the exact head** — the first 20 bytes
@@ -24,17 +24,17 @@
 //!   5. **Empty fields encode to a zero-length prefix** with no
 //!      trailing field bytes (the boundary case for length prefix
 //!      injectivity).
-//!   6. **JSON wire shape pinned** — signature as 128-char lowercase
-//!      hex (via `hex_or_bytes`), holder_node as canonical id string.
+//!   6. **JSON wire shape pinned** — `signature` as 128-char lowercase
+//!      hex (via `hex_or_bytes`), `holder_node` as canonical id string.
 //!   7. **JSON round-trip preserves both fields** (the closest
-//!      analogue to "Display+FromStr roundtrip" — Display is absent
+//!      analogue to "`Display`+`FromStr` roundtrip" — `Display` is absent
 //!      so the round-trip surface is serde).
 //!   8. **CBOR round-trip preserves both fields**.
 //!   9. **CBOR signature encoded as bytes, NOT hex string** — the
 //!      `hex_or_bytes` serde swap behavior.
-//!  10. **Cross-format consistency** — a HolderProof decoded from
+//!  10. **Cross-format consistency** — a `HolderProof` decoded from
 //!      JSON and one decoded from CBOR with the same input produce
-//!      identical signable_bytes when re-fed.
+//!      identical `signable_bytes` when re-fed.
 
 use ciborium::value::Value as CborValue;
 use fcp_core::{HolderProof, OperationId, RequestId, TailscaleNodeId};
@@ -44,7 +44,7 @@ const DOMAIN_SEPARATOR: &[u8] = b"FCP2-HOLDER-PROOF-V1";
 fn fixture_proof() -> HolderProof {
     let mut sig = [0u8; 64];
     for (i, byte) in sig.iter_mut().enumerate() {
-        *byte = i as u8; // 0..=63
+        *byte = u8::try_from(i).expect("signature index fits in u8");
     }
     HolderProof::new(sig, TailscaleNodeId::new("node-holder-1"))
 }
@@ -297,7 +297,7 @@ fn cbor_signature_encoded_as_byte_string_not_hex() {
         .expect("signature key");
     match sig_value {
         CborValue::Bytes(b) => {
-            assert_eq!(b.len(), 64, "CBOR `signature` MUST be 64-byte byte string")
+            assert_eq!(b.len(), 64, "CBOR `signature` MUST be 64-byte byte string");
         }
         CborValue::Text(t) => panic!(
             "CBOR `signature` MUST be Bytes (not Text); got Text({t:?}) — \

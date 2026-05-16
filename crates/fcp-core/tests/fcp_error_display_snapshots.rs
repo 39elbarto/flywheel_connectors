@@ -26,6 +26,7 @@ fn snapshot(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn display_snapshots() -> Vec<DisplaySnapshot> {
     vec![
         snapshot(

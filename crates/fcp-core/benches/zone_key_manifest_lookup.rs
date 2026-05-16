@@ -1,4 +1,4 @@
-//! ZoneKeyManifest recipient-lookup benchmark (br-d2oa0 + br-nw5zb).
+//! `ZoneKeyManifest` recipient-lookup benchmark (br-d2oa0 + br-nw5zb).
 //!
 //! Measures the cost of `wrapped_key_for` / `wrapped_key_v4_for` /
 //! `resolved_wrapped_key_for` at recipient counts N ∈ {8, 32, 128,
@@ -80,7 +80,7 @@ fn make_manifest(n: usize) -> (ZoneKeyManifest, Vec<TailscaleNodeId>) {
 }
 
 /// Hit-path lookup: pick a deterministic recipient near the END of
-/// the list (worst case for linear scan, identical work for HashMap).
+/// the list (worst case for linear scan, identical work for `HashMap`).
 fn bench_v3_hit_lookup(c: &mut Criterion) {
     let mut group = c.benchmark_group("zone_key_manifest_v3_hit");
     group.sample_size(50);
@@ -116,7 +116,7 @@ fn bench_v3_hit_lookup(c: &mut Criterion) {
 
 /// Miss-path lookup: target a recipient that's NOT in the manifest.
 /// Linear scan iterates the full list every time (worst case);
-/// HashMap lookup is constant-time.
+/// `HashMap` lookup is constant-time.
 fn bench_v3_miss_lookup(c: &mut Criterion) {
     let mut group = c.benchmark_group("zone_key_manifest_v3_miss");
     group.sample_size(50);

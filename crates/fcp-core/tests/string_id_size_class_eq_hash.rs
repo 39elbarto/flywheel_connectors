@@ -5,15 +5,15 @@
 //! coverage; no `CompactString` (the `compact_str` crate) is in use
 //! in fcp-core or anywhere else in the workspace at the time of
 //! writing — the canonical fcp-core IDs are `Arc<str>` backed
-//! (CapabilityId, InstanceId, ZoneId, PrincipalId) or `String`
+//! (`CapabilityId`, `InstanceId`, `ZoneId`, `PrincipalId`) or `String`
 //! backed (`quorum::NodeId`). Either backing has the same
 //! observable contract: equal values MUST hash identically and
 //! MUST be equal under `==`, regardless of which construction path
 //! produced them OR what content-size class the value belongs to.
 //!
 //! The companion test `hash_eq_contract.rs` (bead llp14) covered the
-//! construction-path axis (clone / FromStr / TryFrom<String> /
-//! from_static / Display roundtrip / String vs &str). This test
+//! construction-path axis (clone / `FromStr` / `TryFrom`<String> /
+//! `from_static` / Display roundtrip / String vs &str). This test
 //! adds the orthogonal axis: content size class. Specifically it
 //! pins the contract holds on:
 //!
@@ -46,7 +46,7 @@ fn hash_of<T: Hash + ?Sized>(value: &T) -> u64 {
 }
 
 /// Generic property: assert `a == b` AND `hash(a) == hash(b)`.
-fn assert_hash_eq<T: Hash + Eq + std::fmt::Debug>(label: &str, a: T, b: T) {
+fn assert_hash_eq<T: Hash + Eq + std::fmt::Debug>(label: &str, a: &T, b: &T) {
     assert_eq!(a, b, "{label}: equality violated: {a:?} vs {b:?}");
     let ha = hash_of(&a);
     let hb = hash_of(&b);
@@ -123,14 +123,14 @@ fn assert_hash_eq_capability_id(payload: &str) {
     let via_clone = via_new.clone();
     let via_display = CapabilityId::try_from(via_new.to_string()).expect("Display roundtrip");
 
+    assert_hash_eq(&format!("{label} new vs try_from"), &via_new, &via_try_from);
+    assert_hash_eq(&format!("{label} new vs parse"), &via_new, &via_parse);
+    assert_hash_eq(&format!("{label} clone"), &via_new, &via_clone);
     assert_hash_eq(
-        &format!("{label} new vs try_from"),
-        via_new.clone(),
-        via_try_from,
+        &format!("{label} Display roundtrip"),
+        &via_new,
+        &via_display,
     );
-    assert_hash_eq(&format!("{label} new vs parse"), via_new.clone(), via_parse);
-    assert_hash_eq(&format!("{label} clone"), via_new.clone(), via_clone);
-    assert_hash_eq(&format!("{label} Display roundtrip"), via_new, via_display);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -156,18 +156,18 @@ fn instance_id_size_class_sweep_hash_eq() {
 
         assert_hash_eq(
             &format!("InstanceId({size} bytes) try_from vs parse"),
-            via_try_from.clone(),
-            via_parse,
+            &via_try_from,
+            &via_parse,
         );
         assert_hash_eq(
             &format!("InstanceId({size} bytes) clone"),
-            via_try_from.clone(),
-            via_clone,
+            &via_try_from,
+            &via_clone,
         );
         assert_hash_eq(
             &format!("InstanceId({size} bytes) Display roundtrip"),
-            via_try_from,
-            via_display,
+            &via_try_from,
+            &via_display,
         );
     }
 }
@@ -190,18 +190,18 @@ fn principal_id_size_class_sweep_hash_eq() {
 
         assert_hash_eq(
             &format!("PrincipalId({size} bytes) new vs try_from"),
-            via_new.clone(),
-            via_try_from,
+            &via_new,
+            &via_try_from,
         );
         assert_hash_eq(
             &format!("PrincipalId({size} bytes) new vs parse"),
-            via_new.clone(),
-            via_parse,
+            &via_new,
+            &via_parse,
         );
         assert_hash_eq(
             &format!("PrincipalId({size} bytes) clone"),
-            via_new,
-            via_clone,
+            &via_new,
+            &via_clone,
         );
     }
 }
@@ -228,14 +228,10 @@ fn zone_id_short_size_class_hash_eq() {
         let display_rt = ZoneId::try_from(factory.to_string()).expect("Display roundtrip");
 
         let label = format!("ZoneId({canonical}, {} bytes)", canonical.len());
-        assert_hash_eq(
-            &format!("{label} factory vs try_from"),
-            factory.clone(),
-            try_from,
-        );
-        assert_hash_eq(&format!("{label} factory vs parse"), factory.clone(), parse);
-        assert_hash_eq(&format!("{label} clone"), factory.clone(), clone);
-        assert_hash_eq(&format!("{label} Display roundtrip"), factory, display_rt);
+        assert_hash_eq(&format!("{label} factory vs try_from"), &factory, &try_from);
+        assert_hash_eq(&format!("{label} factory vs parse"), &factory, &parse);
+        assert_hash_eq(&format!("{label} clone"), &factory, &clone);
+        assert_hash_eq(&format!("{label} Display roundtrip"), &factory, &display_rt);
     }
 }
 
@@ -253,13 +249,13 @@ fn zone_id_long_project_subzone_hash_eq() {
     let display_rt = ZoneId::try_from(try_from.to_string()).expect("Display roundtrip");
 
     let label = format!("ZoneId(z:project:..., {} bytes)", canonical.len());
+    assert_hash_eq(&format!("{label} try_from vs parse"), &try_from, &parse);
+    assert_hash_eq(&format!("{label} clone"), &try_from, &clone);
     assert_hash_eq(
-        &format!("{label} try_from vs parse"),
-        try_from.clone(),
-        parse,
+        &format!("{label} Display roundtrip"),
+        &try_from,
+        &display_rt,
     );
-    assert_hash_eq(&format!("{label} clone"), try_from.clone(), clone);
-    assert_hash_eq(&format!("{label} Display roundtrip"), try_from, display_rt);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -283,10 +279,14 @@ fn quorum_node_id_size_class_sweep_hash_eq() {
 
         assert_hash_eq(
             &format!("NodeId({size} bytes) String vs &str"),
-            via_owned.clone(),
-            via_borrowed,
+            &via_owned,
+            &via_borrowed,
         );
-        assert_hash_eq(&format!("NodeId({size} bytes) clone"), via_owned, via_clone);
+        assert_hash_eq(
+            &format!("NodeId({size} bytes) clone"),
+            &via_owned,
+            &via_clone,
+        );
     }
 }
 
@@ -299,11 +299,11 @@ fn capability_ids_short_and_long_serve_as_distinct_hashmap_keys() {
     use std::collections::HashMap;
 
     let short = CapabilityId::new("a").expect("1-byte cap");
-    let long = CapabilityId::new(&canonical_payload(100, "cap.")).expect("100-byte cap");
+    let long = CapabilityId::new(canonical_payload(100, "cap.")).expect("100-byte cap");
 
     let mut map: HashMap<CapabilityId, &'static str> = HashMap::new();
-    map.insert(short.clone(), "short-value");
-    map.insert(long.clone(), "long-value");
+    map.insert(short, "short-value");
+    map.insert(long, "long-value");
     assert_eq!(map.len(), 2, "short and long IDs must be distinct keys");
 
     // Look up via a freshly-constructed copy of each — the

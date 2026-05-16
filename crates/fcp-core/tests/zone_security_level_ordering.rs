@@ -1,6 +1,6 @@
 //! Pin `IntegrityLevel` + `ConfidentialityLevel` Display + serde + zone-derived
 //! Bell-LaPadula/Biba flow contracts — the closest analogue to
-//! "ZoneSecurityLevel ordering + Display"
+//! "`ZoneSecurityLevel` ordering + Display"
 //! (flywheel_connectors-z8agn).
 //!
 //! Bead asks for `ZoneSecurityLevel` ordering + Display pinning. No type
@@ -15,10 +15,10 @@
 //!     flowing DOWN requires declassification.
 //!
 //! Existing `isolation_level_ordering.rs` covers ordering chains + zone
-//! defaults at as_u8 granularity. This pin adds residual axes:
+//! defaults at `as_u8` granularity. This pin adds residual axes:
 //!   * Per-variant Display verbatim,
-//!   * Per-variant snake_case serde wire form (NOTE: ConfidentialityLevel
-//!     and IntegrityLevel default to PascalCase — pin the actual form),
+//!   * Per-variant `snake_case` serde wire form (NOTE: `ConfidentialityLevel`
+//!     and `IntegrityLevel` default to `PascalCase` — pin the actual form),
 //!   * Default = Untrusted / Public (zero of each ladder),
 //!   * `from_zone` truth table for every documented zone token + unknown,
 //!   * Bell-LaPadula/Biba flow contract: integrity-down is ≤; confidentiality-up
@@ -179,8 +179,8 @@ fn biba_integrity_flow_predicate_via_le_comparison() {
     assert!(IntegrityLevel::Owner >= dst);
     assert!(IntegrityLevel::Private >= dst);
     assert!(IntegrityLevel::Work >= dst);
-    assert!(!(IntegrityLevel::Community >= dst));
-    assert!(!(IntegrityLevel::Untrusted >= dst));
+    assert!(IntegrityLevel::Community < dst);
+    assert!(IntegrityLevel::Untrusted < dst);
 }
 
 #[test]
@@ -194,8 +194,8 @@ fn bell_lapadula_confidentiality_flow_predicate_via_ge_comparison() {
     assert!(ConfidentialityLevel::Owner >= src);
     assert!(ConfidentialityLevel::Private >= src);
     assert!(ConfidentialityLevel::Work >= src);
-    assert!(!(ConfidentialityLevel::Community >= src));
-    assert!(!(ConfidentialityLevel::Public >= src));
+    assert!(ConfidentialityLevel::Community < src);
+    assert!(ConfidentialityLevel::Public < src);
 }
 
 #[test]

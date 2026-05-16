@@ -12,14 +12,14 @@
 //!      documented platforms.
 //!   2. **Display byte-count fields match actual `.len()`** for
 //!      various input sizes.
-//!   3. **Empty manifest_toml / empty binary** still produce a
+//!   3. **Empty `manifest_toml` / empty binary** still produce a
 //!      well-formed Display string.
-//!   4. **Multi-byte UTF-8 manifest_toml** preserved through both
+//!   4. **Multi-byte UTF-8 `manifest_toml`** preserved through both
 //!      JSON and CBOR.
 //!   5. **Distinct bundles produce distinct JSON bytes** — bundle
 //!      content is part of the wire identity.
 //!   6. **`RegistryEntry` JSON shape pinned** (the paired type that
-//!      indexes ConnectorBundle artifacts in the registry).
+//!      indexes `ConnectorBundle` artifacts in the registry).
 //!   7. **`RegistryEntry.symbol_set_object_id` Some-vs-None semantics**
 //!      via `skip_serializing_if = "Option::is_none"`.
 //!   8. **`RegistryEntry` round-trip** through JSON + CBOR.

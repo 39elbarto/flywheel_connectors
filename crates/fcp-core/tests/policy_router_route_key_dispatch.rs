@@ -27,9 +27,9 @@
 //!   4. **Non-empty allow-list MUST match** — otherwise the
 //!      `*NotAllowed` reason fires.
 //!   5. **Reason-code mapping per dimension** is exact and stable:
-//!        - principal → ZonePolicyPrincipalDenied / NotAllowed
-//!        - connector → ZonePolicyConnectorDenied / NotAllowed
-//!        - capability → ZonePolicyCapabilityDenied / NotAllowed
+//!        - principal → `ZonePolicyPrincipalDenied` / `NotAllowed`
+//!        - connector → `ZonePolicyConnectorDenied` / `NotAllowed`
+//!        - capability → `ZonePolicyCapabilityDenied` / `NotAllowed`
 //!   6. **Pattern semantics inside route key**: `*` and `?` and
 //!      exact match all dispatch correctly through `PolicyPattern`.
 //!   7. **`PolicyPattern` JSON shape is `{"pattern": "<glob>"}`**

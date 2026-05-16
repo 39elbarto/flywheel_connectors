@@ -4,7 +4,8 @@ use fcp_core::util::base64_url;
 fn bytes_for_len(len: usize) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(len);
     for index in 0..len {
-        bytes.push(index.wrapping_mul(73).wrapping_add(len) as u8);
+        let value = index.wrapping_mul(73).wrapping_add(len) % 256;
+        bytes.push(u8::try_from(value).expect("modulo 256 value fits in u8"));
     }
 
     if len >= 1 {

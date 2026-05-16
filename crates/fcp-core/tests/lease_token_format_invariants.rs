@@ -7,28 +7,28 @@
 //! two existing types:
 //!
 //!  - `LeaseId` (lease.rs:150 — type alias for `ObjectId`) — which
-//!    has Display + std::str::FromStr through `ObjectId`. This is
+//!    has Display + `std::str::FromStr` through `ObjectId`. This is
 //!    the closest "token-with-FromStr" analogue.
 //!  - `LeasePurpose` (lease.rs:53) — six-variant enum that has
-//!    `Display` (hand-written snake_case tokens at lease.rs:68) but
-//!    NOT std::str::FromStr. Round-trip on the purpose tag is via
+//!    `Display` (hand-written `snake_case` tokens at lease.rs:68) but
+//!    NOT `std::str::FromStr`. Round-trip on the purpose tag is via
 //!    serde JSON deserialization, NOT via a `parse::<LeasePurpose>()`
 //!    call.
 //!
 //! Tests pin the format invariants both surfaces actually carry:
 //!
 //!   1. **`LeasePurpose` Display token pinned per variant** — the
-//!      operator-facing snake_case strings at lease.rs:71-76 used in
+//!      operator-facing `snake_case` strings at lease.rs:71-76 used in
 //!      audit logs.
 //!   2. **Display agrees with serde JSON tag form** — both produce
-//!      the same snake_case bytes per variant.
+//!      the same `snake_case` bytes per variant.
 //!   3. **JSON round-trip** preserves variant identity.
-//!   4. **Serde JSON acts as the FromStr substitute** — accepting
-//!      every Display token and rejecting PascalCase + unknown.
+//!   4. **Serde JSON acts as the `FromStr` substitute** — accepting
+//!      every Display token and rejecting `PascalCase` + unknown.
 //!   5. **CBOR round-trip** preserves variant.
-//!   6. **Hash + Eq + Copy correctness** for use as HashMap keys.
+//!   6. **Hash + Eq + Copy correctness** for use as `HashMap` keys.
 //!   7. **Pairwise distinct variants** — Display strings + hashes.
-//!   8. **`LeaseId` Display + FromStr round-trip** — the actual
+//!   8. **`LeaseId` Display + `FromStr` round-trip** — the actual
 //!      `parse::<LeaseId>()`-able token form. Both bare-hex and
 //!      `objectid:<hex>` forms accepted, exposing the documented
 //!      prefix-stripping in `ObjectId::parse_prefixed`.
@@ -36,7 +36,7 @@
 //!      non-hex, etc.
 //!  10. **`to_prefixed_string` produces the canonical
 //!      `objectid:<hex>` form** that round-trips back through
-//!      FromStr.
+//!      `FromStr`.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -228,12 +228,11 @@ fn purpose_display_strings_are_pairwise_distinct() {
 
 #[test]
 fn purpose_variants_pairwise_unequal() {
-    for i in 0..ALL_PURPOSES.len() {
-        for j in (i + 1)..ALL_PURPOSES.len() {
+    for (i, (left, _)) in ALL_PURPOSES.iter().enumerate() {
+        for (right, _) in ALL_PURPOSES.iter().skip(i + 1) {
             assert_ne!(
-                ALL_PURPOSES[i].0, ALL_PURPOSES[j].0,
-                "{:?} and {:?} MUST be distinct variants",
-                ALL_PURPOSES[i].0, ALL_PURPOSES[j].0
+                left, right,
+                "{left:?} and {right:?} MUST be distinct variants"
             );
         }
     }

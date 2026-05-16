@@ -7,7 +7,7 @@ fn target(os: &str, arch: &str) -> ConnectorTarget {
     }
 }
 
-fn object_id(byte: u8) -> ObjectId {
+const fn object_id(byte: u8) -> ObjectId {
     ObjectId::from_bytes([byte; 32])
 }
 
@@ -28,7 +28,6 @@ fn registry_snapshot_display_pins_identity_version_and_target() {
     assert_eq!(snapshot.to_string(), "connector:fcp.test@1.2.3 linux-amd64");
     assert_eq!(
         snapshot
-            .clone()
             .with_symbol_set_object_id(object_id(0x33))
             .to_string(),
         "connector:fcp.test@1.2.3 linux-amd64"

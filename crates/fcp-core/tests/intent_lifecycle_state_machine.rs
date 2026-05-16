@@ -1,6 +1,6 @@
 //! Pin `IntentStatus` documented state-machine + `IdempotencyEntry` predicate
 //! truth tables + `OperationValidationError` 9-variant Display matrix —
-//! the closest analogue to "IntentLifecycle state machine"
+//! the closest analogue to "`IntentLifecycle` state machine"
 //! (flywheel_connectors-l53eq).
 //!
 //! Bead asks for `IntentLifecycle` state-transition pinning per the
@@ -11,17 +11,17 @@
 //! predicates and validated by [`OperationValidationError`]
 //! (`operation.rs:445`).
 //!
-//! `intent_manifest_serde_tag_matrix.rs` pins IntentStatus serde matrix.
-//! `exactly_once_golden_vectors.rs` checks OperationValidationError
+//! `intent_manifest_serde_tag_matrix.rs` pins `IntentStatus` serde matrix.
+//! `exactly_once_golden_vectors.rs` checks `OperationValidationError`
 //! displayability + status serde round-trip. Residual unpinned axes:
 //!   * Documented state-machine transition truth table (which
-//!     from→to transitions are LEGAL per the documented Pending →
-//!     InProgress → Completed/Failed/Orphaned ladder),
-//!   * IdempotencyEntry predicate truth tables exhaustive over all 5
-//!     IntentStatus values (is_terminal, should_return_cached),
-//!   * is_intent_orphaned 4-corner truth table,
-//!   * required_idempotency_for_safety_tier 4-cell truth table,
-//!   * OperationValidationError 9-variant Display verbatim with payload
+//!     from→to transitions are LEGAL per the documented `Pending` →
+//!     `InProgress` → `Completed`/`Failed`/`Orphaned` ladder),
+//!   * `IdempotencyEntry` predicate truth tables exhaustive over all 5
+//!     `IntentStatus` values (`is_terminal`, `should_return_cached`),
+//!   * `is_intent_orphaned` 4-corner truth table,
+//!   * `required_idempotency_for_safety_tier` 4-cell truth table,
+//!   * `OperationValidationError` 9-variant Display verbatim with payload
 //!     preservation.
 
 use fcp_cbor::SchemaId;
@@ -41,7 +41,7 @@ const ALL_STATUSES: &[IntentStatus] = &[
     IntentStatus::Orphaned,
 ];
 
-fn obj(byte: u8) -> ObjectId {
+const fn obj(byte: u8) -> ObjectId {
     ObjectId::from_bytes([byte; 32])
 }
 
@@ -61,15 +61,15 @@ fn make_entry(
     }
 }
 
-/// Documented allow-list for the IntentStatus state machine. Per the
+/// Documented allow-list for the `IntentStatus` state machine. Per the
 /// documentation in operation.rs:351-368:
-///   Pending     → InProgress (operation starts)
-///   Pending     → Orphaned   (no progress within threshold, no receipt)
-///   InProgress  → Completed  (success receipt)
-///   InProgress  → Failed     (error receipt)
-///   InProgress  → Orphaned   (partial work, no receipt, expired)
-///   Completed/Failed/Orphaned: terminal (no further transition)
-fn is_documented_legal_transition(from: IntentStatus, to: IntentStatus) -> bool {
+///   `Pending`     → `InProgress` (operation starts)
+///   `Pending`     → `Orphaned`   (no progress within threshold, no receipt)
+///   `InProgress`  → `Completed`  (success receipt)
+///   `InProgress`  → `Failed`     (error receipt)
+///   `InProgress`  → `Orphaned`   (partial work, no receipt, expired)
+///   `Completed`/`Failed`/`Orphaned`: terminal (no further transition)
+const fn is_documented_legal_transition(from: IntentStatus, to: IntentStatus) -> bool {
     use IntentStatus::*;
     matches!(
         (from, to),

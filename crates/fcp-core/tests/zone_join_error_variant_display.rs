@@ -1,5 +1,5 @@
 //! Pin `ZoneKeyError` 5-variant Display matrix — the closest analogue to
-//! "ZoneJoinError variant Display" (flywheel_connectors-jcxq8).
+//! "`ZoneJoinError` variant Display" (flywheel_connectors-jcxq8).
 //!
 //! Bead asks for `ZoneJoinError` Display + serde tag pinning. No type
 //! literally named `ZoneJoinError` exists in fcp-core. The closest
@@ -8,19 +8,19 @@
 //! by zone-key wrap/unwrap operations. Wrapping/unwrapping a zone key
 //! IS the technical mechanism by which a node joins a zone (HPKE seal/
 //! open of the symmetric zone key); failures during that flow are the
-//! "ZoneJoinError" surface.
+//! "`ZoneJoinError`" surface.
 //!
-//! No prior test pins ZoneKeyError — `grep` returns empty. Coverage:
+//! No prior test pins `ZoneKeyError` — `grep` returns empty. Coverage:
 //!   * 5 variants Display verbatim per variant (with payload preservation
 //!     for u64/String fields),
 //!   * `Crypto(#[from] CryptoError)` transparent forward — Display
-//!     prefix `crypto failure:` followed by the inner CryptoError
+//!     prefix `crypto failure:` followed by the inner `CryptoError`
 //!     Display,
 //!   * From<CryptoError> conversion sentinel,
 //!   * Distinct-Display sentinel across all 5 variants,
-//!   * std::error::Error impl,
-//!   * Source-chain pinning: ZoneKeyError::Crypto's source() returns
-//!     the underlying CryptoError (thiserror's #[from] preserves the
+//!   * `std::error::Error` impl,
+//!   * Source-chain pinning: `ZoneKeyError::Crypto`'s `source()` returns
+//!     the underlying `CryptoError` (thiserror's #[from] preserves the
 //!     chain).
 
 use fcp_core::ZoneKeyError;

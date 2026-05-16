@@ -1,27 +1,28 @@
-//! Pin `CapabilityId` Display+FromStr+serde roundtrip + IdValidationError
-//! 6-variant matrix — the closest analogue to "CapabilityToken
+//! Pin `CapabilityId` Display+FromStr+serde roundtrip + `IdValidationError`
+//! 6-variant matrix — the closest analogue to "`CapabilityToken`
 //! display roundtrip" (flywheel_connectors-p1xf4).
 //!
 //! Bead asks for `CapabilityToken` Display+FromStr+serde roundtrip pinning.
-//! `CapabilityToken` is a COSE_Sign1 binary blob (no `Display` or `FromStr`
+//! `CapabilityToken` is a `COSE_Sign1` binary blob (no `Display` or `FromStr`
 //! impl — and a meaningful binary-ID round-trip would be a base64/hex
 //! contract, not a Display contract). The closest text-form analogue with
-//! Display + FromStr + serde(try_from = "String") is [`CapabilityId`] at
+//! Display + `FromStr` + `serde(try_from = "String")` is [`CapabilityId`] at
 //! `crates/fcp-core/src/capability.rs:124`. This is the actual identifier
 //! that names a capability inside a token; pinning its text-form contract
 //! is what the bead is reaching for.
 //!
 //! Existing `capability_id_display_roundtrip.rs` covers Display+FromStr
 //! happy-path + equivalent-constructor equality. This pin adds:
-//!   * Full IdValidationError 6-variant rejection matrix from
-//!     `validate_canonical_id` (Empty / TooLong / NonAscii /
-//!     UppercaseNotAllowed / InvalidStartChar / InvalidChar),
-//!   * JSON shape: scalar string (transparent via serde(try_from/into String)),
+//!   * Full `IdValidationError` 6-variant rejection matrix from
+//!     `validate_canonical_id` (`Empty` / `TooLong` / `NonAscii` /
+//!     `UppercaseNotAllowed` / `InvalidStartChar` / `InvalidChar`),
+//!   * JSON shape: scalar string (transparent via
+//!     `serde(try_from/into String)`),
 //!   * CBOR shape: Text scalar,
 //!   * JSON+CBOR roundtrip preserves canonical bytes,
 //!   * Distinct canonical IDs hash + serialize distinctly,
 //!   * Boundary case: 128-byte ID (the documented max) succeeds; 129 rejects,
-//!   * Display equals as_str() byte-for-byte.
+//!   * Display equals `as_str()` byte-for-byte.
 
 use ciborium::Value as CborValue;
 use fcp_core::{CapabilityId, IdValidationError};
@@ -266,7 +267,7 @@ fn from_str_and_try_from_string_produce_equal_ids() {
     assert_eq!(via_try, via_new);
     assert_eq!(via_new, via_static);
     // String round-trip via Into<String> recovers the canonical text.
-    let owned: String = via_parse.clone().into();
+    let owned: String = via_parse.into();
     assert_eq!(owned, canonical);
 }
 

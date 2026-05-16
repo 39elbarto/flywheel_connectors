@@ -1,21 +1,21 @@
 //! Pin `PcsEventType` + `ResumeReasonCode` serde tag matrix — the
-//! closest analogues to "ZoneEvent serde tag matrix"
+//! closest analogues to "`ZoneEvent` serde tag matrix"
 //! (flywheel_connectors-ifkle).
 //!
 //! Bead asks for `ZoneEvent serde tag JSON+CBOR roundtrip`. No type
 //! literally named `ZoneEvent` exists in fcp-core. The event-shaped
 //! classifier surface covers many already-pinned enums:
-//! - ConnectorEvent (already pinned by connector_event_serde_tags.rs)
-//! - EventSeverity (already pinned by event_severity_ordering.rs)
-//! - OrderingPolicy (already pinned by schedule_policy_variant_matrix.rs)
+//! - `ConnectorEvent` (already pinned by `connector_event_serde_tags.rs`)
+//! - `EventSeverity` (already pinned by `event_severity_ordering.rs`)
+//! - `OrderingPolicy` (already pinned by `schedule_policy_variant_matrix.rs`)
 //!
 //! Two unpinned event-type classifiers in the zone-event surface:
 //!
-//!  - `PcsEventType` (pcs.rs:463) — 6 variants for PCS audit
+//!  - `PcsEventType` (`pcs.rs:463`) — 6 variants for PCS audit
 //!    logging (`GroupCreated` / `EpochAdvanced` / `MemberAdded` /
 //!    `MemberRemoved` / `ZoneKeyDerived` / `CompromiseRecovery`)
 //!    with `#[serde(rename_all = "snake_case")]`.
-//!  - `ResumeReasonCode` (connector_state.rs:1201) — 8 variants
+//!  - `ResumeReasonCode` (`connector_state.rs:1201`) — 8 variants
 //!    for timeline events emitted during checkpoint export,
 //!    handoff, and resume (`CheckpointExported` / `HandoffAuthorized`
 //!    / `CheckpointFresh` / `CheckpointStale` / `DuplicateClassified`
@@ -27,17 +27,17 @@
 //!
 //! Targets:
 //!
-//!   1. **`PcsEventType` per-variant JSON tag** in snake_case
-//!      (group_created / epoch_advanced / member_added /
-//!      member_removed / zone_key_derived / compromise_recovery).
+//!   1. **`PcsEventType` per-variant JSON tag** in `snake_case`
+//!      (`group_created` / `epoch_advanced` / `member_added` /
+//!      `member_removed` / `zone_key_derived` / `compromise_recovery`).
 //!   2. **`PcsEventType` JSON + CBOR round-trip** per variant.
 //!   3. **`PcsEventType` CBOR encodes as Text** (cross-language).
-//!   4. **`PcsEventType` PascalCase + unknown rejected**.
+//!   4. **`PcsEventType` `PascalCase` + unknown rejected**.
 //!   5. **`PcsEventType` 6-variant count + pairwise distinct**.
-//!   6. **`ResumeReasonCode` per-variant JSON tag** in snake_case
-//!      (checkpoint_exported / handoff_authorized / checkpoint_fresh
-//!      / checkpoint_stale / duplicate_classified / resume_accepted
-//!      / resume_denied / evidence_conflict).
+//!   6. **`ResumeReasonCode` per-variant JSON tag** in `snake_case`
+//!      (`checkpoint_exported` / `handoff_authorized` / `checkpoint_fresh`
+//!      / `checkpoint_stale` / `duplicate_classified` / `resume_accepted`
+//!      / `resume_denied` / `evidence_conflict`).
 //!   7. **`ResumeReasonCode` JSON + CBOR round-trip** per variant.
 //!   8. **Multi-word variants use underscore** (no camelCase /
 //!      kebab-case).
@@ -168,9 +168,9 @@ fn pcs_event_type_variants_pairwise_distinct() {
     }
     assert_eq!(seen.len(), PCS_EVENT_TYPE_CASES.len());
 
-    for i in 0..PCS_EVENT_TYPE_CASES.len() {
-        for j in (i + 1)..PCS_EVENT_TYPE_CASES.len() {
-            assert_ne!(PCS_EVENT_TYPE_CASES[i].0, PCS_EVENT_TYPE_CASES[j].0);
+    for (index, (left, _)) in PCS_EVENT_TYPE_CASES.iter().enumerate() {
+        for (right, _) in PCS_EVENT_TYPE_CASES.iter().skip(index + 1) {
+            assert_ne!(*left, *right);
         }
     }
 }
@@ -281,9 +281,9 @@ fn resume_reason_code_variants_pairwise_distinct() {
     }
     assert_eq!(seen.len(), RESUME_REASON_CODE_CASES.len());
 
-    for i in 0..RESUME_REASON_CODE_CASES.len() {
-        for j in (i + 1)..RESUME_REASON_CODE_CASES.len() {
-            assert_ne!(RESUME_REASON_CODE_CASES[i].0, RESUME_REASON_CODE_CASES[j].0);
+    for (index, (left, _)) in RESUME_REASON_CODE_CASES.iter().enumerate() {
+        for (right, _) in RESUME_REASON_CODE_CASES.iter().skip(index + 1) {
+            assert_ne!(*left, *right);
         }
     }
 }

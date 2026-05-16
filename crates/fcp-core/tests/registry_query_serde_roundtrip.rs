@@ -1,5 +1,5 @@
 //! Pin `RevocationCheckResult` as the closest analogue to a
-//! "RegistryQuery" serde JSON+CBOR round-trip
+//! "`RegistryQuery`" serde JSON+CBOR round-trip
 //! (flywheel_connectors-8gfcv).
 //!
 //! Bead asks for `RegistryQuery serde JSON+CBOR roundtrip`. No type
@@ -7,13 +7,13 @@
 //! "query/lookup result" type with serde derives is
 //! `RevocationCheckResult` (revocation.rs:409) — the result of
 //! looking up an `ObjectId` against the revocation registry. It
-//! carries 5 fields (3 scalar + 2 Option<> with
+//! carries 5 fields (3 scalar + 2 `Option<>` with
 //! `skip_serializing_if = "Option::is_none"`) and a nested
-//! `RevocationScope` enum that itself carries snake_case Display
+//! `RevocationScope` enum that itself carries `snake_case` Display
 //! tokens.
 //!
 //! `RegistryEntry` (the other "registry-shaped" type at
-//! connector_artifacts.rs:249) is already pinned by
+//! `connector_artifacts.rs:249`) is already pinned by
 //! `connector_bundle_serde_extended.rs` (huv65) — this test focuses
 //! on the lookup-result surface that's still a gap.
 //!
@@ -27,11 +27,11 @@
 //!   3. **JSON round-trip** preserves every field including Some/None
 //!      states for both Optional fields.
 //!   4. **CBOR round-trip** preserves every field.
-//!   5. **`RevocationScope` per-variant snake_case Display** —
+//!   5. **`RevocationScope` per-variant `snake_case` Display** —
 //!      tokens used inside the query result for filtering.
-//!   6. **`RevocationScope` JSON form is PascalCase variant name
-//!      verbatim** (no rename_all on this enum) — pin the same kind
-//!      of dual-encoding sentinel used for RiskTier.
+//!   6. **`RevocationScope` JSON form is `PascalCase` variant name
+//!      verbatim** (no `rename_all` on this enum) — pin the same kind
+//!      of dual-encoding sentinel used for `RiskTier`.
 //!   7. **Distinct check results produce distinct serializations**
 //!      (the result's wire identity reflects every field).
 //!   8. **`RevocationScope` JSON + CBOR round-trip** for every
@@ -56,7 +56,7 @@ const ALL_SCOPES_SERDE: &[(RevocationScope, &str)] = &[
     (RevocationScope::ConnectorBinary, "ConnectorBinary"),
 ];
 
-fn revoked_result() -> RevocationCheckResult {
+const fn revoked_result() -> RevocationCheckResult {
     RevocationCheckResult {
         is_revoked: true,
         revocation: Some(ObjectId::from_bytes([0x42; 32])),
@@ -66,7 +66,7 @@ fn revoked_result() -> RevocationCheckResult {
     }
 }
 
-fn not_revoked_result() -> RevocationCheckResult {
+const fn not_revoked_result() -> RevocationCheckResult {
     RevocationCheckResult {
         is_revoked: false,
         revocation: None,
@@ -86,9 +86,18 @@ fn revocation_check_result_json_shape_pinned_for_revoked_case() {
     let value = serde_json::to_value(&result).expect("serialize");
     let obj = value.as_object().expect("object");
 
-    assert_eq!(obj.get("is_revoked").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(obj.get("stale_data").and_then(|v| v.as_bool()), Some(false));
-    assert_eq!(obj.get("head_age_secs").and_then(|v| v.as_u64()), Some(60));
+    assert_eq!(
+        obj.get("is_revoked").and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        obj.get("stale_data").and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        obj.get("head_age_secs").and_then(serde_json::Value::as_u64),
+        Some(60)
+    );
     assert!(
         obj.contains_key("revocation"),
         "Some(revocation) MUST be present"
@@ -112,9 +121,18 @@ fn revocation_check_result_json_shape_pinned_for_not_revoked_case() {
     let obj = value.as_object().expect("object");
 
     // Scalar fields always present.
-    assert_eq!(obj.get("is_revoked").and_then(|v| v.as_bool()), Some(false));
-    assert_eq!(obj.get("stale_data").and_then(|v| v.as_bool()), Some(false));
-    assert_eq!(obj.get("head_age_secs").and_then(|v| v.as_u64()), Some(0));
+    assert_eq!(
+        obj.get("is_revoked").and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        obj.get("stale_data").and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        obj.get("head_age_secs").and_then(serde_json::Value::as_u64),
+        Some(0)
+    );
 
     // Optional fields omitted via skip_serializing_if.
     assert!(
@@ -150,10 +168,10 @@ fn revocation_check_result_json_roundtrip_preserves_not_revoked_case() {
     let json = serde_json::to_string(&original).expect("serialize");
     let back: RevocationCheckResult = serde_json::from_str(&json).expect("deserialize");
 
-    assert_eq!(back.is_revoked, false);
+    assert!(!back.is_revoked);
     assert_eq!(back.revocation, None);
     assert_eq!(back.scope, None);
-    assert_eq!(back.stale_data, false);
+    assert!(!back.stale_data);
     assert_eq!(back.head_age_secs, 0);
 }
 
@@ -171,8 +189,8 @@ fn revocation_check_result_json_roundtrip_preserves_stale_data_flag() {
     };
     let json = serde_json::to_string(&original).expect("serialize");
     let back: RevocationCheckResult = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(back.is_revoked, true);
-    assert_eq!(back.stale_data, true);
+    assert!(back.is_revoked);
+    assert!(back.stale_data);
     assert_eq!(back.head_age_secs, u64::MAX);
     assert_eq!(back.scope, Some(RevocationScope::ConnectorBinary));
 }
@@ -202,7 +220,7 @@ fn revocation_check_result_cbor_roundtrip_preserves_not_revoked_case() {
     ciborium::ser::into_writer(&original, &mut buf).expect("encode");
     let back: RevocationCheckResult = ciborium::de::from_reader(buf.as_slice()).expect("decode");
 
-    assert_eq!(back.is_revoked, false);
+    assert!(!back.is_revoked);
     assert_eq!(back.revocation, None);
     assert_eq!(back.scope, None);
 }

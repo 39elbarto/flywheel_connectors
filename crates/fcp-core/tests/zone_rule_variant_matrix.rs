@@ -5,7 +5,7 @@
 //! `DecisionReasonCode` zone-policy subset emitted by the policy engine:
 //! deny-list hits and allow-list misses for principals, connectors, and
 //! capabilities. These variants intentionally use dotted Display tokens while
-//! serde uses snake_case enum tags.
+//! serde uses `snake_case` enum tags.
 
 use ciborium::value::Value as CborValue;
 use fcp_core::DecisionReasonCode;

@@ -38,7 +38,7 @@ fn cases() -> Vec<OauthFlowKindCase> {
     ]
 }
 
-fn oauth_flow_kind_tag(flow: &OAuthRecipe) -> &'static str {
+const fn oauth_flow_kind_tag(flow: &OAuthRecipe) -> &'static str {
     match flow {
         OAuthRecipe::AuthorizationCodePkce { .. } => "authorization_code_pkce",
         OAuthRecipe::DeviceCode { .. } => "device_code",

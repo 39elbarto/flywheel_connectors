@@ -1,13 +1,13 @@
-//! Pin `LeaseTransferValidationError` 9-variant Display matrix — the closest
-//! analogue to "LeasePolicy variant Display"
+//! Pin `LeaseTransferValidationError` 9-variant `Display` matrix — the closest
+//! analogue to "`LeasePolicy` variant `Display`"
 //! (flywheel_connectors-f333w).
 //!
-//! Bead asks for `LeasePolicy` Display + serde tag pinning. No type literally
+//! Bead asks for `LeasePolicy` `Display` + serde tag pinning. No type literally
 //! named `LeasePolicy` exists in fcp-core. The closest "policy"-shaped lease
 //! enum is [`LeaseTransferValidationError`] at `crates/fcp-core/src/lease.rs:365`,
 //! a 9-variant error enumerating the rules `validate_lease_handoff` enforces
 //! when a lease is transferred between nodes. These 9 variants ARE the
-//! LeasePolicy invariants — every documented rule a handoff must satisfy
+//! `LeasePolicy` invariants — every documented rule a handoff must satisfy
 //! shows up here as a rejection variant.
 //!
 //! Existing pinned lease enums:
@@ -17,18 +17,18 @@
 //!   * `LeaseTransferValidationError::SelfTransfer` + `FromHolderMismatch`
 //!     → `lease_holder_display_roundtrip.rs`.
 //!
-//! This pin adds the residual 7 LeaseTransferValidationError Display arms
-//! that aren't pinned anywhere else, plus the validate_lease_handoff
+//! This pin adds the residual 7 `LeaseTransferValidationError` `Display` arms
+//! that aren't pinned anywhere else, plus the `validate_lease_handoff`
 //! variant-selection truth table.
 //!
 //! Coverage:
-//!   * 9-variant Display phrasing pinned verbatim,
-//!   * Payload preservation in rendered string for u64/ObjectId/ZoneId/
-//!     TailscaleNodeId/LeasePurpose fields,
-//!   * Distinct-Display sentinel across all 9 variants,
+//!   * 9-variant `Display` phrasing pinned verbatim,
+//!   * Payload preservation in rendered string for `u64`/`ObjectId`/`ZoneId`/
+//!     `TailscaleNodeId`/`LeasePurpose` fields,
+//!   * Distinct-`Display` sentinel across all 9 variants,
 //!   * `validate_lease_handoff` truth table: every documented rule fires
 //!     the documented variant (precedence test — first-failing rule wins),
-//!   * std::error::Error impl.
+//!   * `std::error::Error` impl.
 
 use fcp_cbor::SchemaId;
 use fcp_core::{
@@ -37,7 +37,7 @@ use fcp_core::{
 };
 use semver::Version;
 
-fn obj(byte: u8) -> ObjectId {
+const fn obj(byte: u8) -> ObjectId {
     ObjectId::from_bytes([byte; 32])
 }
 
@@ -62,7 +62,7 @@ fn make_lease(holder: TailscaleNodeId, lease_seq: u64, exp: u64) -> Lease {
     lease
 }
 
-fn make_handoff(
+struct HandoffSpec {
     previous_lease_id: ObjectId,
     next_lease_id: ObjectId,
     from_holder: TailscaleNodeId,
@@ -72,17 +72,19 @@ fn make_handoff(
     next_fence: u64,
     subject: ObjectId,
     zone: ZoneId,
-) -> LeaseHandoff {
+}
+
+fn make_handoff(spec: HandoffSpec) -> LeaseHandoff {
     LeaseHandoff {
-        previous_lease_id,
-        next_lease_id,
-        from_holder,
-        to_holder,
-        zone_id: zone,
-        subject_object_id: subject,
-        purpose,
-        previous_fencing_token: previous_fence,
-        next_fencing_token: next_fence,
+        previous_lease_id: spec.previous_lease_id,
+        next_lease_id: spec.next_lease_id,
+        from_holder: spec.from_holder,
+        to_holder: spec.to_holder,
+        zone_id: spec.zone,
+        subject_object_id: spec.subject,
+        purpose: spec.purpose,
+        previous_fencing_token: spec.previous_fence,
+        next_fencing_token: spec.next_fence,
         transferred_at: 1_700_000_000,
         checkpoint_object_id: None,
     }
@@ -267,17 +269,17 @@ fn lease_transfer_validation_error_implements_std_error() {
 #[test]
 fn validate_handoff_fires_lease_expired_when_lease_exp_is_in_past() {
     let lease = make_lease(node("alpha"), 5, 1_000);
-    let handoff = make_handoff(
-        obj(0x10),
-        obj(0x11),
-        node("alpha"),
-        node("beta"),
-        LeasePurpose::OperationExecution,
-        5,
-        6,
-        obj(0xaa),
-        ZoneId::work(),
-    );
+    let handoff = make_handoff(HandoffSpec {
+        previous_lease_id: obj(0x10),
+        next_lease_id: obj(0x11),
+        from_holder: node("alpha"),
+        to_holder: node("beta"),
+        purpose: LeasePurpose::OperationExecution,
+        previous_fence: 5,
+        next_fence: 6,
+        subject: obj(0xaa),
+        zone: ZoneId::work(),
+    });
     let now = 2_000;
     let err = validate_lease_handoff(&lease, &handoff, now).unwrap_err();
     match err {
@@ -295,17 +297,17 @@ fn validate_handoff_fires_lease_id_reused_before_other_checks() {
     // unexpired so we can observe the LeaseIdReused branch directly.
     let lease = make_lease(node("alpha"), 5, 9_999_999_999);
     let dup = obj(0x10);
-    let handoff = make_handoff(
-        dup,
-        dup, // reused → triggers LeaseIdReused
-        node("alpha"),
-        node("beta"),
-        LeasePurpose::OperationExecution,
-        5,
-        6,
-        obj(0xaa),
-        ZoneId::work(),
-    );
+    let handoff = make_handoff(HandoffSpec {
+        previous_lease_id: dup,
+        next_lease_id: dup, // reused → triggers LeaseIdReused
+        from_holder: node("alpha"),
+        to_holder: node("beta"),
+        purpose: LeasePurpose::OperationExecution,
+        previous_fence: 5,
+        next_fence: 6,
+        subject: obj(0xaa),
+        zone: ZoneId::work(),
+    });
     let err = validate_lease_handoff(&lease, &handoff, 1_700_000_000).unwrap_err();
     match err {
         LeaseTransferValidationError::LeaseIdReused { lease_id } => {
@@ -318,17 +320,17 @@ fn validate_handoff_fires_lease_id_reused_before_other_checks() {
 #[test]
 fn validate_handoff_fires_self_transfer_when_holders_equal() {
     let lease = make_lease(node("alpha"), 5, 9_999_999_999);
-    let handoff = make_handoff(
-        obj(0x10),
-        obj(0x11),
-        node("alpha"),
-        node("alpha"), // same → triggers SelfTransfer
-        LeasePurpose::OperationExecution,
-        5,
-        6,
-        obj(0xaa),
-        ZoneId::work(),
-    );
+    let handoff = make_handoff(HandoffSpec {
+        previous_lease_id: obj(0x10),
+        next_lease_id: obj(0x11),
+        from_holder: node("alpha"),
+        to_holder: node("alpha"), // same → triggers SelfTransfer
+        purpose: LeasePurpose::OperationExecution,
+        previous_fence: 5,
+        next_fence: 6,
+        subject: obj(0xaa),
+        zone: ZoneId::work(),
+    });
     let err = validate_lease_handoff(&lease, &handoff, 1_700_000_000).unwrap_err();
     match err {
         LeaseTransferValidationError::SelfTransfer { holder } => {
@@ -341,17 +343,17 @@ fn validate_handoff_fires_self_transfer_when_holders_equal() {
 #[test]
 fn validate_handoff_fires_from_holder_mismatch() {
     let lease = make_lease(node("alpha"), 5, 9_999_999_999);
-    let handoff = make_handoff(
-        obj(0x10),
-        obj(0x11),
-        node("imposter"), // doesn't match lease.holder
-        node("beta"),
-        LeasePurpose::OperationExecution,
-        5,
-        6,
-        obj(0xaa),
-        ZoneId::work(),
-    );
+    let handoff = make_handoff(HandoffSpec {
+        previous_lease_id: obj(0x10),
+        next_lease_id: obj(0x11),
+        from_holder: node("imposter"), // doesn't match lease.holder
+        to_holder: node("beta"),
+        purpose: LeasePurpose::OperationExecution,
+        previous_fence: 5,
+        next_fence: 6,
+        subject: obj(0xaa),
+        zone: ZoneId::work(),
+    });
     let err = validate_lease_handoff(&lease, &handoff, 1_700_000_000).unwrap_err();
     match err {
         LeaseTransferValidationError::FromHolderMismatch { expected, got } => {
@@ -365,17 +367,17 @@ fn validate_handoff_fires_from_holder_mismatch() {
 #[test]
 fn validate_handoff_fires_subject_mismatch() {
     let lease = make_lease(node("alpha"), 5, 9_999_999_999);
-    let handoff = make_handoff(
-        obj(0x10),
-        obj(0x11),
-        node("alpha"),
-        node("beta"),
-        LeasePurpose::OperationExecution,
-        5,
-        6,
-        obj(0xbb), // doesn't match lease.subject_object_id
-        ZoneId::work(),
-    );
+    let handoff = make_handoff(HandoffSpec {
+        previous_lease_id: obj(0x10),
+        next_lease_id: obj(0x11),
+        from_holder: node("alpha"),
+        to_holder: node("beta"),
+        purpose: LeasePurpose::OperationExecution,
+        previous_fence: 5,
+        next_fence: 6,
+        subject: obj(0xbb), // doesn't match lease.subject_object_id
+        zone: ZoneId::work(),
+    });
     let err = validate_lease_handoff(&lease, &handoff, 1_700_000_000).unwrap_err();
     match err {
         LeaseTransferValidationError::SubjectMismatch { expected, got } => {
@@ -389,17 +391,17 @@ fn validate_handoff_fires_subject_mismatch() {
 #[test]
 fn validate_handoff_fires_zone_mismatch() {
     let lease = make_lease(node("alpha"), 5, 9_999_999_999);
-    let handoff = make_handoff(
-        obj(0x10),
-        obj(0x11),
-        node("alpha"),
-        node("beta"),
-        LeasePurpose::OperationExecution,
-        5,
-        6,
-        obj(0xaa),
-        ZoneId::private(), // doesn't match lease.zone_id (work)
-    );
+    let handoff = make_handoff(HandoffSpec {
+        previous_lease_id: obj(0x10),
+        next_lease_id: obj(0x11),
+        from_holder: node("alpha"),
+        to_holder: node("beta"),
+        purpose: LeasePurpose::OperationExecution,
+        previous_fence: 5,
+        next_fence: 6,
+        subject: obj(0xaa),
+        zone: ZoneId::private(), // doesn't match lease.zone_id (work)
+    });
     let err = validate_lease_handoff(&lease, &handoff, 1_700_000_000).unwrap_err();
     match err {
         LeaseTransferValidationError::ZoneMismatch { expected, got } => {
@@ -413,17 +415,17 @@ fn validate_handoff_fires_zone_mismatch() {
 #[test]
 fn validate_handoff_fires_purpose_mismatch() {
     let lease = make_lease(node("alpha"), 5, 9_999_999_999);
-    let handoff = make_handoff(
-        obj(0x10),
-        obj(0x11),
-        node("alpha"),
-        node("beta"),
-        LeasePurpose::ConnectorStateWrite, // doesn't match lease.purpose
-        5,
-        6,
-        obj(0xaa),
-        ZoneId::work(),
-    );
+    let handoff = make_handoff(HandoffSpec {
+        previous_lease_id: obj(0x10),
+        next_lease_id: obj(0x11),
+        from_holder: node("alpha"),
+        to_holder: node("beta"),
+        purpose: LeasePurpose::ConnectorStateWrite, // doesn't match lease.purpose
+        previous_fence: 5,
+        next_fence: 6,
+        subject: obj(0xaa),
+        zone: ZoneId::work(),
+    });
     let err = validate_lease_handoff(&lease, &handoff, 1_700_000_000).unwrap_err();
     match err {
         LeaseTransferValidationError::PurposeMismatch { expected, got } => {
@@ -437,17 +439,17 @@ fn validate_handoff_fires_purpose_mismatch() {
 #[test]
 fn validate_handoff_fires_previous_fence_mismatch() {
     let lease = make_lease(node("alpha"), 5, 9_999_999_999);
-    let handoff = make_handoff(
-        obj(0x10),
-        obj(0x11),
-        node("alpha"),
-        node("beta"),
-        LeasePurpose::OperationExecution,
-        99, // doesn't match lease.fencing_token() == 5
-        100,
-        obj(0xaa),
-        ZoneId::work(),
-    );
+    let handoff = make_handoff(HandoffSpec {
+        previous_lease_id: obj(0x10),
+        next_lease_id: obj(0x11),
+        from_holder: node("alpha"),
+        to_holder: node("beta"),
+        purpose: LeasePurpose::OperationExecution,
+        previous_fence: 99, // doesn't match lease.fencing_token() == 5
+        next_fence: 100,
+        subject: obj(0xaa),
+        zone: ZoneId::work(),
+    });
     let err = validate_lease_handoff(&lease, &handoff, 1_700_000_000).unwrap_err();
     match err {
         LeaseTransferValidationError::PreviousFenceMismatch { expected, got } => {
@@ -463,17 +465,17 @@ fn validate_handoff_fires_non_monotonic_fence_when_next_le_previous() {
     let lease = make_lease(node("alpha"), 5, 9_999_999_999);
 
     // next == previous → fires NonMonotonicFence (must STRICTLY increase).
-    let handoff = make_handoff(
-        obj(0x10),
-        obj(0x11),
-        node("alpha"),
-        node("beta"),
-        LeasePurpose::OperationExecution,
-        5,
-        5,
-        obj(0xaa),
-        ZoneId::work(),
-    );
+    let handoff = make_handoff(HandoffSpec {
+        previous_lease_id: obj(0x10),
+        next_lease_id: obj(0x11),
+        from_holder: node("alpha"),
+        to_holder: node("beta"),
+        purpose: LeasePurpose::OperationExecution,
+        previous_fence: 5,
+        next_fence: 5,
+        subject: obj(0xaa),
+        zone: ZoneId::work(),
+    });
     let err = validate_lease_handoff(&lease, &handoff, 1_700_000_000).unwrap_err();
     match err {
         LeaseTransferValidationError::NonMonotonicFence { previous, next } => {
@@ -484,17 +486,17 @@ fn validate_handoff_fires_non_monotonic_fence_when_next_le_previous() {
     }
 
     // next < previous → also fires NonMonotonicFence.
-    let handoff = make_handoff(
-        obj(0x10),
-        obj(0x11),
-        node("alpha"),
-        node("beta"),
-        LeasePurpose::OperationExecution,
-        5,
-        4,
-        obj(0xaa),
-        ZoneId::work(),
-    );
+    let handoff = make_handoff(HandoffSpec {
+        previous_lease_id: obj(0x10),
+        next_lease_id: obj(0x11),
+        from_holder: node("alpha"),
+        to_holder: node("beta"),
+        purpose: LeasePurpose::OperationExecution,
+        previous_fence: 5,
+        next_fence: 4,
+        subject: obj(0xaa),
+        zone: ZoneId::work(),
+    });
     let err = validate_lease_handoff(&lease, &handoff, 1_700_000_000).unwrap_err();
     match err {
         LeaseTransferValidationError::NonMonotonicFence { previous, next } => {
@@ -509,17 +511,17 @@ fn validate_handoff_fires_non_monotonic_fence_when_next_le_previous() {
 fn validate_handoff_accepts_a_well_formed_strictly_increasing_fence_handoff() {
     // Smoke test: every check passes → Ok(()).
     let lease = make_lease(node("alpha"), 5, 9_999_999_999);
-    let handoff = make_handoff(
-        obj(0x10),
-        obj(0x11),
-        node("alpha"),
-        node("beta"),
-        LeasePurpose::OperationExecution,
-        5,
-        6,
-        obj(0xaa),
-        ZoneId::work(),
-    );
+    let handoff = make_handoff(HandoffSpec {
+        previous_lease_id: obj(0x10),
+        next_lease_id: obj(0x11),
+        from_holder: node("alpha"),
+        to_holder: node("beta"),
+        purpose: LeasePurpose::OperationExecution,
+        previous_fence: 5,
+        next_fence: 6,
+        subject: obj(0xaa),
+        zone: ZoneId::work(),
+    });
     let result = validate_lease_handoff(&lease, &handoff, 1_700_000_000);
     assert!(
         result.is_ok(),

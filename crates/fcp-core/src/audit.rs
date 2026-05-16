@@ -1765,7 +1765,7 @@ mod tests {
         assert!(!event.event_type.is_empty());
         assert!(event.seq > 0 || event.prev.is_none()); // Genesis can have seq=0
         assert!(event.occurred_at > 0);
-        assert!(event.correlation_id.0.as_bytes().len() == 16);
+        assert_eq!(event.correlation_id.0.as_bytes().len(), 16);
     }
 
     #[test]

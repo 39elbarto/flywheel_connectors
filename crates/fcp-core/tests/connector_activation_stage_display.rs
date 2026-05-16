@@ -1,48 +1,48 @@
-//! Pin `PrerequisiteStatus` serde tag + DescriptorStatus conversion
-//! mapping — the closest analogues to "ConnectorActivationStage"
+//! Pin `PrerequisiteStatus` serde tag + `DescriptorStatus` conversion
+//! mapping — the closest analogues to "`ConnectorActivationStage`"
 //! (flywheel_connectors-nhms0).
 //!
 //! Bead asks for `ConnectorActivationStage Display + serde tag`. No
 //! type literally named `ConnectorActivationStage` exists in
 //! fcp-core. The activation-stage-shaped surface in fcp-core covers:
 //!
-//!  - `ConnectorLifecycleState` (connector.rs:180) — 5 variants
-//!    Loaded/Activated/Running/Suspended/Terminated. Already pinned
+//!  - `ConnectorLifecycleState` (`connector.rs:180`) — 5 variants
+//!    `Loaded`/`Activated`/`Running`/`Suspended`/`Terminated`. Already pinned
 //!    by `connector_lifecycle_state_display.rs`.
-//!  - `PrerequisiteStatus` (connector_descriptors.rs:355) — 7
+//!  - `PrerequisiteStatus` (`connector_descriptors.rs:355`) — 7
 //!    variants describing "what stage is the prerequisite at?":
-//!    Satisfied / Missing / Drifted / Unverifiable / PolicyBlocked /
-//!    NotYetMeasured / Unavailable. NOT yet pinned.
-//!  - `DescriptorStatus` (connector_descriptors.rs:23) — 11-variant
+//!    `Satisfied` / `Missing` / `Drifted` / `Unverifiable` / `PolicyBlocked` /
+//!    `NotYetMeasured` / `Unavailable`. NOT yet pinned.
+//!  - `DescriptorStatus` (`connector_descriptors.rs:23`) — 11-variant
 //!    superset already pinned by `live_status_serde_tag_matrix.rs`.
-//!  - `ProvisioningStatus` (provisioning.rs:489) — already pinned
+//!  - `ProvisioningStatus` (`provisioning.rs:489`) — already pinned
 //!    by `connector_plan_step_ordering.rs`.
 //!
 //! `PrerequisiteStatus` is the closest "activation stage" analogue
 //! — it's the per-prerequisite stage during connector onboarding/
 //! activation, with a documented `From<PrerequisiteStatus>` →
-//! `DescriptorStatus` projection at connector_descriptors.rs:372.
+//! `DescriptorStatus` projection at `connector_descriptors.rs:372`.
 //!
 //! Targets:
 //!
-//!   1. **Per-variant JSON tag** in snake_case (`satisfied` /
+//!   1. **Per-variant JSON tag** in `snake_case` (`satisfied` /
 //!      `missing` / `drifted` / `unverifiable` / `policy_blocked`
 //!      / `not_yet_measured` / `unavailable`).
 //!   2. **JSON + CBOR round-trip** per variant.
 //!   3. **CBOR encodes as Text** (cross-language consumers).
 //!   4. **Multi-word variant uses underscore** for `policy_blocked`
 //!      and `not_yet_measured`.
-//!   5. **PascalCase + unknown rejected** — drift sentinel.
+//!   5. **`PascalCase` + unknown rejected** — drift sentinel.
 //!   6. **7-variant count + pairwise distinct**.
 //!   7. **`From<PrerequisiteStatus>` → `DescriptorStatus`** truth
-//!      table — every PrerequisiteStatus variant projects to its
-//!      documented DescriptorStatus counterpart (the lossy mapping
+//!      table — every `PrerequisiteStatus` variant projects to its
+//!      documented `DescriptorStatus` counterpart (the lossy mapping
 //!      that operator dashboards use to roll up prerequisite stages
 //!      into descriptor-level health).
-//!   8. **DescriptorStatus tokens for the projected variants match
-//!      PrerequisiteStatus tokens** byte-for-byte where the
-//!      mapping name matches (Missing / Drifted / Unverifiable /
-//!      PolicyBlocked / NotYetMeasured / Unavailable).
+//!   8. **`DescriptorStatus` tokens for the projected variants match
+//!      `PrerequisiteStatus` tokens** byte-for-byte where the
+//!      mapping name matches (`Missing` / `Drifted` / `Unverifiable` /
+//!      `PolicyBlocked` / `NotYetMeasured` / `Unavailable`).
 
 use ciborium::value::Value as CborValue;
 use fcp_core::{DescriptorStatus, PrerequisiteStatus};
@@ -182,13 +182,9 @@ fn prerequisite_status_variants_pairwise_distinct() {
     }
     assert_eq!(seen.len(), ALL_STATUSES.len());
 
-    for i in 0..ALL_STATUSES.len() {
-        for j in (i + 1)..ALL_STATUSES.len() {
-            assert_ne!(
-                ALL_STATUSES[i].0, ALL_STATUSES[j].0,
-                "{:?} and {:?} MUST be distinct",
-                ALL_STATUSES[i].0, ALL_STATUSES[j].0
-            );
+    for (i, (left, _)) in ALL_STATUSES.iter().enumerate() {
+        for (right, _) in ALL_STATUSES.iter().skip(i + 1) {
+            assert_ne!(left, right, "{left:?} and {right:?} MUST be distinct");
         }
     }
 }

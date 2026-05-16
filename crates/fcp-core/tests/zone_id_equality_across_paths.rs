@@ -15,7 +15,7 @@
 //!   path, also used by serde via `try_from = "String"`.
 //! - `<&str>.parse::<ZoneId>()` — `FromStr` (delegates to `try_from`).
 //! - `Display → FromStr` round-trip — the canonical "format and
-//!    re-parse" pair.
+//!   re-parse" pair.
 //! - `clone` — Arc<str> bumping the refcount; equality/hash MUST
 //!   match the original.
 //! - `to_tailscale_tag → from_tailscale_tag` — the ZoneId-only
@@ -30,13 +30,16 @@ use std::str::FromStr;
 
 use fcp_core::ZoneId;
 
+type ZoneFactory = fn() -> ZoneId;
+type CanonicalZone = (&'static str, ZoneFactory);
+
 fn hash_of<T: Hash + ?Sized>(v: &T) -> u64 {
     let mut h = DefaultHasher::new();
     v.hash(&mut h);
     h.finish()
 }
 
-const CANONICAL_ZONES: &[(&str, fn() -> ZoneId)] = &[
+const CANONICAL_ZONES: &[CanonicalZone] = &[
     ("z:owner", ZoneId::owner),
     ("z:private", ZoneId::private),
     ("z:work", ZoneId::work),

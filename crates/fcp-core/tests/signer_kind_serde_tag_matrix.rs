@@ -1,11 +1,11 @@
 //! Pin `<Foo>Kind` classifier serde tags as the closest analogues to
-//! "SignerKind serde tag" (flywheel_connectors-oglwe).
+//! "`SignerKind` serde tag" (flywheel_connectors-oglwe).
 //!
 //! Bead asks for `SignerKind serde tag JSON+CBOR roundtrip`. No type
 //! literally named `SignerKind` exists in fcp-core. The closest
 //! "signer kind" classifier is `ManifestSignature` (the
-//! signer-algorithm tag at connector_artifacts.rs:302, 3 variants
-//! Ed25519/RsaPss/EcdsaP256) — already pinned by 8tf1r in
+//! signer-algorithm tag at `connector_artifacts.rs:302`, 3 variants
+//! `Ed25519`/`RsaPss`/`EcdsaP256`) — already pinned by 8tf1r in
 //! `manifest_signature_serde_tags.rs`.
 //!
 //! The `<Foo>Kind` naming pattern in fcp-core covers four classifier
@@ -16,9 +16,9 @@
 //!    `#[serde(rename_all = "snake_case")]` and a hand-written
 //!    `as_str` returning the same tokens. Used in fixtures but
 //!    NOT yet pinned for serde tag matrix.
-//!  - `PrerequisiteKind` (connector_descriptors.rs:389) — 6
-//!    variants (UserInput/SecretInput/LaunchUrl/Oauth/Webhook/
-//!    CredentialPersistence) with `#[serde(rename_all =
+//!  - `PrerequisiteKind` (`connector_descriptors.rs:389`) — 6
+//!    variants (`UserInput`/`SecretInput`/`LaunchUrl`/`Oauth`/`Webhook`/
+//!    `CredentialPersistence`) with `#[serde(rename_all =
 //!    "snake_case")]`. NOT yet pinned for serde.
 //!  - `ThreadKind` and `AdjustmentKind` — exist but with similar
 //!    treatments.
@@ -30,21 +30,21 @@
 //! Targets:
 //!
 //!   1. **`UsageMetricKind` per-variant serde JSON tag** in
-//!      snake_case.
+//!      `snake_case`.
 //!   2. **`UsageMetricKind::as_str` agrees with serde tag** byte-
 //!      for-byte.
 //!   3. **JSON + CBOR round-trip** for every variant.
 //!   4. **CBOR encodes as Text** (cross-language consumers).
 //!   5. **Multi-word variants use underscore** not hyphen/
-//!      camelCase (`api_credits`, `duration_ms` for UsageMetricKind;
+//!      camelCase (`api_credits`, `duration_ms` for `UsageMetricKind`;
 //!      `user_input`, `secret_input`, `launch_url`,
-//!      `credential_persistence` for PrerequisiteKind).
-//!   6. **PascalCase + unknown + camelCase rejected** for both.
+//!      `credential_persistence` for `PrerequisiteKind`).
+//!   6. **`PascalCase` + unknown + `camelCase` rejected** for both.
 //!   7. **`PrerequisiteKind` per-variant serde JSON tag**.
 //!   8. **`PrerequisiteKind` JSON + CBOR round-trip**.
 //!   9. **Pairwise distinctness** within each enum.
 //!  10. **Cross-enum tokens don't collide accidentally** —
-//!      UsageMetricKind and PrerequisiteKind use disjoint label
+//!      `UsageMetricKind` and `PrerequisiteKind` use disjoint label
 //!      spaces.
 
 use ciborium::value::Value as CborValue;
@@ -275,9 +275,9 @@ fn usage_metric_kind_pairwise_distinct() {
     }
     assert_eq!(seen.len(), USAGE_METRIC_KIND_CASES.len());
 
-    for i in 0..USAGE_METRIC_KIND_CASES.len() {
-        for j in (i + 1)..USAGE_METRIC_KIND_CASES.len() {
-            assert_ne!(USAGE_METRIC_KIND_CASES[i].0, USAGE_METRIC_KIND_CASES[j].0);
+    for (idx, (left, _)) in USAGE_METRIC_KIND_CASES.iter().enumerate() {
+        for (right, _) in USAGE_METRIC_KIND_CASES.iter().skip(idx + 1) {
+            assert_ne!(*left, *right);
         }
     }
 }
@@ -290,9 +290,9 @@ fn prerequisite_kind_pairwise_distinct() {
     }
     assert_eq!(seen.len(), PREREQUISITE_KIND_CASES.len());
 
-    for i in 0..PREREQUISITE_KIND_CASES.len() {
-        for j in (i + 1)..PREREQUISITE_KIND_CASES.len() {
-            assert_ne!(PREREQUISITE_KIND_CASES[i].0, PREREQUISITE_KIND_CASES[j].0);
+    for (idx, (left, _)) in PREREQUISITE_KIND_CASES.iter().enumerate() {
+        for (right, _) in PREREQUISITE_KIND_CASES.iter().skip(idx + 1) {
+            assert_ne!(*left, *right);
         }
     }
 }

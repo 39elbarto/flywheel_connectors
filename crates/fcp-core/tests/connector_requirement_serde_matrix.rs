@@ -1,11 +1,11 @@
 //! Pin `PostureRequirement` serde tag matrix — the closest analogue
-//! to "ConnectorRequirement variant Display + serde tag"
+//! to "`ConnectorRequirement` variant Display + serde tag"
 //! (flywheel_connectors-jl6ne).
 //!
 //! Bead asks for `ConnectorRequirement variant Display + serde tag`.
 //! No type literally named `ConnectorRequirement` exists in fcp-core.
 //! The closest "requirement" classifier is `PostureRequirement`
-//! (posture.rs:244) — a 7-variant internally-tagged enum with
+//! (`posture.rs:244`) — a 7-variant internally-tagged enum with
 //! `#[serde(tag = "type", rename_all = "snake_case")]`:
 //!
 //!  - `RequireTrue { attribute }`            → `require_true`
@@ -16,13 +16,13 @@
 //!  - `RequireMinValue { attribute, min_value }`     → `require_min_value`
 //!  - `RequireMaxValue { attribute, max_value }`     → `require_max_value`
 //!
-//! Used in posture_tests.rs fixtures via the builder but NOT yet
+//! Used in `posture_tests.rs` fixtures via the builder but NOT yet
 //! pinned for Display plus serde tag matrix. Display intentionally
 //! returns the same canonical token as the serde `type` discriminator.
 //!
 //! Targets:
 //!
-//!   1. **Per-variant `type` tag** in JSON (snake_case for all 7).
+//!   1. **Per-variant `type` tag** in JSON (`snake_case` for all 7).
 //!   2. **JSON shape** per variant — internally-tagged with
 //!      flattened struct payload.
 //!   3. **JSON round-trip** preserves variant + nested fields.
@@ -32,7 +32,7 @@
 //!      Value-inspection workaround).
 //!   5. **Display** returns the same token as the serde tag.
 //!   6. **`attribute()` accessor** returns the right key per variant.
-//!   7. **PascalCase + unknown rejected**.
+//!   7. **`PascalCase` + unknown rejected**.
 //!   8. **7-variant count + pairwise distinct serializations**.
 
 use ciborium::value::Value as CborValue;
@@ -51,11 +51,11 @@ fn require_true_type_tag_pinned() {
     };
     let value = serde_json::to_value(&req).expect("serialize");
     assert_eq!(
-        value.get("type").and_then(|v| v.as_str()),
+        value.get("type").and_then(serde_json::Value::as_str),
         Some("require_true")
     );
     assert_eq!(
-        value.get("attribute").and_then(|v| v.as_str()),
+        value.get("attribute").and_then(serde_json::Value::as_str),
         Some("disk_encryption")
     );
 }
@@ -67,7 +67,7 @@ fn require_false_type_tag_pinned() {
     };
     let value = serde_json::to_value(&req).expect("serialize");
     assert_eq!(
-        value.get("type").and_then(|v| v.as_str()),
+        value.get("type").and_then(serde_json::Value::as_str),
         Some("require_false")
     );
 }
@@ -80,14 +80,17 @@ fn require_equal_type_tag_with_value_pinned() {
     };
     let value = serde_json::to_value(&req).expect("serialize");
     assert_eq!(
-        value.get("type").and_then(|v| v.as_str()),
+        value.get("type").and_then(serde_json::Value::as_str),
         Some("require_equal")
     );
     assert_eq!(
-        value.get("attribute").and_then(|v| v.as_str()),
+        value.get("attribute").and_then(serde_json::Value::as_str),
         Some("os_type")
     );
-    assert_eq!(value.get("value").and_then(|v| v.as_str()), Some("macos"));
+    assert_eq!(
+        value.get("value").and_then(serde_json::Value::as_str),
+        Some("macos")
+    );
 }
 
 #[test]
@@ -98,12 +101,12 @@ fn require_one_of_type_tag_with_values_array_pinned() {
     };
     let value = serde_json::to_value(&req).expect("serialize");
     assert_eq!(
-        value.get("type").and_then(|v| v.as_str()),
+        value.get("type").and_then(serde_json::Value::as_str),
         Some("require_one_of")
     );
     let values = value
         .get("values")
-        .and_then(|v| v.as_array())
+        .and_then(serde_json::Value::as_array)
         .expect("values array");
     assert_eq!(values.len(), 2);
     assert_eq!(values[0].as_str(), Some("macos"));
@@ -118,11 +121,11 @@ fn require_min_version_type_tag_pinned() {
     };
     let value = serde_json::to_value(&req).expect("serialize");
     assert_eq!(
-        value.get("type").and_then(|v| v.as_str()),
+        value.get("type").and_then(serde_json::Value::as_str),
         Some("require_min_version")
     );
     assert_eq!(
-        value.get("min_version").and_then(|v| v.as_str()),
+        value.get("min_version").and_then(serde_json::Value::as_str),
         Some("14.0.0")
     );
 }
@@ -135,10 +138,13 @@ fn require_min_value_type_tag_pinned() {
     };
     let value = serde_json::to_value(&req).expect("serialize");
     assert_eq!(
-        value.get("type").and_then(|v| v.as_str()),
+        value.get("type").and_then(serde_json::Value::as_str),
         Some("require_min_value")
     );
-    assert_eq!(value.get("min_value").and_then(|v| v.as_i64()), Some(300));
+    assert_eq!(
+        value.get("min_value").and_then(serde_json::Value::as_i64),
+        Some(300)
+    );
 }
 
 #[test]
@@ -149,10 +155,13 @@ fn require_max_value_type_tag_pinned() {
     };
     let value = serde_json::to_value(&req).expect("serialize");
     assert_eq!(
-        value.get("type").and_then(|v| v.as_str()),
+        value.get("type").and_then(serde_json::Value::as_str),
         Some("require_max_value")
     );
-    assert_eq!(value.get("max_value").and_then(|v| v.as_i64()), Some(600));
+    assert_eq!(
+        value.get("max_value").and_then(serde_json::Value::as_i64),
+        Some(600)
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -490,7 +499,7 @@ fn multi_word_type_tags_use_underscore_not_camel_case() {
     let value = serde_json::to_value(&req).expect("serialize");
     let tag = value
         .get("type")
-        .and_then(|v| v.as_str())
+        .and_then(serde_json::Value::as_str)
         .expect("type field");
     assert_eq!(tag, "require_min_version");
     assert!(!tag.contains('-'));

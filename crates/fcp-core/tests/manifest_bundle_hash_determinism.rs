@@ -1,4 +1,4 @@
-//! Pin hash determinism on the closest analogue to a "ManifestBundle"
+//! Pin hash determinism on the closest analogue to a "`ManifestBundle`"
 //! (flywheel_connectors-j42c7).
 //!
 //! Bead asks for `ManifestBundle hash determinism`. No type literally
@@ -8,7 +8,7 @@
 //!  - `compute_policy_bundle_hash` (policy.rs:280) — the canonical
 //!    function that computes a deterministic `blake3-256:<hex>`
 //!    digest over a `PolicyBundle`'s canonicalized payload (excluding
-//!    signature + bundle_hash itself).
+//!    signature + `bundle_hash` itself).
 //!  - `PolicyBundle::signing_bytes` (policy.rs:381) — the canonical
 //!    signing-bytes derivation that downstream signers feed Ed25519.
 //!  - `to_deterministic_cbor` (used internally) — the deterministic
@@ -19,7 +19,7 @@
 //!   1. **Same inputs → same hash** (call-determinism within a process).
 //!   2. **Field permutations within `policies` produce the same hash**
 //!      — `compute_policy_bundle_hash` sorts its policies internally
-//!      (object_id, schema_id, object_hash) before hashing, so input
+//!      (`object_id`, `schema_id`, `object_hash`) before hashing, so input
 //!      order MUST NOT affect the output.
 //!   3. **Different `bundle_id` produces different hash**.
 //!   4. **Different `policy_seq` produces different hash**.
@@ -43,13 +43,13 @@ use fcp_core::{
 const POLICY_BUNDLE_HASH_ALGO: &str = "blake3-256";
 const POLICY_BUNDLE_HASH_PREFIX: &str = "blake3-256:";
 
-fn fixed_dt(secs: i64) -> DateTime<Utc> {
+const fn fixed_dt(secs: i64) -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(secs, 0).expect("valid timestamp")
 }
 
 fn policy_ref(seed: u8) -> PolicyBundlePolicyRef {
     PolicyBundlePolicyRef {
-        object_id: format!("0x{:064x}", seed),
+        object_id: format!("0x{seed:064x}"),
         schema_id: format!("fcp.policy:zone-policy@1.0.{seed}"),
         object_hash: format!("blake3-256:{:0>64}", format!("{seed:02x}").repeat(32)),
     }
@@ -121,7 +121,7 @@ fn policy_input_order_does_not_affect_hash() {
 
     let perm_1 = vec![p_a.clone(), p_b.clone(), p_c.clone()];
     let perm_2 = vec![p_c.clone(), p_a.clone(), p_b.clone()];
-    let perm_3 = vec![p_b.clone(), p_c.clone(), p_a.clone()];
+    let perm_3 = vec![p_b, p_c, p_a];
 
     let h1 = invoke_hash("b", &zone, 1, None, None, &perm_1);
     let h2 = invoke_hash("b", &zone, 1, None, None, &perm_2);
@@ -224,7 +224,9 @@ fn empty_policies_rejected_with_invalid_bundle_error() {
                 "InvalidBundle reason MUST mention `policies`: {reason}"
             );
         }
-        other => panic!("expected InvalidBundle, got {other:?}"),
+        PolicyBundleError::CanonicalizationFailed { .. } => {
+            panic!("expected InvalidBundle, got {err:?}")
+        }
     }
 }
 

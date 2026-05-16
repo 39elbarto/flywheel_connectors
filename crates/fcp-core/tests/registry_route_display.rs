@@ -1,5 +1,5 @@
 //! Pin `SbomFormat` 2-variant lowercase serde + SBOM struct round-trip
-//! — the closest analogue to "RegistryRoute Display"
+//! — the closest analogue to "`RegistryRoute` Display"
 //! (flywheel_connectors-6wfjx).
 //!
 //! Bead asks for `RegistryRoute` Display + serde tag pinning. No type
@@ -8,7 +8,7 @@
 //!   * `ConnectorRoute` → `connector_route_serde_tags.rs`,
 //!   * `RegistryEntry` → `registry_snapshot_display_serde.rs` +
 //!     `connector_bundle_serde_extended.rs`,
-//!   * `RegistryQuery`-analogue (RevocationCheckResult) →
+//!   * `RegistryQuery`-analogue (`RevocationCheckResult`) →
 //!     `registry_query_serde_roundtrip.rs`,
 //!   * `LoggingTarget` → `logging_target_display_serde.rs`,
 //!   * `ManifestSignature` → `manifest_signature_serde_tags.rs`.
@@ -18,20 +18,20 @@
 //! supply-chain SBOM family discriminator (Cyclonedx / Spdx) used to
 //! route SBOM documents through the registry's verification pipeline.
 //! `#[serde(rename_all = "lowercase")]` produces the wire forms
-//! `cyclonedx` / `spdx`. No prior test pins SbomFormat or its embedding
+//! `cyclonedx` / `spdx`. No prior test pins `SbomFormat` or its embedding
 //! struct `SoftwareBillOfMaterials`.
 //!
 //! Coverage:
-//!   * 2-variant SbomFormat lowercase serde wire form,
+//!   * 2-variant `SbomFormat` lowercase serde wire form,
 //!   * CBOR Text scalar shape,
-//!   * PascalCase + SCREAMING / kebab-case / hyphenated rejection
+//!   * `PascalCase` + `SCREAMING` / `kebab-case` / hyphenated rejection
 //!     sentinels,
 //!   * Distinct-variant + 2-count documented sentinels,
-//!   * SbomComponent 5-field JSON shape + JSON/CBOR round-trip,
-//!   * SbomDependency skip-when-empty depends_on (Vec::is_empty
+//!   * `SbomComponent` 5-field JSON shape + JSON/CBOR round-trip,
+//!   * `SbomDependency` skip-when-empty `depends_on` (`Vec::is_empty`
 //!     skip serialize),
-//!   * SoftwareBillOfMaterials with embedded SbomFormat — the
-//!     bom_format field drives canonical wire form per variant.
+//!   * `SoftwareBillOfMaterials` with embedded `SbomFormat` — the
+//!     `bom_format` field drives canonical wire form per variant.
 
 use ciborium::Value as CborValue;
 use fcp_core::{SbomComponent, SbomDependency, SbomFormat};
@@ -127,7 +127,7 @@ fn sbom_format_count_is_documented_two() {
 fn sbom_format_copy_clone_eq_derive_intact() {
     let a = SbomFormat::Cyclonedx;
     let b = a; // Copy
-    let c = a.clone();
+    let c = a;
     assert_eq!(a, b);
     assert_eq!(a, c);
     assert_ne!(a, SbomFormat::Spdx);

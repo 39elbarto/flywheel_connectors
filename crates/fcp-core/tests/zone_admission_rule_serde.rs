@@ -1,18 +1,18 @@
 //! Pin `PolicyPattern` matcher truth table + serde shape — the closest
-//! analogue to "ZoneAdmissionRule serde" (flywheel_connectors-bdxjo).
+//! analogue to "`ZoneAdmissionRule` serde" (flywheel_connectors-bdxjo).
 //!
 //! Bead asks for `ZoneAdmissionRule` JSON+CBOR roundtrip pinning. No type
 //! literally named `ZoneAdmissionRule` exists in fcp-core. The closest
 //! singular-rule analogue is [`PolicyPattern`] at
 //! `crates/fcp-core/src/policy.rs:216` — a single-field bounded glob rule
-//! used in `ZonePolicyObject`'s admission lists (principal_allow,
-//! principal_deny, connector_allow, connector_deny, capability_allow,
-//! capability_deny). The collective admission-policy struct is already
+//! used in `ZonePolicyObject`'s admission lists (`principal_allow`,
+//! `principal_deny`, `connector_allow`, `connector_deny`, `capability_allow`,
+//! `capability_deny`). The collective admission-policy struct is already
 //! pinned by `zone_admission_policy_serde.rs`; the *singular rule* and
 //! its match-truth-table are not yet pinned.
 //!
 //! Existing `policy_router_route_key_dispatch.rs` covers the basic
-//! PolicyPattern JSON shape + CBOR round-trip. This pin adds:
+//! `PolicyPattern` JSON shape + CBOR round-trip. This pin adds:
 //!   * `.matches()` truth table covering literal, `*`, `?`, prefix,
 //!     suffix, middle, double-star, single-char-glob, empty-pattern,
 //!     and mismatch cases,
@@ -22,7 +22,7 @@
 //!   * Round-trip determinism (same struct → byte-for-byte same JSON),
 //!   * Vec<PolicyPattern> serialization (the on-wire shape used in
 //!     admission lists) preserves order through round-trip,
-//!   * Vec admission-list .matches() OR-semantics via pure pattern
+//!   * `Vec` admission-list `matches()` OR-semantics via pure pattern
 //!     match (no engine) — pinning that admission rules form an
 //!     OR-disjunction.
 
@@ -253,7 +253,7 @@ fn admission_list_or_semantics_via_pattern_matches() {
     // in the list matches (OR). This matches the `matches_any` helper at
     // policy.rs:2757 used by check_pattern_lists. Re-derive the OR via
     // direct .matches() to avoid coupling to the engine internal API.
-    let allow_list = vec![pat("user:alice"), pat("service:*")];
+    let allow_list = [pat("user:alice"), pat("service:*")];
 
     // Single-rule match.
     assert!(allow_list.iter().any(|p| p.matches("user:alice")));

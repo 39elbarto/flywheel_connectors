@@ -1,39 +1,39 @@
 //! Pin `PolicyRiskCode` + `PolicyRiskSeverity` serde matrix — the
-//! closest analogues to "ManifestPolicy variants Display + serde"
+//! closest analogues to "`ManifestPolicy` variants Display + serde"
 //! (flywheel_connectors-9xvmc).
 //!
 //! Bead asks for `ManifestPolicy variants Display + serde`. No type
 //! literally named `ManifestPolicy` exists in fcp-core. The
 //! manifest/policy classifier surface covers many already-pinned
-//! enums (PolicyPattern + PolicyEngine routing by kjs08, PolicyBundle
-//! hash by j42c7, PolicyPreviewDecision by zncpi, BudgetEnforcement
+//! enums (`PolicyPattern` + `PolicyEngine` routing by kjs08, `PolicyBundle`
+//! hash by j42c7, `PolicyPreviewDecision` by zncpi, `BudgetEnforcement`
 //! by b6x37). Two unpinned policy classifiers in the policy.rs
 //! "risk" surface:
 //!
 //!  - `PolicyRiskCode` (policy.rs:857) — 12-variant risk-flag
 //!    classifier emitted by policy diffs:
-//!    PrincipalAllowExpanded / ConnectorAllowExpanded /
-//!    CapabilityAllowExpanded / CapabilityCeilingExpanded /
-//!    CapabilityDenyReduced / RoleExpanded / EgressExpanded /
-//!    TransportDerpEnabled / TransportFunnelEnabled /
-//!    TransportLanEnabled / IntegrityLowered /
-//!    ConfidentialityLowered.
+//!    `PrincipalAllowExpanded` / `ConnectorAllowExpanded` /
+//!    `CapabilityAllowExpanded` / `CapabilityCeilingExpanded` /
+//!    `CapabilityDenyReduced` / `RoleExpanded` / `EgressExpanded` /
+//!    `TransportDerpEnabled` / `TransportFunnelEnabled` /
+//!    `TransportLanEnabled` / `IntegrityLowered` /
+//!    `ConfidentialityLowered`.
 //!    Carries `#[serde(rename_all = "snake_case")]` plus
 //!    `Ord`+`PartialOrd`+`Hash`.
 //!  - `PolicyRiskSeverity` (policy.rs:874) — 4-variant severity
 //!    classifier (Low/Medium/High/Critical) with `rename_all
 //!    snake_case` plus `Ord`+`PartialOrd`. Same variant names as
-//!    RiskLevel (capability.rs) but separate type.
+//!    `RiskLevel` (capability.rs) but separate type.
 //!
 //! Targets:
 //!
-//!   1. **`PolicyRiskCode` per-variant JSON tag** (snake_case for
+//!   1. **`PolicyRiskCode` per-variant JSON tag** (`snake_case` for
 //!      all 12).
 //!   2. **JSON + CBOR round-trip** per variant.
 //!   3. **CBOR encodes as Text** (cross-language consumers).
 //!   4. **Multi-word variants use underscore** (every variant is
 //!      multi-word).
-//!   5. **PascalCase + unknown rejected**.
+//!   5. **`PascalCase` + unknown rejected**.
 //!   6. **12-variant count + pairwise distinct**.
 //!   7. **`PolicyRiskCode` Ord matches declaration order**.
 //!   8. **`PolicyRiskSeverity` per-variant JSON tag** (low/medium/
@@ -41,8 +41,8 @@
 //!   9. **JSON + CBOR round-trip** per severity variant.
 //!  10. **`PolicyRiskSeverity` Ord matches declaration order**
 //!      (`Low < Medium < High < Critical`).
-//!  11. **Cross-enum: PolicyRiskSeverity::Critical vs
-//!      RiskLevel::Critical** — both serialize to `"critical"`
+//!  11. **Cross-enum: `PolicyRiskSeverity::Critical` vs
+//!      `RiskLevel::Critical`** — both serialize to `"critical"`
 //!      (intentional collision, each in its own field).
 
 use ciborium::value::Value as CborValue;
@@ -217,9 +217,9 @@ fn policy_risk_code_variants_pairwise_distinct() {
     }
     assert_eq!(seen.len(), POLICY_RISK_CODE_CASES.len());
 
-    for i in 0..POLICY_RISK_CODE_CASES.len() {
-        for j in (i + 1)..POLICY_RISK_CODE_CASES.len() {
-            assert_ne!(POLICY_RISK_CODE_CASES[i].0, POLICY_RISK_CODE_CASES[j].0);
+    for (i, (left, _)) in POLICY_RISK_CODE_CASES.iter().enumerate() {
+        for (right, _) in POLICY_RISK_CODE_CASES.iter().skip(i + 1) {
+            assert_ne!(left, right);
         }
     }
 }

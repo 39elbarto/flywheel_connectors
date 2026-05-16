@@ -1,9 +1,9 @@
 //! Pin a 3-variant escalating ordering invariant on the closest
-//! analogue to "CompactionLevel" (flywheel_connectors-8lxv3).
+//! analogue to "`CompactionLevel`" (flywheel_connectors-8lxv3).
 //!
-//! Bead asks for "CompactionLevel ordering: None < Compact <
-//! Aggressive". No type literally named `CompactionLevel` exists in
-//! fcp-core. The compaction docstring at connector_state.rs:471
+//! Bead asks for "`CompactionLevel` ordering: `None` < `Compact` <
+//! `Aggressive`". No type literally named `CompactionLevel` exists in
+//! fcp-core. The compaction docstring at `connector_state.rs:471`
 //! describes compaction RULES but has no enum. The closest existing
 //! 3-variant ordered enum in fcp-core is `TaintLevel`
 //! (capability.rs:2766) with variants
@@ -27,7 +27,7 @@
 //!   4. **`max` / `min` / sort behave as expected**.
 //!   5. **Order properties** — reflexivity, antisymmetry, transitivity.
 //!   6. **`is_tainted` predicate truth table** ↔ `!= Untainted`.
-//!   7. **Per-variant JSON serde tag form pinned** (PascalCase since
+//!   7. **Per-variant JSON serde tag form pinned** (`PascalCase` since
 //!      no `#[serde(rename_all = ...)]` on the enum).
 //!   8. **CBOR round-trip preserves variant** for every value.
 //!   9. **Copy + Eq derive correctness** — `TaintLevel` is `Copy +
@@ -57,9 +57,9 @@ fn ordering_is_strict_and_total_across_three_variants() {
     assert!(TaintLevel::Untainted < TaintLevel::HighlyTainted);
 
     // And the reverse is never true.
-    assert!(!(TaintLevel::Tainted < TaintLevel::Untainted));
-    assert!(!(TaintLevel::HighlyTainted < TaintLevel::Tainted));
-    assert!(!(TaintLevel::HighlyTainted < TaintLevel::Untainted));
+    assert!(TaintLevel::Tainted >= TaintLevel::Untainted);
+    assert!(TaintLevel::HighlyTainted >= TaintLevel::Tainted);
+    assert!(TaintLevel::HighlyTainted >= TaintLevel::Untainted);
 }
 
 #[test]
@@ -220,15 +220,15 @@ fn ordering_is_reflexive() {
         assert_eq!(v.cmp(&v), Ordering::Equal);
         assert!(v <= v);
         assert!(v >= v);
-        assert!(!(v < v));
-        assert!(!(v > v));
+        assert_ne!(v.cmp(&v), Ordering::Less);
+        assert_ne!(v.cmp(&v), Ordering::Greater);
     }
 }
 
 #[test]
 fn ordering_is_antisymmetric() {
-    for &a in ASCENDING.iter() {
-        for &b in ASCENDING.iter() {
+    for &a in &ASCENDING {
+        for &b in &ASCENDING {
             // a <= b && b <= a  ⇒  a == b
             if a <= b && b <= a {
                 assert_eq!(a, b, "antisymmetry violated for {a:?} and {b:?}");

@@ -9,14 +9,14 @@
 //!
 //!  - `OperationIntent::signable_bytes` (line 177) — domain
 //!    separator `b"FCP2-INTENT-V1"`, then canonical header,
-//!    request_object_id, capability_token_jti, idempotency_key,
-//!    planned_at (LE u64), planned_by (length-prefixed),
-//!    lease_seq (Option-tagged), upstream_idempotency.
+//!    `request_object_id`, `capability_token_jti`, `idempotency_key`,
+//!    `planned_at` (LE u64), `planned_by` (length-prefixed),
+//!    `lease_seq` (Option-tagged), `upstream_idempotency`.
 //!  - `OperationReceipt::signable_bytes` (line 276) — domain
 //!    separator `b"FCP2-RECEIPT-V1"`, then canonical header,
-//!    request_object_id, idempotency_key, outcome_object_ids
-//!    (count-prefixed), resource_object_ids (count-prefixed),
-//!    usage_metrics (Option-tagged + count-prefixed).
+//!    `request_object_id`, `idempotency_key`, `outcome_object_ids`
+//!    (count-prefixed), `resource_object_ids` (count-prefixed),
+//!    `usage_metrics` (Option-tagged + count-prefixed).
 //!
 //! Inline tests pin determinism + a couple of distinguishing-input
 //! cases. This integration test pins the gaps:
@@ -26,17 +26,17 @@
 //!      signatures and from any other signed envelope.
 //!   2. **Determinism across calls** for both types.
 //!   3. **Field-distinguishing cross-input injectivity** — every
-//!      input axis (request_id, jti, idempotency_key, planned_at,
-//!      planned_by, lease_seq, outcome_object_ids, resource_object_ids,
+//!      input axis (`request_id`, `jti`, `idempotency_key`, `planned_at`,
+//!      `planned_by`, `lease_seq`, `outcome_object_ids`, `resource_object_ids`,
 //!      etc.) produces different bytes when changed.
 //!   4. **Option-tagging encoding** — `[1]` prefix for Some,
 //!      `[0]` for None, on both Optional fields.
 //!   5. **Length-prefix injectivity** on `planned_by` (cross-field
 //!      byte shifts produce different bytes).
 //!   6. **Empty Vec encodes as zero count** (`[0; 4]` LE u32) for
-//!      both outcome_object_ids and resource_object_ids on Receipt.
-//!   7. **Order matters** for outcome_object_ids and
-//!      resource_object_ids on Receipt — swapping changes bytes.
+//!      both `outcome_object_ids` and `resource_object_ids` on Receipt.
+//!   7. **Order matters** for `outcome_object_ids` and
+//!      `resource_object_ids` on Receipt — swapping changes bytes.
 
 use chrono::DateTime;
 use fcp_cbor::SchemaId;
@@ -93,7 +93,7 @@ fn fixture_receipt() -> OperationReceipt {
     }
 }
 
-fn _suppress_unused_chrono() {
+const fn _suppress_unused_chrono() {
     let _ = DateTime::UNIX_EPOCH; // keep import path; chrono is a transitive dep we may need
 }
 

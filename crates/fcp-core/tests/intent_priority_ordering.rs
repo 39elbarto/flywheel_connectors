@@ -1,5 +1,5 @@
 //! Pin `TrustLevel` ordering — the closest analogue to
-//! "IntentPriority Low < Medium < High < Critical"
+//! "`IntentPriority` Low < Medium < High < Critical"
 //! (flywheel_connectors-ljnej).
 //!
 //! Bead asks for `IntentPriority ordering: Low < Medium < High <
@@ -14,7 +14,7 @@
 //! (`Blocked < Anonymous < Untrusted < Paired < Admin < Owner`)
 //! that DO derive `PartialOrd + Ord`, with a documented "from
 //! lowest to highest trust" ordering. Pin that as the closest
-//! analogue and document the RiskLevel mismatch alongside.
+//! analogue and document the `RiskLevel` mismatch alongside.
 //!
 //! Targets:
 //!
@@ -30,7 +30,7 @@
 //!   6. **Per-variant JSON tag** in lowercase (`rename_all =
 //!      "lowercase"`).
 //!   7. **JSON + CBOR round-trip** per variant.
-//!   8. **`RiskLevel` documents the mismatch** — RiskLevel has
+//!   8. **`RiskLevel` documents the mismatch** — `RiskLevel` has
 //!      Low/Medium/High/Critical variant names matching the bead's
 //!      pattern but no Ord; the discriminant order via `as u8` is
 //!      the only ordering surface available, and it follows
@@ -67,8 +67,8 @@ fn trust_level_strict_ordering_chain() {
     assert!(TrustLevel::Anonymous < TrustLevel::Admin);
 
     // Reverse direction never holds.
-    assert!(!(TrustLevel::Owner < TrustLevel::Admin));
-    assert!(!(TrustLevel::Anonymous < TrustLevel::Blocked));
+    assert!(TrustLevel::Owner >= TrustLevel::Admin);
+    assert!(TrustLevel::Anonymous >= TrustLevel::Blocked);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -79,11 +79,7 @@ fn trust_level_strict_ordering_chain() {
 fn cmp_returns_documented_ordering_per_pair() {
     for (i, a) in ASCENDING.iter().enumerate() {
         for (j, b) in ASCENDING.iter().enumerate() {
-            let expected = match i.cmp(&j) {
-                Ordering::Less => Ordering::Less,
-                Ordering::Equal => Ordering::Equal,
-                Ordering::Greater => Ordering::Greater,
-            };
+            let expected = i.cmp(&j);
             assert_eq!(
                 a.cmp(b),
                 expected,
@@ -180,15 +176,15 @@ fn ordering_is_reflexive() {
         assert_eq!(v.cmp(&v), Ordering::Equal);
         assert!(v <= v);
         assert!(v >= v);
-        assert!(!(v < v));
-        assert!(!(v > v));
+        assert_ne!(v.cmp(&v), Ordering::Less);
+        assert_ne!(v.cmp(&v), Ordering::Greater);
     }
 }
 
 #[test]
 fn ordering_is_antisymmetric() {
-    for &a in ASCENDING.iter() {
-        for &b in ASCENDING.iter() {
+    for &a in &ASCENDING {
+        for &b in &ASCENDING {
             if a <= b && b <= a {
                 assert_eq!(a, b, "antisymmetry violated for {a:?} and {b:?}");
             }

@@ -7,17 +7,17 @@
 //! `DecisionReasonCode` (policy.rs:2060) — the 35-variant NORMATIVE
 //! reason-code enum produced by `PolicyEngine::evaluate_invoke`
 //! and surfaced in audit logs. Many decision-shaped types are
-//! already pinned (Decision by qyq9l, CheckOutcome by qyq9l,
-//! PolicyPreviewDecision by zncpi, VerificationDecision by zncpi,
+//! already pinned (Decision by qyq9l, `CheckOutcome` by qyq9l,
+//! `PolicyPreviewDecision` by zncpi, `VerificationDecision` by zncpi,
 //! ResumeDecision-shaped by zncpi); a 7-variant subset of
-//! DecisionReasonCode is pinned by `policy_match_result_variants.rs`.
+//! `DecisionReasonCode` is pinned by `policy_match_result_variants.rs`.
 //! This test pins the FULL 35-variant matrix and the critical
 //! dual-encoding contract:
 //!
 //! **DISPLAY vs SERDE diverge**: `DecisionReasonCode::as_str` /
 //! `Display` returns dotted tokens (`"capability.insufficient"`,
 //! `"zone_policy.principal_denied"`) but the serde wire form uses
-//! `#[serde(rename_all = "snake_case")]` which produces snake_case
+//! `#[serde(rename_all = "snake_case")]` which produces `snake_case`
 //! WITHOUT dots (`"capability_insufficient"`,
 //! `"zone_policy_principal_denied"`). Operator dashboards reading
 //! audit logs MUST know which channel uses which form.
@@ -25,20 +25,20 @@
 //! Targets:
 //!
 //!   1. **Per-variant Display token** (dotted) for all 35 variants.
-//!   2. **Per-variant serde JSON tag** (snake_case, no dots).
+//!   2. **Per-variant serde JSON tag** (`snake_case`, no dots).
 //!   3. **Display ≠ serde tag for every variant with a `.` in
 //!      Display** — pin the divergence loud.
 //!   4. **JSON + CBOR round-trip** per variant.
 //!   5. **CBOR encodes as Text** (cross-language).
 //!   6. **35-variant count + pairwise distinct**.
-//!   7. **PascalCase + dotted-form rejected on the wire** — drift
+//!   7. **`PascalCase` + dotted-form rejected on the wire** — drift
 //!      sentinel.
 //!   8. **Hash + Eq + Copy correctness** for HashMap-key usage.
 
 use ciborium::value::Value as CborValue;
 use fcp_core::DecisionReasonCode;
 
-/// (variant, Display token from as_str, serde JSON tag).
+/// (variant, Display token from `as_str`, serde JSON tag).
 /// For variants where Display contains `.`, the serde form replaces
 /// it with `_`. For dot-free variants the two forms agree.
 const ALL_REASON_CODES: &[(DecisionReasonCode, &str, &str)] = &[
@@ -350,12 +350,12 @@ fn variants_pairwise_distinct_in_both_encodings() {
 
 #[test]
 fn variants_pairwise_unequal() {
-    for i in 0..ALL_REASON_CODES.len() {
-        for j in (i + 1)..ALL_REASON_CODES.len() {
+    for (i, left) in ALL_REASON_CODES.iter().enumerate() {
+        for right in ALL_REASON_CODES.iter().skip(i + 1) {
             assert_ne!(
-                ALL_REASON_CODES[i].0, ALL_REASON_CODES[j].0,
+                left.0, right.0,
                 "{:?} and {:?} MUST be distinct",
-                ALL_REASON_CODES[i].0, ALL_REASON_CODES[j].0
+                left.0, right.0
             );
         }
     }

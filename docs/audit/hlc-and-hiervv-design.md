@@ -92,8 +92,13 @@ at least:
 - `incoming_seq`
 - `local_seq`
 
-This is the current observability hook. Structured OTLP promotion and doctor
-plumbing remain follow-up work.
+The same path records a histogram named
+`fcp.mesh.revocation.hiervv_size_bytes` with labels `zone`,
+`hier_vv_status`, and `decision` after accepted updates and dominated
+rejections. This gives operators per-zone visibility into frontier growth
+without relying on wall-clock freshness decisions.
+
+Structured runtime OTLP promotion for these mesh metrics remains follow-up work.
 
 ## Invariants
 
@@ -121,10 +126,7 @@ rch exec -- cargo fmt -p fcp-audit -p fcp-mesh -p fcp-host -p fcp-conformance --
 
 ## Remaining Work
 
-- Add `fwc doctor --probe hlc` output with `hlc_l_max`, `hlc_c_max`,
-  `skew_observed_ms`, and `hiervv_size_bytes`.
 - Add clock-step-back failure injection and a `clock_anomaly` audit/telemetry
   path.
-- Add numeric perf assertions for HLC tick/merge and HierVV merge/encoding.
 - Persist or reconcile the mesh revocation frontier beyond the current
   in-memory `MeshNode` priority-push path where the registry owner needs it.

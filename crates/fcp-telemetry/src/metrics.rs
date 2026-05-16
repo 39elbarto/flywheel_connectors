@@ -41,6 +41,8 @@ pub const LEASE_FLUSHED_ON_YIELD_METRIC: &str = "fcp.lease.flushed_on_yield";
 pub const LEASE_HANDOFFS_TOTAL_METRIC: &str = "fcp_lease_handoffs_total";
 /// Histogram of lease handoff duration in seconds.
 pub const LEASE_HANDOFF_DURATION_SECONDS_METRIC: &str = "fcp_lease_handoff_duration_seconds";
+/// Histogram of serialized `HierVV` revocation-frontier size by zone.
+pub const REVOCATION_HIERVV_SIZE_BYTES_METRIC: &str = "fcp.mesh.revocation.hiervv_size_bytes";
 
 /// Stable public lease event metric names surfaced by operator status commands.
 pub const LEASE_EVENT_NAMES: [&str; 6] = [
@@ -105,6 +107,10 @@ pub fn init_metrics() {
     describe_counter!("fcp_events_dropped_total", "Total events dropped");
 
     describe_lease_metrics();
+    describe_histogram!(
+        REVOCATION_HIERVV_SIZE_BYTES_METRIC,
+        "Serialized Hierarchical Version Vector revocation frontier size in bytes"
+    );
 
     // Symbol coverage and diversity metrics
     describe_gauge!(

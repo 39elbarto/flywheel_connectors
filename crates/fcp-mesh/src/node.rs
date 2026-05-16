@@ -28,11 +28,11 @@ use fcp_store::{
     QuarantineStore, StoredSymbol, SymbolStore,
 };
 use fcp_tailscale::NodeId;
-use fcp_telemetry::TraceContext;
 use fcp_telemetry::trace_capture::{
     AdmissionOutcome, CapturedTrace, GossipEvent, LeaseEvent, RoutingDecision, SessionEvent,
     TraceCapture, TraceCaptureConfig, TraceEvent, TraceExportFormat,
 };
+use fcp_telemetry::{TraceContext, metrics};
 use hex::encode;
 use thiserror::Error;
 use tracing::debug;
@@ -374,6 +374,10 @@ pub struct MeshNodeMetrics {
     pub gossip_updates: u64,
     /// Peer updates applied.
     pub peer_updates: u64,
+    /// HierVV revocation-frontier size observations recorded.
+    pub revocation_hiervv_size_samples: u64,
+    /// Last serialized HierVV revocation-frontier size in bytes.
+    pub revocation_hiervv_size_last_bytes: u64,
 }
 
 /// Verified revocation push ready to apply to a revocation registry fetch path.
@@ -1171,6 +1175,15 @@ impl MeshNode {
     #[must_use]
     pub fn revocation_frontier_counter(&self, zone_id: &ZoneId) -> u64 {
         self.revocation_frontier.counter_for(zone_id.as_str())
+    }
+
+    /// Serialized size of the current local revocation freshness frontier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if canonical serialization of the HierVV frontier fails.
+    pub fn revocation_frontier_size_bytes(&self) -> Result<usize, String> {
+        self.revocation_frontier.canonical_len()
     }
 
     /// Current peer count (excluding local).
@@ -2428,6 +2441,7 @@ impl MeshNode {
             "evaluated revocation push freshness"
         );
         if !freshness.is_accepted() {
+            self.record_revocation_hiervv_size(&push.zone_id, &freshness);
             return Err(MeshNodeError::StaleRevocationFrontier {
                 peer: push.from.as_str().to_string(),
                 zone_id: push.zone_id.to_string(),
@@ -2450,6 +2464,7 @@ impl MeshNode {
         let freshness = self
             .revocation_frontier
             .observe(push.zone_id.as_str(), push.new_rev_seq);
+        self.record_revocation_hiervv_size(&push.zone_id, &freshness);
         self.metrics.gossip_updates = self.metrics.gossip_updates.saturating_add(1);
         Ok(VerifiedRevocationPush {
             from: NodeId::new(push.from.as_str()),
@@ -2459,6 +2474,51 @@ impl MeshNode {
             timestamp: push.timestamp,
             freshness,
         })
+    }
+
+    fn record_revocation_hiervv_size(
+        &mut self,
+        zone_id: &ZoneId,
+        freshness: &RevocationFreshnessDecision,
+    ) {
+        match self.revocation_frontier.canonical_len() {
+            Ok(size_bytes) => {
+                let size_bytes_u64 = u64::try_from(size_bytes).unwrap_or(u64::MAX);
+                let histogram_value = f64::from(u32::try_from(size_bytes).unwrap_or(u32::MAX));
+                self.metrics.revocation_hiervv_size_samples = self
+                    .metrics
+                    .revocation_hiervv_size_samples
+                    .saturating_add(1);
+                self.metrics.revocation_hiervv_size_last_bytes = size_bytes_u64;
+                metrics::record_histogram(
+                    metrics::REVOCATION_HIERVV_SIZE_BYTES_METRIC,
+                    histogram_value,
+                    &[
+                        ("zone", zone_id.as_str()),
+                        ("hier_vv_status", freshness.hier_vv_status()),
+                        ("decision", freshness.decision_label()),
+                    ],
+                );
+                debug!(
+                    target: "fcp.mesh.revocation.freshness",
+                    hier_vv_status = freshness.hier_vv_status(),
+                    decision = freshness.decision_label(),
+                    zone_id = %zone_id,
+                    hier_vv_size_bytes = size_bytes_u64,
+                    metric = metrics::REVOCATION_HIERVV_SIZE_BYTES_METRIC,
+                    "recorded revocation HierVV size"
+                );
+            }
+            Err(error) => {
+                debug!(
+                    target: "fcp.mesh.revocation.freshness",
+                    zone_id = %zone_id,
+                    error = %error,
+                    metric = metrics::REVOCATION_HIERVV_SIZE_BYTES_METRIC,
+                    "failed to record revocation HierVV size"
+                );
+            }
+        }
     }
 
     /// Verify and answer a bounded gossip request.
@@ -5250,6 +5310,13 @@ mod tests {
             crate::RevocationFreshnessAction::Accept
         );
         assert_eq!(node.revocation_frontier_counter(&ZoneId::work()), 42);
+        assert_eq!(node.metrics().revocation_hiervv_size_samples, 1);
+        assert!(node.metrics().revocation_hiervv_size_last_bytes > 0);
+        assert_eq!(
+            u64::try_from(node.revocation_frontier_size_bytes().expect("size encodes"))
+                .expect("size fits in u64"),
+            node.metrics().revocation_hiervv_size_last_bytes
+        );
     }
 
     #[test]
@@ -5553,6 +5620,8 @@ mod tests {
         ));
         assert_eq!(node.revocation_frontier_counter(&ZoneId::work()), 10);
         assert_eq!(node.metrics().gossip_updates, 0);
+        assert_eq!(node.metrics().revocation_hiervv_size_samples, 1);
+        assert!(node.metrics().revocation_hiervv_size_last_bytes > 0);
     }
 
     #[test]

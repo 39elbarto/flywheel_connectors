@@ -8325,6 +8325,10 @@ fn connector_lease_status_dispatch(
         let zone = args.zone.as_deref().unwrap_or("z:work");
         let mut payload =
             client.connector_lease_status(connector.summary.id.as_str(), Some(zone))?;
+        let host_payload_source = payload
+            .get("source")
+            .cloned()
+            .unwrap_or_else(|| Value::String("host-admin-api".to_owned()));
         if let Some(object) = payload.as_object_mut() {
             object.insert("command".to_owned(), Value::String("connector".to_owned()));
             object.insert(
@@ -8335,10 +8339,7 @@ fn connector_lease_status_dispatch(
                 "source".to_owned(),
                 Value::String("host-admin-api".to_owned()),
             );
-            object.insert(
-                "host_payload_source".to_owned(),
-                Value::String("host-admin-api".to_owned()),
-            );
+            object.insert("host_payload_source".to_owned(), host_payload_source);
             object.insert(
                 "message".to_owned(),
                 Value::String(format!(
@@ -36086,7 +36087,7 @@ deny_ptrace = true
         assert_eq!(payload["command"], "connector");
         assert_eq!(payload["subcommand"], "lease status");
         assert_eq!(payload["source"], "host-admin-api");
-        assert_eq!(payload["host_payload_source"], "host-admin-api");
+        assert_eq!(payload["host_payload_source"], "host-hrw-routing");
         assert_eq!(
             payload["connector"]["canonical_id"],
             "fcp.github:enterprise:v1"

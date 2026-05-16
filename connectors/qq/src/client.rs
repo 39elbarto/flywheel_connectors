@@ -281,10 +281,13 @@ pub struct QqGatewayRuntime {
     config: QqGatewayRuntimeConfig,
     session: InMemoryStreamingSession,
     seen_event_ids: VecDeque<String>,
+    reply_references: VecDeque<String>,
     pending_events: VecDeque<QqGatewayQueuedEvent>,
     heartbeat_sent_count: u64,
     heartbeat_ack_count: u64,
     reconnect_attempts: u32,
+    known_reply_references: u64,
+    unknown_reply_references: u64,
     accepted_events: u64,
     dropped_events: u64,
     duplicate_events: u64,
@@ -305,10 +308,13 @@ impl QqGatewayRuntime {
             config,
             session,
             seen_event_ids: VecDeque::new(),
+            reply_references: VecDeque::new(),
             pending_events: VecDeque::new(),
             heartbeat_sent_count: 0,
             heartbeat_ack_count: 0,
             reconnect_attempts: 0,
+            known_reply_references: 0,
+            unknown_reply_references: 0,
             accepted_events: 0,
             dropped_events: 0,
             duplicate_events: 0,
@@ -332,6 +338,10 @@ impl QqGatewayRuntime {
             max_queue_depth: self.config.max_queue_depth,
             dedupe_size: self.seen_event_ids.len(),
             dedupe_window_size: self.config.dedupe_window_size,
+            reply_reference_count: self.reply_references.len(),
+            max_reply_references: self.max_reply_references(),
+            known_reply_references: self.known_reply_references,
+            unknown_reply_references: self.unknown_reply_references,
             accepted_events: self.accepted_events,
             dropped_events: self.dropped_events,
             duplicate_events: self.duplicate_events,
@@ -486,6 +496,8 @@ impl QqGatewayRuntime {
             });
         }
 
+        self.record_reply_reference_status(&normalized);
+        self.remember_reply_reference(normalized.message_id.as_deref());
         self.pending_events.push_back(QqGatewayQueuedEvent {
             topic: EVENT_QQ_MESSAGE_AUTHORIZED,
             sequence: event.s,
@@ -515,6 +527,38 @@ impl QqGatewayRuntime {
         while self.seen_event_ids.len() > self.config.dedupe_window_size {
             self.seen_event_ids.pop_front();
         }
+    }
+
+    fn record_reply_reference_status(&mut self, event: &NormalizedQqEvent) {
+        let Some(reply_to) = event.reply_to.as_deref().and_then(nonblank_trimmed) else {
+            return;
+        };
+        if self.reply_references.iter().any(|known| known == reply_to) {
+            self.known_reply_references = self.known_reply_references.saturating_add(1);
+        } else {
+            self.unknown_reply_references = self.unknown_reply_references.saturating_add(1);
+        }
+    }
+
+    fn remember_reply_reference(&mut self, message_id: Option<&str>) {
+        let Some(message_id) = message_id.and_then(nonblank_trimmed) else {
+            return;
+        };
+        if let Some(index) = self
+            .reply_references
+            .iter()
+            .position(|known| known == message_id)
+        {
+            self.reply_references.remove(index);
+        }
+        self.reply_references.push_back(message_id.to_string());
+        while self.reply_references.len() > self.max_reply_references() {
+            self.reply_references.pop_front();
+        }
+    }
+
+    const fn max_reply_references(&self) -> usize {
+        self.config.max_queue_depth
     }
 
     fn dropped_projection(
@@ -710,6 +754,15 @@ fn route_target_id(event: &NormalizedQqEvent) -> Option<String> {
 
 fn is_blank(value: Option<&str>) -> bool {
     value.is_none_or(|value| value.trim().is_empty())
+}
+
+fn nonblank_trimmed(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 fn evaluate_c2c_policy(
@@ -2681,6 +2734,81 @@ mod tests {
             })
             .unwrap();
         assert!(uncapped.accepted);
+    }
+
+    #[test]
+    fn gateway_runtime_tracks_bounded_reply_references() {
+        let mut config = QqGatewayRuntimeConfig {
+            enabled: true,
+            max_queue_depth: 2,
+            ..QqGatewayRuntimeConfig::default()
+        };
+        config.policy.group_require_mention = false;
+        let mut runtime = QqGatewayRuntime::new(config);
+
+        let root = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-root",
+                    "content": "root message",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1"
+                })),
+                id: Some("evt-root".into()),
+            })
+            .unwrap();
+        assert!(root.accepted);
+        assert_eq!(root.runtime.reply_reference_count, 1);
+        assert_eq!(root.runtime.max_reply_references, 2);
+        assert_eq!(root.runtime.known_reply_references, 0);
+        assert_eq!(root.runtime.unknown_reply_references, 0);
+
+        let known_reply = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(2),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-known-reply",
+                    "content": "known reply",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-2",
+                    "message_reference": {"message_id": "msg-root"}
+                })),
+                id: Some("evt-known-reply".into()),
+            })
+            .unwrap();
+        assert!(known_reply.accepted);
+        assert_eq!(known_reply.runtime.reply_reference_count, 2);
+        assert_eq!(known_reply.runtime.known_reply_references, 1);
+        assert_eq!(known_reply.runtime.unknown_reply_references, 0);
+
+        let drained = runtime.drain_accepted_events(usize::MAX);
+        assert_eq!(drained.drained_count, 2);
+        assert_eq!(drained.runtime.reply_reference_count, 2);
+
+        let unknown_reply = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(3),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-unknown-reply",
+                    "content": "unknown reply",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-3",
+                    "message_reference": {"message_id": "msg-missing"}
+                })),
+                id: Some("evt-unknown-reply".into()),
+            })
+            .unwrap();
+        assert!(unknown_reply.accepted);
+        assert_eq!(unknown_reply.runtime.reply_reference_count, 2);
+        assert_eq!(unknown_reply.runtime.known_reply_references, 1);
+        assert_eq!(unknown_reply.runtime.unknown_reply_references, 1);
     }
 
     #[test]

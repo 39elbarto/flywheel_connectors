@@ -165,6 +165,10 @@ fn redacted_runtime_snapshot(runtime: &Value) -> Value {
         "max_queue_depth": u64_field(runtime, "max_queue_depth"),
         "dedupe_size": u64_field(runtime, "dedupe_size"),
         "dedupe_window_size": u64_field(runtime, "dedupe_window_size"),
+        "reply_reference_count": u64_field(runtime, "reply_reference_count"),
+        "max_reply_references": u64_field(runtime, "max_reply_references"),
+        "known_reply_references": u64_field(runtime, "known_reply_references"),
+        "unknown_reply_references": u64_field(runtime, "unknown_reply_references"),
         "accepted_events": u64_field(runtime, "accepted_events"),
         "dropped_events": u64_field(runtime, "dropped_events"),
         "duplicate_events": u64_field(runtime, "duplicate_events"),
@@ -653,6 +657,9 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(accepted["topic"], "qq.message.authorized");
     assert_eq!(accepted["policy"]["reason_code"], "group_allowed");
     assert_eq!(accepted["lifecycle"]["action"], "drain_events");
+    assert_eq!(accepted["runtime"]["reply_reference_count"], 1);
+    assert_eq!(accepted["runtime"]["known_reply_references"], 0);
+    assert_eq!(accepted["runtime"]["unknown_reply_references"], 0);
     log_projection_step(&mut logs, "allowed_group_mention", "ok", &accepted);
 
     let missing_mention = invoke_projection(
@@ -803,7 +810,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
                 "content": "bot-openid see attached trace",
                 "group_openid": "group-allowed",
                 "group_member_openid": "member-1",
-                "message_reference": { "message_id": "msg-root" },
+                "message_reference": { "message_id": "msg-accepted" },
                 "attachments": [
                     {
                         "url": "https://cdn.qq.example/private/trace.png",
@@ -820,8 +827,11 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(reply_media["accepted"], true);
     assert_eq!(reply_media["topic"], "qq.message.authorized");
     assert_eq!(reply_media["normalized"]["is_reply"], true);
-    assert_eq!(reply_media["normalized"]["reply_to"], "msg-root");
+    assert_eq!(reply_media["normalized"]["reply_to"], "msg-accepted");
     assert_eq!(reply_media["normalized"]["has_attachments"], true);
+    assert_eq!(reply_media["runtime"]["reply_reference_count"], 3);
+    assert_eq!(reply_media["runtime"]["known_reply_references"], 1);
+    assert_eq!(reply_media["runtime"]["unknown_reply_references"], 0);
     log_projection_step(&mut logs, "reply_media_projection", "ok", &reply_media);
 
     let duplicate = invoke_projection(
@@ -1028,7 +1038,12 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         .as_array()
         .expect("final drain events array");
     assert_eq!(final_drain_events[0]["event_id"], "evt-reply-media");
-    assert_eq!(final_drain_events[0]["normalized"]["reply_to"], "msg-root");
+    assert_eq!(
+        final_drain_events[0]["normalized"]["reply_to"],
+        "msg-accepted"
+    );
+    assert_eq!(final_drain["runtime"]["reply_reference_count"], 3);
+    assert_eq!(final_drain["runtime"]["known_reply_references"], 1);
     log_drain_step(&mut logs, "gateway_drain_final_batch", "ok", &final_drain);
 
     connector
@@ -1068,7 +1083,6 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "msg-disabled",
         "msg-missing-binding",
         "msg-missing-reply-target",
-        "msg-root",
         "bot-openid",
         "group-allowed",
         "group-disabled",
@@ -1097,6 +1111,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     }
     assert!(log_contents.contains("message_id_hash"));
     assert!(log_contents.contains("reply_to_hash"));
+    assert!(log_contents.contains("known_reply_references"));
+    assert!(log_contents.contains("reply_reference_count"));
     assert!(log_contents.contains("attachment_count"));
     assert!(log_contents.contains("attachment_total_bytes"));
     assert!(log_contents.contains("attachment_url_hashes"));

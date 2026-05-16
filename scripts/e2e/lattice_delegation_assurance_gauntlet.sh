@@ -161,6 +161,53 @@ extract_passed_tests() {
   sed -n 's/.*test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' "${log}" | tail -n 1
 }
 
+rch_summary_line() {
+  local log="$1"
+  grep -E '\[RCH\] (remote|local|failed)' "${log}" | tail -n 1 || true
+}
+
+fallback_decision_for_log() {
+  local display_command="$1"
+  local log="$2"
+  local summary
+  summary="$(rch_summary_line "${log}")"
+  if [ -z "${summary}" ]; then
+    case "${display_command}" in
+      *"rch exec"*) printf 'rch_summary_unobserved' ;;
+      *) printf 'not_needed' ;;
+    esac
+  elif printf '%s' "${summary}" | grep -Fq '[RCH] local'; then
+    printf 'rch_local_fallback'
+  elif printf '%s' "${summary}" | grep -Fq '[RCH] remote'; then
+    printf 'not_needed'
+  elif printf '%s' "${summary}" | grep -Fq '[RCH] failed'; then
+    printf 'rch_remote_failed'
+  else
+    printf 'rch_summary_unclassified'
+  fi
+}
+
+worker_execution_class_for_log() {
+  local display_command="$1"
+  local log="$2"
+  local summary
+  summary="$(rch_summary_line "${log}")"
+  if [ -z "${summary}" ]; then
+    case "${display_command}" in
+      *"rch exec"*) printf 'unknown' ;;
+      *) printf 'not_applicable' ;;
+    esac
+  elif printf '%s' "${summary}" | grep -Fq '[RCH] local'; then
+    printf 'local'
+  elif printf '%s' "${summary}" | grep -Fq '[RCH] remote'; then
+    printf 'remote'
+  elif printf '%s' "${summary}" | grep -Fq '[RCH] failed'; then
+    printf 'remote_failed'
+  else
+    printf 'unknown'
+  fi
+}
+
 run_and_capture() {
   local step="$1"
   local display_command="$2"
@@ -176,26 +223,40 @@ run_and_capture() {
     hash="$(sha256_file "${log}")"
     passed_tests="$(extract_passed_tests "${log}")"
     passed_tests_json="$(json_string_or_null "${passed_tests}")"
+    fallback_decision="$(fallback_decision_for_log "${display_command}" "${log}")"
+    worker_execution_class="$(worker_execution_class_for_log "${display_command}" "${log}")"
+    rch_summary="$(rch_summary_line "${log}")"
+    rch_summary_json="$(json_string_or_null "${rch_summary}")"
     assert_stable_revision "stable_revision_after_${step}"
     assert_clean_tree "clean_tree_after_${step}"
     append_json "${step}" "pass" "$(jq -cn \
       --arg command_line "${display_command}" \
       --arg log_artifact "target/fcp-crypto-pq/${RUN_ID}.${step}.log" \
       --arg log_hash "sha256:${hash}" \
+      --arg fallback_decision "${fallback_decision}" \
+      --arg worker_execution_class "${worker_execution_class}" \
       --argjson duration_seconds "${duration}" \
       --argjson passed_tests "${passed_tests_json}" \
-      '{command_line:$command_line,log_artifact:$log_artifact,log_hash:$log_hash,duration_seconds:$duration_seconds,passed_tests:$passed_tests,retry_count:0,fallback_decision:"not_needed",cache_decision:"cargo_target_dir_hashed",cleanup_result:"not_applicable"}')"
+      --argjson rch_summary "${rch_summary_json}" \
+      '{command_line:$command_line,log_artifact:$log_artifact,log_hash:$log_hash,duration_seconds:$duration_seconds,passed_tests:$passed_tests,retry_count:0,fallback_decision:$fallback_decision,worker_execution_class:$worker_execution_class,rch_summary:$rch_summary,cache_decision:"cargo_target_dir_hashed",cleanup_result:"not_applicable"}')"
   else
     local ended duration hash
     ended="$(date -u +%s)"
     duration=$((ended - started))
     hash="$(sha256_file "${log}")"
+    fallback_decision="$(fallback_decision_for_log "${display_command}" "${log}")"
+    worker_execution_class="$(worker_execution_class_for_log "${display_command}" "${log}")"
+    rch_summary="$(rch_summary_line "${log}")"
+    rch_summary_json="$(json_string_or_null "${rch_summary}")"
     fail_step "${step}" "$(jq -cn \
       --arg command_line "${display_command}" \
       --arg log_artifact "target/fcp-crypto-pq/${RUN_ID}.${step}.log" \
       --arg log_hash "sha256:${hash}" \
+      --arg fallback_decision "${fallback_decision}" \
+      --arg worker_execution_class "${worker_execution_class}" \
       --argjson duration_seconds "${duration}" \
-      '{command_line:$command_line,log_artifact:$log_artifact,log_hash:$log_hash,duration_seconds:$duration_seconds,retry_count:0,fallback_decision:"none",cache_decision:"cargo_target_dir_hashed",cleanup_result:"not_applicable"}')"
+      --argjson rch_summary "${rch_summary_json}" \
+      '{command_line:$command_line,log_artifact:$log_artifact,log_hash:$log_hash,duration_seconds:$duration_seconds,retry_count:0,fallback_decision:$fallback_decision,worker_execution_class:$worker_execution_class,rch_summary:$rch_summary,cache_decision:"cargo_target_dir_hashed",cleanup_result:"not_applicable"}')"
   fi
 }
 
@@ -204,6 +265,7 @@ run_rch_cargo() {
   local display_command="$2"
   shift 2
   run_and_capture "${step}" "${display_command}" \
+    env RCH_VISIBILITY=verbose \
     rch exec -- env \
       CARGO_TARGET_DIR="${TARGET_DIR}" \
       CARGO_PROFILE_DEV_DEBUG=0 \
@@ -559,7 +621,12 @@ validate_gauntlet_contract() {
       (.build_profile | type == "string") and
       (.worker_host_class | type == "string") and
       (.details | type == "object") and
-      (if .result == "skip" then (.details.skip_reason | type == "string") else true end)) and
+      (if .result == "skip" then (.details.skip_reason | type == "string") else true end) and
+      (if ((.details.command_line? // "") | contains("rch exec")) then
+        (.details.worker_execution_class | type == "string") and
+        (.details.fallback_decision | type == "string") and
+        (.details | has("rch_summary"))
+      else true end)) and
     any(.[]; .step == "tool_versions" and .result == "pass") and
     any(.[]; .step == "validate_lean_ids" and .result == "pass") and
     any(.[]; .step == "jsonl_contract_validation" and .result == "pass") and

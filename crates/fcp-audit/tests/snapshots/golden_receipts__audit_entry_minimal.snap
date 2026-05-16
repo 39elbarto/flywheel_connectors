@@ -1,5 +1,6 @@
 ---
 source: crates/fcp-audit/tests/golden_receipts.rs
+assertion_line: 158
 expression: entry
 ---
 {
@@ -9,5 +10,10 @@ expression: entry
   "actor": "agent:local",
   "zone_id": "z:work",
   "seq": 0,
-  "occurred_at": 1700000000
+  "occurred_at": 1700000000,
+  "hlc": {
+    "physical_ms": 1700000000000,
+    "logical": 0,
+    "node_id": "agent:local"
+  }
 }

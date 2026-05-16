@@ -36,7 +36,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, RwLock};
 
-use fcp_audit::{AuditEntry, AuditEntryIdFields, AuditError, Severity, compute_audit_entry_id};
+use fcp_audit::{
+    AuditEntry, AuditEntryIdFields, AuditError, HybridLogicalClock, HybridLogicalTimestamp,
+    Severity, audit_entry_hlc_from_occurred_at, compute_audit_entry_id,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -216,6 +219,7 @@ impl InvokeAuditEntryTemplate {
         &self,
         seq: u64,
         occurred_at: u64,
+        hlc: &HybridLogicalTimestamp,
         prev: Option<&str>,
     ) -> Result<String, AuditError> {
         compute_audit_entry_id(AuditEntryIdFields {
@@ -225,6 +229,7 @@ impl InvokeAuditEntryTemplate {
             zone_id: &self.zone_id,
             seq,
             occurred_at,
+            hlc,
             prev,
             correlation_id: &self.correlation_id,
             trace_context: None,
@@ -239,6 +244,7 @@ impl InvokeAuditEntryTemplate {
         &self,
         seq: u64,
         occurred_at: u64,
+        hlc: HybridLogicalTimestamp,
         prev: Option<String>,
         id: String,
     ) -> AuditEntry {
@@ -250,6 +256,7 @@ impl InvokeAuditEntryTemplate {
             zone_id: self.zone_id.clone(),
             seq,
             occurred_at,
+            hlc,
             prev,
             correlation_id: self.correlation_id.clone(),
             trace_context: None,
@@ -267,6 +274,7 @@ struct ZoneChain {
     last_seq: Option<u64>,
     last_id: Option<String>,
     last_occurred_at: Option<u64>,
+    last_hlc: Option<HybridLogicalTimestamp>,
     entries: Vec<AuditEntry>,
     metrics: InvokeAuditChainMetrics,
 }
@@ -435,22 +443,25 @@ impl InvokeAuditChain {
             // 1. Snapshot (last_seq, last_id) under the per-zone
             //    Mutex — short critical section, no allocation
             //    beyond the optional String clone of last_id.
-            let (next_seq, prev_snapshot, last_occurred_at) = {
+            let (next_seq, prev_snapshot, last_occurred_at, last_hlc) = {
                 let z = zone.lock().expect("InvokeAuditChain zone mutex poisoned");
                 (
                     z.last_seq.map_or(0u64, |s| s.saturating_add(1)),
                     z.last_id.clone(),
                     z.last_occurred_at,
+                    z.last_hlc.clone(),
                 )
             };
             let occurred_at = monotonic_occurred_at(ctx.occurred_at, last_occurred_at);
+            let hlc = next_audit_hlc(&template.actor, occurred_at, last_hlc.as_ref());
 
             // 2. Encode canonical + hash OUTSIDE any lock. This is the
             //    dominant cost; running it lock-free is the load-bearing
             //    perf win. On failed CAS attempts, keep this path borrowed:
             //    the full owned AuditEntry is only materialized after the
             //    snapshot wins the commit race.
-            let real_id = template.compute_id(next_seq, occurred_at, prev_snapshot.as_deref())?;
+            let real_id =
+                template.compute_id(next_seq, occurred_at, &hlc, prev_snapshot.as_deref())?;
 
             // 3. Re-lock + CAS commit. If another append landed
             //    on this zone between (1) and (3), our prev /
@@ -460,10 +471,12 @@ impl InvokeAuditChain {
             {
                 let mut z = zone.lock().expect("InvokeAuditChain zone mutex poisoned");
                 if z.last_id.as_deref() == prev_snapshot.as_deref() {
-                    let entry = template.materialize(next_seq, occurred_at, prev_snapshot, real_id);
+                    let entry =
+                        template.materialize(next_seq, occurred_at, hlc, prev_snapshot, real_id);
                     z.last_seq = Some(next_seq);
                     z.last_id = Some(entry.id.clone());
                     z.last_occurred_at = Some(occurred_at);
+                    z.last_hlc = Some(entry.hlc.clone());
                     z.entries.push(entry.clone());
                     z.metrics.entries = z.entries.len();
                     z.metrics.optimistic_commits = z.metrics.optimistic_commits.saturating_add(1);
@@ -519,12 +532,14 @@ impl InvokeAuditChain {
         let mut z = zone.lock().expect("InvokeAuditChain zone mutex poisoned");
         let next_seq = z.last_seq.map_or(0u64, |s| s.saturating_add(1));
         let occurred_at = monotonic_occurred_at(requested_occurred_at, z.last_occurred_at);
+        let hlc = next_audit_hlc(&template.actor, occurred_at, z.last_hlc.as_ref());
         let prev = z.last_id.clone();
-        let id = template.compute_id(next_seq, occurred_at, prev.as_deref())?;
-        let entry = template.materialize(next_seq, occurred_at, prev, id);
+        let id = template.compute_id(next_seq, occurred_at, &hlc, prev.as_deref())?;
+        let entry = template.materialize(next_seq, occurred_at, hlc, prev, id);
         z.last_seq = Some(next_seq);
         z.last_id = Some(entry.id.clone());
         z.last_occurred_at = Some(occurred_at);
+        z.last_hlc = Some(entry.hlc.clone());
         z.entries.push(entry.clone());
         z.metrics.entries = z.entries.len();
         z.metrics.serialized_fallbacks = z.metrics.serialized_fallbacks.saturating_add(1);
@@ -606,6 +621,21 @@ fn monotonic_occurred_at(requested: u64, previous: Option<u64>) -> u64 {
     previous.map_or(requested, |last| requested.max(last))
 }
 
+fn next_audit_hlc(
+    node_id: &str,
+    occurred_at: u64,
+    previous: Option<&HybridLogicalTimestamp>,
+) -> HybridLogicalTimestamp {
+    let physical_ms = audit_entry_hlc_from_occurred_at(occurred_at, node_id).physical_ms;
+    previous.map_or_else(
+        || HybridLogicalTimestamp::from_physical(physical_ms, node_id),
+        |previous| {
+            let mut clock = HybridLogicalClock::new(node_id);
+            clock.merge(previous, physical_ms)
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,6 +665,11 @@ mod tests {
         assert_eq!(entry.event_type, event_types::INVOKE_ALLOW);
         assert_eq!(entry.severity, Severity::Info);
         assert_eq!(entry.zone_id, "z:work");
+        assert_eq!(entry.hlc.node_id, "agent:test");
+        assert_eq!(
+            entry.hlc.physical_ms,
+            entry.occurred_at.saturating_mul(1_000)
+        );
     }
 
     #[test]
@@ -665,6 +700,10 @@ mod tests {
             first.seq + 1
         );
         assert_eq!(second.event_type, event_types::INVOKE_RESULT);
+        assert!(
+            second.hlc > first.hlc,
+            "second entry HLC must advance even when wall-clock seconds are equal"
+        );
     }
 
     #[test]
@@ -1042,6 +1081,10 @@ mod tests {
         assert_eq!(
             entries[1].occurred_at, entries[0].occurred_at,
             "same-zone commit order must remain non-decreasing for fcp-audit verification"
+        );
+        assert!(
+            entries[1].hlc > entries[0].hlc,
+            "HLC must preserve strict causal order when wall-clock seconds are clamped"
         );
         let report = fcp_audit::verify_chain(&entries, None, Some("z:work"));
         assert!(

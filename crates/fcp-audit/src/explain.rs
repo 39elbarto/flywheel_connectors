@@ -683,6 +683,7 @@ mod tests {
             zone_id: "z:work".to_string(),
             seq,
             occurred_at: 1_700_000_000 + seq,
+            hlc: crate::audit_entry_hlc_from_occurred_at(1_700_000_000 + seq, "user:alice"),
             prev: None,
             correlation_id: correlation_id.to_string(),
             trace_context: None,

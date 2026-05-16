@@ -54,6 +54,23 @@ pub const MAX_FUTURE_TIMESTAMP_SKEW_SECS: u64 = 300;
 const AUDIT_ENTRY_SIG_DOMAIN: &[u8] = b"FCP2-AUDIT-ENTRY-SIG-V1";
 const CHAIN_HEAD_SIG_DOMAIN: &[u8] = b"FCP2-AUDIT-CHAIN-HEAD-SIG-V1";
 
+/// Convert an audit entry's wall-clock timestamp into the default HLC stamp.
+///
+/// Callers that already maintain a causal HLC should set the explicit `hlc`
+/// field instead. This helper exists for builder paths and fixtures that only
+/// have the legacy Unix-seconds timestamp available.
+#[must_use]
+pub fn audit_entry_hlc_from_occurred_at(
+    occurred_at: u64,
+    node_id: impl Into<String>,
+) -> HybridLogicalTimestamp {
+    HybridLogicalTimestamp::from_physical(occurred_at.saturating_mul(1_000), node_id)
+}
+
+fn default_audit_entry_hlc() -> HybridLogicalTimestamp {
+    audit_entry_hlc_from_occurred_at(0, "legacy-audit-entry")
+}
+
 // ============================================================================
 // Event type constants
 // ============================================================================
@@ -290,6 +307,9 @@ pub struct AuditEntry {
     pub seq: u64,
     /// When event occurred (Unix timestamp seconds).
     pub occurred_at: u64,
+    /// Hybrid logical timestamp for cross-zone causal ordering.
+    #[serde(default = "default_audit_entry_hlc")]
+    pub hlc: HybridLogicalTimestamp,
     /// Previous entry ID in chain (hash link).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prev: Option<String>,
@@ -334,6 +354,7 @@ struct AuditEntryIdMaterial<'a> {
     zone_id: &'a str,
     seq: u64,
     occurred_at: u64,
+    hlc: &'a HybridLogicalTimestamp,
     prev: Option<&'a str>,
     correlation_id: &'a str,
     trace_context: Option<&'a TraceContext>,
@@ -362,6 +383,8 @@ pub struct AuditEntryIdFields<'a> {
     pub seq: u64,
     /// Event timestamp in Unix seconds.
     pub occurred_at: u64,
+    /// Hybrid logical timestamp bound into the canonical entry id.
+    pub hlc: &'a HybridLogicalTimestamp,
     /// Previous entry ID in the chain, if any.
     pub prev: Option<&'a str>,
     /// Correlation ID for request tracing.
@@ -390,6 +413,7 @@ pub fn compute_audit_entry_id(fields: AuditEntryIdFields<'_>) -> Result<String, 
         zone_id: fields.zone_id,
         seq: fields.seq,
         occurred_at: fields.occurred_at,
+        hlc: fields.hlc,
         prev: fields.prev,
         correlation_id: fields.correlation_id,
         trace_context: fields.trace_context,
@@ -447,6 +471,7 @@ impl AuditEntry {
             zone_id: &self.zone_id,
             seq: self.seq,
             occurred_at: self.occurred_at,
+            hlc: &self.hlc,
             prev: self.prev.as_deref(),
             correlation_id: &self.correlation_id,
             trace_context: self.trace_context.as_ref(),
@@ -612,6 +637,7 @@ pub struct AuditEntryBuilder {
     zone_id: Option<String>,
     seq: Option<u64>,
     occurred_at: Option<u64>,
+    hlc: Option<HybridLogicalTimestamp>,
     prev: Option<String>,
     correlation_id: Option<String>,
     trace_context: Option<TraceContext>,
@@ -673,6 +699,13 @@ impl AuditEntryBuilder {
     #[must_use]
     pub const fn occurred_at(mut self, ts: u64) -> Self {
         self.occurred_at = Some(ts);
+        self
+    }
+
+    /// Set the hybrid logical timestamp.
+    #[must_use]
+    pub fn hlc(mut self, hlc: HybridLogicalTimestamp) -> Self {
+        self.hlc = Some(hlc);
         self
     }
 
@@ -759,6 +792,9 @@ impl AuditEntryBuilder {
         let severity = self
             .severity
             .unwrap_or_else(|| Severity::for_event_type(&event_type));
+        let hlc = self
+            .hlc
+            .unwrap_or_else(|| audit_entry_hlc_from_occurred_at(occurred_at, actor.clone()));
 
         Ok(AuditEntry {
             id,
@@ -768,6 +804,7 @@ impl AuditEntryBuilder {
             zone_id,
             seq,
             occurred_at,
+            hlc,
             prev: self.prev,
             correlation_id: self.correlation_id.unwrap_or_default(),
             trace_context: self.trace_context,
@@ -2355,6 +2392,7 @@ mod tests {
             zone_id: "z:work".to_string(),
             seq: 0,
             occurred_at: 1_700_000_000,
+            hlc: audit_entry_hlc_from_occurred_at(1_700_000_000, "user:alice"),
             prev: None,
             correlation_id: "corr-0".to_string(),
             trace_context: None,
@@ -2375,6 +2413,7 @@ mod tests {
             zone_id: "z:work".to_string(),
             seq,
             occurred_at: 1_700_000_000 + seq * 60,
+            hlc: audit_entry_hlc_from_occurred_at(1_700_000_000 + seq * 60, "user:bob"),
             prev: Some(prev_id.to_string()),
             correlation_id: format!("corr-{seq}"),
             trace_context: None,
@@ -2930,6 +2969,22 @@ mod tests {
     }
 
     #[test]
+    fn audit_entry_hlc_participates_in_canonical_id() {
+        let mut entry = genesis_entry();
+        let baseline = entry.computed_id().unwrap();
+        entry.hlc = HybridLogicalTimestamp::new(
+            entry.hlc.physical_ms,
+            entry.hlc.logical.saturating_add(1),
+            entry.hlc.node_id.clone(),
+        );
+        assert_ne!(
+            baseline,
+            entry.computed_id().unwrap(),
+            "HLC must be part of the audit-entry canonical payload"
+        );
+    }
+
+    #[test]
     fn audit_entry_with_trace_context() {
         let mut entry = genesis_entry();
         entry.trace_context = Some(TraceContext::new("trace-abc", "span-def"));
@@ -2968,6 +3023,7 @@ mod tests {
             zone_id: String::new(),
             seq: 0,
             occurred_at: 0,
+            hlc: audit_entry_hlc_from_occurred_at(0, ""),
             prev: None,
             correlation_id: String::new(),
             trace_context: None,
@@ -2993,6 +3049,7 @@ mod tests {
             zone_id: "z:work".to_string(),
             seq,
             occurred_at: 1_700_000_000 + seq * 60,
+            hlc: audit_entry_hlc_from_occurred_at(1_700_000_000 + seq * 60, "agent:alice"),
             prev: prev_id.map(ToString::to_string),
             correlation_id: format!("corr-{seq}"),
             trace_context: None,
@@ -3475,6 +3532,10 @@ mod tests {
         assert!(entry.is_genesis());
         // Severity auto-computed
         assert_eq!(entry.severity, Severity::Info);
+        assert_eq!(
+            entry.hlc,
+            audit_entry_hlc_from_occurred_at(1_700_000_000, "user:alice")
+        );
     }
 
     #[test]
@@ -3519,6 +3580,7 @@ mod tests {
             zone_id: &entry.zone_id,
             seq: entry.seq,
             occurred_at: entry.occurred_at,
+            hlc: &entry.hlc,
             prev: entry.prev.as_deref(),
             correlation_id: &entry.correlation_id,
             trace_context: entry.trace_context.as_ref(),

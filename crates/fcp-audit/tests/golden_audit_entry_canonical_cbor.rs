@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use fcp_audit::{AuditEntry, Severity, TraceContext};
+use fcp_audit::{AuditEntry, Severity, TraceContext, audit_entry_hlc_from_occurred_at};
 use fcp_cbor::to_canonical_cbor;
 use serde_json::json;
 
@@ -74,6 +74,7 @@ fn fixture_audit_entry_with_severity(severity: Severity, id_suffix: &str) -> Aud
         zone_id: "z:work".to_string(),
         seq: 42,
         occurred_at: 1_700_000_000,
+        hlc: audit_entry_hlc_from_occurred_at(1_700_000_000, "user:golden-fixture"),
         prev: Some("audit-fixture-prev".to_string()),
         correlation_id: "corr-golden-fixture".to_string(),
         trace_context: Some(TraceContext::new(

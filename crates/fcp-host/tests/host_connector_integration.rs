@@ -3123,6 +3123,234 @@ async fn fcp_host_binary_hrw_lease_flush_before_yield_reports_durable_state_barr
 }
 
 #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_hrw_lease_reselects_holder_after_departure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.hrw-binary-failover:utility:1.0.0");
+    let zone_id = ZoneId::work();
+    let state_dir = tempfile::tempdir()?;
+    let state_root = state_dir.path().join("managed-state");
+    let object_id_key = ObjectIdKey::from_bytes([0xC6; 32]);
+    let seeded_state = seed_singleton_writer_connector_state(
+        &state_root,
+        &connector_id,
+        &zone_id,
+        object_id_key,
+        ObjectId::from_bytes([0xA3; 32]),
+    )
+    .await?;
+    let connector_config = singleton_writer_test_connector_config_with_state(
+        &connector_id,
+        "HRW Binary Failover",
+        &state_root,
+        &object_id_key,
+    );
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
+    let all_nodes = ["node-a", "node-b", "node-c"];
+    let initial_eligible_nodes = all_nodes.join(",");
+    let mut initial_holder: Option<(String, HttpHostProcess)> = None;
+    let mut initial_refusals = Vec::new();
+
+    for local_node in all_nodes {
+        match HttpHostProcess::spawn_with_env(
+            vec![connector_config.clone()],
+            &[
+                ("FCP_HOST_HRW_LEASE_LOCAL_NODE", local_node),
+                ("FCP_HOST_HRW_LEASE_NODES", initial_eligible_nodes.as_str()),
+                ("FCP_HOST_HRW_LEASE_CURRENT_SEQ", "10"),
+                (
+                    "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+                    capability_public_key.as_str(),
+                ),
+            ],
+        )
+        .await
+        {
+            Ok(host) => {
+                assert!(
+                    initial_holder.is_none(),
+                    "initial HRW routing admitted more than one singleton_writer host launch"
+                );
+                initial_holder = Some((local_node.to_string(), host));
+            }
+            Err(error) => initial_refusals.push((local_node.to_string(), error.to_string())),
+        }
+    }
+
+    assert!(
+        initial_holder.is_some(),
+        "initial HRW routing should admit one holder; refusals: {initial_refusals:?}"
+    );
+    assert_eq!(
+        initial_refusals.len(),
+        2,
+        "initial three-node HRW routing should refuse both non-holders"
+    );
+
+    let (departed_node, departed_host) =
+        initial_holder.expect("initial HRW routing should admit one holder");
+    let departed_base_url = departed_host.base_url.clone();
+    let flush_response = departed_host
+        .client
+        .post(format!(
+            "{}/rpc/admin/connectors/{}/lease/flush-before-yield?zone=z%3Awork",
+            departed_base_url,
+            connector_id.as_str()
+        ))
+        .bearer_auth(TEST_ADMIN_BEARER_TOKEN)
+        .header("x-fcp-zone", "z:owner")
+        .json(&json!({}))
+        .send()
+        .await?;
+    let flush_status = flush_response.status();
+    let flush_body = flush_response.text().await?;
+    let flush_payload: Value = serde_json::from_str(&flush_body).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "departing holder flush-before-yield response should be JSON, got {flush_status}: {flush_body}: {error}"
+            ),
+        )
+    })?;
+    assert_eq!(
+        flush_status,
+        reqwest::StatusCode::OK,
+        "departing holder {departed_node} should flush canonical state before removal: {flush_payload}"
+    );
+    assert_eq!(
+        flush_payload["flush"]["root_object_id"],
+        seeded_state.root_object_id.to_string()
+    );
+    assert_eq!(flush_payload["flush"]["lease_seq"], seeded_state.lease_seq);
+    drop(departed_host);
+
+    let remaining_nodes = all_nodes
+        .into_iter()
+        .filter(|node| *node != departed_node.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(remaining_nodes.len(), 2);
+    let remaining_eligible_nodes = remaining_nodes.join(",");
+    let mut new_holder: Option<(String, HttpHostProcess)> = None;
+    let mut new_refusals = Vec::new();
+
+    for local_node in &remaining_nodes {
+        match HttpHostProcess::spawn_with_env(
+            vec![connector_config.clone()],
+            &[
+                ("FCP_HOST_HRW_LEASE_LOCAL_NODE", *local_node),
+                (
+                    "FCP_HOST_HRW_LEASE_NODES",
+                    remaining_eligible_nodes.as_str(),
+                ),
+                ("FCP_HOST_HRW_LEASE_CURRENT_SEQ", "11"),
+                (
+                    "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+                    capability_public_key.as_str(),
+                ),
+            ],
+        )
+        .await
+        {
+            Ok(host) => {
+                assert!(
+                    new_holder.is_none(),
+                    "post-departure HRW routing admitted more than one singleton_writer host launch"
+                );
+                new_holder = Some(((*local_node).to_string(), host));
+            }
+            Err(error) => new_refusals.push(((*local_node).to_string(), error.to_string())),
+        }
+    }
+
+    assert!(
+        new_holder.is_some(),
+        "post-departure HRW routing should admit one replacement holder; refusals: {new_refusals:?}"
+    );
+    assert_eq!(
+        new_refusals.len(),
+        1,
+        "two-node post-departure HRW routing should refuse one non-holder"
+    );
+    for (refused_node, refusal) in &new_refusals {
+        assert!(
+            refusal.contains("NotSelectedCoordinator"),
+            "post-departure refusal for {refused_node} should preserve the typed HRW error: {refusal}"
+        );
+    }
+
+    let (new_holder_node, new_host) =
+        new_holder.expect("post-departure HRW routing should admit one replacement holder");
+    assert_ne!(
+        new_holder_node, departed_node,
+        "replacement holder must come from the eligible set after removing the departed node"
+    );
+    let url = |path: &str| format!("{}{path}", new_host.base_url);
+    let mut stale_request = build_invoke_request(connector_id.clone(), &capability_signing_key).0;
+    stale_request.input = json!({
+        "message": "post-failover stale write must be fenced",
+        "lease_seq": 10_u64,
+    });
+    stale_request.lease_seq = Some(10);
+    let stale_response = new_host
+        .client
+        .post(url("/rpc/invoke"))
+        .json(&stale_request)
+        .send()
+        .await?;
+    let stale_status = stale_response.status();
+    let stale_body = stale_response.text().await?;
+    assert_eq!(stale_status, reqwest::StatusCode::FORBIDDEN);
+    assert!(
+        stale_body.contains(r#""code":"LeaseFenced""#),
+        "replacement holder should fence stale pre-handoff writes: {stale_body}"
+    );
+    assert!(
+        stale_body.contains(r#""current_lease_seq":11"#),
+        "replacement holder should report the post-departure fence: {stale_body}"
+    );
+
+    let explain_response = new_host
+        .client
+        .get(url(&format!(
+            "/rpc/admin/connectors/{}/state/explain?zone=z%3Awork",
+            connector_id.as_str()
+        )))
+        .bearer_auth(TEST_ADMIN_BEARER_TOKEN)
+        .header("x-fcp-zone", "z:owner")
+        .send()
+        .await?;
+    let explain_status = explain_response.status();
+    let explain_body = explain_response.text().await?;
+    let explain_payload: Value = serde_json::from_str(&explain_body).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "replacement holder state explain response should be JSON, got {explain_status}: {explain_body}: {error}"
+            ),
+        )
+    })?;
+    assert_eq!(
+        explain_status,
+        reqwest::StatusCode::OK,
+        "replacement holder {new_holder_node} should expose canonical state after failover: {explain_payload}"
+    );
+    assert_eq!(
+        explain_payload["canonical_state"]["root_object_id"],
+        seeded_state.root_object_id.to_string()
+    );
+    assert_eq!(
+        explain_payload["canonical_state"]["head_object_id"],
+        seeded_state.head_object_id.to_string()
+    );
+    assert_eq!(
+        explain_payload["canonical_state"]["model"],
+        "singleton_writer"
+    );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn fcp_host_binary_config_routes_are_live_revision_aware()
 -> Result<(), Box<dyn std::error::Error>> {
     let connector_id = ConnectorId::from_static("fcp.test.config-http:utility:1.0.0");

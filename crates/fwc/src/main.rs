@@ -8392,11 +8392,7 @@ fn connector_lease_status_dispatch(
     };
     let (path, config) = load_context_config()?;
     let (context_name, context) = active_context_entry(&config)?;
-    let zone = args
-        .zone
-        .clone()
-        .or_else(|| context.default_zone.clone())
-        .unwrap_or_else(|| ZoneId::work().to_string());
+    let zone = mesh_connector_lease_zone(args.zone.as_deref(), context, connector, &args.connector);
     let payload = offline_connector_lease_status_payload(
         &path,
         &context_name,
@@ -8503,6 +8499,79 @@ fn lease_ladder_snapshot(
     Ok((subject_id, ranked_holders, holder))
 }
 
+fn mesh_connector_target_entry<'a>(
+    state: &'a MeshTargetState,
+    connector: &DiscoveredConnector,
+    requested_selector: &str,
+) -> Option<(&'a str, &'a MeshConnectorTarget)> {
+    let candidates = [
+        requested_selector,
+        connector.slug.as_str(),
+        connector.detail.summary.id.as_str(),
+        connector.detail.summary.name.as_str(),
+    ];
+    for candidate in candidates {
+        if let Some((key, target)) = state.connector_targets.get_key_value(candidate) {
+            return Some((key.as_str(), target));
+        }
+    }
+
+    let normalized_candidates = candidates
+        .into_iter()
+        .map(normalize_connector_selector)
+        .collect::<BTreeSet<_>>();
+    state.connector_targets.iter().find_map(|(key, target)| {
+        normalized_candidates
+            .contains(&normalize_connector_selector(key))
+            .then_some((key.as_str(), target))
+    })
+}
+
+fn mesh_connector_lease_zone(
+    explicit_zone: Option<&str>,
+    context: &MeshContextFile,
+    connector: &DiscoveredConnector,
+    requested_selector: &str,
+) -> String {
+    explicit_zone
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            mesh_connector_target_entry(&context.mesh_targets, connector, requested_selector)
+                .and_then(|(_, target)| target.zone.clone())
+        })
+        .or_else(|| context.default_zone.clone())
+        .unwrap_or_else(|| ZoneId::work().to_string())
+}
+
+fn mesh_resolved_effective_target_value(
+    state: &MeshTargetState,
+    connector: &DiscoveredConnector,
+    requested_selector: &str,
+) -> Value {
+    if let Some((target_key, target)) =
+        mesh_connector_target_entry(state, connector, requested_selector)
+    {
+        return json!({
+            "connector": &connector.slug,
+            "requested_selector": requested_selector,
+            "target_key": target_key,
+            "node": &target.node,
+            "zone": &target.zone,
+            "source": "connector-target",
+            "persisted_at": &target.persisted_at,
+        });
+    }
+
+    state.active_node.as_ref().map_or(Value::Null, |node| {
+        json!({
+            "connector": &connector.slug,
+            "requested_selector": requested_selector,
+            "node": node,
+            "source": "active-default",
+        })
+    })
+}
+
 fn offline_connector_lease_status_payload(
     config_path: &std::path::Path,
     context_name: &str,
@@ -8541,7 +8610,7 @@ fn offline_connector_lease_status_payload(
         "expiry": Value::Null,
         "quorum_signers_count": 0_u64,
         "ranked_holders": ranked_holders,
-        "effective_target": mesh_effective_target_value(&context.mesh_targets, &connector.slug),
+        "effective_target": mesh_resolved_effective_target_value(&context.mesh_targets, connector, requested_selector),
         "live_host": {
             "requested": false,
             "route_available": false,
@@ -8607,18 +8676,7 @@ fn mesh_lease_ladder_dispatch(
                 continue;
             }
         };
-        let zone = args
-            .zone
-            .clone()
-            .or_else(|| {
-                context
-                    .mesh_targets
-                    .connector_targets
-                    .get(&selector)
-                    .and_then(|target| target.zone.clone())
-            })
-            .or_else(|| context.default_zone.clone())
-            .unwrap_or_else(|| ZoneId::work().to_string());
+        let zone = mesh_connector_lease_zone(args.zone.as_deref(), context, connector, &selector);
         let connector_id = connector.detail.summary.id.as_str();
         let (subject_id, ranked_holders, holder_node_id_hash) =
             lease_ladder_snapshot(connector_id, &zone, &known_nodes)?;
@@ -8637,7 +8695,7 @@ fn mesh_lease_ladder_dispatch(
             "expiry": Value::Null,
             "quorum_signers_count": 0_u64,
             "ranked_holders": ranked_holders,
-            "effective_target": mesh_effective_target_value(&context.mesh_targets, &connector.slug),
+            "effective_target": mesh_resolved_effective_target_value(&context.mesh_targets, connector, &selector),
         }));
     }
 
@@ -36021,6 +36079,42 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_connector_lease_status_offline_uses_connector_target_zone() {
+        let (_tempdir, path, _guard) = temp_context_config();
+        let mut config = super::default_context_config();
+        let mesh_targets = &mut config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets;
+        mesh_targets.active_node = Some("node-alpha".to_owned());
+        mesh_targets.connector_targets.insert(
+            "github".to_owned(),
+            super::MeshConnectorTarget {
+                node: "node-beta".to_owned(),
+                zone: Some("z:community".to_owned()),
+                persisted_at: "2026-03-12T00:00:00Z".to_owned(),
+            },
+        );
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "connector",
+            "lease",
+            "status",
+            "--connector",
+            "github",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["zone_id"], "z:community");
+        assert_eq!(payload["effective_target"]["source"], "connector-target");
+        assert_eq!(payload["effective_target"]["zone"], "z:community");
+    }
+
+    #[test]
     fn execute_connector_lease_status_with_host_queries_admin_route() {
         let (host, server) = spawn_mock_host(
             StdBTreeMap::from([
@@ -36159,6 +36253,49 @@ deny_ptrace = true
                             .is_some_and(|holders| holders.len() == 3)
                 }))
         );
+    }
+
+    #[test]
+    fn execute_mesh_lease_ladder_filter_uses_resolved_connector_target_zone() {
+        let (_tempdir, path, _guard) = temp_context_config();
+        let mut config = super::default_context_config();
+        let mesh_targets = &mut config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets;
+        mesh_targets.active_node = Some("node-alpha".to_owned());
+        mesh_targets.connector_targets.insert(
+            "github".to_owned(),
+            super::MeshConnectorTarget {
+                node: "node-beta".to_owned(),
+                zone: Some("z:community".to_owned()),
+                persisted_at: "2026-03-12T00:00:00Z".to_owned(),
+            },
+        );
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "mesh",
+            "lease",
+            "ladder",
+            "--connector",
+            "fcp.github",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["connector_count"], 1);
+        let connector = payload["connectors"]
+            .as_array()
+            .and_then(|connectors| connectors.first())
+            .expect("one connector ladder should be reported");
+        assert_eq!(connector["connector"]["requested_selector"], "fcp.github");
+        assert_eq!(connector["connector"]["slug"], "github");
+        assert_eq!(connector["zone_id"], "z:community");
+        assert_eq!(connector["effective_target"]["source"], "connector-target");
+        assert_eq!(connector["effective_target"]["target_key"], "github");
     }
 
     #[test]

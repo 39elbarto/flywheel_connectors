@@ -40,7 +40,7 @@ Important implementation truths from `connector.rs`, `main.rs`, and `manifest.to
 
 - Configuration is `base_url`, `token_base_url`, `app_id`, `client_secret`, and bounded `request_timeout_ms`.
 - One connector instance is bound to one QQ bot app identity through one `app_id` / `client_secret` pair.
-- Access tokens are fetched with `POST /app/getAppAccessToken` against the token host and cached in memory only with a refresh safety margin.
+- Access tokens are fetched with `POST /app/getAppAccessToken` against the token host and cached in memory only with a refresh safety margin; an API 401/403 clears the cache and refetches once before the request fails closed.
 - Live REST calls use `Authorization: QQBot <token>` against the API host.
 - Channel sends call `POST /channels/{channel_id}/messages`.
 - Group sends call `POST /v2/groups/{group_openid}/messages`.
@@ -87,7 +87,7 @@ This slice is intentionally closer to "outbound bot message dispatch plus connec
 - One connector instance maps to one QQ bot app identity.
 - Authentication is app-level `app_id` + `client_secret`, exchanged for an access token.
 - The older QQ bot token model is deprecated in the official docs; the connector uses access-token issuance rather than the deprecated token path.
-- Access tokens are cached in memory only and are never persisted to disk by this connector.
+- Access tokens are cached in memory only, refreshed once after API unauthorized/forbidden responses, and are never persisted to disk by this connector.
 - Stable first-slice target identifiers are:
   - `channel_id` for text subchannel sends
   - `group_openid` for group-chat sends

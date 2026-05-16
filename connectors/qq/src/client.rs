@@ -236,6 +236,30 @@ impl QqClient {
         Ok(token.access_token)
     }
 
+    async fn invalidate_access_token(&self) {
+        *self.token_cache.lock().await = None;
+    }
+
+    async fn send_api_request_with_token(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&Value>,
+        access_material: &str,
+    ) -> QqResult<reqwest::Response> {
+        let url = self.api_url(path)?;
+        let request = self
+            .client
+            .request(method, url)
+            .header("Authorization", format!("QQBot {access_material}"));
+        let request = if let Some(body) = body {
+            request.json(body)
+        } else {
+            request
+        };
+        request.send().await.map_err(QqError::Http)
+    }
+
     /// Send an authenticated API request to `QQ`.
     ///
     /// # Errors
@@ -248,18 +272,18 @@ impl QqClient {
         path: &str,
         body: Option<Value>,
     ) -> QqResult<Value> {
-        let access_material = self.access_token().await?;
-        let url = self.api_url(path)?;
-        let request = self
-            .client
-            .request(method, url)
-            .header("Authorization", format!("QQBot {access_material}"));
-        let request = if let Some(body) = body.as_ref() {
-            request.json(body)
-        } else {
-            request
-        };
-        let response = request.send().await.map_err(QqError::Http)?;
+        let mut access_material = self.access_token().await?;
+        let mut response = self
+            .send_api_request_with_token(method.clone(), path, body.as_ref(), &access_material)
+            .await?;
+
+        if should_refresh_token_after_api_status(response.status().as_u16()) {
+            self.invalidate_access_token().await;
+            access_material = self.access_token().await?;
+            response = self
+                .send_api_request_with_token(method, path, body.as_ref(), &access_material)
+                .await?;
+        }
 
         if !response.status().is_success() {
             let status = response.status().as_u16();
@@ -274,6 +298,10 @@ impl QqClient {
 
         response.json().await.map_err(QqError::Http)
     }
+}
+
+const fn should_refresh_token_after_api_status(status: u16) -> bool {
+    matches!(status, 401 | 403)
 }
 
 #[derive(Debug)]
@@ -1146,6 +1174,7 @@ pub fn normalize_message_event(event: &QqGatewayEvent) -> QqResult<NormalizedQqE
         QqRouting::Group => msg.group_openid.clone(),
         _ => None,
     };
+    let text = effective_message_text(&msg);
 
     Ok(NormalizedQqEvent {
         event_type: event_type.to_string(),
@@ -1155,7 +1184,7 @@ pub fn normalize_message_event(event: &QqGatewayEvent) -> QqResult<NormalizedQqE
         group_id,
         sender_id,
         sender_name,
-        text: effective_message_text(&msg),
+        text,
         timestamp: msg.timestamp,
         is_reply,
         reply_to,
@@ -1872,6 +1901,51 @@ mod tests {
                 "expected Unauthorized"
             ),
         }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn api_request_refreshes_token_once_after_unauthorized_api_response() {
+        let api_server = TestHttpServer::respond(vec![
+            TestHttpResponse::text("GET", "/gateway", 401, "expired access token")
+                .with_required_header("authorization", "QQBot expired-token"),
+            TestHttpResponse::json(
+                "GET",
+                "/gateway",
+                200,
+                json!({
+                    "url": "wss://gateway.qq.example/ws"
+                }),
+            )
+            .with_required_header("authorization", "QQBot fresh-token"),
+        ]);
+        let token_server = TestHttpServer::respond(vec![
+            TestHttpResponse::json(
+                "POST",
+                "/app/getAppAccessToken",
+                200,
+                json!({
+                    "access_token": "expired-token",
+                    "expires_in": 7200
+                }),
+            ),
+            TestHttpResponse::json(
+                "POST",
+                "/app/getAppAccessToken",
+                200,
+                json!({
+                    "access_token": "fresh-token",
+                    "expires_in": 7200
+                }),
+            ),
+        ]);
+
+        let client = QqClient::new(test_config(api_server.uri(), token_server.uri())).unwrap();
+        let output = client
+            .api_request(reqwest::Method::GET, "/gateway", None)
+            .await
+            .unwrap();
+
+        assert_eq!(output["url"], "wss://gateway.qq.example/ws");
     }
 
     #[fcp_async_core::runtime::test]

@@ -979,6 +979,8 @@ fn prewarm_evidence(
 
     Ok(SwarmPrewarmColdStartEvidence {
         schema_version: SWARM_PREWARM_COLD_START_SCHEMA_VERSION.to_string(),
+        execution_mode: SwarmEvidenceExecutionMode::Smoke,
+        source_kind: SwarmEvidenceSourceKind::Offline,
         scenario_id: case.scenario_id.to_string(),
         connector_id: "fcp.github:utility:1.0.0".to_string(),
         command_line: prewarm_command_line(&cargo_target_dir),
@@ -1547,7 +1549,11 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
         warm_hit["schema_version"],
         SWARM_PREWARM_COLD_START_SCHEMA_VERSION
     );
+    assert_eq!(warm_hit["execution_mode"], "smoke");
+    assert_eq!(warm_hit["source_kind"], "offline");
     assert_eq!(warm_hit["connector_id"], "fcp.github:utility:1.0.0");
+    assert_eq!(warm_hit["git_revision"], "e2e-smoke-revision");
+    assert_eq!(warm_hit["worker_id"], "offline-e2e-runner");
     let cargo_target_dir = warm_hit["cargo_target_dir"]
         .as_str()
         .ok_or("cargo target dir should be recorded")?;

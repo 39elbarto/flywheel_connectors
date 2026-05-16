@@ -2689,6 +2689,10 @@ pub struct SwarmPrewarmLatencyPercentiles {
 pub struct SwarmPrewarmColdStartEvidence {
     /// Evidence schema version.
     pub schema_version: String,
+    /// Smoke or soak execution mode for this evidence record.
+    pub execution_mode: SwarmEvidenceExecutionMode,
+    /// Whether the evidence came from offline fixtures, a controlled host, or live services.
+    pub source_kind: SwarmEvidenceSourceKind,
     /// Stable scenario identifier.
     pub scenario_id: String,
     /// Connector identifier.
@@ -2784,6 +2788,15 @@ impl SwarmPrewarmColdStartEvidence {
                 expected: SWARM_PREWARM_COLD_START_SCHEMA_VERSION.to_string(),
                 actual: self.schema_version.clone(),
             });
+        }
+        if self.execution_mode == SwarmEvidenceExecutionMode::Soak
+            && self.source_kind == SwarmEvidenceSourceKind::Offline
+        {
+            return Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresHostBackedSource {
+                    source_kind: self.source_kind,
+                },
+            );
         }
         for (field, value) in [
             ("scenario_id", self.scenario_id.as_str()),
@@ -2881,58 +2894,128 @@ impl SwarmPrewarmColdStartEvidence {
     /// serde error when the typed evidence cannot be converted into JSON.
     pub fn to_jsonl_value(&self) -> Result<Value, SwarmPrewarmColdStartEvidenceJsonError> {
         self.validate()?;
-        Ok(json!({
-            "record_type": "swarm_prewarm_cold_start_evidence",
-            "schema_version": self.schema_version,
-            "scenario_id": self.scenario_id,
-            "connector_id": self.connector_id,
-            "command_line": self.command_line,
-            "cargo_target_dir": self.cargo_target_dir,
-            "connector_fixture_id": self.connector_fixture_id,
-            "host_boundary": self.host_boundary,
-            "manifest_hash": self.manifest_hash,
-            "zone": self.zone,
-            "strategy": self.strategy,
-            "pool_state": self.pool_state,
-            "pool_size": self.pool_size,
-            "admission_decision": self.admission_decision,
-            "warm_checkout": self.warm_checkout,
-            "activation_latency_ms": self.activation_latency_ms,
-            "baseline_on_demand_latency_ms": self.baseline_on_demand_latency_ms,
-            "p50_activation_latency_ms": self.latency.p50_ms,
-            "p95_activation_latency_ms": self.latency.p95_ms,
-            "p99_activation_latency_ms": self.latency.p99_ms,
-            "baseline_p50_activation_latency_ms": self.baseline_latency.p50_ms,
-            "baseline_p95_activation_latency_ms": self.baseline_latency.p95_ms,
-            "baseline_p99_activation_latency_ms": self.baseline_latency.p99_ms,
-            "p50_activation_latency_improvement_ms": self
-                .baseline_latency
+        fn put<T: Serialize>(
+            record: &mut serde_json::Map<String, Value>,
+            key: &'static str,
+            value: T,
+        ) -> Result<(), serde_json::Error> {
+            record.insert(key.to_string(), serde_json::to_value(value)?);
+            Ok(())
+        }
+
+        let mut record = serde_json::Map::new();
+        put(
+            &mut record,
+            "record_type",
+            "swarm_prewarm_cold_start_evidence",
+        )?;
+        put(&mut record, "schema_version", &self.schema_version)?;
+        put(&mut record, "execution_mode", self.execution_mode)?;
+        put(&mut record, "source_kind", self.source_kind)?;
+        put(&mut record, "scenario_id", &self.scenario_id)?;
+        put(&mut record, "connector_id", &self.connector_id)?;
+        put(&mut record, "command_line", &self.command_line)?;
+        put(&mut record, "git_revision", &self.git_revision)?;
+        put(&mut record, "worker_id", &self.worker_id)?;
+        put(&mut record, "cargo_target_dir", &self.cargo_target_dir)?;
+        put(
+            &mut record,
+            "connector_fixture_id",
+            &self.connector_fixture_id,
+        )?;
+        put(&mut record, "host_boundary", &self.host_boundary)?;
+        put(&mut record, "manifest_hash", &self.manifest_hash)?;
+        put(&mut record, "zone", &self.zone)?;
+        put(&mut record, "strategy", &self.strategy)?;
+        put(&mut record, "pool_state", &self.pool_state)?;
+        put(&mut record, "pool_size", self.pool_size)?;
+        put(&mut record, "admission_decision", &self.admission_decision)?;
+        put(&mut record, "warm_checkout", self.warm_checkout)?;
+        put(
+            &mut record,
+            "activation_latency_ms",
+            self.activation_latency_ms,
+        )?;
+        put(
+            &mut record,
+            "baseline_on_demand_latency_ms",
+            self.baseline_on_demand_latency_ms,
+        )?;
+        put(
+            &mut record,
+            "p50_activation_latency_ms",
+            self.latency.p50_ms,
+        )?;
+        put(
+            &mut record,
+            "p95_activation_latency_ms",
+            self.latency.p95_ms,
+        )?;
+        put(
+            &mut record,
+            "p99_activation_latency_ms",
+            self.latency.p99_ms,
+        )?;
+        put(
+            &mut record,
+            "baseline_p50_activation_latency_ms",
+            self.baseline_latency.p50_ms,
+        )?;
+        put(
+            &mut record,
+            "baseline_p95_activation_latency_ms",
+            self.baseline_latency.p95_ms,
+        )?;
+        put(
+            &mut record,
+            "baseline_p99_activation_latency_ms",
+            self.baseline_latency.p99_ms,
+        )?;
+        put(
+            &mut record,
+            "p50_activation_latency_improvement_ms",
+            self.baseline_latency
                 .p50_ms
                 .saturating_sub(self.latency.p50_ms),
-            "p95_activation_latency_improvement_ms": self
-                .baseline_latency
+        )?;
+        put(
+            &mut record,
+            "p95_activation_latency_improvement_ms",
+            self.baseline_latency
                 .p95_ms
                 .saturating_sub(self.latency.p95_ms),
-            "p99_activation_latency_improvement_ms": self
-                .baseline_latency
+        )?;
+        put(
+            &mut record,
+            "p99_activation_latency_improvement_ms",
+            self.baseline_latency
                 .p99_ms
                 .saturating_sub(self.latency.p99_ms),
-            "sandbox_layer": self.sandbox_layer,
-            "sandbox_profile": self.sandbox_profile,
-            "sandbox_boundary": self.sandbox_boundary,
-            "credential_mode": self.credential_mode,
-            "rss_bytes": self.rss_bytes,
-            "process_count": self.process_count,
-            "concurrent_startups": self.concurrent_startups,
-            "error_mapping": self.error_mapping,
-            "cleanup_result": self.cleanup_result,
-            "restart_reason": self.restart_reason,
-            "fallback_reason": self.fallback_reason,
-            "unsafe_rejection_reason": self.unsafe_rejection_reason,
-            "skip_reason": self.skip_reason,
-            "shutdown_cleanup_verified": self.shutdown_cleanup_verified,
-            "evidence": serde_json::to_value(self)?,
-        }))
+        )?;
+        put(&mut record, "sandbox_layer", &self.sandbox_layer)?;
+        put(&mut record, "sandbox_profile", &self.sandbox_profile)?;
+        put(&mut record, "sandbox_boundary", &self.sandbox_boundary)?;
+        put(&mut record, "credential_mode", &self.credential_mode)?;
+        put(&mut record, "rss_bytes", self.rss_bytes)?;
+        put(&mut record, "process_count", self.process_count)?;
+        put(&mut record, "concurrent_startups", self.concurrent_startups)?;
+        put(&mut record, "error_mapping", &self.error_mapping)?;
+        put(&mut record, "cleanup_result", &self.cleanup_result)?;
+        put(&mut record, "restart_reason", &self.restart_reason)?;
+        put(&mut record, "fallback_reason", &self.fallback_reason)?;
+        put(
+            &mut record,
+            "unsafe_rejection_reason",
+            &self.unsafe_rejection_reason,
+        )?;
+        put(&mut record, "skip_reason", &self.skip_reason)?;
+        put(
+            &mut record,
+            "shutdown_cleanup_verified",
+            self.shutdown_cleanup_verified,
+        )?;
+        put(&mut record, "evidence", serde_json::to_value(self)?)?;
+        Ok(Value::Object(record))
     }
 }
 
@@ -2945,6 +3028,11 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         expected: String,
         /// Observed schema.
         actual: String,
+    },
+    /// Soak records must be produced by host-backed or live evidence.
+    SoakRequiresHostBackedSource {
+        /// Observed source kind.
+        source_kind: SwarmEvidenceSourceKind,
     },
     /// A required string field was empty.
     EmptyField {
@@ -2979,6 +3067,11 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
             Self::SchemaMismatch { expected, actual } => write!(
                 f,
                 "swarm prewarm schema mismatch: expected '{expected}', got '{actual}'"
+            ),
+            Self::SoakRequiresHostBackedSource { source_kind } => write!(
+                f,
+                "swarm prewarm soak evidence requires host-backed or live source, got '{}'",
+                source_kind.as_str()
             ),
             Self::EmptyField { field } => {
                 write!(f, "swarm prewarm field '{field}' is empty")
@@ -8992,6 +9085,8 @@ mod tests {
     fn prewarm_cold_start_evidence_fixture() -> SwarmPrewarmColdStartEvidence {
         SwarmPrewarmColdStartEvidence {
             schema_version: SWARM_PREWARM_COLD_START_SCHEMA_VERSION.to_string(),
+            execution_mode: SwarmEvidenceExecutionMode::Smoke,
+            source_kind: SwarmEvidenceSourceKind::Offline,
             scenario_id: "prewarm_warm_hit".to_string(),
             connector_id: "fcp.github:utility:1.0.0".to_string(),
             command_line: vec![
@@ -9068,6 +9163,8 @@ mod tests {
             record["schema_version"],
             SWARM_PREWARM_COLD_START_SCHEMA_VERSION
         );
+        assert_eq!(record["execution_mode"], "smoke");
+        assert_eq!(record["source_kind"], "offline");
         assert_eq!(record["connector_id"], "fcp.github:utility:1.0.0");
         assert_eq!(
             record["command_line"],
@@ -9085,6 +9182,8 @@ mod tests {
             ])
         );
         assert_eq!(record["cargo_target_dir"], "/tmp/fcp-prewarm-e2e");
+        assert_eq!(record["git_revision"], "abc123");
+        assert_eq!(record["worker_id"], "rch-worker-64c");
         assert_eq!(
             record["connector_fixture_id"],
             "fcp-test-connector:request-response"
@@ -9192,6 +9291,17 @@ mod tests {
                 activation_ms: 26,
                 baseline_ms: 24
             })
+        );
+
+        let mut offline_soak = prewarm_cold_start_evidence_fixture();
+        offline_soak.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        assert_eq!(
+            offline_soak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresHostBackedSource {
+                    source_kind: SwarmEvidenceSourceKind::Offline
+                }
+            )
         );
     }
 

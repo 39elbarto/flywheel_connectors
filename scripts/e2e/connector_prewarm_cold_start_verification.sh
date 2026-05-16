@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-}"
+REQUIRE_PRODUCTION_SOAK="${REQUIRE_PRODUCTION_SOAK:-0}"
 
 usage() {
   cat <<'EOF'
@@ -13,11 +14,17 @@ Usage: scripts/e2e/connector_prewarm_cold_start_verification.sh [options]
 Options:
   --run-id <id>      Run identifier for artifact paths
   --out-root <path>  Artifact root (default: artifacts/e2e/connector-prewarm-cold-start/<run-id>)
+  --require-production-soak
+                     Fail unless evidence is host-backed/live soak evidence
   -h, --help         Show this help
 
 Runs the connector cold-start prewarm evidence lane through rch, extracts
 redaction-safe JSONL emitted by the fcp-e2e swarm gauntlet test, validates the
 required scenario coverage, and writes an operator replay bundle.
+
+By default this validates the deterministic smoke lane. Set
+REQUIRE_PRODUCTION_SOAK=1 or pass --require-production-soak for final
+acceptance gating; offline policy evidence must not satisfy that mode.
 EOF
 }
 
@@ -30,6 +37,10 @@ while [[ $# -gt 0 ]]; do
     --out-root)
       OUT_ROOT="$2"
       shift 2
+      ;;
+    --require-production-soak)
+      REQUIRE_PRODUCTION_SOAK=1
+      shift
       ;;
     -h|--help)
       usage
@@ -58,6 +69,19 @@ now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 require_cmd jq
 require_cmd rch
+
+case "${REQUIRE_PRODUCTION_SOAK}" in
+  1|true|TRUE|yes|YES)
+    require_production_soak_json=true
+    ;;
+  0|false|FALSE|no|NO)
+    require_production_soak_json=false
+    ;;
+  *)
+    echo "REQUIRE_PRODUCTION_SOAK must be 0/1/true/false/yes/no" >&2
+    exit 2
+    ;;
+esac
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
@@ -138,7 +162,7 @@ if [[ "${overall_status}" == "passed" ]]; then
   fi
 
   if [[ "${evidence_status}" == "passed" ]]; then
-    if ! jq -s -e '
+    if ! jq -s --argjson require_production_soak "${require_production_soak_json}" '
       def required:
         [
           "prewarm_empty_pool",
@@ -156,9 +180,26 @@ if [[ "${overall_status}" == "passed" ]]; then
       def missing: required - (ids);
       {
         record_count: length,
+        require_production_soak: $require_production_soak,
         missing_scenarios: missing,
         schema_ok: all(.[]; .schema_version == "swarm-prewarm-cold-start/v2"),
         record_type_ok: all(.[]; .record_type == "swarm_prewarm_cold_start_evidence"),
+        execution_mode_shape_ok: all(.[];
+          (.execution_mode | type) == "string"
+          and (.source_kind | type) == "string"
+        ),
+        production_soak_ok: (
+          if $require_production_soak then
+            all(.[];
+              .execution_mode == "soak"
+              and (.source_kind == "host_backed" or .source_kind == "live")
+              and (.host_boundary | type) == "string"
+              and .host_boundary != "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout"
+              and (.sandbox_boundary | type) == "string"
+              and (.sandbox_boundary | contains("fcp-sandbox"))
+            )
+          else true end
+        ),
         percentile_fields_ok: all(.[];
           (.p50_activation_latency_ms | type) == "number"
           and (.p95_activation_latency_ms | type) == "number"
@@ -176,13 +217,22 @@ if [[ "${overall_status}" == "passed" ]]; then
       } as $v
       | $v
       | .status = (
-          if (($v.missing_scenarios | length) == 0 and $v.schema_ok and $v.record_type_ok and $v.percentile_fields_ok and $v.redaction_shape_ok)
+          if (
+            ($v.missing_scenarios | length) == 0
+            and $v.schema_ok
+            and $v.record_type_ok
+            and $v.execution_mode_shape_ok
+            and $v.production_soak_ok
+            and $v.percentile_fields_ok
+            and $v.redaction_shape_ok
+          )
           then "passed"
           else "failed"
           end
         )
-      | select(.status == "passed")
     ' "${EVIDENCE_JSONL}" > "${VALIDATION_JSON}"; then
+      validation_status="failed"
+    elif [[ "$(jq -r '.status // "failed"' "${VALIDATION_JSON}")" != "passed" ]]; then
       validation_status="failed"
     fi
   fi
@@ -209,6 +259,7 @@ jq -n \
   --arg git_revision "${git_revision}" \
   --arg target_dir "${target_dir}" \
   --arg rch_require_remote "${RCH_REQUIRE_REMOTE:-1}" \
+  --argjson require_production_soak "${require_production_soak_json}" \
   --arg generated_at "$(now_iso)" \
   '{
     run_id: $run_id,
@@ -218,6 +269,7 @@ jq -n \
     git_revision: $git_revision,
     cargo_target_dir: $target_dir,
     rch_require_remote: $rch_require_remote,
+    require_production_soak: $require_production_soak,
     generated_at: $generated_at
   }' > "${ENVIRONMENT_JSON}"
 
@@ -239,12 +291,14 @@ jq -n \
   --arg validation_json "${VALIDATION_JSON}" \
   --arg skip_jsonl "${SKIP_JSONL}" \
   --arg environment_json "${ENVIRONMENT_JSON}" \
+  --argjson require_production_soak "${require_production_soak_json}" \
   '{
     run_id: $run_id,
     status: $status,
     test_status: $test_status,
     evidence_status: $evidence_status,
     validation_status: $validation_status,
+    require_production_soak: $require_production_soak,
     skip_reason: (if ($skip_reason | length) > 0 then $skip_reason else null end),
     evidence_count: $evidence_count,
     artifacts: {
@@ -260,7 +314,7 @@ cat > "${REPLAY_SH}" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd "${REPO_ROOT}"
-RUN_ID="${RUN_ID}" OUT_ROOT="${OUT_ROOT}" RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" \\
+RUN_ID="${RUN_ID}" OUT_ROOT="${OUT_ROOT}" RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" REQUIRE_PRODUCTION_SOAK="${REQUIRE_PRODUCTION_SOAK}" \\
   bash scripts/e2e/connector_prewarm_cold_start_verification.sh \\
   --run-id "${RUN_ID}" \\
   --out-root "${OUT_ROOT}"

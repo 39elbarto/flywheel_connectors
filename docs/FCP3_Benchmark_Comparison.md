@@ -45,9 +45,9 @@ The connector prewarm lane uses `swarm-prewarm-cold-start/v2` JSONL records from
 `crates/fcp-e2e/tests/swarm_gauntlet_e2e.rs`. The v2 records carry the same
 latency and resource fields as v1 plus the host checkout boundary, sandbox
 profile/boundary, `CARGO_TARGET_DIR`, connector fixture id, pool size,
-admission decision, warm-checkout flag, error mapping, and cleanup result. That
-keeps cold-start comparisons tied to `fcp-host`/`fcp-sandbox` evidence instead
-of a latency-only artifact.
+admission decision, warm-checkout flag, execution mode, source kind, error
+mapping, and cleanup result. That keeps cold-start comparisons tied to the
+explicit evidence class instead of a latency-only artifact.
 The replayable top-level row exposes current p50/p95/p99 activation latency,
 baseline p50/p95/p99 activation latency, and per-percentile improvement deltas
 so before/after promotion gates do not need to parse nested evidence payloads.
@@ -59,7 +59,12 @@ Run `scripts/e2e/connector_prewarm_cold_start_verification.sh` to produce the
 repeatable artifact bundle under `artifacts/e2e/connector-prewarm-cold-start/`.
 The script keeps Cargo execution behind `rch`, extracts the emitted JSONL proof,
 validates the required scenarios, and writes a structured skip artifact when a
-remote worker is unavailable.
+remote worker is unavailable. Its default lane is deterministic smoke evidence
+with `execution_mode=smoke` and `source_kind=offline`; final production-soak
+acceptance must run with `--require-production-soak` or
+`REQUIRE_PRODUCTION_SOAK=1`, which rejects offline policy records and requires
+host-backed or live soak evidence through production `fcp-host`/`fcp-sandbox`
+boundaries.
 
 ## Environment Capture For Final Review
 

@@ -356,6 +356,22 @@ optimization work where the system is not yet user-optimal.
 
 ## Reproducibility
 
+Run the full assurance gauntlet when preparing reviewer or closeout evidence:
+
+```sh
+scripts/e2e/lattice_delegation_assurance_gauntlet.sh
+```
+
+That script is the highest-level command bundle for the KYOPB lattice proof
+chain. It runs the Lean ID checks, Rust/Lean correspondence fixtures,
+`fcp-crypto-pq` representation and V4 unit coverage, the no-mock
+`fcp-host` dispatcher e2e, Criterion lattice benchmarks, formatting,
+check/clippy, `git diff --check`, UBS, artifact hashing, and redaction scans.
+Before emitting a passing summary, it also validates the generated JSONL
+contracts for required provenance fields, theorem and assumption IDs, host
+dispatcher scenarios, and stable `LATTICE_*` error mappings. A skipped Lean
+build is recorded as a skip record; Cargo-backed lanes still run through `rch`.
+
 Run the benchmark:
 
 ```sh

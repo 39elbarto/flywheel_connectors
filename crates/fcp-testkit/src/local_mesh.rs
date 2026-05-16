@@ -1,11 +1,13 @@
 #![allow(clippy::missing_errors_doc, clippy::module_name_repetitions)]
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use fcp_cbor::SchemaId;
+use fcp_cbor::{CanonicalSerializer, SchemaId, SerializationError};
 use fcp_core::{ConnectorId, ObjectHeader, OperationReceipt, Provenance};
-use fcp_crypto::{Ed25519SigningKey, Ed25519VerifyingKey};
+use fcp_crypto::{CryptoError, Ed25519SigningKey, Ed25519VerifyingKey};
 use fcp_mesh::{
     AvailabilityProfile, CpuArch, DeviceProfile, LatencyClass, MeshNode, MeshNodeConfig,
     PowerSource,
@@ -97,6 +99,15 @@ pub struct LocalNodeSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalNodeReplayTimeline {
+    pub node_id_hash: String,
+    pub state_at_t0: LocalNodeSnapshot,
+    pub state_at_chaos: LocalNodeSnapshot,
+    pub state_at_heal: LocalNodeSnapshot,
+    pub state_at_end: LocalNodeSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalReplayManifest {
     pub schema_version: String,
     pub scenario_id: String,
@@ -118,7 +129,17 @@ pub struct LocalReplayBundle {
     pub manifest: LocalReplayManifest,
     pub events: Vec<LocalRoleTransition>,
     pub node_snapshots: Vec<LocalNodeSnapshot>,
+    pub node_timelines: Vec<LocalNodeReplayTimeline>,
     pub hashes: LocalReplayHashes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalReplayBundlePaths {
+    pub root: PathBuf,
+    pub manifest: PathBuf,
+    pub events: PathBuf,
+    pub hashes: PathBuf,
+    pub snapshot_root: PathBuf,
 }
 
 impl LocalReplayBundle {
@@ -136,6 +157,46 @@ impl LocalReplayBundle {
             && !bundle.contains("bearer")
             && !bundle.contains("token")
             && !bundle.contains("cookie"))
+    }
+
+    pub fn write_to_dir(
+        &self,
+        root: impl AsRef<Path>,
+    ) -> Result<LocalReplayBundlePaths, LocalMeshHarnessError> {
+        let root = root.as_ref();
+        let manifest = root.join("manifest.json");
+        let events = root.join("events.jsonl");
+        let hashes = root.join("hashes.json");
+        let snapshot_root = root.join("per_node_snapshots");
+
+        fs::create_dir_all(&snapshot_root)?;
+        write_json_pretty(&manifest, &self.manifest)?;
+        fs::write(&events, self.events_jsonl()?)?;
+        write_json_pretty(&hashes, &self.hashes)?;
+
+        for (index, timeline) in self.node_timelines.iter().enumerate() {
+            let hash_prefix = timeline.node_id_hash.chars().take(12).collect::<String>();
+            let node_dir = snapshot_root.join(format!("node_{index:03}_{hash_prefix}"));
+            fs::create_dir_all(&node_dir)?;
+            write_snapshot_cbor(&node_dir.join("state_at_t0.cbor"), &timeline.state_at_t0)?;
+            write_snapshot_cbor(
+                &node_dir.join("state_at_chaos.cbor"),
+                &timeline.state_at_chaos,
+            )?;
+            write_snapshot_cbor(
+                &node_dir.join("state_at_heal.cbor"),
+                &timeline.state_at_heal,
+            )?;
+            write_snapshot_cbor(&node_dir.join("state_at_end.cbor"), &timeline.state_at_end)?;
+        }
+
+        Ok(LocalReplayBundlePaths {
+            root: root.to_path_buf(),
+            manifest,
+            events,
+            hashes,
+            snapshot_root,
+        })
     }
 }
 
@@ -162,6 +223,12 @@ pub enum LocalMeshHarnessError {
     UnknownNode(String),
     #[error("failed to serialize deterministic harness state: {0}")]
     StateSerialization(#[from] serde_json::Error),
+    #[error("failed to write replay bundle artifact: {0}")]
+    ReplayArtifactIo(#[from] std::io::Error),
+    #[error("failed to serialize replay snapshot as canonical CBOR: {0}")]
+    ReplaySnapshotSerialization(#[from] SerializationError),
+    #[error("failed to derive deterministic harness signing key: {0}")]
+    SigningKey(#[from] CryptoError),
 }
 
 struct LocalMeshNode {
@@ -204,7 +271,7 @@ impl LocalMeshHarness {
             let node_name = format!("mesh-harness-node-{}", index + 1);
             let mesh_id = MeshNodeId::new(node_name.clone());
             let tailscale_id = TailscaleNodeId::new(node_name.clone());
-            let signing_key = deterministic_signing_key(seed_index, &node_name, "signing");
+            let signing_key = deterministic_signing_key(seed_index, &node_name, "signing")?;
             let mesh = build_mesh_node(seed_index, &node_name);
 
             nodes.insert(
@@ -256,11 +323,13 @@ impl LocalMeshHarness {
         let initial_holder = self.select_holder()?;
         self.promote_holder(&scenario_id, chaos_mode, &initial_holder, None, &mut rng)?;
         let idempotency_key = format!("{scenario_id}_idem");
+        let state_at_t0 = self.node_snapshots();
 
-        match chaos_mode {
+        let (state_at_chaos, state_at_heal) = match chaos_mode {
             LocalChaosMode::NetworkPartitionThenHeal => {
                 self.execute_once(&idempotency_key, &initial_holder)?;
                 self.partition_holder(&scenario_id, chaos_mode, &initial_holder, &mut rng)?;
+                let state_at_chaos = self.node_snapshots();
                 let next_holder = self.select_holder()?;
                 self.promote_holder(
                     &scenario_id,
@@ -277,9 +346,12 @@ impl LocalMeshHarness {
                     &next_holder,
                     &mut rng,
                 )?;
+                let state_at_heal = self.node_snapshots();
+                (state_at_chaos, state_at_heal)
             }
             LocalChaosMode::KillLeaderMidWrite => {
                 self.kill_node(&scenario_id, chaos_mode, &initial_holder, &mut rng)?;
+                let state_at_chaos = self.node_snapshots();
                 let next_holder = self.select_holder()?;
                 self.promote_holder(
                     &scenario_id,
@@ -296,10 +368,13 @@ impl LocalMeshHarness {
                     &next_holder,
                     &mut rng,
                 )?;
+                let state_at_heal = self.node_snapshots();
+                (state_at_chaos, state_at_heal)
             }
             LocalChaosMode::KillFollowerMidRead => {
                 let follower = self.random_follower(&initial_holder, &mut rng)?;
                 self.kill_node(&scenario_id, chaos_mode, &follower, &mut rng)?;
+                let state_at_chaos = self.node_snapshots();
                 self.execute_once(&idempotency_key, &initial_holder)?;
                 self.recover_node(
                     &scenario_id,
@@ -308,12 +383,18 @@ impl LocalMeshHarness {
                     &initial_holder,
                     &mut rng,
                 )?;
+                let state_at_heal = self.node_snapshots();
+                (state_at_chaos, state_at_heal)
             }
-        }
+        };
 
         let active_holder = self.select_holder()?;
         let final_state_hash = self.final_state_hash()?;
-        let replay_bundle = self.replay_bundle(&scenario_id, chaos_mode, &final_state_hash)?;
+        let state_at_end = self.node_snapshots();
+        let node_timelines =
+            node_timelines_from_snapshots(state_at_t0, state_at_chaos, state_at_heal, state_at_end);
+        let replay_bundle =
+            self.replay_bundle(&scenario_id, chaos_mode, &final_state_hash, node_timelines)?;
 
         Ok(LocalFailoverOutcome {
             scenario_id,
@@ -575,7 +656,13 @@ impl LocalMeshHarness {
             });
         }
         let index = rng.gen_range(0..followers.len());
-        Ok(followers[index].clone())
+        followers
+            .get(index)
+            .cloned()
+            .ok_or_else(|| LocalMeshHarnessError::NoEligibleHolder {
+                zone_id: self.zone_id.clone(),
+                subject_id: self.subject_id,
+            })
     }
 
     fn node(&self, node_id: &TailscaleNodeId) -> Result<&LocalMeshNode, LocalMeshHarnessError> {
@@ -608,6 +695,7 @@ impl LocalMeshHarness {
         scenario_id: &str,
         chaos_mode: LocalChaosMode,
         final_state_hash: &str,
+        node_timelines: Vec<LocalNodeReplayTimeline>,
     ) -> Result<LocalReplayBundle, LocalMeshHarnessError> {
         let transition_hash = hash_json(&self.transitions)?;
         let receipt_hash = hash_json(&self.receipts_by_key)?;
@@ -622,6 +710,7 @@ impl LocalMeshHarness {
             },
             events: self.transitions.clone(),
             node_snapshots: self.node_snapshots(),
+            node_timelines,
             hashes: LocalReplayHashes {
                 final_state_hash: final_state_hash.to_string(),
                 receipt_hash,
@@ -724,15 +813,22 @@ fn deterministic_rng(seed_index: u64, chaos_mode: LocalChaosMode) -> ChaCha20Rng
     ChaCha20Rng::from_seed(*hasher.finalize().as_bytes())
 }
 
-fn deterministic_signing_key(seed_index: u64, node_name: &str, purpose: &str) -> Ed25519SigningKey {
-    Ed25519SigningKey::from_bytes(&derive_key_material(seed_index, node_name, purpose))
-        .expect("deterministic signing seed should be valid")
+fn deterministic_signing_key(
+    seed_index: u64,
+    node_name: &str,
+    purpose: &str,
+) -> Result<Ed25519SigningKey, LocalMeshHarnessError> {
+    Ok(Ed25519SigningKey::from_bytes(&derive_key_material(
+        seed_index, node_name, purpose,
+    ))?)
 }
 
 fn derive_u64(seed_index: u64, node_name: &str, purpose: &str) -> u64 {
     let bytes = derive_key_material(seed_index, node_name, purpose);
     let mut value = [0_u8; 8];
-    value.copy_from_slice(&bytes[..8]);
+    for (target, source) in value.iter_mut().zip(bytes) {
+        *target = source;
+    }
     u64::from_le_bytes(value)
 }
 
@@ -760,6 +856,45 @@ fn update_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
 
 fn object_id_from_label(label: &str) -> ObjectId {
     ObjectId::from_unscoped_bytes(label.as_bytes())
+}
+
+fn node_timelines_from_snapshots(
+    state_at_t0: Vec<LocalNodeSnapshot>,
+    state_at_chaos: Vec<LocalNodeSnapshot>,
+    state_at_heal: Vec<LocalNodeSnapshot>,
+    state_at_end: Vec<LocalNodeSnapshot>,
+) -> Vec<LocalNodeReplayTimeline> {
+    state_at_t0
+        .into_iter()
+        .zip(state_at_chaos)
+        .zip(state_at_heal)
+        .zip(state_at_end)
+        .map(
+            |(((state_at_t0, state_at_chaos), state_at_heal), state_at_end)| {
+                LocalNodeReplayTimeline {
+                    node_id_hash: state_at_t0.node_id_hash.clone(),
+                    state_at_t0,
+                    state_at_chaos,
+                    state_at_heal,
+                    state_at_end,
+                }
+            },
+        )
+        .collect()
+}
+
+fn write_json_pretty(path: &Path, value: &impl Serialize) -> Result<(), LocalMeshHarnessError> {
+    fs::write(path, serde_json::to_vec_pretty(value)?)?;
+    Ok(())
+}
+
+fn write_snapshot_cbor(
+    path: &Path,
+    snapshot: &LocalNodeSnapshot,
+) -> Result<(), LocalMeshHarnessError> {
+    let schema = SchemaId::new("fcp.testkit", "LocalNodeSnapshot", Version::new(1, 0, 0));
+    fs::write(path, CanonicalSerializer::serialize(snapshot, &schema)?)?;
+    Ok(())
 }
 
 fn hash_label(label: &str) -> String {

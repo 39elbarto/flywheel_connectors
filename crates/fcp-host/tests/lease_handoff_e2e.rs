@@ -1,5 +1,8 @@
 mod lease_e2e_support;
 
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use fcp_core::{ObjectIdKey, TailscaleNodeId, ZoneId};
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_kernel::{ConnectorId, InvokeResponse, InvokeStatus};
@@ -10,7 +13,81 @@ use lease_e2e_support::{
     singleton_writer_connector_lease_subject_id_for_test,
     singleton_writer_test_connector_config_with_state,
 };
+use serde::Serialize;
 use serde_json::{Value, json};
+
+const HOST_FAILOVER_REPLAY_SCHEMA_VERSION: &str = "1.0.0";
+const HOST_FAILOVER_REPLAY_FILE_NAME: &str = "host_failover_replay.jsonl";
+
+#[derive(Debug, Serialize)]
+struct HostFailoverReplayEvent {
+    schema_version: &'static str,
+    phase: &'static str,
+    local_node_hash: Option<String>,
+    payload: Value,
+}
+
+#[derive(Debug, Default)]
+struct HostFailoverReplay {
+    events: Vec<HostFailoverReplayEvent>,
+}
+
+impl HostFailoverReplay {
+    fn record(&mut self, phase: &'static str, local_node: Option<&str>, payload: Value) {
+        self.events.push(HostFailoverReplayEvent {
+            schema_version: HOST_FAILOVER_REPLAY_SCHEMA_VERSION,
+            phase,
+            local_node_hash: local_node.map(hash_node_label),
+            payload,
+        });
+    }
+
+    fn write_jsonl(&self, root: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        fs::create_dir_all(root)?;
+        let path = root.join(HOST_FAILOVER_REPLAY_FILE_NAME);
+        let lines = self
+            .events
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut rendered = lines.join("\n");
+        rendered.push('\n');
+        fs::write(&path, rendered)?;
+        Ok(path)
+    }
+}
+
+fn hash_node_label(node_label: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"fcp-host-lease-handoff-replay-node-v1");
+    hasher.update(node_label.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn node_hash_values(nodes: &[&str]) -> Vec<String> {
+    nodes.iter().map(|node| hash_node_label(node)).collect()
+}
+
+fn redacted_refusal_values(refusals: &[(String, String)]) -> Vec<Value> {
+    refusals
+        .iter()
+        .map(|(node, error)| {
+            json!({
+                "node_id_hash": hash_node_label(node),
+                "not_selected_coordinator": error.contains("NotSelectedCoordinator"),
+            })
+        })
+        .collect()
+}
+
+fn assert_no_raw_node_labels(rendered: &str) {
+    for raw_node in ["node-a", "node-b", "node-c"] {
+        assert!(
+            !rendered.contains(raw_node),
+            "host failover replay must not expose raw node label {raw_node}: {rendered}"
+        );
+    }
+}
 
 #[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn leader_departure_flushes_state_reselects_holder_and_fences_stale_writes()
@@ -20,6 +97,8 @@ async fn leader_departure_flushes_state_reselects_holder_and_fences_stale_writes
     let zone_id = ZoneId::work();
     let state_dir = tempfile::tempdir()?;
     let state_root = state_dir.path().join("managed-state");
+    let replay_dir = tempfile::tempdir()?;
+    let mut replay = HostFailoverReplay::default();
     let object_id_key = ObjectIdKey::from_bytes([0xC6; 32]);
     let all_nodes = ["node-a", "node-b", "node-c"];
     let initial_eligible_nodes = all_nodes.join(",");
@@ -49,6 +128,14 @@ async fn leader_departure_flushes_state_reselects_holder_and_fences_stale_writes
     let capability_public_key = capability_public_key_hex(&capability_signing_key);
     let mut initial_holder: Option<(String, HttpHostProcess)> = None;
     let mut initial_refusals = Vec::new();
+    replay.record(
+        "initial_candidate_set",
+        None,
+        json!({
+            "eligible_node_hashes": node_hash_values(&all_nodes),
+            "durable_lease_seq": seeded_state.lease_seq,
+        }),
+    );
 
     for local_node in all_nodes {
         match HttpHostProcess::spawn_with_env(
@@ -134,6 +221,18 @@ async fn leader_departure_flushes_state_reselects_holder_and_fences_stale_writes
             .is_some()
     );
     assert_eq!(lease_status["local_is_holder"], true);
+    replay.record(
+        "initial_holder_admitted",
+        Some(&departed_node),
+        json!({
+            "expected_holder_hash": hash_node_label(expected_initial_holder.as_str()),
+            "refusals": redacted_refusal_values(&initial_refusals),
+            "lease_evidence_source": lease_status["lease_evidence_source"].clone(),
+            "lease_object_id": lease_status["lease_object_id"].clone(),
+            "fencing_token": lease_status["fencing_token"].clone(),
+            "quorum_satisfied": lease_status["quorum_satisfied"].clone(),
+        }),
+    );
 
     let flush_response = departed_host
         .client
@@ -167,6 +266,14 @@ async fn leader_departure_flushes_state_reselects_holder_and_fences_stale_writes
         seeded_state.root_object_id.to_string()
     );
     assert_eq!(flush_payload["flush"]["lease_seq"], seeded_state.lease_seq);
+    replay.record(
+        "departing_holder_flushed_before_yield",
+        Some(&departed_node),
+        json!({
+            "root_object_id": flush_payload["flush"]["root_object_id"].clone(),
+            "lease_seq": flush_payload["flush"]["lease_seq"].clone(),
+        }),
+    );
     drop(departed_host);
 
     let remaining_nodes = all_nodes
@@ -229,6 +336,16 @@ async fn leader_departure_flushes_state_reselects_holder_and_fences_stale_writes
         new_holder_node, departed_node,
         "replacement holder must come from the eligible set after removing the departed node"
     );
+    replay.record(
+        "replacement_holder_admitted",
+        Some(&new_holder_node),
+        json!({
+            "departed_node_hash": hash_node_label(&departed_node),
+            "remaining_node_hashes": node_hash_values(&remaining_nodes),
+            "refusals": redacted_refusal_values(&new_refusals),
+            "new_fencing_token": 11,
+        }),
+    );
     let url = |path: &str| format!("{}{path}", new_host.base_url);
     let mut stale_request = build_invoke_request(connector_id.clone(), &capability_signing_key).0;
     stale_request.input = json!({
@@ -253,6 +370,16 @@ async fn leader_departure_flushes_state_reselects_holder_and_fences_stale_writes
         stale_body.contains(r#""current_lease_seq":11"#),
         "replacement holder should report the post-departure fence: {stale_body}"
     );
+    replay.record(
+        "stale_write_fenced_after_handoff",
+        Some(&new_holder_node),
+        json!({
+            "http_status": stale_status.as_u16(),
+            "provided_lease_seq": 10,
+            "current_lease_seq": 11,
+            "lease_fenced": stale_body.contains(r#""code":"LeaseFenced""#),
+        }),
+    );
 
     let explain_payload: Value = http_get_json(
         new_host.client.clone(),
@@ -273,6 +400,27 @@ async fn leader_departure_flushes_state_reselects_holder_and_fences_stale_writes
     assert_eq!(
         explain_payload["canonical_state"]["model"],
         "singleton_writer"
+    );
+    replay.record(
+        "canonical_state_exposed_after_handoff",
+        Some(&new_holder_node),
+        json!({
+            "root_object_id": explain_payload["canonical_state"]["root_object_id"].clone(),
+            "head_object_id": explain_payload["canonical_state"]["head_object_id"].clone(),
+            "model": explain_payload["canonical_state"]["model"].clone(),
+        }),
+    );
+    let replay_path = replay.write_jsonl(replay_dir.path())?;
+    let rendered_replay = fs::read_to_string(replay_path)?;
+    assert_no_raw_node_labels(&rendered_replay);
+    assert!(
+        rendered_replay.contains("canonical_state_exposed_after_handoff"),
+        "host failover replay should include the post-handoff canonical-state proof: {rendered_replay}"
+    );
+    assert_eq!(
+        rendered_replay.lines().count(),
+        6,
+        "host failover replay should include the candidate set plus five handoff phases"
     );
 
     Ok(())

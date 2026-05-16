@@ -25,6 +25,8 @@ required scenario coverage, and writes an operator replay bundle.
 By default this validates the deterministic smoke lane. Set
 REQUIRE_PRODUCTION_SOAK=1 or pass --require-production-soak for final
 acceptance gating; offline policy evidence must not satisfy that mode.
+Remote prerequisite skips are non-fatal for deterministic smoke evidence but
+fail closed when production-soak evidence is required.
 EOF
 }
 
@@ -120,11 +122,17 @@ fi
 
 if [[ "${test_status}" == "failed" ]]; then
   if grep -aE '(no workers passed|all workers failed preflight|failed to execute process|topology preflight|Permission denied|No such file or directory|refus(ed|ing) local fallback)' "${TEST_LOG}" >/dev/null; then
-    overall_status="skipped"
     skip_reason="rch_remote_prerequisite_unavailable"
     test_status="skipped"
     evidence_status="skipped"
-    validation_status="skipped"
+    if [[ "${require_production_soak_json}" == "true" ]]; then
+      overall_status="failed"
+      validation_status="failed"
+      exit_code=1
+    else
+      overall_status="skipped"
+      validation_status="skipped"
+    fi
     jq -c -n \
       --arg record_type "swarm_prewarm_cold_start_skip" \
       --arg schema_version "swarm-prewarm-cold-start/v2" \
@@ -163,6 +171,10 @@ if [[ "${overall_status}" == "passed" ]]; then
 
   if [[ "${evidence_status}" == "passed" ]]; then
     if ! jq -s --argjson require_production_soak "${require_production_soak_json}" '
+      def nonempty_string($key):
+        (.[$key] | type) == "string" and (.[$key] | length) > 0;
+      def positive_number($key):
+        (.[$key] | type) == "number" and .[$key] > 0;
       def required:
         [
           "prewarm_empty_pool",
@@ -187,6 +199,53 @@ if [[ "${overall_status}" == "passed" ]]; then
         execution_mode_shape_ok: all(.[];
           (.execution_mode | type) == "string"
           and (.source_kind | type) == "string"
+        ),
+        required_fields_ok: all(.[];
+          (.command_line | type) == "array"
+          and (.command_line | length) > 0
+          and all(.command_line[]; type == "string" and length > 0)
+          and nonempty_string("git_revision")
+          and nonempty_string("worker_id")
+          and nonempty_string("cargo_target_dir")
+          and nonempty_string("connector_fixture_id")
+          and nonempty_string("host_boundary")
+          and nonempty_string("manifest_hash")
+          and nonempty_string("zone")
+          and nonempty_string("strategy")
+          and nonempty_string("pool_state")
+          and nonempty_string("admission_decision")
+          and nonempty_string("sandbox_layer")
+          and nonempty_string("sandbox_profile")
+          and nonempty_string("sandbox_boundary")
+          and nonempty_string("credential_mode")
+          and nonempty_string("error_mapping")
+          and nonempty_string("cleanup_result")
+        ),
+        resource_fields_ok: all(.[];
+          positive_number("pool_size")
+          and positive_number("activation_latency_ms")
+          and positive_number("baseline_on_demand_latency_ms")
+          and positive_number("rss_bytes")
+          and positive_number("process_count")
+          and positive_number("concurrent_startups")
+          and (.warm_checkout | type) == "boolean"
+        ),
+        decision_shape_ok: all(.[];
+          if .admission_decision == "admit_warm" then
+            .warm_checkout == true
+            and (.fallback_reason == null)
+            and (.unsafe_rejection_reason == null)
+          elif .admission_decision == "fallback_on_demand" then
+            .warm_checkout == false
+            and nonempty_string("fallback_reason")
+            and (.unsafe_rejection_reason == null)
+          elif .admission_decision == "reject_unsafe" then
+            .warm_checkout == false
+            and (.fallback_reason == null)
+            and nonempty_string("unsafe_rejection_reason")
+          else
+            false
+          end
         ),
         production_soak_ok: (
           if $require_production_soak then
@@ -222,6 +281,9 @@ if [[ "${overall_status}" == "passed" ]]; then
             and $v.schema_ok
             and $v.record_type_ok
             and $v.execution_mode_shape_ok
+            and $v.required_fields_ok
+            and $v.resource_fields_ok
+            and $v.decision_shape_ok
             and $v.production_soak_ok
             and $v.percentile_fields_ok
             and $v.redaction_shape_ok

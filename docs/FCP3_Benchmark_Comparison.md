@@ -59,9 +59,12 @@ Run `scripts/e2e/connector_prewarm_cold_start_verification.sh` to produce the
 repeatable artifact bundle under `artifacts/e2e/connector-prewarm-cold-start/`.
 The script keeps Cargo execution behind `rch`, extracts the emitted JSONL proof,
 validates the required scenarios, and writes a structured skip artifact when a
-remote worker is unavailable. Its default lane is deterministic smoke evidence
-with `execution_mode=smoke` and `source_kind=offline`; final production-soak
-acceptance must run with `--require-production-soak` or
+remote worker is unavailable. Remote prerequisite skips are acceptable only for
+the default deterministic smoke lane; final production-soak gating fails closed
+when host-backed or live evidence cannot be collected. Its default lane is
+deterministic smoke evidence with `execution_mode=smoke` and
+`source_kind=offline`; final production-soak acceptance must run with
+`--require-production-soak` or
 `REQUIRE_PRODUCTION_SOAK=1`, which rejects offline policy records and requires
 host-backed or live soak evidence through production `fcp-host`/`fcp-sandbox`
 boundaries.

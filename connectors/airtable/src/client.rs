@@ -8,9 +8,8 @@ use std::time::Duration;
 
 use base64::Engine;
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode, Url, header, redirect::Policy};
 use tracing::instrument;
 

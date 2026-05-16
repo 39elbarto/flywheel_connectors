@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use fcp_google_discovery::auth::GoogleMaterializedAuth;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::header::{HeaderValue, RETRY_AFTER};
 use reqwest::{Client, RequestBuilder};
 use serde::de::DeserializeOwned;

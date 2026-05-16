@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fcp_async_core::sync::Mutex;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_sdk::runtime::{InMemoryStreamingSession, StreamingSession};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Url, header::HeaderMap};
 use serde_json::{Value, json};
 

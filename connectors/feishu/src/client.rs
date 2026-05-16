@@ -1,9 +1,8 @@
 //! Feishu/Lark API client.
 
 use fcp_prelude::log_redaction::redact_url;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
-};
+use fcp_sdk::ConnectorRuntime;
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop, classify_http_status};
 use fcp_sdk::retry::RetryDecision;
 use reqwest::{Client, Url};
 use serde::de::DeserializeOwned;
@@ -827,7 +826,7 @@ impl FeishuClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_sdk::migration::ConnectorRuntimeConfig;
+    use fcp_sdk::ConnectorRuntimeConfig;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread::{self, JoinHandle};

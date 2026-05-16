@@ -4,11 +4,9 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-    classify_http_status,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop, classify_http_status};
 use fcp_sdk::retry::RetryDecision;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, Method, RequestBuilder, Response, StatusCode};
 use serde_json::json;

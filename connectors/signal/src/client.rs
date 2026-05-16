@@ -3,9 +3,8 @@
 //! Communicates with signal-cli's REST daemon API.
 //! Uses HTTP calls to `signal-cli-rest-api`.
 
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
-};
+use fcp_sdk::ConnectorRuntime;
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop, classify_http_status};
 use fcp_sdk::retry::RetryDecision;
 use reqwest::{Client, Url};
 use std::time::Duration;
@@ -713,7 +712,7 @@ mod tests {
         )]);
 
         let client = SignalClient::new(&test_config(server.uri())).unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
+        let runtime = ConnectorRuntime::new(fcp_sdk::ConnectorRuntimeConfig::default());
         let resp = client
             .send_message(
                 &runtime,
@@ -745,7 +744,7 @@ mod tests {
         ]);
 
         let client = SignalClient::new(&test_config(server.uri())).unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
+        let runtime = ConnectorRuntime::new(fcp_sdk::ConnectorRuntimeConfig::default());
         let response = client
             .send_message(
                 &runtime,
@@ -783,7 +782,7 @@ mod tests {
         )]);
 
         let client = SignalClient::new(&test_config(server.uri())).unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
+        let runtime = ConnectorRuntime::new(fcp_sdk::ConnectorRuntimeConfig::default());
         let envelopes = client.receive_messages(&runtime, 10).await.unwrap();
         assert_eq!(envelopes.len(), 1);
         assert_eq!(envelopes[0].source, Some("+15559876543".into()));
@@ -826,7 +825,7 @@ mod tests {
         )]);
 
         let client = SignalClient::new(&test_config(server.uri())).unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
+        let runtime = ConnectorRuntime::new(fcp_sdk::ConnectorRuntimeConfig::default());
         let result = client
             .send_message(
                 &runtime,
@@ -855,7 +854,7 @@ mod tests {
         ]);
 
         let client = SignalClient::new(&test_config(server.uri())).unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
+        let runtime = ConnectorRuntime::new(fcp_sdk::ConnectorRuntimeConfig::default());
         client
             .trust_identity(
                 &runtime,
@@ -893,7 +892,7 @@ mod tests {
         )]);
 
         let client = SignalClient::new(&test_config(server.uri())).unwrap();
-        let runtime = ConnectorRuntime::new(fcp_sdk::migration::ConnectorRuntimeConfig::default());
+        let runtime = ConnectorRuntime::new(fcp_sdk::ConnectorRuntimeConfig::default());
         let groups = client.list_groups(&runtime).await.unwrap();
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].name, Some("Test Group 1".into()));

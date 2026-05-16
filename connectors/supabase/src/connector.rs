@@ -14,7 +14,7 @@ use fcp_prelude::{
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
     UnsubscribeRequest,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::Url;
 use serde::Serialize;
 use serde_json::json;

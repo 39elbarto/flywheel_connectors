@@ -14,9 +14,8 @@ use fcp_netlify::error::NetlifyError;
 use fcp_netlify::types::{CreateDeployRequest, CreateSiteRequest, NetlifyAuth, SetEnvVarRequest};
 use fcp_netlify::types::{SetEnvVarValue, User};
 use fcp_prelude::{ApprovalMode, FcpConnector, OperationInfo, RiskLevel, SafetyTier};
-use fcp_sdk::migration::{
-    ConnectorErrorMapping, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig,
-};
+use fcp_sdk::migration::{ConnectorErrorMapping, HttpRetryConfig};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};

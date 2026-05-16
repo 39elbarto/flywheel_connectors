@@ -8,7 +8,7 @@ use fcp_prelude::{
     EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, Introspection,
     OperationId, OperationInfo, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracing::{info, instrument};

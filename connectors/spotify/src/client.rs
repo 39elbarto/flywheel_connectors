@@ -5,7 +5,8 @@ use std::fmt::{self, Write as _};
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 

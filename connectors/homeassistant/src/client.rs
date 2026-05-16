@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use fcp_async_core::time::sleep;
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_streaming::{StreamError, WsClient, WsConfig, WsConnection, WsMessage};
 use reqwest::{Client, Response, StatusCode, Url};
 use serde_json::{Value, json};

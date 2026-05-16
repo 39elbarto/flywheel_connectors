@@ -6,9 +6,8 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use percent_encoding::utf8_percent_encode;
 use reqwest::{Client, StatusCode, header};
 use tracing::debug;

@@ -1,9 +1,8 @@
 //! LINE Messaging API client.
 
 use fcp_prelude::log_redaction::redact_url;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
-};
+use fcp_sdk::ConnectorRuntime;
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop, classify_http_status};
 use fcp_sdk::retry::RetryDecision;
 use reqwest::{Client, RequestBuilder, Url};
 use serde_json::json;

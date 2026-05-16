@@ -1,7 +1,8 @@
 //! Coda API client.
 
 use fcp_prelude::log_redaction::redact_url;
-use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
+use fcp_sdk::ConnectorRuntime;
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::{Client, RequestBuilder};
 use std::fmt::Write as _;

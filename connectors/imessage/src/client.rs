@@ -3,9 +3,8 @@
 //! Communicates with the `BlueBubbles` REST API to bridge `iMessage`.
 //! All requests require the server password as a query parameter.
 
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
-};
+use fcp_sdk::ConnectorRuntime;
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop, classify_http_status};
 use fcp_sdk::retry::RetryDecision;
 use reqwest::{Client, Method, Url, multipart};
 use serde_json::{Value, json};

@@ -11,9 +11,8 @@ use std::time::Duration;
 use fcp_anthropic::client::AnthropicClient;
 use fcp_anthropic::error::AnthropicError;
 use fcp_anthropic::types::Model;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorErrorMapping, ConnectorRuntime, ConnectorRuntimeConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, ConnectorErrorMapping, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};

@@ -6,7 +6,8 @@ use reqwest::{Client, RequestBuilder, header::HeaderMap};
 use serde_json::json;
 use tracing::debug;
 
-use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
+use fcp_sdk::ConnectorRuntime;
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
 
 use crate::error::{ShopifyError, ShopifyResult};
 use crate::types::*;

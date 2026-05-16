@@ -5,7 +5,8 @@ use std::fmt;
 use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 

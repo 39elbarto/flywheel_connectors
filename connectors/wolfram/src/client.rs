@@ -29,11 +29,9 @@
 
 use std::time::Duration;
 
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-    classify_http_status,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop, classify_http_status};
 use fcp_sdk::retry::RetryDecision;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::json;
 use tracing::{info, warn};
 

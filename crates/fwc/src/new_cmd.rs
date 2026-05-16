@@ -2955,9 +2955,8 @@ use std::time::{{Duration, Instant}};
 {mutex_import}
 
 use fcp_sdk::prelude::*;
-use fcp_sdk::migration::{{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-}};
+use fcp_sdk::migration::{{AttemptOutcome, HttpRetryConfig, RetryLoop}};
+use fcp_sdk::{{ConnectorRuntime, ConnectorRuntimeConfig}};
 use sha2::{{Digest, Sha256}};
 
 use crate::config::{struct_name}Config;

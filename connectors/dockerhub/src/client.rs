@@ -5,7 +5,8 @@ use chrono::{DateTime, Utc};
 use reqwest::{Client, RequestBuilder, header::HeaderMap};
 use tracing::debug;
 
-use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
+use fcp_sdk::ConnectorRuntime;
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
 
 use crate::error::{DockerHubError, DockerHubResult};
 use crate::types::*;

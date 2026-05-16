@@ -5,10 +5,8 @@
 
 use std::time::Duration;
 
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorErrorMapping, ConnectorRuntime, ConnectorRuntimeConfig,
-    HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, ConnectorErrorMapping, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, StatusCode};
 use serde::{Serialize, de::DeserializeOwned};
 use tracing::instrument;

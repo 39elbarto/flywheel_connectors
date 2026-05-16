@@ -6,7 +6,8 @@ use fcp_manifest::ConnectorManifest;
 use fcp_prelude::{
     BaseConnector, ConnectorId, FcpError, FcpResult, RequestId, SimulateRequest, SimulateResponse,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::header::HeaderValue;
 use serde_json::{Value, json};
 use tracing::info;

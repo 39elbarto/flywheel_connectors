@@ -12,9 +12,8 @@ use fcp_prelude::{
     ApprovalMode, FcpConnector, FcpError, IdempotencyClass, RequestId, RiskLevel, SafetyTier,
     SubscribeRequest,
 };
-use fcp_sdk::migration::{
-    ConnectorErrorMapping, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig,
-};
+use fcp_sdk::migration::{ConnectorErrorMapping, HttpRetryConfig};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_shopify::client::ShopifyClient;
 use fcp_shopify::connector::ShopifyConnector;
 use fcp_shopify::error::ShopifyError;

@@ -16,7 +16,7 @@ use fcp_prelude::{
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeResponse, SubscribeResult,
     TrustLevel, ZoneId,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
 use fcp_sdk::prelude::*;
 use fcp_sdk::runtime::{
     InMemoryStreamingSession, StreamingConnection, StreamingError, StreamingSession,
@@ -27,6 +27,7 @@ use fcp_sdk::{
     ChatCoordinationConfig, ChatCoordinationSendDecision, ChatCoordinationSendRequest, DmMode,
     InMemoryThreadOwnershipChecker, ThreadId, ThreadOwnershipChecker,
 };
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_streaming::{SseClient, SseConfig, SseEvent, SseStream};
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;

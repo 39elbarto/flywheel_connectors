@@ -6,7 +6,8 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, RequestBuilder, Response, StatusCode, Url, header, redirect::Policy};
 use sha2::{Digest, Sha256};
 use tracing::{debug, instrument};

@@ -21,8 +21,9 @@ use fcp_prelude::{
     FcpError, HandshakeRequest, IdempotencyClass, InstanceId, InvokeRequest, InvokeStatus,
     OperationId, RequestId, SafetyTier, ZoneId,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
 use fcp_sdk::{ChatCoordinationBackend, InMemoryThreadOwnershipChecker};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
 };

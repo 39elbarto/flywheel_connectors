@@ -12,9 +12,8 @@ use fcp_google_discovery::executor::{
     GoogleResponseMode, GoogleRestError, GoogleRestExecutor,
 };
 use fcp_google_discovery::{DiscoveryMethod, DiscoveryParameter};
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, StatusCode, Url, header};
 use tracing::{debug, instrument};
 

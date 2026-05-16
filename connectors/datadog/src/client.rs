@@ -5,9 +5,8 @@ use std::time::Duration;
 
 use fcp_prelude::CredentialId;
 use fcp_prelude::log_redaction::redact_url;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};

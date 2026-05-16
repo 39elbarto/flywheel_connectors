@@ -14,9 +14,8 @@ use std::{collections::BTreeMap, fmt::Write as _, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{
     Client, Response, StatusCode,
     header::{self, HeaderValue},

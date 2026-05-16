@@ -10,9 +10,8 @@ use std::time::Duration;
 
 use chrono::Utc;
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use parking_lot::Mutex;
 use reqwest::{Client, StatusCode, Url};
 

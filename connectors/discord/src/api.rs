@@ -2,10 +2,8 @@
 
 use fcp_async_core::ExecutionContext;
 use fcp_async_core::http::{HttpClient, HttpClientBuilder, HttpResponse, Method};
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorErrorMapping, ConnectorRuntime, ConnectorRuntimeConfig,
-    HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, ConnectorErrorMapping, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tracing::{debug, instrument};
 

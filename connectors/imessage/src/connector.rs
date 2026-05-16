@@ -16,8 +16,8 @@ use fcp_prelude::{
     InvokeResponse, OperationId, OperationInfo, OrderingPolicy, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, ZoneId,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_sdk::prelude::*;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use rusqlite::{Connection, OpenFlags, params_from_iter};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

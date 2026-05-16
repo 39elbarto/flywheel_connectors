@@ -8,7 +8,8 @@ use reqwest::{Client, RequestBuilder};
 use serde_json::json;
 use tracing::debug;
 
-use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
+use fcp_sdk::ConnectorRuntime;
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
 
 use crate::error::{PayPalError, PayPalResult};
 use crate::types::*;
@@ -665,7 +666,7 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_sdk::migration::ConnectorRuntimeConfig;
+    use fcp_sdk::ConnectorRuntimeConfig;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread::{self, JoinHandle};

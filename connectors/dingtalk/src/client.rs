@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use fcp_async_core::sync::Mutex;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Url, header::HeaderMap, multipart};
 use serde_json::{Value, json};
 

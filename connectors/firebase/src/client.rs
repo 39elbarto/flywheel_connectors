@@ -4,9 +4,8 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_google_discovery::auth::GoogleMaterializedAuth;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
 /// RFC 3986 unreserved characters preserved in path segments.

@@ -38,7 +38,8 @@ use fcp_prelude::{
     Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
     SimulateRequest, SimulateResponse,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracing::{info, instrument, warn};

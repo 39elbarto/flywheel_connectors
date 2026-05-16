@@ -3,7 +3,8 @@ use std::time::Duration;
 use reqwest::{Client, RequestBuilder};
 use tracing::debug;
 
-use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
+use fcp_sdk::ConnectorRuntime;
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
 
 use crate::error::{FirecrawlError, FirecrawlResult};
 use crate::types::{

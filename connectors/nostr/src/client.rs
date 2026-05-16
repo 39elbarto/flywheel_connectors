@@ -10,7 +10,7 @@ use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pk
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use cbc::{Decryptor, Encryptor};
 use fcp_prelude::{FcpError, FcpResult};
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_streaming::{StreamError, WsClient, WsConnection, WsMessage};
 use rand::{RngCore, rngs::OsRng};
 use secp256k1::{

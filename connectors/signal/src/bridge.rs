@@ -461,7 +461,7 @@ impl BridgeManager {
     pub async fn sync_groups(
         &self,
         client: &SignalClient,
-        runtime: &fcp_sdk::migration::ConnectorRuntime,
+        runtime: &fcp_sdk::ConnectorRuntime,
     ) -> SignalResult<Vec<GroupInfo>> {
         debug!("Synchronizing Signal groups");
         let groups = client.list_groups(runtime).await?;
@@ -1218,9 +1218,7 @@ mod tests {
         .unwrap();
 
         let client = SignalClient::new(&config).unwrap();
-        let runtime = fcp_sdk::migration::ConnectorRuntime::new(
-            fcp_sdk::migration::ConnectorRuntimeConfig::default(),
-        );
+        let runtime = fcp_sdk::ConnectorRuntime::new(fcp_sdk::ConnectorRuntimeConfig::default());
         let manager = BridgeManager::with_defaults();
 
         let groups = manager.sync_groups(&client, &runtime).await.unwrap();

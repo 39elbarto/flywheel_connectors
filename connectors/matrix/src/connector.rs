@@ -17,9 +17,10 @@ use fcp_prelude::{
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeResult, ThreadInfo, ThreadKind,
     TrustLevel, ZoneId,
 };
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::HttpRetryConfig;
 use fcp_sdk::prelude::*;
 use fcp_sdk::runtime::SupervisorConfig;
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

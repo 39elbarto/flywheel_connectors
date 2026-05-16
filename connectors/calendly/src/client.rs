@@ -1,7 +1,8 @@
 //! Calendly API client.
 
 use fcp_prelude::log_redaction::redact_url;
-use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
+use fcp_sdk::ConnectorRuntime;
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
 use reqwest::{Client, RequestBuilder, Url};
 use std::time::Duration;
 use tracing::{debug, warn};

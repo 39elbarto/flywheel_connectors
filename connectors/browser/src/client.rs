@@ -23,9 +23,8 @@ use fcp_async_core::{
     websocket::{Message as WebSocketMessage, WebSocket, WebSocketConfig, WsError, WsUrl},
 };
 use fcp_prelude::CredentialId;
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, header};
 

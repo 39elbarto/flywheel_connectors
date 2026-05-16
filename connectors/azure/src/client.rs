@@ -4,9 +4,8 @@ use fcp_prelude::log_redaction::redact_url;
 use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
-};
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
+use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use quick_xml::de::from_str as from_xml_str;
 use reqwest::{Client, RequestBuilder, Response, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};

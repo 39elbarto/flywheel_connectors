@@ -68,7 +68,8 @@ proves the replacement holder fences stale writes, and records a redacted
 Each run produces an in-memory `LocalReplayBundle` with:
 
 - `manifest` with scenario ID, seed, chaos mode, node count, and result.
-- `events` with hashed node IDs, role transitions, and handoff targets.
+- `events` with hashed node IDs, role transitions, handoff targets, positive
+  transition durations, and monotonically increasing logical time.
 - `node_snapshots` for all three nodes.
 - `node_timelines` with per-node snapshots at t0, chaos, heal, and end.
 - `invariants` with active-holder liveness, final online-node count, orphaned
@@ -198,6 +199,7 @@ strings fail the preflight instead of leaving a partial replay on disk.
 | Forward and reverse seed matrices differ. | A scenario leaked state across iterations or consumed non-local scheduler/process state. | Re-run the failing seed/mode pair alone and compare its replay bundle against the matrix run. |
 | `receipt_count` is greater than one. | Idempotency key handling allowed a retry to create a second receipt. | Inspect `events.jsonl` around the handoff and confirm only the current holder called `execute_once`. |
 | `duplicate_receipt_count` is non-zero. | The same idempotency key was inserted under multiple receipt records. | Compare `receipt_hash` across reruns and inspect holder promotion order. |
+| Replay logical time is not monotonic. | A transition writer used wall-clock/process order or reset the local logical clock. | Inspect `events.jsonl` around the first non-increasing `logical_time_ms` and keep transition timing derived from the seeded harness. |
 | `orphaned_active_lease_count` is non-zero. | The selected singleton holder is offline or not in holder role after recovery. | Inspect the final node snapshots and the last holder promotion/recovery transition in `events.jsonl`. |
 | `orphaned_connector_state_count` is non-zero. | A receipt lost its request ref, outcome object, idempotency key, node binding, or signature validity. | Compare `receipt_hash` with `per_node_state_hashes` and verify the executing node key for the failing seed. |
 | `invalid_receipt_signature_count` is non-zero. | The `OperationReceipt` signature no longer verifies against the executing node's deterministic signing key. | Reproduce the seed and inspect holder changes before `execute_once`. |

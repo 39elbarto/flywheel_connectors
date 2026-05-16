@@ -39,15 +39,27 @@ fn local_mesh_replay_events_are_jsonl_serializable_and_redacted()
     let jsonl = outcome.replay_bundle.events_jsonl()?;
 
     assert!(!jsonl.trim().is_empty());
+    let mut previous_logical_time_ms = 0;
+    let mut observed_handoff_target = false;
     for line in jsonl.lines() {
-        let value: serde_json::Value = serde_json::from_str(line)?;
-        assert!(value.get("scenario_id").is_some());
-        assert!(value.get("node_id_hash").is_some());
+        let value: Value = serde_json::from_str(line)?;
+        assert_transition_event_contract(
+            &value,
+            &outcome.scenario_id,
+            42,
+            "kill_leader_mid_write",
+            &mut previous_logical_time_ms,
+            &mut observed_handoff_target,
+        )?;
         assert!(
             !line.contains("mesh-harness-node-"),
             "JSONL events must be redacted: {line}"
         );
     }
+    assert!(
+        observed_handoff_target,
+        "kill-leader replay should include at least one redacted handoff target"
+    );
     Ok(())
 }
 
@@ -275,6 +287,81 @@ fn required_bool_field(value: &Value, field: &str) -> Result<bool, Box<dyn std::
         .get(field)
         .and_then(Value::as_bool)
         .ok_or_else(|| invalid_replay_artifact(format!("missing bool field {field}")))
+}
+
+fn assert_transition_event_contract(
+    value: &Value,
+    scenario_id: &str,
+    seed_index: u64,
+    chaos_mode: &str,
+    previous_logical_time_ms: &mut u64,
+    observed_handoff_target: &mut bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(required_string_field(value, "scenario_id")?, scenario_id);
+    assert_eq!(required_u64_field(value, "seed_index")?, seed_index);
+    assert_eq!(required_string_field(value, "chaos_mode")?, chaos_mode);
+
+    let node_id_hash = required_string_field(value, "node_id_hash")?;
+    assert_hash_value("node_id_hash", node_id_hash);
+
+    let prior_role = required_string_field(value, "prior_role")?;
+    let new_role = required_string_field(value, "new_role")?;
+    assert_known_local_role("prior_role", prior_role);
+    assert_known_local_role("new_role", new_role);
+    assert_ne!(
+        prior_role, new_role,
+        "transition event should only be emitted when the role changes"
+    );
+
+    let transition_duration_ms = required_u64_field(value, "transition_duration_ms")?;
+    assert!(
+        transition_duration_ms > 0,
+        "transition duration should be positive"
+    );
+    let logical_time_ms = required_u64_field(value, "logical_time_ms")?;
+    assert!(
+        logical_time_ms > *previous_logical_time_ms,
+        "logical transition time should increase monotonically"
+    );
+    *previous_logical_time_ms = logical_time_ms;
+
+    match value.get("lease_handoff_target_hash") {
+        Some(Value::Null) => {}
+        Some(Value::String(target_hash)) => {
+            *observed_handoff_target = true;
+            assert_hash_value("lease_handoff_target_hash", target_hash);
+        }
+        Some(_) => {
+            return Err(invalid_replay_artifact(
+                "lease_handoff_target_hash must be a hash string or null",
+            ));
+        }
+        None => {
+            return Err(invalid_replay_artifact(
+                "transition event missing lease_handoff_target_hash",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn assert_known_local_role(field: &str, role: &str) {
+    assert!(
+        matches!(
+            role,
+            "candidate" | "holder" | "follower" | "partitioned" | "offline" | "recovered"
+        ),
+        "{field} should use the LocalNodeRole snake_case contract: {role}"
+    );
+}
+
+fn assert_hash_value(field: &str, value: &str) {
+    assert_eq!(value.len(), 64, "{field} should be a 64-character hash");
+    assert!(
+        value.chars().all(|character| character.is_ascii_hexdigit()),
+        "{field} should be hex-encoded"
+    );
 }
 
 fn invalid_replay_artifact(message: impl Into<String>) -> Box<dyn std::error::Error> {

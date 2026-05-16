@@ -693,12 +693,12 @@ append_redaction_scan \
   "target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl" \
   "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"
 
-validate_gauntlet_contract
-
 artifact_hash="$(sha256_file "${ARTIFACT}")"
 append_json "summary" "pass" "$(jq -cn \
   --arg artifact "${ARTIFACT}" \
   --arg artifact_hash "sha256:${artifact_hash}" \
   '{artifact_path:$artifact,artifact_hash:$artifact_hash,profile_ids:["SMALL_TEST","V4_REFERENCE"],scenario_ids:["allow_v4_reference","deny_forged_v4_reference","deny_trust_set_replay_v4_reference","deny_mismatched_operation","deny_mismatched_principal"],theorem_names:["lattice_delegation_chain_corruption_rejected","lattice_delegation_sis_assumption_boundary_complete","lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions"],assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1","FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1","FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1","FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"],benchmark_groups:["trap_gen","delegate","sample_pre","verify","full_crypto_route","host_dispatcher_pipeline"],stable_lattice_error_mapping:"covered_by_host_dispatcher_e2e",cleanup_result:"not_applicable_generated_artifact"}')"
+
+validate_gauntlet_contract
 
 printf 'LATTICE_ASSURANCE_GAUNTLET_JSONL %s\n' "${ARTIFACT}"

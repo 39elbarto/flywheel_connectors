@@ -22,6 +22,7 @@ It supports room creation and membership mutations, message send, timeline and r
 - FCP `subscribe` is supported for manual and supervised fanout. Matching policy-projected deltas are emitted as `EventEnvelope` items on `matrix.message.authorized`, `matrix.message.decrypted`, `matrix.event.dropped`, `matrix.reaction`, and `matrix.encrypted`; verified encrypted media resources are exposed only through the decrypted-message trust boundary as handle-only resources, never as inline bytes.
 - Event fanout is de-duplicated by Matrix event identity at the connector boundary so repeated sync responses do not re-emit the same event.
 - `matrix.sync` preserves raw room deltas and also returns the same inbound-policy projection: authorized messages, trust-gated decrypted messages, dropped-event metadata, reaction events, and encrypted-event metadata.
+- `matrix.send_message` claims chat ownership before homeserver send. Duplicate active owners return `FcpError::Unauthorized` code `4090` before provider HTTP, and successful sends include redaction-safe `coordination` audit records.
 - Authorized message projections now carry workflow context: mention presence, stripped delivery body, free-response/direct-message/thread reasons, dynamic DM detection, and bounded media metadata. Raw Matrix body and media bytes are not required for routing decisions.
 - Reaction projections are sender-policy gated and include approval classification based on configured approval reaction keys. Unauthorized reaction approvals are dropped before agent delivery.
 - Reconfiguring the connector resets the in-memory cursor, dynamic DM classifications, participated thread roots, and emitted-event dedupe set unless `state_persistence.enabled=true` restores a host-managed snapshot scoped to zone/account/device metadata.
@@ -44,6 +45,12 @@ The current connector exposes:
 - `matrix.list_members`
 - `matrix.upload_media`
 - `matrix.download_media`
+
+## Chat Coordination
+
+- `chat_coordination` supports `enabled`, `ttl_seconds`, `fail_open`, `allowlist_channels`, `backend`, and `dm_mode`.
+- `thread_root_event_id` is the preferred ownership key for Matrix thread replies; threadless sends follow the configured DM mode.
+- Coordination audit records contain only redacted claim/channel/agent identifiers, backend, outcome, and denial code metadata.
 
 ## Readiness Model
 

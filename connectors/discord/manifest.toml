@@ -111,6 +111,13 @@ type = "string"
 [provides.operations.send_message.output_schema.properties.content]
 type = "string"
 
+[provides.operations.send_message.output_schema.properties.coordination]
+description = "Redacted chat coordination audit records"
+type = "array"
+
+[provides.operations.send_message.output_schema.properties.coordination.items]
+type = "object"
+
 [provides.operations.send_message.network_constraints]
 host_allow = ["discord.com", "*.discord.com"]
 port_allow = [443]

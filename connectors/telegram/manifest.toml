@@ -109,6 +109,13 @@ description = "Number of sendMessage chunks sent for the logical request"
 type = "integer"
 minimum = 1
 
+[provides.operations."telegram.send_message".output_schema.properties.coordination]
+description = "Redacted chat coordination audit records"
+type = "array"
+
+[provides.operations."telegram.send_message".output_schema.properties.coordination.items]
+type = "object"
+
 [provides.operations."telegram.send_message".network_constraints]
 host_allow = ["api.telegram.org"]
 port_allow = [443]
@@ -187,6 +194,13 @@ type = "integer"
 
 [provides.operations."telegram.send_media".output_schema.properties.chat_id]
 type = "integer"
+
+[provides.operations."telegram.send_media".output_schema.properties.coordination]
+description = "Redacted chat coordination audit records"
+type = "array"
+
+[provides.operations."telegram.send_media".output_schema.properties.coordination.items]
+type = "object"
 
 [provides.operations."telegram.send_media".network_constraints]
 host_allow = ["api.telegram.org"]

@@ -81,6 +81,7 @@ The runtime uses these request shapes under `{base_url}`:
 Input and event handling:
 
 - `telegram.send_message` splits long text into bounded 4096 UTF-16-code-unit Telegram chunks, preserving `message_thread_id` on every chunk and applying `reply_to_message_id` only to the first chunk.
+- `telegram.send_message` and `telegram.send_media` claim chat ownership before Bot API sends. Duplicate active owners return `FcpError::Unauthorized` code `4090` before provider HTTP, and successful sends include redaction-safe `coordination` audit records.
 - `telegram.send_media` validates the 1024 character caption limit.
 - `telegram.send_media` accepts media types `photo`, `document`, `audio`, `video`, and `voice`.
 - `telegram.send_chat_action` accepts Telegram Bot API chat-action enum values such as `typing`, `upload_photo`, and `upload_document`.
@@ -91,6 +92,7 @@ Input and event handling:
 - `chat_id` can be a numeric ID, `@username`, some `t.me` links, or a bare username that can be normalized.
 - Invite links are rejected as chat IDs.
 - `message_thread_id` is accepted for message and media sends and is included in resource URI binding.
+- Optional `chat_coordination` config supports `enabled`, `ttl_seconds`, `fail_open`, `allowlist_channels`, `backend`, and `dm_mode`; the connector defaults to the in-memory backend for deterministic local proof.
 - `get_file` percent-encodes `file_path` and rejects empty, absolute, empty-segment, dot, and dot-dot path forms before constructing a download URL.
 - Long polling uses `getUpdates` with offset, limit `100`, configured poll timeout, and normalized allowed updates.
 - Polling persists `telegram_poll_cursor.json` and `telegram_poll_lease.json` under `zone_dir`.

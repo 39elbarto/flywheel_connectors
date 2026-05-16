@@ -587,6 +587,11 @@ type = "object"
 
 [provides.operations."mattermost.create_post".output_schema]
 type = "object"
+[provides.operations."mattermost.create_post".output_schema.properties.coordination]
+description = "Redacted chat coordination audit records"
+type = "array"
+[provides.operations."mattermost.create_post".output_schema.properties.coordination.items]
+type = "object"
 
 [provides.operations."mattermost.create_post".network_constraints]
 host_allow = ["*.example.com"]

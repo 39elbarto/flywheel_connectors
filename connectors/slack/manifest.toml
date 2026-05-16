@@ -62,6 +62,11 @@ required = ["message"]
 type = "object"
 [provides.operations."slack.post_message".output_schema.properties.message]
 type = "object"
+[provides.operations."slack.post_message".output_schema.properties.coordination]
+description = "Redacted chat coordination audit records"
+type = "array"
+[provides.operations."slack.post_message".output_schema.properties.coordination.items]
+type = "object"
 
 [provides.operations."slack.post_message".network_constraints]
 host_allow = ["slack.com", "*.slack.com"]
@@ -109,6 +114,11 @@ type = "string"
 required = ["message"]
 type = "object"
 [provides.operations."slack.reply_thread".output_schema.properties.message]
+type = "object"
+[provides.operations."slack.reply_thread".output_schema.properties.coordination]
+description = "Redacted chat coordination audit records"
+type = "array"
+[provides.operations."slack.reply_thread".output_schema.properties.coordination.items]
 type = "object"
 
 [provides.operations."slack.reply_thread".network_constraints]
@@ -483,6 +493,11 @@ type = "object"
 type = "string"
 [provides.operations."slack.upload_file".output_schema.properties.source_object_id]
 type = "string"
+[provides.operations."slack.upload_file".output_schema.properties.coordination]
+description = "Redacted chat coordination audit records for threaded uploads"
+type = "array"
+[provides.operations."slack.upload_file".output_schema.properties.coordination.items]
+type = "object"
 
 [provides.operations."slack.upload_file".network_constraints]
 host_allow = ["slack.com", "*.slack.com", "files.slack.com"]

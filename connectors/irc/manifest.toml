@@ -56,7 +56,7 @@ safety_tier = "risky"
 requires_approval = "none"
 idempotency = "none"
 input_schema = { type = "object", required = ["target", "message"] }
-output_schema = { type = "object", required = ["status", "target", "transcript"] }
+output_schema = { type = "object", required = ["status", "target", "transcript"], properties = { coordination = { type = "array", description = "Redacted chat coordination audit records", items = { type = "object" } } } }
 network_constraints = { host_allow = ["${irc_server_host}"], port_allow = [6667, 6697], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations."irc.messages.send".ai_hints]

@@ -14,6 +14,7 @@ The connector is intentionally narrow. It favors one-shot operator or agent acti
 - Authentication is limited to optional `PASS` followed by `NICK` and `USER`.
 - TLS is supported and defaults to port `6697`; plaintext defaults to `6667`.
 - The connector keeps no durable local state.
+- `irc.messages.send` claims chat ownership before opening the short-lived send session. Duplicate active owners return `FcpError::Unauthorized` code `4090` before provider I/O, and successful sends include redaction-safe `coordination` audit records.
 - `irc.channels.join`, `irc.transcript.sample`, and `irc.health` expose both raw transcript lines and normalized event records for IRC numerics and message routing.
 - `irc.transcript.sample` returns at most the requested post-join lines and may legitimately return fewer when the channel is quiet.
 
@@ -47,6 +48,12 @@ The connector is intentionally narrow. It favors one-shot operator or agent acti
 | `irc.channels.join` | `irc.channels.write` | Join one channel, optionally with a key |
 | `irc.transcript.sample` | `irc.messages.read` | Collect a bounded sample of recent IRC lines plus normalized event metadata |
 | `irc.health` | `irc.health.read` | Verify registration and connectivity |
+
+## Chat Coordination
+
+- `chat_coordination` supports `enabled`, `ttl_seconds`, `fail_open`, `allowlist_channels`, `backend`, and `dm_mode`.
+- IRC has no native thread identifier for plain `PRIVMSG`; the target channel or nick is used as the redacted conversation/thread key unless DM mode is set to `skip`.
+- Coordination audit records intentionally omit raw nicknames, channel names, and message text.
 
 ## Safety Matrix
 

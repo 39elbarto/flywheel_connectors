@@ -458,6 +458,109 @@ impl LeaseCoordinator {
             }
         }
 
+        let selected_coordinator = select_coordinator(zone_id, subject_id, eligible_nodes);
+        let current_holder_online = eligible_nodes.iter().any(|node| node == &current.holder);
+        if !current_holder_online
+            && selected_coordinator
+                .as_ref()
+                .is_some_and(|holder| holder == requester)
+        {
+            if let Some(reason) = rebase_status.rejection_reason() {
+                timeline.push(AuthorityTimelineEvent {
+                    observed_at_ms: now_secs * 1000,
+                    operation: "lease.handoff_refused".into(),
+                    subject_id: *subject_id,
+                    purpose: purpose.clone(),
+                    holder: Some(requester.clone()),
+                    coordinator: selected_coordinator,
+                    reason_code: AuthorityReasonCode::LeaseAcquisitionRejected,
+                    fencing_token: None,
+                    expires_at: None,
+                    explanation: reason.to_string(),
+                });
+                return (
+                    AcquireOutcome::Rejected {
+                        reason: reason.to_string(),
+                    },
+                    timeline,
+                );
+            }
+
+            let active_leases_for_requester =
+                canonical_active_lease_count_for_holder(existing_leases, requester, now_secs);
+            if active_leases_for_requester >= self.config.max_leases_per_node {
+                let reason = format!(
+                    "Lease handoff rejected: {} already holds {} active leases (limit={})",
+                    requester.as_str(),
+                    active_leases_for_requester,
+                    self.config.max_leases_per_node
+                );
+                timeline.push(AuthorityTimelineEvent {
+                    observed_at_ms: now_secs * 1000,
+                    operation: "lease.handoff_rejected".into(),
+                    subject_id: *subject_id,
+                    purpose: purpose.clone(),
+                    holder: Some(requester.clone()),
+                    coordinator: selected_coordinator,
+                    reason_code: AuthorityReasonCode::LeaseAcquisitionRejected,
+                    fencing_token: None,
+                    expires_at: None,
+                    explanation: reason.clone(),
+                });
+                return (AcquireOutcome::Rejected { reason }, timeline);
+            }
+
+            let Some(token) = self.next_fencing_token() else {
+                timeline.push(AuthorityTimelineEvent {
+                    observed_at_ms: now_secs * 1000,
+                    operation: "lease.handoff_refused".into(),
+                    subject_id: *subject_id,
+                    purpose: purpose.clone(),
+                    holder: Some(requester.clone()),
+                    coordinator: selected_coordinator,
+                    reason_code: AuthorityReasonCode::LeaseAcquisitionRejected,
+                    fencing_token: None,
+                    expires_at: None,
+                    explanation: "Fencing token space exhausted — refusing handoff".into(),
+                });
+
+                return (
+                    AcquireOutcome::Rejected {
+                        reason: "fencing token space exhausted".into(),
+                    },
+                    timeline,
+                );
+            };
+            let expires_at = now_secs + u64::from(ttl);
+            timeline.push(AuthorityTimelineEvent {
+                observed_at_ms: now_secs * 1000,
+                operation: "lease.handed_off".into(),
+                subject_id: *subject_id,
+                purpose: purpose.clone(),
+                holder: Some(requester.clone()),
+                coordinator: selected_coordinator,
+                reason_code: AuthorityReasonCode::ActiveAuthority,
+                fencing_token: Some(token),
+                expires_at: Some(expires_at),
+                explanation: format!(
+                    "Lease handed off from offline holder {} to {} (old_fencing_token={}, new_fencing_token={token})",
+                    current.holder.as_str(),
+                    requester.as_str(),
+                    current.lease.fencing_token
+                ),
+            });
+            let purpose_label = purpose.to_string();
+            metrics::record_lease_issued(&purpose_label, "handoff");
+            metrics::record_lease_handed_off("leader_offline", None);
+            return (
+                AcquireOutcome::Granted {
+                    fencing_token: token,
+                    expires_at,
+                },
+                timeline,
+            );
+        }
+
         // Different holder — deny
         timeline.push(AuthorityTimelineEvent {
             observed_at_ms: now_secs * 1000,
@@ -516,6 +619,11 @@ impl LeaseCoordinator {
             now_secs,
         } = request;
         let planner_purpose = planner_purpose_for_core(params.purpose);
+        if let Some(rejection) =
+            signed_lease_issue_hrw_rejection(&params, &eligible_nodes, planner_purpose, now_secs)
+        {
+            return rejection;
+        }
         let (outcome, timeline) = self.acquire(
             &params.holder,
             &params.zone_id,
@@ -916,6 +1024,68 @@ fn planner_purpose_for_core(purpose: CoreLeasePurpose) -> LeasePurpose {
     }
 }
 
+fn signed_lease_issue_hrw_rejection(
+    params: &CoreLeaseParams,
+    eligible_nodes: &[TailscaleNodeId],
+    planner_purpose: LeasePurpose,
+    now_secs: u64,
+) -> Option<(SignedLeaseIssueOutcome, Vec<AuthorityTimelineEvent>)> {
+    let selected_holder =
+        select_coordinator(&params.zone_id, &params.subject_object_id, eligible_nodes);
+    match selected_holder.as_ref() {
+        Some(holder) if holder == &params.holder => None,
+        Some(holder) => {
+            let reason = format!(
+                "Lease issue rejected: {} is not HRW-selected holder for subject {}; expected {}",
+                params.holder.as_str(),
+                params.subject_object_id,
+                holder.as_str()
+            );
+            let purpose_label = planner_purpose.to_string();
+            metrics::record_lease_fenced(&purpose_label, "wrong_hrw_holder");
+            Some((
+                SignedLeaseIssueOutcome::Rejected {
+                    reason: reason.clone(),
+                },
+                vec![AuthorityTimelineEvent {
+                    observed_at_ms: now_secs * 1000,
+                    operation: "lease.issue_rejected".into(),
+                    subject_id: params.subject_object_id,
+                    purpose: planner_purpose,
+                    holder: Some(params.holder.clone()),
+                    coordinator: Some(holder.clone()),
+                    reason_code: AuthorityReasonCode::LeaseAcquisitionRejected,
+                    fencing_token: None,
+                    expires_at: None,
+                    explanation: reason,
+                }],
+            ))
+        }
+        None => {
+            let reason = "Lease issue rejected: no HRW-eligible holder for subject".to_owned();
+            let purpose_label = planner_purpose.to_string();
+            metrics::record_lease_fenced(&purpose_label, "no_eligible_holder");
+            Some((
+                SignedLeaseIssueOutcome::Rejected {
+                    reason: reason.clone(),
+                },
+                vec![AuthorityTimelineEvent {
+                    observed_at_ms: now_secs * 1000,
+                    operation: "lease.issue_rejected".into(),
+                    subject_id: params.subject_object_id,
+                    purpose: planner_purpose,
+                    holder: Some(params.holder.clone()),
+                    coordinator: None,
+                    reason_code: AuthorityReasonCode::LeaseAcquisitionRejected,
+                    fencing_token: None,
+                    expires_at: None,
+                    explanation: reason,
+                }],
+            ))
+        }
+    }
+}
+
 /// Convert a durable core lease into the compact planner observation format.
 #[must_use]
 pub fn held_lease_from_signed(lease: &CoreLease) -> HeldLease {
@@ -1052,6 +1222,20 @@ mod tests {
         )
     }
 
+    fn selected_holder_for(eligible: &[TailscaleNodeId]) -> TailscaleNodeId {
+        fcp_prelude::select_coordinator(&zone(), &subject(), eligible)
+            .expect("test eligible holder set should not be empty")
+    }
+
+    fn first_non_selected_holder(eligible: &[TailscaleNodeId]) -> TailscaleNodeId {
+        let selected = selected_holder_for(eligible);
+        eligible
+            .iter()
+            .find(|node| **node != selected)
+            .expect("test holder set should include at least two nodes")
+            .clone()
+    }
+
     fn signatures(signers: &[&str]) -> fcp_core::SignatureSet {
         let mut set = fcp_core::SignatureSet::new();
         for (idx, signer) in signers.iter().enumerate() {
@@ -1086,15 +1270,17 @@ mod tests {
 
     fn issued_connector_state_lease(ttl_secs: u32, now_secs: u64) -> (LeaseCoordinator, CoreLease) {
         let mut coord = LeaseCoordinator::with_defaults();
+        let eligible_nodes = vec![node("node-a"), node("node-b"), node("node-c")];
+        let holder = selected_holder_for(&eligible_nodes);
         let request = SignedLeaseIssueRequest {
             params: core_lease_params(
-                "node-a",
+                holder.as_str(),
                 ttl_secs,
                 CoreLeasePurpose::ConnectorStateWrite,
                 signatures(&["node-a", "node-b"]),
             ),
             existing_leases: Vec::new(),
-            eligible_nodes: vec![node("node-a"), node("node-b"), node("node-c")],
+            eligible_nodes,
             now_secs,
         };
         let (outcome, _timeline) = coord.issue_signed_lease(request);
@@ -1150,9 +1336,10 @@ mod tests {
     fn issue_signed_lease_materializes_core_lease_with_quorum_signatures() {
         let mut coord = LeaseCoordinator::with_defaults();
         let eligible = vec![node("node-a"), node("node-b"), node("node-c")];
+        let holder = selected_holder_for(&eligible);
         let request = SignedLeaseIssueRequest {
             params: core_lease_params(
-                "node-a",
+                holder.as_str(),
                 300,
                 CoreLeasePurpose::ConnectorStateWrite,
                 signatures(&["node-a", "node-b"]),
@@ -1167,7 +1354,7 @@ mod tests {
             panic!("expected signed lease grant");
         };
 
-        assert_eq!(lease.holder, node("node-a"));
+        assert_eq!(lease.holder, holder);
         assert_eq!(lease.subject_object_id, subject());
         assert_eq!(lease.purpose, CoreLeasePurpose::ConnectorStateWrite);
         assert_eq!(lease.lease_seq, 1);
@@ -1195,15 +1382,17 @@ mod tests {
     #[test]
     fn issue_signed_lease_rebases_fencing_token_from_expired_observation() {
         let mut coord = LeaseCoordinator::with_defaults();
+        let eligible_nodes = vec![node("node-a"), node("node-b"), node("node-c")];
+        let holder = selected_holder_for(&eligible_nodes);
         let request = SignedLeaseIssueRequest {
             params: core_lease_params(
-                "node-b",
+                holder.as_str(),
                 300,
                 CoreLeasePurpose::ConnectorStateWrite,
                 signatures(&["node-b", "node-c"]),
             ),
             existing_leases: vec![held_lease("node-a", 7, 100)],
-            eligible_nodes: vec![node("node-a"), node("node-b"), node("node-c")],
+            eligible_nodes,
             now_secs: 1_000,
         };
 
@@ -1219,15 +1408,18 @@ mod tests {
     #[test]
     fn issue_signed_lease_denies_when_active_holder_differs() {
         let mut coord = LeaseCoordinator::with_defaults();
+        let eligible_nodes = vec![node("node-a"), node("node-b"), node("node-c")];
+        let holder = selected_holder_for(&eligible_nodes);
+        let active_holder = first_non_selected_holder(&eligible_nodes);
         let request = SignedLeaseIssueRequest {
             params: core_lease_params(
-                "node-b",
+                holder.as_str(),
                 300,
                 CoreLeasePurpose::ConnectorStateWrite,
                 signatures(&["node-b", "node-c"]),
             ),
-            existing_leases: vec![held_lease("node-a", 5, 2_000)],
-            eligible_nodes: vec![node("node-a"), node("node-b"), node("node-c")],
+            existing_leases: vec![held_lease(active_holder.as_str(), 5, 2_000)],
+            eligible_nodes,
             now_secs: 1_000,
         };
 
@@ -1239,22 +1431,90 @@ mod tests {
                 current_holder,
                 current_fencing_token: 5,
                 ..
-            } if current_holder == node("node-a")
+            } if current_holder == active_holder
         ));
+    }
+
+    #[test]
+    fn issue_signed_lease_rejects_non_hrw_holder_without_existing_leases() {
+        let mut coord = LeaseCoordinator::with_defaults();
+        let eligible_nodes = vec![node("node-a"), node("node-b"), node("node-c")];
+        let wrong_holder = first_non_selected_holder(&eligible_nodes);
+        let request = SignedLeaseIssueRequest {
+            params: core_lease_params(
+                wrong_holder.as_str(),
+                300,
+                CoreLeasePurpose::ConnectorStateWrite,
+                signatures(&["node-a", "node-b"]),
+            ),
+            existing_leases: Vec::new(),
+            eligible_nodes,
+            now_secs: 1_000,
+        };
+
+        let (outcome, timeline) = coord.issue_signed_lease(request);
+
+        match outcome {
+            SignedLeaseIssueOutcome::Rejected { reason } => {
+                assert!(
+                    reason.contains("not HRW-selected"),
+                    "expected wrong-holder rejection, got: {reason}"
+                );
+            }
+            other => panic!("expected Rejected for non-HRW holder, got {other:?}"),
+        }
+        assert!(timeline.iter().any(|event| {
+            event.operation == "lease.issue_rejected"
+                && event.reason_code == AuthorityReasonCode::LeaseAcquisitionRejected
+        }));
+    }
+
+    #[test]
+    fn issue_signed_lease_handoff_supersedes_active_offline_holder() {
+        let mut coord = LeaseCoordinator::with_defaults();
+        let eligible_nodes = vec![node("node-b"), node("node-c")];
+        let holder = selected_holder_for(&eligible_nodes);
+        let request = SignedLeaseIssueRequest {
+            params: core_lease_params(
+                holder.as_str(),
+                300,
+                CoreLeasePurpose::ConnectorStateWrite,
+                signatures(&["node-b", "node-c"]),
+            ),
+            existing_leases: vec![held_lease("node-a", 5, 2_000)],
+            eligible_nodes,
+            now_secs: 1_000,
+        };
+
+        let (outcome, timeline) = coord.issue_signed_lease(request);
+        let SignedLeaseIssueOutcome::Granted { lease } = outcome else {
+            panic!("expected HRW-selected handoff holder to receive new lease");
+        };
+
+        assert_eq!(lease.holder, holder);
+        assert_eq!(lease.lease_seq, 6);
+        assert_eq!(lease.exp, 1_300);
+        assert!(timeline.iter().any(|event| {
+            event.operation == "lease.handed_off"
+                && event.fencing_token == Some(6)
+                && event.reason_code == AuthorityReasonCode::ActiveAuthority
+        }));
     }
 
     #[test]
     fn validate_signed_lease_enforces_quorum_signature_count() {
         let mut coord = LeaseCoordinator::with_defaults();
+        let eligible_nodes = vec![node("node-a"), node("node-b"), node("node-c")];
+        let holder = selected_holder_for(&eligible_nodes);
         let request = SignedLeaseIssueRequest {
             params: core_lease_params(
-                "node-a",
+                holder.as_str(),
                 300,
                 CoreLeasePurpose::ConnectorStateWrite,
                 signatures(&["node-a"]),
             ),
             existing_leases: Vec::new(),
-            eligible_nodes: vec![node("node-a"), node("node-b"), node("node-c")],
+            eligible_nodes,
             now_secs: 1_000,
         };
         let (outcome, _timeline) = coord.issue_signed_lease(request);

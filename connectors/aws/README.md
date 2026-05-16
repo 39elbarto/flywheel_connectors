@@ -116,11 +116,12 @@ Required live inputs:
 
 - `AWS_SANDBOX_ACCESS_KEY_ID`
 - `AWS_SANDBOX_SECRET_ACCESS_KEY`
+- `AWS_SANDBOX_REGION`
 - `AWS_SANDBOX_ACCOUNT_ID`
 - `AWS_SANDBOX_BUCKET`
 - `FCP_SANDBOX_RUN_NAMESPACE`
 
-`AWS_SANDBOX_REGION` defaults to `us-east-1`; set it when the sandbox bucket lives in another region. `AWS_SANDBOX_SESSION_TOKEN` is optional for temporary credentials.
+`AWS_SANDBOX_REGION` must match the sandbox bucket region. `AWS_SANDBOX_SESSION_TOKEN` is optional for temporary credentials.
 
 Use a dedicated AWS sandbox account and a dedicated S3 bucket. The credentials must be scoped to put, list, get, and delete only synthetic objects under the verification prefix. The proof performs an invalid-signature list request as the auth-denial path, then performs a reversible `put_object` -> `list_objects` -> `delete_object` -> post-delete `get_object` lifecycle.
 

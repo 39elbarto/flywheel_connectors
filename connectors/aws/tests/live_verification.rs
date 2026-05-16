@@ -47,9 +47,8 @@ fn manifest() -> EnvironmentManifest {
             SECRET_ACCESS_KEY_ENV,
             "Sandbox AWS secret access key scoped to the verification account",
         )
-        .with_env_var_default(
+        .with_env_var(
             REGION_ENV,
-            "us-east-1",
             "AWS region used for signing the S3 verification request",
         )
         .with_env_var(
@@ -106,8 +105,8 @@ fn emit_live_jsonl(
             "gate_env_var": LIVE_GATE_ENV,
             "required_secret_env": [ACCESS_KEY_ID_ENV, SECRET_ACCESS_KEY_ENV],
             "optional_secret_env": SESSION_TOKEN_ENV,
-            "required_env": [ACCOUNT_ID_ENV, BUCKET_ENV, RUN_NAMESPACE_ENV],
-            "defaulted_env": REGION_ENV,
+            "required_env": [REGION_ENV, ACCOUNT_ID_ENV, BUCKET_ENV, RUN_NAMESPACE_ENV],
+            "defaulted_env": [],
             "command": LIVE_COMMAND,
             "git_revision": option_env!("FCP_LIVE_GIT_REVISION").unwrap_or("unknown"),
             "operation": [

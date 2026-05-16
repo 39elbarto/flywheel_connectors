@@ -30,6 +30,7 @@ const OP_ACK_EVENTS: &str = "workspace_events.ack_events";
 const EXPECTED_SUBSCRIPTIONS_PATH: &str = "/v1/subscriptions";
 const EXPECTED_PULL_PATH: &str = "/v1/projects/demo/subscriptions/workspace-events:pull";
 const EXPECTED_ACK_PATH: &str = "/v1/projects/demo/subscriptions/workspace-events:acknowledge";
+const ACCESS_TOKEN: &str = LOOPBACK_AUTH_VALUE;
 
 const LIST_SUBSCRIPTIONS_RESPONSE: &str = r#"{
   "subscriptions": [
@@ -86,7 +87,7 @@ impl LoopbackFixture {
         });
 
         Self {
-            base_url: format!("http://{address}/v1"),
+            base_url: format!("http://{address}"),
             handle: Some(handle),
         }
     }
@@ -96,6 +97,45 @@ impl LoopbackFixture {
     }
 
     fn join(mut self) -> FixtureObservation {
+        self.handle
+            .take()
+            .expect("fixture thread present")
+            .join()
+            .expect("fixture thread completed")
+    }
+}
+
+struct HttpResponse {
+    status: &'static str,
+    body: String,
+}
+
+struct LoopbackServer {
+    base_url: String,
+    handle: Option<JoinHandle<Vec<FixtureObservation>>>,
+}
+
+impl LoopbackServer {
+    fn start(responses: Vec<HttpResponse>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+        let address = listener.local_addr().expect("read listener address");
+        let handle = thread::spawn(move || {
+            responses
+                .into_iter()
+                .map(|response| {
+                    let (stream, _) = listener.accept().expect("accept connector request");
+                    handle_request(stream, response.status, &response.body)
+                })
+                .collect()
+        });
+
+        Self {
+            base_url: format!("http://{address}"),
+            handle: Some(handle),
+        }
+    }
+
+    fn join(mut self) -> Vec<FixtureObservation> {
         self.handle
             .take()
             .expect("fixture thread present")
@@ -279,20 +319,7 @@ async fn local_non_mock_subscription_and_pubsub_delivery_flow_uses_loopback_http
     let server = LoopbackServer::start(vec![
         HttpResponse {
             status: "200 OK",
-            body: r#"{
-                "subscriptions": [
-                    {
-                        "name": "subscriptions/local-1",
-                        "state": "ACTIVE",
-                        "targetResource": "//chat.googleapis.com/spaces/AAAA",
-                        "notificationEndpoint": {
-                            "pubsubTopic": "projects/demo/topics/workspace-events"
-                        }
-                    }
-                ],
-                "nextPageToken": "token-2"
-            }"#
-            .to_string(),
+            body: LIST_SUBSCRIPTIONS_RESPONSE.to_string(),
         },
         HttpResponse {
             status: "200 OK",
@@ -319,24 +346,88 @@ async fn local_non_mock_subscription_and_pubsub_delivery_flow_uses_loopback_http
         }))
         .await
         .expect("list subscriptions through connector");
-    let observation = fixture.join();
+    let created = connector
+        .handle_invoke(json!({
+            "operation": OP_CREATE_SUBSCRIPTION,
+            "input": {
+                "target_resource": "//chat.googleapis.com/spaces/AAAA",
+                "event_types": ["google.workspace.chat.message.v1.created"],
+                "pubsub_topic": "projects/demo/topics/workspace-events",
+                "ttl": "86400s",
+                "include_resource": true
+            }
+        }))
+        .await
+        .expect("create subscription through connector");
+    let pulled = connector
+        .handle_invoke(json!({
+            "operation": OP_PULL_EVENTS,
+            "input": {
+                "pubsub_subscription": "projects/demo/subscriptions/workspace-events",
+                "max_messages": 1
+            }
+        }))
+        .await
+        .expect("pull events through connector");
+    let acked = connector
+        .handle_invoke(json!({
+            "operation": OP_ACK_EVENTS,
+            "input": {
+                "pubsub_subscription": "projects/demo/subscriptions/workspace-events",
+                "ack_ids": ["ack-local-1"]
+            }
+        }))
+        .await
+        .expect("ack events through connector");
+
+    let observations = server.join();
+    assert_eq!(observations.len(), 4);
+    let list_observation = &observations[0];
+    let create_observation = &observations[1];
+    let pull_observation = &observations[2];
+    let ack_observation = &observations[3];
     let target = assert_request_boundary(
-        &observation.request_line,
+        &list_observation.request_line,
         "GET",
         EXPECTED_SUBSCRIPTIONS_PATH,
     );
 
     assert!(target.contains("pageSize=2"));
     assert!(target.contains("pageToken=token%2D1"));
-    assert!(observation.authorization_seen);
-    assert!(observation.user_agent_seen);
-    assert_eq!(result["next_page_token"], "token-2");
-    assert_eq!(result["subscriptions"][0]["name"], "subscriptions/sub-1");
+    assert!(list_observation.authorization_seen);
+    assert!(list_observation.user_agent_seen);
+    assert_eq!(listed["next_page_token"], "token-2");
+    assert_eq!(listed["subscriptions"][0]["name"], "subscriptions/sub-1");
     assert_eq!(
-        result["subscriptions"][0]["notificationEndpoint"]["pubsubTopic"],
+        listed["subscriptions"][0]["notificationEndpoint"]["pubsubTopic"],
         "projects/demo/topics/workspace-events"
     );
-    assert!(!result.to_string().contains(LOOPBACK_AUTH_VALUE));
+    assert!(!listed.to_string().contains(LOOPBACK_AUTH_VALUE));
+    assert_request_boundary(
+        &create_observation.request_line,
+        "POST",
+        EXPECTED_SUBSCRIPTIONS_PATH,
+    );
+    assert_eq!(created["operation"]["name"], "operations/create-local-1");
+    assert_request_boundary(&pull_observation.request_line, "POST", EXPECTED_PULL_PATH);
+    assert_eq!(pulled["decoded_events"][0]["ack_id"], "ack-local-1");
+    assert_eq!(
+        pulled["decoded_events"][0]["decoded_json"]["event"],
+        "chat_message_created"
+    );
+    assert_request_boundary(&ack_observation.request_line, "POST", EXPECTED_ACK_PATH);
+    assert_eq!(acked["status"], "acked");
+    assert_eq!(acked["acked_count"], 1);
+    assert!(
+        observations
+            .iter()
+            .all(|observation| observation.authorization_seen)
+    );
+    assert!(
+        observations
+            .iter()
+            .all(|observation| observation.user_agent_seen)
+    );
 
     let artifact = json!({
         "connector": "google-workspace-events",
@@ -348,13 +439,19 @@ async fn local_non_mock_subscription_and_pubsub_delivery_flow_uses_loopback_http
         "operation": OP_LIST_SUBSCRIPTIONS,
         "method": "GET",
         "path": EXPECTED_SUBSCRIPTIONS_PATH,
-        "request_line": observation.request_line,
+        "request_line": list_observation.request_line,
         "auth_gate": {
             "mode": "bearer",
-            "authorization_header_verified": observation.authorization_seen
+            "authorization_header_verified": list_observation.authorization_seen
         },
         "headers": {
-            "user_agent_seen": observation.user_agent_seen
+            "user_agent_seen": list_observation.user_agent_seen
+        },
+        "event_transcript": {
+            "subscriptions_listed": 1,
+            "subscription_created": created["operation"]["name"] == "operations/create-local-1",
+            "messages_pulled": 1,
+            "ack_count": 1
         },
         "cleanup": "fixture_thread_joined",
         "result": "passed"

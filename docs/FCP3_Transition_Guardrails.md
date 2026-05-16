@@ -69,7 +69,8 @@ During the FCP3 transition, all code changes must be evaluated against these gua
 **Rule**: New APIs must target the FCP3 architecture, not the FCP2 compatibility layer.
 
 **Examples of violations**:
-- Adding new methods to `fcp-sdk::migration::ConnectorErrorMapping`
+- Importing `ConnectorErrorMapping` from `fcp_sdk::migration` instead of the
+  canonical `fcp_sdk::ConnectorErrorMapping` surface
 - Extending the v2 handshake format instead of implementing v3
 - Adding new v2-style dispatch arms in connector `main.rs`
 

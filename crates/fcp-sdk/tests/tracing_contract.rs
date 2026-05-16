@@ -15,9 +15,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fcp_async_core::{AsyncError, ExecutionContext};
-use fcp_sdk::migration::{AttemptOutcome, ConnectorErrorMapping, RetryLoop};
+use fcp_sdk::migration::{AttemptOutcome, RetryLoop};
 use fcp_sdk::retry::RetryPolicy;
-use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig, FcpError};
+use fcp_sdk::{
+    ConnectorErrorMapping, ConnectorRuntime, ConnectorRuntimeConfig, FcpError,
+    map_async_to_fcp_error,
+};
 use tracing::Level;
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
@@ -57,7 +60,7 @@ impl ConnectorErrorMapping for TestError {
     }
 
     fn to_fcp_error(&self) -> FcpError {
-        fcp_sdk::migration::map_async_to_fcp_error(&match self {
+        map_async_to_fcp_error(&match self {
             Self::Transient(msg) => AsyncError::ProtocolIo {
                 message: msg.clone(),
             },

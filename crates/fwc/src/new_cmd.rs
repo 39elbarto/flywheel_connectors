@@ -2293,7 +2293,7 @@ fn generate_error_rs(short_name: &str) -> String {
 use std::time::Duration;
 
 use fcp_async_core::AsyncError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use fcp_sdk::prelude::FcpError;
 
 /// Connector-specific errors.
@@ -4075,7 +4075,7 @@ async fn test_error_codes_correct() {{
 #[test]
 fn test_error_mapping_rate_limit() {{
     use {crate_ident}::error::{struct_name}Error;
-    use fcp_sdk::migration::ConnectorErrorMapping;
+    use fcp_sdk::ConnectorErrorMapping;
 
     let err = {struct_name}Error::RateLimited {{ retry_after_ms: 5000 }};
     assert!(err.is_retryable(), "rate limit should be retryable");
@@ -4088,7 +4088,7 @@ fn test_error_mapping_rate_limit() {{
 #[test]
 fn test_error_mapping_config() {{
     use {crate_ident}::error::{struct_name}Error;
-    use fcp_sdk::migration::ConnectorErrorMapping;
+    use fcp_sdk::ConnectorErrorMapping;
 
     let err = {struct_name}Error::Config("bad key".into());
     assert!(!err.is_retryable(), "config error should not be retryable");
@@ -4101,7 +4101,7 @@ fn test_error_mapping_config() {{
 #[test]
 fn test_error_mapping_runtime() {{
     use {crate_ident}::error::{struct_name}Error;
-    use fcp_sdk::migration::ConnectorErrorMapping;
+    use fcp_sdk::ConnectorErrorMapping;
 
     let err = {struct_name}Error::Runtime("cancelled".into());
     assert!(!err.is_retryable(), "runtime error should not be retryable");
@@ -4114,7 +4114,7 @@ fn test_error_mapping_runtime() {{
 fn test_error_mapping_from_async_timeout() {{
     use {crate_ident}::error::{struct_name}Error;
     use fcp_async_core::AsyncError;
-    use fcp_sdk::migration::ConnectorErrorMapping;
+    use fcp_sdk::ConnectorErrorMapping;
 
     let async_err = AsyncError::Timeout {{ timeout_ms: 30000 }};
     let err = {struct_name}Error::from_async_error(async_err);
@@ -4125,7 +4125,7 @@ fn test_error_mapping_from_async_timeout() {{
 fn test_error_mapping_from_async_cancelled() {{
     use {crate_ident}::error::{struct_name}Error;
     use fcp_async_core::AsyncError;
-    use fcp_sdk::migration::ConnectorErrorMapping;
+    use fcp_sdk::ConnectorErrorMapping;
 
     let async_err = AsyncError::Cancelled;
     let err = {struct_name}Error::from_async_error(async_err);

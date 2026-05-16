@@ -8,12 +8,14 @@ checkout. The guessed `fcp_core::compat::policy` and
 `fcp_core::compat::evidence` modules do not exist, and there are no workspace
 callers to migrate for those paths.
 
-The active compatibility shim in `docs/FCP3_Transition_Scorecard.md` is not an
-`fcp_core::compat` module. It is the `ConnectorErrorMapping` helper in
-`crates/fcp-sdk/src/migration.rs`. `ConnectorRuntime` has graduated to the
-first-class `crates/fcp-sdk/src/runtime.rs` SDK surface.
+The remaining compatibility shims in `docs/FCP3_Transition_Scorecard.md` are
+not `fcp_core::compat` modules. `ConnectorRuntime` has graduated to the
+first-class `crates/fcp-sdk/src/runtime.rs` SDK surface. `ConnectorErrorMapping`
+now has a first-class `crates/fcp-sdk/src/error_mapping.rs` SDK surface, with a
+temporary `fcp_sdk::migration` re-export left in place while legacy connector
+call sites migrate to `fcp_sdk::ConnectorErrorMapping`.
 
-<!-- compat-shim-inventory-summary: suspected_core_compat_modules=0 suspected_core_compat_callers=0 scorecard_active_shims=1 -->
+<!-- compat-shim-inventory-summary: suspected_core_compat_modules=0 suspected_core_compat_callers=0 scorecard_active_shims=0 scorecard_migrating_shims=1 -->
 
 ## Suspected Core Compat Paths
 
@@ -30,10 +32,10 @@ first-class `crates/fcp-sdk/src/runtime.rs` SDK surface.
 | Shim | Location | Status | Boundary |
 |------|----------|--------|----------|
 | `ConnectorRuntime` | `crates/fcp-sdk/src/runtime.rs` | migrated | First-class SDK lifecycle helper for request/background contexts and shutdown. |
-| `ConnectorErrorMapping` | `crates/fcp-sdk/src/migration.rs` | active | Shared connector error-to-`FcpError` mapping contract. |
+| `ConnectorErrorMapping` | `crates/fcp-sdk/src/error_mapping.rs` | migrating | First-class SDK error-to-`FcpError` mapping contract; migration module re-export remains for legacy call sites only. |
 
 <!-- scorecard-shim-row: id=FCP-SDK-CONNECTOR-RUNTIME symbol=ConnectorRuntime location=crates/fcp-sdk/src/runtime.rs status=migrated -->
-<!-- scorecard-shim-row: id=FCP-SDK-CONNECTOR-ERROR-MAPPING symbol=ConnectorErrorMapping location=crates/fcp-sdk/src/migration.rs status=active -->
+<!-- scorecard-shim-row: id=FCP-SDK-CONNECTOR-ERROR-MAPPING symbol=ConnectorErrorMapping location=crates/fcp-sdk/src/error_mapping.rs status=migrating legacy_reexport=crates/fcp-sdk/src/migration.rs -->
 
 ## Verification Commands
 

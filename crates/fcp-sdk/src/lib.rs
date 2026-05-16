@@ -226,6 +226,8 @@ pub use fcp_manifest::{
 pub mod contract;
 pub mod coordination;
 pub mod credentials;
+/// Canonical connector error-mapping contract.
+pub mod error_mapping;
 pub mod formatting;
 pub mod migration;
 pub mod prelude;
@@ -279,6 +281,9 @@ pub use formatting::{
     ErrorClass, FormatError, FormatMode, Formatter, RenderResult, classify_error_message,
     is_parse_error_message,
 };
+
+/// Canonical connector error-mapping trait and async-runtime error conversion.
+pub use error_mapping::{ConnectorErrorMapping, map_async_to_fcp_error};
 
 /// Retry policy helpers.
 pub use retry::{RetryDecision, RetryPolicy};

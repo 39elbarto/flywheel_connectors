@@ -5,6 +5,7 @@ use std::time::Duration;
 use fcp_async_core::AsyncError;
 use fcp_async_core::http::HttpClientError;
 use fcp_prelude::FcpError;
+use fcp_sdk::ConnectorErrorMapping;
 use thiserror::Error;
 
 /// Slack-specific errors.
@@ -201,7 +202,7 @@ impl SlackError {
 
 // ── FCP3 SDK ConnectorErrorMapping trait implementation ──────────────
 
-impl fcp_sdk::migration::ConnectorErrorMapping for SlackError {
+impl ConnectorErrorMapping for SlackError {
     fn from_async_error(error: AsyncError) -> Self {
         match error {
             AsyncError::Timeout { timeout_ms } => Self::Http {
@@ -879,7 +880,7 @@ mod tests {
     // ── ConnectorErrorMapping trait tests ────────────────────────────
 
     fn from_async(err: AsyncError) -> SlackError {
-        <SlackError as fcp_sdk::migration::ConnectorErrorMapping>::from_async_error(err)
+        <SlackError as ConnectorErrorMapping>::from_async_error(err)
     }
 
     #[test]
@@ -927,7 +928,7 @@ mod tests {
     #[test]
     fn connector_error_mapping_trait_to_fcp_error() {
         let err = from_async(AsyncError::Timeout { timeout_ms: 1000 });
-        let fcp = <SlackError as fcp_sdk::migration::ConnectorErrorMapping>::to_fcp_error(&err);
+        let fcp = <SlackError as ConnectorErrorMapping>::to_fcp_error(&err);
         assert!(matches!(
             fcp,
             FcpError::External {
@@ -940,14 +941,12 @@ mod tests {
     #[test]
     fn connector_error_mapping_trait_is_retryable() {
         let err = from_async(AsyncError::Cancelled);
-        assert!(<SlackError as fcp_sdk::migration::ConnectorErrorMapping>::is_retryable(&err));
+        assert!(<SlackError as ConnectorErrorMapping>::is_retryable(&err));
     }
 
     #[test]
     fn connector_error_mapping_trait_retry_after_none_for_transport() {
         let err = from_async(AsyncError::Timeout { timeout_ms: 100 });
-        assert!(
-            <SlackError as fcp_sdk::migration::ConnectorErrorMapping>::retry_after(&err).is_none()
-        );
+        assert!(<SlackError as ConnectorErrorMapping>::retry_after(&err).is_none());
     }
 }

@@ -70,14 +70,14 @@ Three-node live proof harness:
 
 Phase I.1 reconciliation: the bridge-plan guess that these were
 `fcp_core::compat::policy` and `fcp_core::compat::evidence` modules was false
-for the current checkout. No such `fcp-core` modules or callers exist. The two
-active scorecard shim is the SDK migration helper below; see
+for the current checkout. No such `fcp-core` modules or callers exist. The
+remaining SDK shims are listed below; see
 [`docs/cleanup/shim_inventory.md`](cleanup/shim_inventory.md) for the
 machine-readable inventory.
 
 | Shim | Location | Purpose | Delete After | Status |
 |------|----------|---------|-------------|--------|
-| ConnectorErrorMapping | fcp-sdk/src/migration.rs | V2->V3 error mapping bridge | P4 convergence | ACTIVE (all 150 connectors use it) |
+| ConnectorErrorMapping | fcp-sdk/src/error_mapping.rs | First-class SDK error mapping contract | legacy `fcp_sdk::migration` imports removed | MIGRATING (`flywheel_connectors-angoc.3.7`) |
 | ConnectorRuntime | fcp-sdk/src/runtime.rs | First-class SDK lifecycle helper | migrated out of migration namespace | MIGRATED (`flywheel_connectors-angoc.3.6`) |
 
 ---

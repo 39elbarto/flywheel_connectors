@@ -13,8 +13,8 @@
 //!
 //! - [`RetryLoop`]: Generic retry executor using `ExecutionContext` for
 //!   deadline-aware exponential backoff with jitter.
-//! - [`ConnectorErrorMapping`]: Trait for consistent `AsyncError` → connector
-//!   error conversion.
+//! - [`crate::ConnectorErrorMapping`]: Trait for consistent `AsyncError` →
+//!   connector error conversion.
 //! - [`HttpRetryConfig`]: Serializable retry configuration shared by HTTP connectors.
 //! - [`classify_http_status`]: Canonical HTTP status → retry decision mapping.
 //! - [`map_async_to_fcp_error`]: Canonical `AsyncError` → `FcpError` mapping.
@@ -24,14 +24,16 @@
 //! Every connector migration MUST satisfy all items below. Use this as
 //! the acceptance gate before closing a connector migration bead.
 //!
-//! Runtime bootstrap helpers graduated to [`crate::runtime::ConnectorRuntime`].
-//! This module keeps the retry and error-mapping helpers that still belong to
-//! the remaining SDK migration bead.
+//! Runtime bootstrap helpers graduated to [`crate::runtime::ConnectorRuntime`],
+//! and the connector error-mapping contract graduated to
+//! [`crate::error_mapping`]. This module temporarily re-exports the error
+//! mapping names while older connector call sites migrate to the canonical SDK
+//! surface.
 //!
 //! ## Retry & Error Mapping
 //!
 //! - [ ] Remove hand-rolled retry loops; replace with [`RetryLoop::execute()`].
-//! - [ ] Implement [`ConnectorErrorMapping`] on the connector's error type.
+//! - [ ] Implement [`crate::ConnectorErrorMapping`] on the connector's error type.
 //! - [ ] HTTP status classification delegates to [`classify_http_status()`].
 //! - [ ] `AsyncError` mapping delegates to [`map_async_to_fcp_error()`] for
 //!   the timeout/cancellation/runtime arms.
@@ -195,7 +197,6 @@
 //! - Retry config serializable from connector TOML/JSON configuration
 //! - Error mapping centralized in `ConnectorErrorMapping` impl
 
-use std::fmt;
 use std::time::Duration;
 
 use fcp_async_core::{AsyncError, ExecutionContext};
@@ -206,7 +207,11 @@ use fcp_manifest::{
 use tracing::{debug, warn};
 
 use crate::FcpError;
+pub use crate::error_mapping::{ConnectorErrorMapping, map_async_to_fcp_error};
 use crate::retry::{RetryDecision, RetryPolicy};
+
+#[cfg(test)]
+use std::fmt;
 
 /// Connector-side client for the host egress proxy.
 #[cfg(feature = "connector-http")]
@@ -399,50 +404,6 @@ impl HostEgressProxyError {
             Self::Transport(_) => None,
             Self::Rejected { body, .. } => Some(body),
         }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ConnectorErrorMapping
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Trait for mapping `AsyncError` to connector-specific error types.
-///
-/// Every connector must implement this to handle deadline/cancellation
-/// errors from `ExecutionContext` operations.
-///
-/// # Example
-///
-/// ```ignore
-/// impl ConnectorErrorMapping for MyConnectorError {
-///     fn from_async_error(error: AsyncError) -> Self {
-///         match error {
-///             AsyncError::Timeout { timeout_ms } => Self::DeadlineExceeded {
-///                 message: format!("request deadline exceeded after {timeout_ms}ms"),
-///             },
-///             AsyncError::Cancelled => Self::RequestCancelled,
-///             other => Self::Runtime { message: other.to_string() },
-///         }
-///     }
-///
-///     fn to_fcp_error(&self) -> FcpError { /* ... */ }
-/// }
-/// ```
-pub trait ConnectorErrorMapping: fmt::Display + fmt::Debug + Send + Sync {
-    /// Map an `AsyncError` (timeout, cancellation, etc.) to this connector's error type.
-    fn from_async_error(error: AsyncError) -> Self
-    where
-        Self: Sized;
-
-    /// Convert this connector error to the standard `FcpError` taxonomy.
-    fn to_fcp_error(&self) -> FcpError;
-
-    /// Whether this error is retryable.
-    fn is_retryable(&self) -> bool;
-
-    /// Suggested retry-after delay, if available.
-    fn retry_after(&self) -> Option<Duration> {
-        None
     }
 }
 
@@ -722,33 +683,6 @@ impl HttpRetryConfig {
 #[must_use]
 pub fn classify_http_status(status: u16, retry_after: Option<Duration>) -> RetryDecision {
     crate::retry::decision_from_http_status(status, retry_after)
-}
-
-/// Map an `AsyncError` from context operations to a standard `FcpError`.
-///
-/// This is the canonical mapping for context-level errors (timeout, cancellation).
-/// Connector-specific error types should delegate to this for the `AsyncError` arm.
-#[must_use]
-pub fn map_async_to_fcp_error(error: &AsyncError) -> FcpError {
-    match error {
-        AsyncError::Timeout { timeout_ms } => FcpError::External {
-            service: "runtime".into(),
-            message: format!("request deadline exceeded after {timeout_ms}ms"),
-            status_code: Some(504),
-            retryable: true,
-            retry_after: None,
-        },
-        AsyncError::Cancelled => FcpError::External {
-            service: "runtime".into(),
-            message: "request cancelled".into(),
-            status_code: None,
-            retryable: false,
-            retry_after: None,
-        },
-        other => FcpError::Internal {
-            message: other.to_string(),
-        },
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

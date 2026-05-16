@@ -5022,6 +5022,10 @@ fn connector_lease_flush_before_yield_payload(
 #[derive(Debug, Serialize)]
 #[serde(tag = "code")]
 enum HrwLeaseRouteRefusal<'a> {
+    LeaseRoutingConfigMissing {
+        local_node_env: &'static str,
+        node_set_env: &'static str,
+    },
     LeaseQuorumConfigInvalid {
         configured_eligible_nodes_count: usize,
         required_quorum_signers_count: usize,
@@ -5082,6 +5086,14 @@ fn hrw_lease_refusal_message_for(action: &str, refusal: &HrwLeaseRouteRefusal<'_
     format!("HRW lease routing refused singleton_writer {action}: {payload}")
 }
 
+fn missing_hrw_lease_routing_config_error(action: &str) -> HostError {
+    let refusal = HrwLeaseRouteRefusal::LeaseRoutingConfigMissing {
+        local_node_env: HRW_LEASE_LOCAL_NODE_ENV,
+        node_set_env: HRW_LEASE_NODES_ENV,
+    };
+    HostError::PreflightFailed(hrw_lease_refusal_message_for(action, &refusal))
+}
+
 fn enforce_hrw_singleton_writer_quorum_config(
     action: &str,
     routing: &HrwLeaseRoutingConfig,
@@ -5125,7 +5137,7 @@ fn enforce_hrw_singleton_writer_launch_route(
         return Ok(());
     }
     let Some(routing) = routing else {
-        return Ok(());
+        return Err(missing_hrw_lease_routing_config_error("launch"));
     };
     enforce_hrw_singleton_writer_quorum_config("launch", routing)?;
 
@@ -5216,22 +5228,11 @@ async fn enforce_hrw_lease_route(
 ) -> HostResult<()> {
     let subject_id = singleton_writer_lease_subject_id(request);
     let Some(routing) = routing else {
-        let reason = fcp_mesh::planner::LeaseTransferReason::NoEligibleHolder {
-            zone_id: request.zone_id.clone(),
-            subject_id,
-            purpose: CoreLeasePurpose::ConnectorStateWrite,
-        };
         metrics::record_lease_fenced(
             CONNECTOR_STATE_WRITE_LEASE_PURPOSE_LABEL,
-            "invoke_no_eligible_holder",
+            "invoke_missing_routing_config",
         );
-        let refusal = HrwLeaseRouteRefusal::NotSelectedCoordinator {
-            reason: &reason,
-            yield_flush: None,
-        };
-        return Err(HostError::PreflightFailed(hrw_lease_refusal_message(
-            &refusal,
-        )));
+        return Err(missing_hrw_lease_routing_config_error("invoke"));
     };
     enforce_hrw_singleton_writer_quorum_config("invoke", routing)?;
 
@@ -20045,6 +20046,37 @@ deny_ptrace = true
         assert!(message.contains(r#""reason":"wrong_holder""#));
         assert!(message.contains(expected.as_str()));
         assert!(message.contains(local_node.as_str()));
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn build_registry_entry_hrw_launch_rejects_missing_routing_config() {
+        let connector_id = "fcp.test.hrw-launch-missing-routing:utility:1.0.0";
+        let operation_id = "test.singleton";
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.allowed_operations = vec![operation_id.to_string()];
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "api.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+        config.config = Some(json!({ "state": { "model": "singleton_writer" } }));
+        let _guard = set_test_hrw_lease_routing_override(None);
+
+        let error =
+            match build_registry_entry(config, Arc::new(ResilienceLayer::default()), None).await {
+                Ok(_) => {
+                    panic!("singleton_writer launch must fail closed without HRW routing config")
+                }
+                Err(error) => error,
+            };
+        let message = error.to_string();
+        assert!(message.contains("HRW lease routing refused singleton_writer launch"));
+        assert!(message.contains(r#""code":"LeaseRoutingConfigMissing""#));
+        assert!(message.contains(HRW_LEASE_LOCAL_NODE_ENV));
+        assert!(message.contains(HRW_LEASE_NODES_ENV));
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

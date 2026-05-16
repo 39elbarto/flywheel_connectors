@@ -31,9 +31,11 @@ use thiserror::Error;
 
 pub mod conformal;
 pub mod explain;
+pub mod hlc;
 pub mod replay;
 
 pub use conformal::{ConformalScore, ConformalScoreEstimator};
+pub use hlc::{HybridLogicalClock, HybridLogicalTimestamp};
 
 const AUDIT_ENTRY_ID_DOMAIN: &[u8] = b"FCP2-AUDIT-ENTRY-V1";
 const CAPABILITY_CONSTRAINT_DESCRIPTOR_HASH_DOMAIN: &[u8] =

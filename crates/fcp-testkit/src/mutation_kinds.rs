@@ -154,7 +154,7 @@ impl DeterministicRng {
         Self { state: state | 1 }
     }
 
-    fn next(&mut self) -> u64 {
+    const fn next(&mut self) -> u64 {
         let mut x = self.state;
         x ^= x << 13;
         x ^= x >> 7;

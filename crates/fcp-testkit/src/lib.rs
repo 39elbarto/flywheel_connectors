@@ -61,6 +61,7 @@ pub mod fixtures;
 mod harness;
 mod http_fixture;
 pub mod live_suite;
+pub mod local_mesh;
 mod log_scan;
 mod mock_server;
 pub mod mutation;

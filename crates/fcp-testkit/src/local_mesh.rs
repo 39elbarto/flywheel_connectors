@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::redacted_replay_bundle::assert_redaction_safe_str;
 use fcp_cbor::{CanonicalSerializer, SchemaId, SerializationError};
 use fcp_core::{ConnectorId, ObjectHeader, OperationReceipt, Provenance};
-use fcp_crypto::{CryptoError, Ed25519SigningKey, Ed25519VerifyingKey};
+use fcp_crypto::{CryptoError, Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey};
 use fcp_mesh::{
     AvailabilityProfile, CpuArch, DeviceProfile, LatencyClass, MeshNode, MeshNodeConfig,
     PowerSource,
@@ -134,11 +134,22 @@ pub struct LocalNodeStateHash {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalFailoverInvariantReport {
+    pub active_holder_hash: String,
+    pub online_node_count: usize,
+    pub all_nodes_online_at_end: bool,
+    pub orphaned_active_lease_count: usize,
+    pub orphaned_connector_state_count: usize,
+    pub invalid_receipt_signature_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalReplayBundle {
     pub manifest: LocalReplayManifest,
     pub events: Vec<LocalRoleTransition>,
     pub node_snapshots: Vec<LocalNodeSnapshot>,
     pub node_timelines: Vec<LocalNodeReplayTimeline>,
+    pub invariants: LocalFailoverInvariantReport,
     pub hashes: LocalReplayHashes,
 }
 
@@ -217,6 +228,7 @@ pub struct LocalFailoverOutcome {
     pub receipt_count: usize,
     pub duplicate_receipt_count: usize,
     pub active_holder_hash: String,
+    pub invariants: LocalFailoverInvariantReport,
     pub replay_bundle: LocalReplayBundle,
 }
 
@@ -337,7 +349,7 @@ impl LocalMeshHarness {
         let idempotency_key = format!("{scenario_id}_idem");
         let state_at_t0 = self.node_snapshots();
 
-        let (state_at_chaos, state_at_heal) = match chaos_mode {
+        let (state_at_chaos, state_at_heal, active_holder) = match chaos_mode {
             LocalChaosMode::NetworkPartitionThenHeal => {
                 self.execute_once(&idempotency_key, &initial_holder)?;
                 self.partition_holder(&scenario_id, chaos_mode, &initial_holder, &mut rng)?;
@@ -359,7 +371,7 @@ impl LocalMeshHarness {
                     &mut rng,
                 )?;
                 let state_at_heal = self.node_snapshots();
-                (state_at_chaos, state_at_heal)
+                (state_at_chaos, state_at_heal, next_holder)
             }
             LocalChaosMode::KillLeaderMidWrite => {
                 self.kill_node(&scenario_id, chaos_mode, &initial_holder, &mut rng)?;
@@ -381,7 +393,7 @@ impl LocalMeshHarness {
                     &mut rng,
                 )?;
                 let state_at_heal = self.node_snapshots();
-                (state_at_chaos, state_at_heal)
+                (state_at_chaos, state_at_heal, next_holder)
             }
             LocalChaosMode::KillFollowerMidRead => {
                 let follower = self.random_follower(&initial_holder, &mut rng)?;
@@ -396,17 +408,22 @@ impl LocalMeshHarness {
                     &mut rng,
                 )?;
                 let state_at_heal = self.node_snapshots();
-                (state_at_chaos, state_at_heal)
+                (state_at_chaos, state_at_heal, initial_holder.clone())
             }
         };
 
-        let active_holder = self.select_holder()?;
+        let invariants = self.invariant_report(&active_holder);
         let final_state_hash = self.final_state_hash()?;
         let state_at_end = self.node_snapshots();
         let node_timelines =
             node_timelines_from_snapshots(state_at_t0, state_at_chaos, state_at_heal, state_at_end);
-        let replay_bundle =
-            self.replay_bundle(&scenario_id, chaos_mode, &final_state_hash, node_timelines)?;
+        let replay_bundle = self.replay_bundle(
+            &scenario_id,
+            chaos_mode,
+            &final_state_hash,
+            node_timelines,
+            invariants.clone(),
+        )?;
 
         Ok(LocalFailoverOutcome {
             scenario_id,
@@ -414,6 +431,7 @@ impl LocalMeshHarness {
             receipt_count: self.receipts_by_key.len(),
             duplicate_receipt_count: self.duplicate_receipt_count(),
             active_holder_hash: hash_label(active_holder.as_str()),
+            invariants,
             replay_bundle,
         })
     }
@@ -702,12 +720,65 @@ impl LocalMeshHarness {
         self.receipts_by_key.len().saturating_sub(unique_keys)
     }
 
+    fn invariant_report(&self, active_holder: &TailscaleNodeId) -> LocalFailoverInvariantReport {
+        let online_node_count = self.nodes.values().filter(|node| node.online).count();
+        let all_nodes_online_at_end = online_node_count == self.nodes.len();
+        let active_holder_valid = self
+            .nodes
+            .get(active_holder.as_str())
+            .is_some_and(|node| node.online && node.role == LocalNodeRole::Holder);
+        let orphaned_active_lease_count = usize::from(!active_holder_valid);
+        let invalid_receipt_signature_count = self
+            .receipts_by_key
+            .values()
+            .filter(|receipt| !self.receipt_signature_valid(receipt))
+            .count();
+        let orphaned_connector_state_count = self
+            .receipts_by_key
+            .values()
+            .filter(|receipt| !self.receipt_state_is_connected(receipt))
+            .count();
+
+        LocalFailoverInvariantReport {
+            active_holder_hash: hash_label(active_holder.as_str()),
+            online_node_count,
+            all_nodes_online_at_end,
+            orphaned_active_lease_count,
+            orphaned_connector_state_count,
+            invalid_receipt_signature_count,
+        }
+    }
+
+    fn receipt_signature_valid(&self, receipt: &OperationReceipt) -> bool {
+        if receipt.signature.node_id.as_str() != receipt.executed_by.as_str() {
+            return false;
+        }
+
+        let Some(node) = self.nodes.get(receipt.executed_by.as_str()) else {
+            return false;
+        };
+        let signature = Ed25519Signature::from_bytes(&receipt.signature.signature);
+        node.signing_key
+            .verifying_key()
+            .verify(&receipt.signable_bytes(), &signature)
+            .is_ok()
+    }
+
+    fn receipt_state_is_connected(&self, receipt: &OperationReceipt) -> bool {
+        self.nodes.contains_key(receipt.executed_by.as_str())
+            && receipt.idempotency_key.is_some()
+            && receipt.header.refs.contains(&receipt.request_object_id)
+            && !receipt.outcome_object_ids.is_empty()
+            && self.receipt_signature_valid(receipt)
+    }
+
     fn replay_bundle(
         &self,
         scenario_id: &str,
         chaos_mode: LocalChaosMode,
         final_state_hash: &str,
         node_timelines: Vec<LocalNodeReplayTimeline>,
+        invariants: LocalFailoverInvariantReport,
     ) -> Result<LocalReplayBundle, LocalMeshHarnessError> {
         let transition_hash = hash_json(&self.transitions)?;
         let receipt_hash = hash_json(&self.receipts_by_key)?;
@@ -733,6 +804,7 @@ impl LocalMeshHarness {
             events: self.transitions.clone(),
             node_snapshots,
             node_timelines,
+            invariants,
             hashes: LocalReplayHashes {
                 final_state_hash: final_state_hash.to_string(),
                 expected_hash_for_seed: final_state_hash.to_string(),

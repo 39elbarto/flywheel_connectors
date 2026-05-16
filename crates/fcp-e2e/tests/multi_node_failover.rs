@@ -165,6 +165,34 @@ fn failover_hash_matrix(
             outcome.duplicate_receipt_count, 0,
             "duplicate receipt count must stay zero under chaos"
         );
+        assert_eq!(
+            outcome.invariants.active_holder_hash, outcome.active_holder_hash,
+            "active holder invariant should identify the selected holder"
+        );
+        assert_eq!(
+            outcome.invariants.online_node_count, 3,
+            "all local mesh nodes should be online after recovery"
+        );
+        assert!(
+            outcome.invariants.all_nodes_online_at_end,
+            "failover recovery should leave every local node online"
+        );
+        assert_eq!(
+            outcome.invariants.orphaned_active_lease_count, 0,
+            "active singleton holder must be online and in holder role"
+        );
+        assert_eq!(
+            outcome.invariants.orphaned_connector_state_count, 0,
+            "operation receipts must stay connected to request refs, outcomes, and known nodes"
+        );
+        assert_eq!(
+            outcome.invariants.invalid_receipt_signature_count, 0,
+            "operation receipts must verify against the executing node key"
+        );
+        assert_eq!(
+            outcome.replay_bundle.invariants.orphaned_active_lease_count, 0,
+            "replay bundle should carry the same lease invariant evidence"
+        );
         assert!(
             outcome.replay_bundle.is_redaction_safe()?,
             "replay bundle must not expose raw node ids or secret-bearing labels"

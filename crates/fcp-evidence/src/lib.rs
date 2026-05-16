@@ -169,7 +169,10 @@ pub use proof_runner::{
     CargoProofInvocation, PROOF_RUNNER_EVENT_SCHEMA, PROOF_RUNNER_SUMMARY_SCHEMA,
     ProofCommandFingerprint, ProofCommandSpec, ProofRun, ProofRunClassification, ProofRunError,
     ProofRunEvent, ProofRunEventKind, ProofRunJsonlEvent, ProofRunPolicy, ProofRunStage,
-    ProofRunnerKind, RedactedEnvValue, TargetDirPolicy, WorkerAffinityHint,
+    ProofRunnerKind, RCH_REMOTE_PROOF_EVIDENCE_SCHEMA, RchRemoteProofBlockerReason,
+    RchRemoteProofClassification, RchRemoteProofEvidence, RchRemoteProofExitKind,
+    RchRemoteProofRedaction, RchRemoteProofRedactionFlag, RchRemoteProofSummary,
+    RchRemoteProofSummaryLocation, RedactedEnvValue, TargetDirPolicy, WorkerAffinityHint,
 };
 
 // ── Mesh Failover Flight Recorder (b88ec.6) ───────────────────────

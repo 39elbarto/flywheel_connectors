@@ -26,7 +26,7 @@ with the following shape:
 | span name | `fcp.audit.entry` |
 | span kind | `INTERNAL` |
 | status | `OK` when `entry.decision = "accepted"`; `ERROR` otherwise. Error message = `entry.reason_code` |
-| start time | `entry.hlc.physical_ns` (UTC nanoseconds from HLC physical component) |
+| start time | `entry.hlc.physical_ms * 1_000_000` (UTC nanoseconds from HLC physical component) |
 | end time | start time + a fixed 1-microsecond synthetic duration (audit append is instantaneous; the span is a point event) |
 
 Attributes (all under namespace `fcp.audit.entry.*`):
@@ -34,7 +34,10 @@ Attributes (all under namespace `fcp.audit.entry.*`):
 | Attribute | Type | Source | Required |
 |---|---|---|---|
 | `fcp.audit.entry.entry_id` | string | `entry.id` (BLAKE3-256 hex prefix, 32 chars) | yes |
-| `fcp.audit.entry.hlc` | string | `entry.hlc.serialize()` — formatted as `{physical_ns}.{counter}` per the HLC encoding in fcp-audit | yes |
+| `fcp.audit.entry.hlc` | string | compact HLC key formatted as `{l}.{c}` where `l = entry.hlc.physical_ms * 1_000_000` and `c = entry.hlc.logical` | yes |
+| `fcp.audit.entry.hlc.l` | integer | HLC physical component encoded for OTLP as UTC nanoseconds (`entry.hlc.physical_ms * 1_000_000`) | yes |
+| `fcp.audit.entry.hlc.c` | integer | HLC logical counter (`entry.hlc.logical`) | yes |
+| `fcp.audit.entry.hlc.node_id` | string | stable node id that produced `entry.hlc` | yes |
 | `fcp.audit.entry.zone` | string | `entry.zone` (e.g. `z:work`) | yes |
 | `fcp.audit.entry.decision` | string | one of `accepted`, `rejected_predicate`, `rejected_revocation`, `rejected_expired` | yes |
 | `fcp.audit.entry.reason_code` | string | structured reason enum (e.g. `RevokedBeforeUse`, `QuorumNotMet`, `Expired`) | yes |
@@ -46,8 +49,10 @@ Attributes (all under namespace `fcp.audit.entry.*`):
 ## Parity guarantee
 
 For every audit chain entry `e` written to disk, the host MUST emit
-exactly one OTLP span `s` such that, for the 6 cardinal fields
-(`entry_id`, `hlc`, `zone`, `decision`, `reason_code`, `seq`):
+exactly one OTLP span `s` such that, for the 9 cardinal fields
+(`entry_id`, `hlc`, `hlc.l`, `hlc.c`, `hlc.node_id`, `zone`,
+`decision`, `reason_code`, `seq`), each span attribute matches the
+source field or HLC-derived value pinned in the table above:
 
 ```
 s.attributes[fcp.audit.entry.<field>] == e.<field>
@@ -95,7 +100,7 @@ this with a collector down for 60 seconds then up.
 
 The audit chain SHALL NOT contain raw secret payloads (the host
 runtime ensures this via `SecretTaintTracker` from `angoc.10.2`).
-The OTLP span exports ONLY the 9 cardinal fields above; it does NOT
+The OTLP span exports ONLY the 12 cardinal fields above; it does NOT
 copy the full audit-entry body. Therefore:
 
 - No secret bytes can reach OTLP via this path.

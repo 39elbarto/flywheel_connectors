@@ -53,6 +53,9 @@
             "required": [
                 "fcp.audit.entry.entry_id",
                 "fcp.audit.entry.hlc",
+                "fcp.audit.entry.hlc.l",
+                "fcp.audit.entry.hlc.c",
+                "fcp.audit.entry.hlc.node_id",
                 "fcp.audit.entry.zone",
                 "fcp.audit.entry.decision",
                 "fcp.audit.entry.reason_code",
@@ -70,7 +73,23 @@
                 "fcp.audit.entry.hlc": {
                     "type": "string",
                     "pattern": "^[0-9]+\\.[0-9]+$",
-                    "description": "Hybrid Logical Clock encoded as `{physical_ns}.{counter}`."
+                    "description": "Hybrid Logical Clock encoded as `{l}.{c}` where `l` is the OTLP nanosecond physical component."
+                },
+                "fcp.audit.entry.hlc.l": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "HLC physical component encoded for OTLP as UTC nanoseconds (`entry.hlc.physical_ms * 1_000_000`)."
+                },
+                "fcp.audit.entry.hlc.c": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295,
+                    "description": "HLC logical counter (`entry.hlc.logical`)."
+                },
+                "fcp.audit.entry.hlc.node_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Stable node id that produced `entry.hlc`."
                 },
                 "fcp.audit.entry.zone": {
                     "type": "string",

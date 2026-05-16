@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fcp_cbor::{CanonicalSerializer, SchemaId};
@@ -16,13 +16,19 @@ use serde_json::Value;
 fn deterministic_local_mesh_failover_smoke_covers_all_a4_chaos_modes()
 -> Result<(), Box<dyn std::error::Error>> {
     let scenarios = seed_mode_scenarios();
-    let forward_matrix = failover_hash_matrix(scenarios.iter().copied())?;
-    let reverse_matrix = failover_hash_matrix(scenarios.iter().rev().copied())?;
+    let artifact_root = replay_artifact_root("matrix_forward");
+    let forward_matrix = failover_hash_matrix(scenarios.iter().copied(), Some(&artifact_root))?;
+    let reverse_matrix = failover_hash_matrix(scenarios.iter().rev().copied(), None)?;
 
     assert_eq!(
         forward_matrix.len(),
         300,
         "A.4 smoke must cover 100 seeds x 3 chaos modes"
+    );
+    assert_eq!(
+        replay_artifact_dir_count(&artifact_root)?,
+        300,
+        "forward seed/mode matrix should write one replay bundle per scenario"
     );
     assert_eq!(
         forward_matrix, reverse_matrix,
@@ -189,11 +195,17 @@ fn seed_mode_scenarios() -> Vec<(u64, LocalChaosMode)> {
 
 fn failover_hash_matrix(
     scenarios: impl IntoIterator<Item = (u64, LocalChaosMode)>,
+    artifact_root: Option<&Path>,
 ) -> Result<BTreeMap<(u64, LocalChaosMode), String>, Box<dyn std::error::Error>> {
     let mut matrix = BTreeMap::new();
     for (seed_index, chaos_mode) in scenarios {
         let mut harness = LocalMeshHarness::new_three_node(seed_index)?;
         let outcome = harness.run_failover_scenario(chaos_mode)?;
+        if let Some(root) = artifact_root {
+            outcome
+                .replay_bundle
+                .write_to_dir(root.join(&outcome.scenario_id))?;
+        }
 
         assert_eq!(
             harness.mesh_node_count(),
@@ -379,4 +391,14 @@ fn replay_artifact_root(label: &str) -> PathBuf {
         "fcp-multi-node-failover-replay-{}-{nanos}-{label}",
         std::process::id()
     ))
+}
+
+fn replay_artifact_dir_count(root: &Path) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut count = 0;
+    for entry in fs::read_dir(root)? {
+        if entry?.file_type()?.is_dir() {
+            count += 1;
+        }
+    }
+    Ok(count)
 }

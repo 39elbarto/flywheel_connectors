@@ -85,6 +85,12 @@ receipt signatures verify against the executing node key, that no orphaned
 connector-state receipt remains, that the manifest result is `pass`, and that
 the JSONL event stream does not contain raw node IDs.
 
+The forward 100-seed x 3-mode matrix also writes one replay bundle per scenario
+under a persistent temp artifact root named
+`fcp-multi-node-failover-replay-<pid>-<nanos>-matrix_forward`. The reverse
+matrix replays the same scenarios without writing a second artifact tree; it is
+only used to prove traversal-order independence.
+
 ## Replay Bundle Layout
 
 `LocalReplayBundle::write_to_dir` runs the shared
@@ -171,22 +177,25 @@ strings fail the preflight instead of leaving a partial replay on disk.
 
 1. Extract the failing `seed_index` and `chaos_mode` from the test failure or
    `scenario_id`.
-2. Inspect `events.jsonl` first. The last transition before divergence usually
+2. Locate the scenario replay directory under the `matrix_forward` artifact
+   root. Directory names are the scenario IDs, for example
+   `seed_42_kill_leader_mid_write`.
+3. Inspect `events.jsonl` first. The last transition before divergence usually
    shows whether the failure came from partition handling, leader handoff, or
    recovery.
-3. Compare `state_at_t0.cbor`, `state_at_chaos.cbor`, `state_at_heal.cbor`,
+4. Compare `state_at_t0.cbor`, `state_at_chaos.cbor`, `state_at_heal.cbor`,
    and `state_at_end.cbor` for the same node directory. Decode them with
    `CanonicalSerializer::deserialize::<LocalNodeSnapshot>` and the
    `fcp.testkit:LocalNodeSnapshot@1.0.0` schema.
-4. Compare `hashes.json` against a rerun with the same seed and mode.
+5. Compare `hashes.json` against a rerun with the same seed and mode.
    `expected_hash_for_seed` must match `final_state_hash`, and the
    `per_node_state_hashes` array identifies which final node snapshot diverged
    first when the whole-state hash changes.
-5. Inspect `invariants.json` when the final state hash is stable but failover
+6. Inspect `invariants.json` when the final state hash is stable but failover
    acceptance still fails. Non-zero orphan counts or invalid signatures identify
    whether the issue is active-holder liveness, connector-state reachability, or
    receipt authenticity.
-6. For host-backed handoff failures, inspect `host_failover_replay.jsonl`.
+7. For host-backed handoff failures, inspect `host_failover_replay.jsonl`.
    The first missing phase identifies whether the break happened before holder
    admission, during flush-before-yield, during replacement admission, while
    fencing stale writes, or while exposing canonical state after handoff.
@@ -197,6 +206,7 @@ strings fail the preflight instead of leaving a partial replay on disk.
 |---------|--------------|-----------|
 | `final_state_hash` differs between two runs. | A decision path used process order, wall-clock time, or non-seeded randomness. | Search the failing mode for non-`ChaCha20Rng` decisions and add the value to `events.jsonl`. |
 | Forward and reverse seed matrices differ. | A scenario leaked state across iterations or consumed non-local scheduler/process state. | Re-run the failing seed/mode pair alone and compare its replay bundle against the matrix run. |
+| Matrix artifact count is not 300. | The forward matrix did not write one replay bundle per seed/mode scenario. | Check the `matrix_forward` artifact root and the `write_to_dir` error for the missing scenario. |
 | `receipt_count` is greater than one. | Idempotency key handling allowed a retry to create a second receipt. | Inspect `events.jsonl` around the handoff and confirm only the current holder called `execute_once`. |
 | `duplicate_receipt_count` is non-zero. | The same idempotency key was inserted under multiple receipt records. | Compare `receipt_hash` across reruns and inspect holder promotion order. |
 | Replay logical time is not monotonic. | A transition writer used wall-clock/process order or reset the local logical clock. | Inspect `events.jsonl` around the first non-increasing `logical_time_ms` and keep transition timing derived from the seeded harness. |

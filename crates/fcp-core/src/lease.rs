@@ -633,6 +633,9 @@ pub enum LeaseValidationError {
 
     /// Insufficient quorum signatures.
     InsufficientQuorum { required: usize, got: usize },
+
+    /// Quorum signature set contains multiple signatures for the same node.
+    DuplicateQuorumSigner { node_id: String },
 }
 
 impl std::fmt::Display for LeaseValidationError {
@@ -672,6 +675,9 @@ impl std::fmt::Display for LeaseValidationError {
                     f,
                     "insufficient quorum: required {required} signatures, got {got}"
                 )
+            }
+            Self::DuplicateQuorumSigner { node_id } => {
+                write!(f, "duplicate quorum signer: {node_id}")
             }
         }
     }
@@ -743,7 +749,15 @@ pub fn validate_lease(
         });
     }
 
-    // Check quorum
+    // Check quorum. A malformed serialized SignatureSet can contain duplicate
+    // node IDs even though SignatureSet::add rejects them, so reject duplicates
+    // before raw signature count can satisfy quorum.
+    if let Some(node_id) = lease.quorum_signatures.duplicate_node_id() {
+        return Err(LeaseValidationError::DuplicateQuorumSigner {
+            node_id: node_id.to_owned(),
+        });
+    }
+
     let sig_count = lease.quorum_signatures.len();
     if sig_count < required_signatures {
         return Err(LeaseValidationError::InsufficientQuorum {
@@ -1137,6 +1151,30 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_validate_lease_rejects_duplicate_quorum_signer() {
+        let subject = test_object_id("subject");
+        let zone = test_zone();
+        let mut lease = create_test_lease_with_subject(5, 2000, subject);
+        lease.quorum_signatures = duplicate_signature_set("node-1");
+
+        let result = validate_lease(
+            &lease,
+            &subject,
+            &zone,
+            LeasePurpose::OperationExecution,
+            5,
+            1500,
+            2,
+        );
+
+        assert!(matches!(
+            result,
+            Err(LeaseValidationError::DuplicateQuorumSigner { node_id })
+                if node_id == "node-1"
+        ));
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // LeaseValidationError Display Tests
     // ─────────────────────────────────────────────────────────────────────────
@@ -1160,6 +1198,11 @@ mod tests {
             got: 1,
         };
         assert!(err.to_string().contains("quorum"));
+
+        let err = LeaseValidationError::DuplicateQuorumSigner {
+            node_id: "node-1".to_owned(),
+        };
+        assert!(err.to_string().contains("duplicate quorum signer"));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1925,6 +1968,24 @@ mod tests {
         let mut lease = create_test_lease_with_subject(lease_seq, exp, subject);
         lease.purpose = purpose;
         lease
+    }
+
+    fn duplicate_signature_set(node_id: &str) -> SignatureSet {
+        serde_json::from_value(serde_json::json!({
+            "signatures": [
+                {
+                    "node_id": node_id,
+                    "signature": "aa".repeat(64),
+                    "signed_at": 1000
+                },
+                {
+                    "node_id": node_id,
+                    "signature": "bb".repeat(64),
+                    "signed_at": 2000
+                }
+            ]
+        }))
+        .expect("duplicate signature JSON should deserialize")
     }
 
     // ─────────────────────────────────────────────────────────────────────────

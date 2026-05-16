@@ -56,6 +56,7 @@ impl TokenBucket {
             tokens: AtomicU32::new(requests_per_window),
             last_refill: Mutex::new(Self::phase_preserved_anchor(
                 Instant::now(),
+                Duration::ZERO,
                 refill_interval,
             )),
         }
@@ -101,6 +102,7 @@ impl TokenBucket {
             tokens: AtomicU32::new(capacity),
             last_refill: Mutex::new(Self::phase_preserved_anchor(
                 Instant::now(),
+                Duration::ZERO,
                 refill_interval,
             )),
         }
@@ -123,6 +125,7 @@ impl TokenBucket {
             tokens: AtomicU32::new(burst),
             last_refill: Mutex::new(Self::phase_preserved_anchor(
                 Instant::now(),
+                Duration::ZERO,
                 refill_interval,
             )),
         }
@@ -132,17 +135,21 @@ impl TokenBucket {
     ///
     /// This implements the phase-preserving refill anchor documented for
     /// `TokenBucket::from_config` (the path used by `config_from_core` for
-    /// manifest-backed connector rate limits). By anchoring `last_refill`
-    /// relative to the natural period boundary we avoid fractional drift
-    /// accumulation across refills.
-    fn phase_preserved_anchor(now: Instant, interval: Duration) -> Instant {
-        // For a newly constructed bucket we start the phase at the current instant
-        // (zero elapsed into the first period). The first `refill()` call that
-        // crosses a boundary will then apply the correct remainder math. This
-        // makes the construction site for manifest-driven configs explicitly
-        // participate in the phase-preservation contract described in the
-        // project README.
-        now
+    /// manifest-backed connector rate limits): `now - (elapsed % interval)`.
+    /// Constructors pass zero elapsed, so fresh buckets start exactly at the
+    /// current phase boundary; refill passes observed elapsed to preserve the
+    /// fractional remainder and avoid drift.
+    fn phase_preserved_anchor(now: Instant, elapsed: Duration, interval: Duration) -> Instant {
+        if interval.is_zero() {
+            return now;
+        }
+
+        let remainder = elapsed.as_nanos() % interval.as_nanos();
+        let rem_secs = u64::try_from(remainder / 1_000_000_000).unwrap_or(u64::MAX);
+        let rem_nanos = (remainder % 1_000_000_000) as u32;
+
+        now.checked_sub(Duration::new(rem_secs, rem_nanos))
+            .unwrap_or(now)
     }
 
     /// Refill tokens based on elapsed time.
@@ -191,12 +198,7 @@ impl TokenBucket {
             // By setting last_refill to (now - remainder), we correctly advance the
             // timestamp by exactly the number of elapsed periods, avoiding both
             // fractional drift and ancient history burst issues.
-            let remainder = elapsed.as_nanos() % self.refill_interval.as_nanos();
-            let rem_secs = u64::try_from(remainder / 1_000_000_000).unwrap_or(0);
-            let rem_nanos = (remainder % 1_000_000_000) as u32;
-            *last_refill = now
-                .checked_sub(Duration::new(rem_secs, rem_nanos))
-                .unwrap_or(now);
+            *last_refill = Self::phase_preserved_anchor(now, elapsed, self.refill_interval);
         }
     }
 
@@ -887,6 +889,39 @@ mod tests {
         assert_eq!(limiter.refill_amount, 1);
         // 1_000_000_000 / 10 = 100_000_000 ns = 100ms
         assert_eq!(limiter.refill_interval, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn phase_preserved_anchor_subtracts_elapsed_remainder() {
+        let now = Instant::now();
+        let anchor = TokenBucket::phase_preserved_anchor(
+            now,
+            Duration::from_millis(42),
+            Duration::from_millis(10),
+        );
+
+        assert_eq!(
+            now.saturating_duration_since(anchor),
+            Duration::from_millis(2)
+        );
+    }
+
+    #[test]
+    fn phase_preserved_anchor_zero_elapsed_uses_current_instant() {
+        let now = Instant::now();
+        let anchor =
+            TokenBucket::phase_preserved_anchor(now, Duration::ZERO, Duration::from_millis(10));
+
+        assert_eq!(anchor, now);
+    }
+
+    #[test]
+    fn phase_preserved_anchor_zero_interval_uses_current_instant() {
+        let now = Instant::now();
+        let anchor =
+            TokenBucket::phase_preserved_anchor(now, Duration::from_millis(42), Duration::ZERO);
+
+        assert_eq!(anchor, now);
     }
 
     #[test]

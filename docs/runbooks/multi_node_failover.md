@@ -74,9 +74,10 @@ Each run produces an in-memory `LocalReplayBundle` with:
 - `hashes` for final state, receipt state, and transition state.
 
 The test asserts that repeating the same seed and chaos mode yields the same
-final state hash, that idempotent retry paths leave exactly one receipt with
-zero duplicate receipts, that the manifest result is `pass`, and that the JSONL
-event stream does not contain raw node IDs.
+final state hash when the 0..99 seed matrix is traversed forward and in
+reverse, that idempotent retry paths leave exactly one receipt with zero
+duplicate receipts, that the manifest result is `pass`, and that the JSONL event
+stream does not contain raw node IDs.
 
 ## Replay Bundle Layout
 
@@ -163,6 +164,7 @@ strings fail the preflight instead of leaving a partial replay on disk.
 | Symptom | Likely cause | Next step |
 |---------|--------------|-----------|
 | `final_state_hash` differs between two runs. | A decision path used process order, wall-clock time, or non-seeded randomness. | Search the failing mode for non-`ChaCha20Rng` decisions and add the value to `events.jsonl`. |
+| Forward and reverse seed matrices differ. | A scenario leaked state across iterations or consumed non-local scheduler/process state. | Re-run the failing seed/mode pair alone and compare its replay bundle against the matrix run. |
 | `receipt_count` is greater than one. | Idempotency key handling allowed a retry to create a second receipt. | Inspect `events.jsonl` around the handoff and confirm only the current holder called `execute_once`. |
 | `duplicate_receipt_count` is non-zero. | The same idempotency key was inserted under multiple receipt records. | Compare `receipt_hash` across reruns and inspect holder promotion order. |
 | Redaction assertion fails. | A replay field contains raw node IDs or credential-like text. | Store hashed identifiers with `_hash` suffixes and keep credentials out of replay payloads. |

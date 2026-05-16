@@ -94,6 +94,7 @@ the JSONL event stream does not contain raw node IDs.
   manifest.json
   events.jsonl
   hashes.json
+  invariants.json
   per_node_snapshots/
     node_<index>_<node_hash_prefix>/
       state_at_t0.cbor
@@ -118,6 +119,15 @@ written.
   final node snapshot
 - `receipt_hash`
 - `transition_hash`
+
+`invariants.json` contains:
+
+- `active_holder_hash`
+- `online_node_count`
+- `all_nodes_online_at_end`
+- `orphaned_active_lease_count`
+- `orphaned_connector_state_count`
+- `invalid_receipt_signature_count`
 
 Each snapshot file is canonical CBOR for `fcp.testkit:LocalNodeSnapshot@1.0.0`
 using the `fcp-cbor` schema-hash-prefixed serializer.
@@ -171,7 +181,11 @@ strings fail the preflight instead of leaving a partial replay on disk.
    `expected_hash_for_seed` must match `final_state_hash`, and the
    `per_node_state_hashes` array identifies which final node snapshot diverged
    first when the whole-state hash changes.
-5. For host-backed handoff failures, inspect `host_failover_replay.jsonl`.
+5. Inspect `invariants.json` when the final state hash is stable but failover
+   acceptance still fails. Non-zero orphan counts or invalid signatures identify
+   whether the issue is active-holder liveness, connector-state reachability, or
+   receipt authenticity.
+6. For host-backed handoff failures, inspect `host_failover_replay.jsonl`.
    The first missing phase identifies whether the break happened before holder
    admission, during flush-before-yield, during replacement admission, while
    fencing stale writes, or while exposing canonical state after handoff.

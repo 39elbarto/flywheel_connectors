@@ -63,6 +63,7 @@ fn local_mesh_replay_bundle_writes_documented_artifacts() -> Result<(), Box<dyn 
     assert!(paths.manifest.exists());
     assert!(paths.events.exists());
     assert!(paths.hashes.exists());
+    assert!(paths.invariants.exists());
     assert!(paths.snapshot_root.is_dir());
 
     let manifest = fs::read_to_string(&paths.manifest)?;
@@ -95,6 +96,36 @@ fn local_mesh_replay_bundle_writes_documented_artifacts() -> Result<(), Box<dyn 
         assert!(!node_id_hash.is_empty());
         assert_eq!(state_hash.len(), 64);
     }
+
+    let invariants: Value = serde_json::from_str(&fs::read_to_string(&paths.invariants)?)?;
+    assert_eq!(
+        required_string_field(&invariants, "active_holder_hash")?,
+        outcome.active_holder_hash
+    );
+    assert_eq!(
+        required_u64_field(&invariants, "online_node_count")?,
+        3,
+        "invariants.json should record all nodes online after recovery"
+    );
+    assert!(
+        required_bool_field(&invariants, "all_nodes_online_at_end")?,
+        "invariants.json should record final all-online recovery"
+    );
+    assert_eq!(
+        required_u64_field(&invariants, "orphaned_active_lease_count")?,
+        0,
+        "invariants.json should record no orphaned active leases"
+    );
+    assert_eq!(
+        required_u64_field(&invariants, "orphaned_connector_state_count")?,
+        0,
+        "invariants.json should record no orphaned connector state"
+    );
+    assert_eq!(
+        required_u64_field(&invariants, "invalid_receipt_signature_count")?,
+        0,
+        "invariants.json should record no invalid receipt signatures"
+    );
 
     let node_dirs = fs::read_dir(&paths.snapshot_root)?.collect::<Result<Vec<_>, _>>()?;
     assert_eq!(node_dirs.len(), 3);
@@ -230,6 +261,20 @@ fn required_string_field<'a>(
         .get(field)
         .and_then(Value::as_str)
         .ok_or_else(|| invalid_replay_artifact(format!("missing string field {field}")))
+}
+
+fn required_u64_field(value: &Value, field: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    value
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_replay_artifact(format!("missing u64 field {field}")))
+}
+
+fn required_bool_field(value: &Value, field: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    value
+        .get(field)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| invalid_replay_artifact(format!("missing bool field {field}")))
 }
 
 fn invalid_replay_artifact(message: impl Into<String>) -> Box<dyn std::error::Error> {

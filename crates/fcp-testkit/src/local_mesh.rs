@@ -159,6 +159,7 @@ pub struct LocalReplayBundlePaths {
     pub manifest: PathBuf,
     pub events: PathBuf,
     pub hashes: PathBuf,
+    pub invariants: PathBuf,
     pub snapshot_root: PathBuf,
 }
 
@@ -188,12 +189,14 @@ impl LocalReplayBundle {
         let manifest = root.join("manifest.json");
         let events = root.join("events.jsonl");
         let hashes = root.join("hashes.json");
+        let invariants = root.join("invariants.json");
         let snapshot_root = root.join("per_node_snapshots");
 
         fs::create_dir_all(&snapshot_root)?;
         write_json_pretty(&manifest, &self.manifest)?;
         fs::write(&events, self.events_jsonl()?)?;
         write_json_pretty(&hashes, &self.hashes)?;
+        write_json_pretty(&invariants, &self.invariants)?;
 
         for (index, timeline) in self.node_timelines.iter().enumerate() {
             let hash_prefix = timeline.node_id_hash.chars().take(12).collect::<String>();
@@ -216,6 +219,7 @@ impl LocalReplayBundle {
             manifest,
             events,
             hashes,
+            invariants,
             snapshot_root,
         })
     }

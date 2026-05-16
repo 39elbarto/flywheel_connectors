@@ -111,7 +111,7 @@ async fn handle_message(connector: &mut WhisperConnector, message: &str) -> serd
                 "result": value
             });
             if let Some(id) = id {
-                response["id"] = id;
+                response.as_object_mut().unwrap().insert("id".to_string(), id);
             }
             response
         }
@@ -122,7 +122,7 @@ async fn handle_message(connector: &mut WhisperConnector, message: &str) -> serd
                 "error": err_response
             });
             if let Some(id) = id {
-                response["id"] = id;
+                response.as_object_mut().unwrap().insert("id".to_string(), id);
             }
             response
         }

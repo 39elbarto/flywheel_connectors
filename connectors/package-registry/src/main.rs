@@ -151,7 +151,7 @@ async fn handle_message(
         Ok(value) => {
             let mut response = serde_json::json!({ "jsonrpc": "2.0", "result": value });
             if let Some(id) = id {
-                response["id"] = id;
+                response.as_object_mut().unwrap().insert("id".to_string(), id);
             }
             response
         }
@@ -159,7 +159,7 @@ async fn handle_message(
             let err_response = error.to_response();
             let mut response = serde_json::json!({ "jsonrpc": "2.0", "error": err_response });
             if let Some(id) = id {
-                response["id"] = id;
+                response.as_object_mut().unwrap().insert("id".to_string(), id);
             }
             response
         }

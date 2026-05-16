@@ -158,7 +158,7 @@ async fn handle_message(connector: &mut NostrConnector, message: &str) -> serde_
                 "result": value
             });
             if let Some(id) = id {
-                response["id"] = id;
+                response.as_object_mut().unwrap().insert("id".to_string(), id);
             }
             response
         }
@@ -168,7 +168,7 @@ async fn handle_message(connector: &mut NostrConnector, message: &str) -> serde_
                 "error": error.to_response()
             });
             if let Some(id) = id {
-                response["id"] = id;
+                response.as_object_mut().unwrap().insert("id".to_string(), id);
             }
             response
         }

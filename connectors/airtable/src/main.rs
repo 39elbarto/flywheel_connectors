@@ -140,7 +140,7 @@ async fn handle_message(connector: &mut AirtableConnector, message: &str) -> Pro
                 "result": value
             });
             if let Some(id) = id {
-                response["id"] = id;
+                response.as_object_mut().unwrap().insert("id".to_string(), id);
             }
             ProtocolResponse {
                 body: response,
@@ -154,7 +154,7 @@ async fn handle_message(connector: &mut AirtableConnector, message: &str) -> Pro
                 "error": err_response
             });
             if let Some(id) = id {
-                response["id"] = id;
+                response.as_object_mut().unwrap().insert("id".to_string(), id);
             }
             ProtocolResponse {
                 body: response,

@@ -126,7 +126,7 @@ async fn handle_message(connector: &mut BigQueryConnector, message: &str) -> ser
                 "result": value
             });
             if let Some(id) = id {
-                response["id"] = id;
+                response.as_object_mut().unwrap().insert("id".to_string(), id);
             }
             response
         }
@@ -137,7 +137,7 @@ async fn handle_message(connector: &mut BigQueryConnector, message: &str) -> ser
                 "error": err_response
             });
             if let Some(id) = id {
-                response["id"] = id;
+                response.as_object_mut().unwrap().insert("id".to_string(), id);
             }
             response
         }

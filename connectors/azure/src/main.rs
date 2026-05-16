@@ -156,7 +156,7 @@ async fn handle_message(connector: &mut AzureConnector, message: &str) -> serde_
         Ok(value) => {
             let mut response = serde_json::json!({ "jsonrpc": "2.0", "result": value });
             if let Some(id) = id {
-                response["id"] = id;
+                response.as_object_mut().unwrap().insert("id".to_string(), id);
             }
             response
         }
@@ -164,7 +164,7 @@ async fn handle_message(connector: &mut AzureConnector, message: &str) -> serde_
             let error_response = error.to_response();
             let mut response = serde_json::json!({ "jsonrpc": "2.0", "error": error_response });
             if let Some(id) = id {
-                response["id"] = id;
+                response.as_object_mut().unwrap().insert("id".to_string(), id);
             }
             response
         }

@@ -74,6 +74,7 @@ fcp-audit = { path = "../fcp-audit" }
 fcp-policy = { path = "../fcp-policy" }
 fcp-kernel = { path = "../fcp-kernel" }
 fcp-bench = { path = "../fcp-bench" }
+fcp-chaos = { path = "../fcp-chaos" }
 fwc = { workspace = true }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

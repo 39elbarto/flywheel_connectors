@@ -1,0 +1,19 @@
+name = "oom_kill"
+blast_radius = 1
+recovery_objective_secs = 30
+
+[[rollback_steps]]
+name = "restart_supervised_host"
+action = "restart_fcp_host_supervisor"
+target = "fcp-host"
+
+[rollback_steps.args]
+mode = "supervised"
+
+[[rollback_steps]]
+name = "verify_peer_suspect_cleared"
+action = "verify_peer_suspect_state_cleared"
+target = "mesh_peer_suspect"
+
+[rollback_steps.args]
+timeout_secs = "30"

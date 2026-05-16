@@ -3263,6 +3263,7 @@ dependencies = [
  "fcp-auth-schema",
  "fcp-bench",
  "fcp-cbor",
+ "fcp-chaos",
  "fcp-core",
  "fcp-crypto",
  "fcp-evidence",

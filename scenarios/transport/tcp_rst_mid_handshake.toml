@@ -1,0 +1,19 @@
+name = "tcp_rst_mid_handshake"
+blast_radius = 1
+recovery_objective_secs = 30
+
+[[rollback_steps]]
+name = "clear_handshake_rst_rule"
+action = "clear_tcp_rst_rule"
+target = "fcps_handshake"
+
+[rollback_steps.args]
+phase = "client-hello"
+
+[[rollback_steps]]
+name = "verify_handshake_retry"
+action = "verify_session_reconnect_fresh_cookie"
+target = "fcps_handshake"
+
+[rollback_steps.args]
+timeout_secs = "30"

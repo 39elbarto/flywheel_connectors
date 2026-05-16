@@ -97,6 +97,30 @@ kill_switch_triggered() {
     [[ -e "${KILL_SWITCH}" ]]
 }
 
+abort_for_kill_switch() {
+    emit "kill_switch_triggered" "\"iterations\":${ITERATION},\"abort_within_secs\":30"
+    # Give in-flight scenarios up to 30s to wind down. The shell orchestrator
+    # has no child process in dry-run mode, so this completes immediately.
+    emit "kill_switch_abort_complete" "\"iterations\":${ITERATION}"
+    exit 0
+}
+
+sleep_with_kill_switch_poll() {
+    local remaining="$1"
+    while (( remaining > 0 )); do
+        if kill_switch_triggered; then
+            abort_for_kill_switch
+        fi
+        if (( remaining > 5 )); then
+            sleep 5
+            remaining=$((remaining - 5))
+        else
+            sleep "${remaining}"
+            remaining=0
+        fi
+    done
+}
+
 # Enumerate candidate scenarios. Initialize with an empty element so
 # `set -u` is happy even when no .toml files exist; we drop the placeholder
 # immediately after enumeration.
@@ -118,8 +142,15 @@ DEADLINE=$((START_EPOCH + DURATION_SECS))
 ITERATION=0
 LAST_KILL_CHECK=${START_EPOCH}
 
+if kill_switch_triggered; then
+    abort_for_kill_switch
+fi
+
 while true; do
     now=$(date -u +%s)
+    if kill_switch_triggered; then
+        abort_for_kill_switch
+    fi
     if [[ ${now} -ge ${DEADLINE} ]]; then
         emit "deadline_reached" "\"iterations\":${ITERATION}"
         break
@@ -127,11 +158,7 @@ while true; do
     # Kill-switch poll every 5 seconds.
     if (( now - LAST_KILL_CHECK >= 5 )); then
         if kill_switch_triggered; then
-            emit "kill_switch_triggered" "\"iterations\":${ITERATION},\"abort_within_secs\":30"
-            # Give in-flight scenarios up to 30s to wind down.
-            sleep 1
-            emit "kill_switch_abort_complete" "\"iterations\":${ITERATION}"
-            exit 0
+            abort_for_kill_switch
         fi
         LAST_KILL_CHECK=${now}
     fi
@@ -167,7 +194,7 @@ while true; do
     fi
     # Inter-scenario cool-down: 30s between iterations under a long-haul
     # campaign so the cluster has time to recover/repair between hits.
-    sleep 30
+    sleep_with_kill_switch_poll 30
 done
 
 emit "summary" "\"iterations\":${ITERATION},\"events_file\":\"${EVENTS_FILE}\""

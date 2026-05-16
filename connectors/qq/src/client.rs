@@ -1155,7 +1155,7 @@ pub fn normalize_message_event(event: &QqGatewayEvent) -> QqResult<NormalizedQqE
         group_id,
         sender_id,
         sender_name,
-        text: msg.content,
+        text: effective_message_text(&msg),
         timestamp: msg.timestamp,
         is_reply,
         reply_to,
@@ -1242,10 +1242,39 @@ fn validate_message_event_bounds(msg: &QqMessageEvent) -> QqResult<()> {
                 attachment.content_type.as_deref(),
                 QQ_GATEWAY_ATTACHMENT_FIELD_MAX_CHARS,
             )?;
+            validate_optional_chars(
+                "attachment asr_refer_text",
+                attachment.asr_refer_text.as_deref(),
+                QQ_GATEWAY_TEXT_MAX_CHARS,
+            )?;
         }
     }
 
     Ok(())
+}
+
+fn effective_message_text(msg: &QqMessageEvent) -> Option<String> {
+    if msg
+        .content
+        .as_deref()
+        .is_some_and(|content| !content.trim().is_empty())
+    {
+        return msg.content.clone();
+    }
+
+    if let Some(transcript) = msg.attachments.as_ref().and_then(|attachments| {
+        attachments.iter().find_map(|attachment| {
+            attachment
+                .asr_refer_text
+                .as_deref()
+                .and_then(nonblank_trimmed)
+                .map(str::to_owned)
+        })
+    }) {
+        return Some(transcript);
+    }
+
+    msg.content.clone()
 }
 
 fn validate_optional_chars(label: &str, value: Option<&str>, limit: usize) -> QqResult<()> {
@@ -2037,6 +2066,37 @@ mod tests {
         let normalized = normalize_message_event(&event).unwrap();
         assert!(normalized.has_attachments);
         assert!(!normalized.is_reply);
+    }
+
+    #[test]
+    fn normalize_voice_attachment_prefers_asr_refer_text_when_content_blank() {
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(6),
+            t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+            d: Some(json!({
+                "id": "msg-voice",
+                "content": "   ",
+                "group_openid": "group-1",
+                "group_member_openid": "member-1",
+                "attachments": [
+                    {
+                        "url": "https://example.com/voice.amr",
+                        "filename": "voice.amr",
+                        "content_type": "audio/amr",
+                        "size": 2048,
+                        "asr_refer_text": "transcribed voice command"
+                    }
+                ]
+            })),
+            id: None,
+        };
+        let normalized = normalize_message_event(&event).unwrap();
+        assert_eq!(
+            normalized.text.as_deref(),
+            Some("transcribed voice command")
+        );
+        assert!(normalized.has_attachments);
     }
 
     #[test]

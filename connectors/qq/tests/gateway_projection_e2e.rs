@@ -919,6 +919,69 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(reply_media["runtime"]["unknown_reply_references"], 0);
     log_projection_step(&mut logs, "reply_media_projection", "ok", &reply_media);
 
+    let voice_instance_id = InstanceId::new();
+    let mut voice_connector = QqConnector::new();
+    voice_connector
+        .configure(json!({
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999",
+            "app_id": "qq-app",
+            "client_secret": "test-secret",
+            "gateway": {
+                "enabled": true,
+                "policy": {
+                    "group_policy": "open",
+                    "group_require_mention": true,
+                    "max_attachment_bytes": 4096
+                }
+            }
+        }))
+        .await
+        .expect("configure voice QQ connector");
+    voice_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            voice_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake voice QQ connector");
+    let voice_asr = invoke_projection(
+        &voice_connector,
+        &signing_key,
+        &voice_instance_id,
+        "qq-gateway-voice-asr",
+        json!({
+            "op": 0,
+            "s": 1,
+            "t": "GROUP_AT_MESSAGE_CREATE",
+            "id": "evt-voice-asr",
+            "d": {
+                "id": "msg-voice-asr",
+                "content": "   ",
+                "group_openid": "group-voice",
+                "group_member_openid": "member-voice",
+                "attachments": [
+                    {
+                        "url": "https://cdn.qq.example/private/voice.amr",
+                        "filename": "voice.amr",
+                        "content_type": "audio/amr",
+                        "size": 1024,
+                        "asr_refer_text": "bot-openid approve deployment from voice"
+                    }
+                ]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(voice_asr["accepted"], true);
+    assert_eq!(
+        voice_asr["normalized"]["text"],
+        "bot-openid approve deployment from voice"
+    );
+    assert_eq!(voice_asr["normalized"]["has_attachments"], true);
+    assert_eq!(voice_asr["policy"]["reason_code"], "group_allowed");
+    log_projection_step(&mut logs, "voice_asr_projection", "ok", &voice_asr);
+
     let duplicate = invoke_projection(
         &connector,
         &signing_key,
@@ -1151,6 +1214,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-untyped-message-id",
         "evt-structured-mention",
         "evt-reply-media",
+        "evt-voice-asr",
         "evt-oversized-media",
         "evt-disabled",
         "evt-missing-binding",
@@ -1164,6 +1228,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "msg-untyped-message-id",
         "msg-structured-mention",
         "msg-reply-media",
+        "msg-voice-asr",
         "msg-oversized-media",
         "msg-disabled",
         "msg-missing-binding",
@@ -1185,8 +1250,10 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "please inspect this",
         "see attached trace",
         "too large",
+        "approve deployment from voice",
         "cdn.qq.example",
         "trace.png",
+        "voice.amr",
         "oversized.bin",
     ] {
         assert!(

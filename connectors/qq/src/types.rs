@@ -355,6 +355,7 @@ pub struct QqAttachment {
     pub filename: Option<String>,
     pub content_type: Option<String>,
     pub size: Option<u64>,
+    pub asr_refer_text: Option<String>,
 }
 
 /// Routing classification for a QQ message.
@@ -696,10 +697,12 @@ mod tests {
             filename: Some("f.png".into()),
             content_type: Some("image/png".into()),
             size: Some(2048),
+            asr_refer_text: Some("voice transcript".into()),
         };
         let json = serde_json::to_value(&att).unwrap();
         assert_eq!(json["url"], "https://example.com/f.png");
         assert_eq!(json["size"], 2048);
+        assert_eq!(json["asr_refer_text"], "voice transcript");
     }
 
     #[test]

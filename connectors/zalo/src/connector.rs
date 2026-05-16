@@ -2346,7 +2346,7 @@ mod tests {
 
     use super::*;
     use fcp_manifest::{ConnectorManifest, ConnectorStatus};
-    use fcp_sdk::migration::ConnectorErrorMapping;
+    use fcp_sdk::ConnectorErrorMapping;
 
     const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 

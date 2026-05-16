@@ -116,7 +116,7 @@ impl DocsError {
     }
 }
 
-impl fcp_sdk::migration::ConnectorErrorMapping for DocsError {
+impl fcp_sdk::ConnectorErrorMapping for DocsError {
     fn from_async_error(error: fcp_async_core::AsyncError) -> Self {
         use fcp_async_core::AsyncError;
         match error {
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn connector_error_mapping_timeout() {
         use fcp_async_core::AsyncError;
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = DocsError::from_async_error(AsyncError::Timeout { timeout_ms: 3000 });
         assert!(matches!(
             err,
@@ -311,14 +311,14 @@ mod tests {
     #[test]
     fn connector_error_mapping_cancelled() {
         use fcp_async_core::AsyncError;
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = DocsError::from_async_error(AsyncError::Cancelled);
         assert!(matches!(err, DocsError::Api { status_code: 0, .. }));
     }
 
     #[test]
     fn connector_error_mapping_to_fcp_delegates() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = DocsError::Unauthorized;
         let fcp = ConnectorErrorMapping::to_fcp_error(&err);
         assert!(matches!(fcp, FcpError::Unauthorized { .. }));
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_is_retryable_delegates() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = DocsError::RateLimited {
             retry_after_ms: 5000,
         };
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_retry_after_delegates() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = DocsError::RateLimited {
             retry_after_ms: 60_000,
         };

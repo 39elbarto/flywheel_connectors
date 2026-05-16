@@ -11,7 +11,7 @@ use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, FcpConnector, FcpError, HandshakeRequest,
     InvokeRequest, OperationId, RequestId, SelfCheckStatus, ZoneId,
 };
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use fcp_sonos::{SonosConnector, client::SonosClient, error::SonosError, types::SonosConfig};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_string_contains, header, method, path};

@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use fcp_async_core::AsyncError;
 use fcp_prelude::FcpError;
-use fcp_sdk::migration::{ConnectorErrorMapping, map_async_to_fcp_error};
+use fcp_sdk::ConnectorErrorMapping;
+use fcp_sdk::migration::map_async_to_fcp_error;
 use thiserror::Error;
 
 #[derive(Debug, Error)]

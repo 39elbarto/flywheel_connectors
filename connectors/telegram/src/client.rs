@@ -5,7 +5,8 @@
 
 use std::time::Duration;
 
-use fcp_sdk::migration::{AttemptOutcome, ConnectorErrorMapping, HttpRetryConfig, RetryLoop};
+use fcp_sdk::ConnectorErrorMapping;
+use fcp_sdk::migration::{AttemptOutcome, HttpRetryConfig, RetryLoop};
 use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Client, StatusCode};
 use serde::{Serialize, de::DeserializeOwned};
@@ -2122,7 +2123,7 @@ mod tests {
     #[test]
     fn connector_error_mapping_timeout() {
         use fcp_async_core::AsyncError;
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = TelegramError::from_async_error(AsyncError::Timeout { timeout_ms: 5000 });
         assert!(matches!(err, TelegramError::Api { code: 408, .. }));
         assert!(err.to_string().contains("5000"));
@@ -2131,7 +2132,7 @@ mod tests {
     #[test]
     fn connector_error_mapping_cancelled() {
         use fcp_async_core::AsyncError;
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = TelegramError::from_async_error(AsyncError::Cancelled);
         assert!(matches!(err, TelegramError::Api { code: 0, .. }));
     }
@@ -2139,14 +2140,14 @@ mod tests {
     #[test]
     fn connector_error_mapping_channel_full() {
         use fcp_async_core::AsyncError;
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = TelegramError::from_async_error(AsyncError::ChannelFull);
         assert!(matches!(err, TelegramError::Api { code: 0, .. }));
     }
 
     #[test]
     fn connector_error_mapping_to_fcp_delegates() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = TelegramError::InvalidChatId("bad".into());
         let fcp = ConnectorErrorMapping::to_fcp_error(&err);
         assert!(matches!(fcp, FcpError::InvalidRequest { .. }));
@@ -2154,7 +2155,7 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_is_retryable_delegates() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = TelegramError::Api {
             code: 429,
             description: "rate limited".into(),
@@ -2164,7 +2165,7 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_retry_after_delegates() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = TelegramError::Api {
             code: 429,
             description: "rate limited".into(),

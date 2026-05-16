@@ -475,7 +475,7 @@ impl WolframConnector {
         match operation {
             OP_QUERY => {
                 let qr = client.query(query, app_id).await.map_err(|e| {
-                    use fcp_sdk::migration::ConnectorErrorMapping;
+                    use fcp_sdk::ConnectorErrorMapping;
                     e.to_fcp_error()
                 })?;
                 serde_json::to_value(qr).map_err(|e| FcpError::Internal {
@@ -483,11 +483,11 @@ impl WolframConnector {
                 })
             }
             OP_SHORT_ANSWER => client.short_answer(query, app_id).await.map_err(|e| {
-                use fcp_sdk::migration::ConnectorErrorMapping;
+                use fcp_sdk::ConnectorErrorMapping;
                 e.to_fcp_error()
             }),
             OP_SPOKEN_RESULT => client.spoken_result(query, app_id).await.map_err(|e| {
-                use fcp_sdk::migration::ConnectorErrorMapping;
+                use fcp_sdk::ConnectorErrorMapping;
                 e.to_fcp_error()
             }),
             _ => Err(FcpError::InvalidRequest {

@@ -484,9 +484,7 @@ impl OpenAIClient {
             if attempt.saturating_add(1) < polling.max_poll_attempts {
                 ctx.sleep(Duration::from_millis(polling.poll_interval_ms))
                     .await
-                    .map_err(
-                        <OpenAIError as fcp_sdk::migration::ConnectorErrorMapping>::from_async_error,
-                    )?;
+                    .map_err(<OpenAIError as fcp_sdk::ConnectorErrorMapping>::from_async_error)?;
             }
         }
 

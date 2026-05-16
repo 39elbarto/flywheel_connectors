@@ -11,7 +11,7 @@ use fcp_prelude::{
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
     UnsubscribeRequest,
 };
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use fcp_sdk::prelude::*;
 use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::json;

@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use fcp_async_core::AsyncError;
 use fcp_prelude::FcpError;
-use fcp_sdk::migration::{ConnectorErrorMapping, classify_http_status};
+use fcp_sdk::ConnectorErrorMapping;
+use fcp_sdk::migration::classify_http_status;
 use thiserror::Error;
 
 /// Twitch connector errors.

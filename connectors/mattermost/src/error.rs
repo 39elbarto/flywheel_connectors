@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use fcp_async_core::AsyncError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use fcp_sdk::prelude::FcpError;
 
 /// Mattermost-specific errors.

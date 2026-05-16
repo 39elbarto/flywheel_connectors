@@ -16,7 +16,7 @@ use fcp_google_people::client::GooglePeopleClient;
 use fcp_google_people::connector::GooglePeopleConnector;
 use fcp_google_people::error::GooglePeopleError;
 use fcp_prelude::FcpError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};

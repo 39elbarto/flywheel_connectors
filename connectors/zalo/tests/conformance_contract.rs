@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fcp_manifest::{ConnectorManifest, ConnectorStatus, OperationSection};
 use fcp_prelude::FcpError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use fcp_zalo::{ZaloConnector, ZaloError};
 use serde::Serialize;
 use serde_json::{Value, json};

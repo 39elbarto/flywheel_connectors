@@ -144,7 +144,7 @@ impl HomeAssistantError {
     }
 }
 
-impl fcp_sdk::migration::ConnectorErrorMapping for HomeAssistantError {
+impl fcp_sdk::ConnectorErrorMapping for HomeAssistantError {
     fn from_async_error(error: fcp_async_core::AsyncError) -> Self {
         use fcp_async_core::AsyncError;
         match error {
@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn connector_error_mapping_timeout() {
         use fcp_async_core::AsyncError;
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = HomeAssistantError::from_async_error(AsyncError::Timeout { timeout_ms: 2000 });
         assert!(matches!(
             err,
@@ -547,7 +547,7 @@ mod tests {
     #[test]
     fn connector_error_mapping_cancelled() {
         use fcp_async_core::AsyncError;
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = HomeAssistantError::from_async_error(AsyncError::Cancelled);
         assert!(matches!(
             err,
@@ -558,7 +558,7 @@ mod tests {
     #[test]
     fn connector_error_mapping_protocol_io() {
         use fcp_async_core::AsyncError;
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = HomeAssistantError::from_async_error(AsyncError::ProtocolIo {
             message: "connection reset".into(),
         });
@@ -567,7 +567,7 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_to_fcp_delegates() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = HomeAssistantError::Unauthorized;
         let fcp = ConnectorErrorMapping::to_fcp_error(&err);
         assert!(matches!(
@@ -581,14 +581,14 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_is_retryable_delegates() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = HomeAssistantError::Unavailable;
         assert!(ConnectorErrorMapping::is_retryable(&err));
     }
 
     #[test]
     fn connector_error_mapping_retry_after_delegates() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = HomeAssistantError::RateLimited {
             retry_after_ms: 10_000,
         };

@@ -54,7 +54,10 @@ impl TokenBucket {
             refill_amount: requests_per_window,
             refill_interval,
             tokens: AtomicU32::new(requests_per_window),
-            last_refill: Mutex::new(Self::phase_preserved_anchor(Instant::now(), refill_interval)),
+            last_refill: Mutex::new(Self::phase_preserved_anchor(
+                Instant::now(),
+                refill_interval,
+            )),
         }
     }
 
@@ -96,7 +99,10 @@ impl TokenBucket {
             refill_amount,
             refill_interval,
             tokens: AtomicU32::new(capacity),
-            last_refill: Mutex::new(Self::phase_preserved_anchor(Instant::now(), refill_interval)),
+            last_refill: Mutex::new(Self::phase_preserved_anchor(
+                Instant::now(),
+                refill_interval,
+            )),
         }
     }
 
@@ -115,7 +121,10 @@ impl TokenBucket {
             refill_amount: requests_per_window,
             refill_interval,
             tokens: AtomicU32::new(burst),
-            last_refill: Mutex::new(Self::phase_preserved_anchor(Instant::now(), refill_interval)),
+            last_refill: Mutex::new(Self::phase_preserved_anchor(
+                Instant::now(),
+                refill_interval,
+            )),
         }
     }
 

@@ -64,7 +64,7 @@ impl EmailGenericError {
     }
 }
 
-impl fcp_sdk::migration::ConnectorErrorMapping for EmailGenericError {
+impl fcp_sdk::ConnectorErrorMapping for EmailGenericError {
     fn from_async_error(error: fcp_async_core::AsyncError) -> Self {
         match error {
             fcp_async_core::AsyncError::Timeout { timeout_ms } => {
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_from_timeout() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = EmailGenericError::from_async_error(fcp_async_core::AsyncError::Timeout {
             timeout_ms: 5000,
         });
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn connector_error_mapping_from_cancelled() {
-        use fcp_sdk::migration::ConnectorErrorMapping;
+        use fcp_sdk::ConnectorErrorMapping;
         let err = EmailGenericError::from_async_error(fcp_async_core::AsyncError::Cancelled);
         assert!(matches!(err, EmailGenericError::Imap(_)));
         assert!(err.to_string().contains("cancelled"));

@@ -3,7 +3,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use fcp_async_core::AsyncError;
 use fcp_prelude::FcpError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use reqwest::{Response, StatusCode};
 use serde::Deserialize;
 

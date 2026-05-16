@@ -12,7 +12,7 @@ use fcp_prelude::FcpError;
 use fcp_redis::client::{RedisAuth, RedisClient};
 use fcp_redis::connector::RedisConnector;
 use fcp_redis::error::RedisError;
-use fcp_sdk::migration::ConnectorErrorMapping;
+use fcp_sdk::ConnectorErrorMapping;
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, header, method};
 use wiremock::{Mock, MockServer, ResponseTemplate};

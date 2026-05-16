@@ -8322,14 +8322,18 @@ fn connector_lease_status_dispatch(
                 ));
             }
         };
-        let zone = args.zone.as_deref().unwrap_or("z:work");
+        let (zone, effective_target) =
+            host_connector_lease_status_zone(args.zone.as_deref(), connector, &args.connector)?;
         let mut payload =
-            client.connector_lease_status(connector.summary.id.as_str(), Some(zone))?;
+            client.connector_lease_status(connector.summary.id.as_str(), Some(zone.as_str()))?;
         let host_payload_source = payload
             .get("source")
             .cloned()
             .unwrap_or_else(|| Value::String("host-admin-api".to_owned()));
         if let Some(object) = payload.as_object_mut() {
+            object
+                .entry("zone_id".to_owned())
+                .or_insert_with(|| Value::String(zone.clone()));
             object.insert("command".to_owned(), Value::String("connector".to_owned()));
             object.insert(
                 "subcommand".to_owned(),
@@ -8361,6 +8365,11 @@ fn connector_lease_status_dispatch(
                 "host_registry_version".to_owned(),
                 json!(discovery.registry_version),
             );
+            if !effective_target.is_null() {
+                object
+                    .entry("effective_target".to_owned())
+                    .or_insert(effective_target);
+            }
             object
                 .entry("live_host".to_owned())
                 .or_insert_with(|| json!({}));
@@ -8499,6 +8508,27 @@ fn lease_ladder_snapshot(
     Ok((subject_id, ranked_holders, holder))
 }
 
+fn mesh_connector_target_entry_for_candidates<'a>(
+    state: &'a MeshTargetState,
+    candidates: &[&str],
+) -> Option<(&'a str, &'a MeshConnectorTarget)> {
+    for &candidate in candidates {
+        if let Some((key, target)) = state.connector_targets.get_key_value(candidate) {
+            return Some((key.as_str(), target));
+        }
+    }
+
+    let normalized_candidates = candidates
+        .iter()
+        .map(|candidate| normalize_connector_selector(candidate))
+        .collect::<BTreeSet<_>>();
+    state.connector_targets.iter().find_map(|(key, target)| {
+        normalized_candidates
+            .contains(&normalize_connector_selector(key))
+            .then_some((key.as_str(), target))
+    })
+}
+
 fn mesh_connector_target_entry<'a>(
     state: &'a MeshTargetState,
     connector: &DiscoveredConnector,
@@ -8510,21 +8540,22 @@ fn mesh_connector_target_entry<'a>(
         connector.detail.summary.id.as_str(),
         connector.detail.summary.name.as_str(),
     ];
-    for candidate in candidates {
-        if let Some((key, target)) = state.connector_targets.get_key_value(candidate) {
-            return Some((key.as_str(), target));
-        }
-    }
+    mesh_connector_target_entry_for_candidates(state, &candidates)
+}
 
-    let normalized_candidates = candidates
-        .into_iter()
-        .map(normalize_connector_selector)
-        .collect::<BTreeSet<_>>();
-    state.connector_targets.iter().find_map(|(key, target)| {
-        normalized_candidates
-            .contains(&normalize_connector_selector(key))
-            .then_some((key.as_str(), target))
-    })
+fn host_connector_target_entry<'a>(
+    state: &'a MeshTargetState,
+    connector: &HostConnectorRecord,
+    requested_selector: &str,
+) -> Option<(&'a str, &'a MeshConnectorTarget)> {
+    let mut candidates = vec![
+        requested_selector,
+        connector.slug.as_str(),
+        connector.summary.id.as_str(),
+        connector.summary.name.as_str(),
+    ];
+    candidates.extend(connector.aliases.iter().map(String::as_str));
+    mesh_connector_target_entry_for_candidates(state, &candidates)
 }
 
 fn mesh_connector_lease_zone(
@@ -8534,9 +8565,29 @@ fn mesh_connector_lease_zone(
     requested_selector: &str,
 ) -> String {
     explicit_zone
+        .map(str::trim)
+        .filter(|zone| !zone.is_empty())
         .map(ToOwned::to_owned)
         .or_else(|| {
             mesh_connector_target_entry(&context.mesh_targets, connector, requested_selector)
+                .and_then(|(_, target)| target.zone.clone())
+        })
+        .or_else(|| context.default_zone.clone())
+        .unwrap_or_else(|| ZoneId::work().to_string())
+}
+
+fn host_connector_lease_zone(
+    explicit_zone: Option<&str>,
+    context: &MeshContextFile,
+    connector: &HostConnectorRecord,
+    requested_selector: &str,
+) -> String {
+    explicit_zone
+        .map(str::trim)
+        .filter(|zone| !zone.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            host_connector_target_entry(&context.mesh_targets, connector, requested_selector)
                 .and_then(|(_, target)| target.zone.clone())
         })
         .or_else(|| context.default_zone.clone())
@@ -8570,6 +8621,56 @@ fn mesh_resolved_effective_target_value(
             "source": "active-default",
         })
     })
+}
+
+fn host_resolved_effective_target_value(
+    state: &MeshTargetState,
+    connector: &HostConnectorRecord,
+    requested_selector: &str,
+) -> Value {
+    if let Some((target_key, target)) =
+        host_connector_target_entry(state, connector, requested_selector)
+    {
+        return json!({
+            "connector": &connector.slug,
+            "requested_selector": requested_selector,
+            "target_key": target_key,
+            "node": &target.node,
+            "zone": &target.zone,
+            "source": "connector-target",
+            "persisted_at": &target.persisted_at,
+        });
+    }
+
+    state.active_node.as_ref().map_or(Value::Null, |node| {
+        json!({
+            "connector": &connector.slug,
+            "requested_selector": requested_selector,
+            "node": node,
+            "source": "active-default",
+        })
+    })
+}
+
+fn host_connector_lease_status_zone(
+    explicit_zone: Option<&str>,
+    connector: &HostConnectorRecord,
+    requested_selector: &str,
+) -> Result<(String, Value)> {
+    if let Some(zone) = explicit_zone
+        .map(str::trim)
+        .filter(|zone| !zone.is_empty())
+        .map(ToOwned::to_owned)
+    {
+        return Ok((zone, Value::Null));
+    }
+
+    let (_, config) = load_context_config()?;
+    let (_, context) = active_context_entry(&config)?;
+    Ok((
+        host_connector_lease_zone(None, context, connector, requested_selector),
+        host_resolved_effective_target_value(&context.mesh_targets, connector, requested_selector),
+    ))
 }
 
 fn offline_connector_lease_status_payload(
@@ -36202,6 +36303,91 @@ deny_ptrace = true
                 .as_str()
                 .is_some_and(|hash| hash.starts_with("sha256:"))
         );
+    }
+
+    #[test]
+    fn execute_connector_lease_status_with_host_uses_context_target_zone() {
+        let (_tempdir, path, _guard) = temp_context_config();
+        let mut config = super::default_context_config();
+        let mesh_targets = &mut config
+            .contexts
+            .get_mut("local")
+            .expect("local context should exist")
+            .mesh_targets;
+        mesh_targets.active_node = Some("node-alpha".to_owned());
+        mesh_targets.connector_targets.insert(
+            "github".to_owned(),
+            super::MeshConnectorTarget {
+                node: "node-beta".to_owned(),
+                zone: Some("z:community".to_owned()),
+                persisted_at: "2026-03-12T00:00:00Z".to_owned(),
+            },
+        );
+        super::save_context_config(&path, &config).expect("context config should save");
+
+        let (host, server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "GET /rpc/admin/connectors/fcp.github:enterprise:v1/lease/status?zone=z%3Acommunity"
+                        .to_owned(),
+                    json!({
+                        "status": "ok",
+                        "schema_version": "1.0.0",
+                        "source": "host-hrw-routing",
+                        "connector_id": "fcp.github:enterprise:v1",
+                        "zone_id": "z:community",
+                        "subject_id": "3333333333333333333333333333333333333333333333333333333333333333",
+                        "purpose": "connector_state_write",
+                        "holder_node_id_hash": "blake3:holder-community",
+                        "fencing_token": 10,
+                        "durable_lease_seq": 10,
+                        "expiry": Value::Null,
+                        "quorum_signers_count": 2,
+                        "required_quorum_signers_count": 2,
+                        "quorum_satisfied": true,
+                        "durable_validation": {
+                            "status": "valid",
+                            "error": Value::Null,
+                            "validated_at_unix_secs": 1_800_200_000_u64,
+                        },
+                        "lease_object_id": "4444444444444444444444444444444444444444444444444444444444444444",
+                        "lease_evidence_source": "canonical-fcp-store-lease-object",
+                        "ranked_holders": [],
+                        "live_host": {
+                            "requested": true,
+                            "route_available": true,
+                            "route": "/rpc/admin/connectors/{connector_id}/lease/status",
+                        },
+                        "warnings": [],
+                    }),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "connector",
+            "lease",
+            "status",
+            "--connector",
+            "github",
+        ]);
+
+        server.join().expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["zone_id"], "z:community");
+        assert_eq!(payload["effective_target"]["source"], "connector-target");
+        assert_eq!(payload["effective_target"]["zone"], "z:community");
+        assert_eq!(payload["fencing_token"], 10);
+        assert_eq!(payload["durable_lease_seq"], 10);
     }
 
     #[test]

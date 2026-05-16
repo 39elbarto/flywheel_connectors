@@ -371,6 +371,9 @@ Before emitting a passing summary, it also validates the generated JSONL
 contracts for required provenance fields, theorem and assumption IDs, host
 dispatcher scenarios, and stable `LATTICE_*` error mappings. A skipped Lean
 build is recorded as a skip record; Cargo-backed lanes still run through `rch`.
+The script prints both the JSONL path and final JSONL SHA-256 on stdout. The
+summary record's embedded `pre_summary_artifact_hash` intentionally covers only
+the records before the summary, avoiding a misleading self-referential hash.
 
 Run the benchmark:
 

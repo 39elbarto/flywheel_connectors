@@ -2281,6 +2281,8 @@ fn safe_target_slug(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     use fcp_evidence::{
         BeadIssueRecord, BeadProofComment, EvidenceBundleRecord, PROOF_GRAPH_INDEXER_CORPUS_SCHEMA,
@@ -3242,6 +3244,67 @@ related = []
             required_env_keys: BTreeSet::new(),
             refusal_boundary: "test boundary",
         }
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, script: &str) {
+        fs::write(path, script).expect("write executable script");
+        let mut permissions = fs::metadata(path).expect("script metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("chmod executable script");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rch_execution_local_fallback_does_not_invoke_cargo_payload() {
+        let temp = tempfile::tempdir().expect("create fake-rch tempdir");
+        let rch_path = temp.path().join("rch");
+        let cargo_path = temp.path().join("cargo");
+        let cargo_invoked_path = temp.path().join("cargo.invoked");
+        write_executable(
+            &rch_path,
+            "#!/bin/sh\nprintf '%s\\n' '[RCH] local (remote execution failed)'\nexit 0\n",
+        );
+        write_executable(
+            &cargo_path,
+            "#!/bin/sh\nprintf '%s\\n' invoked > \"$0.invoked\"\nexit 77\n",
+        );
+
+        let mut plan = remote_rch_plan();
+        plan.argv = vec![
+            rch_path.display().to_string(),
+            "exec".to_owned(),
+            "--".to_owned(),
+            cargo_path.display().to_string(),
+            "test".to_owned(),
+            "-p".to_owned(),
+            "fcp-evidence".to_owned(),
+            "proof_runner".to_owned(),
+        ];
+        plan.working_directory = Some(temp.path().display().to_string());
+
+        let execution =
+            execute_plan(&plan, DEFAULT_OUTPUT_PREVIEW_BYTES).expect("execute fake rch plan");
+        let proof = execution
+            .rch_remote_proof
+            .as_ref()
+            .expect("remote proof classification");
+
+        assert_eq!(execution.status_code, Some(0));
+        assert!(!execution.success);
+        assert_eq!(
+            proof.classification,
+            RchRemoteProofClassification::RefusedLocalFallback,
+            "classification={:?}, summary={:?}, selector_reason={:?}, preflight_reason={:?}",
+            proof.classification,
+            proof.evidence.rch_summary_line,
+            proof.evidence.selector_reason,
+            proof.evidence.preflight_reason
+        );
+        assert!(
+            !cargo_invoked_path.exists(),
+            "fake cargo payload was invoked after a local fallback summary"
+        );
     }
 
     #[test]

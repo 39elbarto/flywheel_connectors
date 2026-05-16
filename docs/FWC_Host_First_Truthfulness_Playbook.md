@@ -817,6 +817,17 @@ rch exec -- cargo test --workspace
 rch exec -- cargo fmt --check
 ```
 
+For the fail-closed `rch` proof governor, the owning crate lanes are:
+
+```bash
+rch exec -- cargo test -p fcp-evidence proof_runner
+rch exec -- cargo test -p fwc rch_execution
+```
+
+Those tests cover transcript classification, blocked/local-fallback evidence,
+golden JSONL records, and the guard that local fallback must not invoke the
+Cargo payload.
+
 If you add scripted transcript or scenario runners, the replay instructions and playbooks should preserve the `rch exec -- ...` prefix for any cargo-backed step.
 
 ## Migration Guidance

@@ -790,6 +790,12 @@ pub struct RchRemoteProofEvidence {
     /// Final `[RCH] remote|local` summary line, with secret-bearing details removed.
     #[serde(default)]
     pub rch_summary_line: Option<String>,
+    /// Selector/admission reason when RCH did not produce a remote result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector_reason: Option<String>,
+    /// Remote topology/preflight reason when setup failed before Cargo ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight_reason: Option<String>,
     /// Cargo target directory used for the run.
     #[serde(default)]
     pub target_dir: Option<String>,
@@ -868,6 +874,16 @@ impl RchRemoteProofEvidence {
         }
     }
 
+    /// Serialize this row as one deterministic JSONL record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProofRunError`] when the row is invalid or cannot serialize.
+    pub fn to_jsonl_record(&self) -> Result<String, ProofRunError> {
+        self.validate()?;
+        serde_json::to_string(self).map_err(ProofRunError::from)
+    }
+
     /// Parse the final RCH summary line if one is present.
     #[must_use]
     pub fn parsed_summary(&self) -> Option<RchRemoteProofSummary> {
@@ -905,6 +921,12 @@ impl RchRemoteProofEvidence {
                 "rch_remote_proof.rch_summary_line",
                 &strip_ansi_csi(summary),
             )?;
+        }
+        if let Some(selector_reason) = &self.selector_reason {
+            validate_safe_text("rch_remote_proof.selector_reason", selector_reason)?;
+        }
+        if let Some(preflight_reason) = &self.preflight_reason {
+            validate_safe_text("rch_remote_proof.preflight_reason", preflight_reason)?;
         }
         if let Some(target_dir) = &self.target_dir {
             validate_safe_text("rch_remote_proof.target_dir", target_dir)?;
@@ -1088,6 +1110,25 @@ impl RchRemoteProofClassification {
             Self::RefusedLocalFallback => "refused_local_fallback",
             Self::NotProof { .. } => "not_proof",
             Self::FailedClosed { .. } => "failed_closed",
+        }
+    }
+}
+
+impl RchRemoteProofBlockerReason {
+    /// Stable string label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalFallbackRefused => "local_fallback_refused",
+            Self::ActiveProjectExclusion => "active_project_exclusion",
+            Self::NoAdmissibleWorkers => "no_admissible_workers",
+            Self::TopologyPreflightFailure => "topology_preflight_failure",
+            Self::WorkerPressure => "worker_pressure",
+            Self::NonCargoNonProof => "non_cargo_non_proof",
+            Self::MalformedRchSummary => "malformed_rch_summary",
+            Self::MissingRchSummary => "missing_rch_summary",
+            Self::AmbiguousRchSummary => "ambiguous_rch_summary",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -1706,6 +1747,8 @@ mod tests {
             git_revision: "abc1234".to_owned(),
             worker_id: Some("worker-7".to_owned()),
             rch_summary_line: rch_summary_line.map(str::to_owned),
+            selector_reason: None,
+            preflight_reason: None,
             target_dir: Some("/tmp/fcp-proof-governor".to_owned()),
             started_at_unix_ms: NOW,
             finished_at_unix_ms: Some(NOW + 1_000),
@@ -1907,6 +1950,43 @@ mod tests {
             assert!(value.get(field).is_some(), "missing field {field}");
         }
         assert_eq!(value["schema"], RCH_REMOTE_PROOF_EVIDENCE_SCHEMA);
+    }
+
+    #[test]
+    fn rch_jsonl_record_carries_selector_preflight_worker_and_redaction_metadata() {
+        let mut evidence = rch_evidence(
+            RchRemoteProofExitKind::Blocked,
+            Some(RchRemoteProofBlockerReason::TopologyPreflightFailure),
+            Some("[RCH] local (remote topology preflight failed: ln: Already exists)"),
+        );
+        evidence.selector_reason = Some(
+            RchRemoteProofBlockerReason::NoAdmissibleWorkers
+                .as_str()
+                .to_owned(),
+        );
+        evidence.preflight_reason = Some(
+            RchRemoteProofBlockerReason::TopologyPreflightFailure
+                .as_str()
+                .to_owned(),
+        );
+
+        let record = evidence.to_jsonl_record().expect("jsonl record");
+        let value: serde_json::Value = serde_json::from_str(&record).expect("parse jsonl");
+
+        assert_eq!(value["schema"], RCH_REMOTE_PROOF_EVIDENCE_SCHEMA);
+        assert_eq!(value["worker_id"], "worker-7");
+        assert_eq!(value["command"][0], "rch");
+        assert_eq!(value["git_revision"], "abc1234");
+        assert_eq!(value["target_dir"], "/tmp/fcp-proof-governor");
+        assert_eq!(value["selector_reason"], "no_admissible_workers");
+        assert_eq!(value["preflight_reason"], "topology_preflight_failure");
+        assert!(
+            value["redaction"]["flags"]
+                .as_array()
+                .expect("redaction flags")
+                .iter()
+                .any(|flag| flag == "secret_values_removed")
+        );
     }
 
     #[test]

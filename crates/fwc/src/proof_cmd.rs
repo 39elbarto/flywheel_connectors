@@ -17,8 +17,11 @@ use clap::{Args, Subcommand};
 use fcp_evidence::{
     ClaimId, ClaimNode, ClaimStatus, EvidenceKind, EvidenceNode, ObservedProofArtifact,
     ProofBundleRegistry, ProofBundleValidationReport, ProofBundleValidator, ProofGapStatus,
-    ProofGraph, ProofGraphCorpus, ProofGraphIndexer, ProofValidationStatus, RerunCommand,
-    SupportEdge, SupportRelationship,
+    ProofGraph, ProofGraphCorpus, ProofGraphIndexer, ProofValidationStatus,
+    RCH_REMOTE_PROOF_EVIDENCE_SCHEMA, RchRemoteProofBlockerReason, RchRemoteProofClassification,
+    RchRemoteProofEvidence, RchRemoteProofExitKind, RchRemoteProofRedaction,
+    RchRemoteProofRedactionFlag, RchRemoteProofSummary, RchRemoteProofSummaryLocation,
+    RerunCommand, SupportEdge, SupportRelationship,
 };
 use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use serde::Serialize;
@@ -214,6 +217,18 @@ struct ExecutedProofCommand {
     success: bool,
     stdout_preview: String,
     stderr_preview: String,
+    rch_remote_proof: Option<ExecutedRchProof>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ExecutedRchProof {
+    classification: RchRemoteProofClassification,
+    classification_label: &'static str,
+    proof_relevant: bool,
+    accepted_remote_proof: bool,
+    preserved_exit_code: Option<i32>,
+    evidence: RchRemoteProofEvidence,
+    jsonl_record: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1900,6 +1915,7 @@ fn execute_plan(
     let Some(program) = plan.argv.first() else {
         bail!("ProofGraph rerun plan had an empty argv vector");
     };
+    let started_at_unix_ms = current_unix_ms();
     let mut command = ProcessCommand::new(program);
     command.args(&plan.argv[1..]);
     if let Some(working_directory) = &plan.working_directory {
@@ -1911,12 +1927,208 @@ fn execute_plan(
             plan.command_id
         )
     })?;
+    let finished_at_unix_ms = current_unix_ms();
+    let rch_remote_proof = if plan.requires_remote {
+        Some(classify_rch_execution(
+            plan,
+            &output.stdout,
+            &output.stderr,
+            output.status.code(),
+            output.status.success(),
+            started_at_unix_ms,
+            finished_at_unix_ms,
+        )?)
+    } else {
+        None
+    };
+    let success = execution_success(output.status.success(), rch_remote_proof.as_ref());
     Ok(ExecutedProofCommand {
         status_code: output.status.code(),
-        success: output.status.success(),
+        success,
         stdout_preview: preview_bytes(&output.stdout, max_output_bytes),
         stderr_preview: preview_bytes(&output.stderr, max_output_bytes),
+        rch_remote_proof,
     })
+}
+
+fn classify_rch_execution(
+    plan: &PlannedRerunCommand,
+    stdout: &[u8],
+    stderr: &[u8],
+    status_code: Option<i32>,
+    status_success: bool,
+    started_at_unix_ms: u64,
+    finished_at_unix_ms: u64,
+) -> Result<ExecutedRchProof> {
+    let summary_line = final_rch_summary_line(stdout, stderr);
+    let parsed_summary = summary_line
+        .as_deref()
+        .and_then(RchRemoteProofSummary::parse_final_summary_line);
+    let blocker_reason = blocker_reason_from_summary(summary_line.as_deref());
+    let exit_kind = rch_exit_kind(parsed_summary.as_ref(), status_code, status_success);
+    let row_blocker = match exit_kind {
+        RchRemoteProofExitKind::Blocked | RchRemoteProofExitKind::Unknown => Some(blocker_reason),
+        RchRemoteProofExitKind::RemotePassed
+        | RchRemoteProofExitKind::RemoteFailed { .. }
+        | RchRemoteProofExitKind::NonProof => None,
+    };
+    let (selector_reason, preflight_reason) = split_selector_preflight_reason(row_blocker);
+    let evidence = RchRemoteProofEvidence {
+        schema: RCH_REMOTE_PROOF_EVIDENCE_SCHEMA.to_owned(),
+        command: plan.argv.clone(),
+        cwd: plan
+            .working_directory
+            .clone()
+            .unwrap_or_else(|| ".".to_owned()),
+        git_revision: current_git_revision(plan).unwrap_or_else(|| "unknown".to_owned()),
+        worker_id: parsed_summary
+            .as_ref()
+            .and_then(|summary| summary.worker_id.clone()),
+        rch_summary_line: summary_line,
+        selector_reason,
+        preflight_reason,
+        target_dir: target_dir_from_argv(&plan.argv),
+        started_at_unix_ms,
+        finished_at_unix_ms: Some(finished_at_unix_ms),
+        exit_kind,
+        blocker_reason: row_blocker,
+        redaction: RchRemoteProofRedaction {
+            flags: BTreeSet::from([
+                RchRemoteProofRedactionFlag::CommandChecked,
+                RchRemoteProofRedactionFlag::CwdRedacted,
+                RchRemoteProofRedactionFlag::TargetDirRedacted,
+                RchRemoteProofRedactionFlag::SummaryRedacted,
+                RchRemoteProofRedactionFlag::SecretValuesRemoved,
+            ]),
+        },
+    };
+    let classification = evidence.classify()?;
+    let jsonl_record = evidence.to_jsonl_record()?;
+    Ok(ExecutedRchProof {
+        classification,
+        classification_label: classification.as_str(),
+        proof_relevant: rch_classification_is_proof_relevant(classification),
+        accepted_remote_proof: classification == RchRemoteProofClassification::AcceptedRemoteProof,
+        preserved_exit_code: status_code,
+        evidence,
+        jsonl_record,
+    })
+}
+
+fn execution_success(status_success: bool, rch_remote_proof: Option<&ExecutedRchProof>) -> bool {
+    match rch_remote_proof {
+        Some(proof) => status_success && proof.accepted_remote_proof,
+        None => status_success,
+    }
+}
+
+const fn rch_classification_is_proof_relevant(
+    classification: RchRemoteProofClassification,
+) -> bool {
+    matches!(
+        classification,
+        RchRemoteProofClassification::AcceptedRemoteProof
+            | RchRemoteProofClassification::RemoteCommandFailed { .. }
+    )
+}
+
+fn rch_exit_kind(
+    summary: Option<&RchRemoteProofSummary>,
+    status_code: Option<i32>,
+    status_success: bool,
+) -> RchRemoteProofExitKind {
+    match summary.map(|summary| summary.location) {
+        Some(RchRemoteProofSummaryLocation::Remote) if status_success => {
+            RchRemoteProofExitKind::RemotePassed
+        }
+        Some(RchRemoteProofSummaryLocation::Remote) => status_code
+            .map_or(RchRemoteProofExitKind::Unknown, |exit_code| {
+                RchRemoteProofExitKind::RemoteFailed { exit_code }
+            }),
+        Some(RchRemoteProofSummaryLocation::Local) => RchRemoteProofExitKind::Blocked,
+        None => RchRemoteProofExitKind::Blocked,
+    }
+}
+
+fn final_rch_summary_line(stdout: &[u8], stderr: &[u8]) -> Option<String> {
+    let mut summary = None;
+    for line in String::from_utf8_lossy(stdout)
+        .lines()
+        .chain(String::from_utf8_lossy(stderr).lines())
+    {
+        let trimmed = line.trim();
+        if trimmed.contains("[RCH] remote") || trimmed.contains("[RCH] local") {
+            summary = Some(trimmed.to_owned());
+        }
+    }
+    summary
+}
+
+fn blocker_reason_from_summary(summary_line: Option<&str>) -> RchRemoteProofBlockerReason {
+    let Some(summary_line) = summary_line else {
+        return RchRemoteProofBlockerReason::MissingRchSummary;
+    };
+    let lower = summary_line.to_ascii_lowercase();
+    if lower.contains("active_project_exclusion") {
+        RchRemoteProofBlockerReason::ActiveProjectExclusion
+    } else if lower.contains("no admissible workers") || lower.contains("no_admissible_workers") {
+        RchRemoteProofBlockerReason::NoAdmissibleWorkers
+    } else if lower.contains("topology")
+        || lower.contains("preflight")
+        || lower.contains("ln: already exists")
+    {
+        RchRemoteProofBlockerReason::TopologyPreflightFailure
+    } else if lower.contains("pressure") || lower.contains("all_workers_busy") {
+        RchRemoteProofBlockerReason::WorkerPressure
+    } else if lower.contains("[rch] local") {
+        RchRemoteProofBlockerReason::LocalFallbackRefused
+    } else if RchRemoteProofSummary::parse_final_summary_line(summary_line).is_none() {
+        RchRemoteProofBlockerReason::MalformedRchSummary
+    } else {
+        RchRemoteProofBlockerReason::AmbiguousRchSummary
+    }
+}
+
+fn split_selector_preflight_reason(
+    blocker: Option<RchRemoteProofBlockerReason>,
+) -> (Option<String>, Option<String>) {
+    match blocker {
+        Some(RchRemoteProofBlockerReason::TopologyPreflightFailure) => (
+            None,
+            Some(
+                RchRemoteProofBlockerReason::TopologyPreflightFailure
+                    .as_str()
+                    .to_owned(),
+            ),
+        ),
+        Some(
+            reason @ (RchRemoteProofBlockerReason::LocalFallbackRefused
+            | RchRemoteProofBlockerReason::ActiveProjectExclusion
+            | RchRemoteProofBlockerReason::NoAdmissibleWorkers
+            | RchRemoteProofBlockerReason::WorkerPressure),
+        ) => (Some(reason.as_str().to_owned()), None),
+        Some(reason) => (Some(reason.as_str().to_owned()), None),
+        None => (None, None),
+    }
+}
+
+fn target_dir_from_argv(argv: &[String]) -> Option<String> {
+    argv.iter()
+        .find_map(|arg| arg.strip_prefix("CARGO_TARGET_DIR=").map(str::to_owned))
+}
+
+fn current_git_revision(plan: &PlannedRerunCommand) -> Option<String> {
+    let mut command = ProcessCommand::new("git");
+    command.args(["rev-parse", "--verify", "--short=12", "HEAD"]);
+    if let Some(working_directory) = &plan.working_directory {
+        command.current_dir(Path::new(working_directory));
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let revision = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!revision.is_empty()).then_some(revision)
 }
 
 fn preview_bytes(bytes: &[u8], limit: usize) -> String {
@@ -3000,6 +3212,142 @@ related = []
             argv.iter()
                 .any(|arg| arg.starts_with("CARGO_TARGET_DIR=/tmp/fwc-proof-"))
         );
+    }
+
+    fn remote_rch_plan() -> PlannedRerunCommand {
+        PlannedRerunCommand {
+            target: "claim:test-proof".to_owned(),
+            claim_id: "claim:test-proof".to_owned(),
+            source_kind: "test",
+            source_id: "test-source".to_owned(),
+            command_id: "rerun:test-proof".to_owned(),
+            dry_run: false,
+            requires_remote: true,
+            argv: vec![
+                "env".to_owned(),
+                "RCH_REQUIRE_REMOTE=1".to_owned(),
+                "rch".to_owned(),
+                "exec".to_owned(),
+                "--".to_owned(),
+                "env".to_owned(),
+                "CARGO_TARGET_DIR=/tmp/fwc-proof-test".to_owned(),
+                "CARGO_INCREMENTAL=0".to_owned(),
+                "cargo".to_owned(),
+                "test".to_owned(),
+                "-p".to_owned(),
+                "fcp-evidence".to_owned(),
+                "proof_runner".to_owned(),
+            ],
+            working_directory: Some(".".to_owned()),
+            required_env_keys: BTreeSet::new(),
+            refusal_boundary: "test boundary",
+        }
+    }
+
+    #[test]
+    fn rch_execution_remote_success_emits_accepted_jsonl_record() {
+        let proof = classify_rch_execution(
+            &remote_rch_plan(),
+            b"tests passed\n[RCH] remote worker-7 (867.9s)\n",
+            b"",
+            Some(0),
+            true,
+            NOW,
+            NOW + 1_000,
+        )
+        .expect("classify rch success");
+
+        assert_eq!(
+            proof.classification,
+            RchRemoteProofClassification::AcceptedRemoteProof
+        );
+        assert!(proof.proof_relevant);
+        assert!(proof.accepted_remote_proof);
+        assert!(execution_success(true, Some(&proof)));
+        assert_eq!(proof.preserved_exit_code, Some(0));
+        assert_eq!(proof.evidence.worker_id.as_deref(), Some("worker-7"));
+        assert_eq!(
+            proof.evidence.target_dir.as_deref(),
+            Some("/tmp/fwc-proof-test")
+        );
+        assert!(proof.jsonl_record.contains("\"secret_values_removed\""));
+    }
+
+    #[test]
+    fn rch_execution_remote_failure_preserves_cargo_exit_code() {
+        let proof = classify_rch_execution(
+            &remote_rch_plan(),
+            b"",
+            b"cargo test failed\n[RCH] remote worker-7 failed [RCH-E101]\n",
+            Some(101),
+            false,
+            NOW,
+            NOW + 1_000,
+        )
+        .expect("classify rch failure");
+
+        assert_eq!(
+            proof.classification,
+            RchRemoteProofClassification::RemoteCommandFailed { exit_code: 101 }
+        );
+        assert!(proof.proof_relevant);
+        assert!(!proof.accepted_remote_proof);
+        assert!(!execution_success(false, Some(&proof)));
+        assert_eq!(proof.preserved_exit_code, Some(101));
+    }
+
+    #[test]
+    fn rch_execution_refuses_local_fallback_even_if_process_exits_zero() {
+        let proof = classify_rch_execution(
+            &remote_rch_plan(),
+            b"[RCH] local (remote execution failed)\n",
+            b"",
+            Some(0),
+            true,
+            NOW,
+            NOW + 1_000,
+        )
+        .expect("classify local fallback");
+
+        assert_eq!(
+            proof.classification,
+            RchRemoteProofClassification::RefusedLocalFallback
+        );
+        assert!(!proof.proof_relevant);
+        assert!(!proof.accepted_remote_proof);
+        assert!(!execution_success(true, Some(&proof)));
+        assert_eq!(
+            proof.evidence.selector_reason.as_deref(),
+            Some("local_fallback_refused")
+        );
+    }
+
+    #[test]
+    fn rch_execution_records_topology_preflight_blocker_in_jsonl() {
+        let proof = classify_rch_execution(
+            &remote_rch_plan(),
+            b"",
+            b"[RCH] local (remote topology preflight failed: ln: Already exists)\n",
+            Some(1),
+            false,
+            NOW,
+            NOW + 1_000,
+        )
+        .expect("classify topology blocker");
+
+        assert_eq!(
+            proof.classification,
+            RchRemoteProofClassification::InfraBlocked {
+                blocker: RchRemoteProofBlockerReason::TopologyPreflightFailure
+            }
+        );
+        assert_eq!(
+            proof.evidence.preflight_reason.as_deref(),
+            Some("topology_preflight_failure")
+        );
+        assert!(proof.jsonl_record.contains("\"preflight_reason\""));
+        assert!(proof.jsonl_record.contains("\"command\""));
+        assert!(proof.jsonl_record.contains("\"git_revision\""));
     }
 
     #[test]

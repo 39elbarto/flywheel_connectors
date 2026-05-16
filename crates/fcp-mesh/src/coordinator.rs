@@ -149,6 +149,8 @@ pub struct SignedLeaseIssueRequest {
     pub existing_leases: Vec<ObservedLeaseAuthority>,
     /// Nodes eligible to coordinate this subject.
     pub eligible_nodes: Vec<TailscaleNodeId>,
+    /// Minimum quorum signatures required before the lease can be materialized.
+    pub required_signatures: usize,
     /// Logical clock time for the admission decision.
     pub now_secs: u64,
 }
@@ -616,12 +618,22 @@ impl LeaseCoordinator {
             mut params,
             existing_leases,
             eligible_nodes,
+            required_signatures,
             now_secs,
         } = request;
         let planner_purpose = planner_purpose_for_core(params.purpose);
         if let Some(rejection) =
             signed_lease_issue_hrw_rejection(&params, &eligible_nodes, planner_purpose, now_secs)
         {
+            return rejection;
+        }
+        if let Some(rejection) = signed_lease_issue_quorum_rejection(
+            &params,
+            &eligible_nodes,
+            planner_purpose,
+            now_secs,
+            required_signatures,
+        ) {
             return rejection;
         }
         let (outcome, timeline) = self.acquire(
@@ -1086,6 +1098,46 @@ fn signed_lease_issue_hrw_rejection(
     }
 }
 
+fn signed_lease_issue_quorum_rejection(
+    params: &CoreLeaseParams,
+    eligible_nodes: &[TailscaleNodeId],
+    planner_purpose: LeasePurpose,
+    now_secs: u64,
+    required_signatures: usize,
+) -> Option<(SignedLeaseIssueOutcome, Vec<AuthorityTimelineEvent>)> {
+    let got = params.quorum_signatures.len();
+    if got >= required_signatures {
+        return None;
+    }
+
+    let reason = format!(
+        "Lease issue rejected: insufficient quorum signatures (required={required_signatures}, got={got})"
+    );
+    let purpose_label = planner_purpose.to_string();
+    metrics::record_lease_fenced(&purpose_label, "insufficient_quorum");
+    Some((
+        SignedLeaseIssueOutcome::Rejected {
+            reason: reason.clone(),
+        },
+        vec![AuthorityTimelineEvent {
+            observed_at_ms: now_secs * 1000,
+            operation: "lease.issue_rejected".into(),
+            subject_id: params.subject_object_id,
+            purpose: planner_purpose,
+            holder: Some(params.holder.clone()),
+            coordinator: select_coordinator(
+                &params.zone_id,
+                &params.subject_object_id,
+                eligible_nodes,
+            ),
+            reason_code: AuthorityReasonCode::LeaseAcquisitionRejected,
+            fencing_token: None,
+            expires_at: None,
+            explanation: reason,
+        }],
+    ))
+}
+
 /// Convert a durable core lease into the compact planner observation format.
 #[must_use]
 pub fn held_lease_from_signed(lease: &CoreLease) -> HeldLease {
@@ -1281,6 +1333,7 @@ mod tests {
             ),
             existing_leases: Vec::new(),
             eligible_nodes,
+            required_signatures: 2,
             now_secs,
         };
         let (outcome, _timeline) = coord.issue_signed_lease(request);
@@ -1346,6 +1399,7 @@ mod tests {
             ),
             existing_leases: Vec::new(),
             eligible_nodes: eligible,
+            required_signatures: 2,
             now_secs: 1_000,
         };
 
@@ -1380,6 +1434,63 @@ mod tests {
     }
 
     #[test]
+    fn issue_signed_lease_rejects_insufficient_quorum_before_materialization() {
+        let mut coord = LeaseCoordinator::with_defaults();
+        let eligible = vec![node("node-a"), node("node-b"), node("node-c")];
+        let holder = selected_holder_for(&eligible);
+        let request = SignedLeaseIssueRequest {
+            params: core_lease_params(
+                holder.as_str(),
+                300,
+                CoreLeasePurpose::ConnectorStateWrite,
+                signatures(&["node-a"]),
+            ),
+            existing_leases: Vec::new(),
+            eligible_nodes: eligible.clone(),
+            required_signatures: 2,
+            now_secs: 1_000,
+        };
+
+        let (outcome, timeline) = coord.issue_signed_lease(request);
+
+        match outcome {
+            SignedLeaseIssueOutcome::Rejected { reason } => {
+                assert!(
+                    reason.contains("insufficient quorum signatures"),
+                    "expected quorum rejection, got: {reason}"
+                );
+                assert!(reason.contains("required=2"));
+                assert!(reason.contains("got=1"));
+            }
+            other => panic!("expected Rejected for insufficient quorum, got {other:?}"),
+        }
+        assert!(timeline.iter().any(|event| {
+            event.operation == "lease.issue_rejected"
+                && event.fencing_token.is_none()
+                && event.reason_code == AuthorityReasonCode::LeaseAcquisitionRejected
+                && event.explanation.contains("insufficient quorum signatures")
+        }));
+
+        let grant_request = SignedLeaseIssueRequest {
+            params: core_lease_params(
+                holder.as_str(),
+                300,
+                CoreLeasePurpose::ConnectorStateWrite,
+                signatures(&["node-a", "node-b"]),
+            ),
+            existing_leases: Vec::new(),
+            eligible_nodes: eligible,
+            required_signatures: 2,
+            now_secs: 1_000,
+        };
+        let (grant, _timeline) = coord.issue_signed_lease(grant_request);
+        let SignedLeaseIssueOutcome::Granted { lease } = grant else {
+            panic!("expected valid quorum lease grant");
+        };
+        assert_eq!(lease.lease_seq, 1);
+    }
+
+    #[test]
     fn issue_signed_lease_rebases_fencing_token_from_expired_observation() {
         let mut coord = LeaseCoordinator::with_defaults();
         let eligible_nodes = vec![node("node-a"), node("node-b"), node("node-c")];
@@ -1393,6 +1504,7 @@ mod tests {
             ),
             existing_leases: vec![held_lease("node-a", 7, 100)],
             eligible_nodes,
+            required_signatures: 2,
             now_secs: 1_000,
         };
 
@@ -1420,6 +1532,7 @@ mod tests {
             ),
             existing_leases: vec![held_lease(active_holder.as_str(), 5, 2_000)],
             eligible_nodes,
+            required_signatures: 2,
             now_secs: 1_000,
         };
 
@@ -1449,6 +1562,7 @@ mod tests {
             ),
             existing_leases: Vec::new(),
             eligible_nodes,
+            required_signatures: 2,
             now_secs: 1_000,
         };
 
@@ -1483,6 +1597,7 @@ mod tests {
             ),
             existing_leases: vec![held_lease("node-a", 5, 2_000)],
             eligible_nodes,
+            required_signatures: 2,
             now_secs: 1_000,
         };
 
@@ -1515,6 +1630,7 @@ mod tests {
             ),
             existing_leases: Vec::new(),
             eligible_nodes,
+            required_signatures: 1,
             now_secs: 1_000,
         };
         let (outcome, _timeline) = coord.issue_signed_lease(request);

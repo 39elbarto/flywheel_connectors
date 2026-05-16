@@ -91,6 +91,14 @@ under a persistent temp artifact root named
 matrix replays the same scenarios without writing a second artifact tree; it is
 only used to prove traversal-order independence.
 
+The reusable testkit also has targeted failure-injection coverage for the
+invariant reporter itself: one test tampers with an `OperationReceipt`
+signature and requires `invalid_receipt_signature_count` plus
+`orphaned_connector_state_count` to increment; another marks the active holder
+offline and requires `orphaned_active_lease_count` to increment while
+`all_nodes_online_at_end` flips false. These tests make the invariant fields a
+real backstop instead of only a clean-path assertion.
+
 ## Replay Bundle Layout
 
 `LocalReplayBundle::write_to_dir` runs the shared

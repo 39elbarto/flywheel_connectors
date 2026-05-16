@@ -1004,3 +1004,75 @@ fn hash_label(label: &str) -> String {
 fn hash_json(value: &impl Serialize) -> Result<String, serde_json::Error> {
     serde_json::to_vec(value).map(|bytes| blake3::hash(&bytes).to_hex().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn active_holder(harness: &LocalMeshHarness) -> TailscaleNodeId {
+        harness
+            .nodes
+            .values()
+            .find(|node| node.online && node.role == LocalNodeRole::Holder)
+            .map(|node| node.tailscale_id.clone())
+            .expect("scenario should leave one online active holder")
+    }
+
+    #[test]
+    fn invariant_report_detects_corrupted_receipt_signature() {
+        let mut harness = LocalMeshHarness::new_three_node(11).expect("harness should build");
+        harness
+            .run_failover_scenario(LocalChaosMode::KillLeaderMidWrite)
+            .expect("scenario should produce a receipt");
+        let holder = active_holder(&harness);
+        let clean = harness.invariant_report(&holder);
+        assert_eq!(clean.invalid_receipt_signature_count, 0);
+        assert_eq!(clean.orphaned_connector_state_count, 0);
+
+        let receipt = harness
+            .receipts_by_key
+            .values_mut()
+            .next()
+            .expect("scenario should record one operation receipt");
+        for byte in receipt.signature.signature.iter_mut().take(1) {
+            *byte ^= 0x01;
+        }
+
+        let corrupted = harness.invariant_report(&holder);
+        assert_eq!(
+            corrupted.invalid_receipt_signature_count, 1,
+            "tampered receipts should be counted explicitly"
+        );
+        assert_eq!(
+            corrupted.orphaned_connector_state_count, 1,
+            "a bad receipt signature should make the receipt state unreachable"
+        );
+    }
+
+    #[test]
+    fn invariant_report_detects_offline_active_holder() {
+        let mut harness = LocalMeshHarness::new_three_node(12).expect("harness should build");
+        harness
+            .run_failover_scenario(LocalChaosMode::NetworkPartitionThenHeal)
+            .expect("scenario should recover all nodes");
+        let holder = active_holder(&harness);
+        let clean = harness.invariant_report(&holder);
+        assert_eq!(clean.orphaned_active_lease_count, 0);
+        assert!(clean.all_nodes_online_at_end);
+
+        harness
+            .node_mut(&holder)
+            .expect("active holder should still be addressable")
+            .online = false;
+
+        let orphaned = harness.invariant_report(&holder);
+        assert_eq!(
+            orphaned.orphaned_active_lease_count, 1,
+            "offline active holder should be reported as an orphaned active lease"
+        );
+        assert!(
+            !orphaned.all_nodes_online_at_end,
+            "offline holder should clear the all-nodes-online invariant"
+        );
+    }
+}

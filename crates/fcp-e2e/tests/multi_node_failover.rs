@@ -5,11 +5,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fcp_cbor::{CanonicalSerializer, SchemaId};
-use fcp_testkit::local_mesh::{
-    LocalChaosMode, LocalMeshHarness, LocalMeshHarnessError, LocalNodeSnapshot,
+use fcp_testkit::local_mesh::{LocalChaosMode, LocalMeshHarness, LocalMeshHarnessError};
+use fcp_testkit::redacted_replay_bundle::{
+    verify_in_memory_replay_bundle, verify_written_replay_bundle,
 };
-use semver::Version;
 use serde_json::Value;
 
 #[test]
@@ -78,89 +77,19 @@ fn local_mesh_replay_bundle_writes_documented_artifacts() -> Result<(), Box<dyn 
         .replay_bundle
         .write_to_dir(replay_artifact_root(&outcome.scenario_id))?;
 
-    assert!(paths.manifest.exists());
-    assert!(paths.events.exists());
-    assert!(paths.hashes.exists());
-    assert!(paths.invariants.exists());
-    assert!(paths.snapshot_root.is_dir());
-
-    let manifest = fs::read_to_string(&paths.manifest)?;
-    assert!(manifest.contains("\"schema_version\""));
-    assert!(!manifest.contains("mesh-harness-node-"));
-
-    let events = fs::read_to_string(&paths.events)?;
-    assert!(events.contains("\"node_id_hash\""));
-    assert!(!events.contains("mesh-harness-node-"));
-
-    let hashes: Value = serde_json::from_str(&fs::read_to_string(&paths.hashes)?)?;
-    let final_hash = required_string_field(&hashes, "final_state_hash")?;
-    let expected_hash = required_string_field(&hashes, "expected_hash_for_seed")?;
-    assert_eq!(
-        final_hash, expected_hash,
-        "artifact should record the expected hash for deterministic seed reruns"
-    );
-    let per_node_state_hashes = hashes
-        .get("per_node_state_hashes")
-        .and_then(Value::as_array)
-        .ok_or_else(|| invalid_replay_artifact("hashes.json missing per_node_state_hashes"))?;
-    assert_eq!(
-        per_node_state_hashes.len(),
-        3,
-        "hashes.json should include one final state hash per node"
-    );
-    for entry in per_node_state_hashes {
-        let node_id_hash = required_string_field(entry, "node_id_hash")?;
-        let state_hash = required_string_field(entry, "state_hash")?;
-        assert!(!node_id_hash.is_empty());
-        assert_eq!(state_hash.len(), 64);
-    }
-
-    let invariants: Value = serde_json::from_str(&fs::read_to_string(&paths.invariants)?)?;
-    assert_eq!(
-        required_string_field(&invariants, "active_holder_hash")?,
-        outcome.active_holder_hash
-    );
-    assert_eq!(
-        required_u64_field(&invariants, "online_node_count")?,
-        3,
-        "invariants.json should record all nodes online after recovery"
-    );
-    assert!(
-        required_bool_field(&invariants, "all_nodes_online_at_end")?,
-        "invariants.json should record final all-online recovery"
-    );
-    assert_eq!(
-        required_u64_field(&invariants, "orphaned_active_lease_count")?,
-        0,
-        "invariants.json should record no orphaned active leases"
-    );
-    assert_eq!(
-        required_u64_field(&invariants, "orphaned_connector_state_count")?,
-        0,
-        "invariants.json should record no orphaned connector state"
-    );
-    assert_eq!(
-        required_u64_field(&invariants, "invalid_receipt_signature_count")?,
-        0,
-        "invariants.json should record no invalid receipt signatures"
-    );
-
-    let node_dirs = fs::read_dir(&paths.snapshot_root)?.collect::<Result<Vec<_>, _>>()?;
-    assert_eq!(node_dirs.len(), 3);
-    for entry in node_dirs {
-        let node_dir = entry.path();
-        for stage in [
-            "state_at_t0.cbor",
-            "state_at_chaos.cbor",
-            "state_at_heal.cbor",
-            "state_at_end.cbor",
-        ] {
-            let bytes = fs::read(node_dir.join(stage))?;
-            let schema = SchemaId::new("fcp.testkit", "LocalNodeSnapshot", Version::new(1, 0, 0));
-            let snapshot: LocalNodeSnapshot = CanonicalSerializer::deserialize(&bytes, &schema)?;
-            assert!(!snapshot.node_id_hash.is_empty());
-        }
-    }
+    let summary = verify_written_replay_bundle(&paths, 3)?;
+    assert_eq!(summary.scenario_id, outcome.scenario_id);
+    assert_eq!(summary.node_count, 3);
+    assert_eq!(summary.snapshot_file_count, 12);
+    assert_eq!(summary.final_state_hash, outcome.final_state_hash);
+    assert_eq!(summary.expected_hash_for_seed, outcome.final_state_hash);
+    assert_eq!(summary.per_node_state_hash_count, 3);
+    assert_eq!(summary.active_holder_hash, outcome.active_holder_hash);
+    assert_eq!(summary.online_node_count, 3);
+    assert!(summary.all_nodes_online_at_end);
+    assert_eq!(summary.orphaned_active_lease_count, 0);
+    assert_eq!(summary.orphaned_connector_state_count, 0);
+    assert_eq!(summary.invalid_receipt_signature_count, 0);
 
     Ok(())
 }
@@ -253,18 +182,17 @@ fn failover_hash_matrix(
             "replay bundle must not expose raw node ids or secret-bearing labels"
         );
         assert_eq!(outcome.replay_bundle.manifest.result, "pass");
-        assert!(
-            !outcome.replay_bundle.events.is_empty(),
+        let replay_summary = verify_in_memory_replay_bundle(&outcome.replay_bundle, 3)?;
+        assert_ne!(
+            replay_summary.event_count, 0,
             "replay bundle should include node transition events"
         );
         assert_eq!(
-            outcome.replay_bundle.node_snapshots.len(),
-            3,
+            replay_summary.node_count, 3,
             "replay bundle should include one redacted snapshot per node"
         );
         assert_eq!(
-            outcome.replay_bundle.node_timelines.len(),
-            3,
+            replay_summary.timeline_count, 3,
             "replay bundle should include one per-node timeline per node"
         );
 
@@ -292,13 +220,6 @@ fn required_u64_field(value: &Value, field: &str) -> Result<u64, Box<dyn std::er
         .get(field)
         .and_then(Value::as_u64)
         .ok_or_else(|| invalid_replay_artifact(format!("missing u64 field {field}")))
-}
-
-fn required_bool_field(value: &Value, field: &str) -> Result<bool, Box<dyn std::error::Error>> {
-    value
-        .get(field)
-        .and_then(Value::as_bool)
-        .ok_or_else(|| invalid_replay_artifact(format!("missing bool field {field}")))
 }
 
 fn assert_transition_event_contract(

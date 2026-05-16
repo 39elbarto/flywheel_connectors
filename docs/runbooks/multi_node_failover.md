@@ -139,6 +139,16 @@ written.
 Each snapshot file is canonical CBOR for `fcp.testkit:LocalNodeSnapshot@1.0.0`
 using the `fcp-cbor` schema-hash-prefixed serializer.
 
+Use `fcp_testkit::redacted_replay_bundle::verify_written_replay_bundle` to
+validate a saved replay root before attaching it to a bug report or comparing
+it against another run. The helper decodes `manifest.json`, `events.jsonl`,
+`hashes.json`, `invariants.json`, and every per-node CBOR snapshot, then fails
+if any artifact contains raw harness node labels or credential-like markers
+(`authorization`, `bearer`, `cookie`, `password`, `secret`, `token`), empty
+node hashes, missing transition events, a mismatch between `final_state_hash`
+and `expected_hash_for_seed`, a non-green invariant summary, or a
+node/timeline/hash count mismatch.
+
 ## Host Handoff Replay
 
 `lease_handoff_e2e.rs` writes:

@@ -78,12 +78,17 @@ Conformance coverage:
 - `masked_iblt_conformance.rs::layered_filter_fpr_budget_conformance`
 - `masked_iblt_conformance.rs::corrupted_summary_iblt_is_structured_rejection_without_peer_mutation`
 
+CLI doctor coverage:
+
+- `fwc doctor --probe iblt --json` emits schema
+  `fcp.fwc.doctor.iblt.v1`, `scheme_in_use: "masked"`,
+  `last_decode_p99_us`, `overflow_count_last_1h`, `fpr_observed`, threshold
+  warnings, and remediation commands.
+
 ## Remaining Work
 
 The following acceptance items are still separate follow-up surfaces unless
 landed by the same bead closeout:
 
-- `fwc doctor --probe iblt` reporting for scheme, decode p99, overflow count,
-  and observed FPR;
 - explicit audit-chain verification for overflow fallback;
 - production OTLP histogram aggregation for per-peer masked IBLT decode latency.

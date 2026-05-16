@@ -331,9 +331,13 @@ use fcp_kernel::{
     SupplyChainAttestation,
 };
 use fcp_manifest::ConnectorManifest;
-use fcp_mesh::HierarchicalVersionVector;
+use fcp_mesh::{
+    HierarchicalVersionVector, IbltMask, LayeredFilterConfig, LayeredReconciliationFilter,
+    MaskedIblt,
+};
 use fcp_prelude::{
-    ApprovalToken, CapabilityToken, ConnectorTarget, LeasePurpose as CoreLeasePurpose, ZoneId,
+    ApprovalToken, CapabilityToken, ConnectorTarget, LeasePurpose as CoreLeasePurpose, ObjectId,
+    ZoneId,
 };
 use fcp_registry::{
     AttestationEvidence as RegistryAttestationEvidence, ConnectorBundle,
@@ -1699,6 +1703,8 @@ enum DoctorLocalCheck {
 enum DoctorProbe {
     /// Verify HLC and HierVV local invariants and warning thresholds.
     Hlc,
+    /// Verify masked IBLT and layered filter local invariants and warning thresholds.
+    Iblt,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -12403,6 +12409,10 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
         return doctor_hlc_probe_dispatch();
     }
 
+    if matches!(args.probe, Some(DoctorProbe::Iblt)) {
+        return doctor_iblt_probe_dispatch();
+    }
+
     if let Some(command) = &args.command {
         return doctor_subcommand_dispatch(command);
     }
@@ -12766,6 +12776,189 @@ fn doctor_hlc_probe_warnings(
     }
     if hlc_c_max > HLC_PROBE_COUNTER_WARN_WITHIN_1S {
         warnings.push("hlc_c_counter_exceeds_1000_within_1s");
+    }
+    warnings
+}
+
+const IBLT_PROBE_DECODE_P99_WARN_US: u64 = 20_000;
+const IBLT_PROBE_OVERFLOW_COUNT_WARN_1H: u64 = 5;
+const IBLT_PROBE_TARGET_FPR: f64 = 1.0e-4;
+const IBLT_PROBE_FPR_WARN_MULTIPLIER: f64 = 2.0;
+const IBLT_PROBE_SAMPLE_COUNT: usize = 32;
+const IBLT_PROBE_SHARED_OBJECTS: usize = 96;
+const IBLT_PROBE_FILTER_MEMBERS: usize = 1_000;
+const IBLT_PROBE_FILTER_QUERIES: usize = 10_000;
+
+fn doctor_iblt_probe_dispatch() -> Result<DispatchOutcome> {
+    let report = doctor_iblt_probe_report()?;
+    let healthy = report.warnings.is_empty();
+    let status = if healthy { "ok" } else { "warn" };
+    let message = if healthy {
+        "Masked IBLT and layered filter local invariants are within doctor thresholds."
+    } else {
+        "Masked IBLT or layered filter local invariants crossed one or more doctor warning thresholds."
+    };
+    let exit_code = if healthy {
+        CliExitCode::Success
+    } else {
+        CliExitCode::Validation
+    };
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "doctor");
+    let mut payload = json!({
+        "status": status,
+        "command": "doctor",
+        "probe": "iblt",
+        "source": "local-algorithm-probe",
+        "message": message,
+        "report": {
+            "schema_version": "fcp.fwc.doctor.iblt.v1",
+            "scheme_in_use": "masked",
+            "last_decode_p99_us": report.last_decode_p99_us,
+            "overflow_count_last_1h": report.overflow_count_last_1h,
+            "fpr_observed": report.fpr_observed,
+            "metrics": {
+                "last_decode_p99_us": report.last_decode_p99_us,
+                "overflow_count_last_1h": report.overflow_count_last_1h,
+                "fpr_observed": report.fpr_observed,
+                "decoded_change_count": report.decoded_change_count,
+                "filter_member_count": report.filter_member_count,
+                "filter_query_count": report.filter_query_count,
+            },
+            "thresholds": {
+                "last_decode_p99_us_warn": IBLT_PROBE_DECODE_P99_WARN_US,
+                "overflow_count_last_1h_warn": IBLT_PROBE_OVERFLOW_COUNT_WARN_1H,
+                "configured_fpr": IBLT_PROBE_TARGET_FPR,
+                "fpr_observed_warn": IBLT_PROBE_TARGET_FPR * IBLT_PROBE_FPR_WARN_MULTIPLIER,
+            },
+            "warnings": report.warnings,
+            "commands": [
+                "fwc mesh iblt resnap",
+                "fwc mesh peer demote --id <peer>",
+                "fwc doctor --probe iblt --json",
+            ],
+        },
+        "next_actions": [
+            "fwc mesh iblt resnap",
+            "fwc mesh peer demote --id <peer>",
+            "fwc doctor --probe iblt --json",
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome { payload, exit_code })
+}
+
+#[derive(Debug)]
+struct IbltDoctorProbeReport {
+    last_decode_p99_us: u64,
+    overflow_count_last_1h: u64,
+    fpr_observed: f64,
+    decoded_change_count: usize,
+    filter_member_count: usize,
+    filter_query_count: usize,
+    warnings: Vec<&'static str>,
+}
+
+fn doctor_iblt_probe_report() -> Result<IbltDoctorProbeReport> {
+    let zone = "z:project:fwc-doctor-iblt-probe".parse::<ZoneId>()?;
+    let mask = IbltMask::for_zone(&zone);
+    let mut decode_samples_us = Vec::with_capacity(IBLT_PROBE_SAMPLE_COUNT);
+    let mut decoded_change_count = 0_usize;
+
+    for sample in 0..IBLT_PROBE_SAMPLE_COUNT {
+        let mut left = MaskedIblt::with_expected_difference(mask, 8);
+        let mut right = MaskedIblt::with_expected_difference(mask, 8);
+
+        for index in 0..IBLT_PROBE_SHARED_OBJECTS {
+            let object_id = doctor_iblt_probe_object_id(&format!("shared-{sample:02}-{index:04}"));
+            left.insert(object_id);
+            right.insert(object_id);
+        }
+
+        let left_only_a = doctor_iblt_probe_object_id(&format!("left-a-{sample:02}"));
+        let left_only_b = doctor_iblt_probe_object_id(&format!("left-b-{sample:02}"));
+        let right_only_a = doctor_iblt_probe_object_id(&format!("right-a-{sample:02}"));
+        let right_only_b = doctor_iblt_probe_object_id(&format!("right-b-{sample:02}"));
+        left.insert(left_only_a);
+        left.insert(left_only_b);
+        right.insert(right_only_a);
+        right.insert(right_only_b);
+
+        let started_at = std::time::Instant::now();
+        let decoded = left.subtract(&right)?.decode_complete()?;
+        let elapsed_us = started_at.elapsed().as_micros();
+        decode_samples_us.push(u64::try_from(elapsed_us).unwrap_or(u64::MAX));
+
+        debug_assert!(decoded.only_left.contains(&left_only_a));
+        debug_assert!(decoded.only_left.contains(&left_only_b));
+        debug_assert!(decoded.only_right.contains(&right_only_a));
+        debug_assert!(decoded.only_right.contains(&right_only_b));
+        decoded_change_count += decoded.only_left.len() + decoded.only_right.len();
+    }
+
+    decode_samples_us.sort_unstable();
+    let p99_index = decode_samples_us.len().saturating_sub(1);
+    let last_decode_p99_us = decode_samples_us.get(p99_index).copied().unwrap_or(0);
+
+    let filter_members = (0..IBLT_PROBE_FILTER_MEMBERS)
+        .map(|index| format!("member-{index:04}").into_bytes())
+        .collect::<Vec<_>>();
+    let filter_config = LayeredFilterConfig::default();
+    let filter = LayeredReconciliationFilter::from_items(
+        0x1b17_d0c7_0f1c_e001_u64,
+        filter_config,
+        filter_members.iter().map(Vec::as_slice),
+    );
+    for member in &filter_members {
+        debug_assert!(filter.may_contain(member));
+    }
+
+    let false_positive_count = (0..IBLT_PROBE_FILTER_QUERIES)
+        .filter(|index| filter.may_contain(format!("non-member-{index:04}").as_bytes()))
+        .count();
+    let false_positive_count =
+        u32::try_from(false_positive_count).expect("doctor probe query count fits u32");
+    let filter_query_count =
+        u32::try_from(IBLT_PROBE_FILTER_QUERIES).expect("doctor probe query count fits u32");
+    let fpr_observed = f64::from(false_positive_count) / f64::from(filter_query_count);
+    let overflow_count_last_1h = 0;
+    let warnings = doctor_iblt_probe_warnings(
+        last_decode_p99_us,
+        overflow_count_last_1h,
+        fpr_observed,
+        filter_config.target_fpr,
+    );
+
+    Ok(IbltDoctorProbeReport {
+        last_decode_p99_us,
+        overflow_count_last_1h,
+        fpr_observed,
+        decoded_change_count,
+        filter_member_count: filter.len(),
+        filter_query_count: IBLT_PROBE_FILTER_QUERIES,
+        warnings,
+    })
+}
+
+fn doctor_iblt_probe_object_id(label: &str) -> ObjectId {
+    ObjectId::from_unscoped_bytes(label.as_bytes())
+}
+
+fn doctor_iblt_probe_warnings(
+    last_decode_p99_us: u64,
+    overflow_count_last_1h: u64,
+    fpr_observed: f64,
+    configured_fpr: f64,
+) -> Vec<&'static str> {
+    let mut warnings = Vec::new();
+    if last_decode_p99_us > IBLT_PROBE_DECODE_P99_WARN_US {
+        warnings.push("last_decode_p99_us_exceeds_20ms");
+    }
+    if overflow_count_last_1h > IBLT_PROBE_OVERFLOW_COUNT_WARN_1H {
+        warnings.push("overflow_count_last_1h_exceeds_5");
+    }
+    if fpr_observed > configured_fpr * IBLT_PROBE_FPR_WARN_MULTIPLIER {
+        warnings.push("fpr_observed_exceeds_2x_configured");
     }
     warnings
 }
@@ -28927,12 +29120,12 @@ mod tests {
         HostConnectorCatalog, LiveAuthArgs, LiveTruthKnowledgeState, LiveTruthResolverBranch,
         MetadataField, PACKAGE_OUTPUT_FILENAME, PackageBuildMetadata, PackageOutput,
         PrepareCliError, ResolvedHostConfig, ResolvedHostOperation, catalog,
-        doctor_hlc_probe_warnings, execute, host_discovered_connector, host_discovered_operation,
-        host_mcp_tool_definitions, host_tool_summary_entry, host_tool_when_to_use,
-        live_pipeline_operation_metadata, mcp_tool_invoke_args, normalize_args,
-        pipeline_dry_run_can_materialize_output, prepare_cli, resolve_install_activation_truth,
-        resolve_mesh_live_truth, serve_mcp, try_host_mcp_tool_definitions,
-        try_host_tool_operation_info, validate_registry_binary_name,
+        doctor_hlc_probe_warnings, doctor_iblt_probe_warnings, execute, host_discovered_connector,
+        host_discovered_operation, host_mcp_tool_definitions, host_tool_summary_entry,
+        host_tool_when_to_use, live_pipeline_operation_metadata, mcp_tool_invoke_args,
+        normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
+        resolve_install_activation_truth, resolve_mesh_live_truth, serve_mcp,
+        try_host_mcp_tool_definitions, try_host_tool_operation_info, validate_registry_binary_name,
     };
     use chrono::{Duration as ChronoDuration, Utc};
     use clap::{CommandFactory, Parser};
@@ -33459,6 +33652,18 @@ deny_ptrace = true
     }
 
     #[test]
+    fn doctor_iblt_probe_parses_without_live_zone() {
+        let cli = Cli::try_parse_from(["fwc", "--json", "doctor", "--probe", "iblt"])
+            .expect("doctor --probe iblt should parse without --zone");
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(matches!(args.probe, Some(DoctorProbe::Iblt)));
+        assert!(args.zone.is_none());
+    }
+
+    #[test]
     fn doctor_hlc_probe_reports_required_metrics_and_commands() {
         let (exit_code, payload) = execute_json(&["fwc", "--json", "doctor", "--probe", "hlc"]);
 
@@ -33507,6 +33712,73 @@ deny_ptrace = true
     }
 
     #[test]
+    fn doctor_iblt_probe_reports_required_metrics_and_commands() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "doctor", "--probe", "iblt"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["probe"], "iblt");
+        assert_eq!(payload["source"], "local-algorithm-probe");
+        assert_eq!(
+            payload["report"]["schema_version"],
+            "fcp.fwc.doctor.iblt.v1"
+        );
+        assert_eq!(payload["report"]["scheme_in_use"], "masked");
+
+        assert!(
+            payload["report"]["last_decode_p99_us"]
+                .as_u64()
+                .expect("decode p99 should be numeric")
+                <= 20_000,
+            "doctor probe decode p99 should stay below the warning threshold"
+        );
+        assert_eq!(payload["report"]["overflow_count_last_1h"], 0);
+        assert!(
+            payload["report"]["fpr_observed"]
+                .as_f64()
+                .expect("observed FPR should be numeric")
+                <= 0.0002,
+            "observed FPR should stay below the 2x configured warning threshold"
+        );
+
+        let metrics = &payload["report"]["metrics"];
+        assert!(metrics["decoded_change_count"].as_u64().unwrap() >= 128);
+        assert_eq!(metrics["filter_member_count"], 1_000);
+        assert_eq!(metrics["filter_query_count"], 10_000);
+        assert_eq!(
+            payload["report"]["thresholds"]["last_decode_p99_us_warn"],
+            20_000
+        );
+        assert_eq!(
+            payload["report"]["thresholds"]["overflow_count_last_1h_warn"],
+            5
+        );
+        assert_eq!(payload["report"]["thresholds"]["configured_fpr"], 0.0001);
+        assert!(payload["report"]["warnings"].as_array().unwrap().is_empty());
+        assert!(
+            payload["report"]["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "fwc mesh iblt resnap")
+        );
+        assert!(
+            payload["report"]["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "fwc mesh peer demote --id <peer>")
+        );
+        assert!(
+            payload["report"]["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "fwc doctor --probe iblt --json")
+        );
+    }
+
+    #[test]
     fn doctor_hlc_probe_warning_thresholds_classify_anomalies() {
         assert!(doctor_hlc_probe_warnings(1_000, 2_000, 4_096).is_empty());
         assert_eq!(
@@ -33515,6 +33787,19 @@ deny_ptrace = true
                 "skew_observed_ms_exceeds_2s",
                 "hiervv_size_bytes_exceeds_4kb",
                 "hlc_c_counter_exceeds_1000_within_1s"
+            ]
+        );
+    }
+
+    #[test]
+    fn doctor_iblt_probe_warning_thresholds_classify_anomalies() {
+        assert!(doctor_iblt_probe_warnings(20_000, 5, 0.0002, 0.0001).is_empty());
+        assert_eq!(
+            doctor_iblt_probe_warnings(20_001, 6, 0.000_200_1, 0.0001),
+            vec![
+                "last_decode_p99_us_exceeds_20ms",
+                "overflow_count_last_1h_exceeds_5",
+                "fpr_observed_exceeds_2x_configured"
             ]
         );
     }

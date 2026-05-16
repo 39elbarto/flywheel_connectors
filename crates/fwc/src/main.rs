@@ -297,6 +297,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
 
+use fcp_audit::HybridLogicalClock;
 use fcp_crypto::{
     Ed25519Signature, Ed25519VerifyingKey, canonicalize::to_deterministic_cbor, cose::CoseToken,
 };
@@ -330,6 +331,7 @@ use fcp_kernel::{
     SupplyChainAttestation,
 };
 use fcp_manifest::ConnectorManifest;
+use fcp_mesh::HierarchicalVersionVector;
 use fcp_prelude::{
     ApprovalToken, CapabilityToken, ConnectorTarget, LeasePurpose as CoreLeasePurpose, ZoneId,
 };
@@ -1638,6 +1640,10 @@ struct DoctorArgs {
     #[arg(value_enum, value_name = "CHECK")]
     check: Option<DoctorLocalCheck>,
 
+    /// Local targeted doctor probe to run without a live host.
+    #[arg(long, value_enum, value_name = "PROBE")]
+    probe: Option<DoctorProbe>,
+
     /// Zone to diagnose.
     #[arg(long, short = 'z')]
     zone: Option<String>,
@@ -1686,6 +1692,13 @@ struct DoctorSelfTestArgs {
 enum DoctorLocalCheck {
     /// Verify the Lean formal-proof gate and local proof artifacts.
     Lean,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+enum DoctorProbe {
+    /// Verify HLC and HierVV local invariants and warning thresholds.
+    Hlc,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -12386,6 +12399,10 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
         return doctor_lean_dispatch();
     }
 
+    if matches!(args.probe, Some(DoctorProbe::Hlc)) {
+        return doctor_hlc_probe_dispatch();
+    }
+
     if let Some(command) = &args.command {
         return doctor_subcommand_dispatch(command);
     }
@@ -12632,6 +12649,125 @@ fn doctor_lean_dispatch() -> Result<DispatchOutcome> {
         }),
         exit_code,
     })
+}
+
+const HLC_PROBE_SKEW_WARN_MS: u64 = 2_000;
+const HLC_PROBE_HIERVV_SIZE_WARN_BYTES: usize = 4_096;
+const HLC_PROBE_COUNTER_WARN_WITHIN_1S: u32 = 1_000;
+
+fn doctor_hlc_probe_dispatch() -> Result<DispatchOutcome> {
+    let report = doctor_hlc_probe_report()?;
+    let healthy = report.warnings.is_empty();
+    let status = if healthy { "ok" } else { "warn" };
+    let message = if healthy {
+        "HLC and HierVV local invariants are within doctor thresholds."
+    } else {
+        "HLC and HierVV local invariants crossed one or more doctor warning thresholds."
+    };
+    let exit_code = if healthy {
+        CliExitCode::Success
+    } else {
+        CliExitCode::Validation
+    };
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "doctor");
+    let mut payload = json!({
+        "status": status,
+        "command": "doctor",
+        "probe": "hlc",
+        "source": "local-algorithm-probe",
+        "message": message,
+        "report": {
+            "schema_version": "fcp.fwc.doctor.hlc.v1",
+            "metrics": {
+                "hlc_l_max": report.hlc_l_max,
+                "hlc_c_max": report.hlc_c_max,
+                "skew_observed_ms": report.skew_observed_ms,
+                "hiervv_size_bytes": report.hiervv_size_bytes,
+            },
+            "thresholds": {
+                "skew_observed_ms_warn": HLC_PROBE_SKEW_WARN_MS,
+                "hiervv_size_bytes_warn": HLC_PROBE_HIERVV_SIZE_WARN_BYTES,
+                "hlc_c_counter_within_1s_warn": HLC_PROBE_COUNTER_WARN_WITHIN_1S,
+            },
+            "warnings": report.warnings,
+            "commands": [
+                "fwc audit chain inspect --last 10",
+                "fwc mesh revocation freshness --zone <id>",
+            ],
+        },
+        "next_actions": [
+            "fwc audit chain inspect --last 10",
+            "fwc mesh revocation freshness --zone <id>",
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome { payload, exit_code })
+}
+
+#[derive(Debug)]
+struct HlcDoctorProbeReport {
+    hlc_l_max: u64,
+    hlc_c_max: u32,
+    skew_observed_ms: u64,
+    hiervv_size_bytes: usize,
+    warnings: Vec<&'static str>,
+}
+
+fn doctor_hlc_probe_report() -> Result<HlcDoctorProbeReport> {
+    let mut clock = HybridLogicalClock::new("fwc-doctor-hlc");
+    let baseline_physical_ms = 1_700_000_000_000_u64;
+    let skewed_physical_ms = baseline_physical_ms.saturating_sub(500);
+
+    let first = clock.tick(baseline_physical_ms);
+    let second = clock.tick(skewed_physical_ms);
+    let third = clock.tick(skewed_physical_ms);
+    debug_assert!(second > first);
+    debug_assert!(third > second);
+
+    let hlc_l_max = first
+        .physical_ms
+        .max(second.physical_ms)
+        .max(third.physical_ms);
+    let hlc_c_max = first.logical.max(second.logical).max(third.logical);
+    let skew_observed_ms = baseline_physical_ms.saturating_sub(skewed_physical_ms);
+
+    let mut vector = HierarchicalVersionVector::new();
+    vector.set("z:doctor:hlc-probe", 42);
+    for index in 0..1024 {
+        debug_assert_eq!(
+            vector.counter_for(&format!("z:doctor:hlc-probe:zone-{index:04}")),
+            42
+        );
+    }
+    let hiervv_size_bytes = vector.canonical_len().map_err(anyhow::Error::msg)?;
+    let warnings = doctor_hlc_probe_warnings(hlc_c_max, skew_observed_ms, hiervv_size_bytes);
+
+    Ok(HlcDoctorProbeReport {
+        hlc_l_max,
+        hlc_c_max,
+        skew_observed_ms,
+        hiervv_size_bytes,
+        warnings,
+    })
+}
+
+fn doctor_hlc_probe_warnings(
+    hlc_c_max: u32,
+    skew_observed_ms: u64,
+    hiervv_size_bytes: usize,
+) -> Vec<&'static str> {
+    let mut warnings = Vec::new();
+    if skew_observed_ms > HLC_PROBE_SKEW_WARN_MS {
+        warnings.push("skew_observed_ms_exceeds_2s");
+    }
+    if hiervv_size_bytes > HLC_PROBE_HIERVV_SIZE_WARN_BYTES {
+        warnings.push("hiervv_size_bytes_exceeds_4kb");
+    }
+    if hlc_c_max > HLC_PROBE_COUNTER_WARN_WITHIN_1S {
+        warnings.push("hlc_c_counter_exceeds_1000_within_1s");
+    }
+    warnings
 }
 
 fn doctor_subcommand_dispatch(command: &DoctorCommand) -> Result<DispatchOutcome> {
@@ -28787,15 +28923,16 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{
-        ApprovalMode, Cli, CliExitCode, Commands, ConnectorManifest, DoctorLocalCheck,
+        ApprovalMode, Cli, CliExitCode, Commands, ConnectorManifest, DoctorLocalCheck, DoctorProbe,
         HostConnectorCatalog, LiveAuthArgs, LiveTruthKnowledgeState, LiveTruthResolverBranch,
         MetadataField, PACKAGE_OUTPUT_FILENAME, PackageBuildMetadata, PackageOutput,
-        PrepareCliError, ResolvedHostConfig, ResolvedHostOperation, catalog, execute,
-        host_discovered_connector, host_discovered_operation, host_mcp_tool_definitions,
-        host_tool_summary_entry, host_tool_when_to_use, live_pipeline_operation_metadata,
-        mcp_tool_invoke_args, normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
-        resolve_install_activation_truth, resolve_mesh_live_truth, serve_mcp,
-        try_host_mcp_tool_definitions, try_host_tool_operation_info, validate_registry_binary_name,
+        PrepareCliError, ResolvedHostConfig, ResolvedHostOperation, catalog,
+        doctor_hlc_probe_warnings, execute, host_discovered_connector, host_discovered_operation,
+        host_mcp_tool_definitions, host_tool_summary_entry, host_tool_when_to_use,
+        live_pipeline_operation_metadata, mcp_tool_invoke_args, normalize_args,
+        pipeline_dry_run_can_materialize_output, prepare_cli, resolve_install_activation_truth,
+        resolve_mesh_live_truth, serve_mcp, try_host_mcp_tool_definitions,
+        try_host_tool_operation_info, validate_registry_binary_name,
     };
     use chrono::{Duration as ChronoDuration, Utc};
     use clap::{CommandFactory, Parser};
@@ -33307,6 +33444,79 @@ deny_ptrace = true
         };
         assert!(matches!(args.check, Some(DoctorLocalCheck::Lean)));
         assert!(args.zone.is_none());
+    }
+
+    #[test]
+    fn doctor_hlc_probe_parses_without_live_zone() {
+        let cli = Cli::try_parse_from(["fwc", "--json", "doctor", "--probe", "hlc"])
+            .expect("doctor --probe hlc should parse without --zone");
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(matches!(args.probe, Some(DoctorProbe::Hlc)));
+        assert!(args.zone.is_none());
+    }
+
+    #[test]
+    fn doctor_hlc_probe_reports_required_metrics_and_commands() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "doctor", "--probe", "hlc"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["probe"], "hlc");
+        assert_eq!(payload["source"], "local-algorithm-probe");
+        assert_eq!(payload["report"]["schema_version"], "fcp.fwc.doctor.hlc.v1");
+
+        let metrics = &payload["report"]["metrics"];
+        assert_eq!(metrics["hlc_l_max"], 1_700_000_000_000_u64);
+        assert_eq!(metrics["hlc_c_max"], 2);
+        assert_eq!(metrics["skew_observed_ms"], 500);
+        assert!(
+            metrics["hiervv_size_bytes"].as_u64().unwrap() <= 4_096,
+            "compressed HierVV probe should stay below warning threshold"
+        );
+
+        assert_eq!(
+            payload["report"]["thresholds"]["skew_observed_ms_warn"],
+            2_000
+        );
+        assert_eq!(
+            payload["report"]["thresholds"]["hiervv_size_bytes_warn"],
+            4_096
+        );
+        assert_eq!(
+            payload["report"]["thresholds"]["hlc_c_counter_within_1s_warn"],
+            1_000
+        );
+        assert!(payload["report"]["warnings"].as_array().unwrap().is_empty());
+        assert!(
+            payload["report"]["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "fwc audit chain inspect --last 10")
+        );
+        assert!(
+            payload["report"]["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "fwc mesh revocation freshness --zone <id>")
+        );
+    }
+
+    #[test]
+    fn doctor_hlc_probe_warning_thresholds_classify_anomalies() {
+        assert!(doctor_hlc_probe_warnings(1_000, 2_000, 4_096).is_empty());
+        assert_eq!(
+            doctor_hlc_probe_warnings(1_001, 2_001, 4_097),
+            vec![
+                "skew_observed_ms_exceeds_2s",
+                "hiervv_size_bytes_exceeds_4kb",
+                "hlc_c_counter_exceeds_1000_within_1s"
+            ]
+        );
     }
 
     #[test]

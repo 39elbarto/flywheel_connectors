@@ -1885,7 +1885,10 @@ fn truncate(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_audit::{AuditEntry as SignedAuditEntry, Decision, DecisionReceipt, Severity};
+    use fcp_audit::{
+        AuditEntry as SignedAuditEntry, Decision, DecisionReceipt, Severity,
+        audit_entry_hlc_from_occurred_at,
+    };
     use fcp_crypto::{Ed25519Signature, Ed25519SigningKey};
     use std::collections::BTreeMap;
 
@@ -1898,6 +1901,7 @@ mod tests {
             zone_id: "z:work".to_string(),
             seq,
             occurred_at: 1_700_000_000 + seq,
+            hlc: audit_entry_hlc_from_occurred_at(1_700_000_000 + seq, "user:alice"),
             prev: prev.map(ToOwned::to_owned),
             correlation_id: format!("corr-{seq}"),
             trace_context: None,

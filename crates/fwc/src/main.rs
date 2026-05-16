@@ -313,7 +313,7 @@ use fcp_host::{
     ConnectorInventoryMutationKind as HostConnectorInventoryMutationKind,
     ConnectorInventoryMutationRequest as HostConnectorInventoryMutationRequest,
     ConnectorInventoryMutationResponse as HostConnectorInventoryMutationResponse,
-    ConnectorInventoryResponse as HostConnectorInventoryResponse,
+    ConnectorInventoryResponse as HostConnectorInventoryResponse, ConnectorPrewarmConfig,
     DiscoveryFilter as HostDiscoveryFilter, DiscoveryResponse as HostDiscoveryResponse,
     DoctorReport as HostDoctorReport, DoctorRequest as HostDoctorRequest,
     EventQueryRequest as HostEventQueryRequest, EventQueryResponse as HostEventQueryResponse,
@@ -18782,6 +18782,9 @@ fn managed_connector_from_artifact(
             .map_or(RuntimeNetworkEnforcement::LegacyUnspecified, |entry| {
                 entry.runtime_network_enforcement
             }),
+        prewarm: existing.map_or_else(ConnectorPrewarmConfig::default, |entry| {
+            entry.prewarm.clone()
+        }),
         operation_network_constraints: existing.map_or_else(BTreeMap::new, |entry| {
             entry.operation_network_constraints.clone()
         }),
@@ -28800,7 +28803,7 @@ mod tests {
     use fcp_host::{
         BudgetReportResponse as HostBudgetReportResponse,
         ConnectorAdminStatus as HostConnectorAdminStatus, ConnectorInventoryApplyReport,
-        ConnectorInventoryMutationKind, ConnectorInventoryMutationResponse,
+        ConnectorInventoryMutationKind, ConnectorInventoryMutationResponse, ConnectorPrewarmConfig,
         DiscoveryResponse as HostDiscoveryResponse, DoctorReport as HostDoctorReport,
         IntrospectionResponse as HostIntrospectionResponse, ManagedConnectorConfig,
         PreflightResponse as HostPreflightResponse, RuntimeNetworkEnforcement,
@@ -33594,6 +33597,7 @@ deny_ptrace = true
                             enforce_operation_network_constraints: false,
                             runtime_network_enforcement:
                                 RuntimeNetworkEnforcement::LegacyUnspecified,
+                            prewarm: ConnectorPrewarmConfig::default(),
                             operation_network_constraints: StdBTreeMap::new(),
                         },
                         None,
@@ -33704,6 +33708,7 @@ deny_ptrace = true
                             enforce_operation_network_constraints: false,
                             runtime_network_enforcement:
                                 RuntimeNetworkEnforcement::LegacyUnspecified,
+                            prewarm: ConnectorPrewarmConfig::default(),
                             operation_network_constraints: StdBTreeMap::new(),
                         },
                         None,
@@ -33795,6 +33800,7 @@ deny_ptrace = true
                         enforce_empty_allow_lists: false,
                         enforce_operation_network_constraints: false,
                         runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                        prewarm: ConnectorPrewarmConfig::default(),
                         operation_network_constraints: StdBTreeMap::new(),
                     },
                     None,
@@ -33891,6 +33897,7 @@ deny_ptrace = true
             enforce_empty_allow_lists: false,
             enforce_operation_network_constraints: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: ConnectorPrewarmConfig::default(),
             operation_network_constraints: StdBTreeMap::new(),
         };
         let planned = ManagedConnectorConfig {
@@ -33909,6 +33916,7 @@ deny_ptrace = true
             enforce_empty_allow_lists: previous.enforce_empty_allow_lists,
             enforce_operation_network_constraints: previous.enforce_operation_network_constraints,
             runtime_network_enforcement: previous.runtime_network_enforcement,
+            prewarm: previous.prewarm.clone(),
             operation_network_constraints: previous.operation_network_constraints.clone(),
         };
         let (host, server) = spawn_mock_host(
@@ -33984,6 +33992,7 @@ deny_ptrace = true
             enforce_empty_allow_lists: false,
             enforce_operation_network_constraints: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: ConnectorPrewarmConfig::default(),
             operation_network_constraints: StdBTreeMap::new(),
         };
         let updated = ManagedConnectorConfig {
@@ -34002,6 +34011,7 @@ deny_ptrace = true
             enforce_empty_allow_lists: previous.enforce_empty_allow_lists,
             enforce_operation_network_constraints: previous.enforce_operation_network_constraints,
             runtime_network_enforcement: previous.runtime_network_enforcement,
+            prewarm: previous.prewarm.clone(),
             operation_network_constraints: previous.operation_network_constraints.clone(),
         };
         let (host, server) = spawn_mock_host(
@@ -42185,6 +42195,7 @@ require_attestation_types = ["in-toto"]"#,
                             enforce_operation_network_constraints: false,
                             runtime_network_enforcement:
                                 RuntimeNetworkEnforcement::LegacyUnspecified,
+                            prewarm: ConnectorPrewarmConfig::default(),
                             operation_network_constraints: StdBTreeMap::new(),
                         },
                         None,
@@ -42290,6 +42301,7 @@ require_attestation_types = ["in-toto"]"#,
             enforce_empty_allow_lists: false,
             enforce_operation_network_constraints: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: ConnectorPrewarmConfig::default(),
             operation_network_constraints: StdBTreeMap::new(),
         };
         let updated = ManagedConnectorConfig {
@@ -42308,6 +42320,7 @@ require_attestation_types = ["in-toto"]"#,
             enforce_empty_allow_lists: previous.enforce_empty_allow_lists,
             enforce_operation_network_constraints: previous.enforce_operation_network_constraints,
             runtime_network_enforcement: previous.runtime_network_enforcement,
+            prewarm: previous.prewarm.clone(),
             operation_network_constraints: previous.operation_network_constraints.clone(),
         };
         let (host, host_server) = spawn_mock_host(

@@ -75,8 +75,8 @@ use fcp_host::{
     ManagedNetworkConstraints, ManagedPortConstraint, MeshQuorumSignals,
     NativeProxyOnlySandboxDecision, NativeProxyOnlySandboxSupport, OperationResult,
     OperationResultStatus, PoolExhaustedBehavior, PooledCredentialInput, PreflightRequest,
-    PreflightResponse, ProviderKey, ReceiptQueryRequest, ReceiptQueryResponse, ReceiptSummary,
-    RequestPriority, ResilienceError, ResilienceLayer, RevocationCascadeVerifier,
+    PreflightResponse, PrewarmStrategy, ProviderKey, ReceiptQueryRequest, ReceiptQueryResponse,
+    ReceiptSummary, RequestPriority, ResilienceError, ResilienceLayer, RevocationCascadeVerifier,
     RolloutController, RolloutDecision, RolloutObservation, RolloutOutcome,
     RuntimeNetworkEnforcement, SafetyTierExt, SanitizedConnectorConfig, SimulateCostConfidence,
     SimulateCostEstimate, SimulatePhase, SimulateReceipt, SimulateReceiptQueryRequest,
@@ -1095,11 +1095,37 @@ fn load_manifest_operation_constraints(
     ))
 }
 
+fn validate_production_prewarm_policy(config: &ConnectorConfig) -> HostResult<()> {
+    if let Err(error) = config.prewarm.validate() {
+        return Err(HostError::InvalidFilter(format!(
+            "invalid prewarm policy for connector '{}': {error}",
+            config.id
+        )));
+    }
+
+    match config.prewarm.strategy {
+        PrewarmStrategy::OnDemand => Ok(()),
+        PrewarmStrategy::WarmPool => Err(HostError::InvalidFilter(format!(
+            "connector '{}' requested warm_pool prewarm, but production fcp-host startup still \
+             uses on-demand connector processes; require host-backed production-soak evidence \
+             before enabling warm checkout",
+            config.id
+        ))),
+        PrewarmStrategy::Zygote => Err(HostError::InvalidFilter(format!(
+            "connector '{}' requested zygote prewarm, but zygote startup is rejected until \
+             credential isolation, zone binding, sandbox limits, and manifest freshness have a \
+             security proof",
+            config.id
+        ))),
+    }
+}
+
 async fn build_registry_entry(
     config: ConnectorConfig,
     resilience: Arc<ResilienceLayer>,
     capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
 ) -> HostResult<RegistryEntry> {
+    validate_production_prewarm_policy(&config)?;
     validate_runtime_network_claim(
         &config.id,
         config.runtime_network_enforcement,
@@ -13738,6 +13764,7 @@ mod tests {
             enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: Default::default(),
             operation_network_constraints: BTreeMap::new(),
         }
     }
@@ -13760,6 +13787,7 @@ mod tests {
             enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: Default::default(),
             operation_network_constraints: BTreeMap::new(),
         };
         let incoming = ConnectorConfig {
@@ -13778,6 +13806,7 @@ mod tests {
             enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: Default::default(),
             operation_network_constraints: BTreeMap::new(),
         };
 
@@ -14187,6 +14216,7 @@ deny_ptrace = true
             enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: Default::default(),
             operation_network_constraints: BTreeMap::new(),
         }
     }
@@ -15861,6 +15891,7 @@ deny_ptrace = true
             enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: Default::default(),
             operation_network_constraints: BTreeMap::new(),
         };
         let registry = dispatcher_registry_with_connector(connector_id, connector, initial_config);
@@ -19216,6 +19247,7 @@ deny_ptrace = true
                 enforce_operation_network_constraints: false,
                 enforce_empty_allow_lists: false,
                 runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                prewarm: Default::default(),
                 operation_network_constraints: BTreeMap::new(),
             },
         );
@@ -20061,6 +20093,7 @@ deny_ptrace = true
                     enforce_operation_network_constraints: false,
                     enforce_empty_allow_lists: false,
                     runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                    prewarm: Default::default(),
                     operation_network_constraints: BTreeMap::new(),
                 },
                 connector: ConnectorRuntime::Native(connector),
@@ -20260,6 +20293,7 @@ deny_ptrace = true
                 enforce_operation_network_constraints: false,
                 enforce_empty_allow_lists: false,
                 runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                prewarm: Default::default(),
                 operation_network_constraints: BTreeMap::new(),
             },
         );
@@ -20454,6 +20488,7 @@ deny_ptrace = true
                     enforce_operation_network_constraints: false,
                     enforce_empty_allow_lists: false,
                     runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                    prewarm: Default::default(),
                     operation_network_constraints: BTreeMap::new(),
                 },
                 connector: ConnectorRuntime::Native(connector),
@@ -20604,6 +20639,7 @@ deny_ptrace = true
                 enforce_operation_network_constraints: false,
                 enforce_empty_allow_lists: false,
                 runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                prewarm: Default::default(),
                 operation_network_constraints: BTreeMap::new(),
             },
         );
@@ -23799,6 +23835,7 @@ done"#;
             enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: true,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: Default::default(),
             operation_network_constraints: BTreeMap::new(),
         };
         let registry =
@@ -24177,6 +24214,53 @@ done"#;
         assert!(config.config.is_some());
         assert_eq!(config.categories, vec!["utility", "test"]);
         assert_eq!(config.version.as_deref(), Some("2.3.4"));
+        assert_eq!(config.prewarm, Default::default());
+    }
+
+    #[test]
+    fn production_prewarm_policy_accepts_default_on_demand() {
+        let config = dispatcher_test_config("fcp.test.prewarm-default:utility:1.0.0");
+        validate_production_prewarm_policy(&config).expect("default on-demand prewarm is valid");
+    }
+
+    #[test]
+    fn production_prewarm_policy_rejects_warm_pool_until_soak_is_wired() {
+        let mut config = dispatcher_test_config("fcp.test.prewarm-warm-pool:utility:1.0.0");
+        config.prewarm = fcp_host::ConnectorPrewarmConfig::warm_pool(
+            1,
+            2,
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+
+        let error = validate_production_prewarm_policy(&config)
+            .expect_err("warm_pool must fail closed before production checkout is wired");
+        let message = error.to_string();
+        assert!(message.contains("warm_pool"), "unexpected error: {message}");
+        assert!(
+            message.contains("production-soak evidence"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn production_prewarm_policy_rejects_zygote_security_gap() {
+        let mut config = dispatcher_test_config("fcp.test.prewarm-zygote:utility:1.0.0");
+        config.prewarm = fcp_host::ConnectorPrewarmConfig {
+            strategy: PrewarmStrategy::Zygote,
+            min_idle: 1,
+            max_idle: 1,
+            max_age: Duration::from_secs(30),
+            checkout_timeout: Duration::from_millis(50),
+        };
+
+        let error = validate_production_prewarm_policy(&config)
+            .expect_err("zygote must fail closed without a security proof");
+        let message = error.to_string();
+        assert!(
+            message.contains("zygote prewarm requires a security proof"),
+            "unexpected error: {message}"
+        );
     }
 
     #[test]
@@ -24786,6 +24870,7 @@ done"#;
             enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: Default::default(),
             operation_network_constraints: BTreeMap::new(),
         };
         let dbg = format!("{config:?}");

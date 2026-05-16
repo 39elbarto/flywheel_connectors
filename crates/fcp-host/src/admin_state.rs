@@ -27,7 +27,7 @@ use serde_json::Value;
 
 use crate::{
     HostError, HostResult, ManagedNetworkConstraints, RuntimeNetworkEnforcement,
-    discovery::ConnectorSummary,
+    discovery::ConnectorSummary, supervisor::ConnectorPrewarmConfig,
 };
 
 const HOST_ADMIN_STATE_SNAPSHOT_VERSION: u32 = 1;
@@ -133,6 +133,14 @@ pub struct ManagedConnectorConfig {
         skip_serializing_if = "RuntimeNetworkEnforcement::is_legacy_unspecified"
     )]
     pub runtime_network_enforcement: RuntimeNetworkEnforcement,
+    /// Host-owned connector startup prewarm policy.
+    ///
+    /// This is persisted operator intent, not connector introspection. The
+    /// production host must validate it before launching or checking out any
+    /// process so prewarm evidence cannot be confused with the default
+    /// on-demand startup path.
+    #[serde(default, skip_serializing_if = "is_default_prewarm_config")]
+    pub prewarm: ConnectorPrewarmConfig,
     /// Per-operation network policy used by the host runtime path.
     ///
     /// Keys are operation ids. Values are host-managed constraints that can
@@ -5132,6 +5140,10 @@ fn extend_json_pointer(prefix: &str, token: &str) -> String {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn is_default_prewarm_config(config: &ConnectorPrewarmConfig) -> bool {
+    config == &ConnectorPrewarmConfig::default()
 }
 
 #[cfg(test)]
@@ -10447,6 +10459,7 @@ mod tests {
         assert!(config.name.is_none());
         assert!(config.args.is_empty());
         assert!(config.env.is_empty());
+        assert_eq!(config.prewarm, ConnectorPrewarmConfig::default());
     }
 
     #[test]
@@ -10467,11 +10480,45 @@ mod tests {
             enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
             runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: ConnectorPrewarmConfig::default(),
             operation_network_constraints: BTreeMap::new(),
         };
         let json = serde_json::to_string(&config).unwrap();
         let back: ManagedConnectorConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(config, back);
+    }
+
+    #[test]
+    fn managed_connector_config_serializes_explicit_prewarm_policy() {
+        let config = ManagedConnectorConfig {
+            id: "test-connector".to_string(),
+            binary: "/usr/bin/test".to_string(),
+            manifest_path: None,
+            name: None,
+            description: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            config: None,
+            categories: Vec::new(),
+            version: None,
+            allowed_zones: Vec::new(),
+            allowed_operations: Vec::new(),
+            enforce_operation_network_constraints: false,
+            enforce_empty_allow_lists: false,
+            runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: ConnectorPrewarmConfig::warm_pool(
+                1,
+                2,
+                std::time::Duration::from_secs(30),
+                std::time::Duration::from_millis(50),
+            ),
+            operation_network_constraints: BTreeMap::new(),
+        };
+
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(value["prewarm"]["strategy"], "warm_pool");
+        let back: ManagedConnectorConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(back.prewarm, config.prewarm);
     }
 
     #[test]
@@ -10509,6 +10556,7 @@ mod tests {
                 enforce_operation_network_constraints: true,
                 enforce_empty_allow_lists: false,
                 runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                prewarm: ConnectorPrewarmConfig::default(),
                 operation_network_constraints: BTreeMap::new(),
             },
         };

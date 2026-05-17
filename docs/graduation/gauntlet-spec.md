@@ -35,6 +35,17 @@ connector exits `0`.
 Use `--list-checks` to print the stable check table as
 `check_id|exit_code|description`.
 
+Batch 1 status is generated with:
+
+```bash
+scripts/graduation/run_gauntlet.sh --batch batch1 --status-md docs/graduation/batch1_status.md
+```
+
+The batch mode runs the same checks against the seven Phase G.1 connectors and
+writes a Markdown status artifact. It does not graduate or demote connectors;
+it records the first blocking check for each connector so follow-up work can be
+split without claiming PROVEN status prematurely.
+
 ## Check Matrix
 
 | Check | Exit | Requirement |

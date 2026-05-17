@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -270,6 +271,51 @@ fn test_gauntlet_fail_on_readme_status_mismatch() {
 
     let output = run_gauntlet([connector.as_os_str()]);
     assert_failed_with(&output, 8, "readme_status_match");
+}
+
+#[test]
+fn batch1_status_runner_writes_status_markdown() {
+    let fixture_root = unique_fixture_root("batch1-status");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be creatable");
+    let status_path = fixture_root.join("batch1_status.md");
+    let jsonl_path = fixture_root.join("batch1_status.jsonl");
+    let output = run_gauntlet(vec![
+        OsString::from("--jsonl"),
+        jsonl_path.as_os_str().to_os_string(),
+        OsString::from("--batch"),
+        OsString::from("batch1"),
+        OsString::from("--status-md"),
+        status_path.as_os_str().to_os_string(),
+    ]);
+    assert!(
+        output.status.success(),
+        "batch1 status run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let status_doc =
+        fs::read_to_string(&status_path).expect("batch1 status markdown should be written");
+    assert!(status_doc.contains("# Batch 1 Graduation Status"));
+    assert!(status_doc.contains("scripts/graduation/run_gauntlet.sh --batch batch1"));
+    for connector in [
+        "connectors/postgresql",
+        "connectors/stripe",
+        "connectors/github",
+        "connectors/gmail",
+        "connectors/telegram",
+        "connectors/slack",
+        "connectors/kubernetes",
+    ] {
+        assert!(
+            status_doc.contains(connector),
+            "status doc should mention {connector}"
+        );
+    }
+
+    let jsonl = fs::read_to_string(&jsonl_path).expect("batch1 JSONL should be written");
+    assert!(jsonl.contains("\"connector\":\"connectors/postgresql\""));
+    assert!(jsonl.contains("\"check\":\"connector_path\""));
 }
 
 #[test]

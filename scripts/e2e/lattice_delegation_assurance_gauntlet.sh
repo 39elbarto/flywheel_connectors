@@ -654,7 +654,7 @@ validate_gauntlet_contract() {
       (.result == "pass" or .result == "fail" or .result == "skip") and
       (.git_revision | type == "string") and
       (.cargo_target_dir_class | type == "string") and
-      (.cargo_target_dir_hash | type == "string") and
+      (.cargo_target_dir_hash | sha256_hash) and
       (.build_profile | type == "string") and
       (.worker_host_class | type == "string") and
       (.details | type == "object") and

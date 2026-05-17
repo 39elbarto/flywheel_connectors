@@ -324,6 +324,12 @@ if [[ "${overall_status}" == "passed" ]]; then
             false
           end
         ),
+        boundary_shape_ok: all(.[];
+          (.host_boundary | type) == "string"
+          and (.host_boundary | startswith("fcp-host::"))
+          and (.sandbox_boundary | type) == "string"
+          and (.sandbox_boundary | startswith("fcp-sandbox::"))
+        ),
         nested_evidence_ok: all(.[];
           nested_evidence_matches
         ),
@@ -333,9 +339,10 @@ if [[ "${overall_status}" == "passed" ]]; then
               .execution_mode == "soak"
               and (.source_kind == "host_backed" or .source_kind == "live")
               and (.host_boundary | type) == "string"
+              and (.host_boundary | startswith("fcp-host::"))
               and .host_boundary != "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout"
               and (.sandbox_boundary | type) == "string"
-              and (.sandbox_boundary | contains("fcp-sandbox"))
+              and (.sandbox_boundary | startswith("fcp-sandbox::"))
             )
           else true end
         ),
@@ -354,7 +361,33 @@ if [[ "${overall_status}" == "passed" ]]; then
           and (.cleanup_result | type) == "string"
           and (.cargo_target_dir_class | type) == "string"
           and (.cargo_target_dir_hash | type) == "string"
-        )
+        ),
+        latency_summary: {
+          p50: {
+            current_max_ms: (map(.p50_activation_latency_ms) | max),
+            baseline_max_ms: (map(.baseline_p50_activation_latency_ms) | max),
+            improvement_min_ms: (map(.p50_activation_latency_improvement_ms) | min)
+          },
+          p95: {
+            current_max_ms: (map(.p95_activation_latency_ms) | max),
+            baseline_max_ms: (map(.baseline_p95_activation_latency_ms) | max),
+            improvement_min_ms: (map(.p95_activation_latency_improvement_ms) | min)
+          },
+          p99: {
+            current_max_ms: (map(.p99_activation_latency_ms) | max),
+            baseline_max_ms: (map(.baseline_p99_activation_latency_ms) | max),
+            improvement_min_ms: (map(.p99_activation_latency_improvement_ms) | min)
+          },
+          scenarios_without_p99_improvement: (
+            map(select(.p99_activation_latency_improvement_ms == 0) | .scenario_id) | sort
+          )
+        },
+        production_boundary_summary: {
+          execution_modes: (map(.execution_mode) | unique | sort),
+          source_kinds: (map(.source_kind) | unique | sort),
+          host_boundaries: (map(.host_boundary) | unique | sort),
+          sandbox_boundaries: (map(.sandbox_boundary) | unique | sort)
+        }
       } as $v
       | $v
       | .status = (
@@ -366,6 +399,7 @@ if [[ "${overall_status}" == "passed" ]]; then
             and $v.required_fields_ok
             and $v.resource_fields_ok
             and $v.decision_shape_ok
+            and $v.boundary_shape_ok
             and $v.nested_evidence_ok
             and $v.production_soak_ok
             and $v.percentile_fields_ok

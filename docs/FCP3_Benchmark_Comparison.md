@@ -71,7 +71,12 @@ boundaries. Operators can validate an externally collected production-soak
 JSONL bundle without rerunning the smoke Cargo lane by passing
 `--evidence-jsonl <path>` together with `--require-production-soak`; this uses
 the same scenario coverage, boundary, resource, percentile, nested evidence, and
-redaction checks as the default verifier.
+redaction checks as the default verifier. The verifier's `validation.json`
+also records a latency summary with the worst current p50/p95/p99, worst
+baseline p50/p95/p99, minimum per-percentile improvement, and any scenarios
+with no p99 improvement, plus the observed execution/source classes and
+`fcp-host::`/`fcp-sandbox::` boundary names. That makes before/after promotion
+evidence auditable without scraping every JSONL row by hand.
 
 ## Environment Capture For Final Review
 

@@ -110,10 +110,7 @@ impl TerraformClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            Ok(serde_json::from_str(&body)?)
+            decode_success_body(status, &body)
         } else {
             self.handle_error(status, resp).await
         }
@@ -318,6 +315,19 @@ impl TerraformClient {
     }
 }
 
+fn decode_success_body(status: StatusCode, body: &str) -> TerraformResult<serde_json::Value> {
+    if matches!(status, StatusCode::NO_CONTENT | StatusCode::ACCEPTED) {
+        return Ok(serde_json::json!({}));
+    }
+    if body.trim().is_empty() {
+        return Err(TerraformError::Api {
+            status_code: status.as_u16(),
+            message: "empty response body".into(),
+        });
+    }
+    Ok(serde_json::from_str(body)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,6 +359,46 @@ mod tests {
         let cred = TerraformAuth::CredentialId(CredentialId::new());
         let label = cred.redacted_label();
         assert!(label.starts_with("credential_id:"));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_empty_ok() {
+        let err = decode_success_body(StatusCode::OK, "").unwrap_err();
+        assert!(matches!(
+            err,
+            TerraformError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_whitespace_ok() {
+        let err = decode_success_body(StatusCode::OK, "  \n\t").unwrap_err();
+        assert!(matches!(
+            err,
+            TerraformError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_no_content() {
+        assert_eq!(
+            decode_success_body(StatusCode::NO_CONTENT, "").unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_accepted() {
+        assert_eq!(
+            decode_success_body(StatusCode::ACCEPTED, "").unwrap(),
+            serde_json::json!({})
+        );
     }
 
     #[test]

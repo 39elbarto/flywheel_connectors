@@ -103,10 +103,7 @@ impl RetoolClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            Ok(serde_json::from_str(&body)?)
+            decode_success_body(status, &body)
         } else {
             self.handle_error(status, resp).await
         }
@@ -186,6 +183,19 @@ impl RetoolClient {
     }
 }
 
+fn decode_success_body(status: StatusCode, body: &str) -> RetoolResult<serde_json::Value> {
+    if status == StatusCode::NO_CONTENT {
+        return Ok(serde_json::json!({}));
+    }
+    if body.trim().is_empty() {
+        return Err(RetoolError::Api {
+            status_code: status.as_u16(),
+            message: "empty response body".into(),
+        });
+    }
+    Ok(serde_json::from_str(body)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +218,38 @@ mod tests {
         let label = auth.redacted_label();
         assert!(label.contains("redacted"));
         assert!(!label.contains("secret"));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_empty_ok() {
+        let err = decode_success_body(StatusCode::OK, "").unwrap_err();
+        assert!(matches!(
+            err,
+            RetoolError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_whitespace_ok() {
+        let err = decode_success_body(StatusCode::OK, "  \n\t").unwrap_err();
+        assert!(matches!(
+            err,
+            RetoolError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_no_content() {
+        assert_eq!(
+            decode_success_body(StatusCode::NO_CONTENT, "").unwrap(),
+            serde_json::json!({})
+        );
     }
 
     #[test]

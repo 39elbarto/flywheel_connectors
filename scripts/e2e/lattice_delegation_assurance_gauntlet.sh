@@ -13,7 +13,11 @@ mkdir -p "${OUT_DIR}" "${ARTIFACT_STAGE_ROOT}"
 : > "${ARTIFACT}"
 
 raw_git_revision() {
-  git rev-parse HEAD 2>/dev/null || printf 'unknown'
+  local repo_root
+  repo_root="$(pwd -P 2>/dev/null || pwd)"
+  git -c "safe.directory=${repo_root}" rev-parse HEAD 2>/dev/null ||
+    git rev-parse HEAD 2>/dev/null ||
+    printf 'unknown'
 }
 
 GAUNTLET_GIT_REVISION="${FCP_LATTICE_GIT_REVISION:-$(raw_git_revision)}"
@@ -128,6 +132,15 @@ require_text() {
   if ! grep -Fq "${needle}" "${path}"; then
     fail_step "${step}" "$(jq -cn --arg path "${path}" --arg missing "${needle}" \
       '{path:$path,missing:$missing,cleanup_result:"not_applicable"}')"
+  fi
+}
+
+require_known_git_revision() {
+  local revision
+  revision="$(git_revision)"
+  if ! printf '%s' "${revision}" | grep -Eq '^[0-9a-f]{7,40}$'; then
+    fail_step "preflight_git_revision" "$(jq -cn --arg git_revision "${revision}" \
+      '{git_revision:$git_revision,required_shape:"hex_commit_id_7_to_40_chars",cleanup_result:"not_applicable"}')"
   fi
 }
 
@@ -443,7 +456,7 @@ validate_artifact_contracts() {
       ((representation_profile_ids | sort) == (required_representation_profiles | sort)) and
       all(.[]; type == "object" and
         (.command_line | type == "string") and
-        (.git_revision | type == "string") and
+        (.git_revision | (type == "string" and test("^[0-9a-f]{7,40}$"))) and
         .artifact_path == "target/fcp-crypto-pq/representation-profile-evidence.jsonl" and
         (.fixture_id | type == "string") and
         (.profile | type == "string") and
@@ -490,7 +503,7 @@ validate_artifact_contracts() {
       ((route_scenario_ids | sort) == (required_route_scenarios | sort)) and
       all(.[]; type == "object" and
         (.command_line | type == "string") and
-        (.git_revision | type == "string") and
+        (.git_revision | (type == "string" and test("^[0-9a-f]{7,40}$"))) and
         (.primitive_route_id | type == "string") and
         (.primitive_route_revision | type == "number") and
         (.representation_version | type == "number") and
@@ -541,7 +554,7 @@ validate_artifact_contracts() {
       ((public_matrix_scenario_ids | sort) == (required_public_matrix_scenarios | sort)) and
       all(.[]; type == "object" and
         (.command_line | type == "string") and
-        (.git_revision | type == "string") and
+        (.git_revision | (type == "string" and test("^[0-9a-f]{7,40}$"))) and
         (.primitive_route_id | type == "string") and
         (.primitive_route_revision | type == "number") and
         (.representation_version | type == "number") and
@@ -595,7 +608,7 @@ validate_artifact_contracts() {
       ((sample_pre_scenario_ids | sort) == (required_sample_pre_scenarios | sort)) and
       all(.[]; type == "object" and
         (.command_line | type == "string") and
-        (.git_revision | type == "string") and
+        (.git_revision | (type == "string" and test("^[0-9a-f]{7,40}$"))) and
         (.primitive_route_id | type == "string") and
         (.primitive_route_revision | type == "number") and
         (.representation_version | type == "number") and
@@ -653,7 +666,7 @@ validate_artifact_contracts() {
       all(.[]; type == "object" and
         .schema == "fcp.crypto_pq.lattice_formal_correspondence.v1" and
         (.command_line | type == "string") and
-        (.git_revision | type == "string") and
+        (.git_revision | (type == "string" and test("^[0-9a-f]{7,40}$"))) and
         (.theorem_names |
           if type == "array" then
             (sort == (required_formal_theorem_names | sort))
@@ -723,7 +736,7 @@ validate_artifact_contracts() {
       all(.[]; type == "object" and
         .schema == "fcp.policy.lattice_formal_correspondence.v1" and
         (.command_line | type == "string") and
-        (.git_revision | type == "string") and
+        (.git_revision | (type == "string" and test("^[0-9a-f]{7,40}$"))) and
         (.theorem_names |
           if type == "array" then
             (sort == (required_formal_theorem_names | sort))
@@ -785,7 +798,7 @@ validate_artifact_contracts() {
       ((scenario_ids | sort) == (required_scenarios | sort)) and
       all(.[]; type == "object" and
         (.command_line | type == "string") and
-        (.git_revision | type == "string") and
+        (.git_revision | (type == "string" and test("^[0-9a-f]{7,40}$"))) and
         (.build_profile | type == "string") and
         (.cargo_target_dir_hash | hex_hash) and
         (.cargo_target_dir_class | type == "string") and
@@ -831,6 +844,8 @@ validate_gauntlet_contract() {
   validate_jsonl_contract "validate_gauntlet_contract" "${ARTIFACT}" '
     def sha256_hash:
       type == "string" and test("^sha256:[0-9a-f]{64}$");
+    def git_revision_hash:
+      type == "string" and test("^[0-9a-f]{7,40}$");
     def required_host_scenarios:
       [
         "allow_small_test",
@@ -922,7 +937,7 @@ validate_gauntlet_contract() {
       (.run_id | type == "string") and
       (.step | type == "string") and
       (.result == "pass" or .result == "fail" or .result == "skip") and
-      (.git_revision | type == "string") and
+      (.git_revision | git_revision_hash) and
       (.cargo_target_dir_class | type == "string") and
       (.cargo_target_dir_hash | sha256_hash) and
       (.build_profile | type == "string") and
@@ -982,6 +997,7 @@ require_command ubs
 require_command shasum
 
 append_tool_versions
+require_known_git_revision
 assert_stable_revision "preflight_stable_revision"
 assert_clean_tree "preflight_clean_tree"
 

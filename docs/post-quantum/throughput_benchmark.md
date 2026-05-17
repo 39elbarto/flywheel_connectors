@@ -405,7 +405,9 @@ before the script can print reusable evidence.
 The top-level gauntlet self-contract also requires a single consistent run id,
 git revision, target-dir class/hash, build profile, and worker host class across
 all JSONL records so reviewer evidence cannot be stitched together from
-different runs.
+different runs. The top-level and component artifact revisions must be actual
+7- to 40-character hexadecimal Git commit ids; `unknown` is a preflight or
+contract failure, not reusable evidence.
 The narrower `scripts/e2e/lattice_delegation_formal_correspondence.sh` proof
 script also validates its own JSONL envelope before printing the artifact path:
 it requires exact Lean theorem/assumption ID arrays, stable command log hashes,

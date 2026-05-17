@@ -420,21 +420,22 @@ an explicit redaction-scan pass record, the expected `SMALL_TEST` and
 `V4_REFERENCE` summary profiles, one consistent run id and git revision, and a
 separate final artifact SHA printed after the validation record is appended.
 For each `rch exec` lane the JSONL records include the observed `[RCH]` summary,
-worker execution class, and fallback decision so local fallback is visible in
-the artifact instead of being mistaken for remote proof. Remote worker failures
-are classified separately from successful remote execution. The gauntlet
-self-contract now requires every command-run record, local or `rch`-backed, to
-carry a stable log artifact, `sha256:<64 lowercase hex>` log hash, duration,
-retry count, fallback decision, worker execution class, cache decision, cleanup
-result, and the RCH summary field. Non-`rch` command records must report
-`fallback_decision:"not_needed"`, `worker_execution_class:"not_applicable"`,
-and `rch_summary:null`. `rch exec` records must carry an observed `[RCH]`
-summary whose remote/local/failed classification matches the recorded fallback
-and worker execution class; unobserved or unclassified RCH summaries are not
-reusable evidence. The same self-contract requires every named command lane in
-the gauntlet to be represented by a passing command-run record, including Lean,
-Rust test, Criterion, format, check, clippy, diff-check, and UBS lanes, so a
-partial artifact cannot pass by carrying only a summary and materialized hashes.
+worker execution class, and fallback decision. Local fallback and remote-worker
+failure summaries are still recorded in the failure artifact, but they are not
+reusable gauntlet proof: a command that was requested through `rch exec` must
+finish with `worker_execution_class:"remote"` before the script can append a
+passing command record. The gauntlet self-contract requires every command-run
+record, local or `rch`-backed, to carry a stable log artifact,
+`sha256:<64 lowercase hex>` log hash, duration, retry count, fallback decision,
+worker execution class, cache decision, cleanup result, and the RCH summary
+field. Non-`rch` command records must report `fallback_decision:"not_needed"`,
+`worker_execution_class:"not_applicable"`, and `rch_summary:null`. Passing
+`rch exec` records must carry an observed `[RCH] remote` summary; unobserved,
+unclassified, local-fallback, or remote-failure RCH summaries are not reusable
+evidence. The same self-contract requires every named command lane in the
+gauntlet to be represented by a passing command-run record, including Lean, Rust
+test, Criterion, format, check, clippy, diff-check, and UBS lanes, so a partial
+artifact cannot pass by carrying only a summary and materialized hashes.
 The redaction scan treats raw zone, operation, and principal labels plus
 authorization headers, bearer strings, access or refresh tokens, and the host
 dispatcher fixture literals `send_message`, `agent-alpha`, and `agent-beta` as

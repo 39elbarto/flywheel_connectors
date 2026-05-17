@@ -227,6 +227,37 @@ worker_execution_class_for_log() {
   fi
 }
 
+is_rch_exec_command() {
+  local display_command="$1"
+  case "${display_command}" in
+    *"rch exec"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+require_remote_rch_success() {
+  local step="$1"
+  local display_command="$2"
+  local log_artifact="$3"
+  local log_hash="$4"
+  local duration_seconds="$5"
+  local fallback_decision="$6"
+  local worker_execution_class="$7"
+  local rch_summary_json="$8"
+  if is_rch_exec_command "${display_command}" &&
+    [ "${worker_execution_class}" != "remote" ]; then
+    fail_step "remote_rch_required_${step}" "$(jq -cn \
+      --arg command_line "${display_command}" \
+      --arg log_artifact "${log_artifact}" \
+      --arg log_hash "sha256:${log_hash}" \
+      --arg fallback_decision "${fallback_decision}" \
+      --arg worker_execution_class "${worker_execution_class}" \
+      --argjson duration_seconds "${duration_seconds}" \
+      --argjson rch_summary "${rch_summary_json}" \
+      '{command_line:$command_line,log_artifact:$log_artifact,log_hash:$log_hash,duration_seconds:$duration_seconds,fallback_decision:$fallback_decision,worker_execution_class:$worker_execution_class,rch_summary:$rch_summary,required_worker_execution_class:"remote",cleanup_result:"not_applicable"}')"
+  fi
+}
+
 run_and_capture() {
   local step="$1"
   local display_command="$2"
@@ -246,6 +277,15 @@ run_and_capture() {
     worker_execution_class="$(worker_execution_class_for_log "${display_command}" "${log}")"
     rch_summary="$(rch_summary_line "${log}")"
     rch_summary_json="$(json_string_or_null "${rch_summary}")"
+    require_remote_rch_success \
+      "${step}" \
+      "${display_command}" \
+      "target/fcp-crypto-pq/${RUN_ID}.${step}.log" \
+      "${hash}" \
+      "${duration}" \
+      "${fallback_decision}" \
+      "${worker_execution_class}" \
+      "${rch_summary_json}"
     assert_stable_revision "stable_revision_after_${step}"
     assert_clean_tree "clean_tree_after_${step}"
     append_json "${step}" "pass" "$(jq -cn \
@@ -943,17 +983,9 @@ validate_gauntlet_contract() {
       .details.fallback_decision == "not_needed" and
       .details.worker_execution_class == "remote" and
       (.details.rch_summary | type == "string" and contains("[RCH] remote"));
-    def rch_local_fallback_proof:
-      .details.fallback_decision == "rch_local_fallback" and
-      .details.worker_execution_class == "local" and
-      (.details.rch_summary | type == "string" and contains("[RCH] local"));
-    def rch_remote_failure_proof:
-      .details.fallback_decision == "rch_remote_failed" and
-      .details.worker_execution_class == "remote_failed" and
-      (.details.rch_summary | type == "string" and contains("[RCH] failed"));
     def rch_command_proof:
       (.details.command_line | contains("rch exec")) and
-      (rch_remote_proof or rch_local_fallback_proof or rch_remote_failure_proof);
+      rch_remote_proof;
     def command_record_contract:
       if (.details | has("command_line")) then
         (.details.command_line | type == "string") and

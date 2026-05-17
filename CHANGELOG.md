@@ -24,7 +24,7 @@ Closed the multi-host singleton-writer story. Quorum-signed durable leases gossi
 ### Audit Chain: HLC + HierVV Anti-Entropy and OTLP Parity (`angoc.17.*`, `angoc.7.2.1`)
 Audit gained Hybrid Logical Clocks and Hierarchical Version Vectors so revocation freshness, audit head reconciliation, and IBLT anti-entropy fallback all share a single causality substrate. HLC clock-rollback alerts, HierVV size histograms, doctor probes, and perf budgets ship alongside an OTLP parity exporter that re-emits audit events as OpenTelemetry traces/metrics/logs with pinned HLC attributes.
 - Closed workstreams: `angoc.17.2` (masked IBLT anti-entropy), `angoc.17.3` (HLC + HierVV), `angoc.7.2.1` (audit OTLP parity exporter)
-- Representative commits: [`f9c3ad638`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/f9c3ad638), [`d957bafe0`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/d957bafe0), [`8d8d1bb02`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/8d8d1bb02), [`9e5e9ea68`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/9e5e9ea68), [`152a61b5c`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/152a61b5c)
+- Representative commits: [`f9c3ad638`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/f9c3ad638), [`d957bafe0`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/d957bafe0), [`8d8d1bb02`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/8d8d1bb02), [`a58ceac63`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/a58ceac63), [`152a61b5c`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/152a61b5c)
 
 ### Credential Pooling (`4kw5f.7`)
 A new `fcp-host` subsystem: multi-credential per-provider pools with priority, strategy, exhaustion-cooldown, and active-lease tracking. Includes registry mutation primitives, admin API routes, audit log, SDK lease bridge, deadline semantics on wait-exhaustion, sticky restick and max-use policies, operator documentation, and a redaction-safe connector-boundary E2E evidence harness.
@@ -70,7 +70,7 @@ OpenTelemetry OTLP export wired through `fcp-telemetry` with backpressure proof,
 
 ### SDK Migration Shim Retirement (`angoc.3.6`, `angoc.3.7`)
 The `ConnectorRuntime` migration shim graduated. All call sites migrated to the production SDK surface, the shim was retired, and the error-mapping surface unified across crates. Workspace-events local proof also landed.
-- Representative commits: [`559c37afe`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/559c37afe), [`d090c8569`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/d090c8569), [`fc3c02179`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/fc3c02179)
+- Representative commits: [`4e85816a5`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/4e85816a5), [`d090c8569`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/d090c8569), [`fc3c02179`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/fc3c02179)
 
 ### Prewarm Verification and Production-Soak Gating (`k3zfl.8`)
 Cold-start prewarm probes now discriminate smoke evidence from production-soak evidence and gate production-soak acceptance. Fail-closed prewarm policy is enforced; prewarm evidence keeps clippy-clean and feeds the cutover-gate registry.

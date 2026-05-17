@@ -2948,6 +2948,107 @@ fn validate_prewarm_latency(
     Ok(())
 }
 
+fn validate_prewarm_admission_decision(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    match evidence.admission_decision.as_str() {
+        "admit_warm" => {
+            if !evidence.warm_checkout {
+                return Err(
+                    SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                        decision: evidence.admission_decision.clone(),
+                        reason: "admit_warm requires warm_checkout=true",
+                    },
+                );
+            }
+            if evidence.fallback_reason.is_some() {
+                return Err(
+                    SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                        decision: evidence.admission_decision.clone(),
+                        reason: "admit_warm must not carry fallback_reason",
+                    },
+                );
+            }
+            if evidence.unsafe_rejection_reason.is_some() {
+                return Err(
+                    SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                        decision: evidence.admission_decision.clone(),
+                        reason: "admit_warm must not carry unsafe_rejection_reason",
+                    },
+                );
+            }
+        }
+        "fallback_on_demand" => {
+            if evidence.warm_checkout {
+                return Err(
+                    SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                        decision: evidence.admission_decision.clone(),
+                        reason: "fallback_on_demand requires warm_checkout=false",
+                    },
+                );
+            }
+            if evidence
+                .fallback_reason
+                .as_deref()
+                .is_none_or(|reason| reason.trim().is_empty())
+            {
+                return Err(
+                    SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                        decision: evidence.admission_decision.clone(),
+                        reason: "fallback_on_demand requires non-empty fallback_reason",
+                    },
+                );
+            }
+            if evidence.unsafe_rejection_reason.is_some() {
+                return Err(
+                    SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                        decision: evidence.admission_decision.clone(),
+                        reason: "fallback_on_demand must not carry unsafe_rejection_reason",
+                    },
+                );
+            }
+        }
+        "reject_unsafe" => {
+            if evidence.warm_checkout {
+                return Err(
+                    SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                        decision: evidence.admission_decision.clone(),
+                        reason: "reject_unsafe requires warm_checkout=false",
+                    },
+                );
+            }
+            if evidence.fallback_reason.is_some() {
+                return Err(
+                    SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                        decision: evidence.admission_decision.clone(),
+                        reason: "reject_unsafe must not carry fallback_reason",
+                    },
+                );
+            }
+            if evidence
+                .unsafe_rejection_reason
+                .as_deref()
+                .is_none_or(|reason| reason.trim().is_empty())
+            {
+                return Err(
+                    SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                        decision: evidence.admission_decision.clone(),
+                        reason: "reject_unsafe requires non-empty unsafe_rejection_reason",
+                    },
+                );
+            }
+        }
+        decision => {
+            return Err(
+                SwarmPrewarmColdStartEvidenceError::InvalidAdmissionDecision {
+                    decision: decision.to_string(),
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
 fn validate_prewarm_resources(
     evidence: &SwarmPrewarmColdStartEvidence,
 ) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
@@ -3129,6 +3230,7 @@ impl SwarmPrewarmColdStartEvidence {
         validate_prewarm_soak_boundaries(self)?;
         validate_prewarm_command_and_target(self)?;
         validate_prewarm_latency(self)?;
+        validate_prewarm_admission_decision(self)?;
         validate_prewarm_resources(self)?;
         Ok(())
     }
@@ -3198,6 +3300,18 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         /// Observed hash value.
         hash: String,
     },
+    /// Admission decision was not one of the stable evidence states.
+    InvalidAdmissionDecision {
+        /// Observed decision label.
+        decision: String,
+    },
+    /// Admission decision and checkout/reason fields disagree.
+    InconsistentAdmissionDecision {
+        /// Observed decision label.
+        decision: String,
+        /// Human-readable invariant that was violated.
+        reason: &'static str,
+    },
     /// A latency measurement was absent or zero.
     MissingLatencyMeasurement,
     /// Percentiles were absent or out of order.
@@ -3249,6 +3363,14 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
             Self::InvalidManifestHash { hash } => write!(
                 f,
                 "swarm prewarm manifest hash must be 'blake3:' followed by 64 lowercase hex characters, got '{hash}'"
+            ),
+            Self::InvalidAdmissionDecision { decision } => write!(
+                f,
+                "swarm prewarm admission decision must be admit_warm, fallback_on_demand, or reject_unsafe, got '{decision}'"
+            ),
+            Self::InconsistentAdmissionDecision { decision, reason } => write!(
+                f,
+                "swarm prewarm admission decision '{decision}' is inconsistent: {reason}"
             ),
             Self::MissingLatencyMeasurement => {
                 write!(f, "swarm prewarm latency measurement is missing")
@@ -9552,6 +9674,81 @@ mod tests {
                 activation_ms: 26,
                 baseline_ms: 24
             })
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_enforces_admission_decision_shape() {
+        let mut unknown_decision = prewarm_cold_start_evidence_fixture();
+        unknown_decision.admission_decision = "reuse_prewarmer".to_string();
+        assert_eq!(
+            unknown_decision.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InvalidAdmissionDecision {
+                    decision: "reuse_prewarmer".to_string()
+                }
+            )
+        );
+
+        let mut warm_without_checkout = prewarm_cold_start_evidence_fixture();
+        warm_without_checkout.warm_checkout = false;
+        assert_eq!(
+            warm_without_checkout.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "admit_warm".to_string(),
+                    reason: "admit_warm requires warm_checkout=true"
+                }
+            )
+        );
+
+        let mut warm_with_fallback_reason = prewarm_cold_start_evidence_fixture();
+        warm_with_fallback_reason.fallback_reason = Some("pool_empty".to_string());
+        assert_eq!(
+            warm_with_fallback_reason.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "admit_warm".to_string(),
+                    reason: "admit_warm must not carry fallback_reason"
+                }
+            )
+        );
+
+        let mut fallback = prewarm_cold_start_evidence_fixture();
+        fallback.admission_decision = "fallback_on_demand".to_string();
+        fallback.warm_checkout = false;
+        fallback.fallback_reason = Some("pool_empty".to_string());
+        assert_eq!(fallback.validate(), Ok(()));
+
+        let mut fallback_without_reason = fallback;
+        fallback_without_reason.fallback_reason = None;
+        assert_eq!(
+            fallback_without_reason.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "fallback_on_demand".to_string(),
+                    reason: "fallback_on_demand requires non-empty fallback_reason"
+                }
+            )
+        );
+
+        let mut unsafe_rejection = prewarm_cold_start_evidence_fixture();
+        unsafe_rejection.admission_decision = "reject_unsafe".to_string();
+        unsafe_rejection.warm_checkout = false;
+        unsafe_rejection.unsafe_rejection_reason =
+            Some("zygote_startup_without_security_proof".to_string());
+        assert_eq!(unsafe_rejection.validate(), Ok(()));
+
+        let mut unsafe_rejection_with_fallback = unsafe_rejection;
+        unsafe_rejection_with_fallback.fallback_reason = Some("pool_empty".to_string());
+        assert_eq!(
+            unsafe_rejection_with_fallback.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "reject_unsafe".to_string(),
+                    reason: "reject_unsafe must not carry fallback_reason"
+                }
+            )
         );
     }
 

@@ -65,8 +65,13 @@ when host-backed or live evidence cannot be collected. Verifier validation and
 the typed `SwarmPrewarmColdStartEvidence::validate()` contract both require
 `CARGO_TARGET_DIR` provenance and connector manifest identity to carry
 `blake3:<64 lowercase hex>` hashes, not just free-form labels or prefix-only
-markers. Its default lane is deterministic smoke evidence with `execution_mode=smoke` and
-`source_kind=offline`; final production-soak acceptance must run with
+markers. They also enforce the same admission-decision shape: `admit_warm`
+must carry `warm_checkout=true` with no fallback or unsafe-rejection reason,
+`fallback_on_demand` must carry `warm_checkout=false` plus a non-empty
+`fallback_reason`, and `reject_unsafe` must carry `warm_checkout=false` plus a
+non-empty `unsafe_rejection_reason`. Its default lane is deterministic smoke
+evidence with `execution_mode=smoke` and `source_kind=offline`; final
+production-soak acceptance must run with
 `--require-production-soak` or
 `REQUIRE_PRODUCTION_SOAK=1`, which rejects offline policy records and requires
 host-backed or live soak evidence through production `fcp-host`/`fcp-sandbox`

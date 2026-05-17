@@ -3,7 +3,7 @@
 > **Status**: runtime contract documented; manifest/runtime drift documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/github_connector_verification.sh`
 > **GitHub REST upstream**: https://docs.github.com/en/rest
 > **Issues upstream**: https://docs.github.com/en/rest/issues/issues
 > **Pull requests upstream**: https://docs.github.com/en/rest/pulls/pulls
@@ -75,9 +75,9 @@ This README documents the runtime truth and keeps current drift visible:
 - Source contains `invoke_begin_oauth` and `invoke_complete_oauth` helpers, but neither operation is advertised by introspection or reachable through `handle_invoke`.
 - Manifest description mentions releases, but there are no release operations in this runtime slice.
 - Manifest event caps say streaming is enabled, but the runtime exposes no event stream catalog; the only event-shaped output is returned by `github.process_webhook`.
-- There is no dedicated tracked verification shell script for this connector.
+- `connectors/github/tests/local_non_mock.rs` exercises the production connector invoke path against a deterministic loopback GitHub API fixture for read, write, and workflow-dispatch operations.
 
-A follow-up parity bead should reconcile search/rate-limit capability mapping, align webhook schemas, surface approval modes in introspection, either publish or remove the OAuth helper paths, and add a tracked verification bundle.
+A follow-up parity bead should reconcile search/rate-limit capability mapping, align webhook schemas, surface approval modes in introspection, either publish or remove the OAuth helper paths, and decide whether the loopback acceptance fixture should grow into GitHub fixture replay.
 
 ## First-Slice Scope
 
@@ -218,11 +218,11 @@ The deterministic integration evidence is anchored on connector-local tests cove
 - `connectors/github/src/types.rs` defines issue, pull request, repository, content, workflow, search, and webhook shapes.
 - `connectors/github/src/error.rs` defines connector error classes and FCP error conversion.
 - `connectors/github/manifest.toml` defines the operation catalog, network constraints, sandbox boundary, zone policy, event caps, and rate-limit pools.
-- `connectors/github/tests/integration.rs` and `connectors/github/tests/conformance_contract.rs` cover deterministic runtime behavior and contract assertions.
+- `connectors/github/tests/integration.rs`, `connectors/github/tests/conformance_contract.rs`, and `connectors/github/tests/local_non_mock.rs` cover deterministic runtime behavior, contract assertions, and local loopback acceptance.
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/github_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The tracked verifier is `scripts/e2e/github_connector_verification.sh`. The closeout surface is the verifier, crate-local test suite, and direct `rch` proof commands.
 
 The verification surface captures:
 
@@ -231,6 +231,12 @@ The verification surface captures:
 - auth, endpoint policy, provider error, webhook, lifecycle, simulation, and introspection tests
 - formatting, check, test, and clippy proof through `rch`
 - UBS on changed files before commit
+
+Run the tracked verifier first:
+
+```bash
+scripts/e2e/github_connector_verification.sh
+```
 
 ## Operator Guidance
 

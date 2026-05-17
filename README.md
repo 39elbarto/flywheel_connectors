@@ -151,7 +151,7 @@ fwc serve-mcp --host http://127.0.0.1:8787 github slack gmail
 
 # Audit + history
 fwc history --connector github --limit 20
-fwc audit head --zone z:work
+fwc audit verify --zone z:work
 fwc supply-chain verify github
 ```
 
@@ -794,7 +794,7 @@ ZoneCheckpoint {
 - Required events: secret access, risky operations, approvals, zone transitions, revocations.
 - W3C-compatible `trace_id` / `span_id` flow through `InvokeRequest`, `AuditEvent`, and the OTLP parity exporter.
 
-The OTLP exporter re-emits audit events as OpenTelemetry traces, metrics, and logs with pinned HLC attributes, host backpressure proof, retry harness, and `fwc otlp` readiness command.
+The OTLP exporter re-emits audit events as OpenTelemetry traces, metrics, and logs with pinned HLC attributes, host backpressure proof, retry harness, and an `fwc telemetry otlp-readiness` operator probe.
 
 ---
 
@@ -991,7 +991,7 @@ fwc schema github issues.create --offline
 
 # History and audit
 fwc history --connector github --limit 20
-fwc audit head --zone z:work
+fwc audit verify --zone z:work
 ```
 
 ### Command Families
@@ -1803,8 +1803,8 @@ Honest about what FCP does not do yet:
 | Clippy fails with `fcp-async-core` errors | Pre-existing lints in async-core test code | Connector code is clean; run clippy per crate: `cargo clippy -p fcp-<crate>` |
 | OAuth token refresh fails | Token expired between materialize and use | For `credential_id` auth, the egress proxy + credential pool handles refresh. For `access_token`, re-run configure with a fresh token |
 | SSE stream stops without error | Connection idle timeout | The Anthropic SSE parser has a 16 MiB buffer limit and proper CRLF handling. Check network/proxy timeout settings |
-| `Unsigned manifest` rejection | V4 zone-key migration not promoted | Promote via `fwc zone-keys migrate-to-v4` after staging V4 wrap recipients |
-| HRW lease conflict | Stale lease or sequence drift | `fwc mesh lease status <connector>` to inspect; `fwc mesh lease release` after confirming no live writer |
+| `Unsigned manifest` rejection | V4 zone-key migration not promoted | Owner-key migration is exposed via `fwc bootstrap migrate-owner-key --from v3 --to v4`; zone-key promotion still has to happen at the host/manifest layer rather than via a top-level fwc subcommand |
+| HRW lease conflict | Stale lease or sequence drift | `fwc mesh lease ladder --connector <id>` to inspect the current HRW ladder; lease release is a host-side operation, not exposed as a top-level fwc subcommand |
 
 ---
 
@@ -2177,25 +2177,25 @@ Connector verifier scripts (`scripts/e2e/<connector>_verification.sh`) emit `*.r
 
 Operations with `risk_level = "high"` or `risk_level = "dangerous"` require an explicit `ApprovalToken` before invoke. The unified approval model handles both *elevation* (data moving up the integrity lattice) and *declassification* (data moving down the confidentiality lattice).
 
+The operator-facing surface is `fwc approvals`, which inspects approval artifacts persisted by the host. Filter by status, connector, or artifact ID to investigate what is pending, allowed, denied, or expired:
+
 ```bash
-# List pending approvals
-fwc approvals list
+# List approvals in the local approvals directory
+fwc approvals
 
-# Show details of one approval, including provenance and constraints
-fwc approvals show <approval-id>
+# Filter to one connector
+fwc approvals --connector github
 
-# Approve (signs an ApprovalToken with the approver's node issuance key)
-fwc approvals grant <approval-id> --constraint "expires-in=1h" --constraint "max-uses=1"
+# Filter by status
+fwc approvals --status allowed
+fwc approvals --status denied
+fwc approvals --expired
 
-# Deny
-fwc approvals deny <approval-id> --reason "untrusted source"
-
-# Bundle approvals (for batch operations)
-fwc approvals bundle create --include <approval-id> --include <approval-id>
-fwc approvals bundle apply <bundle-id>
+# Inspect one artifact by id
+fwc approvals <artifact-id>
 ```
 
-ApprovalTokens carry the approver's signature, constraints (expires-in, max-uses, target-instance-id), and a reference to the originating operation intent. The host re-checks the token at every invoke; expired or exhausted tokens fail closed.
+ApprovalToken issuance and signing happen inside the host's approval state machine; the artifacts surface via `fwc approvals` after issuance. Tokens carry the approver's signature, constraints (expires-in, max-uses, target-instance-id), and a reference to the originating operation intent. The host re-checks the token at every invoke; expired or exhausted tokens fail closed.
 
 `SanitizerReceipt` objects are a related primitive: a sanitizer capability (URL scanner, malware scanner, schema validator) produces a receipt proving the sanitization happened. The receipt clears specific taints from the data's provenance, letting it pass downstream gates that would otherwise refuse `EXTERNAL_INPUT`-tainted bytes.
 
@@ -2355,7 +2355,7 @@ Additional invariants enforced by the contract test:
 - The combined `fcp.audit.entry.hlc` string must equal `"{l}.{c}"`.
 - All four attributes must be listed in the schema's `required` array and present in the `properties` object.
 
-The exporter has backpressure proof, timeout proof, and retry harness coverage. `fwc otlp` readiness command verifies endpoint reachability before relying on the export path. The full attribute taxonomy beyond HLC (zone, connector, operation, capability, principal, idempotency key, audit seq, hier_vv frontier) is defined alongside the HLC attributes in `audit_otlp_span.schema.json`; consult that schema directly for the authoritative list.
+The exporter has backpressure proof, timeout proof, and retry harness coverage. The `fwc telemetry otlp-readiness` command verifies endpoint reachability before relying on the export path. The full attribute taxonomy beyond HLC (zone, connector, operation, capability, principal, idempotency key, audit seq, hier_vv frontier) is defined alongside the HLC attributes in `audit_otlp_span.schema.json`; consult that schema directly for the authoritative list.
 
 ---
 
@@ -2472,7 +2472,7 @@ A separate axis from risk: how must an agent prove it's authorized? Five values:
 |------|-------------------|---------|
 | `Safe` | None; read-only or benign | `github.issues.list` |
 | `Risky` | Policy check; may have side effects | `github.issues.create` |
-| `Dangerous` | Interactive approval (`fwc approvals grant`) | `stripe.charges.refund` |
+| `Dangerous` | Interactive approval via the host approval flow | `stripe.charges.refund` |
 | `Critical` | Quorum / elevation via threshold-signed approval | `host.connector.uninstall` |
 | `Forbidden` | Never allowed under any circumstance; manifest can declare specific operations forbidden to a zone | Anything in the connector's `forbidden` set for the bound zone |
 
@@ -2686,7 +2686,8 @@ Used by AI agents that don't have an interactive browser. The flow is RFC 8628 O
 ```
                                               fcp-host       Provider
                                               │              │
-1. fwc auth start <provider>                  │              │
+1. fwc auth login <provider> --oauth-device   │              │
+   --client-id ...                            │              │
                                               ├─── POST /device/code ──►│
                                               │                         │
                                               │◄─── { device_code,      │
@@ -2700,7 +2701,7 @@ Used by AI agents that don't have an interactive browser. The flow is RFC 8628 O
 3. User visits URL in any browser             │
    on any device and approves                 │
                                               │
-4. Host polls (interval rate-limited):        │
+4. fwc auth login-poll <profile>              │
                                               ├─── POST /token ──►      │
                                               │    grant_type=...       │
                                               │    device_code=...      │
@@ -2717,10 +2718,10 @@ Used by AI agents that don't have an interactive browser. The flow is RFC 8628 O
 
 ### OAuth Authorization-Code with PKCE (Interactive)
 
-Used by interactive operators. PKCE (RFC 7636) protects against authorization-code interception even without a client secret.
+Used by interactive operators. PKCE (RFC 7636) protects against authorization-code interception even without a client secret. The fwc surface is `fwc auth login <provider> --oauth-auth-code ...` to start the flow and `fwc auth login-complete <profile>` to finish it after the redirect arrives.
 
 ```
-1. fwc auth start <provider> --interactive
+1. fwc auth login <provider> --oauth-auth-code --client-id ... ...
    ├── Generate code_verifier (43-128 random chars)
    ├── Compute code_challenge = BASE64URL(SHA256(code_verifier))
    └── Open browser to authorize URL with code_challenge
@@ -2728,7 +2729,8 @@ Used by interactive operators. PKCE (RFC 7636) protects against authorization-co
 2. User authorizes in browser
    └── Provider redirects to localhost:RANDOM with ?code=AUTH_CODE
 
-3. fwc captures redirect via ephemeral localhost listener
+3. fwc auth login-complete captures the redirect
+   via the ephemeral localhost listener
 
 4. fwc → fcp-host:
    ├── POST /token with grant_type=authorization_code
@@ -2749,42 +2751,52 @@ The credential pool's strategy determines what happens when this AuthProfile is 
 
 ### Pipeline TOML
 
+The on-disk schema lives in `crates/fwc/src/pipeline*.rs`; real fixtures are under `crates/fwc/testdata/pipelines/`. A representative shape:
+
 ```toml
 [pipeline]
-id = "notify-on-new-issues"
+name = "notify-on-new-issues"
 description = "Watch a GitHub repo and post new issues to Slack"
 version = "0.1.0"
 
-[params]
-owner       = { type = "string", required = true }
-repo        = { type = "string", required = true }
-slack_channel = { type = "string", default = "#issues" }
+[[steps]]
+id = "list_existing"
+operation = "github.list_issues"
+input = { owner = "{{params.owner}}", repo = "{{params.repo}}" }
 
 [[steps]]
-id        = "list-issues"
-connector = "github"
-operation = "issues.list"
-inputs = { owner = "${params.owner}", repo = "${params.repo}", state = "open" }
+id = "create_issue"
+operation = "github.create_issue"
+depends_on = ["list_existing"]
+input = { owner = "{{params.owner}}", repo = "{{params.repo}}", title = "{{params.title}}", body = "{{params.body}}" }
 
 [[steps]]
-id        = "post-each"
-needs     = ["list-issues"]
-connector = "slack"
-operation = "messages.send"
-foreach   = "${steps.list-issues.output.issues}"
-inputs = {
-  channel = "${params.slack_channel}",
-  text    = "New issue: ${item.title}",
-  blocks  = [{ type = "link", url = "${item.html_url}", title = "${item.title}" }],
-}
+id = "notify"
+operation = "slack.send_message"
+depends_on = ["create_issue"]
+input = { channel = "{{params.channel}}", text = "Created issue {{steps.create_issue.output.number}} for {{params.repo}}" }
 
-[execution]
-on_error    = "abort"        # or "continue", "rollback"
-max_parallelism = 4
-timeout_secs    = 300
+[params.owner]
+type = "string"
+required = true
+
+[params.repo]
+type = "string"
+required = true
+
+[params.title]
+type = "string"
+required = true
 ```
 
-Pipelines are validated with `fwc pipeline validate <file>`, dry-run with `fwc pipeline dry-run`, and executed with `fwc pipeline run`. Step outputs are referenced via `${steps.<id>.output.<json_path>}`; foreach steps iterate over arrays with the current element bound to `${item}`.
+Notes on the actual schema:
+
+- `[pipeline]` carries `name`, `description`, `version`.
+- Each `[[steps]]` table carries an `id`, a dotted `operation` (`<connector>.<operation>`), an `input` table, and an optional `depends_on` array naming sibling step IDs. Per-step `continue_on_error` is supported.
+- Parameters are declared as `[params.<name>]` tables with `type` and `required` fields.
+- Template substitution uses double-brace `{{...}}` syntax. Step outputs are referenced as `{{steps.<id>.output.<json_path>}}`; parameters are referenced as `{{params.<name>}}`.
+
+Pipelines are validated with `fwc pipeline validate <file>`, dry-run with `fwc pipeline dry-run`, and executed with `fwc pipeline run`.
 
 ### Recipes
 
@@ -3026,7 +3038,7 @@ The provisioning automation surfaces vary by provider but share a common shape:
 
 | Step | What FCP Does | Operator-Visible |
 |------|---------------|------------------|
-| **Discover** | Inspect manifest's `[provisioning]` section to find what's needed | `fwc setup <connector> --plan` shows the steps |
+| **Discover** | Inspect the manifest's `[provisioning]` section to find what is needed | `fwc show <connector>` and `fwc ops <connector>` surface the declared requirements |
 | **OAuth dance** | Run device-code or PKCE flow; capture tokens; store in pool | Browser opens once; tokens live in credential pool, never in env vars |
 | **Webhook endpoint** | Allocate a public endpoint via tailnet funnel or registered domain; register signing key | `webhook_url` and `signing_secret` recorded in connector config |
 | **Bot creation** | For Telegram/Discord etc., invoke the provider's bot-creation API | Bot token in credential pool |
@@ -3096,7 +3108,7 @@ Beyond the manifest crate itself, two cross-crate validation passes also run:
 - **Const-literal drift** — a `fcp-conformance` test ensures runtime `const OP_*` literals exported by the connector binary match the manifest's operation IDs (introduced under epic `4kw5f.8`). A connector that adds an operation in code but forgets to declare it in the manifest fails this check.
 - **Capability ⊆ zone ceiling** — `fcp-host` and `fcp-policy` verify that the connector's required capabilities are within the zones declared as allowed sources before activation.
 
-The `fwc manifest validate <connector>` command runs the manifest crate's validator explicitly; `fwc install` runs it implicitly before staging the binary.
+The `fwc manifest fix --check` command runs the manifest crate's validator in non-mutating mode; `fwc install` runs the validator implicitly before staging the binary.
 
 ---
 

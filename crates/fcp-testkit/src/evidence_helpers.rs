@@ -3097,6 +3097,20 @@ fn validate_prewarm_admission_decision(
     Ok(())
 }
 
+fn validate_prewarm_cleanup(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if !evidence.shutdown_cleanup_verified {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::ShutdownCleanupUnverified {
+                scenario_id: evidence.scenario_id.clone(),
+                cleanup_result: evidence.cleanup_result.clone(),
+            },
+        );
+    }
+    Ok(())
+}
+
 fn validate_prewarm_resources(
     evidence: &SwarmPrewarmColdStartEvidence,
 ) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
@@ -3280,6 +3294,7 @@ impl SwarmPrewarmColdStartEvidence {
         validate_prewarm_latency(self)?;
         validate_prewarm_production_improvement(self)?;
         validate_prewarm_admission_decision(self)?;
+        validate_prewarm_cleanup(self)?;
         validate_prewarm_resources(self)?;
         Ok(())
     }
@@ -3383,6 +3398,13 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         /// Conservative baseline latency.
         baseline_ms: u64,
     },
+    /// Shutdown cleanup was not positively verified.
+    ShutdownCleanupUnverified {
+        /// Scenario that lacked cleanup verification.
+        scenario_id: String,
+        /// Cleanup result label attached to the record.
+        cleanup_result: String,
+    },
     /// A required resource field was absent or zero.
     MissingResourceMeasurement {
         /// Field name.
@@ -3453,6 +3475,13 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
             } => write!(
                 f,
                 "swarm prewarm production scenario '{scenario_id}' requires positive {percentile} improvement, got activation {activation_ms} and baseline {baseline_ms}"
+            ),
+            Self::ShutdownCleanupUnverified {
+                scenario_id,
+                cleanup_result,
+            } => write!(
+                f,
+                "swarm prewarm scenario '{scenario_id}' requires verified shutdown cleanup, got '{cleanup_result}'"
             ),
             Self::MissingResourceMeasurement { field } => {
                 write!(f, "swarm prewarm resource field '{field}' is missing")
@@ -9854,6 +9883,22 @@ mod tests {
         fallback_soak.warm_checkout = false;
         fallback_soak.fallback_reason = Some("sandbox_limits_unavailable".to_string());
         assert_eq!(fallback_soak.validate(), Ok(()));
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_requires_shutdown_cleanup_verification() {
+        let mut unverified_cleanup = prewarm_cold_start_evidence_fixture();
+        unverified_cleanup.shutdown_cleanup_verified = false;
+        unverified_cleanup.cleanup_result = "not_verified".to_string();
+        assert_eq!(
+            unverified_cleanup.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::ShutdownCleanupUnverified {
+                    scenario_id: "prewarm_warm_hit".to_string(),
+                    cleanup_result: "not_verified".to_string()
+                }
+            )
+        );
     }
 
     #[test]

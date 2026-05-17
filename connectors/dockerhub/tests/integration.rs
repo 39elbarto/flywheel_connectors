@@ -386,6 +386,13 @@ async fn auth_missing_resource_rate_limit_and_malformed_json_are_typed() {
         .mount(&server)
         .await;
 
+    Mock::given(method("GET"))
+        .and(path("/v2/repositories/acme/widget/tags/empty/"))
+        .and(header("authorization", AUTH_HEADER))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
     let client = client(&server).await;
 
     let unauthorized = client.health_check(&runtime).await.unwrap_err();
@@ -413,6 +420,19 @@ async fn auth_missing_resource_rate_limit_and_malformed_json_are_typed() {
         .await
         .unwrap_err();
     assert!(matches!(malformed, DockerHubError::Json(_)));
+
+    let empty_body = client
+        .get_tag(&runtime, "acme", "widget", "empty")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        empty_body,
+        DockerHubError::Api {
+            status: 200,
+            ref message
+        } if message == "empty response body"
+    ));
+    assert!(!empty_body.is_retryable());
 }
 
 #[fcp_async_core::runtime::test]

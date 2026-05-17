@@ -435,8 +435,14 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
         Err(e) => return AttemptOutcome::Terminal(DockerHubError::Http(e)),
     };
 
-    // Handle empty 204 responses
-    if text.is_empty() || text.trim() == "null" {
+    // Handle actual 204 responses without allowing other 2xx calls to fake success.
+    if text.trim().is_empty() {
+        if status != 204 {
+            return AttemptOutcome::Terminal(DockerHubError::Api {
+                status,
+                message: "empty response body".into(),
+            });
+        }
         if let Ok(v) = serde_json::from_str::<T>("null") {
             return AttemptOutcome::Success(v);
         }

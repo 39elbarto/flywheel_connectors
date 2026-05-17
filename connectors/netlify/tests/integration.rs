@@ -641,6 +641,14 @@ async fn auth_rate_limit_malformed_json_and_invalid_input_are_typed() {
         .mount(&server)
         .await;
 
+    Mock::given(method("GET"))
+        .and(path("/api/v1/sites/empty"))
+        .and(header("Authorization", format!("Bearer {TEST_TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .expect(1)
+        .mount(&server)
+        .await;
+
     let client = client(&server).await;
 
     let unauthorized = client
@@ -668,6 +676,19 @@ async fn auth_rate_limit_malformed_json_and_invalid_input_are_typed() {
         .expect_err("malformed JSON should be typed");
     assert!(matches!(malformed, NetlifyError::Json(_)));
     assert!(!malformed.is_retryable());
+
+    let empty_body = client
+        .get_site(&runtime, "empty")
+        .await
+        .expect_err("empty non-204 success body should fail closed");
+    assert!(matches!(
+        empty_body,
+        NetlifyError::Api {
+            status: 200,
+            ref message
+        } if message == "empty response body"
+    ));
+    assert!(!empty_body.is_retryable());
 
     let traversal = client
         .get_site(&runtime, "../site")

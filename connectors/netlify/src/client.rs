@@ -431,9 +431,14 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
         Err(e) => return AttemptOutcome::Terminal(NetlifyError::Http(e)),
     };
 
-    // Handle empty 204 responses
-    if text.is_empty() || text.trim() == "null" {
-        // Try to parse an empty/null value
+    // Handle actual 204 responses without allowing other 2xx calls to fake success.
+    if text.trim().is_empty() {
+        if status != 204 {
+            return AttemptOutcome::Terminal(NetlifyError::Api {
+                status,
+                message: "empty response body".into(),
+            });
+        }
         if let Ok(v) = serde_json::from_str::<T>("null") {
             return AttemptOutcome::Success(v);
         }

@@ -1048,9 +1048,8 @@ fwc list --offline --format markdown  # Markdown table
 
 ```bash
 # Pipes chain two operations
-fwc pipe github:issues.list slack:messages.send \
-    --map 'issue.title -> text' \
-    --map 'issue.url -> blocks[0].url'
+fwc pipe github.list_issues slack.send_message \
+    --map 'title -> text, html_url -> blocks[0].url'
 
 # Pipelines: TOML-defined multi-step workflows with dependency ordering
 fwc pipeline list
@@ -1471,7 +1470,7 @@ Every step is logged with W3C trace context (`trace_id`, `span_id`) for end-to-e
 Building a new connector requires implementing the FCP connector contract. The `fwc new` scaffold generator creates the complete structure:
 
 ```bash
-fwc new myservice --archetype request-response
+fwc new fcp.myservice --archetype request-response
 ```
 
 This generates:
@@ -1520,7 +1519,7 @@ let result = match method {
 id = "fcp.myservice"
 name = "MyService Connector"
 version = "0.1.0"
-archetypes = ["request-response"]
+archetypes = ["operational"]
 
 [zones]
 home = "z:work"
@@ -1826,7 +1825,7 @@ Yes. The host-first stack (`fwc` + `fcp-host`) works standalone on a single mach
 TOON (Token-Optimized Output Notation) is 2-5× more token-efficient than JSON for AI agent consumption. Every `fwc` command also supports `--json` for full-fidelity structured output, plus `--format table|csv|tsv|markdown` for human consumption.
 
 **Q: How do I add a new connector?**
-Use the scaffold generator: `fwc new myservice --archetype request-response`. This creates a complete connector crate with manifest, error types, client stub, `ConnectorErrorMapping`, limits constants, and test harness.
+Use the scaffold generator: `fwc new fcp.myservice --archetype request-response`. This creates a complete connector crate with manifest, error types, client stub, `ConnectorErrorMapping`, limits constants, and test harness.
 
 **Q: What happens if a connector tries to access a host outside its manifest?**
 The egress proxy denies the request. Network constraints are declared per-operation in the manifest (`allowed_hosts`, `allowed_ports`, `require_tls`). The sandbox enforces CIDR deny defaults (localhost, private ranges, tailnet) and SNI verification. The denial is logged as an audit event.
@@ -2099,7 +2098,7 @@ When implementing a new connector, identify which archetype(s) apply. Most conne
 
 Voice-call connectors (Twilio, Telnyx, Plivo) are composite: their manifests declare `["operational", "streaming", "bidirectional"]` plus webhook ingress for inbound call events. The shared `fcp-voice-call` crate carries the call-lifecycle types (`CallAuthToken`, `SessionStore`, replay cache) that are common across providers; the per-archetype machinery comes from the individual archetype implementations.
 
-Each archetype maps to a different protocol loop pattern in `main.rs`, a different sandbox profile, and a different test fixture style in `fcp-testkit`. The canonical archetype enum is `ConnectorRoute` in `crates/fcp-core/src/connector.rs`. The `fwc new --archetype <name>` scaffold picks the right defaults.
+Two enums classify connectors along orthogonal axes. The table above describes interaction *patterns* (the `ConnectorRoute` taxonomy in `crates/fcp-core/src/connector.rs`, ten variants kebab-case). The manifest schema accepts a separate, narrower `ConnectorArchetype` vocabulary in `crates/fcp-manifest/src/lib.rs`: `Operational`, `Streaming`, `Bidirectional`, `Storage`, `Knowledge`. Real manifests declare combinations from this latter set (for example `["operational", "streaming", "knowledge"]` for GitHub and Gmail; `["operational", "streaming", "bidirectional"]` for the voice-call providers). Each archetype maps to a different protocol loop pattern in `main.rs`, a different sandbox profile, and a different test-fixture style in `fcp-testkit`. The `fwc new --archetype <name>` scaffold picks the right defaults.
 
 ---
 
@@ -2816,9 +2815,8 @@ The export lets operators copy a recipe to a local pipeline file and customize i
 For one-shot adapters, `fwc pipe` chains two operations without a TOML file:
 
 ```bash
-fwc pipe github:issues.list slack:messages.send \
-    --map 'issue.title -> text' \
-    --map 'issue.url -> blocks[0].url'
+fwc pipe github.list_issues slack.send_message \
+    --map 'title -> text, html_url -> blocks[0].url'
 ```
 
 Pipes are the imperative shorthand; pipelines and recipes are the declarative form.

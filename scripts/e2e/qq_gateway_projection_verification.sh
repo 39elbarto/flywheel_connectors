@@ -155,6 +155,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           "untyped_message_id_not_mention",
           "structured_group_mention",
           "oversized_media_policy_drop",
+          "unknown_media_size_policy_drop",
           "reply_media_projection",
           "voice_asr_projection",
           "slash_approval_projection",
@@ -219,7 +220,10 @@ if [[ "${overall_status}" == "passed" ]]; then
           and any(.[]; .step == "structured_group_mention" and .details.accepted == true and .details.policy.mentioned_bot == true)
         ),
         reply_shape_ok: any(.[]; .step == "reply_media_projection" and .details.normalized.is_reply == true and (.details.normalized.reply_to_hash | type) == "string"),
-        media_shape_ok: any(.[]; .step == "oversized_media_policy_drop" and .details.reason_code == "attachment_bytes_exceeded"),
+        media_shape_ok: (
+          any(.[]; .step == "oversized_media_policy_drop" and .details.reason_code == "attachment_bytes_exceeded")
+          and any(.[]; .step == "unknown_media_size_policy_drop" and .details.reason_code == "attachment_size_unknown")
+        ),
         voice_shape_ok: any(.[]; .step == "voice_asr_projection" and .details.accepted == true and .details.normalized.has_attachments == true and (.details.normalized.text_len | type) == "number" and .details.normalized.text_len > 0),
         slash_shape_ok: any(.[]; .step == "slash_approval_projection" and .details.accepted == true and .details.normalized.interaction_kind == "approval" and (.details.normalized.command_name_hash | type) == "string" and .details.normalized.approval_action == "approve"),
         replay_shape_ok: (
@@ -286,6 +290,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "evt-voice-asr" \
     "evt-slash-approval" \
     "evt-oversized-media" \
+    "evt-unknown-size-media" \
     "evt-disabled" \
     "evt-missing-binding" \
     "evt-missing-message-id" \
@@ -305,6 +310,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "msg-voice-asr" \
     "msg-slash-approval" \
     "msg-oversized-media" \
+    "msg-unknown-size-media" \
     "msg-disabled" \
     "msg-missing-binding" \
     "msg-missing-message-id" \
@@ -337,6 +343,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "please inspect this" \
     "see attached trace" \
     "too large" \
+    "missing size metadata" \
     "after shutdown should deny" \
     "approve deployment from voice" \
     "/approve rollout-42" \
@@ -344,7 +351,8 @@ if [[ "${overall_status}" == "passed" ]]; then
     "cdn.qq.example" \
     "trace.png" \
     "voice.amr" \
-    "oversized.bin"
+    "oversized.bin" \
+    "missing-size.pdf"
   do
     if grep -aF "${forbidden}" "${EVIDENCE_JSONL}" >/dev/null; then
       overall_status="failed"

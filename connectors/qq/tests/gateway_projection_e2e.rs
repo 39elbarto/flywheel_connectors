@@ -1039,6 +1039,45 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         &oversized_media,
     );
 
+    let unknown_size_media = invoke_projection(
+        &connector,
+        &signing_key,
+        &instance_id,
+        "qq-gateway-unknown-size-media",
+        json!({
+            "op": 0,
+            "s": 6,
+            "t": "GROUP_AT_MESSAGE_CREATE",
+            "id": "evt-unknown-size-media",
+            "d": {
+                "id": "msg-unknown-size-media",
+                "content": "bot-openid missing size metadata",
+                "group_openid": "group-allowed",
+                "group_member_openid": "member-1",
+                "attachments": [
+                    {
+                        "url": "https://cdn.qq.example/private/missing-size.pdf",
+                        "filename": "missing-size.pdf",
+                        "content_type": "application/pdf"
+                    }
+                ]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(unknown_size_media["accepted"], false);
+    assert_eq!(unknown_size_media["reason_code"], "attachment_size_unknown");
+    assert_eq!(
+        unknown_size_media["policy"]["reason_code"],
+        "attachment_size_unknown"
+    );
+    log_projection_step(
+        &mut logs,
+        "unknown_media_size_policy_drop",
+        "ok",
+        &unknown_size_media,
+    );
+
     let reply_media = invoke_projection(
         &connector,
         &signing_key,
@@ -1046,7 +1085,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "qq-gateway-reply-media",
         json!({
             "op": 0,
-            "s": 6,
+            "s": 7,
             "t": "GROUP_AT_MESSAGE_CREATE",
             "id": "evt-reply-media",
             "d": {
@@ -1207,7 +1246,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "qq-gateway-duplicate",
         json!({
             "op": 0,
-            "s": 7,
+            "s": 8,
             "t": "GROUP_AT_MESSAGE_CREATE",
             "id": "evt-accepted",
             "d": {
@@ -1230,7 +1269,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "qq-gateway-stale-sequence",
         json!({
             "op": 0,
-            "s": 6,
+            "s": 7,
             "t": "GROUP_AT_MESSAGE_CREATE",
             "id": "evt-stale-sequence",
             "d": {
@@ -1282,7 +1321,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     .await;
     assert_eq!(heartbeat_request["reason_code"], "heartbeat_request");
     assert_eq!(heartbeat_request["lifecycle"]["action"], "send_heartbeat");
-    assert_eq!(heartbeat_request["lifecycle"]["resume_sequence"], 6);
+    assert_eq!(heartbeat_request["lifecycle"]["resume_sequence"], 7);
     log_projection_step(&mut logs, "heartbeat_request", "ok", &heartbeat_request);
 
     let reconnect = invoke_projection(
@@ -1521,6 +1560,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-voice-asr",
         "evt-slash-approval",
         "evt-oversized-media",
+        "evt-unknown-size-media",
         "evt-disabled",
         "evt-missing-binding",
         "evt-missing-message-id",
@@ -1540,6 +1580,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "msg-voice-asr",
         "msg-slash-approval",
         "msg-oversized-media",
+        "msg-unknown-size-media",
         "msg-disabled",
         "msg-missing-binding",
         "msg-missing-reply-target",
@@ -1571,6 +1612,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "please inspect this",
         "see attached trace",
         "too large",
+        "missing size metadata",
         "after shutdown should deny",
         "approve deployment from voice",
         "/approve rollout-42",
@@ -1579,6 +1621,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "trace.png",
         "voice.amr",
         "oversized.bin",
+        "missing-size.pdf",
     ] {
         assert!(
             !log_contents.contains(forbidden),
@@ -1597,6 +1640,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert!(log_contents.contains("attachment_total_bytes"));
     assert!(log_contents.contains("attachment_url_hashes"));
     assert!(log_contents.contains("attachment_bytes_exceeded"));
+    assert!(log_contents.contains("attachment_size_unknown"));
     assert!(log_contents.contains("queue_full_policy_denied"));
     assert!(log_contents.contains("queue_full_backpressure_drop"));
     assert!(log_contents.contains("queue_full"));

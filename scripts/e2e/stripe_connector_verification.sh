@@ -194,6 +194,7 @@ run_logged \
     connectors/stripe/src/types.rs \
     connectors/stripe/tests/conformance_contract.rs \
     connectors/stripe/tests/integration.rs \
+    connectors/stripe/tests/local_non_mock.rs \
     connectors/stripe/tests/live_verification.rs \
     connectors/stripe/tests/mutation.rs \
     scripts/e2e/stripe_connector_verification.sh
@@ -215,6 +216,10 @@ run_rch_cargo_step \
 run_rch_cargo_step \
   integration_suite \
   cargo test -p fcp-stripe --test integration -- --nocapture
+
+run_rch_cargo_step \
+  local_non_mock_acceptance \
+  cargo test -p fcp-stripe --test local_non_mock -- --nocapture
 
 run_rch_cargo_step \
   conformance_contract \

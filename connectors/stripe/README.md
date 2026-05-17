@@ -82,9 +82,9 @@ This README documents runtime truth and keeps current drift visible:
 - Webhook replay protection stores only in-memory event IDs and evicts by tolerance window and cache size.
 - List operations expose only narrow filters and `limit`; they do not expose full Stripe pagination cursors, search endpoints, expand parameters, or API version selection.
 - Manifest says connector format is `wasi`; the current Rust crate is a normal package/bin using reqwest and the FCP runtime helpers.
-- The tracked verification shell script currently fails closed at the gauntlet's `local_non_mock` check until `connectors/stripe/tests/local_non_mock.rs` lands.
+- `connectors/stripe/tests/local_non_mock.rs` exercises the production connector invoke path against a deterministic loopback Stripe fixture for read, write, and payment/refund operations.
 
-A follow-up parity bead should align approval metadata and runtime enforcement, decide whether JSON request bodies are an intentional Stripe facade or live API drift, reconcile idempotency behavior for DELETE paths, add pagination/search/expand support if needed, and add the tracked local non-mock acceptance test.
+A follow-up parity bead should align approval metadata and runtime enforcement, decide whether JSON request bodies are an intentional Stripe facade or live API drift, reconcile idempotency behavior for DELETE paths, add pagination/search/expand support if needed, and decide whether the loopback acceptance fixture should grow into Stripe CLI replay.
 
 ## First-Slice Scope
 
@@ -236,7 +236,7 @@ The deterministic integration evidence is anchored on connector-local tests cove
 - `connectors/stripe/src/error.rs` defines connector error classes and FCP error conversion.
 - `connectors/stripe/src/limits.rs` defines webhook payload and replay-cache bounds.
 - `connectors/stripe/manifest.toml` defines the operation catalog, network constraints, sandbox boundary, zone policy, event caps, and rate-limit pools.
-- `connectors/stripe/tests/integration.rs`, `connectors/stripe/tests/conformance_contract.rs`, and `connectors/stripe/tests/live_verification.rs` cover deterministic HTTP behavior, contract assertions, and opt-in live proof.
+- `connectors/stripe/tests/integration.rs`, `connectors/stripe/tests/conformance_contract.rs`, `connectors/stripe/tests/local_non_mock.rs`, and `connectors/stripe/tests/live_verification.rs` cover deterministic HTTP behavior, contract assertions, local loopback acceptance, and opt-in live proof.
 
 ## Verification Bundle
 

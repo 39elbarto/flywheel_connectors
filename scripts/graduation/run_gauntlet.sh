@@ -222,6 +222,7 @@ write_batch_status_markdown() {
     printf '\n## Current Next Actions\n\n'
     printf '%s\n' "- Add or restore connector-local \`operations_info\` metadata where the gauntlet stops at \`operations_info\`."
     printf '%s\n' "- Add redaction-safe \`scripts/e2e/...\` verification-script declarations where the gauntlet stops at \`verification_script_declared\`."
+    printf '%s\n' "- Add connector-local \`tests/local_non_mock.rs\` acceptance coverage where the gauntlet stops at \`local_non_mock\`."
     printf '%s\n' "- Fix manifest network constraints where the gauntlet stops at \`network_policy\`."
     printf '%s\n' "- Do not mark any Batch 1 connector PROVEN until its manifest, README, local non-mock proof, sandbox/network policy, and operator guidance all pass the gauntlet."
   } >"${path}"

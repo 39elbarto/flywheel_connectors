@@ -3832,8 +3832,8 @@ Some commands (`bv` without `--robot-*`, `cass` without `--robot`, bare `br`) la
 | **HRW** | Highest Random Weight hashing — deterministic peer-selection function |
 | **IBLT** | Invertible Bloom Lookup Table — set-difference data structure |
 | **InstanceId** | Unique identifier for a running connector subprocess (binds capability tokens) |
-| **KID** | Key ID — identifier for a specific key within a multi-key keyring (used for rotation) |
 | **KEM** | Key Encapsulation Mechanism (X-Wing is a hybrid KEM combining X25519 and ML-KEM-768) |
+| **KID** | Key ID; identifier for a specific key within a multi-key keyring (used for rotation) |
 | **MeshNode** | A device participating in the FCP mesh |
 | **ML-DSA-65** | NIST FIPS 204 post-quantum signature scheme (formerly CRYSTALS-Dilithium-3) |
 | **OperationIntent** | A pre-commit object naming the idempotency key before invoke; required for Strict/Risky operations |

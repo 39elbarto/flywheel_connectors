@@ -453,6 +453,8 @@ validate_artifact_contracts() {
 
   validate_jsonl_contract "validate_crypto_route_contract" \
     "target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl" '
+      def hex_hash:
+        type == "string" and test("^[0-9a-f]{64}$");
       length > 0 and
       all(.[]; type == "object" and
         (.command_line | type == "string") and
@@ -462,8 +464,8 @@ validate_artifact_contracts() {
         (.representation_version | type == "number") and
         (.parameter_profile | type == "string") and
         (.fixture_id | type == "string") and
-        (.zone_id_hash | type == "string") and
-        (.period_id_hash | type == "string") and
+        (.zone_id_hash | hex_hash) and
+        (.period_id_hash | hex_hash) and
         (.matrix_dimensions | type == "object") and
         (.primitive_timings_ms | type == "object") and
         (.timing_ms | type == "number") and
@@ -474,6 +476,10 @@ validate_artifact_contracts() {
 
   validate_jsonl_contract "validate_crypto_public_matrix_contract" \
     "target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl" '
+      def hex_hash:
+        type == "string" and test("^[0-9a-f]{64}$");
+      def optional_hex_hash:
+        . == null or hex_hash;
       length > 0 and
       all(.[]; type == "object" and
         (.command_line | type == "string") and
@@ -484,9 +490,11 @@ validate_artifact_contracts() {
         (.public_matrix_material_version | type == "number") and
         (.parameter_profile | type == "string") and
         (.fixture_id | type == "string") and
-        (.zone_id_hash | type == "string") and
-        (.period_id_hash | type == "string") and
+        (.zone_id_hash | hex_hash) and
+        (.period_id_hash | hex_hash) and
         (.public_material_summary | type == "object") and
+        (.public_material_summary.binding_hash_hex | hex_hash) and
+        (.public_material_summary.material_digest_hex | optional_hex_hash) and
         (.matrix_dimensions | type == "object") and
         (.reconstruction_result | type == "string") and
         (.allocation_summary | type == "object") and
@@ -497,6 +505,10 @@ validate_artifact_contracts() {
 
   validate_jsonl_contract "validate_crypto_sample_pre_contract" \
     "target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl" '
+      def hex_hash:
+        type == "string" and test("^[0-9a-f]{64}$");
+      def tagged_hash:
+        type == "string" and test("^hash:[0-9a-f]{64}$");
       length > 0 and
       all(.[]; type == "object" and
         (.command_line | type == "string") and
@@ -506,9 +518,9 @@ validate_artifact_contracts() {
         (.representation_version | type == "number") and
         (.parameter_profile | type == "string") and
         (.fixture_id | type == "string") and
-        (.zone_id_hash | type == "string") and
-        (.period_id_hash | type == "string") and
-        (.h_fixture_id | type == "string") and
+        (.zone_id_hash | hex_hash) and
+        (.period_id_hash | hex_hash) and
+        (.h_fixture_id | tagged_hash) and
         (.matrix_dimensions | type == "object") and
         (.norm_bound_squared | type == "number") and
         (.observed_norm_squared | type == "number") and
@@ -524,6 +536,12 @@ validate_artifact_contracts() {
 
   validate_jsonl_contract "validate_crypto_formal_contract" \
     "target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl" '
+      def hex_hash:
+        type == "string" and test("^[0-9a-f]{64}$");
+      def tagged_hash:
+        type == "string" and test("^hash:[0-9a-f]{64}$");
+      def optional_hex_hash:
+        . == null or hex_hash;
       length > 0 and
       all(.[]; type == "object" and
         (.schema | type == "string") and
@@ -531,19 +549,23 @@ validate_artifact_contracts() {
         (.git_revision | type == "string") and
         (.theorem_names | type == "array" and length > 0) and
         (.assumption_ids | type == "array" and length > 0) and
-        (.fixture_id_hash | type == "string") and
+        (.fixture_id_hash | tagged_hash) and
         (.fixture_category | type == "string") and
         (.parameter_profile | type == "string") and
         (.primitive_route_id | type == "string") and
         (.primitive_route_revision | type == "number") and
         (.representation_version | type == "number") and
         (.public_matrix_material_version | type == "number") and
-        (.zone_id_hash | type == "string") and
-        (.period_id_hash | type == "string") and
+        (.zone_id_hash | hex_hash) and
+        (.period_id_hash | hex_hash) and
         (.public_material_summary | type == "object") and
+        (.public_material_summary.binding_hash_hex | hex_hash) and
+        (.public_material_summary.material_digest_hex | optional_hex_hash) and
         (.matrix_dimensions | type == "object") and
         (.checks | type == "object") and
         (.artifact_hashes | type == "object") and
+        (.artifact_hashes.public_seed_hash_hex | hex_hash) and
+        (.artifact_hashes.public_material_digest_hex | optional_hex_hash) and
         (.duration_ms | type == "number") and
         (.result | type == "string") and
         has("skip_reason")) and
@@ -553,6 +575,8 @@ validate_artifact_contracts() {
 
   validate_jsonl_contract "validate_policy_formal_contract" \
     "target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl" '
+      def hex_hash:
+        type == "string" and test("^[0-9a-f]{64}$");
       length > 0 and
       all(.[]; type == "object" and
         (.schema | type == "string") and
@@ -560,16 +584,16 @@ validate_artifact_contracts() {
         (.git_revision | type == "string") and
         (.theorem_names | type == "array" and length > 0) and
         (.assumption_ids | type == "array" and length > 0) and
-        (.fixture_id_hash | type == "string") and
+        (.fixture_id_hash | hex_hash) and
         (.parameter_profile | type == "string") and
         (.route_revision | type == "number") and
         (.representation_version | type == "number") and
         (.public_matrix_material_version | type == "number") and
-        (.zone_id_hash | type == "string") and
-        (.period_id_hash | type == "string") and
-        (.certificate_id_hash | type == "string") and
-        (.trust_set_id_hash | type == "string") and
-        (.request_descriptor_hash | type == "string") and
+        (.zone_id_hash | hex_hash) and
+        (.period_id_hash | hex_hash) and
+        (.certificate_id_hash | hex_hash) and
+        (.trust_set_id_hash | hex_hash) and
+        (.request_descriptor_hash | hex_hash) and
         (.checks | type == "object") and
         (.duration_ms | type == "number") and
         (.result | type == "string") and

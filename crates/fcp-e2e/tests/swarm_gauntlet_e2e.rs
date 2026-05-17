@@ -883,6 +883,13 @@ fn prewarm_cargo_target_dir_hash(cargo_target_dir: &str) -> String {
     )
 }
 
+fn prewarm_manifest_hash() -> String {
+    format!(
+        "blake3:{}",
+        blake3::hash(b"fcp-test-connector:request-response:strict-prewarm").to_hex()
+    )
+}
+
 fn prewarm_command_line(cargo_target_dir: &str) -> Vec<String> {
     vec![
         "rch".to_string(),
@@ -1022,7 +1029,7 @@ fn prewarm_evidence(
         cargo_target_dir_hash,
         connector_fixture_id: "fcp-test-connector:request-response".to_string(),
         host_boundary: "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout".to_string(),
-        manifest_hash: "blake3:prewarm-manifest".to_string(),
+        manifest_hash: prewarm_manifest_hash(),
         zone: "z:project:swarm-prewarm".to_string(),
         strategy: serde_label(&case.config.strategy)?,
         pool_state: serde_label(&case.observation.pool_state)?,
@@ -1605,7 +1612,18 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
         warm_hit["host_boundary"],
         "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout"
     );
-    assert_eq!(warm_hit["manifest_hash"], "blake3:prewarm-manifest");
+    let warm_manifest_hash = warm_hit["manifest_hash"]
+        .as_str()
+        .ok_or("manifest hash should be recorded")?;
+    let warm_manifest_hash_hex = warm_manifest_hash
+        .strip_prefix("blake3:")
+        .ok_or("manifest hash should use blake3 prefix")?;
+    assert_eq!(warm_manifest_hash_hex.len(), 64);
+    assert!(
+        warm_manifest_hash_hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
     assert_eq!(warm_hit["zone"], "z:project:swarm-prewarm");
     assert_eq!(warm_hit["strategy"], "warm_pool");
     assert_eq!(warm_hit["pool_state"], "warm_hit");

@@ -353,6 +353,10 @@ if [[ "${overall_status}" == "passed" ]]; then
         nested_evidence_ok: all(.[];
           nested_evidence_matches
         ),
+        manifest_hash_shape_ok: all(.[];
+          (.manifest_hash | blake3_hash)
+          and (.evidence.manifest_hash | blake3_hash)
+        ),
         production_soak_ok: (
           if $require_production_soak then
             all(.[];
@@ -430,6 +434,7 @@ if [[ "${overall_status}" == "passed" ]]; then
             and $v.decision_shape_ok
             and $v.boundary_shape_ok
             and $v.nested_evidence_ok
+            and $v.manifest_hash_shape_ok
             and $v.production_soak_ok
             and $v.production_improvement_ok
             and $v.percentile_fields_ok

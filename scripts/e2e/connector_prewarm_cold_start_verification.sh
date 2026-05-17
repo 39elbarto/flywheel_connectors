@@ -133,6 +133,7 @@ else
     env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
       RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}" \
       CARGO_TARGET_DIR="${target_dir}" \
+      PREWARM_EVIDENCE_CARGO_TARGET_DIR="${target_dir}" \
       CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}" \
       CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
       CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}" \
@@ -233,6 +234,9 @@ if [[ "${overall_status}" == "passed" ]]; then
           and nonempty_string("git_revision")
           and nonempty_string("worker_id")
           and nonempty_string("cargo_target_dir")
+          and nonempty_string("cargo_target_dir_class")
+          and nonempty_string("cargo_target_dir_hash")
+          and (.cargo_target_dir_hash | startswith("blake3:"))
           and nonempty_string("connector_fixture_id")
           and nonempty_string("host_boundary")
           and nonempty_string("manifest_hash")
@@ -298,6 +302,8 @@ if [[ "${overall_status}" == "passed" ]]; then
           and (.worker_id | type) == "string"
           and (.credential_mode | type) == "string"
           and (.cleanup_result | type) == "string"
+          and (.cargo_target_dir_class | type) == "string"
+          and (.cargo_target_dir_hash | type) == "string"
         )
       } as $v
       | $v
@@ -332,7 +338,12 @@ if [[ "${overall_status}" == "passed" ]]; then
 fi
 
 if [[ -s "${EVIDENCE_JSONL}" ]]; then
-  if grep -aE '(sk-live-|Bearer[[:space:]]+|super-secret-value|secret_seed|private_key)' "${EVIDENCE_JSONL}" >/dev/null; then
+  if grep -aE '(sk-live-|Bearer[[:space:]]+|super-secret-value|secret_seed|private_key|/Users/|/private/var/)' "${EVIDENCE_JSONL}" >/dev/null; then
+    redaction_status="failed"
+    overall_status="failed"
+    validation_status="failed"
+    exit_code=1
+  elif jq -s -e 'any(.[]; .cargo_target_dir_class == "private_absolute")' "${EVIDENCE_JSONL}" >/dev/null; then
     redaction_status="failed"
     overall_status="failed"
     validation_status="failed"

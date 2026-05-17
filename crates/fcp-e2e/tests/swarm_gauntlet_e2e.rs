@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::io::Write;
+use std::path::Path;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -851,7 +852,35 @@ fn maybe_write_batch_morselization_jsonl_artifact(jsonl: &str) -> std::io::Resul
 }
 
 fn prewarm_cargo_target_dir() -> String {
-    std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "/tmp/fcp-prewarm-e2e".to_string())
+    std::env::var("PREWARM_EVIDENCE_CARGO_TARGET_DIR")
+        .or_else(|_| std::env::var("PREWARM_CARGO_TARGET_DIR"))
+        .or_else(|_| std::env::var("CARGO_TARGET_DIR"))
+        .unwrap_or_else(|_| "/tmp/fcp-prewarm-e2e".to_string())
+}
+
+fn prewarm_cargo_target_dir_class(cargo_target_dir: &str) -> &'static str {
+    if cargo_target_dir == "/tmp"
+        || cargo_target_dir.starts_with("/tmp/")
+        || cargo_target_dir == "/private/tmp"
+        || cargo_target_dir.starts_with("/private/tmp/")
+    {
+        "tmp"
+    } else if cargo_target_dir.starts_with("/Users/")
+        || cargo_target_dir.starts_with("/private/var/")
+    {
+        "private_absolute"
+    } else if Path::new(cargo_target_dir).is_absolute() {
+        "absolute"
+    } else {
+        "relative"
+    }
+}
+
+fn prewarm_cargo_target_dir_hash(cargo_target_dir: &str) -> String {
+    format!(
+        "blake3:{}",
+        blake3::hash(cargo_target_dir.as_bytes()).to_hex()
+    )
 }
 
 fn prewarm_command_line(cargo_target_dir: &str) -> Vec<String> {
@@ -970,6 +999,8 @@ fn prewarm_evidence(
     let decision = case.config.decide_checkout(&case.observation);
     let (fallback_reason, unsafe_rejection_reason) = prewarm_decision_reasons(&decision)?;
     let cargo_target_dir = prewarm_cargo_target_dir();
+    let cargo_target_dir_class = prewarm_cargo_target_dir_class(&cargo_target_dir).to_string();
+    let cargo_target_dir_hash = prewarm_cargo_target_dir_hash(&cargo_target_dir);
     let error_mapping = match (&fallback_reason, &unsafe_rejection_reason) {
         (Some(reason), None) => format!("fallback_on_demand:{reason}"),
         (None, Some(reason)) => format!("reject_unsafe:{reason}"),
@@ -987,6 +1018,8 @@ fn prewarm_evidence(
         git_revision: "e2e-smoke-revision".to_string(),
         worker_id: "offline-e2e-runner".to_string(),
         cargo_target_dir,
+        cargo_target_dir_class,
+        cargo_target_dir_hash,
         connector_fixture_id: "fcp-test-connector:request-response".to_string(),
         host_boundary: "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout".to_string(),
         manifest_hash: "blake3:prewarm-manifest".to_string(),
@@ -1558,6 +1591,12 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
         .as_str()
         .ok_or("cargo target dir should be recorded")?;
     assert!(!cargo_target_dir.is_empty());
+    assert_eq!(warm_hit["cargo_target_dir_class"], "tmp");
+    assert!(
+        warm_hit["cargo_target_dir_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("blake3:"))
+    );
     assert_eq!(
         warm_hit["connector_fixture_id"],
         "fcp-test-connector:request-response"

@@ -2708,6 +2708,10 @@ pub struct SwarmPrewarmColdStartEvidence {
     pub worker_id: String,
     /// Cargo target directory used by the proof run.
     pub cargo_target_dir: String,
+    /// Coarse classification of the Cargo target directory for redaction-safe summaries.
+    pub cargo_target_dir_class: String,
+    /// Redaction-safe hash of the Cargo target directory.
+    pub cargo_target_dir_hash: String,
     /// Connector fixture activated by the host-backed proof.
     pub connector_fixture_id: String,
     /// Host boundary that made the checkout decision.
@@ -2837,6 +2841,16 @@ fn put_prewarm_identity_json(
     put_prewarm_json(record, "git_revision", &evidence.git_revision)?;
     put_prewarm_json(record, "worker_id", &evidence.worker_id)?;
     put_prewarm_json(record, "cargo_target_dir", &evidence.cargo_target_dir)?;
+    put_prewarm_json(
+        record,
+        "cargo_target_dir_class",
+        &evidence.cargo_target_dir_class,
+    )?;
+    put_prewarm_json(
+        record,
+        "cargo_target_dir_hash",
+        &evidence.cargo_target_dir_hash,
+    )?;
     put_prewarm_json(
         record,
         "connector_fixture_id",
@@ -2970,6 +2984,11 @@ impl SwarmPrewarmColdStartEvidence {
             ("git_revision", self.git_revision.as_str()),
             ("worker_id", self.worker_id.as_str()),
             ("cargo_target_dir", self.cargo_target_dir.as_str()),
+            (
+                "cargo_target_dir_class",
+                self.cargo_target_dir_class.as_str(),
+            ),
+            ("cargo_target_dir_hash", self.cargo_target_dir_hash.as_str()),
             ("connector_fixture_id", self.connector_fixture_id.as_str()),
             ("host_boundary", self.host_boundary.as_str()),
             ("manifest_hash", self.manifest_hash.as_str()),
@@ -2993,6 +3012,13 @@ impl SwarmPrewarmColdStartEvidence {
             || self.command_line.iter().any(|part| part.trim().is_empty())
         {
             return Err(SwarmPrewarmColdStartEvidenceError::EmptyCommandLine);
+        }
+        if !self.cargo_target_dir_hash.starts_with("blake3:") {
+            return Err(
+                SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirHash {
+                    hash: self.cargo_target_dir_hash.clone(),
+                },
+            );
         }
         if self.activation_latency_ms == 0 || self.baseline_on_demand_latency_ms == 0 {
             return Err(SwarmPrewarmColdStartEvidenceError::MissingLatencyMeasurement);
@@ -3108,6 +3134,11 @@ pub enum SwarmPrewarmColdStartEvidenceError {
     },
     /// Reproduction command line was empty or contained an empty part.
     EmptyCommandLine,
+    /// Cargo target directory hash did not use the expected redaction-safe form.
+    InvalidCargoTargetDirHash {
+        /// Observed hash value.
+        hash: String,
+    },
     /// A latency measurement was absent or zero.
     MissingLatencyMeasurement,
     /// Percentiles were absent or out of order.
@@ -3152,6 +3183,10 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
                 write!(f, "swarm prewarm field '{field}' is empty")
             }
             Self::EmptyCommandLine => write!(f, "swarm prewarm command line is empty"),
+            Self::InvalidCargoTargetDirHash { hash } => write!(
+                f,
+                "swarm prewarm cargo target directory hash must start with 'blake3:', got '{hash}'"
+            ),
             Self::MissingLatencyMeasurement => {
                 write!(f, "swarm prewarm latency measurement is missing")
             }
@@ -9158,6 +9193,11 @@ mod tests {
     }
 
     fn prewarm_cold_start_evidence_fixture() -> SwarmPrewarmColdStartEvidence {
+        let cargo_target_dir = "/tmp/fcp-prewarm-e2e";
+        let cargo_target_dir_hash = format!(
+            "blake3:{}",
+            blake3::hash(cargo_target_dir.as_bytes()).to_hex()
+        );
         SwarmPrewarmColdStartEvidence {
             schema_version: SWARM_PREWARM_COLD_START_SCHEMA_VERSION.to_string(),
             execution_mode: SwarmEvidenceExecutionMode::Smoke,
@@ -9178,7 +9218,9 @@ mod tests {
             ],
             git_revision: "abc123".to_string(),
             worker_id: "rch-worker-64c".to_string(),
-            cargo_target_dir: "/tmp/fcp-prewarm-e2e".to_string(),
+            cargo_target_dir: cargo_target_dir.to_string(),
+            cargo_target_dir_class: "tmp".to_string(),
+            cargo_target_dir_hash,
             connector_fixture_id: "fcp-test-connector:request-response".to_string(),
             host_boundary: "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout"
                 .to_string(),
@@ -9257,6 +9299,12 @@ mod tests {
             ])
         );
         assert_eq!(record["cargo_target_dir"], "/tmp/fcp-prewarm-e2e");
+        assert_eq!(record["cargo_target_dir_class"], "tmp");
+        assert!(
+            record["cargo_target_dir_hash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("blake3:"))
+        );
         assert_eq!(record["git_revision"], "abc123");
         assert_eq!(record["worker_id"], "rch-worker-64c");
         assert_eq!(
@@ -9337,6 +9385,17 @@ mod tests {
             Err(
                 SwarmPrewarmColdStartEvidenceError::MissingResourceMeasurement {
                     field: "pool_size"
+                }
+            )
+        );
+
+        let mut bad_target_dir_hash = prewarm_cold_start_evidence_fixture();
+        bad_target_dir_hash.cargo_target_dir_hash = "raw-target-dir".to_string();
+        assert_eq!(
+            bad_target_dir_hash.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirHash {
+                    hash: "raw-target-dir".to_string()
                 }
             )
         );

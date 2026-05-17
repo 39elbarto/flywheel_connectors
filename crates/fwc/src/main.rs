@@ -9188,6 +9188,17 @@ fn parse_direct_cutover_gate_snapshot(
         ));
     }
 
+    let snapshot_overall_status = snapshot
+        .get("overall_status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "direct cutover-gate snapshot is missing `overall_status`".to_owned())?;
+    let computed_overall_status = mesh_cmd::cutover_gate_overall_status(&gates).tag();
+    if snapshot_overall_status != computed_overall_status {
+        return Err(format!(
+            "direct cutover-gate snapshot overall_status `{snapshot_overall_status}` does not match gate records `{computed_overall_status}`"
+        ));
+    }
+
     Ok(gates)
 }
 
@@ -29415,10 +29426,13 @@ mod tests {
             };
         }
 
+        let overall_status = super::mesh_cmd::cutover_gate_overall_status(&gates).tag();
+
         json!({
             "schema_version": schema_version,
             "catalog_connector_count": 3,
             "node_count": 3,
+            "overall_status": overall_status,
             "gates": gates,
         })
     }
@@ -29626,6 +29640,39 @@ mod tests {
             missing_routes
                 .iter()
                 .any(|route| route.as_str() == Some("valid-cutover-gate-snapshot"))
+        );
+        let gates = payload["gates"]
+            .as_array()
+            .ok_or_else(|| "gates must be an array".to_owned())?;
+        assert!(gates.iter().all(|gate| gate["status"] == "skip"
+            && gate["measured_value"]["skip_reason"] == "direct-cutover-telemetry-invalid"));
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_cutover_gates_rejects_mismatched_direct_snapshot_overall_status()
+    -> std::result::Result<(), String> {
+        let mut routes = StdBTreeMap::new();
+        routes.insert(
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(),
+        );
+        let mut snapshot = mock_direct_green_cutover_gate_snapshot();
+        snapshot["overall_status"] = json!("skip");
+        routes.insert("GET /rpc/mesh/cutover-gates".to_owned(), snapshot);
+        let (host, server) = spawn_mock_host(routes, 2);
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "--host", &host, "mesh", "cutover-gates"]);
+
+        server
+            .join()
+            .map_err(|_| "mock host should complete".to_owned())?;
+        assert_eq!(exit_code, std::process::ExitCode::SUCCESS);
+        assert_eq!(payload["overall_status"], "skip");
+        assert_eq!(
+            payload["live_telemetry"]["reason_code"],
+            "direct-cutover-telemetry-invalid"
         );
         let gates = payload["gates"]
             .as_array()

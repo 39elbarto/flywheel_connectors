@@ -299,3 +299,6 @@ telemetry when the host payload advertises `schema_version:
 fcp-host-cutover-gates/v1`; a missing or older schema stays `skip` with
 `direct-cutover-telemetry-invalid` instead of green-lighting cutover from a
 stale or foreign route.
+The same fail-closed rule applies when the host snapshot's top-level
+`overall_status` contradicts the individual gate records; operators should fix
+the host telemetry route rather than trusting a locally recomputed green result.

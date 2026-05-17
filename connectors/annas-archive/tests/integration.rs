@@ -200,7 +200,7 @@ async fn client_500_returns_api_error() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn client_empty_response_returns_empty_json() {
+async fn client_200_empty_body_fails_closed() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/search"))
@@ -209,8 +209,8 @@ async fn client_empty_response_returns_empty_json() {
         .await;
 
     let client = AnnasArchiveClient::new(Some(&server.uri())).unwrap();
-    let result = client.search("test", None, None, None).await.unwrap();
-    assert_eq!(result, json!({}));
+    let err = client.search("test", None, None, None).await.unwrap_err();
+    assert!(err.to_string().contains("empty response body"));
 }
 
 #[fcp_async_core::runtime::test]

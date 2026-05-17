@@ -530,6 +530,27 @@ async fn error_500() {
     );
 }
 
+#[fcp_async_core::runtime::test]
+async fn error_200_empty_body_fails_closed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/files/123"))
+        .and(header("Authorization", "Bearer test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "box.files.get",
+            "input": {"file_id": "123"}
+        }))
+        .await
+        .is_err()
+    );
+}
+
 // -- Unknown op / Simulate ----------------------------------------------------
 
 #[fcp_async_core::runtime::test]

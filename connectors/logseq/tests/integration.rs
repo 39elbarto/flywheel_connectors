@@ -621,6 +621,26 @@ async fn error_503() {
     );
 }
 
+#[fcp_async_core::runtime::test]
+async fn error_200_empty_body_fails_closed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/pages"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "logseq.pages.list",
+            "input": {}
+        }))
+        .await
+        .is_err()
+    );
+}
+
 // -- Unknown op / Simulate --
 
 #[fcp_async_core::runtime::test]

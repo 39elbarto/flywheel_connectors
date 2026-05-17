@@ -128,7 +128,14 @@ impl RoamClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
+            if body.trim().is_empty() {
+                if status != StatusCode::NO_CONTENT {
+                    return Err(RoamError::Api {
+                        status_code: status.as_u16(),
+                        message: "empty response body".into(),
+                        retry_after_ms: None,
+                    });
+                }
                 return Ok(json!({}));
             }
             Ok(serde_json::from_str(&body)?)

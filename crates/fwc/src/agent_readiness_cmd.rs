@@ -1484,6 +1484,10 @@ mod tests {
             result.payload["handoff"]["decision"]["primary_reason_code"],
             "proof-blocked-rch-topology-preflight"
         );
+        assert_eq!(
+            result.payload["handoff"]["active_blocker_beads"][0],
+            "flywheel_connectors-ylexc"
+        );
 
         let report_text =
             fs::read_to_string(tmp.path().join(REPORT_FILENAME)).expect("report json");
@@ -1495,6 +1499,10 @@ mod tests {
         assert_eq!(
             report["probes"]["rch"]["admission_reason_code"],
             "topology_preflight_failure"
+        );
+        assert_eq!(
+            report["probes"]["beads"]["blocked_infra_bead_ids"][0],
+            "flywheel_connectors-ylexc"
         );
     }
 

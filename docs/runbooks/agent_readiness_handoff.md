@@ -76,11 +76,18 @@ retry once after a short delay, then proceed without Agent Mail. Do not run
 `am doctor repair`, `am doctor reconstruct`, `am service restart`, or any
 process-kill workaround, even if a health check suggests it.
 
-`flywheel_connectors-rfbrc` is the rch/disk proof blocker. If the report shows
-no healthy `rch` workers, a blocked `rch` status probe, or disk pressure, do not
-clean disk, delete artifacts, repair workers, or use local Cargo as proof. Stop
-at the refused `cargo_proof` and `push` actions and hand the blocker to the
-operator with the report digest and active blocker bead.
+`flywheel_connectors-rfbrc` is the generic rch/disk proof blocker. If the report
+shows no healthy `rch` workers, a blocked `rch` status probe, refused local
+fallback, remote proof failure, stale telemetry, or disk pressure, do not clean
+disk, delete artifacts, repair workers, or use local Cargo as proof. Stop at the
+refused `cargo_proof` and `push` actions and hand the blocker to the operator
+with the report digest and active blocker bead.
+
+`flywheel_connectors-ylexc` is the rch topology-preflight blocker. If the report
+shows `proof-blocked-rch-topology-preflight` or
+`topology_preflight_failure`, keep the failure separate from generic worker
+unavailability and preserve the exact colliding path or preflight stderr needed
+for operator diagnosis.
 
 ## Dry-Run Script
 

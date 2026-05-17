@@ -15,10 +15,11 @@ use crate::agent_readiness::{
     AGENT_READINESS_REPORT_SCHEMA, AgentMailReadiness, AgentReadinessError,
     AgentReadinessPolicyMapping, AgentReadinessProbes, AgentReadinessReport, BeadsReadiness,
     DiskMountState, DiskReadiness, GitReadiness, LockState, PathKind, PathRedactionScope,
-    ProbeResult, RchAdmissionDecision, RchAdmissionObservation, RchAdmissionReasonCode,
-    RchProofSummaryLine, RchProofSummaryLocation, RchReadiness, ReadinessDecision,
-    ReadinessRedactionContract, ReadinessStatus, ReadinessSubsystem, RedactedPath, TelemetryState,
-    WorktreeReadiness, validate_key_fragment, validate_safe_text,
+    ProbeResult, RCH_PROOF_BLOCKER_BEAD_ID, RCH_TOPOLOGY_PREFLIGHT_BLOCKER_BEAD_ID,
+    RchAdmissionDecision, RchAdmissionObservation, RchAdmissionReasonCode, RchProofSummaryLine,
+    RchProofSummaryLocation, RchReadiness, ReadinessDecision, ReadinessRedactionContract,
+    ReadinessStatus, ReadinessSubsystem, RedactedPath, TelemetryState, WorktreeReadiness,
+    validate_key_fragment, validate_safe_text,
 };
 
 /// Stable schema for the startup probe plan.
@@ -685,8 +686,10 @@ impl From<NoNetworkProbeScenario> for FixtureScenarioState {
 
 fn fixture_blocker_bead_ids(scenario: FixtureScenarioState) -> BTreeSet<String> {
     let mut blocker_bead_ids = BTreeSet::new();
-    if scenario.rch_blocked {
-        blocker_bead_ids.insert("flywheel_connectors-rfbrc".to_owned());
+    if scenario.rch_topology_preflight_failure {
+        blocker_bead_ids.insert(RCH_TOPOLOGY_PREFLIGHT_BLOCKER_BEAD_ID.to_owned());
+    } else if scenario.rch_blocked {
+        blocker_bead_ids.insert(RCH_PROOF_BLOCKER_BEAD_ID.to_owned());
     }
     if scenario.agent_mail_blocked {
         blocker_bead_ids.insert("flywheel_connectors-d5yeb".to_owned());
@@ -1446,52 +1449,60 @@ mod tests {
                 RchAdmissionDecision::RchInfraFailure,
                 RchAdmissionReasonCode::WorkersUnavailable,
                 "proof-blocked-rch-workers-unavailable",
+                RCH_PROOF_BLOCKER_BEAD_ID,
             ),
             (
                 NoNetworkProbeScenario::RchActiveProjectExclusion,
                 RchAdmissionDecision::WaitForProjectSlot,
                 RchAdmissionReasonCode::ActiveProjectExclusion,
                 "proof-blocked-rch-active-project-exclusion",
+                RCH_PROOF_BLOCKER_BEAD_ID,
             ),
             (
                 NoNetworkProbeScenario::RchSlotPressure,
                 RchAdmissionDecision::WaitForProjectSlot,
                 RchAdmissionReasonCode::SlotPressure,
                 "proof-blocked-rch-slot-pressure",
+                RCH_PROOF_BLOCKER_BEAD_ID,
             ),
             (
                 NoNetworkProbeScenario::RchLocalFallbackDetected,
                 RchAdmissionDecision::RefuseLocalFallback,
                 RchAdmissionReasonCode::LocalFallbackDetected,
                 "proof-blocked-rch-local-fallback-refused",
+                RCH_PROOF_BLOCKER_BEAD_ID,
             ),
             (
                 NoNetworkProbeScenario::RchTopologyPreflightFailure,
                 RchAdmissionDecision::RchInfraFailure,
                 RchAdmissionReasonCode::TopologyPreflightFailure,
                 "proof-blocked-rch-topology-preflight",
+                RCH_TOPOLOGY_PREFLIGHT_BLOCKER_BEAD_ID,
             ),
             (
                 NoNetworkProbeScenario::RchStaleCancellationResidue,
                 RchAdmissionDecision::RchInfraFailure,
                 RchAdmissionReasonCode::StaleCancellationResidue,
                 "proof-blocked-rch-stale-cancellation",
+                RCH_PROOF_BLOCKER_BEAD_ID,
             ),
             (
                 NoNetworkProbeScenario::RchRemoteBuildFailure,
                 RchAdmissionDecision::RealBuildFailure,
                 RchAdmissionReasonCode::RemoteBuildFailed,
                 "proof-failed-remote-build",
+                RCH_PROOF_BLOCKER_BEAD_ID,
             ),
             (
                 NoNetworkProbeScenario::RchSourceOnly,
                 RchAdmissionDecision::SourceOnlyWork,
                 RchAdmissionReasonCode::PressureTelemetryStale,
                 "proof-blocked-rch-source-only",
+                RCH_PROOF_BLOCKER_BEAD_ID,
             ),
         ];
 
-        for (scenario, decision, reason_code, primary_reason) in cases {
+        for (scenario, decision, reason_code, primary_reason, expected_blocker) in cases {
             let report = NoNetworkProbeFixture {
                 scenario,
                 ..NoNetworkProbeFixture::default()
@@ -1518,6 +1529,18 @@ mod tests {
             assert!(observation.total_slots >= observation.used_slots);
             assert!(!report.decision.can_run_cargo_proof);
             assert!(!report.probes.rch.local_cargo_allowed);
+            assert!(
+                report.decision.blocker_bead_ids.contains(expected_blocker),
+                "{scenario:?} decision should identify {expected_blocker}"
+            );
+            assert!(
+                report
+                    .probes
+                    .beads
+                    .blocked_infra_bead_ids
+                    .contains(expected_blocker),
+                "{scenario:?} beads probe should identify {expected_blocker}"
+            );
         }
     }
 

@@ -19,6 +19,8 @@ pub const AGENT_READINESS_REPORT_SCHEMA: &str = "fcp.agent-readiness-report.v1";
 pub const AGENT_READINESS_EVENT_SCHEMA: &str = "fcp.agent-readiness-event.v1";
 
 const MAX_KEY_FRAGMENT_LEN: usize = 160;
+pub(crate) const RCH_PROOF_BLOCKER_BEAD_ID: &str = "flywheel_connectors-rfbrc";
+pub(crate) const RCH_TOPOLOGY_PREFLIGHT_BLOCKER_BEAD_ID: &str = "flywheel_connectors-ylexc";
 
 /// Complete redaction-safe report for a single agent startup or handoff check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1553,7 +1555,7 @@ impl DecisionBuilder {
             );
             builder
                 .blocker_bead_ids
-                .insert("flywheel_connectors-rfbrc".to_owned());
+                .insert(RCH_PROOF_BLOCKER_BEAD_ID.to_owned());
         } else if beads_unavailable {
             builder.read_only(
                 "beads-write-unavailable",
@@ -1579,9 +1581,12 @@ impl DecisionBuilder {
                 )
             };
             builder.proof_blocked(reason, remediation);
-            builder
-                .blocker_bead_ids
-                .insert("flywheel_connectors-rfbrc".to_owned());
+            let blocker_bead_id = if rch_unavailable {
+                rch_blocker_bead_id(&probes.rch)
+            } else {
+                RCH_PROOF_BLOCKER_BEAD_ID
+            };
+            builder.blocker_bead_ids.insert(blocker_bead_id.to_owned());
         } else if mail_unavailable {
             builder.beads_only(
                 "agent-mail-db-error",
@@ -1785,6 +1790,15 @@ const fn rch_blocked_reason(rch: &RchReadiness) -> (&'static str, &'static str) 
             "proof-blocked-rch-unavailable",
             "defer Cargo proof and push until rch has healthy workers",
         ),
+    }
+}
+
+const fn rch_blocker_bead_id(rch: &RchReadiness) -> &'static str {
+    match rch.admission_reason_code {
+        Some(RchAdmissionReasonCode::TopologyPreflightFailure) => {
+            RCH_TOPOLOGY_PREFLIGHT_BLOCKER_BEAD_ID
+        }
+        _ => RCH_PROOF_BLOCKER_BEAD_ID,
     }
 }
 
@@ -2431,6 +2445,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn rch_admission_observation_classifies_required_reasons() {
         let mut observation = RchAdmissionObservation {
             command_digest: Some("blake3-proof-digest".to_owned()),
@@ -2645,7 +2660,7 @@ mod tests {
         report
             .decision
             .blocker_bead_ids
-            .insert("flywheel_connectors-rfbrc".to_owned());
+            .insert(RCH_PROOF_BLOCKER_BEAD_ID.to_owned());
 
         report.validate().expect("blocked rch report validates");
     }
@@ -2677,6 +2692,7 @@ mod tests {
         LocalRefStale,
         DirtySharedTree,
         RchUnavailable,
+        RchTopologyPreflightFailure,
         DiskPressure,
         BranchMirrorMismatch,
         RemoteRefUnavailable,
@@ -2814,10 +2830,10 @@ mod tests {
         ]
     }
 
-    fn blocked_degraded_decision_cases() -> [ExpectedDecisionCase; 6] {
+    fn blocked_degraded_decision_cases() -> [ExpectedDecisionCase; 7] {
         use DegradedDecisionCase::{
             AgentMailRepairAttempted, BranchMirrorMismatch, DiskPressure, LocalCargoAllowed,
-            RchUnavailable, RemoteRefUnavailable,
+            RchTopologyPreflightFailure, RchUnavailable, RemoteRefUnavailable,
         };
         use ReadinessOperatingMode::{OperatorActionRequired, ProofBlocked};
 
@@ -2829,7 +2845,16 @@ mod tests {
                 ReadinessStatus::Blocked,
                 Some("proof-blocked-rch-workers-unavailable"),
                 PROOF_REFUSALS,
-                &["flywheel_connectors-rfbrc"],
+                &[RCH_PROOF_BLOCKER_BEAD_ID],
+            ),
+            expected_case(
+                "rch topology preflight failure",
+                RchTopologyPreflightFailure,
+                ProofBlocked,
+                ReadinessStatus::Blocked,
+                Some("proof-blocked-rch-topology-preflight"),
+                PROOF_REFUSALS,
+                &[RCH_TOPOLOGY_PREFLIGHT_BLOCKER_BEAD_ID],
             ),
             expected_case(
                 "disk pressure",
@@ -2838,7 +2863,7 @@ mod tests {
                 ReadinessStatus::Blocked,
                 Some("proof-blocked-disk-pressure"),
                 PROOF_REFUSALS,
-                &["flywheel_connectors-rfbrc"],
+                &[RCH_PROOF_BLOCKER_BEAD_ID],
             ),
             expected_case(
                 "branch mirror mismatch",
@@ -2865,7 +2890,7 @@ mod tests {
                 ReadinessStatus::Blocked,
                 Some("local-cargo-policy-contradiction"),
                 WORK_REFUSALS,
-                &["flywheel_connectors-rfbrc"],
+                &[RCH_PROOF_BLOCKER_BEAD_ID],
             ),
             expected_case(
                 "agent mail repair attempted",
@@ -2899,6 +2924,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn apply_degraded_decision_case(
         scenario: DegradedDecisionCase,
         report: &mut AgentReadinessReport,
@@ -2955,6 +2981,31 @@ mod tests {
                     workers_unreachable: 8,
                     total_slots: 32,
                     pressure_telemetry_state: TelemetryState::Unavailable,
+                    diagnose_would_offload: Some(true),
+                    dry_run_would_offload: Some(false),
+                    ..RchAdmissionObservation::default()
+                });
+            }
+            DegradedDecisionCase::RchTopologyPreflightFailure => {
+                report.probes.rch.check_result = blocked_probe(
+                    ReadinessSubsystem::Rch,
+                    "rch exec -- cargo check -p fcp-evidence",
+                    "rch-topology-preflight-failure",
+                );
+                report.probes.rch.workers_healthy = 1;
+                report.probes.rch.cargo_offload_allowed = false;
+                report.probes.rch.admission_decision = RchAdmissionDecision::RchInfraFailure;
+                report.probes.rch.admission_reason_code =
+                    Some(RchAdmissionReasonCode::TopologyPreflightFailure);
+                report.probes.rch.admission_observation = Some(RchAdmissionObservation {
+                    command_digest: Some("blake3-topology-proof".to_owned()),
+                    worker_selection_reason: Some(
+                        "remote topology preflight failed: ln: Already exists".to_owned(),
+                    ),
+                    workers_total: 8,
+                    workers_healthy: 1,
+                    total_slots: 32,
+                    pressure_telemetry_state: TelemetryState::Current,
                     diagnose_would_offload: Some(true),
                     dry_run_would_offload: Some(false),
                     ..RchAdmissionObservation::default()

@@ -2118,13 +2118,13 @@ Two enums classify connectors along orthogonal axes. The table above describes i
 }
 
 # TOON (equivalent — ~40% fewer tokens for typical fwc payloads)
-connector github
-operations
-  - id issues.create
-    risk low
-  - id issues.list
-    risk low
-zones [z:work, z:owner]
+connector: github
+operations[2]{id,risk}:
+  issues.create,low
+  issues.list,low
+zones[2]:
+  z:work
+  z:owner
 ```
 
 Token-efficiency is a first-class concern when an LLM consumes every command output: TOON typically saves 30–60% of tokens versus JSON on `fwc list`, `fwc show`, and `fwc ops` payloads, which adds up when an agent runs hundreds of discovery commands per session.

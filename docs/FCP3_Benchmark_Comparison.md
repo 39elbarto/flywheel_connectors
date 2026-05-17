@@ -51,6 +51,8 @@ explicit evidence class instead of a latency-only artifact.
 The replayable top-level row exposes current p50/p95/p99 activation latency,
 baseline p50/p95/p99 activation latency, and per-percentile improvement deltas
 so before/after promotion gates do not need to parse nested evidence payloads.
+The command line must prove the Cargo lane ran through `rch exec --` instead of
+local Cargo so the artifact is usable as shared-worker evidence.
 The E2E JSONL bundle covers warm hit, empty pool, stale warm entry, crash before
 checkout, shutdown cleanup, concurrent swarm startup, burst exhaustion,
 sandbox-limit fallback, checkout cancellation before admit, and zygote rejection

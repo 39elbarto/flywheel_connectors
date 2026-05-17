@@ -315,6 +315,14 @@ if [[ "${overall_status}" == "passed" ]]; then
         and .p50_activation_latency_improvement_ms == (.baseline_p50_activation_latency_ms - .p50_activation_latency_ms)
         and .p95_activation_latency_improvement_ms == (.baseline_p95_activation_latency_ms - .p95_activation_latency_ms)
         and .p99_activation_latency_improvement_ms == (.baseline_p99_activation_latency_ms - .p99_activation_latency_ms);
+      def rch_command_line_ok:
+        (.command_line | type) == "array"
+        and (.command_line | length) >= 4
+        and .command_line[0] == "rch"
+        and .command_line[1] == "exec"
+        and ((.command_line | index("--")) as $separator
+          | ($separator != null)
+            and ((.command_line | index("cargo")) as $cargo | ($cargo != null and $cargo > $separator)));
       def ids: map(.scenario_id);
       def missing: required - (ids);
       def duplicate_scenarios:
@@ -331,6 +339,9 @@ if [[ "${overall_status}" == "passed" ]]; then
         execution_mode_shape_ok: all(.[];
           (.execution_mode | type) == "string"
           and (.source_kind | type) == "string"
+        ),
+        command_provenance_ok: all(.[];
+          rch_command_line_ok
         ),
         required_fields_ok: all(.[];
           (.command_line | type) == "array"
@@ -479,6 +490,7 @@ if [[ "${overall_status}" == "passed" ]]; then
             and $v.schema_ok
             and $v.record_type_ok
             and $v.execution_mode_shape_ok
+            and $v.command_provenance_ok
             and $v.required_fields_ok
             and $v.resource_fields_ok
             and $v.decision_shape_ok

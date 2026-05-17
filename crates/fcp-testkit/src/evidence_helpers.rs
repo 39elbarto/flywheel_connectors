@@ -2920,6 +2920,31 @@ fn validate_prewarm_command_and_target(
     {
         return Err(SwarmPrewarmColdStartEvidenceError::EmptyCommandLine);
     }
+    let command_line = &evidence.command_line;
+    let Some(separator_index) = command_line.iter().position(|part| part == "--") else {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::CommandLineDoesNotUseRch {
+                command_line: command_line.clone(),
+            },
+        );
+    };
+    let Some(cargo_index) = command_line.iter().position(|part| part == "cargo") else {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::CommandLineDoesNotUseRch {
+                command_line: command_line.clone(),
+            },
+        );
+    };
+    if command_line.first().map(String::as_str) != Some("rch")
+        || command_line.get(1).map(String::as_str) != Some("exec")
+        || cargo_index <= separator_index
+    {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::CommandLineDoesNotUseRch {
+                command_line: command_line.clone(),
+            },
+        );
+    }
     if !is_redaction_safe_blake3_hash(&evidence.cargo_target_dir_hash) {
         return Err(
             SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirHash {
@@ -3536,6 +3561,11 @@ pub enum SwarmPrewarmColdStartEvidenceError {
     },
     /// Reproduction command line was empty or contained an empty part.
     EmptyCommandLine,
+    /// Reproduction command line did not prove Cargo was run through rch.
+    CommandLineDoesNotUseRch {
+        /// Observed command line.
+        command_line: Vec<String>,
+    },
     /// Cargo target directory hash did not use the expected redaction-safe form.
     InvalidCargoTargetDirHash {
         /// Observed hash value.
@@ -3627,6 +3657,11 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
                 write!(f, "swarm prewarm field '{field}' is empty")
             }
             Self::EmptyCommandLine => write!(f, "swarm prewarm command line is empty"),
+            Self::CommandLineDoesNotUseRch { command_line } => write!(
+                f,
+                "swarm prewarm command line must run Cargo through 'rch exec --', got '{}'",
+                command_line.join(" ")
+            ),
             Self::InvalidCargoTargetDirHash { hash } => write!(
                 f,
                 "swarm prewarm cargo target directory hash must be 'blake3:' followed by 64 lowercase hex characters, got '{hash}'"
@@ -10173,6 +10208,41 @@ mod tests {
                 SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
                     decision: "reject_unsafe".to_string(),
                     reason: "reject_unsafe must not carry fallback_reason"
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_requires_rch_command_line() {
+        let mut direct_cargo = prewarm_cold_start_evidence_fixture();
+        direct_cargo.command_line = vec![
+            "cargo".to_string(),
+            "test".to_string(),
+            "-p".to_string(),
+            "fcp-e2e".to_string(),
+        ];
+        assert_eq!(
+            direct_cargo.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::CommandLineDoesNotUseRch {
+                    command_line: direct_cargo.command_line
+                }
+            )
+        );
+
+        let mut missing_separator = prewarm_cold_start_evidence_fixture();
+        missing_separator.command_line = vec![
+            "rch".to_string(),
+            "exec".to_string(),
+            "cargo".to_string(),
+            "test".to_string(),
+        ];
+        assert_eq!(
+            missing_separator.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::CommandLineDoesNotUseRch {
+                    command_line: missing_separator.command_line
                 }
             )
         );

@@ -2684,6 +2684,9 @@ pub struct SwarmPrewarmLatencyPercentiles {
     pub mean_ms: u64,
 }
 
+const SYNTHETIC_PREWARM_CHECKOUT_BOUNDARY: &str =
+    "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout";
+
 /// Replayable JSONL evidence for connector prewarm cold-start behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwarmPrewarmColdStartEvidence {
@@ -2774,6 +2777,30 @@ fn validate_prewarm_execution_source(
     {
         return Err(
             SwarmPrewarmColdStartEvidenceError::SoakRequiresHostBackedSource { source_kind },
+        );
+    }
+    Ok(())
+}
+
+fn validate_prewarm_soak_boundaries(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if evidence.execution_mode != SwarmEvidenceExecutionMode::Soak {
+        return Ok(());
+    }
+
+    if evidence.host_boundary.trim() == SYNTHETIC_PREWARM_CHECKOUT_BOUNDARY {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::SoakRequiresProductionHostBoundary {
+                host_boundary: evidence.host_boundary.clone(),
+            },
+        );
+    }
+    if !evidence.sandbox_boundary.contains("fcp-sandbox") {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::SoakRequiresSandboxBoundary {
+                sandbox_boundary: evidence.sandbox_boundary.clone(),
+            },
         );
     }
     Ok(())
@@ -2961,6 +2988,7 @@ impl SwarmPrewarmColdStartEvidence {
                 return Err(SwarmPrewarmColdStartEvidenceError::EmptyField { field });
             }
         }
+        validate_prewarm_soak_boundaries(self)?;
         if self.command_line.is_empty()
             || self.command_line.iter().any(|part| part.trim().is_empty())
         {
@@ -3063,6 +3091,16 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         /// Observed source kind.
         source_kind: SwarmEvidenceSourceKind,
     },
+    /// Soak records must come through a real production host boundary.
+    SoakRequiresProductionHostBoundary {
+        /// Observed host boundary.
+        host_boundary: String,
+    },
+    /// Soak records must name a real fcp-sandbox enforcement boundary.
+    SoakRequiresSandboxBoundary {
+        /// Observed sandbox boundary.
+        sandbox_boundary: String,
+    },
     /// A required string field was empty.
     EmptyField {
         /// Field name.
@@ -3101,6 +3139,14 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
                 f,
                 "swarm prewarm soak evidence requires host-backed or live source, got '{}'",
                 source_kind.as_str()
+            ),
+            Self::SoakRequiresProductionHostBoundary { host_boundary } => write!(
+                f,
+                "swarm prewarm soak evidence requires production host boundary, got '{host_boundary}'"
+            ),
+            Self::SoakRequiresSandboxBoundary { sandbox_boundary } => write!(
+                f,
+                "swarm prewarm soak evidence requires fcp-sandbox boundary, got '{sandbox_boundary}'"
             ),
             Self::EmptyField { field } => {
                 write!(f, "swarm prewarm field '{field}' is empty")
@@ -9332,6 +9378,41 @@ mod tests {
                 }
             )
         );
+
+        let mut synthetic_host_soak = prewarm_cold_start_evidence_fixture();
+        synthetic_host_soak.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        synthetic_host_soak.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        assert_eq!(
+            synthetic_host_soak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresProductionHostBoundary {
+                    host_boundary: SYNTHETIC_PREWARM_CHECKOUT_BOUNDARY.to_string()
+                }
+            )
+        );
+
+        let mut missing_sandbox_boundary = prewarm_cold_start_evidence_fixture();
+        missing_sandbox_boundary.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        missing_sandbox_boundary.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        missing_sandbox_boundary.host_boundary =
+            "fcp-host::supervisor::ConnectorSupervisor::activate_connector".to_string();
+        missing_sandbox_boundary.sandbox_boundary = "strict-profile-limits".to_string();
+        assert_eq!(
+            missing_sandbox_boundary.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresSandboxBoundary {
+                    sandbox_boundary: "strict-profile-limits".to_string()
+                }
+            )
+        );
+
+        let mut production_soak = prewarm_cold_start_evidence_fixture();
+        production_soak.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        production_soak.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        production_soak.host_boundary =
+            "fcp-host::supervisor::ConnectorSupervisor::activate_connector".to_string();
+        production_soak.sandbox_boundary = "fcp-sandbox::strict-profile-limits".to_string();
+        assert_eq!(production_soak.validate(), Ok(()));
     }
 
     #[test]

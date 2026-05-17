@@ -101,6 +101,7 @@ fn handle_request(mut stream: TcpStream) -> FixtureObservation {
 struct TestConnector {
     connector: BitbucketConnector,
     signing_key: Ed25519SigningKey,
+    instance_id: String,
 }
 
 impl TestConnector {
@@ -118,12 +119,12 @@ impl TestConnector {
         }
         object.insert(
             "capability_token".into(),
-            serde_json::to_value(capability_token(&self.signing_key)).unwrap(),
+            serde_json::to_value(capability_token(&self.signing_key, &self.instance_id)).unwrap(),
         );
     }
 }
 
-fn capability_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+fn capability_token(signing_key: &Ed25519SigningKey, instance_id: &str) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec!["*".into()],
@@ -137,6 +138,7 @@ fn capability_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         .principal("user:local-non-mock")
         .operations(&["bitbucket.repositories.get"])
         .issuer("node:local-non-mock")
+        .target_instance(instance_id)
         .validity(now, now + ChronoDuration::hours(1))
         .try_constraints_cbor(&cbor)
         .unwrap()
@@ -164,13 +166,15 @@ async fn setup_connector(base_url: &str) -> TestConnector {
         .await
         .expect("configure connector");
     let signing_key = Ed25519SigningKey::generate();
-    connector
+    let handshake = connector
         .handle_handshake(handshake_params(&signing_key))
         .await
         .expect("handshake connector");
+    let instance_id = handshake["instance_id"].as_str().unwrap().to_string();
     TestConnector {
         connector,
         signing_key,
+        instance_id,
     }
 }
 

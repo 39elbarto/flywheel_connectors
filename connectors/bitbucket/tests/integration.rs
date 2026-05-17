@@ -27,6 +27,7 @@ use fcp_bitbucket::connector::BitbucketConnector;
 struct TestConnector {
     connector: BitbucketConnector,
     signing_key: Ed25519SigningKey,
+    instance_id: String,
 }
 
 impl Deref for TestConnector {
@@ -71,6 +72,7 @@ impl TestConnector {
             "capability_token".into(),
             serde_json::to_value(generate_token_with_cap(
                 &self.signing_key,
+                &self.instance_id,
                 capability,
                 &[operation],
             ))
@@ -99,6 +101,7 @@ fn capability_for_operation(operation: &str) -> Option<&'static str> {
 
 fn generate_token_with_cap(
     signing_key: &Ed25519SigningKey,
+    instance_id: &str,
     capability: &str,
     operations: &[&str],
 ) -> CapabilityToken {
@@ -115,6 +118,7 @@ fn generate_token_with_cap(
         .principal("user:test")
         .operations(operations)
         .issuer("node:test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .unwrap()
@@ -138,12 +142,15 @@ async fn setup_connector(mock_url: &str) -> TestConnector {
         .await
         .unwrap();
     let signing_key = Ed25519SigningKey::generate();
-    c.handle_handshake(handshake_params(&signing_key, "test"))
+    let handshake = c
+        .handle_handshake(handshake_params(&signing_key, "test"))
         .await
         .unwrap();
+    let instance_id = handshake["instance_id"].as_str().unwrap().to_string();
     TestConnector {
         connector: c,
         signing_key,
+        instance_id,
     }
 }
 
@@ -751,6 +758,27 @@ async fn error_500() {
     );
 }
 
+#[fcp_async_core::runtime::test]
+async fn error_200_empty_body_fails_closed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/user"))
+        .and(header("Authorization", "Bearer test_oauth_token"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "bitbucket.user.get",
+            "input": {}
+        }))
+        .await
+        .is_err()
+    );
+}
+
 // -- Unknown op / Simulate --
 
 #[fcp_async_core::runtime::test]
@@ -792,6 +820,7 @@ async fn invoke_wrong_capability_is_rejected() {
     let c = setup_connector(&server.uri()).await;
     let token = generate_token_with_cap(
         &c.signing_key,
+        &c.instance_id,
         "bitbucket.user.read",
         &["bitbucket.pull_requests.create"],
     );
@@ -850,6 +879,7 @@ async fn simulate_wrong_capability_is_denied() {
     let c = setup_connector(&server.uri()).await;
     let token = generate_token_with_cap(
         &c.signing_key,
+        &c.instance_id,
         "bitbucket.user.read",
         &["bitbucket.pull_requests.create"],
     );

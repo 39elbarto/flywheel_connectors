@@ -141,8 +141,10 @@ write_summary() {
       required_hosts: 3,
       host_count: length,
       hosts: .,
+      data_hashes: ([.[].data_hash // empty] | unique),
+      consensus_data_hash: (if ([.[].data_hash // empty] | unique | length) == 1 then ([.[].data_hash // empty] | unique | .[0]) else null end),
       steps_jsonl: $steps_jsonl,
-      pass_condition: "exactly three host endpoints and every host reports fwc mesh cutover-gates overall_status=green with all four gates green"
+      pass_condition: "exactly three host endpoints, every host reports fwc mesh cutover-gates overall_status=green with all four gates green, and all three payloads share the same data_hash"
     }' "${host_files[@]}" > "${SUMMARY_JSON}"
 }
 
@@ -323,6 +325,17 @@ for idx in "${!HOSTS[@]}"; do
 
   HOST_VERDICTS+=("${verdict_path}")
 done
+
+if [[ "${overall}" == "passed" ]]; then
+  unique_data_hash_count="$(jq -r '.data_hash // empty' "${HOST_VERDICTS[@]}" | sort -u | wc -l | tr -d ' ')"
+  if [[ "${unique_data_hash_count}" == "1" ]]; then
+    record_step "data_hash_consensus" "passed" "" 0 0 "" ""
+  else
+    record_step "data_hash_consensus" "failed" "green host payloads reported divergent data_hash values" 0 0 "" ""
+    overall="failed"
+    overall_reason="green host payloads reported divergent data_hash values"
+  fi
+fi
 
 write_summary "${overall}" "${overall_reason}" "${HOST_VERDICTS[@]}"
 

@@ -80,9 +80,12 @@ FCP_CUTOVER_GATE_HOSTS="http://node-a:8790,http://node-b:8790,http://node-c:8790
 The harness writes `summary.json`, `steps.jsonl`, per-host payloads, stderr
 logs, and `replay.sh` under
 `artifacts/e2e/mesh_cutover_gates_3node/<run-id>/`. Host endpoints are hashed
-in the structured logs. If no endpoints are configured, the harness exits
-successfully with a `skipped` summary; that skip artifact is evidence that no
-live 3-node proof was attempted, not evidence that the cutover gates are green.
+in the structured logs. The pass condition is stricter than three independent
+green responses: all three host payloads must also report the same `data_hash`,
+proving they agree on one cutover-gate snapshot contract. If no endpoints are
+configured, the harness exits successfully with a `skipped` summary; that skip
+artifact is evidence that no live 3-node proof was attempted, not evidence that
+the cutover gates are green.
 
 ## Common Failures
 
@@ -91,6 +94,7 @@ live 3-node proof was attempted, not evidence that the cutover gates are green.
 | All gates report `skip`. | Live mesh/audit/policy telemetry routes are unavailable to `fwc`. | Wire the missing host routes before using cutover status as a graduation signal. |
 | `live_telemetry.state = "unavailable"`. | The host-admin probe failed during evaluation, commonly because the host was down, restarting, or unreachable. | Re-run after host recovery and compare `data_hash`; the same snapshot after restart must keep the same digest. |
 | `live_telemetry.reason_code = "direct-cutover-telemetry-invalid"`. | The host returned a direct cutover-gates snapshot that did not contain exactly the four stable gate records. | Fix the `GET /rpc/mesh/cutover-gates` response before treating any gate as green. |
+| Harness fails with `green host payloads reported divergent data_hash values`. | Every host reported green gates, but the three hosts did not agree on the same snapshot digest. | Compare the per-host payloads under the artifact root and fix the stale or divergent host telemetry route before treating the run as cutover proof. |
 | One gate reports `red`. | The route exists, but the measured value misses its target. | Fix the underlying replication, quorum, or distribution issue; do not lower the target unless the zone SLO explicitly allows it. |
 | JSON schema validation fails. | The CLI output changed without a matching schema bump. | Update `crates/fwc/schemas/mesh_cutover_gates.schema.json` and the conformance test in the same change. |
 

@@ -2811,6 +2811,16 @@ const SWARM_PREWARM_COLD_START_PROMOTION_IMPROVEMENT_SCENARIOS: [&str; 3] = [
     "prewarm_concurrent_swarm_startup",
 ];
 
+const SWARM_PREWARM_REDACTION_MARKERS: [(&str, &str); 7] = [
+    ("sk-live-", "sk-live-"),
+    ("Bearer ", "Bearer token"),
+    ("super-secret-value", "super-secret-value"),
+    ("secret_seed", "secret_seed"),
+    ("private_key", "private_key"),
+    ("/Users/", "private user path"),
+    ("/private/var/", "private var path"),
+];
+
 fn validate_prewarm_execution_source(
     execution_mode: SwarmEvidenceExecutionMode,
     source_kind: SwarmEvidenceSourceKind,
@@ -2907,6 +2917,100 @@ fn validate_prewarm_required_fields(
         }
     }
     Ok(())
+}
+
+fn validate_prewarm_redaction(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if evidence.cargo_target_dir_class == "private_absolute" {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::PrivateCargoTargetDirClass {
+                cargo_target_dir_class: evidence.cargo_target_dir_class.clone(),
+            },
+        );
+    }
+
+    for (field, value) in prewarm_redaction_fields(evidence) {
+        if let Some(marker) = prewarm_sensitive_marker(value) {
+            return Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker { field, marker },
+            );
+        }
+    }
+
+    for value in &evidence.command_line {
+        if let Some(marker) = prewarm_sensitive_marker(value) {
+            return Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "command_line",
+                    marker,
+                },
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn prewarm_redaction_fields(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> [(&'static str, &str); 24] {
+    [
+        ("scenario_id", evidence.scenario_id.as_str()),
+        ("connector_id", evidence.connector_id.as_str()),
+        ("git_revision", evidence.git_revision.as_str()),
+        ("worker_id", evidence.worker_id.as_str()),
+        ("cargo_target_dir", evidence.cargo_target_dir.as_str()),
+        (
+            "cargo_target_dir_class",
+            evidence.cargo_target_dir_class.as_str(),
+        ),
+        (
+            "cargo_target_dir_hash",
+            evidence.cargo_target_dir_hash.as_str(),
+        ),
+        (
+            "connector_fixture_id",
+            evidence.connector_fixture_id.as_str(),
+        ),
+        ("host_boundary", evidence.host_boundary.as_str()),
+        ("manifest_hash", evidence.manifest_hash.as_str()),
+        ("zone", evidence.zone.as_str()),
+        ("strategy", evidence.strategy.as_str()),
+        ("pool_state", evidence.pool_state.as_str()),
+        ("admission_decision", evidence.admission_decision.as_str()),
+        ("sandbox_layer", evidence.sandbox_layer.as_str()),
+        ("sandbox_profile", evidence.sandbox_profile.as_str()),
+        ("sandbox_boundary", evidence.sandbox_boundary.as_str()),
+        ("credential_mode", evidence.credential_mode.as_str()),
+        ("error_mapping", evidence.error_mapping.as_str()),
+        ("cleanup_result", evidence.cleanup_result.as_str()),
+        (
+            "restart_reason",
+            evidence.restart_reason.as_deref().unwrap_or(""),
+        ),
+        (
+            "fallback_reason",
+            evidence.fallback_reason.as_deref().unwrap_or(""),
+        ),
+        (
+            "unsafe_rejection_reason",
+            evidence.unsafe_rejection_reason.as_deref().unwrap_or(""),
+        ),
+        ("skip_reason", evidence.skip_reason.as_deref().unwrap_or("")),
+    ]
+}
+
+fn prewarm_sensitive_marker(value: &str) -> Option<&'static str> {
+    for (needle, marker) in SWARM_PREWARM_REDACTION_MARKERS {
+        if value.contains(needle) {
+            return Some(marker);
+        }
+    }
+    if value.contains("Bearer\t") || value.contains("Bearer\n") || value.contains("Bearer\r") {
+        return Some("Bearer token");
+    }
+    None
 }
 
 fn validate_prewarm_command_and_target(
@@ -3336,6 +3440,7 @@ impl SwarmPrewarmColdStartEvidence {
         }
         validate_prewarm_execution_source(self.execution_mode, self.source_kind)?;
         validate_prewarm_required_fields(self)?;
+        validate_prewarm_redaction(self)?;
         validate_prewarm_soak_boundaries(self)?;
         validate_prewarm_command_and_target(self)?;
         validate_prewarm_latency(self)?;
@@ -3624,6 +3729,18 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         /// Cleanup result label attached to the record.
         cleanup_result: String,
     },
+    /// Cargo target directory was classified as a private absolute path.
+    PrivateCargoTargetDirClass {
+        /// Observed target directory class.
+        cargo_target_dir_class: String,
+    },
+    /// Evidence contained a marker that must be redacted before export.
+    SensitiveRedactionMarker {
+        /// Field that contained the marker.
+        field: &'static str,
+        /// Stable marker class.
+        marker: &'static str,
+    },
     /// A required resource field was absent or zero.
     MissingResourceMeasurement {
         /// Field name.
@@ -3713,6 +3830,16 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
             } => write!(
                 f,
                 "swarm prewarm scenario '{scenario_id}' requires cleanup_result='verified', got '{cleanup_result}'"
+            ),
+            Self::PrivateCargoTargetDirClass {
+                cargo_target_dir_class,
+            } => write!(
+                f,
+                "swarm prewarm cargo target directory class must be export-safe, got '{cargo_target_dir_class}'"
+            ),
+            Self::SensitiveRedactionMarker { field, marker } => write!(
+                f,
+                "swarm prewarm field '{field}' contains unredacted marker '{marker}'"
             ),
             Self::MissingResourceMeasurement { field } => {
                 write!(f, "swarm prewarm resource field '{field}' is missing")
@@ -10309,6 +10436,51 @@ mod tests {
                 scenario_id: "prewarm_warm_hit".to_string(),
                 cleanup_result: "pending".to_string()
             })
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_rejects_unredacted_fields() {
+        let mut live_token_leak = prewarm_cold_start_evidence_fixture();
+        live_token_leak.credential_mode = "deferred Bearer sk-live-example".to_string();
+        assert_eq!(
+            live_token_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "credential_mode",
+                    marker: "sk-live-"
+                }
+            )
+        );
+
+        let mut command_leak = prewarm_cold_start_evidence_fixture();
+        command_leak
+            .command_line
+            .push("TOKEN=Bearer\tsecret".to_string());
+        assert_eq!(
+            command_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "command_line",
+                    marker: "Bearer token"
+                }
+            )
+        );
+
+        let mut private_target_dir = prewarm_cold_start_evidence_fixture();
+        private_target_dir.cargo_target_dir = "/Users/alice/fcp-target".to_string();
+        private_target_dir.cargo_target_dir_class = "private_absolute".to_string();
+        private_target_dir.cargo_target_dir_hash = format!(
+            "blake3:{}",
+            blake3::hash(private_target_dir.cargo_target_dir.as_bytes()).to_hex()
+        );
+        assert_eq!(
+            private_target_dir.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::PrivateCargoTargetDirClass {
+                    cargo_target_dir_class: "private_absolute".to_string()
+                }
+            )
         );
     }
 

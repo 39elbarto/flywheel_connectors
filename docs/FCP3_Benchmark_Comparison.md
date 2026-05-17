@@ -92,8 +92,10 @@ evidence row must also keep p50 <= p95 <= p99 for both current and baseline
 latency, and current activation latency must not exceed the matching on-demand
 baseline. The top-level improvement fields must match baseline-minus-current
 latency exactly, and each row must explicitly set
-`shutdown_cleanup_verified=true` with `cleanup_result="verified"`. The
-verifier's `validation.json`
+`shutdown_cleanup_verified=true` with `cleanup_result="verified"`. The typed
+validator and shell verifier also reject unredacted live-token, bearer,
+private-key, secret-seed, private-user-path, and `private_absolute` target-dir
+evidence before export. The verifier's `validation.json`
 also records a latency summary with the worst current p50/p95/p99, worst
 baseline p50/p95/p99, minimum per-percentile improvement, and any scenarios
 with no p99 improvement, plus the observed execution/source classes and

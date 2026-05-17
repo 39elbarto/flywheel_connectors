@@ -1918,7 +1918,7 @@ Built with:
 - [blake3](https://github.com/BLAKE3-team/BLAKE3) — fast cryptographic hashing.
 - [coset](https://github.com/google/coset) — COSE token construction and verification.
 - [ciborium](https://github.com/enarx/ciborium) — CBOR serialization.
-- [raptorq](https://github.com/cberner/raptorq) — fountain code encoding/decoding.
+- An in-tree RaptorQ codec in `crates/fcp-raptorq/` (RFC 6330) — fountain code encoding, decoding, and repair.
 - [reqwest](https://github.com/seanmonstar/reqwest) — HTTP client for connector API calls.
 - [wiremock](https://github.com/LukeMathWalker/wiremock-rs) — HTTP mocking across the workspace test suite.
 - [parking_lot](https://github.com/Amanieu/parking_lot) — Mutex/RwLock with built-in cycle detector.

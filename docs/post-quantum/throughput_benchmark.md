@@ -391,7 +391,10 @@ matrix artifact contract requires exactly one record for the two successful
 primitive profiles plus each public-tail, binding, seed, route, and unsupported
 custom-profile denial. The SamplePre/Verify artifact contract requires the
 success, forged-equation, wrong-norm, wrong-zone, wrong-period, malformed
-preimage, and outside-period scenarios for both profiles. Its summary record
+preimage, and outside-period scenarios for both profiles. The crypto and policy
+formal correspondence contracts require exactly one record for each supported
+profile, exact theorem and assumption ID vectors, and all correspondence check
+booleans set to true. The gauntlet summary record
 must also enumerate the exact expected profile, scenario, theorem, assumption,
 and benchmark sets plus stable error mapping and cleanup fields before the
 script can print reusable evidence.

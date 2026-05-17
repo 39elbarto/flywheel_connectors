@@ -626,15 +626,44 @@ validate_artifact_contracts() {
         type == "string" and test("^hash:[0-9a-f]{64}$");
       def optional_hex_hash:
         . == null or hex_hash;
+      def required_formal_profiles:
+        [
+          "SMALL_TEST",
+          "V4_REFERENCE"
+        ];
+      def required_formal_theorem_names:
+        [
+          "Fcp.Invariants.LatticeDelegation.lattice_delegation_chain_corruption_rejected",
+          "Fcp.Invariants.LatticeDelegation.lattice_delegation_sis_assumption_boundary_complete",
+          "Fcp.Invariants.LatticeDelegation.lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions"
+        ];
+      def required_formal_assumption_ids:
+        [
+          "FCP-PQ-SIS-HARDNESS-V1",
+          "FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1",
+          "FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1",
+          "FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1",
+          "FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1",
+          "FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"
+        ];
+      def formal_profile_ids:
+        map(.parameter_profile);
       length > 0 and
+      ((formal_profile_ids | sort) == (required_formal_profiles | sort)) and
       all(.[]; type == "object" and
-        (.schema | type == "string") and
+        .schema == "fcp.crypto_pq.lattice_formal_correspondence.v1" and
         (.command_line | type == "string") and
         (.git_revision | type == "string") and
-        (.theorem_names | type == "array" and length > 0) and
-        (.assumption_ids | type == "array" and length > 0) and
+        (.theorem_names |
+          if type == "array" then
+            (sort == (required_formal_theorem_names | sort))
+          else false end) and
+        (.assumption_ids |
+          if type == "array" then
+            (sort == (required_formal_assumption_ids | sort))
+          else false end) and
         (.fixture_id_hash | tagged_hash) and
-        (.fixture_category | type == "string") and
+        .fixture_category == "deterministic-public-correspondence" and
         (.parameter_profile | type == "string") and
         (.primitive_route_id | type == "string") and
         (.primitive_route_revision | type == "number") and
@@ -647,27 +676,62 @@ validate_artifact_contracts() {
         (.public_material_summary.material_digest_hex | optional_hex_hash) and
         (.matrix_dimensions | type == "object") and
         (.checks | type == "object") and
+        .checks.public_material_reconstruction == true and
+        .checks.route_profile_domain_separation == true and
+        .checks.operation_principal_domain_separation == true and
+        .checks.malformed_public_header_rejected == true and
+        .checks.malformed_tail_coefficients_rejected == true and
+        .checks.stale_route_revision_rejected == true and
+        .checks.unsupported_profile_rejected == true and
         (.artifact_hashes | type == "object") and
         (.artifact_hashes.public_seed_hash_hex | hex_hash) and
         (.artifact_hashes.public_material_digest_hex | optional_hex_hash) and
         (.duration_ms | type == "number") and
-        (.result | type == "string") and
-        has("skip_reason")) and
-      any(.[]; (.theorem_names | index("Fcp.Invariants.LatticeDelegation.lattice_delegation_sis_assumption_boundary_complete")) != null) and
-      any(.[]; (.assumption_ids | index("FCP-PQ-SIS-HARDNESS-V1")) != null)
+        .result == "passed" and
+        has("skip_reason") and
+        .skip_reason == null)
     '
 
   validate_jsonl_contract "validate_policy_formal_contract" \
     "target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl" '
       def hex_hash:
         type == "string" and test("^[0-9a-f]{64}$");
+      def required_formal_profiles:
+        [
+          "SMALL_TEST",
+          "V4_REFERENCE"
+        ];
+      def required_formal_theorem_names:
+        [
+          "Fcp.Invariants.LatticeDelegation.lattice_delegation_chain_corruption_rejected",
+          "Fcp.Invariants.LatticeDelegation.lattice_delegation_sis_assumption_boundary_complete",
+          "Fcp.Invariants.LatticeDelegation.lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions"
+        ];
+      def required_formal_assumption_ids:
+        [
+          "FCP-PQ-SIS-HARDNESS-V1",
+          "FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1",
+          "FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1",
+          "FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1",
+          "FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1",
+          "FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"
+        ];
+      def formal_profile_ids:
+        map(.parameter_profile);
       length > 0 and
+      ((formal_profile_ids | sort) == (required_formal_profiles | sort)) and
       all(.[]; type == "object" and
-        (.schema | type == "string") and
+        .schema == "fcp.policy.lattice_formal_correspondence.v1" and
         (.command_line | type == "string") and
         (.git_revision | type == "string") and
-        (.theorem_names | type == "array" and length > 0) and
-        (.assumption_ids | type == "array" and length > 0) and
+        (.theorem_names |
+          if type == "array" then
+            (sort == (required_formal_theorem_names | sort))
+          else false end) and
+        (.assumption_ids |
+          if type == "array" then
+            (sort == (required_formal_assumption_ids | sort))
+          else false end) and
         (.fixture_id_hash | hex_hash) and
         (.parameter_profile | type == "string") and
         (.route_revision | type == "number") and
@@ -679,11 +743,19 @@ validate_artifact_contracts() {
         (.trust_set_id_hash | hex_hash) and
         (.request_descriptor_hash | hex_hash) and
         (.checks | type == "object") and
+        .checks.zone_period_public_key_shape == true and
+        .checks.delegation_certificate_claims == true and
+        .checks.operation_binding_rejected == true and
+        .checks.principal_binding_rejected == true and
+        .checks.request_binding_rejected == true and
+        .checks.dispatcher_enforcement_checks == true and
+        .checks.trust_set_replay_denied == true and
+        .checks.stale_route_revision_rejected == true and
+        .checks.certificate_envelope_rejected == true and
         (.duration_ms | type == "number") and
-        (.result | type == "string") and
-        has("skip_reason")) and
-      any(.[]; (.assumption_ids | index("FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1")) != null) and
-      any(.[]; .checks.dispatcher_enforcement_checks == true and .checks.trust_set_replay_denied == true)
+        .result == "passed" and
+        has("skip_reason") and
+        .skip_reason == null)
     '
 
   validate_jsonl_contract "validate_host_dispatcher_contract" \
@@ -742,7 +814,7 @@ validate_artifact_contracts() {
     '
 
   append_json "jsonl_contract_validation" "pass" "$(jq -cn \
-    '{validated_artifacts:["target/fcp-crypto-pq/representation-profile-evidence.jsonl","target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl","target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl","target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl","target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl","target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl","target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"],required_representation_profiles:["SMALL_TEST","V4_REFERENCE"],representation_profile_cardinality:"exactly_once",required_route_scenarios:["passed:SMALL_TEST","passed:V4_REFERENCE","denied:malformed root basis","denied:malformed child basis","denied:wrong parent","denied:wrong zone","denied:wrong period","denied:wrong parameter profile","denied:unsupported custom profile","denied:fixture-only trapdoor used on production route"],route_scenario_cardinality:"exactly_once",required_public_matrix_scenarios:["passed:SMALL_TEST","passed:V4_REFERENCE","denied:malformed public tail","denied:wrong public binding hash","denied:wrong public seed","denied:wrong route revision","denied:V4 malformed public tail","denied:V4 wrong public binding hash","denied:V4 wrong public seed","denied:V4 wrong route revision","denied:unsupported custom profile"],public_matrix_scenario_cardinality:"exactly_once",sample_pre_scenario_cardinality:"exactly_once_per_profile",required_host_scenarios:["allow_v4_reference","deny_forged_v4_reference","deny_trust_set_replay_v4_reference","deny_mismatched_operation","deny_mismatched_principal"],host_scenario_cardinality:"exactly_once",required_assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1"],cleanup_result:"not_applicable"}')"
+    '{validated_artifacts:["target/fcp-crypto-pq/representation-profile-evidence.jsonl","target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl","target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl","target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl","target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl","target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl","target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"],required_representation_profiles:["SMALL_TEST","V4_REFERENCE"],representation_profile_cardinality:"exactly_once",required_route_scenarios:["passed:SMALL_TEST","passed:V4_REFERENCE","denied:malformed root basis","denied:malformed child basis","denied:wrong parent","denied:wrong zone","denied:wrong period","denied:wrong parameter profile","denied:unsupported custom profile","denied:fixture-only trapdoor used on production route"],route_scenario_cardinality:"exactly_once",required_public_matrix_scenarios:["passed:SMALL_TEST","passed:V4_REFERENCE","denied:malformed public tail","denied:wrong public binding hash","denied:wrong public seed","denied:wrong route revision","denied:V4 malformed public tail","denied:V4 wrong public binding hash","denied:V4 wrong public seed","denied:V4 wrong route revision","denied:unsupported custom profile"],public_matrix_scenario_cardinality:"exactly_once",sample_pre_scenario_cardinality:"exactly_once_per_profile",required_formal_profiles:["SMALL_TEST","V4_REFERENCE"],formal_profile_cardinality:"exactly_once_per_formal_artifact",required_formal_theorem_names:["Fcp.Invariants.LatticeDelegation.lattice_delegation_chain_corruption_rejected","Fcp.Invariants.LatticeDelegation.lattice_delegation_sis_assumption_boundary_complete","Fcp.Invariants.LatticeDelegation.lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions"],required_formal_assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1","FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1","FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1","FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"],crypto_formal_check_cardinality:"all_true_per_profile",policy_formal_check_cardinality:"all_true_per_profile",required_host_scenarios:["allow_v4_reference","deny_forged_v4_reference","deny_trust_set_replay_v4_reference","deny_mismatched_operation","deny_mismatched_principal"],host_scenario_cardinality:"exactly_once",cleanup_result:"not_applicable"}')"
 }
 
 validate_gauntlet_contract() {

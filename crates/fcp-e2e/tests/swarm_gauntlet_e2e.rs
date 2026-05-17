@@ -46,6 +46,7 @@ use fcp_testkit::evidence_helpers::{
     SwarmRunEnvironment, SwarmStatisticalGateInput, SwarmStatisticalGateOutcome,
     SwarmStatisticalGateReasonKind, SwarmStatisticalGateReport, SwarmStatisticalGateTuning,
     SwarmStatisticalTraceQuality, SwarmWorkloadKind,
+    validate_swarm_prewarm_cold_start_evidence_bundle,
 };
 use serde_json::{Value, json};
 
@@ -1528,6 +1529,7 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
         })?,
     ];
 
+    validate_swarm_prewarm_cold_start_evidence_bundle(&evidence, false)?;
     let records = evidence
         .into_iter()
         .map(|record| -> Result<Value, Box<dyn Error>> {
@@ -1598,7 +1600,10 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
         .as_str()
         .ok_or("cargo target dir should be recorded")?;
     assert!(!cargo_target_dir.is_empty());
-    assert_eq!(warm_hit["cargo_target_dir_class"], "tmp");
+    assert_eq!(
+        warm_hit["cargo_target_dir_class"],
+        prewarm_cargo_target_dir_class(cargo_target_dir)
+    );
     assert!(
         warm_hit["cargo_target_dir_hash"]
             .as_str()

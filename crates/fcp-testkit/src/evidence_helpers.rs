@@ -2792,6 +2792,25 @@ pub struct SwarmPrewarmColdStartEvidence {
     pub shutdown_cleanup_verified: bool,
 }
 
+const SWARM_PREWARM_COLD_START_REQUIRED_SCENARIOS: [&str; 10] = [
+    "prewarm_empty_pool",
+    "prewarm_warm_hit",
+    "prewarm_stale_entry",
+    "prewarm_crash_before_checkout",
+    "prewarm_shutdown_cleanup",
+    "prewarm_concurrent_swarm_startup",
+    "prewarm_exhausted_under_burst",
+    "prewarm_sandbox_limits_unavailable",
+    "prewarm_checkout_cancelled_before_admit",
+    "prewarm_zygote_rejected_without_security_proof",
+];
+
+const SWARM_PREWARM_COLD_START_PROMOTION_IMPROVEMENT_SCENARIOS: [&str; 3] = [
+    "prewarm_warm_hit",
+    "prewarm_shutdown_cleanup",
+    "prewarm_concurrent_swarm_startup",
+];
+
 fn validate_prewarm_execution_source(
     execution_mode: SwarmEvidenceExecutionMode,
     source_kind: SwarmEvidenceSourceKind,
@@ -2949,10 +2968,7 @@ fn validate_prewarm_latency(
 }
 
 fn is_prewarm_promotion_improvement_scenario(scenario_id: &str) -> bool {
-    matches!(
-        scenario_id,
-        "prewarm_warm_hit" | "prewarm_shutdown_cleanup" | "prewarm_concurrent_swarm_startup"
-    )
+    SWARM_PREWARM_COLD_START_PROMOTION_IMPROVEMENT_SCENARIOS.contains(&scenario_id)
 }
 
 fn validate_prewarm_production_improvement(
@@ -3325,6 +3341,166 @@ impl SwarmPrewarmColdStartEvidence {
         put_prewarm_runtime_json(&mut record, self)?;
         put_prewarm_json(&mut record, "evidence", serde_json::to_value(self)?)?;
         Ok(Value::Object(record))
+    }
+}
+
+/// Validate a complete connector prewarm cold-start evidence bundle.
+///
+/// # Errors
+///
+/// Returns [`SwarmPrewarmColdStartEvidenceBundleError`] when any row is invalid,
+/// a required scenario is missing, a scenario is duplicated, or production-soak
+/// evidence is required but the bundle still contains smoke/offline records.
+pub fn validate_swarm_prewarm_cold_start_evidence_bundle(
+    records: &[SwarmPrewarmColdStartEvidence],
+    require_production_soak: bool,
+) -> Result<(), SwarmPrewarmColdStartEvidenceBundleError> {
+    if records.is_empty() {
+        return Err(SwarmPrewarmColdStartEvidenceBundleError::EmptyBundle);
+    }
+
+    let mut seen = BTreeSet::new();
+    for record in records {
+        record.validate().map_err(|source| {
+            SwarmPrewarmColdStartEvidenceBundleError::InvalidRecord {
+                scenario_id: record.scenario_id.clone(),
+                source,
+            }
+        })?;
+
+        if !SWARM_PREWARM_COLD_START_REQUIRED_SCENARIOS.contains(&record.scenario_id.as_str()) {
+            return Err(
+                SwarmPrewarmColdStartEvidenceBundleError::UnexpectedScenario {
+                    scenario_id: record.scenario_id.clone(),
+                },
+            );
+        }
+
+        if !seen.insert(record.scenario_id.clone()) {
+            return Err(
+                SwarmPrewarmColdStartEvidenceBundleError::DuplicateScenario {
+                    scenario_id: record.scenario_id.clone(),
+                },
+            );
+        }
+
+        if require_production_soak
+            && (record.execution_mode != SwarmEvidenceExecutionMode::Soak
+                || !matches!(
+                    record.source_kind,
+                    SwarmEvidenceSourceKind::HostBacked | SwarmEvidenceSourceKind::Live
+                ))
+        {
+            return Err(
+                SwarmPrewarmColdStartEvidenceBundleError::ProductionSoakRequired {
+                    scenario_id: record.scenario_id.clone(),
+                    execution_mode: record.execution_mode,
+                    source_kind: record.source_kind,
+                },
+            );
+        }
+    }
+
+    for scenario_id in SWARM_PREWARM_COLD_START_REQUIRED_SCENARIOS {
+        if !seen.contains(scenario_id) {
+            return Err(SwarmPrewarmColdStartEvidenceBundleError::MissingScenario { scenario_id });
+        }
+    }
+
+    Ok(())
+}
+
+/// Validation error for complete prewarm cold-start evidence bundles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwarmPrewarmColdStartEvidenceBundleError {
+    /// The bundle did not contain any evidence rows.
+    EmptyBundle,
+    /// A single evidence row failed validation.
+    InvalidRecord {
+        /// Scenario associated with the invalid row.
+        scenario_id: String,
+        /// Underlying row validation error.
+        source: SwarmPrewarmColdStartEvidenceError,
+    },
+    /// A required scenario was absent.
+    MissingScenario {
+        /// Missing scenario id.
+        scenario_id: &'static str,
+    },
+    /// A scenario appeared more than once.
+    DuplicateScenario {
+        /// Duplicated scenario id.
+        scenario_id: String,
+    },
+    /// The bundle contained a scenario outside the required prewarm contract.
+    UnexpectedScenario {
+        /// Unexpected scenario id.
+        scenario_id: String,
+    },
+    /// Final acceptance was requested but a row was not production-soak evidence.
+    ProductionSoakRequired {
+        /// Scenario associated with the invalid row.
+        scenario_id: String,
+        /// Observed execution mode.
+        execution_mode: SwarmEvidenceExecutionMode,
+        /// Observed source kind.
+        source_kind: SwarmEvidenceSourceKind,
+    },
+}
+
+impl fmt::Display for SwarmPrewarmColdStartEvidenceBundleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyBundle => write!(f, "swarm prewarm evidence bundle is empty"),
+            Self::InvalidRecord {
+                scenario_id,
+                source,
+            } => write!(
+                f,
+                "swarm prewarm scenario '{scenario_id}' failed validation: {source}"
+            ),
+            Self::MissingScenario { scenario_id } => {
+                write!(
+                    f,
+                    "swarm prewarm evidence bundle is missing scenario '{scenario_id}'"
+                )
+            }
+            Self::DuplicateScenario { scenario_id } => {
+                write!(
+                    f,
+                    "swarm prewarm evidence bundle duplicates scenario '{scenario_id}'"
+                )
+            }
+            Self::UnexpectedScenario { scenario_id } => {
+                write!(
+                    f,
+                    "swarm prewarm evidence bundle contains unexpected scenario '{scenario_id}'"
+                )
+            }
+            Self::ProductionSoakRequired {
+                scenario_id,
+                execution_mode,
+                source_kind,
+            } => write!(
+                f,
+                "swarm prewarm scenario '{scenario_id}' must be production soak evidence, got mode '{}' and source '{}'",
+                execution_mode.as_str(),
+                source_kind.as_str()
+            ),
+        }
+    }
+}
+
+impl Error for SwarmPrewarmColdStartEvidenceBundleError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidRecord { source, .. } => Some(source),
+            Self::EmptyBundle
+            | Self::MissingScenario { .. }
+            | Self::DuplicateScenario { .. }
+            | Self::UnexpectedScenario { .. }
+            | Self::ProductionSoakRequired { .. } => None,
+        }
     }
 }
 
@@ -9573,6 +9749,138 @@ mod tests {
         }
     }
 
+    fn prewarm_bundle_record(
+        scenario_id: &str,
+        pool_state: &str,
+        admission_decision: &str,
+        warm_checkout: bool,
+        fallback_reason: Option<&str>,
+        unsafe_rejection_reason: Option<&str>,
+    ) -> SwarmPrewarmColdStartEvidence {
+        let mut record = prewarm_cold_start_evidence_fixture();
+        record.scenario_id = scenario_id.to_string();
+        record.pool_state = pool_state.to_string();
+        record.admission_decision = admission_decision.to_string();
+        record.warm_checkout = warm_checkout;
+        record.fallback_reason = fallback_reason.map(str::to_string);
+        record.unsafe_rejection_reason = unsafe_rejection_reason.map(str::to_string);
+        record
+    }
+
+    fn prewarm_cold_start_bundle_fixture() -> Vec<SwarmPrewarmColdStartEvidence> {
+        let mut crash = prewarm_bundle_record(
+            "prewarm_crash_before_checkout",
+            "crash_before_checkout",
+            "fallback_on_demand",
+            false,
+            Some("crash_before_checkout"),
+            None,
+        );
+        crash.restart_reason = Some("exit_code_1".to_string());
+
+        let mut concurrent = prewarm_bundle_record(
+            "prewarm_concurrent_swarm_startup",
+            "warm_hit",
+            "admit_warm",
+            true,
+            None,
+            None,
+        );
+        concurrent.concurrent_startups = 10_000;
+        concurrent.process_count = 256;
+
+        let mut exhausted = prewarm_bundle_record(
+            "prewarm_exhausted_under_burst",
+            "empty",
+            "fallback_on_demand",
+            false,
+            Some("empty_pool"),
+            None,
+        );
+        exhausted.concurrent_startups = 4_096;
+        exhausted.process_count = 256;
+        exhausted.skip_reason = Some("pool_exhausted_by_burst".to_string());
+
+        let mut sandbox_limits = prewarm_bundle_record(
+            "prewarm_sandbox_limits_unavailable",
+            "empty",
+            "fallback_on_demand",
+            false,
+            Some("sandbox_limits_unavailable"),
+            None,
+        );
+        sandbox_limits.sandbox_layer = "limits_unavailable".to_string();
+        sandbox_limits.skip_reason = Some("sandbox_limits_unverified".to_string());
+
+        let mut cancelled = prewarm_bundle_record(
+            "prewarm_checkout_cancelled_before_admit",
+            "starting",
+            "fallback_on_demand",
+            false,
+            Some("warm_entry_still_starting"),
+            None,
+        );
+        cancelled.skip_reason = Some("checkout_cancelled_before_admit".to_string());
+
+        vec![
+            prewarm_bundle_record(
+                "prewarm_empty_pool",
+                "empty",
+                "fallback_on_demand",
+                false,
+                Some("empty_pool"),
+                None,
+            ),
+            prewarm_bundle_record(
+                "prewarm_warm_hit",
+                "warm_hit",
+                "admit_warm",
+                true,
+                None,
+                None,
+            ),
+            prewarm_bundle_record(
+                "prewarm_stale_entry",
+                "stale",
+                "fallback_on_demand",
+                false,
+                Some("warm_entry_stale"),
+                None,
+            ),
+            crash,
+            prewarm_bundle_record(
+                "prewarm_shutdown_cleanup",
+                "warm_hit",
+                "admit_warm",
+                true,
+                None,
+                None,
+            ),
+            concurrent,
+            exhausted,
+            sandbox_limits,
+            cancelled,
+            prewarm_bundle_record(
+                "prewarm_zygote_rejected_without_security_proof",
+                "warm_hit",
+                "reject_unsafe",
+                false,
+                None,
+                Some("zygote_without_security_proof"),
+            ),
+        ]
+    }
+
+    fn promote_prewarm_bundle_to_production_soak(records: &mut [SwarmPrewarmColdStartEvidence]) {
+        for record in records {
+            record.execution_mode = SwarmEvidenceExecutionMode::Soak;
+            record.source_kind = SwarmEvidenceSourceKind::HostBacked;
+            record.host_boundary =
+                "fcp-host::supervisor::ConnectorSupervisor::activate_connector".to_string();
+            record.sandbox_boundary = "fcp-sandbox::strict-profile-limits".to_string();
+        }
+    }
+
     #[test]
     fn swarm_prewarm_cold_start_evidence_serializes_required_jsonl_fields()
     -> Result<(), Box<dyn Error>> {
@@ -9986,6 +10294,91 @@ mod tests {
             "fcp-host::supervisor::ConnectorSupervisor::activate_connector".to_string();
         production_soak.sandbox_boundary = "fcp-sandbox::strict-profile-limits".to_string();
         assert_eq!(production_soak.validate(), Ok(()));
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_bundle_enforces_exact_scenario_set() {
+        let bundle = prewarm_cold_start_bundle_fixture();
+        assert_eq!(
+            validate_swarm_prewarm_cold_start_evidence_bundle(&bundle, false),
+            Ok(())
+        );
+
+        assert_eq!(
+            validate_swarm_prewarm_cold_start_evidence_bundle(&[], false),
+            Err(SwarmPrewarmColdStartEvidenceBundleError::EmptyBundle)
+        );
+
+        let mut missing = bundle.clone();
+        missing.retain(|record| record.scenario_id != "prewarm_stale_entry");
+        assert_eq!(
+            validate_swarm_prewarm_cold_start_evidence_bundle(&missing, false),
+            Err(SwarmPrewarmColdStartEvidenceBundleError::MissingScenario {
+                scenario_id: "prewarm_stale_entry"
+            })
+        );
+
+        let mut duplicated = bundle.clone();
+        duplicated.push(bundle[0].clone());
+        assert_eq!(
+            validate_swarm_prewarm_cold_start_evidence_bundle(&duplicated, false),
+            Err(
+                SwarmPrewarmColdStartEvidenceBundleError::DuplicateScenario {
+                    scenario_id: "prewarm_empty_pool".to_string()
+                }
+            )
+        );
+
+        let mut unexpected = bundle;
+        unexpected[0].scenario_id = "prewarm_partial_bundle".to_string();
+        assert_eq!(
+            validate_swarm_prewarm_cold_start_evidence_bundle(&unexpected, false),
+            Err(
+                SwarmPrewarmColdStartEvidenceBundleError::UnexpectedScenario {
+                    scenario_id: "prewarm_partial_bundle".to_string()
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_bundle_enforces_production_soak_mode() {
+        let mut production = prewarm_cold_start_bundle_fixture();
+        promote_prewarm_bundle_to_production_soak(&mut production);
+        assert_eq!(
+            validate_swarm_prewarm_cold_start_evidence_bundle(&production, true),
+            Ok(())
+        );
+
+        let smoke = prewarm_cold_start_bundle_fixture();
+        assert_eq!(
+            validate_swarm_prewarm_cold_start_evidence_bundle(&smoke, true),
+            Err(
+                SwarmPrewarmColdStartEvidenceBundleError::ProductionSoakRequired {
+                    scenario_id: "prewarm_empty_pool".to_string(),
+                    execution_mode: SwarmEvidenceExecutionMode::Smoke,
+                    source_kind: SwarmEvidenceSourceKind::Offline
+                }
+            )
+        );
+
+        let warm_hit = production
+            .iter_mut()
+            .find(|record| record.scenario_id == "prewarm_warm_hit")
+            .expect("bundle fixture should include warm-hit scenario");
+        warm_hit.baseline_latency.p50_ms = warm_hit.latency.p50_ms;
+        assert_eq!(
+            validate_swarm_prewarm_cold_start_evidence_bundle(&production, true),
+            Err(SwarmPrewarmColdStartEvidenceBundleError::InvalidRecord {
+                scenario_id: "prewarm_warm_hit".to_string(),
+                source: SwarmPrewarmColdStartEvidenceError::MissingProductionImprovement {
+                    scenario_id: "prewarm_warm_hit".to_string(),
+                    percentile: "p50",
+                    activation_ms: 18,
+                    baseline_ms: 18
+                }
+            })
+        );
     }
 
     #[test]

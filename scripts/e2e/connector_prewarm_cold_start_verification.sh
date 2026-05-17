@@ -91,6 +91,16 @@ mark_validation_redaction_failed() {
   fi
 }
 
+mark_validation_redaction_passed() {
+  if [[ -s "${VALIDATION_JSON}" ]]; then
+    local validation_redaction_tmp="${VALIDATION_JSON}.redaction"
+    if jq '.redaction_scan_ok = true | .redaction_scan_reason = null' \
+      "${VALIDATION_JSON}" > "${validation_redaction_tmp}"; then
+      mv "${validation_redaction_tmp}" "${VALIDATION_JSON}"
+    fi
+  fi
+}
+
 require_cmd jq
 if [[ -z "${EVIDENCE_JSONL_IN}" ]]; then
   require_cmd rch
@@ -565,6 +575,8 @@ if [[ -s "${EVIDENCE_JSONL}" ]]; then
     validation_status="failed"
     mark_validation_redaction_failed "private_absolute_target_dir"
     exit_code=1
+  else
+    mark_validation_redaction_passed
   fi
 fi
 

@@ -97,8 +97,9 @@ validator and shell verifier also require the replay command to carry the same
 `CARGO_TARGET_DIR=<cargo_target_dir>` value exported in the evidence row, and
 reject unredacted live-token, bearer, private-key, secret-seed,
 private-user-path, and `private_absolute` target-dir evidence before export;
-`validation.json` records `redaction_scan_ok=false` with a reason when that
-final scan rejects the bundle. The verifier's `validation.json`
+`validation.json` records `redaction_scan_ok=true` when that final scan passes
+or `redaction_scan_ok=false` with a reason when it rejects the bundle. The
+verifier's `validation.json`
 also records a latency summary with the worst current p50/p95/p99, worst
 baseline p50/p95/p99, minimum per-percentile improvement, and any scenarios
 with no p99 improvement, plus the observed execution/source classes and

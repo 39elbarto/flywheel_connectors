@@ -2762,7 +2762,7 @@ mod tests {
     // ===== Empty response body handling =====
 
     #[test]
-    fn handle_empty_success_body() {
+    fn handle_empty_json_success_body_fails_closed() {
         let rt = tokio_runtime();
         rt.block_on(async {
             let server = LoopbackServer::start().await;
@@ -2778,9 +2778,9 @@ mod tests {
                     "operation_id": "pg.health",
                     "input": {}
                 }))
-                .await
-                .unwrap();
-            assert!(result.get("health").is_some());
+                .await;
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("empty response body"), "{err}");
         });
     }
 

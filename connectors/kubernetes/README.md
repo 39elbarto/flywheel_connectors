@@ -128,7 +128,7 @@ The current Kubernetes README slice documents the existing runtime surface:
 - Default production host shape: `kubernetes.default.svc`.
 - Common Kubernetes API ports: `443` and `6443`.
 - TLS and SNI are required by the manifest for provider operations.
-- Manifest network policy allows cluster/private API ranges but denies tailnet ranges.
+- Manifest network policy denies localhost, private ranges, and tailnet ranges; local loopback coverage is limited to deterministic test fixtures outside production egress.
 - Runtime base URL policy accepts in-cluster service hosts and custom HTTPS API endpoints.
 - Runtime base URL policy accepts loopback hosts for deterministic tests.
 - Runtime base URL policy rejects non-loopback HTTP.

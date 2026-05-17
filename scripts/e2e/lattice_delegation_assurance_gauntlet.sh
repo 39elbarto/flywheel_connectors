@@ -674,6 +674,35 @@ validate_gauntlet_contract() {
         "deny_mismatched_operation",
         "deny_mismatched_principal"
       ];
+    def required_profile_ids:
+      [
+        "SMALL_TEST",
+        "V4_REFERENCE"
+      ];
+    def required_theorem_names:
+      [
+        "lattice_delegation_chain_corruption_rejected",
+        "lattice_delegation_sis_assumption_boundary_complete",
+        "lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions"
+      ];
+    def required_assumption_ids:
+      [
+        "FCP-PQ-SIS-HARDNESS-V1",
+        "FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1",
+        "FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1",
+        "FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1",
+        "FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1",
+        "FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"
+      ];
+    def required_benchmark_groups:
+      [
+        "trap_gen",
+        "delegate",
+        "sample_pre",
+        "verify",
+        "full_crypto_route",
+        "host_dispatcher_pipeline"
+      ];
     def required_tool_versions:
       any(.[]; .step == "tool_versions" and .result == "pass" and
         (.details.cargo | type == "string") and
@@ -758,28 +787,15 @@ validate_gauntlet_contract() {
       (.details.pre_summary_artifact_hash | sha256_hash) and
       .details.final_artifact_hash_output == "stdout:LATTICE_ASSURANCE_GAUNTLET_SHA256" and
       (.details.profile_ids | type == "array" and
-        index("SMALL_TEST") != null and
-        index("V4_REFERENCE") != null) and
+        ((. | sort) == (required_profile_ids | sort))) and
       (.details.scenario_ids | type == "array" and
         ((. | sort) == (required_host_scenarios | sort))) and
       (.details.theorem_names | type == "array" and
-        index("lattice_delegation_chain_corruption_rejected") != null and
-        index("lattice_delegation_sis_assumption_boundary_complete") != null and
-        index("lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions") != null) and
+        ((. | sort) == (required_theorem_names | sort))) and
       (.details.assumption_ids | type == "array" and
-        index("FCP-PQ-SIS-HARDNESS-V1") != null and
-        index("FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1") != null and
-        index("FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1") != null and
-        index("FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1") != null and
-        index("FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1") != null and
-        index("FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1") != null) and
+        ((. | sort) == (required_assumption_ids | sort))) and
       (.details.benchmark_groups | type == "array" and
-        index("trap_gen") != null and
-        index("delegate") != null and
-        index("sample_pre") != null and
-        index("verify") != null and
-        index("full_crypto_route") != null and
-        index("host_dispatcher_pipeline") != null) and
+        ((. | sort) == (required_benchmark_groups | sort))) and
       .details.stable_lattice_error_mapping == "covered_by_host_dispatcher_e2e" and
       (.details.cleanup_result | type == "string"))
   '

@@ -384,9 +384,9 @@ and optional material digests may only be null or exact lowercase hex. The host
 dispatcher contract applies the same strict shape to every consumed `*_hash`
 field, including the optional receipt hash when present, and requires exactly
 one record for each required dispatcher scenario. Its summary record must
-also enumerate the full expected profile, exact scenario set,
-theorem, assumption, benchmark, stable error mapping, and cleanup fields before
-the script can print reusable evidence.
+also enumerate the exact expected profile, scenario, theorem, assumption, and
+benchmark sets plus stable error mapping and cleanup fields before the script
+can print reusable evidence.
 The top-level gauntlet self-contract also requires a single consistent run id,
 git revision, target-dir class/hash, build profile, and worker host class across
 all JSONL records so reviewer evidence cannot be stitched together from

@@ -3108,6 +3108,12 @@ fn validate_prewarm_cleanup(
             },
         );
     }
+    if evidence.cleanup_result != "verified" {
+        return Err(SwarmPrewarmColdStartEvidenceError::InvalidCleanupResult {
+            scenario_id: evidence.scenario_id.clone(),
+            cleanup_result: evidence.cleanup_result.clone(),
+        });
+    }
     Ok(())
 }
 
@@ -3405,6 +3411,13 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         /// Cleanup result label attached to the record.
         cleanup_result: String,
     },
+    /// Cleanup was marked verified with a contradictory cleanup result label.
+    InvalidCleanupResult {
+        /// Scenario with an invalid cleanup result label.
+        scenario_id: String,
+        /// Cleanup result label attached to the record.
+        cleanup_result: String,
+    },
     /// A required resource field was absent or zero.
     MissingResourceMeasurement {
         /// Field name.
@@ -3482,6 +3495,13 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
             } => write!(
                 f,
                 "swarm prewarm scenario '{scenario_id}' requires verified shutdown cleanup, got '{cleanup_result}'"
+            ),
+            Self::InvalidCleanupResult {
+                scenario_id,
+                cleanup_result,
+            } => write!(
+                f,
+                "swarm prewarm scenario '{scenario_id}' requires cleanup_result='verified', got '{cleanup_result}'"
             ),
             Self::MissingResourceMeasurement { field } => {
                 write!(f, "swarm prewarm resource field '{field}' is missing")
@@ -9898,6 +9918,19 @@ mod tests {
                     cleanup_result: "not_verified".to_string()
                 }
             )
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_rejects_contradictory_cleanup_result() {
+        let mut contradictory_cleanup = prewarm_cold_start_evidence_fixture();
+        contradictory_cleanup.cleanup_result = "pending".to_string();
+        assert_eq!(
+            contradictory_cleanup.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidCleanupResult {
+                scenario_id: "prewarm_warm_hit".to_string(),
+                cleanup_result: "pending".to_string()
+            })
         );
     }
 

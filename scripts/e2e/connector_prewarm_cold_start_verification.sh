@@ -383,6 +383,7 @@ if [[ "${overall_status}" == "passed" ]]; then
         ),
         cleanup_shape_ok: all(.[];
           .shutdown_cleanup_verified == true
+          and .cleanup_result == "verified"
         ),
         boundary_shape_ok: all(.[];
           (.host_boundary | type) == "string"

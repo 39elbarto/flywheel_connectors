@@ -164,10 +164,7 @@ impl SemanticScholarClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            Ok(serde_json::from_str(&body)?)
+            decode_success_body(status, &body)
         } else {
             self.handle_error(status, resp).await
         }
@@ -358,6 +355,19 @@ fn redact_credential_id(id: &CredentialId) -> String {
     let raw = id.to_string();
     let prefix: String = raw.chars().take(8).collect();
     format!("{prefix}...redacted")
+}
+
+fn decode_success_body(status: StatusCode, body: &str) -> SemanticScholarResult<serde_json::Value> {
+    if status == StatusCode::NO_CONTENT {
+        return Ok(serde_json::json!({}));
+    }
+    if body.trim().is_empty() {
+        return Err(SemanticScholarError::Api {
+            status_code: status.as_u16(),
+            message: "empty response body".into(),
+        });
+    }
+    Ok(serde_json::from_str(body)?)
 }
 
 #[cfg(test)]
@@ -628,6 +638,38 @@ mod tests {
         let dbg = format!("{client:?}");
         assert!(dbg.contains("CredentialId"));
         assert!(!dbg.contains("550e8400-e29b-41d4-a716-446655440000"));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_empty_ok() {
+        let err = decode_success_body(StatusCode::OK, "").unwrap_err();
+        assert!(matches!(
+            err,
+            SemanticScholarError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_whitespace_ok() {
+        let err = decode_success_body(StatusCode::OK, "  \n\t").unwrap_err();
+        assert!(matches!(
+            err,
+            SemanticScholarError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_no_content() {
+        assert_eq!(
+            decode_success_body(StatusCode::NO_CONTENT, "").unwrap(),
+            serde_json::json!({})
+        );
     }
 
     // ── sanitize_path_segment tests ─────────────────────────────────

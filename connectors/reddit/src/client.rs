@@ -149,13 +149,18 @@ impl RedditClient {
     }
 
     async fn handle_response(&self, resp: Response) -> RedditResult<serde_json::Value> {
+        self.handle_response_with_empty_action(resp, false).await
+    }
+
+    async fn handle_response_with_empty_action(
+        &self,
+        resp: Response,
+        allow_empty_ok: bool,
+    ) -> RedditResult<serde_json::Value> {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(serde_json::json!({}));
-            }
-            Ok(serde_json::from_str(&body)?)
+            decode_success_body(status, &body, allow_empty_ok)
         } else {
             self.handle_error(status, resp).await
         }
@@ -214,6 +219,15 @@ impl RedditClient {
         path: &str,
         body: &[(&str, &str)],
     ) -> RedditResult<serde_json::Value> {
+        self.post_form_with_empty_action(path, body, false).await
+    }
+
+    async fn post_form_with_empty_action(
+        &self,
+        path: &str,
+        body: &[(&str, &str)],
+        allow_empty_ok: bool,
+    ) -> RedditResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %redact_url(&url), "POST form request");
         let encoded: String = body
@@ -228,7 +242,8 @@ impl RedditClient {
                 .body(encoded),
         )?;
         let resp = req.send().await?;
-        self.handle_response(resp).await
+        self.handle_response_with_empty_action(resp, allow_empty_ok)
+            .await
     }
 
     // -- Search --
@@ -384,8 +399,12 @@ impl RedditClient {
         spam: bool,
     ) -> RedditResult<serde_json::Value> {
         let spam_s = spam.to_string();
-        self.post_form("/api/remove", &[("id", thing_fullname), ("spam", &spam_s)])
-            .await
+        self.post_form_with_empty_action(
+            "/api/remove",
+            &[("id", thing_fullname), ("spam", &spam_s)],
+            true,
+        )
+        .await
     }
 
     // -- Subreddit metadata --
@@ -646,6 +665,23 @@ impl RedditClient {
     }
 }
 
+fn decode_success_body(
+    status: StatusCode,
+    body: &str,
+    allow_empty_ok: bool,
+) -> RedditResult<serde_json::Value> {
+    if status == StatusCode::NO_CONTENT || (allow_empty_ok && body.trim().is_empty()) {
+        return Ok(serde_json::json!({}));
+    }
+    if body.trim().is_empty() {
+        return Err(RedditError::Api {
+            status_code: status.as_u16(),
+            message: "empty response body".into(),
+        });
+    }
+    Ok(serde_json::from_str(body)?)
+}
+
 async fn read_media_response(
     mut resp: Response,
     max_bytes: u64,
@@ -871,6 +907,46 @@ mod tests {
     #[test]
     fn urlencoded_no_special() {
         assert_eq!(urlencoded("simple"), "simple");
+    }
+
+    #[test]
+    fn decode_success_body_rejects_empty_ok() {
+        let err = decode_success_body(StatusCode::OK, "", false).unwrap_err();
+        assert!(matches!(
+            err,
+            RedditError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_whitespace_ok() {
+        let err = decode_success_body(StatusCode::OK, "  \n\t", false).unwrap_err();
+        assert!(matches!(
+            err,
+            RedditError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_no_content() {
+        assert_eq!(
+            decode_success_body(StatusCode::NO_CONTENT, "", false).unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_action_ok() {
+        assert_eq!(
+            decode_success_body(StatusCode::OK, "", true).unwrap(),
+            serde_json::json!({})
+        );
     }
 
     #[test]

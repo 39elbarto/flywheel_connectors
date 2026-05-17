@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use fcp_async_core::{AsyncError, ExecutionContext};
 use fcp_kernel::{ConnectorId, SelfCheckReport, SelfCheckStatus};
 use fcp_policy::ZoneId;
-use futures_util::future::join_all;
+use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{ConnectorRegistry, HostError, HostResult};
@@ -327,7 +327,8 @@ where
                 });
             }
 
-            for result in join_all(futures).await {
+            let mut stream = futures_util::stream::iter(futures).buffer_unordered(16);
+            while let Some(result) = stream.next().await {
                 self_checks.push(result?);
             }
         }

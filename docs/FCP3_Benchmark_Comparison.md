@@ -95,7 +95,8 @@ latency exactly, and each row must explicitly set
 `shutdown_cleanup_verified=true` with `cleanup_result="verified"`. The typed
 validator and shell verifier also reject unredacted live-token, bearer,
 private-key, secret-seed, private-user-path, and `private_absolute` target-dir
-evidence before export. The verifier's `validation.json`
+evidence before export; `validation.json` records `redaction_scan_ok=false`
+with a reason when that final scan rejects the bundle. The verifier's `validation.json`
 also records a latency summary with the worst current p50/p95/p99, worst
 baseline p50/p95/p99, minimum per-percentile improvement, and any scenarios
 with no p99 improvement, plus the observed execution/source classes and

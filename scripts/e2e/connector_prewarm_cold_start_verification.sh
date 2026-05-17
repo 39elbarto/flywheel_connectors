@@ -79,6 +79,18 @@ require_cmd() {
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+mark_validation_redaction_failed() {
+  local reason="$1"
+  if [[ -s "${VALIDATION_JSON}" ]]; then
+    local validation_redaction_tmp="${VALIDATION_JSON}.redaction"
+    if jq --arg reason "${reason}" \
+      '.redaction_scan_ok = false | .redaction_scan_reason = $reason | .status = "failed"' \
+      "${VALIDATION_JSON}" > "${validation_redaction_tmp}"; then
+      mv "${validation_redaction_tmp}" "${VALIDATION_JSON}"
+    fi
+  fi
+}
+
 require_cmd jq
 if [[ -z "${EVIDENCE_JSONL_IN}" ]]; then
   require_cmd rch
@@ -528,11 +540,13 @@ if [[ -s "${EVIDENCE_JSONL}" ]]; then
     redaction_status="failed"
     overall_status="failed"
     validation_status="failed"
+    mark_validation_redaction_failed "secret_or_private_path_marker"
     exit_code=1
   elif jq -s -e 'any(.[]; .cargo_target_dir_class == "private_absolute")' "${EVIDENCE_JSONL}" >/dev/null; then
     redaction_status="failed"
     overall_status="failed"
     validation_status="failed"
+    mark_validation_redaction_failed "private_absolute_target_dir"
     exit_code=1
   fi
 fi

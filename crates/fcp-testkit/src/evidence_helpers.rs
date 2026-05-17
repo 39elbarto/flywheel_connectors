@@ -2888,6 +2888,11 @@ fn validate_prewarm_command_and_target(
             },
         );
     }
+    if !is_redaction_safe_blake3_hash(&evidence.manifest_hash) {
+        return Err(SwarmPrewarmColdStartEvidenceError::InvalidManifestHash {
+            hash: evidence.manifest_hash.clone(),
+        });
+    }
     Ok(())
 }
 
@@ -3168,6 +3173,11 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         /// Observed hash value.
         hash: String,
     },
+    /// Connector manifest hash did not use the expected redaction-safe form.
+    InvalidManifestHash {
+        /// Observed hash value.
+        hash: String,
+    },
     /// A latency measurement was absent or zero.
     MissingLatencyMeasurement,
     /// Percentiles were absent or out of order.
@@ -3215,6 +3225,10 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
             Self::InvalidCargoTargetDirHash { hash } => write!(
                 f,
                 "swarm prewarm cargo target directory hash must be 'blake3:' followed by 64 lowercase hex characters, got '{hash}'"
+            ),
+            Self::InvalidManifestHash { hash } => write!(
+                f,
+                "swarm prewarm manifest hash must be 'blake3:' followed by 64 lowercase hex characters, got '{hash}'"
             ),
             Self::MissingLatencyMeasurement => {
                 write!(f, "swarm prewarm latency measurement is missing")
@@ -9227,6 +9241,10 @@ mod tests {
             "blake3:{}",
             blake3::hash(cargo_target_dir.as_bytes()).to_hex()
         );
+        let manifest_hash = format!(
+            "blake3:{}",
+            blake3::hash(b"fcp-test-connector:request-response:strict-prewarm").to_hex()
+        );
         SwarmPrewarmColdStartEvidence {
             schema_version: SWARM_PREWARM_COLD_START_SCHEMA_VERSION.to_string(),
             execution_mode: SwarmEvidenceExecutionMode::Smoke,
@@ -9253,7 +9271,7 @@ mod tests {
             connector_fixture_id: "fcp-test-connector:request-response".to_string(),
             host_boundary: "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout"
                 .to_string(),
-            manifest_hash: "blake3:manifest".to_string(),
+            manifest_hash,
             zone: "z:project:swarm".to_string(),
             strategy: "warm_pool".to_string(),
             pool_state: "warm_hit".to_string(),
@@ -9344,7 +9362,11 @@ mod tests {
             record["host_boundary"],
             "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout"
         );
-        assert_eq!(record["manifest_hash"], "blake3:manifest");
+        assert!(
+            record["manifest_hash"]
+                .as_str()
+                .is_some_and(is_redaction_safe_blake3_hash)
+        );
         assert_eq!(record["zone"], "z:project:swarm");
         assert_eq!(record["pool_state"], "warm_hit");
         assert_eq!(record["pool_size"], 256);
@@ -9420,7 +9442,7 @@ mod tests {
     }
 
     #[test]
-    fn swarm_prewarm_cold_start_evidence_rejects_target_hash_and_percentiles() {
+    fn swarm_prewarm_cold_start_evidence_rejects_hashes_and_percentiles() {
         let mut bad_target_dir_hash = prewarm_cold_start_evidence_fixture();
         bad_target_dir_hash.cargo_target_dir_hash = "raw-target-dir".to_string();
         assert_eq!(
@@ -9454,6 +9476,35 @@ mod tests {
                     hash: uppercase_hash
                 }
             )
+        );
+
+        let mut bad_manifest_hash = prewarm_cold_start_evidence_fixture();
+        bad_manifest_hash.manifest_hash = "blake3:manifest".to_string();
+        assert_eq!(
+            bad_manifest_hash.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidManifestHash {
+                hash: "blake3:manifest".to_string()
+            })
+        );
+
+        let mut short_manifest_hash = prewarm_cold_start_evidence_fixture();
+        short_manifest_hash.manifest_hash = "blake3:abc123".to_string();
+        assert_eq!(
+            short_manifest_hash.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidManifestHash {
+                hash: "blake3:abc123".to_string()
+            })
+        );
+
+        let uppercase_manifest_hash =
+            "blake3:ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD".to_string();
+        let mut uppercase_manifest_hash_evidence = prewarm_cold_start_evidence_fixture();
+        uppercase_manifest_hash_evidence.manifest_hash = uppercase_manifest_hash.clone();
+        assert_eq!(
+            uppercase_manifest_hash_evidence.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidManifestHash {
+                hash: uppercase_manifest_hash
+            })
         );
 
         let mut bad_percentiles = prewarm_cold_start_evidence_fixture();

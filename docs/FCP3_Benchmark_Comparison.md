@@ -63,9 +63,9 @@ remote worker is unavailable. Remote prerequisite skips are acceptable only for
 the default deterministic smoke lane; final production-soak gating fails closed
 when host-backed or live evidence cannot be collected. Verifier validation and
 the typed `SwarmPrewarmColdStartEvidence::validate()` contract both require
-`CARGO_TARGET_DIR` provenance to carry a `blake3:<64 lowercase hex>` hash, not
-just a free-form label or prefix-only marker. Its default lane is deterministic
-smoke evidence with `execution_mode=smoke` and
+`CARGO_TARGET_DIR` provenance and connector manifest identity to carry
+`blake3:<64 lowercase hex>` hashes, not just free-form labels or prefix-only
+markers. Its default lane is deterministic smoke evidence with `execution_mode=smoke` and
 `source_kind=offline`; final production-soak acceptance must run with
 `--require-production-soak` or
 `REQUIRE_PRODUCTION_SOAK=1`, which rejects offline policy records and requires

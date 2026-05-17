@@ -431,7 +431,10 @@ result, and the RCH summary field. Non-`rch` command records must report
 and `rch_summary:null`. `rch exec` records must carry an observed `[RCH]`
 summary whose remote/local/failed classification matches the recorded fallback
 and worker execution class; unobserved or unclassified RCH summaries are not
-reusable evidence.
+reusable evidence. The same self-contract requires every named command lane in
+the gauntlet to be represented by a passing command-run record, including Lean,
+Rust test, Criterion, format, check, clippy, diff-check, and UBS lanes, so a
+partial artifact cannot pass by carrying only a summary and materialized hashes.
 The redaction scan treats raw zone, operation, and principal labels plus
 authorization headers, bearer strings, access or refresh tokens, and the host
 dispatcher fixture literals `send_message`, `agent-alpha`, and `agent-beta` as

@@ -898,6 +898,23 @@ validate_gauntlet_contract() {
         "full_crypto_route",
         "host_dispatcher_pipeline"
       ];
+    def required_command_steps:
+      [
+        "lean_lake_build",
+        "crypto_representation_profile_tests",
+        "crypto_v4_unit_tests",
+        "policy_lattice_delegation_tests",
+        "host_lattice_dispatcher_e2e",
+        "criterion_lattice_crypto_bench",
+        "rustfmt_lattice_surfaces",
+        "cargo_check_lattice_surfaces",
+        "cargo_clippy_crypto_representation",
+        "cargo_clippy_policy_lattice",
+        "cargo_clippy_host_dispatcher",
+        "bash_syntax",
+        "git_diff_check",
+        "ubs_lattice_surfaces"
+      ];
     def populated_tool_version:
       type == "string" and length > 0 and . != "unavailable";
     def required_tool_versions:
@@ -948,6 +965,12 @@ validate_gauntlet_contract() {
         .details.cache_decision == "cargo_target_dir_hashed" and
         (.details.cleanup_result | type == "string")
       else true end;
+    def required_command_steps_present:
+      . as $records |
+      all(required_command_steps[]; . as $step |
+        any($records[]; .step == $step and .result == "pass" and
+          (.details | has("command_line")) and
+          command_record_contract));
     def top_level_provenance_consistent:
       ([.[] | .run_id] | unique | length == 1) and
       ([.[] | .git_revision] | unique | length == 1) and
@@ -971,7 +994,7 @@ validate_gauntlet_contract() {
       (.details | type == "object") and
       command_record_contract) and
     required_tool_versions and
-    any(.[]; .step == "lean_lake_build" and .result == "pass") and
+    required_command_steps_present and
     any(.[]; .step == "validate_lean_ids" and .result == "pass") and
     any(.[]; .step == "jsonl_contract_validation" and .result == "pass") and
     required_artifact_hash("crypto_representation_artifact"; "target/fcp-crypto-pq/representation-profile-evidence.jsonl") and

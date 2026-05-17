@@ -135,9 +135,16 @@ test_status="passed"
 evidence_status="passed"
 validation_status="passed"
 redaction_status="passed"
+remote_proof_status="not_applicable"
+remote_proof_reason=""
+remote_proof_summary=""
 overall_status="passed"
 skip_reason=""
 exit_code=0
+
+rch_summary_line() {
+  grep -aE '\[RCH\][[:space:]]+(remote|local|failed)' "${TEST_LOG}" | tail -n 1 || true
+}
 
 if [[ -n "${EVIDENCE_JSONL_IN}" ]]; then
   if [[ ! -s "${EVIDENCE_JSONL_IN}" ]]; then
@@ -152,7 +159,7 @@ else
   echo "[connector-prewarm-cold-start] running fcp-e2e prewarm evidence lane"
   if ! (
     cd "${REPO_ROOT}"
-    env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
+    env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" RCH_VISIBILITY=verbose rch exec -- env \
       RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}" \
       CARGO_TARGET_DIR="${target_dir}" \
       PREWARM_EVIDENCE_CARGO_TARGET_DIR="${target_dir}" \
@@ -203,6 +210,27 @@ if [[ "${test_status}" == "failed" ]]; then
     overall_status="failed"
     exit_code=1
   fi
+fi
+
+if [[ -z "${EVIDENCE_JSONL_IN}" && "${test_status}" == "passed" ]]; then
+  remote_proof_summary="$(rch_summary_line)"
+  if [[ "${remote_proof_summary}" =~ \[RCH\][[:space:]]+remote ]]; then
+    remote_proof_status="passed"
+  elif [[ "${remote_proof_summary}" =~ \[RCH\][[:space:]]+local ]]; then
+    remote_proof_status="failed"
+    remote_proof_reason="rch_local_fallback_observed"
+    validation_status="failed"
+    overall_status="failed"
+    exit_code=1
+  else
+    remote_proof_status="failed"
+    remote_proof_reason="rch_remote_summary_missing"
+    validation_status="failed"
+    overall_status="failed"
+    exit_code=1
+  fi
+elif [[ -n "${EVIDENCE_JSONL_IN}" ]]; then
+  remote_proof_status="provided_evidence_not_reexecuted"
 fi
 
 if [[ "${overall_status}" == "passed" ]]; then
@@ -588,6 +616,9 @@ jq -n \
   --arg git_revision "${git_revision}" \
   --arg target_dir "${target_dir}" \
   --arg rch_require_remote "${RCH_REQUIRE_REMOTE:-1}" \
+  --arg remote_proof_status "${remote_proof_status}" \
+  --arg remote_proof_reason "${remote_proof_reason}" \
+  --arg remote_proof_summary "${remote_proof_summary}" \
   --arg evidence_jsonl_in "${EVIDENCE_JSONL_IN}" \
   --argjson require_production_soak "${require_production_soak_json}" \
   --arg generated_at "$(now_iso)" \
@@ -599,6 +630,11 @@ jq -n \
     git_revision: $git_revision,
     cargo_target_dir: $target_dir,
     rch_require_remote: $rch_require_remote,
+    remote_proof: {
+      status: $remote_proof_status,
+      reason: (if ($remote_proof_reason | length) > 0 then $remote_proof_reason else null end),
+      rch_summary: (if ($remote_proof_summary | length) > 0 then $remote_proof_summary else null end)
+    },
     evidence_jsonl_in: (if ($evidence_jsonl_in | length) > 0 then $evidence_jsonl_in else null end),
     require_production_soak: $require_production_soak,
     generated_at: $generated_at
@@ -616,6 +652,9 @@ jq -n \
   --arg evidence_status "${evidence_status}" \
   --arg validation_status "${validation_status}" \
   --arg redaction_status "${redaction_status}" \
+  --arg remote_proof_status "${remote_proof_status}" \
+  --arg remote_proof_reason "${remote_proof_reason}" \
+  --arg remote_proof_summary "${remote_proof_summary}" \
   --arg skip_reason "${skip_reason}" \
   --argjson evidence_count "${evidence_count}" \
   --arg test_log "${TEST_LOG}" \
@@ -631,6 +670,9 @@ jq -n \
     evidence_status: $evidence_status,
     validation_status: $validation_status,
     redaction_status: $redaction_status,
+    remote_proof_status: $remote_proof_status,
+    remote_proof_reason: (if ($remote_proof_reason | length) > 0 then $remote_proof_reason else null end),
+    remote_proof_summary: (if ($remote_proof_summary | length) > 0 then $remote_proof_summary else null end),
     require_production_soak: $require_production_soak,
     skip_reason: (if ($skip_reason | length) > 0 then $skip_reason else null end),
     evidence_count: $evidence_count,
@@ -643,15 +685,16 @@ jq -n \
     }
   }' > "${SUMMARY_JSON}"
 
-cat > "${REPLAY_SH}" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-cd "${REPO_ROOT}"
-RUN_ID="${RUN_ID}" OUT_ROOT="${OUT_ROOT}" RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" REQUIRE_PRODUCTION_SOAK="${REQUIRE_PRODUCTION_SOAK}" EVIDENCE_JSONL_IN="${EVIDENCE_JSONL_IN}" \\
-  bash scripts/e2e/connector_prewarm_cold_start_verification.sh \\
-  --run-id "${RUN_ID}" \\
-  --out-root "${OUT_ROOT}"
-EOF
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -euo pipefail'
+  printf 'cd %q\n' "${REPO_ROOT}"
+  printf 'RUN_ID=%q OUT_ROOT=%q RCH_REQUIRE_REMOTE=%q REQUIRE_PRODUCTION_SOAK=%q EVIDENCE_JSONL_IN=%q \\\n' \
+    "${RUN_ID}" "${OUT_ROOT}" "${RCH_REQUIRE_REMOTE:-1}" "${REQUIRE_PRODUCTION_SOAK}" "${EVIDENCE_JSONL_IN}"
+  printf '  bash scripts/e2e/connector_prewarm_cold_start_verification.sh \\\n'
+  printf '  --run-id %q \\\n' "${RUN_ID}"
+  printf '  --out-root %q\n' "${OUT_ROOT}"
+} > "${REPLAY_SH}"
 chmod +x "${REPLAY_SH}"
 
 echo "Connector prewarm cold-start artifacts written to ${OUT_ROOT}"

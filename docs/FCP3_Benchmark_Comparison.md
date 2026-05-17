@@ -59,12 +59,16 @@ sandbox-limit fallback, checkout cancellation before admit, and zygote rejection
 without a security proof.
 Run `scripts/e2e/connector_prewarm_cold_start_verification.sh` to produce the
 repeatable artifact bundle under `artifacts/e2e/connector-prewarm-cold-start/`.
-The script keeps Cargo execution behind `rch`, extracts the emitted JSONL proof,
-validates the required scenarios, and writes a structured skip artifact when a
-remote worker is unavailable. Remote prerequisite skips are acceptable only for
-the default deterministic smoke lane; final production-soak gating fails closed
-when host-backed or live evidence cannot be collected. Verifier validation and
-the typed `SwarmPrewarmColdStartEvidence::validate()` contract both require
+The script keeps Cargo execution behind `rch`, forces verbose RCH visibility,
+requires its embedded proof run to finish with an observed `[RCH] remote`
+summary, extracts the emitted JSONL proof, validates the required scenarios, and
+writes a structured skip artifact when a remote worker is unavailable. A
+successful embedded run that reports `[RCH] local` or emits no RCH summary fails
+closed instead of being reusable shared-worker evidence. Remote prerequisite
+skips are acceptable only for the default deterministic smoke lane; final
+production-soak gating fails closed when host-backed or live evidence cannot be
+collected. Verifier validation and the typed
+`SwarmPrewarmColdStartEvidence::validate()` contract both require
 `CARGO_TARGET_DIR` provenance and connector manifest identity to carry
 `blake3:<64 lowercase hex>` hashes, not just free-form labels or prefix-only
 markers. They also enforce the same admission-decision shape: `admit_warm`
@@ -99,7 +103,10 @@ reject unredacted live-token, bearer, private-key, secret-seed,
 private-user-path, and `private_absolute` target-dir evidence before export;
 `validation.json` records `redaction_scan_ok=true` when that final scan passes
 or `redaction_scan_ok=false` with a reason when it rejects the bundle. The
-verifier's `validation.json`
+verifier's environment and summary artifacts record `remote_proof_status`, the
+observed RCH summary, and any remote-proof failure reason so operators can
+distinguish remote execution from refused local fallback. The verifier's
+`validation.json`
 also records a latency summary with the worst current p50/p95/p99, worst
 baseline p50/p95/p99, minimum per-percentile improvement, and any scenarios
 with no p99 improvement, plus the observed execution/source classes and

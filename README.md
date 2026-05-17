@@ -447,7 +447,7 @@ In the target architecture every device is a MeshNode. Today the proven operator
 │  │  - Stable node ID (unforgeable WireGuard keys)                     │  │
 │  │  - Signing/encryption/issuance keys with owner attestation         │  │
 │  │  - ACL tags for zone mapping                                       │  │
-│  │  - Optional DevicePostureAttestation (TPM / Secure Enclave)        │  │
+│  │  - Optional PostureAttestation (TPM / Secure Enclave)              │  │
 │  └────────────────────────────────────────────────────────────────────┘  │
 │  ┌────────────────────────────────────────────────────────────────────┐  │
 │  │  Symbol Store                                                      │  │
@@ -523,7 +523,7 @@ New devices join the mesh through owner-signed enrollment:
 
 1. Device joins the Tailscale tailnet.
 2. Owner issues a `DeviceEnrollment` object (signed).
-3. Owner issues a `NodeKeyAttestation` binding the node to signing/encryption/issuance keys; sensitive zones may require a `DevicePostureAttestation` (TPM, Secure Enclave, Android Keystore).
+3. Owner issues a `NodeKeyAttestation` binding the node to signing/encryption/issuance keys; sensitive zones may require a `PostureAttestation` (TPM, Secure Enclave, Android Keystore).
 4. Device receives enrollment via mesh gossip.
 5. Other nodes accept the new device as peer.
 
@@ -3148,9 +3148,9 @@ A zone-level `cidr_deny` for `0.0.0.0/8` therefore cannot be relaxed by a connec
 
 ---
 
-## DevicePostureAttestation
+## PostureAttestation
 
-Sensitive zones can require hardware-backed key residency. `DevicePostureAttestation` is an owner-signed object naming the hardware modality and binding it to a `NodeKeyAttestation`. Supported modalities:
+Sensitive zones can require hardware-backed key residency. `PostureAttestation` is an owner-signed object naming the hardware modality and binding it to a `NodeKeyAttestation`. Supported modalities:
 
 | Modality | Platform | What's Attested |
 |----------|----------|-----------------|

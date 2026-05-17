@@ -513,7 +513,32 @@ validate_artifact_contracts() {
         type == "string" and test("^[0-9a-f]{64}$");
       def optional_hex_hash:
         . == null or hex_hash;
+      def required_public_matrix_scenarios:
+        [
+          "passed:SMALL_TEST",
+          "passed:V4_REFERENCE",
+          "denied:malformed public tail",
+          "denied:wrong public binding hash",
+          "denied:wrong public seed",
+          "denied:wrong route revision",
+          "denied:V4 malformed public tail",
+          "denied:V4 wrong public binding hash",
+          "denied:V4 wrong public seed",
+          "denied:V4 wrong route revision",
+          "denied:unsupported custom profile"
+        ];
+      def public_matrix_scenario_ids:
+        map(
+          if .result == "passed" and .skip_reason == null then
+            "passed:" + .parameter_profile
+          elif .result == "denied" and (.skip_reason | type == "string") then
+            "denied:" + .skip_reason
+          else
+            "invalid_public_matrix_scenario"
+          end
+        );
       length > 0 and
+      ((public_matrix_scenario_ids | sort) == (required_public_matrix_scenarios | sort)) and
       all(.[]; type == "object" and
         (.command_line | type == "string") and
         (.git_revision | type == "string") and
@@ -533,7 +558,8 @@ validate_artifact_contracts() {
         (.allocation_summary | type == "object") and
         (.timing_ms | type == "number") and
         (.result | type == "string") and
-        has("skip_reason"))
+        has("skip_reason") and
+        (.skip_reason == null or (.skip_reason | type == "string")))
     '
 
   validate_jsonl_contract "validate_crypto_sample_pre_contract" \
@@ -691,7 +717,7 @@ validate_artifact_contracts() {
     '
 
   append_json "jsonl_contract_validation" "pass" "$(jq -cn \
-    '{validated_artifacts:["target/fcp-crypto-pq/representation-profile-evidence.jsonl","target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl","target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl","target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl","target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl","target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl","target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"],required_representation_profiles:["SMALL_TEST","V4_REFERENCE"],representation_profile_cardinality:"exactly_once",required_route_scenarios:["passed:SMALL_TEST","passed:V4_REFERENCE","denied:malformed root basis","denied:malformed child basis","denied:wrong parent","denied:wrong zone","denied:wrong period","denied:wrong parameter profile","denied:unsupported custom profile","denied:fixture-only trapdoor used on production route"],route_scenario_cardinality:"exactly_once",required_host_scenarios:["allow_v4_reference","deny_forged_v4_reference","deny_trust_set_replay_v4_reference","deny_mismatched_operation","deny_mismatched_principal"],host_scenario_cardinality:"exactly_once",required_assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1"],cleanup_result:"not_applicable"}')"
+    '{validated_artifacts:["target/fcp-crypto-pq/representation-profile-evidence.jsonl","target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl","target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl","target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl","target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl","target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl","target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"],required_representation_profiles:["SMALL_TEST","V4_REFERENCE"],representation_profile_cardinality:"exactly_once",required_route_scenarios:["passed:SMALL_TEST","passed:V4_REFERENCE","denied:malformed root basis","denied:malformed child basis","denied:wrong parent","denied:wrong zone","denied:wrong period","denied:wrong parameter profile","denied:unsupported custom profile","denied:fixture-only trapdoor used on production route"],route_scenario_cardinality:"exactly_once",required_public_matrix_scenarios:["passed:SMALL_TEST","passed:V4_REFERENCE","denied:malformed public tail","denied:wrong public binding hash","denied:wrong public seed","denied:wrong route revision","denied:V4 malformed public tail","denied:V4 wrong public binding hash","denied:V4 wrong public seed","denied:V4 wrong route revision","denied:unsupported custom profile"],public_matrix_scenario_cardinality:"exactly_once",required_host_scenarios:["allow_v4_reference","deny_forged_v4_reference","deny_trust_set_replay_v4_reference","deny_mismatched_operation","deny_mismatched_principal"],host_scenario_cardinality:"exactly_once",required_assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1"],cleanup_result:"not_applicable"}')"
 }
 
 validate_gauntlet_contract() {

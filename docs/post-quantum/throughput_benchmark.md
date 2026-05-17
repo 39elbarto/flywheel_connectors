@@ -389,9 +389,12 @@ The route artifact contract likewise requires exactly one record for the two
 successful primitive profiles and each explicit denial scenario. The public
 matrix artifact contract requires exactly one record for the two successful
 primitive profiles plus each public-tail, binding, seed, route, and unsupported
-custom-profile denial. Its summary record must also enumerate the exact
-expected profile, scenario, theorem, assumption, and benchmark sets plus stable
-error mapping and cleanup fields before the script can print reusable evidence.
+custom-profile denial. The SamplePre/Verify artifact contract requires the
+success, forged-equation, wrong-norm, wrong-zone, wrong-period, malformed
+preimage, and outside-period scenarios for both profiles. Its summary record
+must also enumerate the exact expected profile, scenario, theorem, assumption,
+and benchmark sets plus stable error mapping and cleanup fields before the
+script can print reusable evidence.
 The top-level gauntlet self-contract also requires a single consistent run id,
 git revision, target-dir class/hash, build profile, and worker host class across
 all JSONL records so reviewer evidence cannot be stitched together from

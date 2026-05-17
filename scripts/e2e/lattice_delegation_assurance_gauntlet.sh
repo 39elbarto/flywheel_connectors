@@ -892,17 +892,19 @@ validate_gauntlet_contract() {
         "full_crypto_route",
         "host_dispatcher_pipeline"
       ];
+    def populated_tool_version:
+      type == "string" and length > 0 and . != "unavailable";
     def required_tool_versions:
       any(.[]; .step == "tool_versions" and .result == "pass" and
-        (.details.cargo | type == "string") and
-        (.details.rustc | type == "string") and
-        (.details.rustfmt | type == "string") and
-        (.details.clippy | type == "string") and
-        (.details.rch | type == "string") and
-        (.details.lake | type == "string") and
-        (.details.jq | type == "string") and
-        (.details.git | type == "string") and
-        (.details.ubs | type == "string") and
+        (.details.cargo | populated_tool_version) and
+        (.details.rustc | populated_tool_version) and
+        (.details.rustfmt | populated_tool_version) and
+        (.details.clippy | populated_tool_version) and
+        (.details.rch | populated_tool_version) and
+        (.details.lake | populated_tool_version) and
+        (.details.jq | populated_tool_version) and
+        (.details.git | populated_tool_version) and
+        (.details.ubs | populated_tool_version) and
         (.details.cleanup_result | type == "string"));
     def required_artifact_hash($step; $path):
       any(.[]; .step == $step and .result == "pass" and
@@ -936,16 +938,16 @@ validate_gauntlet_contract() {
       .script == "scripts/e2e/lattice_delegation_assurance_gauntlet.sh" and
       (.run_id | type == "string") and
       (.step | type == "string") and
-      (.result == "pass" or .result == "fail" or .result == "skip") and
+      .result == "pass" and
       (.git_revision | git_revision_hash) and
       (.cargo_target_dir_class | type == "string") and
       (.cargo_target_dir_hash | sha256_hash) and
       (.build_profile | type == "string") and
       (.worker_host_class | type == "string") and
       (.details | type == "object") and
-      (if .result == "skip" then (.details.skip_reason | type == "string") else true end) and
       command_record_contract) and
     required_tool_versions and
+    any(.[]; .step == "lean_lake_build" and .result == "pass") and
     any(.[]; .step == "validate_lean_ids" and .result == "pass") and
     any(.[]; .step == "jsonl_contract_validation" and .result == "pass") and
     required_artifact_hash("crypto_representation_artifact"; "target/fcp-crypto-pq/representation-profile-evidence.jsonl") and
@@ -995,6 +997,11 @@ require_command git
 require_command rch
 require_command ubs
 require_command shasum
+require_command cargo
+require_command rustc
+require_command rustfmt
+require_command clippy-driver
+require_command lake
 
 append_tool_versions
 require_known_git_revision
@@ -1022,12 +1029,7 @@ done
 append_json "validate_lean_ids" "pass" "$(jq -cn \
   '{theorem_names:["lattice_delegation_chain_corruption_rejected","lattice_delegation_sis_assumption_boundary_complete","lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions"],assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1","FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1","FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1","FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"],cleanup_result:"not_applicable"}')"
 
-if command -v lake >/dev/null 2>&1; then
-  run_and_capture "lean_lake_build" "lake build" lake build
-else
-  append_json "lean_lake_build" "skip" "$(jq -cn \
-    '{skip_reason:"lake_not_available",cleanup_result:"not_applicable"}')"
-fi
+run_and_capture "lean_lake_build" "lake build" lake build
 
 run_rch_cargo "crypto_representation_profile_tests" \
   "rch exec -- env CARGO_TARGET_DIR=<hashed> cargo test --locked -p fcp-crypto-pq --test representation_profile -- --nocapture" \

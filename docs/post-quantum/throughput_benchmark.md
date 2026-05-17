@@ -369,11 +369,13 @@ chain. It runs the Lean ID checks, Rust/Lean correspondence fixtures,
 check/clippy, `git diff --check`, UBS, artifact hashing, and redaction scans.
 Before emitting a passing summary, it also validates the generated JSONL
 contracts for required provenance fields, theorem and assumption IDs, host
-dispatcher scenarios, and stable `LATTICE_*` error mappings. A skipped Lean
-build is recorded as a skip record; Cargo-backed lanes still run through `rch`.
-The gauntlet self-contract also fails closed unless the `tool_versions` record
-contains the expected Cargo, Rust, RCH, Lean, jq, git, and UBS fields and every
-component artifact hash record names its stable artifact path with a
+dispatcher scenarios, and stable `LATTICE_*` error mappings. The Lean build is
+mandatory for reusable gauntlet evidence: a missing `lake` binary fails
+preflight instead of producing a passing artifact with a skip record. The
+gauntlet self-contract also fails closed unless every record is a passing record,
+the `tool_versions` record contains populated Cargo, Rust, RCH, Lean, jq, git,
+and UBS versions, and every component artifact hash record names its stable
+artifact path with a
 `sha256:<64 lowercase hex>` digest. Every top-level gauntlet record must also
 carry its hashed `CARGO_TARGET_DIR` provenance in the same
 `sha256:<64 lowercase hex>` shape, so a free-form target-dir label cannot pass

@@ -371,13 +371,18 @@ Before emitting a passing summary, it also validates the generated JSONL
 contracts for required provenance fields, theorem and assumption IDs, host
 dispatcher scenarios, and stable `LATTICE_*` error mappings. A skipped Lean
 build is recorded as a skip record; Cargo-backed lanes still run through `rch`.
+The gauntlet self-contract also fails closed unless the `tool_versions` record
+contains the expected Cargo, Rust, RCH, Lean, jq, git, and UBS fields and every
+component artifact hash record names its stable artifact path with a `sha256:`
+digest.
 For each `rch exec` lane the JSONL records include the observed `[RCH]` summary,
 worker execution class, and fallback decision so local fallback is visible in
 the artifact instead of being mistaken for remote proof. Remote worker failures
 are classified separately from successful remote execution.
 The redaction scan treats raw zone, operation, and principal labels plus
-authorization headers, bearer strings, and access or refresh tokens as
-case-insensitive failures.
+authorization headers, bearer strings, access or refresh tokens, and the host
+dispatcher fixture literals `send_message`, `agent-alpha`, and `agent-beta` as
+failures.
 Because the summary record is appended after the normal redaction scan, the
 script scans the finished JSONL again and requires a `final_redaction_scan`
 pass record before printing the artifact path and final hash.

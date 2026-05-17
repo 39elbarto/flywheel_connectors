@@ -374,6 +374,9 @@ scan_jsonl_artifact() {
     "preimage_bytes" \
     "raw_operation" \
     "raw_principal" \
+    "send_message" \
+    "agent-alpha" \
+    "agent-beta" \
     "provider_body" \
     "reviewer_contact"; do
     if grep -Fq "${forbidden}" "${path}"; then
@@ -621,7 +624,25 @@ validate_artifact_contracts() {
 }
 
 validate_gauntlet_contract() {
+  # shellcheck disable=SC2016 # jq variables/functions are intentionally single-quoted.
   validate_jsonl_contract "validate_gauntlet_contract" "${ARTIFACT}" '
+    def required_tool_versions:
+      any(.[]; .step == "tool_versions" and .result == "pass" and
+        (.details.cargo | type == "string") and
+        (.details.rustc | type == "string") and
+        (.details.rustfmt | type == "string") and
+        (.details.clippy | type == "string") and
+        (.details.rch | type == "string") and
+        (.details.lake | type == "string") and
+        (.details.jq | type == "string") and
+        (.details.git | type == "string") and
+        (.details.ubs | type == "string") and
+        (.details.cleanup_result | type == "string"));
+    def required_artifact_hash($step; $path):
+      any(.[]; .step == $step and .result == "pass" and
+        .details.artifact_path == $path and
+        (.details.artifact_hash | type == "string" and startswith("sha256:")) and
+        (.details.cleanup_result | type == "string"));
     length > 0 and
     all(.[]; type == "object" and
       .schema == "fcp.lattice_delegation.assurance_gauntlet.v1" and
@@ -641,9 +662,16 @@ validate_gauntlet_contract() {
         (.details.fallback_decision | type == "string") and
         (.details | has("rch_summary"))
       else true end)) and
-    any(.[]; .step == "tool_versions" and .result == "pass") and
+    required_tool_versions and
     any(.[]; .step == "validate_lean_ids" and .result == "pass") and
     any(.[]; .step == "jsonl_contract_validation" and .result == "pass") and
+    required_artifact_hash("crypto_representation_artifact"; "target/fcp-crypto-pq/representation-profile-evidence.jsonl") and
+    required_artifact_hash("crypto_route_artifact"; "target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl") and
+    required_artifact_hash("crypto_public_matrix_artifact"; "target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl") and
+    required_artifact_hash("crypto_sample_pre_artifact"; "target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl") and
+    required_artifact_hash("crypto_formal_artifact"; "target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl") and
+    required_artifact_hash("policy_formal_artifact"; "target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl") and
+    required_artifact_hash("host_dispatcher_artifact"; "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl") and
     any(.[]; .step == "redaction_scan" and .result == "pass") and
     any(.[]; .step == "final_redaction_scan" and .result == "pass") and
     any(.[]; .step == "summary" and .result == "pass" and

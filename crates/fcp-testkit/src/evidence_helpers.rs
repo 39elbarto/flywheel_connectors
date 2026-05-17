@@ -10211,6 +10211,18 @@ mod tests {
                 }
             )
         );
+
+        let mut unverified_shutdown_cleanup = prewarm_cold_start_evidence_fixture();
+        unverified_shutdown_cleanup.shutdown_cleanup_verified = false;
+        assert_eq!(
+            unverified_shutdown_cleanup.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::ShutdownCleanupUnverified {
+                    scenario_id: "prewarm_warm_hit".to_string(),
+                    cleanup_result: "verified".to_string()
+                }
+            )
+        );
     }
 
     #[test]

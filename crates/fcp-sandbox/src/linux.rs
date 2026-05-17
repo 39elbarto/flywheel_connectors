@@ -193,23 +193,102 @@ mod syscall_nr {
     pub const OPENAT: u32 = 56;
     pub const CLOSE: u32 = 57;
     pub const FSTAT: u32 = 80;
+    pub const LSEEK: u32 = 62;
     pub const EXIT: u32 = 93;
     pub const EXIT_GROUP: u32 = 94;
     pub const CLONE: u32 = 220;
+    pub const CLONE3: u32 = 435;
+    pub const WAIT4: u32 = 260;
     pub const EXECVE: u32 = 221;
     pub const EXECVEAT: u32 = 281;
     pub const MMAP: u32 = 222;
     pub const MPROTECT: u32 = 226;
     pub const MUNMAP: u32 = 215;
+    pub const MREMAP: u32 = 216;
     pub const BRK: u32 = 214;
     pub const SOCKET: u32 = 198;
     pub const CONNECT: u32 = 203;
+    pub const ACCEPT4: u32 = 242;
+    pub const BIND: u32 = 200;
+    pub const LISTEN: u32 = 201;
+    pub const SENDTO: u32 = 206;
+    pub const RECVFROM: u32 = 207;
+    pub const SENDMSG: u32 = 211;
+    pub const RECVMSG: u32 = 212;
+    pub const SHUTDOWN: u32 = 210;
+    pub const GETSOCKNAME: u32 = 204;
+    pub const GETPEERNAME: u32 = 205;
+    pub const SETSOCKOPT: u32 = 208;
+    pub const GETSOCKOPT: u32 = 209;
     pub const PTRACE: u32 = 117;
     pub const FORK: u32 = 1079; // Not available on aarch64, use clone
     pub const VFORK: u32 = 1071; // Not available on aarch64
     pub const CLOCK_GETTIME: u32 = 113;
+    pub const CLOCK_GETRES: u32 = 114;
+    pub const GETTIMEOFDAY: u32 = 169;
+    pub const NANOSLEEP: u32 = 101;
+    pub const CLOCK_NANOSLEEP: u32 = 115;
     pub const GETRANDOM: u32 = 278;
     pub const FUTEX: u32 = 98;
+    pub const EPOLL_CREATE1: u32 = 20;
+    pub const EPOLL_CTL: u32 = 21;
+    pub const EPOLL_PWAIT: u32 = 22;
+    pub const SCHED_YIELD: u32 = 124;
+    pub const TGKILL: u32 = 131;
+    pub const SET_TID_ADDRESS: u32 = 96;
+    pub const SET_ROBUST_LIST: u32 = 99;
+    pub const RSEQ: u32 = 293;
+    pub const GETPID: u32 = 172;
+    pub const GETPPID: u32 = 173;
+    pub const GETUID: u32 = 174;
+    pub const GETEUID: u32 = 175;
+    pub const GETGID: u32 = 176;
+    pub const GETEGID: u32 = 177;
+    pub const GETGROUPS: u32 = 158;
+    pub const GETRESUID: u32 = 149;
+    pub const GETRESGID: u32 = 151;
+    pub const GETPGRP: u32 = 155;
+    pub const GETPGID: u32 = 154;
+    pub const GETSID: u32 = 156;
+    pub const UNAME: u32 = 160;
+    pub const SYSINFO: u32 = 179;
+    pub const TIMES: u32 = 153;
+    pub const GETRLIMIT: u32 = 163;
+    pub const PRLIMIT64: u32 = 261;
+    pub const IOCTL: u32 = 29;
+    pub const PRCTL: u32 = 167;
+    pub const DUP: u32 = 23;
+    pub const DUP3: u32 = 24;
+    pub const PIPE2: u32 = 59;
+    pub const FCNTL: u32 = 25;
+    pub const FLOCK: u32 = 32;
+    pub const FSYNC: u32 = 82;
+    pub const FDATASYNC: u32 = 83;
+    pub const TRUNCATE: u32 = 45;
+    pub const FTRUNCATE: u32 = 46;
+    pub const GETDENTS64: u32 = 61;
+    pub const GETCWD: u32 = 17;
+    pub const CHDIR: u32 = 49;
+    pub const FCHDIR: u32 = 50;
+    pub const RENAMEAT: u32 = 38;
+    pub const MKDIRAT: u32 = 34;
+    pub const UNLINKAT: u32 = 35;
+    pub const SYMLINKAT: u32 = 36;
+    pub const READLINKAT: u32 = 78;
+    pub const FCHMOD: u32 = 52;
+    pub const FCHMODAT: u32 = 53;
+    pub const FCHOWN: u32 = 55;
+    pub const FCHOWNAT: u32 = 54;
+    pub const UMASK: u32 = 166;
+    pub const PREAD64: u32 = 67;
+    pub const PWRITE64: u32 = 68;
+    pub const READV: u32 = 65;
+    pub const WRITEV: u32 = 66;
+    pub const PPOLL: u32 = 73;
+    pub const STATX: u32 = 291;
+    pub const OPENAT2: u32 = 437;
+    pub const FACCESSAT: u32 = 48;
+    pub const FACCESSAT2: u32 = 439;
 }
 
 // ============================================================================
@@ -462,19 +541,101 @@ impl LinuxSandbox {
         let mut allowed = vec![
             READ,
             WRITE,
-            OPENAT,
             CLOSE,
             FSTAT,
-            EXIT,
-            EXIT_GROUP,
+            LSEEK,
             MMAP,
             MPROTECT,
             MUNMAP,
+            MREMAP,
             BRK,
-            CLOCK_GETTIME,
-            GETRANDOM,
+            PREAD64,
+            PWRITE64,
+            READV,
+            WRITEV,
+            PPOLL,
+            NANOSLEEP,
+            CLOCK_NANOSLEEP,
+            OPENAT,
+            OPENAT2,
+            STATX,
+            FACCESSAT,
+            FACCESSAT2,
+            GETDENTS64,
+            GETCWD,
+            READLINKAT,
+            DUP,
+            DUP3,
+            PIPE2,
+            FCNTL,
             FUTEX,
+            FLOCK,
+            FSYNC,
+            FDATASYNC,
+            GETPID,
+            GETPPID,
+            GETUID,
+            GETEUID,
+            GETGID,
+            GETEGID,
+            GETGROUPS,
+            GETRESUID,
+            GETRESGID,
+            GETPGRP,
+            GETPGID,
+            GETSID,
+            UNAME,
+            SYSINFO,
+            TIMES,
+            GETTIMEOFDAY,
+            CLOCK_GETTIME,
+            CLOCK_GETRES,
+            GETRANDOM,
+            GETRLIMIT,
+            PRLIMIT64,
+            EPOLL_CREATE1,
+            EPOLL_CTL,
+            EPOLL_PWAIT,
+            TGKILL,
+            SET_TID_ADDRESS,
+            SET_ROBUST_LIST,
+            RSEQ,
+            EXIT,
+            EXIT_GROUP,
+            SCHED_YIELD,
+            CLONE,
+            CLONE3,
+            WAIT4,
         ];
+
+        // File modification syscalls (if writable paths exist)
+        if !policy.writable_paths.is_empty() {
+            allowed.extend([
+                TRUNCATE, FTRUNCATE, RENAMEAT, MKDIRAT, UNLINKAT,
+                SYMLINKAT, FCHMOD, FCHMODAT, FCHOWN, FCHOWNAT, UMASK, CHDIR,
+                FCHDIR,
+            ]);
+        }
+
+        // Network syscalls (only if direct network is allowed)
+        if !policy.block_direct_network {
+            allowed.extend([
+                SOCKET,
+                CONNECT,
+                ACCEPT4,
+                BIND,
+                LISTEN,
+                SENDTO,
+                RECVFROM,
+                SENDMSG,
+                RECVMSG,
+                SHUTDOWN,
+                GETSOCKNAME,
+                GETPEERNAME,
+                SETSOCKOPT,
+                GETSOCKOPT,
+            ]);
+        }
 
         // Process creation syscalls (if exec is allowed)
         if !policy.deny_exec {
@@ -486,9 +647,7 @@ impl LinuxSandbox {
             allowed.push(PTRACE);
         }
 
-        // AArch64 does not have a separate IOCTL/PRCTL defined in our subset yet,
-        // so we return an empty graceful list for now.
-        let graceful = vec![];
+        let graceful = vec![IOCTL, PRCTL];
 
         (allowed, graceful)
     }

@@ -808,10 +808,67 @@ impl EgressGuard {
             });
         }
 
+        let parsed_deny: Vec<IpNet> = constraints
+            .cidr_deny
+            .iter()
+            .map(|cidr_str| {
+                cidr_str.parse::<IpNet>().map_err(|e| {
+                    warn!(cidr = %cidr_str, error = %e, "rejecting unparseable CIDR deny rule");
+                    EgressError::InvalidRequest(format!("invalid cidr_deny rule `{cidr_str}`: {e}"))
+                })
+            })
+            .collect::<Result<_, _>>()?;
+
         let mut allowed_ips = Vec::with_capacity(ips.len());
-        for ip in ips {
-            self.check_ip_constraints(*ip, constraints)?;
-            if !constraints.ip_allow.is_empty() && !ip_allow_contains(&constraints.ip_allow, *ip) {
+        for &ip in ips {
+            // Check localhost
+            if constraints.deny_localhost && is_localhost(ip) {
+                return Err(EgressError::Denied {
+                    reason: format!("localhost access denied: {ip}"),
+                    code: DenyReason::LocalhostDenied,
+                });
+            }
+
+            // Check private ranges (RFC1918)
+            if constraints.deny_private_ranges && is_private_range(ip) {
+                return Err(EgressError::Denied {
+                    reason: format!("private range access denied: {ip}"),
+                    code: DenyReason::PrivateRangeDenied,
+                });
+            }
+
+            // Check link-local (always denied with private ranges)
+            if constraints.deny_private_ranges && is_link_local(ip) {
+                return Err(EgressError::Denied {
+                    reason: format!("link-local access denied: {ip}"),
+                    code: DenyReason::LinkLocalDenied,
+                });
+            }
+
+            // Check tailnet ranges
+            if constraints.deny_tailnet_ranges && is_tailnet_range(ip) {
+                return Err(EgressError::Denied {
+                    reason: format!("tailnet range access denied: {ip}"),
+                    code: DenyReason::TailnetRangeDenied,
+                });
+            }
+
+            // Check custom CIDR deny list.
+            let check_ip = match ip {
+                IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+                IpAddr::V4(_) => ip,
+            };
+
+            for (cidr, cidr_str) in parsed_deny.iter().zip(constraints.cidr_deny.iter()) {
+                if cidr.contains(&check_ip) {
+                    return Err(EgressError::Denied {
+                        reason: format!("CIDR deny rule matched: {ip} in {cidr_str}"),
+                        code: DenyReason::CidrDenyMatched,
+                    });
+                }
+            }
+
+            if !constraints.ip_allow.is_empty() && !ip_allow_contains(&constraints.ip_allow, ip) {
                 return Err(EgressError::Denied {
                     reason: format!(
                         "resolved IP {ip} not in ip_allow (size {})",
@@ -820,7 +877,7 @@ impl EgressGuard {
                     code: DenyReason::IpNotAllowed,
                 });
             }
-            allowed_ips.push(*ip);
+            allowed_ips.push(ip);
         }
 
         Ok(allowed_ips)

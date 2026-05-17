@@ -2347,10 +2347,11 @@ mod tests {
             "fcp-wasi-missing-writable-file-{}-{unique}",
             std::process::id()
         ));
-        let missing = dir.join("state.json");
 
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let missing = dir.join("state.json");
 
         let runtime = WasiRuntime::new(WasiConfig {
             writable_paths: vec![missing.clone()],

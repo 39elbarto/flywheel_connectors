@@ -190,6 +190,7 @@ These are excluded on purpose:
 
 The deterministic integration evidence is anchored on connector-local tests covering:
 
+- local non-mock loopback acceptance for production `handle_invoke()` paths across `slack.post_message`, `slack.list_channels`, and `slack.set_channel_topic`
 - configuration, base URL policy, handshake, capability verification, simulate, introspection, health, doctor, self-check, shutdown, and counters
 - all eleven invoke operations and required-input validation
 - operation metadata, safety tier, risk, idempotency, capability metadata, and manifest drift checks
@@ -222,6 +223,7 @@ For source or behavior changes, also run the connector proof lane through `rch`:
 
 ```bash
 rch exec -- cargo test -p fcp-slack
+rch exec -- cargo test -p fcp-slack --test local_non_mock -- --nocapture
 rch exec -- cargo check -p fcp-slack --all-targets
 rch exec -- cargo clippy -p fcp-slack --all-targets -- -D warnings
 rch exec -- cargo fmt --check
@@ -232,6 +234,7 @@ rch exec -- cargo fmt --check
 - Use a bot token with only the Slack scopes required by the operations you plan to invoke.
 - Use a real app-level `xapp` token for Socket Mode; bot-token fallback is only a runtime fallback, not proof that Socket Mode will work.
 - `scripts/e2e/slack_connector_verification.sh` is the redaction-safe replay bundle for no-live-credential loopback evidence. It runs Cargo proof through `rch`, captures `SLACK_LOOPBACK_E2E_JSONL` and `SLACK_LIVE_E2E_JSONL` rows, covers Slack Events API URL verification through a host-verified connector payload, and records structured skip rows only for live Slack credential surfaces.
+- Rerun commands: `scripts/e2e/slack_connector_verification.sh`, `rch exec -- cargo test -p fcp-slack --test local_non_mock -- --nocapture`, and `scripts/graduation/run_gauntlet.sh connectors/slack`.
 - The optional live-smoke evidence lane for canary reply and mention-gating is intentionally side-effect gated. Without an operator credential lease and explicit write approval, `cargo test -p fcp-slack --test live_verification slack_live_smoke_structured_skip_jsonl -- --nocapture` emits redaction-safe `SLACK_LIVE_E2E_JSONL` skip rows and writes `target/fcp-slack/live-smoke-evidence.jsonl` unless `SLACK_LIVE_E2E_ARTIFACT` is set.
 - Treat message, file, and topic operations as high-review until approval verification is implemented.
 - Keep `monitor_policy.require_mention` enabled for public channels unless the channel is explicitly allowed for free response.

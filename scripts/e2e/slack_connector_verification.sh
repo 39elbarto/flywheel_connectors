@@ -37,7 +37,8 @@ classify_failure() {
     echo "infra_blocked"
     return
   fi
-  if grep -Eq 'No space left on device|timeout: failed to execute process|RCH-E|connection reset by peer|missing worker system package|failed to execute process|failed to get successful HTTP response from `https://index\.crates\.io/|Backend unavailable|unable to update registry `crates-io`|spurious network error' "${log_path}"; then
+  # shellcheck disable=SC2016
+  if grep -Eq 'No space left on device|timeout: failed to execute process|RCH-E|no admissible workers|remote required; refusing local fallback|no worker assigned|connection reset by peer|missing worker system package|failed to execute process|failed to get successful HTTP response from `https://index\.crates\.io/|Backend unavailable|unable to update registry `crates-io`|spurious network error' "${log_path}"; then
     echo "infra_blocked"
   else
     echo "failed"
@@ -173,6 +174,7 @@ run_governed_rch_cargo_step() {
     return
   fi
 
+  # shellcheck disable=SC2129
   write_proof_corpus "${name}" "${corpus_path}" "$@" >>"${log_path}" 2>&1
   (
     cd "${REPO_ROOT}" || exit
@@ -180,7 +182,18 @@ run_governed_rch_cargo_step() {
   ) >"${proof_json}" 2>>"${log_path}"
 
   cat "${proof_json}" >>"${log_path}"
-  classification="$(jq -r '.execution.rch_remote_proof.classification_label // "missing"' "${proof_json}" 2>>"${log_path}" || echo missing)"
+  classification="$(jq -r '
+    if .status == "error"
+      and (
+        .error.type == "unknown-command"
+        or ((.error.message // "") | test("not a valid fwc command"))
+      )
+    then
+      "infra_blocked"
+    else
+      .execution.rch_remote_proof.classification_label // "missing"
+    end
+  ' "${proof_json}" 2>>"${log_path}" || echo missing)"
   jq -r '.execution.rch_remote_proof.jsonl_record // empty' "${proof_json}" >"${proof_jsonl}" 2>>"${log_path}" || true
   status="$(governor_step_status "${classification}")"
   if [[ "${status}" != "passed" ]]; then
@@ -198,6 +211,9 @@ run_rch_cargo_step loopback_jsonl \
   SLACK_LOOPBACK_E2E_ARTIFACT="${OUT_ROOT}/evidence/loopback_policy_matrix.jsonl" \
   cargo test -p fcp-slack --test integration slack_loopback_e2e_jsonl_matrix -- --nocapture
 loopback_jsonl_status="${LAST_STEP_STATUS}"
+run_rch_cargo_step local_non_mock_acceptance \
+  cargo test -p fcp-slack --test local_non_mock -- --nocapture
+local_non_mock_status="${LAST_STEP_STATUS}"
 run_rch_cargo_step socket_policy \
   cargo test -p fcp-slack --test integration socket_mode_ -- --nocapture
 socket_policy_status="${LAST_STEP_STATUS}"
@@ -207,9 +223,9 @@ run_rch_cargo_step live_smoke_skip_jsonl \
   cargo test -p fcp-slack --test live_verification slack_live_smoke_structured_skip_jsonl -- --nocapture
 live_skip_status="${LAST_STEP_STATUS}"
 run_rch_cargo_step clippy \
-  cargo clippy -p fcp-slack --test integration --test live_verification --no-deps -- -D warnings
+  cargo clippy -p fcp-slack --test integration --test live_verification --test local_non_mock --no-deps -- -D warnings
 clippy_status="${LAST_STEP_STATUS}"
-run_step diff_check git diff --check -- connectors/slack/Cargo.toml connectors/slack/manifest.toml connectors/slack/src/connector.rs connectors/slack/tests/integration.rs connectors/slack/tests/live_verification.rs connectors/slack/README.md scripts/e2e/slack_connector_verification.sh
+run_step diff_check git diff --check -- connectors/slack/Cargo.toml connectors/slack/manifest.toml connectors/slack/src/connector.rs connectors/slack/tests/integration.rs connectors/slack/tests/live_verification.rs connectors/slack/tests/local_non_mock.rs connectors/slack/README.md scripts/e2e/slack_connector_verification.sh
 diff_check_status="${LAST_STEP_STATUS}"
 
 loopback_jsonl_path="${OUT_ROOT}/evidence/loopback_policy_matrix.jsonl"
@@ -267,6 +283,7 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
   "steps": {
     "format_check": "${format_check_status}",
     "loopback_jsonl": "${loopback_jsonl_status}",
+    "local_non_mock_acceptance": "${local_non_mock_status}",
     "socket_policy": "${socket_policy_status}",
     "live_smoke_skip_jsonl": "${live_skip_status}",
     "clippy": "${clippy_status}",

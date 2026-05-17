@@ -645,6 +645,7 @@ validate_gauntlet_contract() {
     any(.[]; .step == "validate_lean_ids" and .result == "pass") and
     any(.[]; .step == "jsonl_contract_validation" and .result == "pass") and
     any(.[]; .step == "redaction_scan" and .result == "pass") and
+    any(.[]; .step == "final_redaction_scan" and .result == "pass") and
     any(.[]; .step == "summary" and .result == "pass" and
       (.details.pre_summary_artifact_hash | type == "string" and startswith("sha256:")) and
       .details.final_artifact_hash_output == "stdout:LATTICE_ASSURANCE_GAUNTLET_SHA256" and
@@ -784,6 +785,13 @@ append_json "summary" "pass" "$(jq -cn \
   --arg artifact "${ARTIFACT}" \
   --arg pre_summary_artifact_hash "sha256:${pre_summary_artifact_hash}" \
   '{artifact_path:$artifact,pre_summary_artifact_hash:$pre_summary_artifact_hash,final_artifact_hash_output:"stdout:LATTICE_ASSURANCE_GAUNTLET_SHA256",profile_ids:["SMALL_TEST","V4_REFERENCE"],scenario_ids:["allow_v4_reference","deny_forged_v4_reference","deny_trust_set_replay_v4_reference","deny_mismatched_operation","deny_mismatched_principal"],theorem_names:["lattice_delegation_chain_corruption_rejected","lattice_delegation_sis_assumption_boundary_complete","lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions"],assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1","FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1","FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1","FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"],benchmark_groups:["trap_gen","delegate","sample_pre","verify","full_crypto_route","host_dispatcher_pipeline"],stable_lattice_error_mapping:"covered_by_host_dispatcher_e2e",cleanup_result:"not_applicable_generated_artifact"}')"
+
+# The summary is appended after the normal redaction_scan record, so scan the
+# finished artifact before success output can name it as reusable evidence.
+scan_jsonl_artifact "${ARTIFACT}"
+append_json "final_redaction_scan" "pass" "$(jq -cn \
+  '{scanned_jsonl_artifacts:1,summary_record:"covered",cleanup_result:"not_applicable"}')"
+scan_jsonl_artifact "${ARTIFACT}"
 
 validate_gauntlet_contract
 

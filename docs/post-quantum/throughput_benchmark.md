@@ -378,6 +378,9 @@ are classified separately from successful remote execution.
 The redaction scan treats raw zone, operation, and principal labels plus
 authorization headers, bearer strings, and access or refresh tokens as
 case-insensitive failures.
+Because the summary record is appended after the normal redaction scan, the
+script scans the finished JSONL again and requires a `final_redaction_scan`
+pass record before printing the artifact path and final hash.
 The script prints both the JSONL path and final JSONL SHA-256 on stdout. The
 summary record's embedded `pre_summary_artifact_hash` intentionally covers only
 the records before the summary, avoiding a misleading self-referential hash.

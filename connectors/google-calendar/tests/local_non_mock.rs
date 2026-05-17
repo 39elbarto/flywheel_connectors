@@ -197,12 +197,8 @@ fn content_length(headers: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn assert_request(captured: &CapturedRequest, method: &str, target: &str) {
-    let request_line = captured
-        .head
-        .lines()
-        .next()
-        .expect("captured request should include a request line");
+fn assert_request(captured: &FixtureObservation, method: &str, target: &str) {
+    let request_line = captured.request_line.as_str();
     let mut request_parts = request_line.split_whitespace();
     let actual_method = request_parts
         .next()
@@ -216,56 +212,75 @@ fn assert_request(captured: &CapturedRequest, method: &str, target: &str) {
 
     assert_eq!(actual_method, method, "unexpected request method");
     assert_eq!(actual_version, "HTTP/1.1", "unexpected HTTP version");
+    assert_eq!(actual_target, target, "unexpected request path in line {request_line:?}");
 
-    let (expected_path, expected_query) = split_target(target);
-    let (actual_path, actual_query) = split_target(actual_target);
-    assert_eq!(
-        decoded_path(actual_path),
-        decoded_path(expected_path),
-        "unexpected request path in line {request_line:?}"
-    );
-
-    match expected_query {
-        Some(expected) => assert_eq!(
-            sorted_query_pairs(actual_query.unwrap_or_default()),
-            sorted_query_pairs(expected),
-            "unexpected query parameters in line {request_line:?}"
-        ),
-        None => assert!(
-            actual_query.is_none_or(str::is_empty),
-            "unexpected query string in line {request_line:?}"
-        ),
-    }
-
-    let lower_head = captured.head.to_ascii_lowercase();
+    let lower_head = captured.headers.to_ascii_lowercase();
     assert!(
-        lower_head.contains(&format!("authorization: bearer {ACCESS_TOKEN}")),
+        lower_head.contains(&format!("authorization: bearer {LOOPBACK_AUTH_VALUE}")),
         "request should carry redaction-safe bearer auth; head={}",
-        captured.head
+        captured.headers
     );
 }
 
-fn split_target(target: &str) -> (&str, Option<&str>) {
-    target
-        .split_once('?')
-        .map_or((target, None), |(path, query)| (path, Some(query)))
+fn header_seen(headers: &str, expected_name: &str, expected_value: &str) -> bool {
+    headers.lines().any(|line| {
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        name.eq_ignore_ascii_case(expected_name) && value.trim() == expected_value
+    })
 }
 
-fn decoded_path(path: &str) -> String {
-    percent_decode_str(path)
-        .decode_utf8()
-        .expect("loopback path should be valid percent-encoded UTF-8")
-        .into_owned()
+fn header_value_contains(headers: &str, expected_name: &str, expected_value: &str) -> bool {
+    headers.lines().any(|line| {
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        name.eq_ignore_ascii_case(expected_name)
+            && value
+                .to_ascii_lowercase()
+                .contains(&expected_value.to_ascii_lowercase())
+    })
 }
 
-fn sorted_query_pairs(query: &str) -> Vec<(&str, &str)> {
-    let mut pairs = query
-        .split('&')
-        .filter(|part| !part.is_empty())
-        .map(|part| part.split_once('=').unwrap_or((part, "")))
-        .collect::<Vec<_>>();
-    pairs.sort_unstable();
-    pairs
+fn handshake_req(host_public_key: [u8; 32], instance_id: &InstanceId) -> HandshakeRequest {
+    HandshakeRequest {
+        protocol_version: "1.0.0".into(),
+        zone: ZoneId::work(),
+        zone_dir: None,
+        host_public_key,
+        nonce: [31_u8; 32],
+        capabilities_requested: vec![CapabilityId::from_static(READ_CAPABILITY)],
+        host: None,
+        transport_caps: None,
+        requested_instance_id: Some(instance_id.clone()),
+    }
+}
+
+fn capability_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
+    capability: &str,
+    operation: &str,
+) -> CapabilityToken {
+    let constraints = CapabilityConstraints::default();
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+
+    let now = Utc::now();
+    let raw = CapabilityTokenBuilder::new()
+        .capability_id(capability)
+        .zone_id("z:work")
+        .target_instance(instance_id.as_str())
+        .principal("user:local-non-mock")
+        .operations(&[operation])
+        .issuer("node:local-non-mock")
+        .validity(now, now + ChronoDuration::hours(1))
+        .try_constraints_cbor(&cbor)
+        .expect("constraints cbor should validate")
+        .sign(signing_key)
+        .expect("capability token should sign");
+    CapabilityToken::from_raw(raw)
 }
 
 async fn configured_connector(
@@ -275,7 +290,7 @@ async fn configured_connector(
     let mut connector = GoogleCalendarConnector::new();
     connector
         .handle_configure(json!({
-            "access_token": ACCESS_TOKEN,
+            "access_token": LOOPBACK_AUTH_VALUE,
             "required_scopes": ["https://www.googleapis.com/auth/calendar"],
             "base_url": base_url
         }))
@@ -310,35 +325,6 @@ fn capability_for(operation: &str) -> &'static str {
         "gcal.delete_event" => "gcal.delete",
         _ => "gcal.read",
     }
-}
-
-fn generate_valid_token(
-    signing_key: &Ed25519SigningKey,
-    instance_id: &InstanceId,
-    operation: &str,
-) -> CapabilityToken {
-    let now = Utc::now();
-    let constraints = CapabilityConstraints {
-        resource_allow: vec!["*".into()],
-        ..Default::default()
-    };
-    let mut cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
-
-    let now = Utc::now();
-    let raw = CapabilityTokenBuilder::new()
-        .capability_id(capability)
-        .zone_id("z:work")
-        .target_instance(instance_id.as_str())
-        .principal("user:local-non-mock")
-        .operations(&[operation])
-        .issuer("node:local-non-mock")
-        .validity(now, now + ChronoDuration::hours(1))
-        .try_constraints_cbor(&cbor)
-        .expect("constraints cbor should validate")
-        .sign(signing_key)
-        .expect("capability token should sign");
-    CapabilityToken::from_raw(raw)
 }
 
 async fn setup_connector(

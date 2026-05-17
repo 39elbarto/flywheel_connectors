@@ -39,12 +39,18 @@ run_logged() {
   local name="$1"
   shift
   local log_path="${OUT_ROOT}/logs/${name}.log"
+  local rc
 
   echo "[calendly-verification] ${name}: $*"
   (
-    cd "${REPO_ROOT}"
+    cd "${REPO_ROOT}" || exit
     "$@"
   ) >"${log_path}" 2>&1
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && ! require_rch_remote_proof "${name}" "${log_path}" "$@"; then
+    return 1
+  fi
+  return "${rc}"
 }
 
 run_capture_stdout() {
@@ -52,12 +58,18 @@ run_capture_stdout() {
   local stdout_path="$2"
   shift 2
   local log_path="${OUT_ROOT}/logs/${name}.log"
+  local rc
 
   echo "[calendly-verification] ${name}: $*"
   (
-    cd "${REPO_ROOT}"
+    cd "${REPO_ROOT}" || exit
     "$@"
   ) >"${stdout_path}" 2>"${log_path}"
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && ! require_rch_remote_proof "${name}" "${log_path}" "$@"; then
+    return 1
+  fi
+  return "${rc}"
 }
 
 promote_overall_status() {
@@ -76,15 +88,106 @@ promote_overall_status() {
   esac
 }
 
+log_has_remote_proof_failure() {
+  local log_path="$1"
+  local line
+  while IFS= read -r line; do
+    if [[ "${line}" == *"rch command did not produce remote proof"* ]]; then
+      return 0
+    fi
+  done < "${log_path}"
+  return 1
+}
+
+log_has_dbus_blocker() {
+  local log_path="$1"
+  local line
+  while IFS= read -r line; do
+    case "${line}" in
+      *"missing worker system package dbus-1.pc"*|*"The system library \`dbus-1\` required"*|*"pkg-config --libs --cflags dbus-1"*)
+        return 0
+        ;;
+    esac
+  done < "${log_path}"
+  return 1
+}
+
+log_has_infra_blocker() {
+  local log_path="$1"
+  local line
+  while IFS= read -r line; do
+    case "${line}" in
+      *"RCH-E"*|*"remote required; refusing local fallback"*|*"rch command did not produce remote proof"*|*"No space left on device"*|*"connection reset by peer"*|*"Backend unavailable"*|*"unable to update registry"*|*"spurious network error"*|*"failed to get successful HTTP response"*|*"missing worker system package"*|*"timeout: failed to execute process"*)
+        return 0
+        ;;
+    esac
+  done < "${log_path}"
+  return 1
+}
+
 classify_manifest_failure() {
   local log_path="$1"
-  if grep -Eq 'missing worker system package dbus-1\.pc|The system library `dbus-1` required|pkg-config --libs --cflags dbus-1' "${log_path}"; then
+  if [[ ! -f "${log_path}" ]]; then
+    echo "infra_blocked"
+    return
+  fi
+
+  if log_has_infra_blocker "${log_path}" || log_has_dbus_blocker "${log_path}"; then
     echo "infra_blocked"
   else
     echo "failed"
   fi
 }
 
+classify_step_failure() {
+  local log_path="$1"
+  if [[ ! -f "${log_path}" ]]; then
+    echo "infra_blocked"
+    return
+  fi
+
+  if log_has_infra_blocker "${log_path}"; then
+    echo "infra_blocked"
+  else
+    echo "failed"
+  fi
+}
+
+command_uses_rch_exec() {
+  local previous=""
+  for arg in "$@"; do
+    if [[ "${previous}" == "rch" && "${arg}" == "exec" ]]; then
+      return 0
+    fi
+    previous="${arg}"
+  done
+  return 1
+}
+
+rch_remote_summary_present() {
+  local log_path="$1"
+  local line
+  while IFS= read -r line; do
+    if [[ "${line}" == *"[RCH] remote"* ]]; then
+      return 0
+    fi
+  done < "${log_path}"
+  return 1
+}
+
+require_rch_remote_proof() {
+  local name="$1"
+  local log_path="$2"
+  shift 2
+
+  if command_uses_rch_exec "$@" && ! rch_remote_summary_present "${log_path}"; then
+    echo "[calendly-verification] ${name}: rch command did not produce remote proof" >&2
+    echo "rch command did not produce remote proof" >>"${log_path}"
+    return 1
+  fi
+}
+
+require_cmd jq
 require_cmd rch
 
 FWC_MANIFEST_BIN="${FWC_MANIFEST_BIN:-fwc}"
@@ -102,6 +205,8 @@ if command -v "${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
 else
   manifest_check_runner="rch:cargo-run"
   manifest_check_cmd=(
+    env
+    RCH_VISIBILITY=verbose
     rch
     exec
     --
@@ -129,221 +234,264 @@ then
 else
   manifest_status="$(classify_manifest_failure "${OUT_ROOT}/logs/manifest_check.log")"
   if [[ "${manifest_status}" == "infra_blocked" ]]; then
-    manifest_note="rch worker image missing dbus-1.pc while building fwc for manifest validation"
+    if log_has_remote_proof_failure "${OUT_ROOT}/logs/manifest_check.log"; then
+      manifest_note="rch command did not produce remote proof for fallback manifest validation"
+    elif log_has_dbus_blocker "${OUT_ROOT}/logs/manifest_check.log"; then
+      manifest_note="rch worker image missing dbus-1.pc while building fwc for manifest validation"
+    else
+      manifest_note="infrastructure blocked manifest validation; inspect logs/manifest_check.log"
+    fi
   else
     manifest_note="manifest validation command failed; inspect logs/manifest_check.log"
   fi
-  cat > "${OUT_ROOT}/evidence/manifest_check.json" <<EOF
-{
-  "status": "${manifest_status}",
-  "note": "${manifest_note}",
-  "command_output": "${manifest_stdout_path}",
-  "log": "${OUT_ROOT}/logs/manifest_check.log"
-}
-EOF
+  jq -n \
+    --arg status "${manifest_status}" \
+    --arg note "${manifest_note}" \
+    --arg command_output "${manifest_stdout_path}" \
+    --arg log "${OUT_ROOT}/logs/manifest_check.log" \
+    '{status:$status,note:$note,command_output:$command_output,log:$log}' \
+    > "${OUT_ROOT}/evidence/manifest_check.json"
   promote_overall_status "${manifest_status}"
 fi
 
 if run_logged \
   cargo_check \
-  rch exec -- cargo check -p fcp-calendly --all-targets
+  env RCH_VISIBILITY=verbose rch exec -- cargo check -p fcp-calendly --all-targets
 then
   cargo_check_status="passed"
 else
-  cargo_check_status="failed"
-  promote_overall_status failed
+  cargo_check_status="$(classify_step_failure "${OUT_ROOT}/logs/cargo_check.log")"
+  promote_overall_status "${cargo_check_status}"
 fi
 
 if run_logged \
   format_check \
-  rch exec -- cargo fmt --manifest-path connectors/calendly/Cargo.toml --check
+  env RCH_VISIBILITY=verbose rch exec -- cargo fmt --manifest-path connectors/calendly/Cargo.toml --check
 then
   format_check_status="passed"
 else
-  format_check_status="failed"
-  promote_overall_status failed
+  format_check_status="$(classify_step_failure "${OUT_ROOT}/logs/format_check.log")"
+  promote_overall_status "${format_check_status}"
 fi
 
 if run_logged \
   health_guidance_evidence \
-  rch exec -- cargo test -p fcp-calendly --test integration health_unconfigured_includes_guidance -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration health_unconfigured_includes_guidance -- --nocapture
 then
   health_guidance_status="passed"
 else
-  health_guidance_status="failed"
-  promote_overall_status failed
+  health_guidance_status="$(classify_step_failure "${OUT_ROOT}/logs/health_guidance_evidence.log")"
+  promote_overall_status "${health_guidance_status}"
 fi
 
 if run_logged \
   doctor_guidance_evidence \
-  rch exec -- cargo test -p fcp-calendly --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
 then
   doctor_guidance_status="passed"
 else
-  doctor_guidance_status="failed"
-  promote_overall_status failed
+  doctor_guidance_status="$(classify_step_failure "${OUT_ROOT}/logs/doctor_guidance_evidence.log")"
+  promote_overall_status "${doctor_guidance_status}"
 fi
 
 if run_logged \
   self_check_evidence \
-  rch exec -- cargo test -p fcp-calendly --test integration self_check_ready_with_user_probe_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration self_check_ready_with_user_probe_evidence -- --nocapture
 then
   self_check_status="passed"
 else
-  self_check_status="failed"
-  promote_overall_status failed
+  self_check_status="$(classify_step_failure "${OUT_ROOT}/logs/self_check_evidence.log")"
+  promote_overall_status "${self_check_status}"
 fi
 
 if run_logged \
   retryable_self_check_evidence \
-  rch exec -- cargo test -p fcp-calendly --test integration self_check_retryable_reports_degraded -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration self_check_retryable_reports_degraded -- --nocapture
 then
   retryable_self_check_status="passed"
 else
-  retryable_self_check_status="failed"
-  promote_overall_status failed
+  retryable_self_check_status="$(classify_step_failure "${OUT_ROOT}/logs/retryable_self_check_evidence.log")"
+  promote_overall_status "${retryable_self_check_status}"
 fi
 
 if run_logged \
   scheduling_link_mutation_evidence \
-  rch exec -- cargo test -p fcp-calendly --test integration invoke_scheduling_link_create_emits_mutation_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration invoke_scheduling_link_create_emits_mutation_evidence -- --nocapture
 then
   scheduling_link_mutation_status="passed"
 else
-  scheduling_link_mutation_status="failed"
-  promote_overall_status failed
+  scheduling_link_mutation_status="$(classify_step_failure "${OUT_ROOT}/logs/scheduling_link_mutation_evidence.log")"
+  promote_overall_status "${scheduling_link_mutation_status}"
 fi
 
 if run_logged \
   event_cancel_mutation_evidence \
-  rch exec -- cargo test -p fcp-calendly --test integration invoke_cancel_event_emits_mutation_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration invoke_cancel_event_emits_mutation_evidence -- --nocapture
 then
   event_cancel_mutation_status="passed"
 else
-  event_cancel_mutation_status="failed"
-  promote_overall_status failed
+  event_cancel_mutation_status="$(classify_step_failure "${OUT_ROOT}/logs/event_cancel_mutation_evidence.log")"
+  promote_overall_status "${event_cancel_mutation_status}"
 fi
 
 if run_logged \
   compliance_evidence \
-  rch exec -- cargo test -p fcp-calendly --test integration introspection_emits_v3_compliance_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration introspection_emits_v3_compliance_evidence -- --nocapture
 then
   compliance_status="passed"
 else
-  compliance_status="failed"
-  promote_overall_status failed
+  compliance_status="$(classify_step_failure "${OUT_ROOT}/logs/compliance_evidence.log")"
+  promote_overall_status "${compliance_status}"
 fi
 
 if run_logged \
   integration_suite \
-  rch exec -- cargo test -p fcp-calendly --test integration -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration -- --nocapture
 then
   integration_suite_status="passed"
 else
-  integration_suite_status="failed"
-  promote_overall_status failed
+  integration_suite_status="$(classify_step_failure "${OUT_ROOT}/logs/integration_suite.log")"
+  promote_overall_status "${integration_suite_status}"
 fi
 
 if run_logged \
   crate_suite \
-  rch exec -- cargo test -p fcp-calendly -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly -- --nocapture
 then
   crate_suite_status="passed"
 else
-  crate_suite_status="failed"
-  promote_overall_status failed
+  crate_suite_status="$(classify_step_failure "${OUT_ROOT}/logs/crate_suite.log")"
+  promote_overall_status "${crate_suite_status}"
 fi
 
 if run_logged \
   clippy \
-  rch exec -- cargo clippy -p fcp-calendly --all-targets -- -D warnings
+  env RCH_VISIBILITY=verbose rch exec -- cargo clippy -p fcp-calendly --all-targets -- -D warnings
 then
   clippy_status="passed"
 else
-  clippy_status="failed"
-  promote_overall_status failed
+  clippy_status="$(classify_step_failure "${OUT_ROOT}/logs/clippy.log")"
+  promote_overall_status "${clippy_status}"
 fi
 
-cat > "${OUT_ROOT}/environment.json" <<EOF
+jq -n \
+  --arg run_id "${RUN_ID}" \
+  --arg connector "fcp-calendly" \
+  --arg repo_root "${REPO_ROOT}" \
+  --arg verification_script "scripts/e2e/calendly_connector_verification.sh" \
+  --arg artifact_root "${OUT_ROOT}" \
+  --arg manifest_check_runner "${manifest_check_runner}" \
+  --arg scope_note "verification covers readiness, auth probe behavior, provider-scope guidance, and the two risky scheduling mutations against localhost mocks" \
+  '{
+    run_id: $run_id,
+    connector: $connector,
+    repo_root: $repo_root,
+    verification_script: $verification_script,
+    artifact_root: $artifact_root,
+    manifest_check_runner: $manifest_check_runner,
+    scope_note: $scope_note
+  }' > "${OUT_ROOT}/environment.json"
+
 {
-  "run_id": "${RUN_ID}",
-  "connector": "fcp-calendly",
-  "repo_root": "${REPO_ROOT}",
-  "verification_script": "scripts/e2e/calendly_connector_verification.sh",
-  "artifact_root": "${OUT_ROOT}",
-  "manifest_check_runner": "${manifest_check_runner}",
-  "scope_note": "verification covers readiness, auth probe behavior, provider-scope guidance, and the two risky scheduling mutations against localhost mocks"
-}
-EOF
-
-cat > "${OUT_ROOT}/replay.sh" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-FWC_MANIFEST_BIN="${FWC_MANIFEST_BIN:-fwc}"
-if command -v "${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
-  "${FWC_MANIFEST_BIN}" manifest fix connectors/calendly/manifest.toml --check --json
-else
-  rch exec -- cargo run -q -p fwc -- manifest fix connectors/calendly/manifest.toml --check --json
-fi
-rch exec -- cargo fmt --manifest-path connectors/calendly/Cargo.toml --check
-rch exec -- cargo check -p fcp-calendly --all-targets
-rch exec -- cargo test -p fcp-calendly --test integration health_unconfigured_includes_guidance -- --nocapture
-rch exec -- cargo test -p fcp-calendly --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
-rch exec -- cargo test -p fcp-calendly --test integration self_check_ready_with_user_probe_evidence -- --nocapture
-rch exec -- cargo test -p fcp-calendly --test integration self_check_retryable_reports_degraded -- --nocapture
-rch exec -- cargo test -p fcp-calendly --test integration invoke_scheduling_link_create_emits_mutation_evidence -- --nocapture
-rch exec -- cargo test -p fcp-calendly --test integration invoke_cancel_event_emits_mutation_evidence -- --nocapture
-rch exec -- cargo test -p fcp-calendly --test integration introspection_emits_v3_compliance_evidence -- --nocapture
-rch exec -- cargo test -p fcp-calendly --test integration -- --nocapture
-rch exec -- cargo test -p fcp-calendly -- --nocapture
-rch exec -- cargo clippy -p fcp-calendly --all-targets -- -D warnings
-EOF
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -euo pipefail'
+  printf '%s\n' ''
+  printf '%s\n' "FWC_MANIFEST_BIN=\"\${FWC_MANIFEST_BIN:-fwc}\""
+  printf '%s\n' "if command -v \"\${FWC_MANIFEST_BIN}\" >/dev/null 2>&1; then"
+  printf '%s\n' "  \"\${FWC_MANIFEST_BIN}\" manifest fix connectors/calendly/manifest.toml --check --json"
+  printf '%s\n' 'else'
+  printf '%s\n' '  env RCH_VISIBILITY=verbose rch exec -- cargo run -q -p fwc -- manifest fix connectors/calendly/manifest.toml --check --json'
+  printf '%s\n' 'fi'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo fmt --manifest-path connectors/calendly/Cargo.toml --check'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo check -p fcp-calendly --all-targets'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration health_unconfigured_includes_guidance -- --nocapture'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration self_check_ready_with_user_probe_evidence -- --nocapture'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration self_check_retryable_reports_degraded -- --nocapture'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration invoke_scheduling_link_create_emits_mutation_evidence -- --nocapture'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration invoke_cancel_event_emits_mutation_evidence -- --nocapture'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration introspection_emits_v3_compliance_evidence -- --nocapture'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration -- --nocapture'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly -- --nocapture'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo clippy -p fcp-calendly --all-targets -- -D warnings'
+} > "${OUT_ROOT}/replay.sh"
 chmod +x "${OUT_ROOT}/replay.sh"
 
-cat > "${OUT_ROOT}/summary.json" <<EOF
-{
-  "run_id": "${RUN_ID}",
-  "connector": "fcp-calendly",
-  "overall_status": "${OVERALL_STATUS}",
-  "artifacts_root": "${OUT_ROOT}",
-  "steps": {
-    "manifest_check": {
-      "status": "${manifest_status}",
-      "note": "${manifest_note}"
+jq -n \
+  --arg run_id "${RUN_ID}" \
+  --arg connector "fcp-calendly" \
+  --arg overall_status "${OVERALL_STATUS}" \
+  --arg artifacts_root "${OUT_ROOT}" \
+  --arg manifest_status "${manifest_status}" \
+  --arg manifest_note "${manifest_note}" \
+  --arg cargo_check "${cargo_check_status}" \
+  --arg format_check "${format_check_status}" \
+  --arg health_guidance_evidence "${health_guidance_status}" \
+  --arg doctor_guidance_evidence "${doctor_guidance_status}" \
+  --arg self_check_evidence "${self_check_status}" \
+  --arg retryable_self_check_evidence "${retryable_self_check_status}" \
+  --arg scheduling_link_mutation_evidence "${scheduling_link_mutation_status}" \
+  --arg event_cancel_mutation_evidence "${event_cancel_mutation_status}" \
+  --arg compliance_evidence "${compliance_status}" \
+  --arg integration_suite "${integration_suite_status}" \
+  --arg crate_suite "${crate_suite_status}" \
+  --arg clippy "${clippy_status}" \
+  --arg manifest_check "${OUT_ROOT}/evidence/manifest_check.json" \
+  --arg cargo_check_log "${OUT_ROOT}/logs/cargo_check.log" \
+  --arg format_check_log "${OUT_ROOT}/logs/format_check.log" \
+  --arg health_guidance_evidence_log "${OUT_ROOT}/logs/health_guidance_evidence.log" \
+  --arg doctor_guidance_evidence_log "${OUT_ROOT}/logs/doctor_guidance_evidence.log" \
+  --arg self_check_evidence_log "${OUT_ROOT}/logs/self_check_evidence.log" \
+  --arg retryable_self_check_evidence_log "${OUT_ROOT}/logs/retryable_self_check_evidence.log" \
+  --arg scheduling_link_mutation_evidence_log "${OUT_ROOT}/logs/scheduling_link_mutation_evidence.log" \
+  --arg event_cancel_mutation_evidence_log "${OUT_ROOT}/logs/event_cancel_mutation_evidence.log" \
+  --arg compliance_evidence_log "${OUT_ROOT}/logs/compliance_evidence.log" \
+  --arg integration_suite_log "${OUT_ROOT}/logs/integration_suite.log" \
+  --arg crate_suite_log "${OUT_ROOT}/logs/crate_suite.log" \
+  --arg clippy_log "${OUT_ROOT}/logs/clippy.log" \
+  --arg environment "${OUT_ROOT}/environment.json" \
+  --arg replay "${OUT_ROOT}/replay.sh" \
+  '{
+    run_id: $run_id,
+    connector: $connector,
+    overall_status: $overall_status,
+    artifacts_root: $artifacts_root,
+    steps: {
+      manifest_check: {
+        status: $manifest_status,
+        note: $manifest_note
+      },
+      cargo_check: $cargo_check,
+      format_check: $format_check,
+      health_guidance_evidence: $health_guidance_evidence,
+      doctor_guidance_evidence: $doctor_guidance_evidence,
+      self_check_evidence: $self_check_evidence,
+      retryable_self_check_evidence: $retryable_self_check_evidence,
+      scheduling_link_mutation_evidence: $scheduling_link_mutation_evidence,
+      event_cancel_mutation_evidence: $event_cancel_mutation_evidence,
+      compliance_evidence: $compliance_evidence,
+      integration_suite: $integration_suite,
+      crate_suite: $crate_suite,
+      clippy: $clippy
     },
-    "cargo_check": "${cargo_check_status}",
-    "format_check": "${format_check_status}",
-    "health_guidance_evidence": "${health_guidance_status}",
-    "doctor_guidance_evidence": "${doctor_guidance_status}",
-    "self_check_evidence": "${self_check_status}",
-    "retryable_self_check_evidence": "${retryable_self_check_status}",
-    "scheduling_link_mutation_evidence": "${scheduling_link_mutation_status}",
-    "event_cancel_mutation_evidence": "${event_cancel_mutation_status}",
-    "compliance_evidence": "${compliance_status}",
-    "integration_suite": "${integration_suite_status}",
-    "crate_suite": "${crate_suite_status}",
-    "clippy": "${clippy_status}"
-  },
-  "artifacts": {
-    "manifest_check": "${OUT_ROOT}/evidence/manifest_check.json",
-    "cargo_check_log": "${OUT_ROOT}/logs/cargo_check.log",
-    "format_check_log": "${OUT_ROOT}/logs/format_check.log",
-    "health_guidance_evidence_log": "${OUT_ROOT}/logs/health_guidance_evidence.log",
-    "doctor_guidance_evidence_log": "${OUT_ROOT}/logs/doctor_guidance_evidence.log",
-    "self_check_evidence_log": "${OUT_ROOT}/logs/self_check_evidence.log",
-    "retryable_self_check_evidence_log": "${OUT_ROOT}/logs/retryable_self_check_evidence.log",
-    "scheduling_link_mutation_evidence_log": "${OUT_ROOT}/logs/scheduling_link_mutation_evidence.log",
-    "event_cancel_mutation_evidence_log": "${OUT_ROOT}/logs/event_cancel_mutation_evidence.log",
-    "compliance_evidence_log": "${OUT_ROOT}/logs/compliance_evidence.log",
-    "integration_suite_log": "${OUT_ROOT}/logs/integration_suite.log",
-    "crate_suite_log": "${OUT_ROOT}/logs/crate_suite.log",
-    "clippy_log": "${OUT_ROOT}/logs/clippy.log",
-    "environment": "${OUT_ROOT}/environment.json",
-    "replay": "${OUT_ROOT}/replay.sh"
-  }
-}
-EOF
+    artifacts: {
+      manifest_check: $manifest_check,
+      cargo_check_log: $cargo_check_log,
+      format_check_log: $format_check_log,
+      health_guidance_evidence_log: $health_guidance_evidence_log,
+      doctor_guidance_evidence_log: $doctor_guidance_evidence_log,
+      self_check_evidence_log: $self_check_evidence_log,
+      retryable_self_check_evidence_log: $retryable_self_check_evidence_log,
+      scheduling_link_mutation_evidence_log: $scheduling_link_mutation_evidence_log,
+      event_cancel_mutation_evidence_log: $event_cancel_mutation_evidence_log,
+      compliance_evidence_log: $compliance_evidence_log,
+      integration_suite_log: $integration_suite_log,
+      crate_suite_log: $crate_suite_log,
+      clippy_log: $clippy_log,
+      environment: $environment,
+      replay: $replay
+    }
+  }' > "${OUT_ROOT}/summary.json"
 
 echo "Calendly verification artifacts written to ${OUT_ROOT}"
 exit "${EXIT_CODE}"

@@ -4923,6 +4923,35 @@ mod tests {
     }
 
     #[test]
+    fn test_inbound_delivery_state_evicts_oldest_when_bounded() {
+        let mut state = DiscordInboundDeliveryState::default();
+        for idx in 0..=DISCORD_INBOUND_DELIVERY_MAX_PENDING {
+            state.register(DiscordInboundDeliveryMetadata {
+                session_key: format!("discord:111:{idx}"),
+                event_kind: "room_event",
+                channel_id: "111".into(),
+                guild_id: Some("999".into()),
+                message_id: idx.to_string(),
+            });
+        }
+
+        assert_eq!(
+            state.pending_len(),
+            DISCORD_INBOUND_DELIVERY_MAX_PENDING,
+            "inbound delivery state must stay bounded"
+        );
+        assert!(
+            !state.contains("discord:111:0"),
+            "oldest inbound delivery record should be evicted first"
+        );
+        let newest_session_key = format!("discord:111:{DISCORD_INBOUND_DELIVERY_MAX_PENDING}");
+        assert!(
+            state.contains(&newest_session_key),
+            "newest inbound delivery record should be retained"
+        );
+    }
+
+    #[test]
     fn test_gateway_event_to_fcp_channel_create_sets_thread_info_for_thread_channels() {
         let connector_id = ConnectorId::from_static("fcp.discord");
         let instance_id = InstanceId::new();

@@ -97,19 +97,48 @@ description = "Message ID to reply to"
 type = "string"
 pattern = "^[0-9]+$"
 
+[provides.operations.send_message.input_schema.properties.delivery]
+description = "Delivery-control metadata for visible/final accounting, hidden progress suppression, and inbound event correlation"
+type = "object"
+
+[provides.operations.send_message.input_schema.properties.delivery.properties.kind]
+description = "Logical delivery kind"
+type = "string"
+enum = ["final", "progress", "tool", "block"]
+
+[provides.operations.send_message.input_schema.properties.delivery.properties.visibility]
+description = "Whether the delivery should create a provider-visible Discord message"
+type = "string"
+enum = ["visible", "hidden"]
+
+[provides.operations.send_message.input_schema.properties.delivery.properties.label]
+description = "Optional operator-facing label copied into the delivery receipt"
+type = "string"
+maxLength = 64
+
+[provides.operations.send_message.input_schema.properties.delivery.properties.inbound_event]
+description = "Optional inbound Discord event correlation retained until a matching visible outbound delivery succeeds"
+type = "object"
+required = ["session_key"]
+
+[provides.operations.send_message.input_schema.properties.delivery.properties.inbound_event.properties.session_key]
+description = "Opaque fcp_delivery.session_key from a prior discord.message event"
+type = "string"
+maxLength = 256
+
 [provides.operations.send_message.output_schema]
 required = ["id", "channel_id"]
 type = "object"
 
 [provides.operations.send_message.output_schema.properties.id]
-description = "Created message ID"
-type = "string"
+description = "Created message ID, or null when a hidden non-final delivery is suppressed before REST"
+type = ["string", "null"]
 
 [provides.operations.send_message.output_schema.properties.channel_id]
 type = "string"
 
 [provides.operations.send_message.output_schema.properties.content]
-type = "string"
+type = ["string", "null"]
 
 [provides.operations.send_message.output_schema.properties.coordination]
 description = "Redacted chat coordination audit records"
@@ -117,6 +146,72 @@ type = "array"
 
 [provides.operations.send_message.output_schema.properties.coordination.items]
 type = "object"
+
+[provides.operations.send_message.output_schema.properties.delivery]
+description = "Redacted delivery receipt for Discord REST sends, hidden suppression, and inbound event correlation"
+type = "object"
+
+[provides.operations.send_message.output_schema.properties.delivery.properties.status]
+description = "Connector delivery outcome"
+type = "string"
+enum = ["delivered", "suppressed"]
+
+[provides.operations.send_message.output_schema.properties.delivery.properties.kind]
+type = "string"
+enum = ["final", "progress", "tool", "block"]
+
+[provides.operations.send_message.output_schema.properties.delivery.properties.visibility]
+type = "string"
+enum = ["visible", "hidden"]
+
+[provides.operations.send_message.output_schema.properties.delivery.properties.final]
+type = "boolean"
+
+[provides.operations.send_message.output_schema.properties.delivery.properties.visible]
+type = "boolean"
+
+[provides.operations.send_message.output_schema.properties.delivery.properties.message_id]
+type = ["string", "null"]
+
+[provides.operations.send_message.output_schema.properties.delivery.properties.reason]
+type = "string"
+
+[provides.operations.send_message.output_schema.properties.delivery.properties.inbound_event]
+description = "Receipt for an optional inbound_event session_key supplied on the send"
+type = "object"
+
+[provides.operations.send_message.output_schema.properties.delivery.properties.inbound_event.properties.status]
+description = "Inbound event retention outcome"
+type = "string"
+enum = ["pending", "target_mismatch", "marked_delivered", "not_found"]
+
+[provides.operations.send_message.output_schema.properties.delivery.properties.inbound_event.properties.session_key]
+type = "string"
+
+[provides.operations.send_message.output_schema.properties.delivery.properties.inbound_event.properties.event_kind]
+type = "string"
+enum = ["room_event", "direct_message"]
+
+[provides.operations.send_message.output_schema.properties.delivery.properties.inbound_event.properties.channel_id]
+type = "string"
+
+[provides.operations.send_message.output_schema.properties.delivery.properties.inbound_event.properties.guild_id]
+type = ["string", "null"]
+
+[provides.operations.send_message.output_schema.properties.delivery.properties.inbound_event.properties.source_message_id]
+type = "string"
+
+[provides.operations.send_message.output_schema.properties.delivery.properties.inbound_event.properties.delivered_message_id]
+type = "string"
+
+[provides.operations.send_message.output_schema.properties.delivery.properties.inbound_event.properties.expected_channel_id]
+type = "string"
+
+[provides.operations.send_message.output_schema.properties.delivery.properties.inbound_event.properties.actual_channel_id]
+type = "string"
+
+[provides.operations.send_message.output_schema.properties.delivery.properties.inbound_event.properties.reason]
+type = "string"
 
 [provides.operations.send_message.network_constraints]
 host_allow = ["discord.com", "*.discord.com"]
@@ -697,6 +792,33 @@ type = "string"
 
 [provides.events.message.schema.properties.author]
 type = "object"
+
+[provides.events.message.schema.properties.fcp_delivery]
+description = "Inbound delivery correlation retained until a matching visible outbound delivery succeeds"
+type = "object"
+required = ["session_key", "event_kind", "channel_id", "message_id", "retention"]
+
+[provides.events.message.schema.properties.fcp_delivery.properties.session_key]
+description = "Opaque key to pass as delivery.inbound_event.session_key to discord.send_message"
+type = "string"
+
+[provides.events.message.schema.properties.fcp_delivery.properties.event_kind]
+type = "string"
+enum = ["room_event", "direct_message"]
+
+[provides.events.message.schema.properties.fcp_delivery.properties.channel_id]
+type = "string"
+
+[provides.events.message.schema.properties.fcp_delivery.properties.guild_id]
+type = ["string", "null"]
+
+[provides.events.message.schema.properties.fcp_delivery.properties.message_id]
+description = "Source Discord message ID"
+type = "string"
+
+[provides.events.message.schema.properties.fcp_delivery.properties.retention]
+type = "string"
+enum = ["pending_until_outbound_delivery"]
 
 [provides.events.message_update]
 description = "Discord message was edited"

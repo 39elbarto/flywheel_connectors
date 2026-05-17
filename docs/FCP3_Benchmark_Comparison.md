@@ -80,7 +80,9 @@ from duplicate scenario records. Production-soak acceptance also
 requires positive p50, p95, and p99 improvement deltas for the warm-hit,
 shutdown-cleanup, and concurrent-swarm-startup promotion scenarios; fallback
 and rejection scenarios may still report zero improvement with their measured
-rationale. The verifier's `validation.json`
+rationale. Every provided evidence row must also keep p50 <= p95 <= p99 for
+both current and baseline latency, and current activation latency must not
+exceed the matching on-demand baseline. The verifier's `validation.json`
 also records a latency summary with the worst current p50/p95/p99, worst
 baseline p50/p95/p99, minimum per-percentile improvement, and any scenarios
 with no p99 improvement, plus the observed execution/source classes and

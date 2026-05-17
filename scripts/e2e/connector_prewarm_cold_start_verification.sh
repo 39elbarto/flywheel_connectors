@@ -288,6 +288,26 @@ if [[ "${overall_status}" == "passed" ]]; then
       def promotion_improvement_failures($records):
         promotion_improvement_scenarios
         | map(select(has_positive_improvement($records; .) | not));
+      def latency_order_ok:
+        (.p50_activation_latency_ms | type) == "number"
+        and (.p95_activation_latency_ms | type) == "number"
+        and (.p99_activation_latency_ms | type) == "number"
+        and (.baseline_p50_activation_latency_ms | type) == "number"
+        and (.baseline_p95_activation_latency_ms | type) == "number"
+        and (.baseline_p99_activation_latency_ms | type) == "number"
+        and .p50_activation_latency_ms > 0
+        and .p50_activation_latency_ms <= .p95_activation_latency_ms
+        and .p95_activation_latency_ms <= .p99_activation_latency_ms
+        and .baseline_p50_activation_latency_ms > 0
+        and .baseline_p50_activation_latency_ms <= .baseline_p95_activation_latency_ms
+        and .baseline_p95_activation_latency_ms <= .baseline_p99_activation_latency_ms;
+      def latency_regression_ok:
+        (.activation_latency_ms | type) == "number"
+        and (.baseline_on_demand_latency_ms | type) == "number"
+        and .activation_latency_ms <= .baseline_on_demand_latency_ms
+        and .p50_activation_latency_ms <= .baseline_p50_activation_latency_ms
+        and .p95_activation_latency_ms <= .baseline_p95_activation_latency_ms
+        and .p99_activation_latency_ms <= .baseline_p99_activation_latency_ms;
       def ids: map(.scenario_id);
       def missing: required - (ids);
       def duplicate_scenarios:
@@ -395,6 +415,12 @@ if [[ "${overall_status}" == "passed" ]]; then
           and (.baseline_p95_activation_latency_ms | type) == "number"
           and (.baseline_p99_activation_latency_ms | type) == "number"
         ),
+        latency_order_ok: all(.[];
+          latency_order_ok
+        ),
+        latency_regression_ok: all(.[];
+          latency_regression_ok
+        ),
         redaction_shape_ok: all(.[];
           (.connector_id | type) == "string"
           and (.worker_id | type) == "string"
@@ -448,6 +474,8 @@ if [[ "${overall_status}" == "passed" ]]; then
             and $v.production_soak_ok
             and $v.production_improvement_ok
             and $v.percentile_fields_ok
+            and $v.latency_order_ok
+            and $v.latency_regression_ok
             and $v.redaction_shape_ok
           )
           then "passed"

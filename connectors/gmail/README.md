@@ -3,7 +3,7 @@
 > **Status**: runtime contract documented; manifest/runtime drift documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/gmail_connector_verification.sh`
 > **Gmail REST upstream**: https://developers.google.com/workspace/gmail/api/reference/rest
 > **Messages upstream**: https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages
 > **Messages send upstream**: https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.messages/send
@@ -198,6 +198,7 @@ These are excluded on purpose:
 
 The deterministic integration evidence is anchored on connector-local tests covering:
 
+- local non-mock loopback acceptance for production `handle_invoke()` paths across `gmail.list_labels`, `gmail.get_message`, and `gmail.send_message`
 - lifecycle, configuration, base URL policy, loopback allowance, introspection, simulation, doctor, self-check, and shutdown behavior
 - message get/list/send/modify/trash, thread get, label list, draft get/create/send, and history sync through deterministic HTTP fixtures
 - cursor persistence and resumed history sync with `lease_seq` fencing
@@ -216,12 +217,13 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/gmail_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The dedicated tracked verification bundle is `scripts/e2e/gmail_connector_verification.sh`. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
 
 The verification surface captures:
 
 - runtime operation inventory and policy metadata
 - deterministic WireMock coverage for Gmail API paths
+- deterministic local loopback coverage for the `local_non_mock` acceptance suite
 - shared Google auth, endpoint policy, provider error, lifecycle, simulation, history cursor, and introspection tests
 - formatting, check, test, and clippy proof through `rch`
 - UBS on changed files before commit
@@ -257,6 +259,8 @@ The verification surface captures:
 
 **Rerun commands**:
 
+- `scripts/e2e/gmail_connector_verification.sh`
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-gmail-readme cargo test -p fcp-gmail --test local_non_mock -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-gmail-readme cargo check -p fcp-gmail --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-gmail-readme cargo test -p fcp-gmail --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-gmail-readme cargo clippy -p fcp-gmail --all-targets --no-deps -- -D warnings`

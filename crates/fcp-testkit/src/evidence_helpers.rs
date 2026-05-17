@@ -2819,6 +2819,16 @@ const fn validate_prewarm_latency_percentiles(latency: &SwarmPrewarmLatencyPerce
         && latency.mean_ms != 0
 }
 
+fn is_redaction_safe_blake3_hash(hash: &str) -> bool {
+    let Some(hex) = hash.strip_prefix("blake3:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn validate_prewarm_required_fields(
     evidence: &SwarmPrewarmColdStartEvidence,
 ) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
@@ -2871,7 +2881,7 @@ fn validate_prewarm_command_and_target(
     {
         return Err(SwarmPrewarmColdStartEvidenceError::EmptyCommandLine);
     }
-    if !evidence.cargo_target_dir_hash.starts_with("blake3:") {
+    if !is_redaction_safe_blake3_hash(&evidence.cargo_target_dir_hash) {
         return Err(
             SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirHash {
                 hash: evidence.cargo_target_dir_hash.clone(),
@@ -3204,7 +3214,7 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
             Self::EmptyCommandLine => write!(f, "swarm prewarm command line is empty"),
             Self::InvalidCargoTargetDirHash { hash } => write!(
                 f,
-                "swarm prewarm cargo target directory hash must start with 'blake3:', got '{hash}'"
+                "swarm prewarm cargo target directory hash must be 'blake3:' followed by 64 lowercase hex characters, got '{hash}'"
             ),
             Self::MissingLatencyMeasurement => {
                 write!(f, "swarm prewarm latency measurement is missing")
@@ -9418,6 +9428,30 @@ mod tests {
             Err(
                 SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirHash {
                     hash: "raw-target-dir".to_string()
+                }
+            )
+        );
+
+        let mut short_target_dir_hash = prewarm_cold_start_evidence_fixture();
+        short_target_dir_hash.cargo_target_dir_hash = "blake3:abc123".to_string();
+        assert_eq!(
+            short_target_dir_hash.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirHash {
+                    hash: "blake3:abc123".to_string()
+                }
+            )
+        );
+
+        let uppercase_hash =
+            "blake3:ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD".to_string();
+        let mut uppercase_target_dir_hash = prewarm_cold_start_evidence_fixture();
+        uppercase_target_dir_hash.cargo_target_dir_hash = uppercase_hash.clone();
+        assert_eq!(
+            uppercase_target_dir_hash.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirHash {
+                    hash: uppercase_hash
                 }
             )
         );

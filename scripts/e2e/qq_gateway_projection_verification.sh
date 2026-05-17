@@ -158,6 +158,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           "voice_asr_projection",
           "slash_approval_projection",
           "duplicate_drop",
+          "stale_sequence_replay_drop",
           "heartbeat_ack",
           "heartbeat_request",
           "reconnect_requested",
@@ -206,7 +207,18 @@ if [[ "${overall_status}" == "passed" ]]; then
         media_shape_ok: any(.[]; .step == "oversized_media_policy_drop" and .details.reason_code == "attachment_bytes_exceeded"),
         voice_shape_ok: any(.[]; .step == "voice_asr_projection" and .details.accepted == true and .details.normalized.has_attachments == true and (.details.normalized.text_len | type) == "number" and .details.normalized.text_len > 0),
         slash_shape_ok: any(.[]; .step == "slash_approval_projection" and .details.accepted == true and .details.normalized.interaction_kind == "approval" and (.details.normalized.command_name_hash | type) == "string" and .details.normalized.approval_action == "approve"),
-        replay_shape_ok: any(.[]; .step == "duplicate_drop" and .details.reason_code == "duplicate_event"),
+        replay_shape_ok: (
+          any(.[]; .step == "duplicate_drop" and .details.reason_code == "duplicate_event")
+          and any(.[];
+            .step == "stale_sequence_replay_drop"
+            and .details.accepted == false
+            and .details.reason_code == "stale_sequence"
+            and .details.normalized == null
+            and .details.policy == null
+            and .details.runtime.stale_sequence_events == 1
+            and .details.lifecycle.action == "none"
+          )
+        ),
         heartbeat_shape_ok: (
           any(.[]; .step == "heartbeat_ack" and .details.reason_code == "heartbeat_ack")
           and any(.[]; .step == "heartbeat_request" and .details.reason_code == "heartbeat_request" and .details.lifecycle.action == "send_heartbeat")
@@ -265,6 +277,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "evt-missing-reply-target" \
     "evt-queue-fill" \
     "evt-queue-full" \
+    "evt-stale-sequence" \
     "evt-reconnect-requested" \
     "evt-invalid-session" \
     "evt-reconnect-cap-first" \
@@ -283,6 +296,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "msg-missing-reply-target" \
     "msg-queue-fill" \
     "msg-queue-full" \
+    "msg-stale-sequence" \
     "msg-after-shutdown" \
     "bot-openid" \
     "group-allowed" \
@@ -301,6 +315,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "blank reply target" \
     "queue fill message" \
     "queue backpressure message" \
+    "stale sequence should drop" \
     "deploy status" \
     "plain message" \
     "not a mention segment" \

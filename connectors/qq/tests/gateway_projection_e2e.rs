@@ -1188,6 +1188,38 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(duplicate["reason_code"], "duplicate_event");
     log_projection_step(&mut logs, "duplicate_drop", "ok", &duplicate);
 
+    let stale_sequence = invoke_projection(
+        &connector,
+        &signing_key,
+        &instance_id,
+        "qq-gateway-stale-sequence",
+        json!({
+            "op": 0,
+            "s": 6,
+            "t": "GROUP_AT_MESSAGE_CREATE",
+            "id": "evt-stale-sequence",
+            "d": {
+                "id": "msg-stale-sequence",
+                "content": "bot-openid stale sequence should drop",
+                "group_openid": "group-allowed",
+                "group_member_openid": "member-1"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(stale_sequence["accepted"], false);
+    assert_eq!(stale_sequence["reason_code"], "stale_sequence");
+    assert_eq!(stale_sequence["normalized"], Value::Null);
+    assert_eq!(stale_sequence["policy"], Value::Null);
+    assert_eq!(stale_sequence["runtime"]["stale_sequence_events"], 1);
+    assert_eq!(stale_sequence["lifecycle"]["action"], "none");
+    log_projection_step(
+        &mut logs,
+        "stale_sequence_replay_drop",
+        "ok",
+        &stale_sequence,
+    );
+
     let heartbeat = invoke_projection(
         &connector,
         &signing_key,
@@ -1460,6 +1492,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-missing-reply-target",
         "evt-queue-fill",
         "evt-queue-full",
+        "evt-stale-sequence",
         "evt-reconnect-requested",
         "evt-invalid-session",
         "evt-reconnect-cap-first",
@@ -1477,6 +1510,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "msg-missing-reply-target",
         "msg-queue-fill",
         "msg-queue-full",
+        "msg-stale-sequence",
         "msg-after-shutdown",
         "bot-openid",
         "group-allowed",
@@ -1495,6 +1529,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "blank reply target",
         "queue fill message",
         "queue backpressure message",
+        "stale sequence should drop",
         "deploy status",
         "plain message",
         "not a mention segment",
@@ -1529,6 +1564,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert!(log_contents.contains("attachment_bytes_exceeded"));
     assert!(log_contents.contains("queue_full_backpressure_drop"));
     assert!(log_contents.contains("queue_full"));
+    assert!(log_contents.contains("stale_sequence_replay_drop"));
+    assert!(log_contents.contains("stale_sequence_events"));
     assert!(log_contents.contains("reconnect_requested"));
     assert!(log_contents.contains("invalid_session_resumable"));
     assert!(log_contents.contains("reconnect_attempts_exhausted"));

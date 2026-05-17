@@ -377,9 +377,12 @@ component artifact hash record names its stable artifact path with a
 `sha256:<64 lowercase hex>` digest. Every top-level gauntlet record must also
 carry its hashed `CARGO_TARGET_DIR` provenance in the same
 `sha256:<64 lowercase hex>` shape, so a free-form target-dir label cannot pass
-as reusable reviewer evidence. Its summary record must also enumerate the full
-expected profile, scenario, theorem, assumption, benchmark, stable error
-mapping, and cleanup fields before the script can print reusable evidence.
+as reusable reviewer evidence. The host dispatcher component contract similarly
+requires every `*_hash` evidence field it consumes, including the optional
+receipt hash when present, to be exactly 64 lowercase hex characters. Its
+summary record must also enumerate the full expected profile, scenario,
+theorem, assumption, benchmark, stable error mapping, and cleanup fields before
+the script can print reusable evidence.
 For each `rch exec` lane the JSONL records include the observed `[RCH]` summary,
 worker execution class, and fallback decision so local fallback is visible in
 the artifact instead of being mistaken for remote proof. Remote worker failures

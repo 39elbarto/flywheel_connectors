@@ -580,26 +580,28 @@ validate_artifact_contracts() {
 
   validate_jsonl_contract "validate_host_dispatcher_contract" \
     "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl" '
+      def hex_hash:
+        type == "string" and test("^[0-9a-f]{64}$");
       length > 0 and
       all(.[]; type == "object" and
         (.command_line | type == "string") and
         (.git_revision | type == "string") and
         (.build_profile | type == "string") and
-        (.cargo_target_dir_hash | type == "string") and
+        (.cargo_target_dir_hash | hex_hash) and
         (.cargo_target_dir_class | type == "string") and
         (.worker_host_class | type == "string") and
         (.timing_sample_count | type == "number") and
         .artifact_path == "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl" and
         (.parameter_profile | type == "string") and
-        (.fixture_id_hash | type == "string") and
+        (.fixture_id_hash | hex_hash) and
         (.scenario | type == "string") and
-        (.zone_id_hash | type == "string") and
-        (.period_id_hash | type == "string") and
-        (.cert_id_hash | type == "string") and
-        (.trust_set_id_hash | type == "string") and
-        (.trust_set_source_hash | type == "string") and
-        (.operation_id_hash | type == "string") and
-        (.principal_id_hash | type == "string") and
+        (.zone_id_hash | hex_hash) and
+        (.period_id_hash | hex_hash) and
+        (.cert_id_hash | hex_hash) and
+        (.trust_set_id_hash | hex_hash) and
+        (.trust_set_source_hash | hex_hash) and
+        (.operation_id_hash | hex_hash) and
+        (.principal_id_hash | hex_hash) and
         (.request_binding_result | type == "string") and
         (.matrix_dimensions | type == "object") and
         (.primitive_timings | type == "object") and
@@ -607,6 +609,7 @@ validate_artifact_contracts() {
         (.norm_bound_bucket | type == "string") and
         (.verifier_result | type == "string") and
         has("receipt_id_hash") and
+        (.receipt_id_hash == null or (.receipt_id_hash | hex_hash)) and
         (.dispatcher_decision | type == "string") and
         has("error_mapping") and
         (.benchmark_summary | type == "string") and

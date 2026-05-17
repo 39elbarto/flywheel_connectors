@@ -308,6 +308,13 @@ if [[ "${overall_status}" == "passed" ]]; then
         and .p50_activation_latency_ms <= .baseline_p50_activation_latency_ms
         and .p95_activation_latency_ms <= .baseline_p95_activation_latency_ms
         and .p99_activation_latency_ms <= .baseline_p99_activation_latency_ms;
+      def latency_improvement_consistency_ok:
+        (.p50_activation_latency_improvement_ms | type) == "number"
+        and (.p95_activation_latency_improvement_ms | type) == "number"
+        and (.p99_activation_latency_improvement_ms | type) == "number"
+        and .p50_activation_latency_improvement_ms == (.baseline_p50_activation_latency_ms - .p50_activation_latency_ms)
+        and .p95_activation_latency_improvement_ms == (.baseline_p95_activation_latency_ms - .p95_activation_latency_ms)
+        and .p99_activation_latency_improvement_ms == (.baseline_p99_activation_latency_ms - .p99_activation_latency_ms);
       def ids: map(.scenario_id);
       def missing: required - (ids);
       def duplicate_scenarios:
@@ -421,6 +428,9 @@ if [[ "${overall_status}" == "passed" ]]; then
         latency_regression_ok: all(.[];
           latency_regression_ok
         ),
+        latency_improvement_consistency_ok: all(.[];
+          latency_improvement_consistency_ok
+        ),
         redaction_shape_ok: all(.[];
           (.connector_id | type) == "string"
           and (.worker_id | type) == "string"
@@ -476,6 +486,7 @@ if [[ "${overall_status}" == "passed" ]]; then
             and $v.percentile_fields_ok
             and $v.latency_order_ok
             and $v.latency_regression_ok
+            and $v.latency_improvement_consistency_ok
             and $v.redaction_shape_ok
           )
           then "passed"

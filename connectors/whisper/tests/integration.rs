@@ -817,6 +817,13 @@ async fn loopback_errors_cover_audio_auth_rate_provider_network_timeout_and_malf
         .expect(1)
         .mount(&provider_server)
         .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/transcriptions"))
+        .and(body_partial_json(json!({ "model": "whisper-empty" })))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .expect(1)
+        .mount(&provider_server)
+        .await;
     let provider_connector =
         configured_connector(&format!("{}/v1", provider_server.uri()), None).await;
     let missing_model = provider_connector
@@ -866,6 +873,18 @@ async fn loopback_errors_cover_audio_auth_rate_provider_network_timeout_and_malf
         .await
         .expect_err("malformed provider JSON should fail");
     assert!(matches!(malformed, FcpError::Internal { .. }));
+
+    let empty_body = provider_connector
+        .handle_invoke(json!({
+            "operation_id": TRANSCRIBE_OP,
+            "input": {
+                "audio_base64": FIXTURE_AUDIO_BASE64,
+                "model": "whisper-empty"
+            }
+        }))
+        .await
+        .expect_err("empty provider success body should fail closed");
+    assert_external_error(&empty_body, Some(200), false);
 
     let network_connector = configured_connector(&unused_loopback_base_url(), None).await;
     let network = network_connector

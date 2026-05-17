@@ -134,8 +134,10 @@ impl MondayClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(json!({}));
+            if body.trim().is_empty() {
+                return Err(MondayError::GraphQL {
+                    message: "empty response body".into(),
+                });
             }
             // Monday.com returns 200 for GraphQL errors, so check for errors in the body.
             let gql_resp: GraphQLResponse = serde_json::from_str(&body)?;

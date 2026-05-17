@@ -1191,7 +1191,7 @@ The most impactful tuning the workspace ships today:
 - **`fcp-raptorq`** — repair-tail decode coalesce; per-pivot Gaussian elimination heap allocation reduction; hot-path benches.
 - **`fcp-webhook`** — precomputed routing index O(1) lookup.
 - **`fcp-streaming`** — SSE parser cursor advance without full rescan.
-- **`fcp-oauth`** — single-flight `tokio::watch` (no Vec scan).
+- **`fcp-oauth`** — single-flight refresh gate using `fcp_async_core::channel::watch` (no Vec scan).
 - **`fcp-host`** — concurrent `InvokeAuditChain` per-zone sharding (removes global Mutex serialization).
 - **`fcp-bootstrap`** — cert-selection O(log n) index.
 - **`fcp-tailscale`** — borrowed peer-tag scan.
@@ -3712,7 +3712,7 @@ A non-exhaustive list of the concrete optimization patterns the workspace uses, 
 | **Arena allocators** | `canonicalize_map` in `fcp-cbor` (`m7aoz`) — single arena `Vec<u8>` vs per-entry allocations | Map canonicalization allocation overhead amortized |
 | **Pre-computed routing index** | `fcp-webhook` route dispatch (`7j7fa`) — HashMap of provider → handler | Per-request route lookup went from O(n) linear scan to O(1) |
 | **Cursor-advance parsing** | `fcp-streaming` SSE parser (`gqpn5`) — advance read pointer instead of full rescan | Frame parsing avoids re-walking already-consumed bytes |
-| **Single-flight coordination** | `fcp-oauth` token refresh (`p36a0`) — `tokio::watch` channel for concurrent refreshes | N concurrent refresh requests collapse to 1 upstream call |
+| **Single-flight coordination** | `fcp-oauth` token refresh (`p36a0`) — `fcp_async_core::channel::watch` gate for concurrent refreshes | N concurrent refresh requests collapse to 1 upstream call |
 | **Per-zone sharding** | `fcp-host` `InvokeAuditChain` (`uwlj5`) — sharded by zone instead of global Mutex | Concurrent invokes in different zones no longer serialize on a single audit mutex |
 | **Sorted-index cert selection** | `fcp-bootstrap` (`vkq68`) — O(log n) binary search vs linear scan | Cert selection during handshake went from O(n) to O(log n) |
 | **Borrowed scan vs owned clone** | `fcp-tailscale` peer-tag scan (`qfsse`) — borrow peer-tag list instead of clone | Per-handshake heap allocation removed |

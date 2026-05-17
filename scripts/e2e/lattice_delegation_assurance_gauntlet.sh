@@ -917,6 +917,26 @@ validate_gauntlet_contract() {
         .details.artifact_path == $path and
         (.details.artifact_hash | sha256_hash) and
         (.details.cleanup_result | type == "string"));
+    def non_rch_command_proof:
+      (.details.command_line | contains("rch exec") | not) and
+      .details.fallback_decision == "not_needed" and
+      .details.worker_execution_class == "not_applicable" and
+      .details.rch_summary == null;
+    def rch_remote_proof:
+      .details.fallback_decision == "not_needed" and
+      .details.worker_execution_class == "remote" and
+      (.details.rch_summary | type == "string" and contains("[RCH] remote"));
+    def rch_local_fallback_proof:
+      .details.fallback_decision == "rch_local_fallback" and
+      .details.worker_execution_class == "local" and
+      (.details.rch_summary | type == "string" and contains("[RCH] local"));
+    def rch_remote_failure_proof:
+      .details.fallback_decision == "rch_remote_failed" and
+      .details.worker_execution_class == "remote_failed" and
+      (.details.rch_summary | type == "string" and contains("[RCH] failed"));
+    def rch_command_proof:
+      (.details.command_line | contains("rch exec")) and
+      (rch_remote_proof or rch_local_fallback_proof or rch_remote_failure_proof);
     def command_record_contract:
       if (.details | has("command_line")) then
         (.details.command_line | type == "string") and
@@ -924,10 +944,8 @@ validate_gauntlet_contract() {
         (.details.log_hash | sha256_hash) and
         (.details.duration_seconds | type == "number") and
         (.details.retry_count | type == "number") and
-        (.details.fallback_decision | type == "string") and
-        (.details.worker_execution_class | type == "string") and
-        (.details | has("rch_summary")) and
-        (.details.cache_decision | type == "string") and
+        (non_rch_command_proof or rch_command_proof) and
+        .details.cache_decision == "cargo_target_dir_hashed" and
         (.details.cleanup_result | type == "string")
       else true end;
     def top_level_provenance_consistent:

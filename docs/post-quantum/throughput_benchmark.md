@@ -426,7 +426,12 @@ are classified separately from successful remote execution. The gauntlet
 self-contract now requires every command-run record, local or `rch`-backed, to
 carry a stable log artifact, `sha256:<64 lowercase hex>` log hash, duration,
 retry count, fallback decision, worker execution class, cache decision, cleanup
-result, and the RCH summary field.
+result, and the RCH summary field. Non-`rch` command records must report
+`fallback_decision:"not_needed"`, `worker_execution_class:"not_applicable"`,
+and `rch_summary:null`. `rch exec` records must carry an observed `[RCH]`
+summary whose remote/local/failed classification matches the recorded fallback
+and worker execution class; unobserved or unclassified RCH summaries are not
+reusable evidence.
 The redaction scan treats raw zone, operation, and principal labels plus
 authorization headers, bearer strings, access or refresh tokens, and the host
 dispatcher fixture literals `send_message`, `agent-alpha`, and `agent-beta` as

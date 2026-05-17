@@ -92,7 +92,7 @@ Prompt-injection description scanning, MCP sampling handler, and auth-error retr
 
 ## 2026-04-21 — 2026-05-05 — Post-Quantum Crypto, Typestate Ratchet, and the Multi-Agent Swarm Session
 
-This window hosts the project's largest single-session capability landing: a 4-codex + 2-claude-code swarm on 2026-05-02 closed ~168 beads, hardened security across alpha/beta/gamma/delta/epsilon domains, and shipped 31 new connector beads. See [`docs/audit/swarm-session-summary-2026-05-02.md`](docs/audit/swarm-session-summary-2026-05-02.md) for the full session memo.
+This window hosts the project's largest single-session capability landing: a 4-codex + 2-claude-code swarm on 2026-05-02 closed ~167 beads (net of the ~2,935 baseline), hardened security across alpha/beta/gamma/delta/epsilon domains, and shipped 31 new connector beads. See [`docs/audit/swarm-session-summary-2026-05-02.md`](docs/audit/swarm-session-summary-2026-05-02.md) for the full session memo.
 
 ### Post-Quantum Cryptography (`kyopb.1.*`)
 Production-grade PQ infrastructure landed in a new `fcp-crypto-pq` crate. X-Wing KEM with RustCrypto draft-06 plus IETF KAT regression harness, ML-DSA-65 (FIPS 204) with randomized signing and pinned KAT vectors, the `ZoneKeyManifest V4` schema supporting mixed V3+V4 wrap lists and safe `migrated_to_v4` promotion, hybrid verifier dispatch through HPKE-X25519 and X-Wing, and `subtle::ConstantTimeEq` replacing `PartialEq` on every PQ secret type. A Lean formal-soundness theorem for the lattice-trapdoor delegation chain landed alongside throughput benches comparing Ed25519, ML-DSA-65, and lattice delegation. A mixed V3/V4 mesh migration harness proves readers on both schemas agree on the effective zone key.

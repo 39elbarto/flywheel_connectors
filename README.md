@@ -2269,7 +2269,7 @@ This project is largely built and maintained by coordinated swarms of AI coding 
 - **[UBS](https://github.com/Dicklesworthstone/ubs)** — Ultimate Bug Scanner, a multi-language lint that runs in `--ci` mode before commits.
 - **[APR (Automated Plan Reviser Pro)](https://github.com/Dicklesworthstone/automated_plan_reviser_pro)** — 12+ rounds of GPT Pro 5.2 Extended Reasoning over the FCP V3 specification, with each round narrowing from architectural flaws → interface refinements → nuanced optimizations.
 
-A representative swarm session (2026-05-02) ran 4 Codex agents and 2 Claude Code agents in parallel for ~6 hours, closing ~168 beads, filing 18 P1/P2 security findings (all fixed same-day), and shipping 31 new connector beads. Session memo at [`docs/audit/swarm-session-summary-2026-05-02.md`](docs/audit/swarm-session-summary-2026-05-02.md).
+A representative swarm session (2026-05-02) ran 4 Codex agents and 2 Claude Code agents in parallel for ~6 hours, closing ~167 beads (net of the ~2,935 baseline), filing 18 P1/P2 security findings (all fixed same-day), and shipping 31 new connector beads. Session memo at [`docs/audit/swarm-session-summary-2026-05-02.md`](docs/audit/swarm-session-summary-2026-05-02.md).
 
 The development model also imposes discipline most human-only projects don't bother with:
 

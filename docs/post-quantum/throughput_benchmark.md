@@ -382,8 +382,9 @@ hash-bearing fields they consume: raw digest fields must be exactly 64 lowercase
 hex characters, existing tagged fixture IDs must be `hash:<64 lowercase hex>`,
 and optional material digests may only be null or exact lowercase hex. The host
 dispatcher contract applies the same strict shape to every consumed `*_hash`
-field, including the optional receipt hash when present. Its summary record must
-also enumerate the full expected profile, scenario,
+field, including the optional receipt hash when present, and requires exactly
+one record for each required dispatcher scenario. Its summary record must
+also enumerate the full expected profile, exact scenario set,
 theorem, assumption, benchmark, stable error mapping, and cleanup fields before
 the script can print reusable evidence.
 The top-level gauntlet self-contract also requires a single consistent run id,

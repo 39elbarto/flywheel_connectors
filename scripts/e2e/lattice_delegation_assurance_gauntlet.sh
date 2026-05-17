@@ -606,7 +606,18 @@ validate_artifact_contracts() {
     "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl" '
       def hex_hash:
         type == "string" and test("^[0-9a-f]{64}$");
+      def required_scenarios:
+        [
+          "allow_v4_reference",
+          "deny_forged_v4_reference",
+          "deny_trust_set_replay_v4_reference",
+          "deny_mismatched_operation",
+          "deny_mismatched_principal"
+        ];
+      def scenario_ids:
+        map(.scenario);
       length > 0 and
+      ((scenario_ids | sort) == (required_scenarios | sort)) and
       all(.[]; type == "object" and
         (.command_line | type == "string") and
         (.git_revision | type == "string") and
@@ -647,7 +658,7 @@ validate_artifact_contracts() {
     '
 
   append_json "jsonl_contract_validation" "pass" "$(jq -cn \
-    '{validated_artifacts:["target/fcp-crypto-pq/representation-profile-evidence.jsonl","target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl","target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl","target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl","target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl","target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl","target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"],required_host_scenarios:["allow_v4_reference","deny_forged_v4_reference","deny_trust_set_replay_v4_reference","deny_mismatched_operation","deny_mismatched_principal"],required_assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1"],cleanup_result:"not_applicable"}')"
+    '{validated_artifacts:["target/fcp-crypto-pq/representation-profile-evidence.jsonl","target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl","target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl","target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl","target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl","target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl","target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"],required_host_scenarios:["allow_v4_reference","deny_forged_v4_reference","deny_trust_set_replay_v4_reference","deny_mismatched_operation","deny_mismatched_principal"],host_scenario_cardinality:"exactly_once",required_assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1"],cleanup_result:"not_applicable"}')"
 }
 
 validate_gauntlet_contract() {
@@ -655,6 +666,14 @@ validate_gauntlet_contract() {
   validate_jsonl_contract "validate_gauntlet_contract" "${ARTIFACT}" '
     def sha256_hash:
       type == "string" and test("^sha256:[0-9a-f]{64}$");
+    def required_host_scenarios:
+      [
+        "allow_v4_reference",
+        "deny_forged_v4_reference",
+        "deny_trust_set_replay_v4_reference",
+        "deny_mismatched_operation",
+        "deny_mismatched_principal"
+      ];
     def required_tool_versions:
       any(.[]; .step == "tool_versions" and .result == "pass" and
         (.details.cargo | type == "string") and
@@ -742,11 +761,7 @@ validate_gauntlet_contract() {
         index("SMALL_TEST") != null and
         index("V4_REFERENCE") != null) and
       (.details.scenario_ids | type == "array" and
-        index("allow_v4_reference") != null and
-        index("deny_forged_v4_reference") != null and
-        index("deny_trust_set_replay_v4_reference") != null and
-        index("deny_mismatched_operation") != null and
-        index("deny_mismatched_principal") != null) and
+        ((. | sort) == (required_host_scenarios | sort))) and
       (.details.theorem_names | type == "array" and
         index("lattice_delegation_chain_corruption_rejected") != null and
         index("lattice_delegation_sis_assumption_boundary_complete") != null and

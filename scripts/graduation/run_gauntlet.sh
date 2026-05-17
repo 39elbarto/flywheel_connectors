@@ -220,11 +220,18 @@ write_batch_status_markdown() {
         "$(md_escape "${detail}")"
     done
     printf '\n## Current Next Actions\n\n'
-    printf '%s\n' "- Add or restore connector-local \`operations_info\` metadata where the gauntlet stops at \`operations_info\`."
-    printf '%s\n' "- Add redaction-safe \`scripts/e2e/...\` verification-script declarations where the gauntlet stops at \`verification_script_declared\`."
-    printf '%s\n' "- Add connector-local \`tests/local_non_mock.rs\` acceptance coverage where the gauntlet stops at \`local_non_mock\`."
-    printf '%s\n' "- Fix manifest network constraints where the gauntlet stops at \`network_policy\`."
-    printf '%s\n' "- Do not mark any Batch 1 connector PROVEN until its manifest, README, local non-mock proof, sandbox/network policy, and operator guidance all pass the gauntlet."
+    if [[ "${passing}" -eq "${total}" ]]; then
+      printf '%s\n' "- Keep this artifact scoped to mechanical gauntlet status until the PROVEN promotion proof bundle lands."
+      printf '%s\n' "- Run each Batch 1 connector's tracked verifier and cite redaction-safe JSONL artifact paths/hashes, not just the presence-only gauntlet checks."
+      printf '%s\n' "- Promote README and manifest statuses to PROVEN only in the same change that cites the full verifier, conformance, and proof-lane results."
+      printf '%s\n' "- After PROVEN markers are present, run \`rch exec -- cargo test -p fcp-conformance --test graduation_gauntlet_conformance all_proven_connectors_pass_gauntlet -- --nocapture\`."
+    else
+      printf '%s\n' "- Add or restore connector-local \`operations_info\` metadata where the gauntlet stops at \`operations_info\`."
+      printf '%s\n' "- Add redaction-safe \`scripts/e2e/...\` verification-script declarations where the gauntlet stops at \`verification_script_declared\`."
+      printf '%s\n' "- Add connector-local \`tests/local_non_mock.rs\` acceptance coverage where the gauntlet stops at \`local_non_mock\`."
+      printf '%s\n' "- Fix manifest network constraints where the gauntlet stops at \`network_policy\`."
+      printf '%s\n' "- Do not mark any Batch 1 connector PROVEN until its manifest, README, local non-mock proof, sandbox/network policy, and operator guidance all pass the gauntlet."
+    fi
   } >"${path}"
 }
 

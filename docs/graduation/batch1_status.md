@@ -18,8 +18,7 @@ Summary: `7/7` Batch 1 connectors currently pass the mechanical gauntlet.
 
 ## Current Next Actions
 
-- Add or restore connector-local `operations_info` metadata where the gauntlet stops at `operations_info`.
-- Add redaction-safe `scripts/e2e/...` verification-script declarations where the gauntlet stops at `verification_script_declared`.
-- Add connector-local `tests/local_non_mock.rs` acceptance coverage where the gauntlet stops at `local_non_mock`.
-- Fix manifest network constraints where the gauntlet stops at `network_policy`.
-- Do not mark any Batch 1 connector PROVEN until its manifest, README, local non-mock proof, sandbox/network policy, and operator guidance all pass the gauntlet.
+- Keep this artifact scoped to mechanical gauntlet status until the PROVEN promotion proof bundle lands.
+- Run each Batch 1 connector's tracked verifier and cite redaction-safe JSONL artifact paths/hashes, not just the presence-only gauntlet checks.
+- Promote README and manifest statuses to PROVEN only in the same change that cites the full verifier, conformance, and proof-lane results.
+- After PROVEN markers are present, run `rch exec -- cargo test -p fcp-conformance --test graduation_gauntlet_conformance all_proven_connectors_pass_gauntlet -- --nocapture`.

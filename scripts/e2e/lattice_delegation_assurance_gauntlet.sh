@@ -685,7 +685,15 @@ validate_gauntlet_contract() {
         (.details.cache_decision | type == "string") and
         (.details.cleanup_result | type == "string")
       else true end;
+    def top_level_provenance_consistent:
+      ([.[] | .run_id] | unique | length == 1) and
+      ([.[] | .git_revision] | unique | length == 1) and
+      ([.[] | .cargo_target_dir_class] | unique | length == 1) and
+      ([.[] | .cargo_target_dir_hash] | unique | length == 1) and
+      ([.[] | .build_profile] | unique | length == 1) and
+      ([.[] | .worker_host_class] | unique | length == 1);
     length > 0 and
+    top_level_provenance_consistent and
     all(.[]; type == "object" and
       .schema == "fcp.lattice_delegation.assurance_gauntlet.v1" and
       .script == "scripts/e2e/lattice_delegation_assurance_gauntlet.sh" and

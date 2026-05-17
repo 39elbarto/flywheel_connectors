@@ -386,6 +386,10 @@ field, including the optional receipt hash when present. Its summary record must
 also enumerate the full expected profile, scenario,
 theorem, assumption, benchmark, stable error mapping, and cleanup fields before
 the script can print reusable evidence.
+The top-level gauntlet self-contract also requires a single consistent run id,
+git revision, target-dir class/hash, build profile, and worker host class across
+all JSONL records so reviewer evidence cannot be stitched together from
+different runs.
 For each `rch exec` lane the JSONL records include the observed `[RCH]` summary,
 worker execution class, and fallback decision so local fallback is visible in
 the artifact instead of being mistaken for remote proof. Remote worker failures

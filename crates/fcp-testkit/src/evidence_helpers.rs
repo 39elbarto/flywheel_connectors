@@ -2686,11 +2686,25 @@ pub struct SwarmPrewarmLatencyPercentiles {
 
 const SYNTHETIC_PREWARM_CHECKOUT_BOUNDARY: &str =
     "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout";
+const PRODUCTION_PREWARM_HOST_BOUNDARY_PREFIX: &str = "fcp-host::";
+const PRODUCTION_PREWARM_SANDBOX_BOUNDARY_PREFIX: &str = "fcp-sandbox::";
 
 fn is_synthetic_prewarm_host_boundary(host_boundary: &str) -> bool {
     let trimmed = host_boundary.trim();
     trimmed == SYNTHETIC_PREWARM_CHECKOUT_BOUNDARY
         || trimmed.contains("ConnectorPrewarmConfig::decide_checkout")
+}
+
+fn is_production_prewarm_host_boundary(host_boundary: &str) -> bool {
+    let trimmed = host_boundary.trim();
+    trimmed.starts_with(PRODUCTION_PREWARM_HOST_BOUNDARY_PREFIX)
+        && !is_synthetic_prewarm_host_boundary(trimmed)
+}
+
+fn is_production_prewarm_sandbox_boundary(sandbox_boundary: &str) -> bool {
+    sandbox_boundary
+        .trim()
+        .starts_with(PRODUCTION_PREWARM_SANDBOX_BOUNDARY_PREFIX)
 }
 
 /// Replayable JSONL evidence for connector prewarm cold-start behavior.
@@ -2799,14 +2813,14 @@ fn validate_prewarm_soak_boundaries(
         return Ok(());
     }
 
-    if is_synthetic_prewarm_host_boundary(&evidence.host_boundary) {
+    if !is_production_prewarm_host_boundary(&evidence.host_boundary) {
         return Err(
             SwarmPrewarmColdStartEvidenceError::SoakRequiresProductionHostBoundary {
                 host_boundary: evidence.host_boundary.clone(),
             },
         );
     }
-    if !evidence.sandbox_boundary.contains("fcp-sandbox") {
+    if !is_production_prewarm_sandbox_boundary(&evidence.sandbox_boundary) {
         return Err(
             SwarmPrewarmColdStartEvidenceError::SoakRequiresSandboxBoundary {
                 sandbox_boundary: evidence.sandbox_boundary.clone(),
@@ -9569,6 +9583,23 @@ mod tests {
             )
         );
 
+        let mut wrapped_sandbox_boundary = prewarm_cold_start_evidence_fixture();
+        wrapped_sandbox_boundary.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        wrapped_sandbox_boundary.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        wrapped_sandbox_boundary.host_boundary =
+            "fcp-host::supervisor::ConnectorSupervisor::activate_connector".to_string();
+        wrapped_sandbox_boundary.sandbox_boundary =
+            "collected-via fcp-sandbox::strict-profile-limits".to_string();
+        assert_eq!(
+            wrapped_sandbox_boundary.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresSandboxBoundary {
+                    sandbox_boundary: "collected-via fcp-sandbox::strict-profile-limits"
+                        .to_string()
+                }
+            )
+        );
+
         let mut production_soak = prewarm_cold_start_evidence_fixture();
         production_soak.execution_mode = SwarmEvidenceExecutionMode::Soak;
         production_soak.source_kind = SwarmEvidenceSourceKind::HostBacked;
@@ -9579,7 +9610,7 @@ mod tests {
     }
 
     #[test]
-    fn swarm_prewarm_cold_start_evidence_rejects_synthetic_host_boundaries() {
+    fn swarm_prewarm_cold_start_evidence_rejects_non_production_host_boundaries() {
         let mut synthetic_host_soak = prewarm_cold_start_evidence_fixture();
         synthetic_host_soak.execution_mode = SwarmEvidenceExecutionMode::Soak;
         synthetic_host_soak.source_kind = SwarmEvidenceSourceKind::HostBacked;
@@ -9588,6 +9619,21 @@ mod tests {
             Err(
                 SwarmPrewarmColdStartEvidenceError::SoakRequiresProductionHostBoundary {
                     host_boundary: SYNTHETIC_PREWARM_CHECKOUT_BOUNDARY.to_string()
+                }
+            )
+        );
+
+        let mut wrapped_host_soak = prewarm_cold_start_evidence_fixture();
+        wrapped_host_soak.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        wrapped_host_soak.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        wrapped_host_soak.host_boundary =
+            "collected-via fcp-host::supervisor::ConnectorSupervisor::activate_connector"
+                .to_string();
+        assert_eq!(
+            wrapped_host_soak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresProductionHostBoundary {
+                    host_boundary: wrapped_host_soak.host_boundary
                 }
             )
         );

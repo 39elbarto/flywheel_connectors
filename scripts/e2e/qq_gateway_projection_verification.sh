@@ -147,6 +147,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           "missing_reply_target_drop",
           "channel_policy_denied",
           "channel_policy_allowed",
+          "queue_full_backpressure_drop",
           "hello_session_restore",
           "allowed_group_mention",
           "missing_group_mention_drop",
@@ -183,6 +184,18 @@ if [[ "${overall_status}" == "passed" ]]; then
           any(.[]; .step == "channel_policy_denied" and .details.accepted == false and .details.reason_code == "channel_not_allowed")
           and any(.[]; .step == "channel_policy_allowed" and .details.accepted == true and .details.policy.reason_code == "channel_allowed" and .details.policy.mentioned_bot == true)
         ),
+        queue_shape_ok: any(.[];
+          .step == "queue_full_backpressure_drop"
+          and .details.accepted == false
+          and .details.reason_code == "queue_full"
+          and .details.normalized == null
+          and .details.policy == null
+          and .details.runtime.queue_depth == 1
+          and .details.runtime.max_queue_depth == 1
+          and .details.runtime.accepted_events == 1
+          and .details.runtime.dropped_events == 1
+          and .details.lifecycle.action == "none"
+        ),
         group_policy_shape_ok: (
           any(.[]; .step == "allowed_group_mention" and .details.accepted == true and .details.policy.reason_code == "group_allowed")
           and any(.[]; .step == "missing_group_mention_drop" and .details.reason_code == "missing_group_mention")
@@ -217,7 +230,7 @@ if [[ "${overall_status}" == "passed" ]]; then
       } as $v
       | $v
       | .status = (
-          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.group_policy_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok)
+          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.queue_shape_ok and $v.group_policy_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok)
           then "passed"
           else "failed"
           end
@@ -250,6 +263,8 @@ if [[ "${overall_status}" == "passed" ]]; then
     "evt-missing-binding" \
     "evt-missing-message-id" \
     "evt-missing-reply-target" \
+    "evt-queue-fill" \
+    "evt-queue-full" \
     "evt-reconnect-requested" \
     "evt-invalid-session" \
     "evt-reconnect-cap-first" \
@@ -266,20 +281,26 @@ if [[ "${overall_status}" == "passed" ]]; then
     "msg-missing-binding" \
     "msg-missing-message-id" \
     "msg-missing-reply-target" \
+    "msg-queue-fill" \
+    "msg-queue-full" \
     "msg-after-shutdown" \
     "bot-openid" \
     "group-allowed" \
     "group-slash" \
     "group-disabled" \
     "group-binding" \
+    "group-queue" \
     "member-1" \
     "member-slash" \
     "member-disabled" \
+    "member-queue" \
     "Alice" \
     "gateway disabled should not authorize" \
     "event missing sender binding" \
     "event missing message id" \
     "blank reply target" \
+    "queue fill message" \
+    "queue backpressure message" \
     "deploy status" \
     "plain message" \
     "not a mention segment" \

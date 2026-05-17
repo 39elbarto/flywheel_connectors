@@ -744,6 +744,85 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(channel_allowed["runtime"]["queue_depth"], 1);
     log_projection_step(&mut logs, "channel_policy_allowed", "ok", &channel_allowed);
 
+    let queue_instance_id = InstanceId::new();
+    let mut queue_connector = QqConnector::new();
+    queue_connector
+        .configure(json!({
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999",
+            "app_id": "qq-app",
+            "client_secret": "test-secret",
+            "gateway": {
+                "enabled": true,
+                "max_queue_depth": 1,
+                "policy": {
+                    "group_policy": "open",
+                    "group_require_mention": false
+                }
+            }
+        }))
+        .await
+        .expect("configure queue-bound QQ connector");
+    queue_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            queue_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake queue-bound QQ connector");
+    let queue_fill = invoke_projection(
+        &queue_connector,
+        &signing_key,
+        &queue_instance_id,
+        "qq-gateway-queue-fill",
+        json!({
+            "op": 0,
+            "s": 1,
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": "evt-queue-fill",
+            "d": {
+                "id": "msg-queue-fill",
+                "content": "queue fill message",
+                "group_openid": "group-queue",
+                "group_member_openid": "member-queue"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(queue_fill["accepted"], true);
+    assert_eq!(queue_fill["runtime"]["queue_depth"], 1);
+    assert_eq!(queue_fill["runtime"]["max_queue_depth"], 1);
+    assert_eq!(queue_fill["runtime"]["accepted_events"], 1);
+    let queue_full = invoke_projection(
+        &queue_connector,
+        &signing_key,
+        &queue_instance_id,
+        "qq-gateway-queue-full",
+        json!({
+            "op": 0,
+            "s": 2,
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": "evt-queue-full",
+            "d": {
+                "id": "msg-queue-full",
+                "content": "queue backpressure message",
+                "group_openid": "group-queue",
+                "group_member_openid": "member-queue"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(queue_full["accepted"], false);
+    assert_eq!(queue_full["reason_code"], "queue_full");
+    assert_eq!(queue_full["normalized"], Value::Null);
+    assert_eq!(queue_full["policy"], Value::Null);
+    assert_eq!(queue_full["runtime"]["queue_depth"], 1);
+    assert_eq!(queue_full["runtime"]["max_queue_depth"], 1);
+    assert_eq!(queue_full["runtime"]["accepted_events"], 1);
+    assert_eq!(queue_full["runtime"]["dropped_events"], 1);
+    assert_eq!(queue_full["lifecycle"]["action"], "none");
+    log_projection_step(&mut logs, "queue_full_backpressure_drop", "ok", &queue_full);
+
     let hello = invoke_projection(
         &connector,
         &signing_key,
@@ -1379,6 +1458,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-missing-binding",
         "evt-missing-message-id",
         "evt-missing-reply-target",
+        "evt-queue-fill",
+        "evt-queue-full",
         "evt-reconnect-requested",
         "evt-invalid-session",
         "evt-reconnect-cap-first",
@@ -1394,20 +1475,26 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "msg-disabled",
         "msg-missing-binding",
         "msg-missing-reply-target",
+        "msg-queue-fill",
+        "msg-queue-full",
         "msg-after-shutdown",
         "bot-openid",
         "group-allowed",
         "group-slash",
         "group-disabled",
         "group-binding",
+        "group-queue",
         "member-1",
         "member-slash",
         "member-disabled",
+        "member-queue",
         "Alice",
         "gateway disabled should not authorize",
         "event missing sender binding",
         "event missing message id",
         "blank reply target",
+        "queue fill message",
+        "queue backpressure message",
         "deploy status",
         "plain message",
         "not a mention segment",
@@ -1440,6 +1527,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert!(log_contents.contains("attachment_total_bytes"));
     assert!(log_contents.contains("attachment_url_hashes"));
     assert!(log_contents.contains("attachment_bytes_exceeded"));
+    assert!(log_contents.contains("queue_full_backpressure_drop"));
+    assert!(log_contents.contains("queue_full"));
     assert!(log_contents.contains("reconnect_requested"));
     assert!(log_contents.contains("invalid_session_resumable"));
     assert!(log_contents.contains("reconnect_attempts_exhausted"));

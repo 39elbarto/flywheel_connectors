@@ -9,7 +9,7 @@ Summary: `2/7` Batch 1 connectors currently pass the mechanical gauntlet.
 | Connector | Status | First failing check | Checks passed before failure | Detail |
 |-----------|--------|---------------------|------------------------------|--------|
 | `connectors/postgresql` | `pass` | `-` | `12` | All checks passed |
-| `connectors/stripe` | `blocked` | `verification_script_declared` | `4` | README does not declare a scripts/e2e verification script |
+| `connectors/stripe` | `blocked` | `local_non_mock` | `6` | missing tests/local_non_mock.rs |
 | `connectors/github` | `blocked` | `local_non_mock` | `6` | missing tests/local_non_mock.rs |
 | `connectors/gmail` | `blocked` | `local_non_mock` | `6` | missing tests/local_non_mock.rs |
 | `connectors/telegram` | `blocked` | `local_non_mock` | `6` | missing tests/local_non_mock.rs |

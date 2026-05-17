@@ -3,7 +3,7 @@
 > **Status**: runtime contract documented with approval, webhook, form-encoding, and runtime/manifest drift
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/stripe_connector_verification.sh`
 > **Stripe API upstream**: https://docs.stripe.com/api
 > **Stripe auth upstream**: https://docs.stripe.com/api/authentication
 > **Stripe idempotency upstream**: https://docs.stripe.com/api/idempotent_requests
@@ -82,9 +82,9 @@ This README documents runtime truth and keeps current drift visible:
 - Webhook replay protection stores only in-memory event IDs and evicts by tolerance window and cache size.
 - List operations expose only narrow filters and `limit`; they do not expose full Stripe pagination cursors, search endpoints, expand parameters, or API version selection.
 - Manifest says connector format is `wasi`; the current Rust crate is a normal package/bin using reqwest and the FCP runtime helpers.
-- There is no tracked verification shell script for this connector.
+- The tracked verification shell script currently fails closed at the gauntlet's `local_non_mock` check until `connectors/stripe/tests/local_non_mock.rs` lands.
 
-A follow-up parity bead should align approval metadata and runtime enforcement, decide whether JSON request bodies are an intentional Stripe facade or live API drift, reconcile idempotency behavior for DELETE paths, add pagination/search/expand support if needed, and add a tracked deterministic verification bundle.
+A follow-up parity bead should align approval metadata and runtime enforcement, decide whether JSON request bodies are an intentional Stripe facade or live API drift, reconcile idempotency behavior for DELETE paths, add pagination/search/expand support if needed, and add the tracked local non-mock acceptance test.
 
 ## First-Slice Scope
 
@@ -243,6 +243,7 @@ The deterministic integration evidence is anchored on connector-local tests cove
 Run these after changing this connector contract:
 
 ```bash
+scripts/e2e/stripe_connector_verification.sh
 git diff --check -- connectors/stripe/README.md
 ubs connectors/stripe/README.md
 LC_ALL=C rg -n '[^ -~]' connectors/stripe/README.md
@@ -260,7 +261,16 @@ rch exec -- cargo fmt --check
 
 For opt-in live verification, inspect `connectors/stripe/tests/live_verification.rs` and run only against a dedicated Stripe test-mode account.
 
+The tracked verifier skips live Stripe tests by default. To include that lane, set `STRIPE_RUN_LIVE_TESTS=1` and provision `STRIPE_SECRET_KEY` in the worker environment; the script passes only `FCP_LIVE_SANDBOX=1` on the command line so secret keys do not appear in proof argv.
+
 ## Operator Guidance
+
+Rerun commands:
+
+```bash
+scripts/e2e/stripe_connector_verification.sh
+scripts/graduation/run_gauntlet.sh connectors/stripe
+```
 
 - Use a Stripe test-mode account for mutation proof.
 - Prefer `credential_id` mode when host policy should own the secret key.

@@ -203,7 +203,8 @@ validate_formal_script_contract() {
       (.details.cleanup_result | type == "string")) and
     any(.[]; .step == "summary" and .result == "pass" and
       .details.artifact_path == "target/fcp-crypto-pq/lattice-delegation-formal-correspondence-proof.jsonl" and
-      (.details.artifact_hash | sha256_hash) and
+      (.details.pre_summary_artifact_hash | sha256_hash) and
+      .details.final_artifact_hash_output == "stdout:LATTICE_FORMAL_CORRESPONDENCE_SHA256" and
       (.details.profile_ids | type == "array" and
         ((. | sort) == (required_profile_ids | sort))) and
       .details.route_revision == 1 and
@@ -297,12 +298,14 @@ done
 append_json "redaction_scan" "pass" "$(jq -cn \
   '{forbidden_terms_checked:["/Users/","/tmp/","trapdoor_coefficients","secret_seed","expanded_secret_matrix","preimage_coefficients","preimage_bytes","bearer","token=","op:","principal:","z:"],local_private_paths:"absent",secret_material:"absent",auth_header_values:"absent",request_plaintext:"absent",cleanup_result:"not_applicable"}')"
 
-artifact_hash="$(shasum -a 256 "${ARTIFACT}" | awk '{print $1}')"
+pre_summary_artifact_hash="$(shasum -a 256 "${ARTIFACT}" | awk '{print $1}')"
 append_json "summary" "pass" "$(jq -cn \
   --arg artifact "target/fcp-crypto-pq/lattice-delegation-formal-correspondence-proof.jsonl" \
-  --arg artifact_hash "sha256:${artifact_hash}" \
-  '{artifact_path:$artifact,artifact_hash:$artifact_hash,profile_ids:["SMALL_TEST","V4_REFERENCE"],route_revision:1,cleanup_result:"not_applicable_generated_artifact"}')"
+  --arg pre_summary_artifact_hash "sha256:${pre_summary_artifact_hash}" \
+  '{artifact_path:$artifact,pre_summary_artifact_hash:$pre_summary_artifact_hash,final_artifact_hash_output:"stdout:LATTICE_FORMAL_CORRESPONDENCE_SHA256",profile_ids:["SMALL_TEST","V4_REFERENCE"],route_revision:1,cleanup_result:"not_applicable_generated_artifact"}')"
 
 validate_formal_script_contract
 
+final_artifact_hash="$(shasum -a 256 "${ARTIFACT}" | awk '{print $1}')"
 printf 'LATTICE_FORMAL_CORRESPONDENCE_JSONL %s\n' "${ARTIFACT}"
+printf 'LATTICE_FORMAL_CORRESPONDENCE_SHA256 sha256:%s\n' "${final_artifact_hash}"

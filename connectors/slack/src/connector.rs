@@ -485,13 +485,8 @@ impl SlackConnector {
         }))
     }
 
-    /// Handle introspect method.
-    ///
-    /// # Errors
-    /// Returns [`FcpError`] if serialization of the introspection data fails.
-    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        let introspection = Introspection {
-            operations: vec![
+    fn operations_info() -> Vec<OperationInfo> {
+        vec![
                 op_info(
                     "slack.post_message",
                     "Post a message to a Slack channel",
@@ -869,7 +864,16 @@ impl SlackConnector {
                         related: vec![CapabilityId::from_static("slack.list_channels")],
                     },
                 ),
-            ],
+        ]
+    }
+
+    /// Handle introspect method.
+    ///
+    /// # Errors
+    /// Returns [`FcpError`] if serialization of the introspection data fails.
+    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let introspection = Introspection {
+            operations: Self::operations_info(),
             events: SOCKET_DEFAULT_TOPICS
                 .iter()
                 .map(|topic| EventInfo {

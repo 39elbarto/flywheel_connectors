@@ -379,9 +379,12 @@ artifact path with a
 `sha256:<64 lowercase hex>` digest. Every top-level gauntlet record must also
 carry its hashed `CARGO_TARGET_DIR` provenance in the same
 `sha256:<64 lowercase hex>` shape, so a free-form target-dir label cannot pass
-as reusable reviewer evidence. The component JSONL contracts also validate the
-hash-bearing fields they consume: raw digest fields must be exactly 64 lowercase
-hex characters, existing tagged fixture IDs must be `hash:<64 lowercase hex>`,
+as reusable reviewer evidence. Its internal Git probes use the current checkout
+as an explicit `safe.directory`, so evidence runs from external worker volumes
+still fail on real dirty-tree or diff-check findings instead of Git ownership
+guardrails. The component JSONL contracts also validate the hash-bearing fields
+they consume: raw digest fields must be exactly 64 lowercase hex characters,
+existing tagged fixture IDs must be `hash:<64 lowercase hex>`,
 and optional material digests may only be null or exact lowercase hex. The
 representation profile contract requires exactly one `SMALL_TEST` record and
 one `V4_REFERENCE` record. The host dispatcher contract applies the same strict

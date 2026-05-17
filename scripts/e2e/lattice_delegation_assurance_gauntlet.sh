@@ -12,12 +12,18 @@ LOG_PREFIX="${OUT_DIR}/${RUN_ID}"
 mkdir -p "${OUT_DIR}" "${ARTIFACT_STAGE_ROOT}"
 : > "${ARTIFACT}"
 
+repo_root() {
+  pwd -P 2>/dev/null || pwd
+}
+
+git_safe() {
+  local root
+  root="$(repo_root)"
+  git -c "safe.directory=${root}" -C "${root}" "$@"
+}
+
 raw_git_revision() {
-  local repo_root
-  repo_root="$(pwd -P 2>/dev/null || pwd)"
-  git -c "safe.directory=${repo_root}" rev-parse HEAD 2>/dev/null ||
-    git rev-parse HEAD 2>/dev/null ||
-    printf 'unknown'
+  git_safe rev-parse HEAD 2>/dev/null || printf 'unknown'
 }
 
 GAUNTLET_GIT_REVISION="${FCP_LATTICE_GIT_REVISION:-$(raw_git_revision)}"
@@ -147,8 +153,8 @@ require_known_git_revision() {
 assert_clean_tree() {
   local step="$1"
   local status
-  git update-index -q --refresh 2>/dev/null || true
-  status="$(git status --porcelain --untracked-files=normal)"
+  git_safe update-index -q --refresh 2>/dev/null || true
+  status="$(git_safe status --porcelain --untracked-files=normal)"
   if [ -n "${status}" ]; then
     fail_step "${step}" "$(jq -cn --arg status "${status}" \
       '{dirty_tree_entries:($status | split("\n") | map(select(length > 0))),cleanup_result:"not_applicable"}')"
@@ -1081,7 +1087,7 @@ run_and_capture "bash_syntax" \
 
 run_and_capture "git_diff_check" \
   "git diff --check -- lattice proof surfaces" \
-  git diff --check -- \
+  git_safe diff --check -- \
     scripts/e2e/lattice_delegation_formal_correspondence.sh \
     scripts/e2e/lattice_delegation_assurance_gauntlet.sh \
     crates/fcp-crypto-pq/tests/representation_profile.rs \

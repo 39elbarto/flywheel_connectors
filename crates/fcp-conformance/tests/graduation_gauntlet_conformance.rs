@@ -276,6 +276,22 @@ fn test_gauntlet_fail_on_readme_status_mismatch() {
 }
 
 #[test]
+fn test_gauntlet_fail_on_manifest_status_mismatch() {
+    let fixture_root = unique_fixture_root("manifest-status-mismatch");
+    let connector = write_fixture_connector(
+        &fixture_root,
+        FixtureOptions {
+            status: "runtime contract documented",
+            manifest_status: "proven",
+            ..FixtureOptions::default()
+        },
+    );
+
+    let output = run_gauntlet([connector.as_os_str()]);
+    assert_failed_with(&output, 8, "readme_status_match");
+}
+
+#[test]
 fn batch1_status_runner_writes_status_markdown() {
     let fixture_root = unique_fixture_root("batch1-status");
     fs::create_dir_all(&fixture_root).expect("fixture root should be creatable");

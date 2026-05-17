@@ -122,20 +122,29 @@ graduation_check_readme_status_match() {
   local connector="$1"
   local readme="${connector}/README.md"
   local manifest="${connector}/manifest.toml"
+  local readme_proven=0
+  local manifest_proven=0
 
   if [[ ! -f "${readme}" || ! -f "${manifest}" ]]; then
     return 0
   fi
 
-  if ! grep -Eq '^> \*\*Status\*\*:.*\bPROVEN\b' "${readme}"; then
-    return 0
+  if grep -Eq '^> \*\*Status\*\*:.*\bPROVEN\b' "${readme}"; then
+    readme_proven=1
   fi
-
   if grep -Eq '^[[:space:]]*status[[:space:]]*=[[:space:]]*"proven"' "${manifest}"; then
+    manifest_proven=1
+  fi
+
+  if [[ "${readme_proven}" -eq "${manifest_proven}" ]]; then
     return 0
   fi
 
-  echo "README status is PROVEN but manifest status is not proven"
+  if [[ "${readme_proven}" -eq 1 ]]; then
+    echo "README status is PROVEN but manifest status is not proven"
+  else
+    echo "manifest status is proven but README status is not PROVEN"
+  fi
   return 1
 }
 

@@ -866,7 +866,7 @@ The workspace ships 176 production connector crates plus one adversarial conform
 | **Home & Local** | Sonos, Hue, Home Assistant |
 | **Other** | MCP Bridge, Salesforce, Box, Dropbox, Microsoft 365 |
 
-The authoritative inventory is the `connectors/` directory or manifest-backed `fwc list --offline`, not a handwritten static table. A few connectors are explicitly non-live today (`huggingface` and `tlon` ship as `status = "incubating"`; `zalouser` as `status = "quarantined"`). Inventory presence does not mean end-to-end proof.
+The authoritative inventory is the `connectors/` directory or manifest-backed `fwc list --offline`, not a handwritten static table. A few connectors are explicitly non-live today (`tlon` ships as `status = "incubating"`; `zalouser` ships as `status = "quarantined"`; `huggingface` describes itself as incubating in its connector description but does not declare a `status` field). Inventory presence does not mean end-to-end proof.
 
 ### Google Workspace Platform
 
@@ -1782,7 +1782,7 @@ Honest about what FCP does not do yet:
 - **Production deployment is still single-active-host** — the honest operating model is one active `fcp-host` with staged standby peers. Connector admin state remains node-local and automatic multi-node failover is not yet a production guarantee.
 - **Mesh-native cutover is incomplete** — gossip, IBLT, XOR filters, masked-IBLT anti-entropy, and the LiveTruthResolver are built and tested, but mesh-backed truth is not the default highest-confidence source in production yet.
 - **No GUI** — `fwc` is CLI-only. The `serve-mcp` command exposes connectors as MCP tools for AI agent consumption, but there is no web dashboard.
-- **Connector maturity varies** — all 176 production connector crates compile and pass tests, but depth of operation coverage ranges from comprehensive (GitHub, Gmail) to minimal. A few connectors are explicitly non-live (`huggingface` and `tlon` ship as `status = "incubating"`; `zalouser` as `status = "quarantined"`).
+- **Connector maturity varies** — all 176 production connector crates compile and pass tests, but depth of operation coverage ranges from comprehensive (GitHub, Gmail) to minimal. A few connectors are explicitly non-live (`tlon` ships as `status = "incubating"`; `zalouser` ships as `status = "quarantined"`; `huggingface` describes itself as incubating in its connector description but does not declare a `status` field).
 - **Windows sandbox is Tier 2** — `fcp-sandbox` implements seccomp + Landlock on Linux and basic WASI isolation; macOS uses seatbelt. Windows sandbox support is not yet hardened.
 - **No automatic connector updates** — `fwc install` and `fwc update` exist, but automatic background updates with rollback are not yet implemented.
 - **Multi-node connector-state replication is designed, not operational** — `ConnectorStateRoot` and externalized state objects are specified, but the production host stores state locally.
@@ -2204,7 +2204,7 @@ ApprovalToken issuance and signing happen inside the host's approval state machi
 
 The `lean/` directory and `lakefile.lean` ship a Lean 4 proof workspace. The current verified content:
 
-- **`lean/Fcp/Zone/Lattice.lean`** — zone-flow lattice soundness: the merge rule (`MIN(integrity)`, `MAX(confidentiality)`) preserves the relevant security ordering, and label adjustments via `ApprovalToken` only ever move labels in monotonic-permitted directions.
+- **`lean/Fcp/Zone/Lattice.lean`** — zone-flow soundness on a confidentiality lattice. The file proves: `no_silent_downgrade_lemma` (an allowed flow never sends data to a more restrictive target), `zone_flow_soundness`, `zone_isolation_invariant` (a passing zone check implies no secret leaked along the operation's trace), `zone_lattice_sound` (no leak reachable from an allowed flow), `no_self_loop_leak`, and `transitive_capability_implies_witness` (composing two direct capabilities yields a transitive-capability witness). The lattice is single-level (confidentiality only, modeled as `Nat`) rather than the full (integrity, confidentiality) product lattice; multi-label and explicit-declassification proofs live outside this file.
 - **Lattice-trapdoor delegation chain soundness** — the post-quantum lattice delegation primitive in `fcp-crypto-pq` has a gated witness proving the soundness theorem. The underlying lattice-arithmetic implementation stubs remain unactionable as a long-tail research item (`kyopb.1.3.1.1`, ~320h scope).
 
 Lean proof outputs feed `docs/formal/zone_lattice.md` and `docs/formal/readme-proof-obligations.json`. The proof workspace is built via Lake; the toolchain is pinned in `lean-toolchain`.
@@ -2991,7 +2991,7 @@ Merged:                   integrity=20               confidentiality=80
 
 The merged value cannot be written to `z:public` (confidentiality 80 > 20) and cannot be used in a `z:private` action that requires integrity ≥ 80 (integrity is now 20 because of the Discord input). To use it as if it were trustworthy, an ApprovalToken from a sanitizer capability (URL scanner, schema validator) must clear the relevant taint reductions.
 
-The Lean proof at `lean/Fcp/Zone/Lattice.lean` verifies that the merge rule preserves the security ordering, and that valid label adjustments via `ApprovalToken` only ever move labels in monotonic-permitted directions (never elevating untrusted data, never silently declassifying).
+The Lean proof at `lean/Fcp/Zone/Lattice.lean` verifies the underlying single-level zone-flow soundness (no allowed flow downgrades a secret, no leak is reachable from a passing zone check). The full (integrity, confidentiality) merge rule and the proof-carrying `ApprovalToken` label adjustments are implemented in `fcp-core`'s provenance machinery; they are not separately mechanized in the current Lean file.
 
 ---
 

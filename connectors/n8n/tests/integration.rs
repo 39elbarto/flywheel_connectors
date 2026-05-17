@@ -778,7 +778,7 @@ async fn invoke_before_configure_fails() {
 // -- Empty response body handling --
 
 #[fcp_async_core::runtime::test]
-async fn empty_response_body_returns_empty_object() {
+async fn empty_success_response_body_fails_closed() {
     let server = MockServer::start().await;
     Mock::given(method("PATCH"))
         .and(path("/workflows/1001"))
@@ -787,14 +787,14 @@ async fn empty_response_body_returns_empty_object() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    let result = c
+    let err = c
         .handle_invoke(json!({
             "operation_id": "n8n.workflows.activate",
             "input": {"id": "1001", "active": true}
         }))
         .await
-        .unwrap();
-    assert!(result.is_object());
+        .expect_err("empty 200 responses must not be accepted as successful JSON");
+    assert!(err.to_string().contains("empty response body"));
 }
 
 // -- Auth header verification --

@@ -1630,7 +1630,7 @@ Owner policy can enforce:
 - `min_slsa_level = 2`
 - `trusted_builders = ["github-actions", "internal-ci"]`
 
-**Optional enhanced security:** Registries can use a `RegistrySecurityProfile` with TUF root pinning (prevents freeze/rollback and mix-and-match attacks) and Sigstore/cosign verification (supply-chain provenance beyond publisher keys).
+**Optional enhanced security:** Registries can configure a `RegistryTrustPolicy` (`crates/fcp-registry/src/lib.rs:285`) that adds TUF root pinning (prevents freeze/rollback and mix-and-match attacks) and Sigstore/cosign verification (supply-chain provenance beyond publisher keys).
 
 ---
 
@@ -2253,7 +2253,7 @@ Every durable object in FCP follows the same lifecycle. Understanding it clarifi
 └────────────────────────────────────────────────────────────────┘
 ```
 
-Object retention is policy-driven: `retain_until` timestamps, reference counts, and zone-level placement policies all feed the GC controller. The store's `LatestPointer` is a content-addressed cursor that survives V1 → V2 schema upgrades and emits an `UpgradedLatestPointer` audit event on silent migration (`28nms` fix).
+Object retention is policy-driven: `retain_until` timestamps, reference counts, and zone-level placement policies all feed the GC controller. The compatibility ledger's latest-pointer cursor survives V1 → V2 schema upgrades and, when a stale V1 pointer is silently upgraded to the on-disk high-water-mark V2 ledger, emits a structured `tracing::warn!` with a `reason` field that distinguishes legitimate first-reopen upgrades from tamper-suggestive ones (the `28nms` discipline; see `crates/fcp-store/src/compatibility_ledger.rs`).
 
 ---
 
@@ -2366,7 +2366,7 @@ The mesh layer enforces two related properties that together prevent a hostile o
 
 A node enforces an upper bound on the ratio of response symbols to request symbols, so a peer cannot trick the node into amplifying a small request into a much larger reply (the classic DDoS-reflection attack pattern). The default amplification factor is `DEFAULT_AMPLIFICATION_FACTOR = 10` in `crates/fcp-mesh/src/admission.rs`: responses can be at most 10× the request size. The ratio is configurable per-peer via `AdmissionPolicy::max_amplification_factor`.
 
-A peer that sends a 100-symbol request can therefore receive at most 1000 symbols in response. A reply that would exceed the cap surfaces an `AdmissionError::AmplificationViolation` with the request and response symbol counts attached. The cap applies at the admission layer, before the control-plane logic composes a large reply, so a bug in higher-level code that would otherwise return a 50 MB blob to a 100-byte ping is refused before it reaches the wire. The same admission controller also rejects requests with `RequestTooLarge`, `ResponseTooLarge`, `BudgetExhausted`, or `RateLimitExceeded` outcomes depending on which guard the request trips first.
+A peer that sends a 100-symbol request can therefore receive at most 1000 symbols in response. A reply that would exceed the cap surfaces an `AdmissionError::AmplificationViolation` with the request and response symbol counts attached. The cap applies at the admission layer, before the control-plane logic composes a large reply, so a bug in higher-level code that would otherwise return a 50 MB blob to a 100-byte ping is refused before it reaches the wire. The same admission controller also rejects with neighboring variants from the same enum: `ByteBudgetExceeded`, `SymbolBudgetExceeded`, `AuthFailureBudgetExceeded`, `DecodeCapacityExceeded`, `DecodeCpuBudgetExceeded`, `AuthenticationRequired`, `ObjectQuarantined`, or `QuarantineQuotaExceeded`, depending on which guard the request trips first.
 
 ### Per-Peer Resource Budget
 
@@ -3156,7 +3156,7 @@ Sensitive zones can require hardware-backed key residency. `PostureAttestation` 
 |----------|----------|-----------------|
 | **TPM 2.0** | Linux, Windows | Node signing/encryption/issuance keys generated and sealed inside the TPM; private material cannot be exported |
 | **Apple Secure Enclave** | macOS, iOS | Keys live in the Secure Enclave; software cannot extract them |
-| **Android Keystore** | Android | Keys are bound to a `KeyMint` hardware-backed key alias with attestation chain |
+| **Android Keystore** | Android | Keys are bound to an Android KeyMint (the platform HAL) hardware-backed key alias with attestation chain |
 | **PKCS#11 hardware token** | Cross-platform | YubiKey, Nitrokey, SoftHSM2; `fcp-crypto-hw` carries the adapter |
 
 A zone's `ZonePolicy` can declare `require_posture = ["tpm2", "secure-enclave"]` to enforce that only nodes with one of the named hardware modalities can decrypt that zone's keys. The host refuses to register a node into such a zone without a valid posture attestation. PKCS#11 PIN handling uses constant-time comparison (`subtle::ConstantTimeEq`) and zeroizes the PIN buffer on drop (`zeroize::ZeroizeOnDrop`) — surfaced as a fix during the Gemini Lane 4 (Bootstrap) audit.

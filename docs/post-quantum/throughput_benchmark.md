@@ -389,7 +389,11 @@ the script can print reusable evidence.
 For each `rch exec` lane the JSONL records include the observed `[RCH]` summary,
 worker execution class, and fallback decision so local fallback is visible in
 the artifact instead of being mistaken for remote proof. Remote worker failures
-are classified separately from successful remote execution.
+are classified separately from successful remote execution. The gauntlet
+self-contract now requires every command-run record, local or `rch`-backed, to
+carry a stable log artifact, `sha256:<64 lowercase hex>` log hash, duration,
+retry count, fallback decision, worker execution class, cache decision, cleanup
+result, and the RCH summary field.
 The redaction scan treats raw zone, operation, and principal labels plus
 authorization headers, bearer strings, access or refresh tokens, and the host
 dispatcher fixture literals `send_message`, `agent-alpha`, and `agent-beta` as

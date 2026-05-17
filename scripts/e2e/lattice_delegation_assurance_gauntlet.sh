@@ -672,6 +672,19 @@ validate_gauntlet_contract() {
         .details.artifact_path == $path and
         (.details.artifact_hash | sha256_hash) and
         (.details.cleanup_result | type == "string"));
+    def command_record_contract:
+      if (.details | has("command_line")) then
+        (.details.command_line | type == "string") and
+        (.details.log_artifact | type == "string") and
+        (.details.log_hash | sha256_hash) and
+        (.details.duration_seconds | type == "number") and
+        (.details.retry_count | type == "number") and
+        (.details.fallback_decision | type == "string") and
+        (.details.worker_execution_class | type == "string") and
+        (.details | has("rch_summary")) and
+        (.details.cache_decision | type == "string") and
+        (.details.cleanup_result | type == "string")
+      else true end;
     length > 0 and
     all(.[]; type == "object" and
       .schema == "fcp.lattice_delegation.assurance_gauntlet.v1" and
@@ -686,11 +699,7 @@ validate_gauntlet_contract() {
       (.worker_host_class | type == "string") and
       (.details | type == "object") and
       (if .result == "skip" then (.details.skip_reason | type == "string") else true end) and
-      (if ((.details.command_line? // "") | contains("rch exec")) then
-        (.details.worker_execution_class | type == "string") and
-        (.details.fallback_decision | type == "string") and
-        (.details | has("rch_summary"))
-      else true end)) and
+      command_record_contract) and
     required_tool_versions and
     any(.[]; .step == "validate_lean_ids" and .result == "pass") and
     any(.[]; .step == "jsonl_contract_validation" and .result == "pass") and

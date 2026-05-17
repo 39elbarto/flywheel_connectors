@@ -764,11 +764,20 @@ validate_artifact_contracts() {
         type == "string" and test("^[0-9a-f]{64}$");
       def required_scenarios:
         [
+          "allow_small_test",
           "allow_v4_reference",
+          "deny_forged_preimage",
           "deny_forged_v4_reference",
-          "deny_trust_set_replay_v4_reference",
+          "deny_mismatched_zone",
+          "deny_mismatched_period",
           "deny_mismatched_operation",
-          "deny_mismatched_principal"
+          "deny_mismatched_principal",
+          "deny_malformed_preimage",
+          "deny_missing_certificate",
+          "deny_incomplete_delegation_chain",
+          "deny_chain_too_deep",
+          "deny_trust_set_replay",
+          "deny_trust_set_replay_v4_reference"
         ];
       def scenario_ids:
         map(.scenario);
@@ -814,7 +823,7 @@ validate_artifact_contracts() {
     '
 
   append_json "jsonl_contract_validation" "pass" "$(jq -cn \
-    '{validated_artifacts:["target/fcp-crypto-pq/representation-profile-evidence.jsonl","target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl","target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl","target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl","target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl","target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl","target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"],required_representation_profiles:["SMALL_TEST","V4_REFERENCE"],representation_profile_cardinality:"exactly_once",required_route_scenarios:["passed:SMALL_TEST","passed:V4_REFERENCE","denied:malformed root basis","denied:malformed child basis","denied:wrong parent","denied:wrong zone","denied:wrong period","denied:wrong parameter profile","denied:unsupported custom profile","denied:fixture-only trapdoor used on production route"],route_scenario_cardinality:"exactly_once",required_public_matrix_scenarios:["passed:SMALL_TEST","passed:V4_REFERENCE","denied:malformed public tail","denied:wrong public binding hash","denied:wrong public seed","denied:wrong route revision","denied:V4 malformed public tail","denied:V4 wrong public binding hash","denied:V4 wrong public seed","denied:V4 wrong route revision","denied:unsupported custom profile"],public_matrix_scenario_cardinality:"exactly_once",sample_pre_scenario_cardinality:"exactly_once_per_profile",required_formal_profiles:["SMALL_TEST","V4_REFERENCE"],formal_profile_cardinality:"exactly_once_per_formal_artifact",required_formal_theorem_names:["Fcp.Invariants.LatticeDelegation.lattice_delegation_chain_corruption_rejected","Fcp.Invariants.LatticeDelegation.lattice_delegation_sis_assumption_boundary_complete","Fcp.Invariants.LatticeDelegation.lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions"],required_formal_assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1","FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1","FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1","FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"],crypto_formal_check_cardinality:"all_true_per_profile",policy_formal_check_cardinality:"all_true_per_profile",required_host_scenarios:["allow_v4_reference","deny_forged_v4_reference","deny_trust_set_replay_v4_reference","deny_mismatched_operation","deny_mismatched_principal"],host_scenario_cardinality:"exactly_once",cleanup_result:"not_applicable"}')"
+    '{validated_artifacts:["target/fcp-crypto-pq/representation-profile-evidence.jsonl","target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl","target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl","target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl","target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl","target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl","target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"],required_representation_profiles:["SMALL_TEST","V4_REFERENCE"],representation_profile_cardinality:"exactly_once",required_route_scenarios:["passed:SMALL_TEST","passed:V4_REFERENCE","denied:malformed root basis","denied:malformed child basis","denied:wrong parent","denied:wrong zone","denied:wrong period","denied:wrong parameter profile","denied:unsupported custom profile","denied:fixture-only trapdoor used on production route"],route_scenario_cardinality:"exactly_once",required_public_matrix_scenarios:["passed:SMALL_TEST","passed:V4_REFERENCE","denied:malformed public tail","denied:wrong public binding hash","denied:wrong public seed","denied:wrong route revision","denied:V4 malformed public tail","denied:V4 wrong public binding hash","denied:V4 wrong public seed","denied:V4 wrong route revision","denied:unsupported custom profile"],public_matrix_scenario_cardinality:"exactly_once",sample_pre_scenario_cardinality:"exactly_once_per_profile",required_formal_profiles:["SMALL_TEST","V4_REFERENCE"],formal_profile_cardinality:"exactly_once_per_formal_artifact",required_formal_theorem_names:["Fcp.Invariants.LatticeDelegation.lattice_delegation_chain_corruption_rejected","Fcp.Invariants.LatticeDelegation.lattice_delegation_sis_assumption_boundary_complete","Fcp.Invariants.LatticeDelegation.lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions"],required_formal_assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1","FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1","FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1","FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"],crypto_formal_check_cardinality:"all_true_per_profile",policy_formal_check_cardinality:"all_true_per_profile",required_host_scenarios:["allow_small_test","allow_v4_reference","deny_forged_preimage","deny_forged_v4_reference","deny_mismatched_zone","deny_mismatched_period","deny_mismatched_operation","deny_mismatched_principal","deny_malformed_preimage","deny_missing_certificate","deny_incomplete_delegation_chain","deny_chain_too_deep","deny_trust_set_replay","deny_trust_set_replay_v4_reference"],host_scenario_cardinality:"exactly_once",cleanup_result:"not_applicable"}')"
 }
 
 validate_gauntlet_contract() {
@@ -824,11 +833,20 @@ validate_gauntlet_contract() {
       type == "string" and test("^sha256:[0-9a-f]{64}$");
     def required_host_scenarios:
       [
+        "allow_small_test",
         "allow_v4_reference",
+        "deny_forged_preimage",
         "deny_forged_v4_reference",
-        "deny_trust_set_replay_v4_reference",
+        "deny_mismatched_zone",
+        "deny_mismatched_period",
         "deny_mismatched_operation",
-        "deny_mismatched_principal"
+        "deny_mismatched_principal",
+        "deny_malformed_preimage",
+        "deny_missing_certificate",
+        "deny_incomplete_delegation_chain",
+        "deny_chain_too_deep",
+        "deny_trust_set_replay",
+        "deny_trust_set_replay_v4_reference"
       ];
     def required_profile_ids:
       [
@@ -1087,7 +1105,7 @@ pre_summary_artifact_hash="$(sha256_file "${ARTIFACT}")"
 append_json "summary" "pass" "$(jq -cn \
   --arg artifact "${ARTIFACT}" \
   --arg pre_summary_artifact_hash "sha256:${pre_summary_artifact_hash}" \
-  '{artifact_path:$artifact,pre_summary_artifact_hash:$pre_summary_artifact_hash,final_artifact_hash_output:"stdout:LATTICE_ASSURANCE_GAUNTLET_SHA256",profile_ids:["SMALL_TEST","V4_REFERENCE"],scenario_ids:["allow_v4_reference","deny_forged_v4_reference","deny_trust_set_replay_v4_reference","deny_mismatched_operation","deny_mismatched_principal"],theorem_names:["lattice_delegation_chain_corruption_rejected","lattice_delegation_sis_assumption_boundary_complete","lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions"],assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1","FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1","FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1","FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"],benchmark_groups:["trap_gen","delegate","sample_pre","verify","full_crypto_route","host_dispatcher_pipeline"],stable_lattice_error_mapping:"covered_by_host_dispatcher_e2e",cleanup_result:"not_applicable_generated_artifact"}')"
+  '{artifact_path:$artifact,pre_summary_artifact_hash:$pre_summary_artifact_hash,final_artifact_hash_output:"stdout:LATTICE_ASSURANCE_GAUNTLET_SHA256",profile_ids:["SMALL_TEST","V4_REFERENCE"],scenario_ids:["allow_small_test","allow_v4_reference","deny_forged_preimage","deny_forged_v4_reference","deny_mismatched_zone","deny_mismatched_period","deny_mismatched_operation","deny_mismatched_principal","deny_malformed_preimage","deny_missing_certificate","deny_incomplete_delegation_chain","deny_chain_too_deep","deny_trust_set_replay","deny_trust_set_replay_v4_reference"],theorem_names:["lattice_delegation_chain_corruption_rejected","lattice_delegation_sis_assumption_boundary_complete","lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions"],assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1","FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1","FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1","FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"],benchmark_groups:["trap_gen","delegate","sample_pre","verify","full_crypto_route","host_dispatcher_pipeline"],stable_lattice_error_mapping:"covered_by_host_dispatcher_e2e",cleanup_result:"not_applicable_generated_artifact"}')"
 
 # The summary is appended after the normal redaction_scan record, so scan the
 # finished artifact before success output can name it as reusable evidence.

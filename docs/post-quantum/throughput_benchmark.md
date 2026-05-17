@@ -384,7 +384,11 @@ and optional material digests may only be null or exact lowercase hex. The
 representation profile contract requires exactly one `SMALL_TEST` record and
 one `V4_REFERENCE` record. The host dispatcher contract applies the same strict
 shape to every consumed `*_hash` field, including the optional receipt hash when
-present, and requires exactly one record for each required dispatcher scenario.
+present, and requires exactly one record for each of the 14 dispatcher scenarios
+emitted by `lattice_policy_dispatcher_e2e`: both allow profiles, forged
+preimage denials, zone/period/operation/principal mismatch denials, malformed
+preimage denial, missing-certificate denial, incomplete/too-deep chain denials,
+and SMALL_TEST plus V4 trust-set replay denials.
 The route artifact contract likewise requires exactly one record for the two
 successful primitive profiles and each explicit denial scenario. The public
 matrix artifact contract requires exactly one record for the two successful
@@ -395,9 +399,9 @@ preimage, and outside-period scenarios for both profiles. The crypto and policy
 formal correspondence contracts require exactly one record for each supported
 profile, exact theorem and assumption ID vectors, and all correspondence check
 booleans set to true. The gauntlet summary record
-must also enumerate the exact expected profile, scenario, theorem, assumption,
-and benchmark sets plus stable error mapping and cleanup fields before the
-script can print reusable evidence.
+must also enumerate the exact expected profile, 14-scenario dispatcher, theorem,
+assumption, and benchmark sets plus stable error mapping and cleanup fields
+before the script can print reusable evidence.
 The top-level gauntlet self-contract also requires a single consistent run id,
 git revision, target-dir class/hash, build profile, and worker host class across
 all JSONL records so reviewer evidence cannot be stitched together from

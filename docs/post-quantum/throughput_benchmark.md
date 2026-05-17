@@ -373,8 +373,10 @@ dispatcher scenarios, and stable `LATTICE_*` error mappings. A skipped Lean
 build is recorded as a skip record; Cargo-backed lanes still run through `rch`.
 The gauntlet self-contract also fails closed unless the `tool_versions` record
 contains the expected Cargo, Rust, RCH, Lean, jq, git, and UBS fields and every
-component artifact hash record names its stable artifact path with a `sha256:`
-digest.
+component artifact hash record names its stable artifact path with a
+`sha256:<64 lowercase hex>` digest. Its summary record must also enumerate the
+full expected profile, scenario, theorem, assumption, benchmark, stable error
+mapping, and cleanup fields before the script can print reusable evidence.
 For each `rch exec` lane the JSONL records include the observed `[RCH]` summary,
 worker execution class, and fallback decision so local fallback is visible in
 the artifact instead of being mistaken for remote proof. Remote worker failures

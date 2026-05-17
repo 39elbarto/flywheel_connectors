@@ -626,6 +626,8 @@ validate_artifact_contracts() {
 validate_gauntlet_contract() {
   # shellcheck disable=SC2016 # jq variables/functions are intentionally single-quoted.
   validate_jsonl_contract "validate_gauntlet_contract" "${ARTIFACT}" '
+    def sha256_hash:
+      type == "string" and test("^sha256:[0-9a-f]{64}$");
     def required_tool_versions:
       any(.[]; .step == "tool_versions" and .result == "pass" and
         (.details.cargo | type == "string") and
@@ -641,7 +643,7 @@ validate_gauntlet_contract() {
     def required_artifact_hash($step; $path):
       any(.[]; .step == $step and .result == "pass" and
         .details.artifact_path == $path and
-        (.details.artifact_hash | type == "string" and startswith("sha256:")) and
+        (.details.artifact_hash | sha256_hash) and
         (.details.cleanup_result | type == "string"));
     length > 0 and
     all(.[]; type == "object" and
@@ -675,10 +677,37 @@ validate_gauntlet_contract() {
     any(.[]; .step == "redaction_scan" and .result == "pass") and
     any(.[]; .step == "final_redaction_scan" and .result == "pass") and
     any(.[]; .step == "summary" and .result == "pass" and
-      (.details.pre_summary_artifact_hash | type == "string" and startswith("sha256:")) and
+      (.details.pre_summary_artifact_hash | sha256_hash) and
       .details.final_artifact_hash_output == "stdout:LATTICE_ASSURANCE_GAUNTLET_SHA256" and
-      (.details.scenario_ids | type == "array" and index("allow_v4_reference") != null) and
-      (.details.benchmark_groups | type == "array" and index("host_dispatcher_pipeline") != null))
+      (.details.profile_ids | type == "array" and
+        index("SMALL_TEST") != null and
+        index("V4_REFERENCE") != null) and
+      (.details.scenario_ids | type == "array" and
+        index("allow_v4_reference") != null and
+        index("deny_forged_v4_reference") != null and
+        index("deny_trust_set_replay_v4_reference") != null and
+        index("deny_mismatched_operation") != null and
+        index("deny_mismatched_principal") != null) and
+      (.details.theorem_names | type == "array" and
+        index("lattice_delegation_chain_corruption_rejected") != null and
+        index("lattice_delegation_sis_assumption_boundary_complete") != null and
+        index("lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions") != null) and
+      (.details.assumption_ids | type == "array" and
+        index("FCP-PQ-SIS-HARDNESS-V1") != null and
+        index("FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1") != null and
+        index("FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1") != null and
+        index("FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1") != null and
+        index("FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1") != null and
+        index("FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1") != null) and
+      (.details.benchmark_groups | type == "array" and
+        index("trap_gen") != null and
+        index("delegate") != null and
+        index("sample_pre") != null and
+        index("verify") != null and
+        index("full_crypto_route") != null and
+        index("host_dispatcher_pipeline") != null) and
+      .details.stable_lattice_error_mapping == "covered_by_host_dispatcher_e2e" and
+      (.details.cleanup_result | type == "string"))
   '
 }
 

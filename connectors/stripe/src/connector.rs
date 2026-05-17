@@ -523,10 +523,8 @@ impl StripeConnector {
         }))
     }
 
-    /// Handle introspect method.
-    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        let introspection = Introspection {
-            operations: vec![
+    fn operations_info() -> Vec<OperationInfo> {
+        vec![
                 op_info(
                     "stripe.create_customer",
                     "Create a new Stripe customer",
@@ -1030,7 +1028,13 @@ impl StripeConnector {
                         ],
                     },
                 ),
-            ],
+        ]
+    }
+
+    /// Handle introspect method.
+    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let introspection = Introspection {
+            operations: Self::operations_info(),
             events: vec![],
             resource_types: vec![],
             auth_caps: None,

@@ -381,6 +381,9 @@ if [[ "${overall_status}" == "passed" ]]; then
             false
           end
         ),
+        cleanup_shape_ok: all(.[];
+          .shutdown_cleanup_verified == true
+        ),
         boundary_shape_ok: all(.[];
           (.host_boundary | type) == "string"
           and (.host_boundary | startswith("fcp-host::"))
@@ -478,6 +481,7 @@ if [[ "${overall_status}" == "passed" ]]; then
             and $v.required_fields_ok
             and $v.resource_fields_ok
             and $v.decision_shape_ok
+            and $v.cleanup_shape_ok
             and $v.boundary_shape_ok
             and $v.nested_evidence_ok
             and $v.manifest_hash_shape_ok

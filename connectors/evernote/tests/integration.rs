@@ -487,6 +487,27 @@ async fn error_500() {
     );
 }
 
+#[fcp_async_core::runtime::test]
+async fn error_200_empty_body_fails_closed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/notebooks"))
+        .and(header("Authorization", "Bearer test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "evernote.notebooks.list",
+            "input": {}
+        }))
+        .await
+        .is_err()
+    );
+}
+
 // -- Unknown Op / Simulate --------------------------------------------
 
 #[fcp_async_core::runtime::test]

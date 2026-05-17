@@ -6,9 +6,251 @@ This project has no tagged releases or GitHub Releases. Development follows a co
 
 ---
 
-## [Unreleased] — as of 2026-03-21
+## [Unreleased] — as of 2026-05-16
 
-**Current state:** 121 connectors, 30 infrastructure crates, ~1,980 commits, 58,000+ tests.
+**Current state:** 176 production connector crates (plus one adversarial conformance test crate, `connectors/_adversarial/`), 41 platform crates under `crates/`, ~5,800 commits on `main`, 60,000+ tests.
+
+The window 2026-03-22 → 2026-05-16 added ~3,800 non-merge commits across post-quantum cryptography, host-first → mesh-native truth resolution, a workspace-wide typestate ratchet, multi-host HRW lease coordination, real-CDP browser parity, voice-call multi-provider parity, credential pooling, a new shared `fcp-provider-auth` crate, OTLP audit parity, HLC + HierVV anti-entropy, manifest-operations conformance, and connector test-directory ratchets. Thirteen new workspace crates landed in this window: `fcp-auth-schema`, `fcp-bench`, `fcp-chaos`, `fcp-crypto-pq`, `fcp-crypto-hw`, `fcp-evidence`, `fcp-kernel`, `fcp-openai-compat`, `fcp-policy`, `fcp-prelude`, `fcp-provider-auth`, `fcp-voice-call`, and the `br-tools` maintenance helper.
+
+---
+
+## 2026-05-06 — 2026-05-16 — Mesh Authority, Credential Pooling, Browser CDP Parity, and Audit OTLP
+
+### HRW Lease Coordination and Multi-Host Failover (`hr0rr.2.*`)
+Closed the multi-host singleton-writer story. Quorum-signed durable leases gossip across nodes; rendezvous hashing (HRW) picks the holder deterministically; binary launch/flush/invoke fencing prevents split-writer windows; stale-lease detection, malformed-lease rejection, and duplicate-signer rejection are now enforced at construction and on gossip ingress. A multi-node failover replay harness with redaction-safe artifact writes lands as the closeout proof.
+- Closed workstreams: `hr0rr.2.1`, `hr0rr.2.3` (HRW lease coordination A3), `hr0rr.2.4` (failover replay)
+- Representative commits: [`a19d71acc`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/a19d71acc), [`1216ede7e`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/1216ede7e), [`485de992a`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/485de992a), [`355cf231c`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/355cf231c), [`6da9aa16d`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/6da9aa16d)
+
+### Audit Chain: HLC + HierVV Anti-Entropy and OTLP Parity (`angoc.17.*`, `angoc.7.2.1`)
+Audit gained Hybrid Logical Clocks and Hierarchical Version Vectors so revocation freshness, audit head reconciliation, and IBLT anti-entropy fallback all share a single causality substrate. HLC clock-rollback alerts, HierVV size histograms, doctor probes, and perf budgets ship alongside an OTLP parity exporter that re-emits audit events as OpenTelemetry traces/metrics/logs with pinned HLC attributes.
+- Closed workstreams: `angoc.17.2` (masked IBLT anti-entropy), `angoc.17.3` (HLC + HierVV), `angoc.7.2.1` (audit OTLP parity exporter)
+- Representative commits: [`f9c3ad638`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/f9c3ad638), [`d957bafe0`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/d957bafe0), [`8d8d1bb02`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/8d8d1bb02), [`9e5e9ea68`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/9e5e9ea68), [`152a61b5c`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/152a61b5c)
+
+### Credential Pooling (`4kw5f.7`)
+A new `fcp-host` subsystem: multi-credential per-provider pools with priority, strategy, exhaustion-cooldown, and active-lease tracking. Includes registry mutation primitives, admin API routes, audit log, SDK lease bridge, deadline semantics on wait-exhaustion, sticky restick and max-use policies, operator documentation, and a redaction-safe connector-boundary E2E evidence harness.
+- Closed workstreams: `4kw5f.7.1` through `4kw5f.7.12` plus `4kw5f.7` parent
+- Representative commits: [`bdaeb10cf`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/bdaeb10cf), [`9013719c9`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/9013719c9), [`5f626e5ad`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/5f626e5ad), [`975436e38`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/975436e38)
+
+### `fcp-provider-auth`: Shared Multi-Method Auth Crate (`4kw5f.10`)
+New workspace crate consolidating per-provider auth across API key, AWS SigV4 request signing, JWT refresh, OAuth device-code, OAuth authorization-code with PKCE, refresh-token flow, and setup-token. Provider-specific helper constructors land alongside TTL-aware refresh actors. `AuthProfile` now flows through the credential-pool lease layer; `fcp-host` and `fwc` expose profile-admin and OAuth login surfaces.
+- Closed workstreams: `4kw5f.10.1`–`4kw5f.10.9`
+
+### Manifest Operations Conformance for 14+ Connectors (`4kw5f.8.*`)
+The manifest-operations parent epic closed. Every targeted connector now declares typed input/output schemas plus per-operation network constraints in `manifest.toml`: Mistral, ElevenLabs, Deepgram, Matrix, Outlook, Teams, Exa, Firecrawl, Tavily, Brave-Search, Perplexity-Search, Wolfram, DuckDuckGo, SearXNG. A conformance harness scans for `const OP_*` literal drift between manifest and runtime; zero-operation connectors are now treated as conformance failures.
+- Closed workstreams: `4kw5f.8.1`–`4kw5f.8.15`, `4kw5f.8` parent
+- Representative commit: [`d951c4755`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/d951c4755)
+
+### Connector Test-Directory Ratchet (`4kw5f.11.*`)
+A workspace conformance guard fails CI if a mature connector lacks a `tests/` directory. Fourteen previously-untested connectors received connector-local conformance plus integration test suites: IRC, BlueBubbles, Google Meet, Signal, Mattermost, Twitch, iMessage, Google Chat, Apple Notes, Apple Reminders, Tlon (Urbit), Zalo, Email Generic, Whisper.
+- Closed workstreams: `4kw5f.11.1`–`4kw5f.11.15`
+- Representative commits: [`4052f5a86`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/4052f5a86), [`b243f493e`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/b243f493e), [`de9f02b33`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/de9f02b33)
+
+### Browser Real-CDP Control-Plane Parity (`4kw5f.3.3`)
+The browser connector replaced its scripted-automation fallback with a Rust-owned CDP control-worker, supervised target/session manager, cookie ownership boundary, native launcher/proxy worker, direct-CDP routing for every operation, and a real-browser operation-matrix closeout. The shape mirrors OpenClaw's supervised semantics. Readable-content and document-extraction parity guardrails land alongside.
+- Closed workstreams: `4kw5f.3.1`, `4kw5f.3.3` (parent), `4kw5f.3.3.2.*` subtree
+- Representative commits: [`a8713d844`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/a8713d844), [`9a56a3ecb`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/9a56a3ecb), [`d4a5927a2`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/d4a5927a2)
+
+### Anthropic Provider Parity and Speech Providers
+Anthropic gained feature parity for beta-header management (1M context, interleaved thinking), multi-auth (API key plus Claude Code OAuth setup-token), service-tier selection, model normalization, replay/media/stream policy parity, and CLI auth boundary hardening. Two sibling provider connectors split off: `anthropic-vertex` (Vertex AI Claude provider) and `aws-bedrock` (Bedrock Mantle + Anthropic Messages parity). `azure-speech` and `microsoft-foundry` connectors land with custom-identity boundary, real-time streaming STT/TTS WebSocket coverage, batch transcription, and deployment-aware routing in `llm-router`.
+- Closed workstreams: `4kw5f.2.4.3.*`, `4kw5f.2.4.4`, `4kw5f.2.4.5.*`, `4kw5f.2.9.6.*` (Azure Speech)
+- Representative commits: [`8c9509efb`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/8c9509efb), [`bc1ba938a`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/bc1ba938a), [`c714ae149`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/c714ae149)
+
+### QQ Gateway Hardening (`6n7.12.3`)
+The QQ connector picked up channel-policy slicing, structured-mention parsing, reply-reference counters with rebase proof, slash-approval routing, voice ASR projection, gateway lifecycle directives, fail-closed-when-disabled gating, drain-queue rate governance, and token-refresh discipline.
+- Representative commits: [`e195ab02b`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/e195ab02b), [`5466c6114`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/5466c6114), [`50f4c9923`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/50f4c9923), [`e97f719ab`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/e97f719ab)
+
+### Connector Sandbox Live-Proof Tier B Matrix (`bky21.4.6.*`)
+Tier B live-sandbox proofs landed for AWS S3 lifecycle, Azure blob lifecycle, GCP, Cloudflare DNS, DockerHub, Microsoft 365 file, CircleCI, Datadog, Mixpanel, Amplitude, PostHog, Grafana, Netlify, Vercel, Pulumi preview, 1Password, Calendly, Confluence, Intercom, Monday, Bitwarden, PostHog capture, and a bridge-process sandbox proof. Idempotent cleanup probes accompany each. Sixteen source-level mock-leakage beads closed in parallel.
+- Closed workstreams: `bky21.4.6.1`–`bky21.4.6.5`, `bky21.15`–`bky21.30`, `bky21` parent
+- Representative commits: [`25e574f0a`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/25e574f0a), [`a7a567146`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/a7a567146), [`f08ac2da2`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/f08ac2da2), [`1e8acde56`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/1e8acde56)
+
+### Telemetry OTLP Host Integration (`4kw5f.2.9.8.1`)
+OpenTelemetry OTLP export wired through `fcp-telemetry` with backpressure proof, timeout proof, retry harness, ML-DSA signing-key frame optimization, host OTLP readiness route, and `fwc otlp` readiness command. Coverage spans traces, metrics, and logs.
+- Representative commits: [`2eadafa13`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/2eadafa13), [`6a6ab0350`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/6a6ab0350), [`cad96c021`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/cad96c021)
+
+### SDK Migration Shim Retirement (`angoc.3.6`, `angoc.3.7`)
+The `ConnectorRuntime` migration shim graduated. All call sites migrated to the production SDK surface, the shim was retired, and the error-mapping surface unified across crates. Workspace-events local proof also landed.
+- Representative commits: [`559c37afe`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/559c37afe), [`d090c8569`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/d090c8569), [`fc3c02179`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/fc3c02179)
+
+### Prewarm Verification and Production-Soak Gating (`k3zfl.8`)
+Cold-start prewarm probes now discriminate smoke evidence from production-soak evidence and gate production-soak acceptance. Fail-closed prewarm policy is enforced; prewarm evidence keeps clippy-clean and feeds the cutover-gate registry.
+- Representative commits: [`293b5e58e`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/293b5e58e), [`a15460750`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/a15460750), [`5028783f7`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/5028783f7)
+
+### Email Generic Inbound Supervision (`4kw5f.4.2`)
+The `email-generic` connector gained a supervised inbound preview fan-out, poll-once invoke exposure, and clippy hardening — enabling single-shot incremental fetch without losing the long-running supervisor contract.
+
+### MCP Bridge Hardening (`4kw5f.6`)
+Prompt-injection description scanning, MCP sampling handler, and auth-error retry semantics landed in the `mcp-bridge` connector.
+
+### Other
+- Proof bundle registry, validator, and `fwc proof status` surface (`8fhsm.*`)
+- RCH proof classification corpus expansion (`angoc.6.3.1`)
+- Tailscale live-status fallback and skip-probe diagnostics (`u1jce`)
+- Manifest field-coverage gate tightening with constraint/ai-hint gap closures
+
+---
+
+## 2026-04-21 — 2026-05-05 — Post-Quantum Crypto, Typestate Ratchet, and the Multi-Agent Swarm Session
+
+This window hosts the project's largest single-session capability landing: a 4-codex + 2-claude-code swarm on 2026-05-02 closed ~168 beads, hardened security across alpha/beta/gamma/delta/epsilon domains, and shipped 31 new connector beads. See [`docs/audit/swarm-session-summary-2026-05-02.md`](docs/audit/swarm-session-summary-2026-05-02.md) for the full session memo.
+
+### Post-Quantum Cryptography (`kyopb.1.*`)
+Production-grade PQ infrastructure landed in a new `fcp-crypto-pq` crate. X-Wing KEM with RustCrypto draft-06 plus IETF KAT regression harness, ML-DSA-65 (FIPS 204) with randomized signing and pinned KAT vectors, the `ZoneKeyManifest V4` schema supporting mixed V3+V4 wrap lists and safe `migrated_to_v4` promotion, hybrid verifier dispatch through HPKE-X25519 and X-Wing, and `subtle::ConstantTimeEq` replacing `PartialEq` on every PQ secret type. A Lean formal-soundness theorem for the lattice-trapdoor delegation chain landed alongside throughput benches comparing Ed25519, ML-DSA-65, and lattice delegation. A mixed V3/V4 mesh migration harness proves readers on both schemas agree on the effective zone key.
+- Closed workstreams: `kyopb.1.1.*`, `kyopb.1.2.1`–`kyopb.1.2.3`, `kyopb.1.3.2`–`kyopb.1.3.4`, `kyopb.1.4.3`
+- Representative commits: [`bf487859d`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/bf487859d), [`79da0aae4`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/79da0aae4), [`fb9ae688a`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/fb9ae688a), [`431af6c4a`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/431af6c4a), [`b6b687fa3`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/b6b687fa3)
+
+### Connector Typestate Ratchet Convergence (`dja9u`)
+The `verify_bound` typestate migration across all 29 in-scope connectors reached `LEGACY_VERIFY_ALLOWLIST = 0`. Every connector boundary now enforces capability-token typestate at compile time; the permissive-verify legacy path is permanently closed. The README's `TYPESTATE_ENFORCED` count is pinned in code.
+- Closed: `dja9u.1.a` through `dja9u.1.f`; parent `dja9u`
+- Representative commit: [`b03fac273`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/b03fac273)
+
+### REVIEW MODE Cross-Domain Same-Day Fixes
+A `/review-mode` audit pass across protocol, sandbox, and supervisor surfaces caught five real bugs in commits that had already shipped during the same session — all fixed same-day with regression tests:
+- **`vzn2p`** (P1): `IndexedZoneKeyManifest` duplicate-recipient ambiguity; `HashMap::insert` retained last while linear resolver kept first, blocking mesh-native cutover. Fixed to reject duplicates fail-closed.
+- **`f69kn`** (P1): `ZoneKeyRing::apply_manifest` ignored V4 wraps; V4-only manifests silently failed with `MissingWrappedZoneKey`. Fixed via hybrid-verifier dispatch and new `apply_manifest_v4` entry point.
+- **`l9tt6`** (P2): `v2kt4` allow-list gate had a TOCTOU race across two read-lock acquisitions. Fixed via `allow_list_snapshot` reading all three governance fields under one lock.
+- **`1a73y`** (P3): `InvokeAuditChain` CAS error taxonomy.
+- **`vkb3m`** (P3): V3-deprecation cutover observable missed the `IndexedZoneKeyManifest` lookup path.
+- Representative commits: [`9f4abf31d`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/9f4abf31d), [`828d44873`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/828d44873), [`1d9621f93`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/1d9621f93)
+
+### Security Audit Cascade (alpha/beta/gamma/delta/epsilon)
+Parallel security-audit sweeps filed 18 P1/P2/P3 findings; every critical or high finding shipped in-session:
+- **`fcp-graphql`** (`ziovc`, `nb1p2`, `0q8eh`): query depth/size/alias/root-field limits; fail-closed subscription backpressure; reject empty bearer tokens.
+- **`fcp-webhook`** (`gxwsv`): reject empty/short HMAC signing secrets.
+- **`fcp-oauth`** (`v0wme`): reject empty authorization codes.
+- **`fcp-sandbox`** (`n781d`, `0lc3s`): `CredentialInjector` default-deny hosts; reject malformed `cidr_deny` at runtime.
+- **`fcp-mesh`** (`lmp9l`): redact trace snapshot/export defaults; `ia6x5` emergency revocation burst push hardening.
+- **`fcp-audit`** (`eah6j`): reject empty signed-head in verifier.
+- **`fcp-store`** (`28nms`): emit `UpgradedLatestPointer` audit event on V1→V2 pointer upgrade.
+- One additional P1 (`kfr9j`) caught by the `/security-audit beta` lane: ML-DSA length-bypass through transparent byte envelopes — fixed by custom length-invariant `Deserialize` with proptest fuzz coverage.
+- Representative commits: [`dca242e58`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/dca242e58), [`9beb77bbb`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/9beb77bbb), [`9a9b3b4e6`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/9a9b3b4e6), [`a637a2396`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/a637a2396)
+
+### Performance Sweeps Across Five Domains
+Algorithmic and lock-contention improvements landed with Criterion bench coverage in tow:
+- **`fcp-core`**: `IndexedZoneKeyManifest` O(1) recipient lookups (`d2oa0` at [`cf325f358`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/cf325f358)).
+- **`fcp-store`**: repair queue `Vec` → `BinaryHeap` O(log n) (`u97n8`); WAL + cursor benches (`ztdcm`).
+- **`fcp-cbor`**: `canonicalize_map` arena allocator (`m7aoz`).
+- **`fcp-raptorq`**: repair-tail decode coalesce (`qmepq`); hot-path benches (`0orhf`).
+- **`fcp-webhook`**: precomputed routing index O(1) (`7j7fa`).
+- **`fcp-streaming`**: SSE parser cursor advance without rescan (`gqpn5`).
+- **`fcp-oauth`**: single-flight `tokio::watch` (`p36a0`).
+- **`fcp-host`**: concurrent `InvokeAuditChain` per-zone sharding (`uwlj5`).
+- **`fcp-bootstrap`**: cert-selection O(log n) index (`vkq68`).
+- **`fcp-tailscale`**: borrowed peer-tag scan (`qfsse`).
+- **`fcp-graphql`**: hot-path benches (`a4uf2`).
+
+### Net-New Connector Expansion: 31 Beads, 10+ New Workspace Crates
+A new `fcp-openai-compat` crate provides a shared OpenAI-compatible client; a new `fcp-voice-call` crate hosts `CallAuthToken`, `SessionStore`, and replay-cache primitives shared by all voice providers. New connectors landed across categories:
+- **LLM providers** (`4kw5f.2.9.2.*`): xAI Grok (with realtime web search), DeepSeek (R1/R2 reasoning_content), Ollama (local-LLM mesh-sovereign), Together (open-weights), NVIDIA NIM (enterprise inference), LM Studio (desktop), MoonShot Kimi (long-context Chinese), Qwen (DashScope), Fireworks (fast OSS inference).
+- **Speech/media** (`4kw5f.2.5`): ElevenLabs bounded TTS + scribe realtime; Deepgram realtime listen WebSocket; multi-provider loopback E2E fixtures.
+- **Search** (`4kw5f.2.9.5`): DuckDuckGo privacy search; Brave web LLM-context parity; Perplexity native search; SearXNG self-hosted; Tavily and Exa with guardrails.
+- **Embeddings** (`4kw5f.2.9.4`): Voyage AI.
+- **Media generation** (`4kw5f.2.9.3`): Fal AI queue-based; Runway Gen-3/Gen-4 video; ComfyUI workflow image generation.
+- **Voice providers**: Telnyx (Ed25519 webhooks); Plivo (HMAC-SHA256 V2/V3 webhooks); Twilio refactor onto `fcp-voice-call` substrate.
+- **Chat coordination core** (`6n7.16`): Matrix E2EE decrypted-projection; Discord/Slack/Telegram/Mattermost/Google Chat/IRC sends route through coordination core; Feishu webhook ingress; Nextcloud Talk typed policy/network/webhook config.
+- New workspace crates: `fcp-auth-schema`, `fcp-evidence`, `fcp-kernel`, `fcp-policy`, `fcp-prelude`, `fcp-crypto-pq`, `fcp-bench`, `fcp-chaos`, `fcp-openai-compat`, `fcp-voice-call`.
+- Closed: 31 child beads under `4kw5f.2.9`, `4kw5f.2.5`, `4kw5f.2.7`, `4kw5f.5.3.2.*`, `6n7.5`–`6n7.16`
+- Representative commits: [`b81333773`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/b81333773), [`d1f264c29`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/d1f264c29), [`5895f94bf`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/5895f94bf)
+
+### Test-Harness Expansion
+- 191 `fcp-core` serde matrix pins covering `CapabilityType`, `HashAlgorithm`, `ZoneId`, `MeshNodeConfig`, `SchedulingClass`, `PolicyEffect`, `LoggingTarget`, `HostFingerprint`, integrity/confidentiality label matrices, and typestate enforcement on `migrated_to_v4`.
+- 101+ new fuzz targets across CBOR, crypto, protocol, webhook, OAuth, streaming, mesh, and host domains.
+- E2E integration suites with structured tracing (no mocks) across `fcp-streaming`/`fcp-webhook`/`fcp-graphql`/`fcp-oauth` (delta) and sandbox/manifest/registry/audit/ratelimit/telemetry (epsilon).
+- 19 golden vectors for `fcp-policy`/`fcp-host`/`fcp-mesh`/`fcp-audit`.
+- Swarm prewarm cold-start gauntlet (`k3zfl.8`–`k3zfl.11`) with `SwarmPrewarmColdStartEvidence` schema, resource-ledger smoke tests, prewarm checkout safety model, and p95 evidence exposure.
+- Representative commits: [`6f46e6a13`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/6f46e6a13), [`29f803b8a`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/29f803b8a), [`1cfa759cc`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/1cfa759cc)
+
+### Disk and Build Infrastructure
+A target/debug bloat incident (~248 GB stale across competing agent build trees) was cleaned up under user authorization, recovering ~252 GB. Agents subsequently honor a `CARGO_TARGET_DIR=/Volumes/USB_NVME/fcp-<lane>` per-agent quarantine to prevent recurrence. A session-end summary memo lives at [`docs/audit/swarm-session-summary-2026-05-02.md`](docs/audit/swarm-session-summary-2026-05-02.md).
+
+---
+
+## 2026-04-06 — 2026-04-20 — Gemini Multi-Lane Audit, MOR Epic Closures, and Bootstrap Closeout
+
+### Gemini Multi-Lane Security and Protocol Audit
+A four-lane Gemini code-review pass fixed 23 bugs and surfaced 5 architectural findings, published as [`GEMINI_LANE1_CRYPTO.md`](GEMINI_LANE1_CRYPTO.md), [`GEMINI_LANE2_MESH.md`](GEMINI_LANE2_MESH.md), [`GEMINI_LANE3_REVOCATION.md`](GEMINI_LANE3_REVOCATION.md), [`GEMINI_LANE4_BOOTSTRAP.md`](GEMINI_LANE4_BOOTSTRAP.md), and the synthesizing [`GEMINI_FINAL_REPORT.md`](GEMINI_FINAL_REPORT.md).
+- **Lane 1 (Crypto)**: CBOR canonical sort order per RFC 8949, Ed25519 small-subgroup rejection, HMAC case-insensitivity, HPKE exact-length verification, COSE duplicate-key detection.
+- **Lane 2 (Mesh)**: zone-aware routing enforcement, gossip authorization, lease fencing-token drift limits, per-peer decode admission, semver-safe version comparison.
+- **Lane 3 (Revocation)**: critical fix wiring `is_revoked()` into the 11-stage enforcement pipeline (previously freshness was checked but the concrete lookup was omitted); monotonic `update_head` gate added.
+- **Lane 4 (Bootstrap)**: genesis fingerprint now includes `created_at` and `initial_zones`; `OsRng` entropy paths hardened; hardware-token PIN zeroization fixed.
+- Representative commits: [`842d2f864`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/842d2f864), [`b64162556`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/b64162556), [`956f80108`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/956f80108), [`0fb4643e9`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/0fb4643e9)
+
+### MOR (Modes of Reasoning) Epic Closures: C1, C2, C3
+Type-level and architectural security invariants codified across three orthogonal tracks (`docs/MODES_OF_REASONING_REPORT_AND_ANALYSIS_OF_PROJECT.md`):
+- **C1.x (Revocation timing)**: `RevocationSeal` for check-use atomicity, exact-membership verification (no XOR filter in the revocation path), `RevocationSlaChecker` for zone-wide freshness, `RevocationPushMessage` priority gossip, 10 integration tests under `revocation_timing.rs`.
+- **C2.x (Teaching order)**: README restructuring, `OperationalModelVersion` (V1 host-first vs V2 mesh-native), `TruthPrecedencePolicy`, claims-vs-reality audit, quarterly debiasing process.
+- **C3.x (Type-level security)**: sealed-trait pattern on `FcpConnector`, phantom-type consuming `verify()`, freshness class manifests, capability constraints, `ZoneBound<T>` zone-binding invariant.
+- Representative commits: [`1edb7f2b5`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/1edb7f2b5), [`68f145692`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/68f145692), [`d090e5323`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/d090e5323), [`ac6996dd9`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/ac6996dd9)
+
+### Bootstrap Epic Closure (`24llg`)
+All seven sub-gates passed. Highlights: AWS/GCP fake-signing replaced with real SigV4 plus regression suite; distributed state placement semantics and failover regression scenarios; `SoftTokenDriver` with HKDF-seeded Ed25519 keys; `BootstrapError` typed-refusal variants with remediation hints; an 11-scenario `fcp-verification-bundle/v1` evidence pack; placeholder/TODO eradication via the `truthful generator` golden-bundle scanner.
+- Closed children: `24llg.1`, `24llg.3`, `24llg.4`, `24llg.5`, `24llg.6`, `24llg.7`; parent `24llg`
+- Representative commits: [`17d004683`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/17d004683), [`009877dde`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/009877dde), [`55a8b26ad`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/55a8b26ad)
+
+### Runtime and Core Inventory Epics: `z1nkz` and `0aczd`
+- **`z1nkz`** — runtime scaffolding deletion wave: deprecated nonce APIs removed; `asupersync` → `fcp_async_core` import migration; workflow-preservation evidence index published as [`docs/FCP3_Workflow_Preservation_Evidence.md`](docs/FCP3_Workflow_Preservation_Evidence.md).
+- **`0aczd`** — `fcp-core` semantic junk-drawer retirement: capability telemetry migrated out of `fcp-core`; PCS module inventory; semantic crate-graph audit ([`docs/FCP3_Crate_Graph_Audit.md`](docs/FCP3_Crate_Graph_Audit.md)) with 175 reverse-deps documented; re-exports from `fcp-kernel`/`fcp-policy`/`fcp-evidence` for 12 blur modules.
+- Representative commits: [`366c753ad`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/366c753ad), [`04798b317`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/04798b317), [`1273d5fce`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/1273d5fce)
+
+### Connector Hardening Sweep (40+ Connectors)
+URL validation, OAuth/OIDC tightening, capability split, error taxonomy alignment, and rate-limit arithmetic across 40+ connectors. Base URL/content URL overrides hardened (Salesforce, Dropbox, Monday, Intercom, Bitbucket, Algolia, Mailchimp, ClickUp, Asana, Plaid, QQ); `RateLimited` mapping migrated (Zapier, n8n, Make, OpenRouter, Mistral, Kubernetes); path sanitization. Google Drive/Sheets compliance harnesses; Qdrant testcontainer lifecycle; Slack `ok=true` panic close; Discord `gateway_url` pinning.
+- Representative commits: [`1f4237100`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/1f4237100), [`d55f7c9f3`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/d55f7c9f3), [`5ececde6a`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/5ececde6a), [`658cd606f`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/658cd606f)
+
+### Fuzz, Metamorphic, Golden, and Conformance Coverage
+- Fuzz: protocol framing, CBOR round-trip, provenance decode, HPKE, Shamir reconstruction, IBLT decode, WAL recovery.
+- Metamorphic: HPKE cross-ciphertext swap, Ed25519 context-sign, RaptorQ random-loss + duplicates, protocol encode↔decode stability, rate-limit and streaming relations.
+- Golden snapshots: audit receipts, OAuth URL shapes, gossip/revocation signing transcripts, GraphQL/Tailscale/webhook goldens.
+- Conformance: 5× policy matrix (zone × capability), negative-path vectors, manifest differential, spec-derived determinism.
+- Representative commits: [`96430a7ac`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/96430a7ac), [`482760aee`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/482760aee), [`2fc61aa60`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/2fc61aa60)
+
+### Fail-Closed and Default-Deny Hardening
+25+ sites explicitly fail closed on misconfiguration: registry unconfigured supply-chain verifiers, SDK unregistered rate-limit pools, bootstrap empty PIN before PKCS#11, host unknown-tool batch validation, webhook oversized Stripe signatures, OAuth refresh-use-refresh invariant, GraphQL short batch responses.
+- Representative commits: [`a11f90f43`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/a11f90f43), [`1a296db85`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/1a296db85), [`91c029b08`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/91c029b08)
+
+### Pre-Cutover Benchmark Baseline (`34q27`, `8bqme`)
+Captured baseline scenario set, environment capture, transcript baseline, and performance/resource baseline with diff protocol. Semantic proof index and closure checklist published under `8bqme`.
+
+---
+
+## 2026-03-22 — 2026-04-05 — FCP3 Core Migration, Mesh Authority, and FWC Intent Compiler
+
+### FCP3 Migration and Artifact Canonicalization
+Workspace-wide migration from FCP2 schema to FCP3 execution model. `fcp-kernel` and `fcp-evidence` re-exports from `fcp-core` establish canonical artifact and type namespaces. Workspace rebranded to FCPS in docs and Cargo descriptions; FCP3 promoted as canonical spec target.
+- Representative commits: [`1f7a0cd2d`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/1f7a0cd2d), [`070a0f013`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/070a0f013), [`6d12a5df0`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/6d12a5df0), [`875e371dd`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/875e371dd)
+
+### Mesh Orchestration: `LeaseCoordinator` and V3 Placement Policy
+`fcp-mesh` gained `LeaseCoordinator` for multi-node execution authority, singleton-writer election, fencing-token diff tracking, coordinator rebase-before-issue, and FCP Spec §11.2 placement policy types with decision evidence.
+- Representative commits: [`6cebeb569`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/6cebeb569), [`ae693a624`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/ae693a624), [`e5e5f89cf`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/e5e5f89cf)
+
+### Conformance Harness: Resilience Evidence Bundles
+`fcp-conformance` added 8+ resilience scenarios with typed evidence artifacts: split-brain prevention, stale rejoin, graceful shutdown, multi-node failure, quorum loss, crash recovery, degraded availability, replay protection. The `fcp-testkit` `LogCapture` shim was replaced with durable JSON evidence bundles.
+- Representative commits: [`13cb14821`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/13cb14821), [`a663a5c74`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/a663a5c74), [`43d19432b`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/43d19432b)
+
+### FWC Intent Compiler and Host Diagnostics
+`fwc` expanded from manifest introspection to a full intent/readiness/recovery diagnostic framework: structured fork-resolution diagnostics, truthful preflight denial envelopes, connector-filtered catalog loading, 13 new catalog commands, CUAL integration tests, policy command refinements, error-taxonomy refactor, audit/bench/readiness/search updates. The local intent compiler (`crates/fwc/src/intent.rs`) reached ~5.9k lines with 258 inline tests.
+- Representative commits: [`446785ad7`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/446785ad7), [`13aca3fff`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/13aca3fff), [`b86013e9d`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/b86013e9d)
+
+### RaptorQ Hardening and Repair Optimization
+End-to-end payload hash verification rejects false-positive decodes. Dense Gaussian-elimination fallback rewritten with overdetermined GF(256) solve and post-hoc verification. Intermediate symbol count (l) initialization fixed. `fcp-store` added explainable repair evaluation with zone queue tracking and GC consistency refactor; over-budget repairs now captured as `DeferredCycleBudget` instead of dropped silently.
+- Representative commits: [`d010a26a0`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/d010a26a0), [`9b0711789`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/9b0711789), [`031b8df3a`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/031b8df3a)
+
+### Connector Hardening Sweep (Three Phases)
+Three waves of systematic protocol and security hardening across 30+ connectors: Phase 1 (DocuSign, Plaid, Anthropic, GCP, Airtable); Phase 2 (Azure, Salesforce, DocuSign, LLM-Router, Notion); Phase 3 (base URL validation, policy enforcement, config tightening). 30-second HTTP timeouts, secret redaction in `Debug` output, constant-time comparison on X25519 shared secret and OAuth state parameter; API error response bodies truncated to 2 KB across 20 connectors.
+- Representative commits: [`c06339e8d`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/c06339e8d), [`f8565f52e`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/f8565f52e), [`6f0afc9cf`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/6f0afc9cf), [`124dd9ba7`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/124dd9ba7), [`525be8fff`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/525be8fff)
+
+### WeCom (WeChat for Work) and Chinese-Platform Hardening
+WeCom gained host-forwarded callback ingest, media download, crypto verification, and image/file send operations with duplicate-check support. DingTalk and QQ received token redaction in `Debug` output and token error retries. IRC and Nostr connector scaffolds landed; IRC gained CRLF injection prevention and normalized event metadata.
+- Representative commits: [`b22f9d634`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/b22f9d634), [`fcf5e9030`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/fcf5e9030), [`e3fd9382b`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/e3fd9382b)
+
+### New Connector Onboarding
+Scaffolds for `elevenlabs`, `tlon`, `zalo`, `zalouser`, `google-admin-reports`, `irc`, `nostr`, `brave-search`, `deepgram`, and several more. Connector inventory crossed 136 crates during this window; manifest counts crossed 150 by 2026-04-05.
+
+### `fcp-host` Zone and Capability Enforcement
+Typed enforcement config with canonical ID validation and wildcard support; batch zone override; structured health renames (`ConnectorProcessState`, `ConnectorId`); typed descriptor re-exports; canonical HTTP error mapping with `map_http_status` tests. `fcp-sandbox` raw-socket host policy for WASI network constraint enforcement.
+- Representative commits: [`e71847c9f`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/e71847c9f), [`6cf02d4ff`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/6cf02d4ff), [`e8684ecbe`](https://github.com/Dicklesworthstone/flywheel_connectors/commit/e8684ecbe)
+
+### Performance, CI, and Docs
+RaptorQ heap allocation reduction (per-pivot Gaussian elimination), CBOR canonicalization, HPKE AAD, and `fwc` search scoring (pre-cached lowercase fields, parallelized manifest loading) landed in this window. CI gained an E2E artifact validator for JSONL schema, redaction, and bundle integrity. V3 acceptance contract bumped to v1.1.0 with testing taxonomy, archetype matrix, and E2E log-schema expansion.
 
 ---
 

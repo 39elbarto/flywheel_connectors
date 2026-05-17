@@ -3335,7 +3335,7 @@ Inbound webhooks (`fcp-webhook`) use a deterministic-id + TTL cache. The webhook
 event_id = SHA256(provider ‖ 0x00 ‖ event_type ‖ 0x00 ‖ body)
 ```
 
-The deterministic id means the same payload always produces the same id, regardless of provider-supplied headers (which can be missing or spoofed). The cache stores `(event_id, accepted_at)` pairs; lookup at ingress checks both presence (replay refused) and age (entries older than `webhook.replay_ttl_secs`, default 86 400 seconds = 24 hours, are eligible for GC).
+The deterministic id means the same payload always produces the same id, regardless of provider-supplied headers (which can be missing or spoofed). The cache stores `(event_id, accepted_at)` pairs; lookup at ingress checks both presence (replay refused) and age (entries older than the webhook config's `idempotency_ttl`, default 86 400 seconds = 24 hours, are eligible for GC).
 
 The TTL is bounded by two competing pressures: too short, and a legitimate retry from a slow upstream gets refused as a duplicate; too long, and the cache grows without bound. 24 hours covers virtually every real-world webhook retry window (Stripe maxes at ~3 days; GitHub at hours; Slack within minutes) while keeping the cache small enough to fit in memory for reasonable workloads. The atomic `claim_event` operation acquires a write lock, checks, and records in one critical section, eliminating the TOCTOU race that the deprecated split `check_replay()` + `record_event()` pair had.
 

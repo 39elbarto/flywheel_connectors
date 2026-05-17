@@ -151,7 +151,7 @@ fwc serve-mcp --host http://127.0.0.1:8787 github slack gmail
 
 # Audit + history
 fwc history --connector github --limit 20
-fwc audit verify --zone z:work
+fwc audit tail --zone z:work
 fwc supply-chain verify github
 ```
 
@@ -991,7 +991,7 @@ fwc schema github issues.create --offline
 
 # History and audit
 fwc history --connector github --limit 20
-fwc audit verify --zone z:work
+fwc audit tail --zone z:work
 ```
 
 ### Command Families

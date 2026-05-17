@@ -455,7 +455,31 @@ validate_artifact_contracts() {
     "target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl" '
       def hex_hash:
         type == "string" and test("^[0-9a-f]{64}$");
+      def required_route_scenarios:
+        [
+          "passed:SMALL_TEST",
+          "passed:V4_REFERENCE",
+          "denied:malformed root basis",
+          "denied:malformed child basis",
+          "denied:wrong parent",
+          "denied:wrong zone",
+          "denied:wrong period",
+          "denied:wrong parameter profile",
+          "denied:unsupported custom profile",
+          "denied:fixture-only trapdoor used on production route"
+        ];
+      def route_scenario_ids:
+        map(
+          if .result == "passed" and .skip_reason == null then
+            "passed:" + .parameter_profile
+          elif .result == "denied" and (.skip_reason | type == "string") then
+            "denied:" + .skip_reason
+          else
+            "invalid_route_scenario"
+          end
+        );
       length > 0 and
+      ((route_scenario_ids | sort) == (required_route_scenarios | sort)) and
       all(.[]; type == "object" and
         (.command_line | type == "string") and
         (.git_revision | type == "string") and
@@ -471,7 +495,8 @@ validate_artifact_contracts() {
         (.timing_ms | type == "number") and
         (.cleanup | type == "string") and
         (.result | type == "string") and
-        has("skip_reason"))
+        has("skip_reason") and
+        (.skip_reason == null or (.skip_reason | type == "string")))
     '
 
   validate_jsonl_contract "validate_crypto_public_matrix_contract" \
@@ -658,7 +683,7 @@ validate_artifact_contracts() {
     '
 
   append_json "jsonl_contract_validation" "pass" "$(jq -cn \
-    '{validated_artifacts:["target/fcp-crypto-pq/representation-profile-evidence.jsonl","target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl","target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl","target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl","target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl","target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl","target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"],required_host_scenarios:["allow_v4_reference","deny_forged_v4_reference","deny_trust_set_replay_v4_reference","deny_mismatched_operation","deny_mismatched_principal"],host_scenario_cardinality:"exactly_once",required_assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1"],cleanup_result:"not_applicable"}')"
+    '{validated_artifacts:["target/fcp-crypto-pq/representation-profile-evidence.jsonl","target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl","target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl","target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl","target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl","target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl","target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"],required_route_scenarios:["passed:SMALL_TEST","passed:V4_REFERENCE","denied:malformed root basis","denied:malformed child basis","denied:wrong parent","denied:wrong zone","denied:wrong period","denied:wrong parameter profile","denied:unsupported custom profile","denied:fixture-only trapdoor used on production route"],route_scenario_cardinality:"exactly_once",required_host_scenarios:["allow_v4_reference","deny_forged_v4_reference","deny_trust_set_replay_v4_reference","deny_mismatched_operation","deny_mismatched_principal"],host_scenario_cardinality:"exactly_once",required_assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1"],cleanup_result:"not_applicable"}')"
 }
 
 validate_gauntlet_contract() {

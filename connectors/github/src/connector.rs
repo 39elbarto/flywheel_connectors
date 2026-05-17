@@ -518,13 +518,8 @@ impl GitHubConnector {
         }
     }
 
-    /// Handle introspect method.
-    ///
-    /// # Errors
-    /// Returns [`FcpError`] if serialization of the introspection data fails.
-    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        let introspection = Introspection {
-            operations: vec![
+    fn operations_info() -> Vec<OperationInfo> {
+        vec![
                 op_info(
                     "github.create_issue",
                     "Create an issue in a repository",
@@ -886,7 +881,16 @@ impl GitHubConnector {
                         related: vec![CapabilityId::from_static("github.get_issue"), CapabilityId::from_static("github.get_pull_request")],
                     },
                 ),
-            ],
+        ]
+    }
+
+    /// Handle introspect method.
+    ///
+    /// # Errors
+    /// Returns [`FcpError`] if serialization of the introspection data fails.
+    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let introspection = Introspection {
+            operations: Self::operations_info(),
             events: vec![],
             resource_types: vec![],
             auth_caps: None,

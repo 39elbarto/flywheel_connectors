@@ -115,8 +115,6 @@ impl AmplitudeClient {
     /// through the connector boundary unnoticed. Each caller now declares the
     /// exact type it expects, so a shape regression surfaces as a `Decode`
     /// error at the boundary instead of as silently wrong output downstream.
-    /// Empty bodies use the type's `Default` so endpoints that legitimately
-    /// return an empty 200 (e.g. some health-check shapes) continue to work.
     async fn handle_response<T>(&self, resp: Response) -> AmplitudeResult<T>
     where
         T: DeserializeOwned + Default,
@@ -124,10 +122,7 @@ impl AmplitudeClient {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
-            if body.is_empty() {
-                return Ok(T::default());
-            }
-            Ok(serde_json::from_str(&body)?)
+            decode_success_body(status, &body)
         } else {
             self.handle_error(status, resp).await
         }
@@ -299,6 +294,22 @@ fn encode_query_value(value: &str, field: &str) -> AmplitudeResult<String> {
         }
     }
     Ok(encoded)
+}
+
+fn decode_success_body<T>(status: StatusCode, body: &str) -> AmplitudeResult<T>
+where
+    T: DeserializeOwned + Default,
+{
+    if status == StatusCode::NO_CONTENT {
+        return Ok(T::default());
+    }
+    if body.trim().is_empty() {
+        return Err(AmplitudeError::Api {
+            status_code: status.as_u16(),
+            message: "empty response body".into(),
+        });
+    }
+    Ok(serde_json::from_str(body)?)
 }
 
 const HEX_UPPER: [u8; 16] = *b"0123456789ABCDEF";
@@ -515,6 +526,36 @@ mod tests {
         assert!(!dbg.contains("MY_SECRET_KEY"));
         assert!(!dbg.contains("MY_SECRET_SECRET"));
         assert!(dbg.contains("AmplitudeClient"));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_empty_ok() {
+        let err = decode_success_body::<serde_json::Value>(StatusCode::OK, "").unwrap_err();
+        assert!(matches!(
+            err,
+            AmplitudeError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_rejects_whitespace_ok() {
+        let err = decode_success_body::<serde_json::Value>(StatusCode::OK, "  \n\t").unwrap_err();
+        assert!(matches!(
+            err,
+            AmplitudeError::Api {
+                status_code: 200,
+                message
+            } if message == "empty response body"
+        ));
+    }
+
+    #[test]
+    fn decode_success_body_allows_empty_no_content() {
+        let parsed = decode_success_body::<serde_json::Value>(StatusCode::NO_CONTENT, "").unwrap();
+        assert_eq!(parsed, serde_json::Value::Null);
     }
 
     #[test]

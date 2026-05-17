@@ -1338,10 +1338,10 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_3_operations() {
+    fn operations_info_has_4_operations() {
         let ops = operations_info();
         let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 3);
+        assert_eq!(arr.len(), 4);
     }
 
     #[test]
@@ -1426,6 +1426,7 @@ mod tests {
         assert!(ids.contains(&"amplitude.charts.query"));
         assert!(ids.contains(&"amplitude.cohorts.list"));
         assert!(ids.contains(&"amplitude.events.export"));
+        assert!(ids.contains(&"amplitude.health"));
     }
 
     #[test]
@@ -1695,14 +1696,14 @@ mod tests {
         let config = AmplitudeConfig::from_params(&json!({
             "api_key": "key",
             "secret_key": "secret",
-            "base_url": "https://custom.com",
+            "base_url": "https://api.eu.amplitude.com/api/2",
         }))
         .unwrap();
         let cloned = config.clone();
         // Use original after clone
         assert_eq!(config.auth.api_key, "key");
         assert_eq!(cloned.auth.api_key, "key");
-        assert_eq!(cloned.base_url, "https://custom.com");
+        assert_eq!(cloned.base_url, "https://api.eu.amplitude.com/api/2");
     }
 
     #[test]
@@ -1780,15 +1781,13 @@ mod tests {
 
     #[test]
     fn provisioning_readiness_custom_base_url_rejected() {
-        let config = AmplitudeConfig::from_params(&json!({
+        let result = AmplitudeConfig::from_params(&json!({
             "api_key": "key",
             "secret_key": "secret",
             "base_url": "https://evil.example.com",
-        }))
-        .unwrap();
-        let readiness = config.provisioning_readiness();
-        assert!(!readiness.network_ok);
-        assert!(readiness.network_message.contains("amplitude.com"));
+        }));
+        let err = result.expect_err("off-policy base URL must be rejected during config parsing");
+        assert!(err.to_string().contains("amplitude.com"));
     }
 
     #[test]

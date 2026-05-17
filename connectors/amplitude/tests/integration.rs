@@ -289,7 +289,7 @@ async fn introspection_emits_v3_compliance_evidence() {
     let c = AmplitudeConnector::new();
     let intro = c.handle_introspect().await.unwrap();
     let ops = intro["operations"].as_array().expect("operations array");
-    assert_eq!(ops.len(), 3);
+    assert_eq!(ops.len(), 4);
     assert!(ops.iter().all(|op| {
         op["ai_hints"]["examples"]
             .as_array()

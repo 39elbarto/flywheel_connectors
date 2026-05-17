@@ -510,10 +510,6 @@ impl QqGatewayRuntime {
         };
         self.remember_event_id(event_id.as_deref());
 
-        if self.pending_events.len() >= self.config.max_queue_depth {
-            return Ok(self.dropped_projection(event.s, event_id, "queue_full"));
-        }
-
         let policy = evaluate_inbound_policy(&normalized, &self.config.policy);
         if !policy.allowed {
             self.dropped_events = self.dropped_events.saturating_add(1);
@@ -529,6 +525,10 @@ impl QqGatewayRuntime {
                 runtime: self.snapshot(),
                 lifecycle: self.lifecycle_directive(QQ_GATEWAY_ACTION_NONE, reason_code),
             });
+        }
+
+        if self.pending_events.len() >= self.config.max_queue_depth {
+            return Ok(self.dropped_projection(event.s, event_id, "queue_full"));
         }
 
         self.record_reply_reference_status(&normalized);
@@ -2650,16 +2650,42 @@ mod tests {
             .unwrap();
         assert!(allowed.accepted);
 
-        let overflow = runtime
+        let denied_while_full = runtime
             .project_event(QqGatewayEvent {
                 op: 0,
                 s: Some(3),
                 t: Some("GROUP_AT_MESSAGE_CREATE".into()),
                 d: Some(json!({
+                    "id": "msg-denied-while-full",
+                    "content": "bot-openid denied while queue is full",
+                    "group_openid": "group-denied",
+                    "group_member_openid": "member-3"
+                })),
+                id: Some("evt-denied-while-full".into()),
+            })
+            .unwrap();
+        assert!(!denied_while_full.accepted);
+        assert_eq!(denied_while_full.reason_code, "group_not_allowed");
+        assert_eq!(
+            denied_while_full
+                .policy
+                .as_ref()
+                .map(|policy| policy.reason_code),
+            Some("group_not_allowed")
+        );
+        assert_eq!(denied_while_full.runtime.queue_depth, 1);
+        assert_eq!(denied_while_full.runtime.accepted_events, 1);
+
+        let overflow = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(4),
+                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+                d: Some(json!({
                     "id": "msg-overflow",
                     "content": "bot-openid overflow",
                     "group_openid": "group-allowed",
-                    "group_member_openid": "member-3"
+                    "group_member_openid": "member-4"
                 })),
                 id: Some("evt-overflow".into()),
             })

@@ -147,6 +147,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           "missing_reply_target_drop",
           "channel_policy_denied",
           "channel_policy_allowed",
+          "queue_full_policy_denied",
           "queue_full_backpressure_drop",
           "hello_session_restore",
           "allowed_group_mention",
@@ -185,17 +186,31 @@ if [[ "${overall_status}" == "passed" ]]; then
           any(.[]; .step == "channel_policy_denied" and .details.accepted == false and .details.reason_code == "channel_not_allowed")
           and any(.[]; .step == "channel_policy_allowed" and .details.accepted == true and .details.policy.reason_code == "channel_allowed" and .details.policy.mentioned_bot == true)
         ),
-        queue_shape_ok: any(.[];
-          .step == "queue_full_backpressure_drop"
-          and .details.accepted == false
-          and .details.reason_code == "queue_full"
-          and .details.normalized == null
-          and .details.policy == null
-          and .details.runtime.queue_depth == 1
-          and .details.runtime.max_queue_depth == 1
-          and .details.runtime.accepted_events == 1
-          and .details.runtime.dropped_events == 1
-          and .details.lifecycle.action == "none"
+        queue_shape_ok: (
+          any(.[];
+            .step == "queue_full_backpressure_drop"
+            and .details.accepted == false
+            and .details.reason_code == "queue_full"
+            and .details.normalized == null
+            and .details.policy == null
+            and .details.runtime.queue_depth == 1
+            and .details.runtime.max_queue_depth == 1
+            and .details.runtime.accepted_events == 1
+            and .details.runtime.dropped_events == 2
+            and .details.lifecycle.action == "none"
+          )
+          and any(.[];
+            .step == "queue_full_policy_denied"
+            and .details.accepted == false
+            and .details.reason_code == "group_not_allowed"
+            and .details.policy.reason_code == "group_not_allowed"
+            and .details.normalized.routing == "group"
+            and .details.runtime.queue_depth == 1
+            and .details.runtime.max_queue_depth == 1
+            and .details.runtime.accepted_events == 1
+            and .details.runtime.dropped_events == 1
+            and .details.lifecycle.action == "none"
+          )
         ),
         group_policy_shape_ok: (
           any(.[]; .step == "allowed_group_mention" and .details.accepted == true and .details.policy.reason_code == "group_allowed")

@@ -756,7 +756,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
                 "enabled": true,
                 "max_queue_depth": 1,
                 "policy": {
-                    "group_policy": "open",
+                    "group_policy": "allowlist",
+                    "group_allow_from": ["group-queue"],
                     "group_require_mention": false
                 }
             }
@@ -793,6 +794,40 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(queue_fill["runtime"]["queue_depth"], 1);
     assert_eq!(queue_fill["runtime"]["max_queue_depth"], 1);
     assert_eq!(queue_fill["runtime"]["accepted_events"], 1);
+    let queue_full_policy_denied = invoke_projection(
+        &queue_connector,
+        &signing_key,
+        &queue_instance_id,
+        "qq-gateway-queue-full-policy-denied",
+        json!({
+            "op": 0,
+            "s": 2,
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": "evt-queue-full-policy-denied",
+            "d": {
+                "id": "msg-queue-full-policy-denied",
+                "content": "queue should not hide denied sender policy",
+                "group_openid": "group-denied",
+                "group_member_openid": "member-denied"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(queue_full_policy_denied["accepted"], false);
+    assert_eq!(queue_full_policy_denied["reason_code"], "group_not_allowed");
+    assert_eq!(
+        queue_full_policy_denied["policy"]["reason_code"],
+        "group_not_allowed"
+    );
+    assert_eq!(queue_full_policy_denied["runtime"]["queue_depth"], 1);
+    assert_eq!(queue_full_policy_denied["runtime"]["accepted_events"], 1);
+    assert_eq!(queue_full_policy_denied["runtime"]["dropped_events"], 1);
+    log_projection_step(
+        &mut logs,
+        "queue_full_policy_denied",
+        "ok",
+        &queue_full_policy_denied,
+    );
     let queue_full = invoke_projection(
         &queue_connector,
         &signing_key,
@@ -819,7 +854,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(queue_full["runtime"]["queue_depth"], 1);
     assert_eq!(queue_full["runtime"]["max_queue_depth"], 1);
     assert_eq!(queue_full["runtime"]["accepted_events"], 1);
-    assert_eq!(queue_full["runtime"]["dropped_events"], 1);
+    assert_eq!(queue_full["runtime"]["dropped_events"], 2);
     assert_eq!(queue_full["lifecycle"]["action"], "none");
     log_projection_step(&mut logs, "queue_full_backpressure_drop", "ok", &queue_full);
 
@@ -1562,6 +1597,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert!(log_contents.contains("attachment_total_bytes"));
     assert!(log_contents.contains("attachment_url_hashes"));
     assert!(log_contents.contains("attachment_bytes_exceeded"));
+    assert!(log_contents.contains("queue_full_policy_denied"));
     assert!(log_contents.contains("queue_full_backpressure_drop"));
     assert!(log_contents.contains("queue_full"));
     assert!(log_contents.contains("stale_sequence_replay_drop"));

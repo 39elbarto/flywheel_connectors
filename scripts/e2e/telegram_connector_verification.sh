@@ -35,7 +35,8 @@ classify_failure() {
     echo "infra_blocked"
     return
   fi
-  if grep -Eq 'No space left on device|timeout: failed to execute process|RCH-E|connection reset by peer|missing worker system package|failed to execute process|failed to get successful HTTP response from `https://index\.crates\.io/|Backend unavailable|unable to update registry `crates-io`|spurious network error' "${log_path}"; then
+  # shellcheck disable=SC2016
+  if grep -Eq 'No space left on device|timeout: failed to execute process|RCH-E|remote required; refusing local fallback|no admissible workers|no worker assigned|connection reset by peer|missing worker system package|failed to execute process|failed to get successful HTTP response from `https://index\.crates\.io/|Backend unavailable|unable to update registry `crates-io`|spurious network error' "${log_path}"; then
     echo "infra_blocked"
   else
     echo "failed"
@@ -99,6 +100,10 @@ run_rch_cargo_step loopback_jsonl \
   cargo test -p fcp-telegram --features test-support --test integration telegram_loopback_e2e_jsonl_matrix -- --nocapture
 loopback_jsonl_status="${LAST_STEP_STATUS}"
 
+run_rch_cargo_step local_non_mock_acceptance \
+  cargo test -p fcp-telegram --test local_non_mock -- --nocapture
+local_non_mock_status="${LAST_STEP_STATUS}"
+
 run_rch_cargo_step conformance_contract \
   cargo test -p fcp-telegram --test conformance_contract -- --nocapture
 conformance_contract_status="${LAST_STEP_STATUS}"
@@ -123,7 +128,7 @@ run_rch_cargo_step clippy \
   cargo clippy -p fcp-telegram --features test-support --all-targets -- -D warnings
 clippy_status="${LAST_STEP_STATUS}"
 
-run_step diff_check git diff --check -- connectors/telegram/tests/integration.rs connectors/telegram/README.md scripts/e2e/telegram_connector_verification.sh
+run_step diff_check git diff --check -- connectors/telegram/tests/integration.rs connectors/telegram/tests/local_non_mock.rs connectors/telegram/README.md scripts/e2e/telegram_connector_verification.sh
 diff_check_status="${LAST_STEP_STATUS}"
 
 loopback_jsonl_path="${OUT_ROOT}/evidence/loopback_matrix.jsonl"
@@ -167,6 +172,7 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
   "steps": {
     "format_check": "${format_check_status}",
     "loopback_jsonl": "${loopback_jsonl_status}",
+    "local_non_mock_acceptance": "${local_non_mock_status}",
     "conformance_contract": "${conformance_contract_status}",
     "live_optional": "${live_optional_status}",
     "clippy": "${clippy_status}",

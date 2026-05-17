@@ -132,7 +132,7 @@ The current Telegram README slice documents the existing runtime surface:
 - lifecycle, doctor, health, self-check, simulate, introspect, invoke, subscribe, and shutdown behavior
 - provider error handling, retry behavior, local path safety, and message/caption limits
 - runtime/manifest/provider-doc drift around update taxonomy, approval tokens, grant filtering, rate limits, and interface hashes
-- deterministic WireMock, connector-suite tests, and the no-live-credential loopback JSONL verifier
+- deterministic WireMock, connector-suite tests, connector-local `local_non_mock` coverage, and the no-live-credential loopback JSONL verifier
 
 ## Auth And Zone Boundary
 
@@ -227,9 +227,9 @@ The current implementation does not include:
 
 The connector proof lane is tracked at `scripts/e2e/telegram_connector_verification.sh`.
 It offloads Cargo work through `rch`, runs format, the no-live-credential
-loopback JSONL matrix, the Telegram conformance contract, optional live-smoke
-structured skip handling, clippy, and a diff whitespace check on the owned
-Telegram proof files.
+loopback JSONL matrix, the connector-local `local_non_mock` acceptance test,
+the Telegram conformance contract, optional live-smoke structured skip handling,
+clippy, and a diff whitespace check on the owned Telegram proof files.
 
 ```bash
 bash scripts/e2e/telegram_connector_verification.sh
@@ -245,3 +245,17 @@ revision, fixture ID, operation, update/chat/user hashes, sender-policy
 decision, capability decision, retry/backoff outcome, HTTP status, FCP error
 mapping, event topic, payload byte counts, artifact paths, cleanup state, and
 skip reason.
+
+## Operator Guidance
+
+Rerun commands:
+
+```bash
+bash scripts/e2e/telegram_connector_verification.sh
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telegram-local-non-mock CARGO_INCREMENTAL=0 cargo test -p fcp-telegram --test local_non_mock -- --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-telegram-conformance CARGO_INCREMENTAL=0 cargo test -p fcp-telegram --test conformance_contract -- --nocapture
+```
+
+Treat live Telegram checks as opt-in only. Provide `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_LIVE_WRITE_APPROVAL=yes` only in a controlled sandbox; the default
+verification lane is the redaction-safe local loopback suite.

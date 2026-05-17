@@ -1048,7 +1048,7 @@ fwc list --offline --format markdown  # Markdown table
 
 ```bash
 # Pipes chain two operations
-fwc pipe github.list_issues slack.send_message \
+fwc pipe github.search_issues slack.post_message \
     --map 'title -> text, html_url -> blocks[0].url'
 
 # Pipelines: TOML-defined multi-step workflows with dependency ordering
@@ -2750,7 +2750,7 @@ The credential pool's strategy determines what happens when this AuthProfile is 
 
 ### Pipeline TOML
 
-The on-disk schema lives in `crates/fwc/src/pipeline*.rs`; real fixtures are under `crates/fwc/testdata/pipelines/`. A representative shape:
+The on-disk schema lives in `crates/fwc/src/pipeline*.rs`. The example below uses real operation IDs from the GitHub and Slack connector manifests (`github.search_issues`, `github.create_issue`, `slack.post_message`) so the snippet runs against the actual connectors; test fixtures under `crates/fwc/testdata/pipelines/` exercise the same schema with synthetic operation IDs that exist only for the in-tree harness.
 
 ```toml
 [pipeline]
@@ -2760,8 +2760,8 @@ version = "0.1.0"
 
 [[steps]]
 id = "list_existing"
-operation = "github.list_issues"
-input = { owner = "{{params.owner}}", repo = "{{params.repo}}" }
+operation = "github.search_issues"
+input = { owner = "{{params.owner}}", repo = "{{params.repo}}", state = "open" }
 
 [[steps]]
 id = "create_issue"
@@ -2771,7 +2771,7 @@ input = { owner = "{{params.owner}}", repo = "{{params.repo}}", title = "{{param
 
 [[steps]]
 id = "notify"
-operation = "slack.send_message"
+operation = "slack.post_message"
 depends_on = ["create_issue"]
 input = { channel = "{{params.channel}}", text = "Created issue {{steps.create_issue.output.number}} for {{params.repo}}" }
 
@@ -2815,7 +2815,7 @@ The export lets operators copy a recipe to a local pipeline file and customize i
 For one-shot adapters, `fwc pipe` chains two operations without a TOML file:
 
 ```bash
-fwc pipe github.list_issues slack.send_message \
+fwc pipe github.search_issues slack.post_message \
     --map 'title -> text, html_url -> blocks[0].url'
 ```
 

@@ -3049,6 +3049,21 @@ fn validate_prewarm_command_and_target(
             },
         );
     }
+    let expected_target_dir_arg = format!("CARGO_TARGET_DIR={}", evidence.cargo_target_dir);
+    if command_line
+        .iter()
+        .position(|part| part == &expected_target_dir_arg)
+        .is_none_or(|target_dir_index| {
+            target_dir_index <= separator_index || target_dir_index >= cargo_index
+        })
+    {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::CommandLineTargetDirMismatch {
+                cargo_target_dir: evidence.cargo_target_dir.clone(),
+                command_line: command_line.clone(),
+            },
+        );
+    }
     if !is_redaction_safe_blake3_hash(&evidence.cargo_target_dir_hash) {
         return Err(
             SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirHash {
@@ -3671,6 +3686,13 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         /// Observed command line.
         command_line: Vec<String>,
     },
+    /// Reproduction command line did not include the recorded Cargo target directory.
+    CommandLineTargetDirMismatch {
+        /// Recorded Cargo target directory.
+        cargo_target_dir: String,
+        /// Observed command line.
+        command_line: Vec<String>,
+    },
     /// Cargo target directory hash did not use the expected redaction-safe form.
     InvalidCargoTargetDirHash {
         /// Observed hash value.
@@ -3750,6 +3772,18 @@ pub enum SwarmPrewarmColdStartEvidenceError {
     EmptyConcurrentStartupCount,
 }
 
+fn fmt_prewarm_command_target_dir_mismatch(
+    f: &mut fmt::Formatter<'_>,
+    cargo_target_dir: &str,
+    command_line: &[String],
+) -> fmt::Result {
+    write!(
+        f,
+        "swarm prewarm command line must include CARGO_TARGET_DIR='{cargo_target_dir}', got '{}'",
+        command_line.join(" ")
+    )
+}
+
 impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -3779,6 +3813,10 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
                 "swarm prewarm command line must run Cargo through 'rch exec --', got '{}'",
                 command_line.join(" ")
             ),
+            Self::CommandLineTargetDirMismatch {
+                cargo_target_dir,
+                command_line,
+            } => fmt_prewarm_command_target_dir_mismatch(f, cargo_target_dir, command_line),
             Self::InvalidCargoTargetDirHash { hash } => write!(
                 f,
                 "swarm prewarm cargo target directory hash must be 'blake3:' followed by 64 lowercase hex characters, got '{hash}'"
@@ -9853,6 +9891,8 @@ mod tests {
                 "rch".to_string(),
                 "exec".to_string(),
                 "--".to_string(),
+                "env".to_string(),
+                format!("CARGO_TARGET_DIR={cargo_target_dir}"),
                 "cargo".to_string(),
                 "test".to_string(),
                 "-p".to_string(),
@@ -10066,6 +10106,8 @@ mod tests {
                 "rch",
                 "exec",
                 "--",
+                "env",
+                "CARGO_TARGET_DIR=/tmp/fcp-prewarm-e2e",
                 "cargo",
                 "test",
                 "-p",
@@ -10354,6 +10396,47 @@ mod tests {
             Err(
                 SwarmPrewarmColdStartEvidenceError::CommandLineDoesNotUseRch {
                     command_line: direct_cargo.command_line
+                }
+            )
+        );
+
+        let mut mismatched_target_dir = prewarm_cold_start_evidence_fixture();
+        mismatched_target_dir.command_line = vec![
+            "rch".to_string(),
+            "exec".to_string(),
+            "--".to_string(),
+            "env".to_string(),
+            "CARGO_TARGET_DIR=/tmp/other-prewarm-target".to_string(),
+            "cargo".to_string(),
+            "test".to_string(),
+            "-p".to_string(),
+            "fcp-e2e".to_string(),
+        ];
+        assert_eq!(
+            mismatched_target_dir.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::CommandLineTargetDirMismatch {
+                    cargo_target_dir: "/tmp/fcp-prewarm-e2e".to_string(),
+                    command_line: mismatched_target_dir.command_line
+                }
+            )
+        );
+
+        let mut inert_target_dir_arg = prewarm_cold_start_evidence_fixture();
+        inert_target_dir_arg.command_line = vec![
+            "rch".to_string(),
+            "exec".to_string(),
+            "--".to_string(),
+            "cargo".to_string(),
+            "test".to_string(),
+            "CARGO_TARGET_DIR=/tmp/fcp-prewarm-e2e".to_string(),
+        ];
+        assert_eq!(
+            inert_target_dir_arg.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::CommandLineTargetDirMismatch {
+                    cargo_target_dir: "/tmp/fcp-prewarm-e2e".to_string(),
+                    command_line: inert_target_dir_arg.command_line
                 }
             )
         );

@@ -335,6 +335,19 @@ if [[ "${overall_status}" == "passed" ]]; then
         and ((.command_line | index("--")) as $separator
           | ($separator != null)
             and ((.command_line | index("cargo")) as $cargo | ($cargo != null and $cargo > $separator)));
+      def target_dir_provenance_ok:
+        . as $record
+        | ("CARGO_TARGET_DIR=" + $record.cargo_target_dir) as $target_dir_arg
+        | ($record.cargo_target_dir | type) == "string"
+          and ($record.command_line | type) == "array"
+          and (($record.command_line | index("--")) as $separator
+            | ($record.command_line | index("cargo")) as $cargo
+            | ($record.command_line | index($target_dir_arg)) as $target_dir
+            | $separator != null
+              and $cargo != null
+              and $target_dir != null
+              and $target_dir > $separator
+              and $target_dir < $cargo);
       def ids: map(.scenario_id);
       def missing: required - (ids);
       def duplicate_scenarios:
@@ -354,6 +367,9 @@ if [[ "${overall_status}" == "passed" ]]; then
         ),
         command_provenance_ok: all(.[];
           rch_command_line_ok
+        ),
+        target_dir_provenance_ok: all(.[];
+          target_dir_provenance_ok
         ),
         required_fields_ok: all(.[];
           (.command_line | type) == "array"
@@ -503,6 +519,7 @@ if [[ "${overall_status}" == "passed" ]]; then
             and $v.record_type_ok
             and $v.execution_mode_shape_ok
             and $v.command_provenance_ok
+            and $v.target_dir_provenance_ok
             and $v.required_fields_ok
             and $v.resource_fields_ok
             and $v.decision_shape_ok

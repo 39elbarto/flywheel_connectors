@@ -2948,6 +2948,54 @@ fn validate_prewarm_latency(
     Ok(())
 }
 
+fn is_prewarm_promotion_improvement_scenario(scenario_id: &str) -> bool {
+    matches!(
+        scenario_id,
+        "prewarm_warm_hit" | "prewarm_shutdown_cleanup" | "prewarm_concurrent_swarm_startup"
+    )
+}
+
+fn validate_prewarm_production_improvement(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if evidence.execution_mode != SwarmEvidenceExecutionMode::Soak
+        || evidence.source_kind == SwarmEvidenceSourceKind::Offline
+        || !is_prewarm_promotion_improvement_scenario(&evidence.scenario_id)
+    {
+        return Ok(());
+    }
+
+    for (percentile, activation_ms, baseline_ms) in [
+        (
+            "p50",
+            evidence.latency.p50_ms,
+            evidence.baseline_latency.p50_ms,
+        ),
+        (
+            "p95",
+            evidence.latency.p95_ms,
+            evidence.baseline_latency.p95_ms,
+        ),
+        (
+            "p99",
+            evidence.latency.p99_ms,
+            evidence.baseline_latency.p99_ms,
+        ),
+    ] {
+        if activation_ms >= baseline_ms {
+            return Err(
+                SwarmPrewarmColdStartEvidenceError::MissingProductionImprovement {
+                    scenario_id: evidence.scenario_id.clone(),
+                    percentile,
+                    activation_ms,
+                    baseline_ms,
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
 fn validate_prewarm_admission_decision(
     evidence: &SwarmPrewarmColdStartEvidence,
 ) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
@@ -3230,6 +3278,7 @@ impl SwarmPrewarmColdStartEvidence {
         validate_prewarm_soak_boundaries(self)?;
         validate_prewarm_command_and_target(self)?;
         validate_prewarm_latency(self)?;
+        validate_prewarm_production_improvement(self)?;
         validate_prewarm_admission_decision(self)?;
         validate_prewarm_resources(self)?;
         Ok(())
@@ -3323,6 +3372,17 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         /// Conservative baseline latency.
         baseline_ms: u64,
     },
+    /// Production soak promotion scenarios must prove positive p50/p95/p99 improvement.
+    MissingProductionImprovement {
+        /// Scenario that lacked positive improvement.
+        scenario_id: String,
+        /// Percentile that did not improve.
+        percentile: &'static str,
+        /// Observed activation latency.
+        activation_ms: u64,
+        /// Conservative baseline latency.
+        baseline_ms: u64,
+    },
     /// A required resource field was absent or zero.
     MissingResourceMeasurement {
         /// Field name.
@@ -3384,6 +3444,15 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
             } => write!(
                 f,
                 "swarm prewarm activation latency {activation_ms} exceeds baseline {baseline_ms}"
+            ),
+            Self::MissingProductionImprovement {
+                scenario_id,
+                percentile,
+                activation_ms,
+                baseline_ms,
+            } => write!(
+                f,
+                "swarm prewarm production scenario '{scenario_id}' requires positive {percentile} improvement, got activation {activation_ms} and baseline {baseline_ms}"
             ),
             Self::MissingResourceMeasurement { field } => {
                 write!(f, "swarm prewarm resource field '{field}' is missing")
@@ -9750,6 +9819,41 @@ mod tests {
                 }
             )
         );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_requires_production_improvement() {
+        let mut no_improvement = prewarm_cold_start_evidence_fixture();
+        no_improvement.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        no_improvement.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        no_improvement.host_boundary =
+            "fcp-host::supervisor::ConnectorSupervisor::activate_connector".to_string();
+        no_improvement.sandbox_boundary = "fcp-sandbox::strict-profile-limits".to_string();
+        no_improvement.baseline_latency.p50_ms = no_improvement.latency.p50_ms;
+        no_improvement.baseline_latency.p95_ms = no_improvement.latency.p95_ms;
+        no_improvement.baseline_latency.p99_ms = no_improvement.latency.p99_ms;
+        no_improvement.baseline_latency.p999_ms = no_improvement.latency.p999_ms;
+        no_improvement.baseline_latency.max_ms = no_improvement.latency.max_ms;
+        no_improvement.baseline_latency.mean_ms = no_improvement.latency.mean_ms;
+        no_improvement.baseline_on_demand_latency_ms = no_improvement.activation_latency_ms;
+        assert_eq!(
+            no_improvement.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::MissingProductionImprovement {
+                    scenario_id: "prewarm_warm_hit".to_string(),
+                    percentile: "p50",
+                    activation_ms: 18,
+                    baseline_ms: 18
+                }
+            )
+        );
+
+        let mut fallback_soak = no_improvement;
+        fallback_soak.scenario_id = "prewarm_sandbox_limits_unavailable".to_string();
+        fallback_soak.admission_decision = "fallback_on_demand".to_string();
+        fallback_soak.warm_checkout = false;
+        fallback_soak.fallback_reason = Some("sandbox_limits_unavailable".to_string());
+        assert_eq!(fallback_soak.validate(), Ok(()));
     }
 
     #[test]

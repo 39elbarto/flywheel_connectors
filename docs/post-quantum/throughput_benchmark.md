@@ -404,7 +404,10 @@ dispatcher fixture literals `send_message`, `agent-alpha`, and `agent-beta` as
 failures.
 Because the summary record is appended after the normal redaction scan, the
 script scans the finished JSONL again and requires a `final_redaction_scan`
-pass record before printing the artifact path and final hash.
+pass record before printing the artifact path and final hash. The self-contract
+requires the normal redaction scan to cover all eight expected JSONL artifacts
+and requires the final redaction scan to cover the summary-bearing gauntlet
+artifact.
 The script prints both the JSONL path and final JSONL SHA-256 on stdout. The
 summary record's embedded `pre_summary_artifact_hash` intentionally covers only
 the records before the summary, avoiding a misleading self-referential hash.

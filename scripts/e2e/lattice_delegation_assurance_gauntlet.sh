@@ -718,8 +718,23 @@ validate_gauntlet_contract() {
     required_artifact_hash("crypto_formal_artifact"; "target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl") and
     required_artifact_hash("policy_formal_artifact"; "target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl") and
     required_artifact_hash("host_dispatcher_artifact"; "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl") and
-    any(.[]; .step == "redaction_scan" and .result == "pass") and
-    any(.[]; .step == "final_redaction_scan" and .result == "pass") and
+    any(.[]; .step == "redaction_scan" and .result == "pass" and
+      .details.scanned_jsonl_artifacts == 8 and
+      .details.trapdoor_payload == "absent" and
+      .details.preimage_payload == "absent" and
+      .details.rng_seed_payload == "absent" and
+      .details.operation_plaintext == "absent" and
+      .details.principal_plaintext == "absent" and
+      .details.zone_label_plaintext == "absent" and
+      .details.auth_header_values == "absent" and
+      .details.local_private_paths == "absent" and
+      .details.provider_payloads == "absent" and
+      .details.reviewer_private_data == "absent" and
+      (.details.cleanup_result | type == "string")) and
+    any(.[]; .step == "final_redaction_scan" and .result == "pass" and
+      .details.scanned_jsonl_artifacts == 1 and
+      .details.summary_record == "covered" and
+      (.details.cleanup_result | type == "string")) and
     any(.[]; .step == "summary" and .result == "pass" and
       (.details.pre_summary_artifact_hash | sha256_hash) and
       .details.final_artifact_hash_output == "stdout:LATTICE_ASSURANCE_GAUNTLET_SHA256" and

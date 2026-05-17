@@ -275,6 +275,12 @@ snapshot node hashes, per-node state hashes, active-holder hashes,
 `final_state_hash`, `expected_hash_for_seed`, `receipt_hash`, and
 `transition_hash`.
 
+The ProofGraph flight-recorder adapter follows the same node-redaction rule:
+`MeshFailoverFlightRecord` rejects participating nodes, primary-before/after
+nodes, and event node references unless they are lowercase 64-hex hashes.
+Its JSONL projection emits `node_id_hash`, not raw node labels, so evidence
+bundles can be attached to proof graphs without exposing host inventory names.
+
 ## Graduation Path
 
 This harness is the reusable deterministic substrate for the full A.4 proof.

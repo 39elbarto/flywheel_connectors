@@ -97,6 +97,120 @@ run_and_capture() {
   fi
 }
 
+validate_jsonl_contract() {
+  local step="$1"
+  local path="$2"
+  local filter="$3"
+  local diagnostic
+  if ! diagnostic="$(jq -e -s "${filter}" "${path}" 2>&1 >/dev/null)"; then
+    if [ -z "${diagnostic}" ]; then
+      diagnostic="contract_filter_returned_false"
+    fi
+    fail_step "${step}" "$(jq -cn \
+      --arg artifact "${path}" \
+      --arg validation_error "${diagnostic}" \
+      '{artifact_path:$artifact,validation_error:$validation_error,cleanup_result:"not_applicable"}')"
+  fi
+  append_json "${step}" "pass" "$(jq -cn --arg artifact "${path}" \
+    '{artifact_path:$artifact,cleanup_result:"not_applicable"}')"
+}
+
+validate_formal_script_contract() {
+  # shellcheck disable=SC2016 # jq variables/functions are intentionally single-quoted.
+  validate_jsonl_contract "validate_formal_script_contract" "${ARTIFACT}" '
+    def sha256_hash:
+      type == "string" and test("^sha256:[0-9a-f]{64}$");
+    def required_profile_ids:
+      [
+        "SMALL_TEST",
+        "V4_REFERENCE"
+      ];
+    def required_theorem_names:
+      [
+        "lattice_delegation_chain_corruption_rejected",
+        "lattice_delegation_sis_assumption_boundary_complete",
+        "lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions"
+      ];
+    def required_assumption_ids:
+      [
+        "FCP-PQ-SIS-HARDNESS-V1",
+        "FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1",
+        "FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1",
+        "FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1",
+        "FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1",
+        "FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"
+      ];
+    def required_forbidden_terms:
+      [
+        "/Users/",
+        "/tmp/",
+        "trapdoor_coefficients",
+        "secret_seed",
+        "expanded_secret_matrix",
+        "preimage_coefficients",
+        "preimage_bytes",
+        "bearer",
+        "token=",
+        "op:",
+        "principal:",
+        "z:"
+      ];
+    def command_step($step):
+      any(.[]; .step == $step and .result == "pass" and
+        (.details.log_hash | sha256_hash) and
+        .details.log_artifact_class == "relative-target-log" and
+        (.details.cleanup_result | type == "string"));
+    def lean_lake_step:
+      any(.[]; .step == "lean_lake_build" and
+        ((.result == "skip" and .details.skip_reason == "lake_not_available" and
+          (.details.cleanup_result | type == "string")) or
+         (.result == "pass" and
+          (.details.log_hash | sha256_hash) and
+          .details.log_artifact_class == "relative-target-log" and
+          (.details.cleanup_result | type == "string"))));
+    def top_level_provenance_consistent:
+      ([.[] | .run_id] | unique | length == 1) and
+      ([.[] | .git_revision] | unique | length == 1);
+    length > 0 and
+    top_level_provenance_consistent and
+    all(.[]; type == "object" and
+      .schema == "fcp.lattice_delegation.formal_correspondence.v1" and
+      .script == "scripts/e2e/lattice_delegation_formal_correspondence.sh" and
+      (.run_id | type == "string") and
+      (.step | type == "string") and
+      (.result == "pass" or .result == "fail" or .result == "skip") and
+      (.git_revision | type == "string") and
+      (.details | type == "object") and
+      (if .result == "skip" then (.details.skip_reason | type == "string") else true end)) and
+    any(.[]; .step == "validate_lean_ids" and .result == "pass" and
+      (.details.theorem_names | type == "array" and
+        ((. | sort) == (required_theorem_names | sort))) and
+      (.details.assumption_ids | type == "array" and
+        ((. | sort) == (required_assumption_ids | sort))) and
+      (.details.cleanup_result | type == "string")) and
+    lean_lake_step and
+    command_step("rust_crypto_correspondence") and
+    command_step("rust_policy_correspondence") and
+    command_step("rust_crypto_existing_v4") and
+    command_step("ubs_touched_files") and
+    any(.[]; .step == "redaction_scan" and .result == "pass" and
+      (.details.forbidden_terms_checked | type == "array" and
+        ((. | sort) == (required_forbidden_terms | sort))) and
+      .details.local_private_paths == "absent" and
+      .details.secret_material == "absent" and
+      .details.auth_header_values == "absent" and
+      .details.request_plaintext == "absent" and
+      (.details.cleanup_result | type == "string")) and
+    any(.[]; .step == "summary" and .result == "pass" and
+      .details.artifact_path == "target/fcp-crypto-pq/lattice-delegation-formal-correspondence-proof.jsonl" and
+      (.details.artifact_hash | sha256_hash) and
+      (.details.profile_ids | type == "array" and
+        ((. | sort) == (required_profile_ids | sort))) and
+      .details.route_revision == 1 and
+      (.details.cleanup_result | type == "string"))
+  '
+}
+
 assert_stable_revision "preflight_stable_revision"
 
 LEAN_FILE="lean/Fcp/Invariants/LatticeDelegation.lean"
@@ -180,11 +294,15 @@ for forbidden in "/Users/" "/tmp/" "trapdoor_coefficients" "secret_seed" "expand
       '{forbidden:$forbidden,cleanup_result:"not_applicable"}')"
   fi
 done
+append_json "redaction_scan" "pass" "$(jq -cn \
+  '{forbidden_terms_checked:["/Users/","/tmp/","trapdoor_coefficients","secret_seed","expanded_secret_matrix","preimage_coefficients","preimage_bytes","bearer","token=","op:","principal:","z:"],local_private_paths:"absent",secret_material:"absent",auth_header_values:"absent",request_plaintext:"absent",cleanup_result:"not_applicable"}')"
 
 artifact_hash="$(shasum -a 256 "${ARTIFACT}" | awk '{print $1}')"
 append_json "summary" "pass" "$(jq -cn \
   --arg artifact "target/fcp-crypto-pq/lattice-delegation-formal-correspondence-proof.jsonl" \
   --arg artifact_hash "sha256:${artifact_hash}" \
   '{artifact_path:$artifact,artifact_hash:$artifact_hash,profile_ids:["SMALL_TEST","V4_REFERENCE"],route_revision:1,cleanup_result:"not_applicable_generated_artifact"}')"
+
+validate_formal_script_contract
 
 printf 'LATTICE_FORMAL_CORRESPONDENCE_JSONL %s\n' "${ARTIFACT}"

@@ -402,6 +402,11 @@ The top-level gauntlet self-contract also requires a single consistent run id,
 git revision, target-dir class/hash, build profile, and worker host class across
 all JSONL records so reviewer evidence cannot be stitched together from
 different runs.
+The narrower `scripts/e2e/lattice_delegation_formal_correspondence.sh` proof
+script also validates its own JSONL envelope before printing the artifact path:
+it requires exact Lean theorem/assumption ID arrays, stable command log hashes,
+an explicit redaction-scan pass record, the expected `SMALL_TEST` and
+`V4_REFERENCE` summary profiles, and one consistent run id and git revision.
 For each `rch exec` lane the JSONL records include the observed `[RCH]` summary,
 worker execution class, and fallback decision so local fallback is visible in
 the artifact instead of being mistaken for remote proof. Remote worker failures

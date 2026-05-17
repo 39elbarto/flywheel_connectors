@@ -544,13 +544,8 @@ impl GmailConnector {
         })
     }
 
-    /// Handle introspect method.
-    ///
-    /// # Errors
-    /// Returns [`FcpError`] if serialization of the introspection data fails.
-    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        let introspection = Introspection {
-            operations: vec![
+    fn operations_info() -> Vec<OperationInfo> {
+        vec![
                 op_info(
                     "gmail.send_message",
                     "Send an email message",
@@ -873,7 +868,16 @@ impl GmailConnector {
                         ],
                     },
                 ),
-            ],
+        ]
+    }
+
+    /// Handle introspect method.
+    ///
+    /// # Errors
+    /// Returns [`FcpError`] if serialization of the introspection data fails.
+    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let introspection = Introspection {
+            operations: Self::operations_info(),
             events: vec![],
             resource_types: vec![],
             auth_caps: None,

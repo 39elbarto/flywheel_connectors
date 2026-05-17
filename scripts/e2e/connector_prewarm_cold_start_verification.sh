@@ -285,10 +285,15 @@ if [[ "${overall_status}" == "passed" ]]; then
         | map(select(has_positive_improvement($records; .) | not));
       def ids: map(.scenario_id);
       def missing: required - (ids);
+      def duplicate_scenarios:
+        group_by(.scenario_id)
+        | map(select(length > 1) | .[0].scenario_id);
       {
         record_count: length,
         require_production_soak: $require_production_soak,
         missing_scenarios: missing,
+        duplicate_scenarios: duplicate_scenarios,
+        scenario_set_exact: ((ids | sort) == (required | sort)),
         schema_ok: all(.[]; .schema_version == "swarm-prewarm-cold-start/v2"),
         record_type_ok: all(.[]; .record_type == "swarm_prewarm_cold_start_evidence"),
         execution_mode_shape_ok: all(.[];
@@ -426,6 +431,8 @@ if [[ "${overall_status}" == "passed" ]]; then
       | .status = (
           if (
             ($v.missing_scenarios | length) == 0
+            and ($v.duplicate_scenarios | length) == 0
+            and $v.scenario_set_exact
             and $v.schema_ok
             and $v.record_type_ok
             and $v.execution_mode_shape_ok

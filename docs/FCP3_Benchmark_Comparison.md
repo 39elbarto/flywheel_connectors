@@ -61,8 +61,10 @@ The script keeps Cargo execution behind `rch`, extracts the emitted JSONL proof,
 validates the required scenarios, and writes a structured skip artifact when a
 remote worker is unavailable. Remote prerequisite skips are acceptable only for
 the default deterministic smoke lane; final production-soak gating fails closed
-when host-backed or live evidence cannot be collected. Its default lane is
-deterministic smoke evidence with `execution_mode=smoke` and
+when host-backed or live evidence cannot be collected. Verifier validation also
+requires `CARGO_TARGET_DIR` provenance to carry a `blake3:<64 lowercase hex>`
+hash, not just a free-form label. Its default lane is deterministic smoke
+evidence with `execution_mode=smoke` and
 `source_kind=offline`; final production-soak acceptance must run with
 `--require-production-soak` or
 `REQUIRE_PRODUCTION_SOAK=1`, which rejects offline policy records and requires

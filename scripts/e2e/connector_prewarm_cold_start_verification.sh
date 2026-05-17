@@ -202,6 +202,8 @@ if [[ "${overall_status}" == "passed" ]]; then
         (.[$key] | type) == "string" and (.[$key] | length) > 0;
       def positive_number($key):
         (.[$key] | type) == "number" and .[$key] > 0;
+      def blake3_hash:
+        type == "string" and test("^blake3:[0-9a-f]{64}$");
       def same($key):
         .[$key] == .evidence[$key];
       def same_optional($key):
@@ -282,8 +284,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           and nonempty_string("worker_id")
           and nonempty_string("cargo_target_dir")
           and nonempty_string("cargo_target_dir_class")
-          and nonempty_string("cargo_target_dir_hash")
-          and (.cargo_target_dir_hash | startswith("blake3:"))
+          and (.cargo_target_dir_hash | blake3_hash)
           and nonempty_string("connector_fixture_id")
           and nonempty_string("host_boundary")
           and nonempty_string("manifest_hash")

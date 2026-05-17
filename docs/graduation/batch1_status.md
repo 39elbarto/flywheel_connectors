@@ -14,10 +14,11 @@ Summary: `1/7` Batch 1 connectors currently pass the mechanical gauntlet.
 | `connectors/gmail` | `blocked` | `operations_info` | `1` | missing operations_info source metadata |
 | `connectors/telegram` | `blocked` | `operations_info` | `1` | missing operations_info source metadata |
 | `connectors/slack` | `blocked` | `operations_info` | `1` | missing operations_info source metadata |
-| `connectors/kubernetes` | `blocked` | `verification_script_declared` | `4` | README does not declare a scripts/e2e verification script |
+| `connectors/kubernetes` | `blocked` | `network_policy` | `9` | manifest operation network policy must deny localhost and private ranges |
 
 ## Current Next Actions
 
 - Add or restore connector-local `operations_info` metadata where the gauntlet stops at `operations_info`.
 - Add redaction-safe `scripts/e2e/...` verification-script declarations where the gauntlet stops at `verification_script_declared`.
+- Fix manifest network constraints where the gauntlet stops at `network_policy`.
 - Do not mark any Batch 1 connector PROVEN until its manifest, README, local non-mock proof, sandbox/network policy, and operator guidance all pass the gauntlet.

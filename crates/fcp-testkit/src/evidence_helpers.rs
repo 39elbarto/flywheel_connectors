@@ -2819,6 +2819,118 @@ const fn validate_prewarm_latency_percentiles(latency: &SwarmPrewarmLatencyPerce
         && latency.mean_ms != 0
 }
 
+fn validate_prewarm_required_fields(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    for (field, value) in [
+        ("scenario_id", evidence.scenario_id.as_str()),
+        ("connector_id", evidence.connector_id.as_str()),
+        ("git_revision", evidence.git_revision.as_str()),
+        ("worker_id", evidence.worker_id.as_str()),
+        ("cargo_target_dir", evidence.cargo_target_dir.as_str()),
+        (
+            "cargo_target_dir_class",
+            evidence.cargo_target_dir_class.as_str(),
+        ),
+        (
+            "cargo_target_dir_hash",
+            evidence.cargo_target_dir_hash.as_str(),
+        ),
+        (
+            "connector_fixture_id",
+            evidence.connector_fixture_id.as_str(),
+        ),
+        ("host_boundary", evidence.host_boundary.as_str()),
+        ("manifest_hash", evidence.manifest_hash.as_str()),
+        ("zone", evidence.zone.as_str()),
+        ("strategy", evidence.strategy.as_str()),
+        ("pool_state", evidence.pool_state.as_str()),
+        ("admission_decision", evidence.admission_decision.as_str()),
+        ("sandbox_layer", evidence.sandbox_layer.as_str()),
+        ("sandbox_profile", evidence.sandbox_profile.as_str()),
+        ("sandbox_boundary", evidence.sandbox_boundary.as_str()),
+        ("credential_mode", evidence.credential_mode.as_str()),
+        ("error_mapping", evidence.error_mapping.as_str()),
+        ("cleanup_result", evidence.cleanup_result.as_str()),
+    ] {
+        if value.trim().is_empty() {
+            return Err(SwarmPrewarmColdStartEvidenceError::EmptyField { field });
+        }
+    }
+    Ok(())
+}
+
+fn validate_prewarm_command_and_target(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if evidence.command_line.is_empty()
+        || evidence
+            .command_line
+            .iter()
+            .any(|part| part.trim().is_empty())
+    {
+        return Err(SwarmPrewarmColdStartEvidenceError::EmptyCommandLine);
+    }
+    if !evidence.cargo_target_dir_hash.starts_with("blake3:") {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirHash {
+                hash: evidence.cargo_target_dir_hash.clone(),
+            },
+        );
+    }
+    Ok(())
+}
+
+fn validate_prewarm_latency(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if evidence.activation_latency_ms == 0 || evidence.baseline_on_demand_latency_ms == 0 {
+        return Err(SwarmPrewarmColdStartEvidenceError::MissingLatencyMeasurement);
+    }
+    if evidence.activation_latency_ms > evidence.baseline_on_demand_latency_ms {
+        return Err(SwarmPrewarmColdStartEvidenceError::LatencyRegression {
+            activation_ms: evidence.activation_latency_ms,
+            baseline_ms: evidence.baseline_on_demand_latency_ms,
+        });
+    }
+    if !validate_prewarm_latency_percentiles(&evidence.latency)
+        || !validate_prewarm_latency_percentiles(&evidence.baseline_latency)
+    {
+        return Err(SwarmPrewarmColdStartEvidenceError::InvalidLatencyPercentiles);
+    }
+    for (activation_ms, baseline_ms) in [
+        (evidence.latency.p50_ms, evidence.baseline_latency.p50_ms),
+        (evidence.latency.p95_ms, evidence.baseline_latency.p95_ms),
+        (evidence.latency.p99_ms, evidence.baseline_latency.p99_ms),
+    ] {
+        if activation_ms > baseline_ms {
+            return Err(SwarmPrewarmColdStartEvidenceError::LatencyRegression {
+                activation_ms,
+                baseline_ms,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_prewarm_resources(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    for (field, value) in [
+        ("rss_bytes", evidence.rss_bytes),
+        ("pool_size", u64::from(evidence.pool_size)),
+        ("process_count", u64::from(evidence.process_count)),
+    ] {
+        if value == 0 {
+            return Err(SwarmPrewarmColdStartEvidenceError::MissingResourceMeasurement { field });
+        }
+    }
+    if evidence.concurrent_startups == 0 {
+        return Err(SwarmPrewarmColdStartEvidenceError::EmptyConcurrentStartupCount);
+    }
+    Ok(())
+}
+
 fn put_prewarm_json<T: Serialize>(
     record: &mut serde_json::Map<String, Value>,
     key: &'static str,
@@ -2978,104 +3090,11 @@ impl SwarmPrewarmColdStartEvidence {
             });
         }
         validate_prewarm_execution_source(self.execution_mode, self.source_kind)?;
-        for (field, value) in [
-            ("scenario_id", self.scenario_id.as_str()),
-            ("connector_id", self.connector_id.as_str()),
-            ("git_revision", self.git_revision.as_str()),
-            ("worker_id", self.worker_id.as_str()),
-            ("cargo_target_dir", self.cargo_target_dir.as_str()),
-            (
-                "cargo_target_dir_class",
-                self.cargo_target_dir_class.as_str(),
-            ),
-            ("cargo_target_dir_hash", self.cargo_target_dir_hash.as_str()),
-            ("connector_fixture_id", self.connector_fixture_id.as_str()),
-            ("host_boundary", self.host_boundary.as_str()),
-            ("manifest_hash", self.manifest_hash.as_str()),
-            ("zone", self.zone.as_str()),
-            ("strategy", self.strategy.as_str()),
-            ("pool_state", self.pool_state.as_str()),
-            ("admission_decision", self.admission_decision.as_str()),
-            ("sandbox_layer", self.sandbox_layer.as_str()),
-            ("sandbox_profile", self.sandbox_profile.as_str()),
-            ("sandbox_boundary", self.sandbox_boundary.as_str()),
-            ("credential_mode", self.credential_mode.as_str()),
-            ("error_mapping", self.error_mapping.as_str()),
-            ("cleanup_result", self.cleanup_result.as_str()),
-        ] {
-            if value.trim().is_empty() {
-                return Err(SwarmPrewarmColdStartEvidenceError::EmptyField { field });
-            }
-        }
+        validate_prewarm_required_fields(self)?;
         validate_prewarm_soak_boundaries(self)?;
-        if self.command_line.is_empty()
-            || self.command_line.iter().any(|part| part.trim().is_empty())
-        {
-            return Err(SwarmPrewarmColdStartEvidenceError::EmptyCommandLine);
-        }
-        if !self.cargo_target_dir_hash.starts_with("blake3:") {
-            return Err(
-                SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirHash {
-                    hash: self.cargo_target_dir_hash.clone(),
-                },
-            );
-        }
-        if self.activation_latency_ms == 0 || self.baseline_on_demand_latency_ms == 0 {
-            return Err(SwarmPrewarmColdStartEvidenceError::MissingLatencyMeasurement);
-        }
-        if self.activation_latency_ms > self.baseline_on_demand_latency_ms {
-            return Err(SwarmPrewarmColdStartEvidenceError::LatencyRegression {
-                activation_ms: self.activation_latency_ms,
-                baseline_ms: self.baseline_on_demand_latency_ms,
-            });
-        }
-        if !validate_prewarm_latency_percentiles(&self.latency)
-            || !validate_prewarm_latency_percentiles(&self.baseline_latency)
-        {
-            return Err(SwarmPrewarmColdStartEvidenceError::InvalidLatencyPercentiles);
-        }
-        if self.latency.p50_ms > self.baseline_latency.p50_ms {
-            return Err(SwarmPrewarmColdStartEvidenceError::LatencyRegression {
-                activation_ms: self.latency.p50_ms,
-                baseline_ms: self.baseline_latency.p50_ms,
-            });
-        }
-        if self.latency.p95_ms > self.baseline_latency.p95_ms {
-            return Err(SwarmPrewarmColdStartEvidenceError::LatencyRegression {
-                activation_ms: self.latency.p95_ms,
-                baseline_ms: self.baseline_latency.p95_ms,
-            });
-        }
-        if self.latency.p99_ms > self.baseline_latency.p99_ms {
-            return Err(SwarmPrewarmColdStartEvidenceError::LatencyRegression {
-                activation_ms: self.latency.p99_ms,
-                baseline_ms: self.baseline_latency.p99_ms,
-            });
-        }
-        if self.rss_bytes == 0 {
-            return Err(
-                SwarmPrewarmColdStartEvidenceError::MissingResourceMeasurement {
-                    field: "rss_bytes",
-                },
-            );
-        }
-        if self.pool_size == 0 {
-            return Err(
-                SwarmPrewarmColdStartEvidenceError::MissingResourceMeasurement {
-                    field: "pool_size",
-                },
-            );
-        }
-        if self.process_count == 0 {
-            return Err(
-                SwarmPrewarmColdStartEvidenceError::MissingResourceMeasurement {
-                    field: "process_count",
-                },
-            );
-        }
-        if self.concurrent_startups == 0 {
-            return Err(SwarmPrewarmColdStartEvidenceError::EmptyConcurrentStartupCount);
-        }
+        validate_prewarm_command_and_target(self)?;
+        validate_prewarm_latency(self)?;
+        validate_prewarm_resources(self)?;
         Ok(())
     }
 
@@ -9356,7 +9375,7 @@ mod tests {
     }
 
     #[test]
-    fn swarm_prewarm_cold_start_evidence_rejects_incomplete_or_regressed_records() {
+    fn swarm_prewarm_cold_start_evidence_rejects_latency_and_resource_regressions() {
         let mut regressed = prewarm_cold_start_evidence_fixture();
         regressed.activation_latency_ms = 120;
         assert_eq!(
@@ -9388,7 +9407,10 @@ mod tests {
                 }
             )
         );
+    }
 
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_rejects_target_hash_and_percentiles() {
         let mut bad_target_dir_hash = prewarm_cold_start_evidence_fixture();
         bad_target_dir_hash.cargo_target_dir_hash = "raw-target-dir".to_string();
         assert_eq!(
@@ -9426,7 +9448,10 @@ mod tests {
                 baseline_ms: 24
             })
         );
+    }
 
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_enforces_soak_boundaries() {
         let mut offline_soak = prewarm_cold_start_evidence_fixture();
         offline_soak.execution_mode = SwarmEvidenceExecutionMode::Soak;
         assert_eq!(

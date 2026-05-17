@@ -1,6 +1,7 @@
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -122,9 +123,7 @@ fn artifact_path() -> PathBuf {
             let root = if root.is_absolute() {
                 root
             } else {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("../..")
-                    .join(root)
+                workspace_root().join(root)
             };
 
             return root.join(
@@ -135,9 +134,26 @@ fn artifact_path() -> PathBuf {
         }
     }
 
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(RELATIVE_ARTIFACT_PATH)
+    workspace_root().join(RELATIVE_ARTIFACT_PATH)
+}
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn command_stdout(mut command: Command) -> Option<String> {
+    command
+        .output()
+        .ok()
+        .and_then(|output| output.status.success().then_some(output.stdout))
+        .and_then(|stdout| String::from_utf8(stdout).ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn is_git_revision(value: &str) -> bool {
+    let len = value.len();
+    (7..=40).contains(&len) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn git_revision() -> String {
@@ -148,15 +164,26 @@ fn git_revision() -> String {
         }
     }
 
-    std::process::Command::new("git")
-        .args(["rev-parse", "--short=12", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|output| output.status.success().then_some(output.stdout))
-        .and_then(|stdout| String::from_utf8(stdout).ok())
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown".to_owned())
+    let root = workspace_root();
+    let root_arg = root.to_string_lossy().into_owned();
+    command_stdout({
+        let mut command = Command::new("git");
+        command
+            .arg("-c")
+            .arg(format!("safe.directory={root_arg}"))
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-parse", "HEAD"]);
+        command
+    })
+    .or_else(|| {
+        command_stdout({
+            let mut command = Command::new("git");
+            command.arg("-C").arg(&root).args(["rev-parse", "HEAD"]);
+            command
+        })
+    })
+    .unwrap_or_else(|| "unknown".to_owned())
 }
 
 const fn build_profile() -> &'static str {
@@ -600,6 +627,10 @@ fn run_scenario(
 #[test]
 fn lattice_policy_dispatcher_e2e_writes_redaction_safe_jsonl() {
     let git_revision = git_revision();
+    assert!(
+        is_git_revision(&git_revision),
+        "JSONL evidence must carry a concrete git revision, got {git_revision:?}"
+    );
     let small = minted_fixture(
         pq::LatticeParams::SMALL_TEST,
         b"fcp-host/e2e/lattice-dispatcher-small-v1",

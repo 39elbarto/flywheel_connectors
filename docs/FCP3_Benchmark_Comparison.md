@@ -73,7 +73,11 @@ boundaries. Operators can validate an externally collected production-soak
 JSONL bundle without rerunning the smoke Cargo lane by passing
 `--evidence-jsonl <path>` together with `--require-production-soak`; this uses
 the same scenario coverage, boundary, resource, percentile, nested evidence, and
-redaction checks as the default verifier. The verifier's `validation.json`
+redaction checks as the default verifier. Production-soak acceptance also
+requires positive p50, p95, and p99 improvement deltas for the warm-hit,
+shutdown-cleanup, and concurrent-swarm-startup promotion scenarios; fallback
+and rejection scenarios may still report zero improvement with their measured
+rationale. The verifier's `validation.json`
 also records a latency summary with the worst current p50/p95/p99, worst
 baseline p50/p95/p99, minimum per-percentile improvement, and any scenarios
 with no p99 improvement, plus the observed execution/source classes and

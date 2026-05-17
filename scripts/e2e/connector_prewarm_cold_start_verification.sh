@@ -264,6 +264,25 @@ if [[ "${overall_status}" == "passed" ]]; then
           "prewarm_checkout_cancelled_before_admit",
           "prewarm_zygote_rejected_without_security_proof"
         ];
+      def promotion_improvement_scenarios:
+        [
+          "prewarm_warm_hit",
+          "prewarm_shutdown_cleanup",
+          "prewarm_concurrent_swarm_startup"
+        ];
+      def has_positive_improvement($records; $scenario):
+        any($records[];
+          .scenario_id == $scenario
+          and (.p50_activation_latency_improvement_ms | type) == "number"
+          and .p50_activation_latency_improvement_ms > 0
+          and (.p95_activation_latency_improvement_ms | type) == "number"
+          and .p95_activation_latency_improvement_ms > 0
+          and (.p99_activation_latency_improvement_ms | type) == "number"
+          and .p99_activation_latency_improvement_ms > 0
+        );
+      def promotion_improvement_failures($records):
+        promotion_improvement_scenarios
+        | map(select(has_positive_improvement($records; .) | not));
       def ids: map(.scenario_id);
       def missing: required - (ids);
       {
@@ -347,6 +366,15 @@ if [[ "${overall_status}" == "passed" ]]; then
             )
           else true end
         ),
+        production_improvement_summary: {
+          required_positive_improvement_scenarios: promotion_improvement_scenarios,
+          missing_or_nonpositive: promotion_improvement_failures(.)
+        },
+        production_improvement_ok: (
+          if $require_production_soak then
+            (promotion_improvement_failures(.) | length) == 0
+          else true end
+        ),
         percentile_fields_ok: all(.[];
           (.p50_activation_latency_ms | type) == "number"
           and (.p95_activation_latency_ms | type) == "number"
@@ -403,6 +431,7 @@ if [[ "${overall_status}" == "passed" ]]; then
             and $v.boundary_shape_ok
             and $v.nested_evidence_ok
             and $v.production_soak_ok
+            and $v.production_improvement_ok
             and $v.percentile_fields_ok
             and $v.redaction_shape_ok
           )

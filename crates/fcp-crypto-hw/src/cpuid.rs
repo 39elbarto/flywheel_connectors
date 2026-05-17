@@ -108,7 +108,7 @@ fn detect_x86(features: &mut HwFeatureSet) {
 }
 
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-fn detect_x86(_features: &mut HwFeatureSet) {}
+const fn detect_x86(_features: &mut HwFeatureSet) {}
 
 #[cfg(all(
     target_arch = "aarch64",
@@ -124,7 +124,7 @@ fn detect_aarch64(features: &mut HwFeatureSet) {
     target_arch = "aarch64",
     not(any(target_os = "linux", target_os = "android"))
 ))]
-fn detect_aarch64(features: &mut HwFeatureSet) {
+const fn detect_aarch64(features: &mut HwFeatureSet) {
     features.has_aarch64_aes = cfg!(target_feature = "aes") || cfg!(target_vendor = "apple");
     features.has_aarch64_sha2 = cfg!(target_feature = "sha2") || cfg!(target_vendor = "apple");
     features.has_aarch64_sve = cfg!(target_feature = "sve");
@@ -134,7 +134,7 @@ fn detect_aarch64(features: &mut HwFeatureSet) {
 const fn detect_aarch64(_features: &mut HwFeatureSet) {}
 
 #[cfg(all(target_os = "macos", target_vendor = "apple"))]
-fn detect_macos_secure_enclave(features: &mut HwFeatureSet) {
+const fn detect_macos_secure_enclave(features: &mut HwFeatureSet) {
     features.has_apple_secure_enclave = cfg!(target_arch = "aarch64");
 }
 

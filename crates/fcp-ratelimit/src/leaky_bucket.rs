@@ -99,7 +99,7 @@ impl LeakyBucket {
             // Only update the anchor if the level actually changed, or if the bucket
             // is fully empty. This prevents tiny time increments from being absorbed
             // by f64 truncation without actually leaking any capacity.
-            if new_level != *level || *level == 0.0 {
+            if (new_level - *level).abs() > f64::EPSILON || *level < f64::EPSILON {
                 *level = new_level;
                 drop(level);
                 *last_leak = now;

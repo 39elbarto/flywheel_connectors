@@ -485,11 +485,13 @@ pub mod __fuzz {
     use super::sanitize_path_segment;
 
     /// Validate an arbitrary Drive URL path segment candidate.
+    #[must_use]
     pub fn sanitize_path_segment_candidate(value: &str) -> bool {
         sanitize_path_segment(value, "file_id").is_ok()
     }
 }
 
+#[must_use]
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::with_capacity(data.len().div_ceil(3) * 4);

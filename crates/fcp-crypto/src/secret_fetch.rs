@@ -765,7 +765,7 @@ mod tests {
         registry.insert(CREDENTIAL_ID, b"xoxb-test".as_slice());
 
         // Compile-time: any sync hook is an async hook.
-        let async_hook: Arc<dyn AsyncSecretFetchHook> = registry.clone();
+        let async_hook: Arc<dyn AsyncSecretFetchHook> = registry;
         let _: &dyn AsyncSecretFetchHook = async_hook.as_ref();
 
         // Runtime: the immediately-ready future returns the same value the
@@ -856,14 +856,15 @@ mod tests {
         let _ = driver;
     }
 
+    // Compile-time check that Send + Sync + 'static survive trait-object
+    // erasure for the async trait.
+    fn assert_send_sync_static<T: Send + Sync + 'static + ?Sized>(_: &T) {}
+
     #[test]
     fn async_trait_is_object_safe_via_arc_dyn() {
         let backend: Arc<dyn AsyncSecretFetchHook> =
             Arc::new(AsyncOnlyRegistry::new(CREDENTIAL_ID, b"xoxb-object-safe"));
 
-        // Compile-time check that Send + Sync + 'static survive trait-object
-        // erasure for the async trait.
-        fn assert_send_sync_static<T: Send + Sync + 'static + ?Sized>(_: &T) {}
         assert_send_sync_static(backend.as_ref());
 
         let rt = tokio::runtime::Builder::new_current_thread()

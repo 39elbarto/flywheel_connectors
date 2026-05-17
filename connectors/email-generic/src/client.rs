@@ -234,9 +234,14 @@ impl EmailGenericClient {
                 if !line.starts_with("* LIST") {
                     return None;
                 }
-                line.rsplit('"')
-                    .nth(1)
-                    .map(std::string::ToString::to_string)
+                let trimmed = line.trim();
+                if trimmed.ends_with('"') {
+                    let mut parts = trimmed.rsplitn(3, '"');
+                    parts.next()?;
+                    parts.next().map(std::string::ToString::to_string)
+                } else {
+                    trimmed.rsplit(' ').next().map(std::string::ToString::to_string)
+                }
             })
             .collect()
     }
@@ -327,10 +332,19 @@ impl EmailGenericClient {
                     continue;
                 }
                 let fetch = format!("UID FETCH {uid} (RFC822)");
-                let raw = Self::run_imap_fetch_literal(reader, &format!("f{uid}"), &fetch)?;
-                let message = Self::parse_inbound_message(uid.clone(), &raw)?;
+                let raw = match Self::run_imap_fetch_literal(reader, &format!("f{uid}"), &fetch) {
+                    Ok(raw) => raw,
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch message UID {}: {}", uid, e);
+                        seen_uids.observe(uid);
+                        continue;
+                    }
+                };
+                match Self::parse_inbound_message(uid.clone(), &raw) {
+                    Ok(message) => messages.push(message),
+                    Err(e) => tracing::warn!("Failed to parse message UID {}: {}", uid, e),
+                }
                 seen_uids.observe(uid);
-                messages.push(message);
             }
             Ok(messages)
         })
@@ -440,10 +454,27 @@ impl EmailGenericClient {
     fn strip_html_tags(html: &str) -> String {
         let mut text = String::new();
         let mut in_tag = false;
-        for ch in html.chars() {
+        let mut chars = html.chars().peekable();
+        while let Some(ch) = chars.next() {
             match ch {
-                '<' => in_tag = true,
-                '>' => in_tag = false,
+                '<' => {
+                    if let Some(&next_ch) = chars.peek() {
+                        if next_ch.is_ascii_alphabetic() || next_ch == '/' {
+                            in_tag = true;
+                            continue;
+                        }
+                    }
+                    if !in_tag {
+                        text.push(ch);
+                    }
+                }
+                '>' => {
+                    if in_tag {
+                        in_tag = false;
+                    } else {
+                        text.push(ch);
+                    }
+                }
                 _ if !in_tag => text.push(ch),
                 _ => {}
             }
@@ -488,20 +519,20 @@ impl EmailGenericClient {
         let message = builder
             .body(body.to_string())
             .map_err(|error| EmailGenericError::Smtp(error.to_string()))?;
-        let credentials = Credentials::new(
+        let creds = Credentials::new(
             self.config.smtp.username.clone(),
-            self.config.smtp.password.clone(),
+            self.config.smtp.get_password(),
         );
         let mailer = if self.config.smtp.starttls {
             SmtpTransport::relay(&self.config.smtp.host)
                 .map_err(|error| EmailGenericError::Smtp(error.to_string()))?
                 .port(self.config.smtp.port)
-                .credentials(credentials)
+                .credentials(creds)
                 .build()
         } else {
             SmtpTransport::builder_dangerous(&self.config.smtp.host)
                 .port(self.config.smtp.port)
-                .credentials(credentials)
+                .credentials(creds)
                 .build()
         };
         mailer

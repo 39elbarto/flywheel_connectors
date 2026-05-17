@@ -12,7 +12,7 @@ Summary: `2/7` Batch 1 connectors currently pass the mechanical gauntlet.
 | `connectors/stripe` | `blocked` | `verification_script_declared` | `4` | README does not declare a scripts/e2e verification script |
 | `connectors/github` | `blocked` | `local_non_mock` | `6` | missing tests/local_non_mock.rs |
 | `connectors/gmail` | `blocked` | `local_non_mock` | `6` | missing tests/local_non_mock.rs |
-| `connectors/telegram` | `blocked` | `operations_info` | `1` | missing operations_info source metadata |
+| `connectors/telegram` | `blocked` | `local_non_mock` | `6` | missing tests/local_non_mock.rs |
 | `connectors/slack` | `blocked` | `operations_info` | `1` | missing operations_info source metadata |
 | `connectors/kubernetes` | `pass` | `-` | `12` | All checks passed |
 

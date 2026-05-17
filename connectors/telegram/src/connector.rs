@@ -1558,10 +1558,8 @@ impl TelegramConnector {
         Ok(resource_uris)
     }
 
-    /// Handle introspection.
-    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        let introspection = Introspection {
-            operations: vec![
+    fn operations_info() -> Vec<OperationInfo> {
+        vec![
                 OperationInfo {
                     id: OperationId::from_static("telegram.send_message"),
                     summary: "Send a text message to a Telegram chat".into(),
@@ -1810,7 +1808,13 @@ impl TelegramConnector {
                     rate_limit: None,
                     requires_approval: None,
                 },
-            ],
+        ]
+    }
+
+    /// Handle introspection.
+    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        let introspection = Introspection {
+            operations: Self::operations_info(),
             events: vec![
                 EventInfo {
                     topic: "telegram.message.new".into(),

@@ -8,6 +8,7 @@
     clippy::too_many_lines
 )]
 
+pub mod auth;
 pub mod client;
 pub mod connector;
 pub mod error;

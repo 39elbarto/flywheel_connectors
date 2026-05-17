@@ -43,6 +43,12 @@ pub struct SmtpConfig {
     pub starttls: bool,
 }
 
+impl SmtpConfig {
+    pub fn get_password(&self) -> String {
+        self.password.clone()
+    }
+}
+
 impl std::fmt::Debug for SmtpConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SmtpConfig")

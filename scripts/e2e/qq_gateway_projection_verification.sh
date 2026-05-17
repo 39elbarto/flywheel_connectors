@@ -206,7 +206,14 @@ if [[ "${overall_status}" == "passed" ]]; then
           any(.[]; .step == "gateway_drain_first_batch" and .details.drained_count == 2 and .details.remaining_count == 1)
           and any(.[]; .step == "gateway_drain_final_batch" and .details.drained_count == 1 and .details.remaining_count == 0 and .details.runtime.queue_depth == 0)
         ),
-        shutdown_shape_ok: any(.[]; .step == "shutdown" and .status == "ok")
+        shutdown_shape_ok: any(.[];
+          .step == "shutdown"
+          and .status == "ok"
+          and .details.health_status == "Starting"
+          and .details.gateway_runtime_present == false
+          and .details.project_after_shutdown_denied == true
+          and .details.drain_after_shutdown_denied == true
+        )
       } as $v
       | $v
       | .status = (
@@ -247,6 +254,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "evt-invalid-session" \
     "evt-reconnect-cap-first" \
     "evt-reconnect-exhausted" \
+    "evt-after-shutdown" \
     "msg-accepted" \
     "msg-untyped-message-id" \
     "msg-structured-mention" \
@@ -258,6 +266,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "msg-missing-binding" \
     "msg-missing-message-id" \
     "msg-missing-reply-target" \
+    "msg-after-shutdown" \
     "bot-openid" \
     "group-allowed" \
     "group-slash" \
@@ -277,6 +286,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "please inspect this" \
     "see attached trace" \
     "too large" \
+    "after shutdown should deny" \
     "approve deployment from voice" \
     "/approve rollout-42" \
     "rollout-42" \

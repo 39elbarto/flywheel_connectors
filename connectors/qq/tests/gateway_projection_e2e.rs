@@ -340,6 +340,18 @@ async fn invoke_projection(
     id: &str,
     event: Value,
 ) -> Value {
+    try_invoke_projection(connector, signing_key, instance_id, id, event)
+        .await
+        .expect("project QQ gateway event")
+}
+
+async fn try_invoke_projection(
+    connector: &QqConnector,
+    signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
+    id: &str,
+    event: Value,
+) -> Result<Value, String> {
     let response = connector
         .invoke(InvokeRequest {
             r#type: "invoke".into(),
@@ -359,8 +371,16 @@ async fn invoke_projection(
             approval_tokens: Vec::new(),
         })
         .await
-        .expect("project QQ gateway event");
-    response.result.expect("projection result")
+        .map_err(|error| error.to_string())?;
+    if response.status != InvokeStatus::Ok {
+        return Err(format!(
+            "projection status {:?}: {:?}",
+            response.status, response.error
+        ));
+    }
+    response
+        .result
+        .ok_or_else(|| "projection response missing result".to_string())
 }
 
 async fn invoke_drain(
@@ -370,6 +390,18 @@ async fn invoke_drain(
     id: &str,
     input: Value,
 ) -> Value {
+    try_invoke_drain(connector, signing_key, instance_id, id, input)
+        .await
+        .expect("drain QQ gateway events")
+}
+
+async fn try_invoke_drain(
+    connector: &QqConnector,
+    signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
+    id: &str,
+    input: Value,
+) -> Result<Value, String> {
     let response = connector
         .invoke(InvokeRequest {
             r#type: "invoke".into(),
@@ -389,8 +421,16 @@ async fn invoke_drain(
             approval_tokens: Vec::new(),
         })
         .await
-        .expect("drain QQ gateway events");
-    response.result.expect("drain result")
+        .map_err(|error| error.to_string())?;
+    if response.status != InvokeStatus::Ok {
+        return Err(format!(
+            "drain status {:?}: {:?}",
+            response.status, response.error
+        ));
+    }
+    response
+        .result
+        .ok_or_else(|| "drain response missing result".to_string())
 }
 
 #[fcp_async_core::runtime::test]
@@ -1278,7 +1318,50 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         })
         .await
         .expect("shutdown QQ connector");
-    log_step(&mut logs, "shutdown", "ok", &json!({}));
+    let post_shutdown_health = connector.health().await;
+    let post_shutdown_status = format!("{:?}", post_shutdown_health.status);
+    assert_eq!(post_shutdown_status, "Starting");
+    assert!(post_shutdown_health.details.is_none());
+    let post_shutdown_projection = try_invoke_projection(
+        &connector,
+        &signing_key,
+        &instance_id,
+        "qq-gateway-after-shutdown-projection",
+        json!({
+            "op": 0,
+            "s": 8,
+            "t": "GROUP_AT_MESSAGE_CREATE",
+            "id": "evt-after-shutdown",
+            "d": {
+                "id": "msg-after-shutdown",
+                "content": "bot-openid after shutdown should deny",
+                "group_openid": "group-allowed",
+                "group_member_openid": "member-1"
+            }
+        }),
+    )
+    .await;
+    let post_shutdown_drain = try_invoke_drain(
+        &connector,
+        &signing_key,
+        &instance_id,
+        "qq-gateway-after-shutdown-drain",
+        json!({}),
+    )
+    .await;
+    assert!(post_shutdown_projection.is_err());
+    assert!(post_shutdown_drain.is_err());
+    log_step(
+        &mut logs,
+        "shutdown",
+        "ok",
+        &json!({
+            "health_status": post_shutdown_status,
+            "gateway_runtime_present": post_shutdown_health.details.is_some(),
+            "project_after_shutdown_denied": post_shutdown_projection.is_err(),
+            "drain_after_shutdown_denied": post_shutdown_drain.is_err(),
+        }),
+    );
 
     let log_contents = read_to_string(&log_path).expect("read QQ gateway e2e log");
     for forbidden in [
@@ -1300,6 +1383,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-invalid-session",
         "evt-reconnect-cap-first",
         "evt-reconnect-exhausted",
+        "evt-after-shutdown",
         "msg-accepted",
         "msg-untyped-message-id",
         "msg-structured-mention",
@@ -1310,6 +1394,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "msg-disabled",
         "msg-missing-binding",
         "msg-missing-reply-target",
+        "msg-after-shutdown",
         "bot-openid",
         "group-allowed",
         "group-slash",
@@ -1329,6 +1414,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "please inspect this",
         "see attached trace",
         "too large",
+        "after shutdown should deny",
         "approve deployment from voice",
         "/approve rollout-42",
         "rollout-42",

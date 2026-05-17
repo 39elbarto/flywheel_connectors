@@ -138,6 +138,7 @@ When `gateway.enabled` is false, `qq.gateway.project_event` fails closed with `g
 Gateway projection also fails closed before authorization when the normalized event is missing the route binding required for its QQ delivery mode: `channel_id` and sender for channel events, `group_openid` and sender for group events, and sender for C2C events.
 Events without a stable QQ message id, or replies whose `message_reference` does not carry a usable target message id, are dropped before authorization so fan-out and reply tracking never rely on unbound message identity.
 Gateway reconnect (`op=7`) and invalid-session (`op=9`) frames are projected as dropped control records with bounded reconnect attempt accounting and a lifecycle action of `reconnect_resume`, `reconnect_identify`, or `stop_reconnect`; `reconnect_after_ms` scales by reconnect attempt and is capped by `max_reconnect_backoff_ms`, and once `max_reconnect_attempts` is exceeded the reason becomes `reconnect_attempts_exhausted`. The runtime snapshot increments `terminal_reconnect_failures` whenever it emits `stop_reconnect`, so host evidence can distinguish a terminal failure from an ordinary retry directive. A subsequent hello frame resets the attempt counter and returns `identify` or `resume` depending on whether a session token is available.
+Connector shutdown drops the in-memory gateway runtime with the HTTP client; post-shutdown project/drain operations must fail closed instead of leaving queued gateway events available for fan-out.
 
 ## Chat Coordination Configuration
 
@@ -218,7 +219,7 @@ These are excluded on purpose:
 ## Verification
 
 - Gateway projection evidence: `RUN_ID=qq-gateway-projection-<id> RCH_REQUIRE_REMOTE=1 bash scripts/e2e/qq_gateway_projection_verification.sh`
-- The verifier runs the connector-boundary `qq_gateway_projection_logs_policy_replay_and_shutdown` e2e lane through `rch`, extracts `QQ_GATEWAY_PROJECTION_JSONL` records, checks disabled-gateway, route-binding, channel/group policy, reply, media, voice-ASR, slash/approval, replay, heartbeat, reconnect-exhaustion/terminal failure, drain, and shutdown coverage, and writes a replay bundle under `artifacts/e2e/qq-gateway-projection/<run-id>/`.
+- The verifier runs the connector-boundary `qq_gateway_projection_logs_policy_replay_and_shutdown` e2e lane through `rch`, extracts `QQ_GATEWAY_PROJECTION_JSONL` records, checks disabled-gateway, route-binding, channel/group policy, reply, media, voice-ASR, slash/approval, replay, heartbeat, reconnect-exhaustion/terminal failure, drain, and post-shutdown no-runtime/no-fan-out coverage, and writes a replay bundle under `artifacts/e2e/qq-gateway-projection/<run-id>/`.
 - A structured `rch_remote_prerequisite_unavailable` skip means the remote Cargo proof lane did not run; it is not evidence that the full supervised WebSocket runtime is complete.
 
 ## Implementation Notes For `flywheel_connectors-j05nu.1.14.2`

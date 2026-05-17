@@ -70,8 +70,8 @@ host-backed or live soak evidence through production `fcp-host`/`fcp-sandbox`
 boundaries. Operators can validate an externally collected production-soak
 JSONL bundle without rerunning the smoke Cargo lane by passing
 `--evidence-jsonl <path>` together with `--require-production-soak`; this uses
-the same scenario coverage, boundary, resource, percentile, and redaction checks
-as the default verifier.
+the same scenario coverage, boundary, resource, percentile, nested evidence, and
+redaction checks as the default verifier.
 
 ## Environment Capture For Final Review
 

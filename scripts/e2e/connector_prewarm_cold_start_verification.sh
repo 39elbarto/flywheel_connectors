@@ -202,6 +202,53 @@ if [[ "${overall_status}" == "passed" ]]; then
         (.[$key] | type) == "string" and (.[$key] | length) > 0;
       def positive_number($key):
         (.[$key] | type) == "number" and .[$key] > 0;
+      def same($key):
+        .[$key] == .evidence[$key];
+      def same_optional($key):
+        .[$key] == (.evidence[$key] // null);
+      def nested_evidence_matches:
+        (.evidence | type) == "object"
+        and same("schema_version")
+        and same("execution_mode")
+        and same("source_kind")
+        and same("scenario_id")
+        and same("connector_id")
+        and same("command_line")
+        and same("git_revision")
+        and same("worker_id")
+        and same("cargo_target_dir")
+        and same("cargo_target_dir_class")
+        and same("cargo_target_dir_hash")
+        and same("connector_fixture_id")
+        and same("host_boundary")
+        and same("manifest_hash")
+        and same("zone")
+        and same("strategy")
+        and same("pool_state")
+        and same("admission_decision")
+        and same("warm_checkout")
+        and same("activation_latency_ms")
+        and same("baseline_on_demand_latency_ms")
+        and (.p50_activation_latency_ms == .evidence.latency.p50_ms)
+        and (.p95_activation_latency_ms == .evidence.latency.p95_ms)
+        and (.p99_activation_latency_ms == .evidence.latency.p99_ms)
+        and (.baseline_p50_activation_latency_ms == .evidence.baseline_latency.p50_ms)
+        and (.baseline_p95_activation_latency_ms == .evidence.baseline_latency.p95_ms)
+        and (.baseline_p99_activation_latency_ms == .evidence.baseline_latency.p99_ms)
+        and same("sandbox_layer")
+        and same("sandbox_profile")
+        and same("sandbox_boundary")
+        and same("credential_mode")
+        and same("rss_bytes")
+        and same("process_count")
+        and same("concurrent_startups")
+        and same("error_mapping")
+        and same("cleanup_result")
+        and same_optional("restart_reason")
+        and same_optional("fallback_reason")
+        and same_optional("unsafe_rejection_reason")
+        and same_optional("skip_reason")
+        and same("shutdown_cleanup_verified");
       def required:
         [
           "prewarm_empty_pool",
@@ -277,6 +324,9 @@ if [[ "${overall_status}" == "passed" ]]; then
             false
           end
         ),
+        nested_evidence_ok: all(.[];
+          nested_evidence_matches
+        ),
         production_soak_ok: (
           if $require_production_soak then
             all(.[];
@@ -316,6 +366,7 @@ if [[ "${overall_status}" == "passed" ]]; then
             and $v.required_fields_ok
             and $v.resource_fields_ok
             and $v.decision_shape_ok
+            and $v.nested_evidence_ok
             and $v.production_soak_ok
             and $v.percentile_fields_ok
             and $v.redaction_shape_ok

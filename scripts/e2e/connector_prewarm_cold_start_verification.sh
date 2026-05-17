@@ -6,6 +6,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-}"
 REQUIRE_PRODUCTION_SOAK="${REQUIRE_PRODUCTION_SOAK:-0}"
+EVIDENCE_JSONL_IN="${EVIDENCE_JSONL_IN:-}"
 
 usage() {
   cat <<'EOF'
@@ -16,6 +17,9 @@ Options:
   --out-root <path>  Artifact root (default: artifacts/e2e/connector-prewarm-cold-start/<run-id>)
   --require-production-soak
                      Fail unless evidence is host-backed/live soak evidence
+  --evidence-jsonl <path>
+                     Validate an existing production/smoke evidence JSONL file
+                     instead of running the embedded rch Cargo lane
   -h, --help         Show this help
 
 Runs the connector cold-start prewarm evidence lane through rch, extracts
@@ -27,6 +31,8 @@ REQUIRE_PRODUCTION_SOAK=1 or pass --require-production-soak for final
 acceptance gating; offline policy evidence must not satisfy that mode.
 Remote prerequisite skips are non-fatal for deterministic smoke evidence but
 fail closed when production-soak evidence is required.
+Use --evidence-jsonl to validate externally collected production-soak records
+through the same fail-closed schema, boundary, scenario, and redaction checks.
 EOF
 }
 
@@ -43,6 +49,10 @@ while [[ $# -gt 0 ]]; do
     --require-production-soak)
       REQUIRE_PRODUCTION_SOAK=1
       shift
+      ;;
+    --evidence-jsonl)
+      EVIDENCE_JSONL_IN="$2"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -70,7 +80,9 @@ require_cmd() {
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 require_cmd jq
-require_cmd rch
+if [[ -z "${EVIDENCE_JSONL_IN}" ]]; then
+  require_cmd rch
+fi
 
 case "${REQUIRE_PRODUCTION_SOAK}" in
   1|true|TRUE|yes|YES)
@@ -105,20 +117,31 @@ overall_status="passed"
 skip_reason=""
 exit_code=0
 
-echo "[connector-prewarm-cold-start] running fcp-e2e prewarm evidence lane"
-if ! (
-  cd "${REPO_ROOT}"
-  env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
-    RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}" \
-    CARGO_TARGET_DIR="${target_dir}" \
-    CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}" \
-    CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
-    CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}" \
-    CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}" \
-    RUSTFLAGS="${RUSTFLAGS:--Cdebuginfo=0}" \
-    cargo test -p fcp-e2e --no-default-features --test swarm_gauntlet_e2e prewarm_cold_start -- --nocapture
-) >"${TEST_LOG}" 2>&1; then
-  test_status="failed"
+if [[ -n "${EVIDENCE_JSONL_IN}" ]]; then
+  if [[ ! -s "${EVIDENCE_JSONL_IN}" ]]; then
+    echo "Evidence JSONL input does not exist or is empty: ${EVIDENCE_JSONL_IN}" >&2
+    exit 2
+  fi
+  echo "[connector-prewarm-cold-start] validating provided evidence JSONL ${EVIDENCE_JSONL_IN}"
+  test_status="provided"
+  cp "${EVIDENCE_JSONL_IN}" "${EVIDENCE_JSONL}"
+  printf 'validated provided evidence JSONL: %s\n' "${EVIDENCE_JSONL_IN}" >"${TEST_LOG}"
+else
+  echo "[connector-prewarm-cold-start] running fcp-e2e prewarm evidence lane"
+  if ! (
+    cd "${REPO_ROOT}"
+    env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
+      RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}" \
+      CARGO_TARGET_DIR="${target_dir}" \
+      CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}" \
+      CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}" \
+      CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}" \
+      CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}" \
+      RUSTFLAGS="${RUSTFLAGS:--Cdebuginfo=0}" \
+      cargo test -p fcp-e2e --no-default-features --test swarm_gauntlet_e2e prewarm_cold_start -- --nocapture
+  ) >"${TEST_LOG}" 2>&1; then
+    test_status="failed"
+  fi
 fi
 
 if [[ "${test_status}" == "failed" ]]; then
@@ -160,10 +183,12 @@ if [[ "${test_status}" == "failed" ]]; then
 fi
 
 if [[ "${overall_status}" == "passed" ]]; then
-  if ! grep -a '^FCP_PREWARM_COLD_START_JSONL ' "${TEST_LOG}" \
-    | sed 's/^FCP_PREWARM_COLD_START_JSONL //' > "${EVIDENCE_JSONL}"
-  then
-    evidence_status="failed"
+  if [[ -z "${EVIDENCE_JSONL_IN}" ]]; then
+    if ! grep -a '^FCP_PREWARM_COLD_START_JSONL ' "${TEST_LOG}" \
+      | sed 's/^FCP_PREWARM_COLD_START_JSONL //' > "${EVIDENCE_JSONL}"
+    then
+      evidence_status="failed"
+    fi
   fi
 
   if [[ ! -s "${EVIDENCE_JSONL}" ]] || ! jq -c . "${EVIDENCE_JSONL}" >/dev/null; then
@@ -323,6 +348,7 @@ jq -n \
   --arg git_revision "${git_revision}" \
   --arg target_dir "${target_dir}" \
   --arg rch_require_remote "${RCH_REQUIRE_REMOTE:-1}" \
+  --arg evidence_jsonl_in "${EVIDENCE_JSONL_IN}" \
   --argjson require_production_soak "${require_production_soak_json}" \
   --arg generated_at "$(now_iso)" \
   '{
@@ -333,6 +359,7 @@ jq -n \
     git_revision: $git_revision,
     cargo_target_dir: $target_dir,
     rch_require_remote: $rch_require_remote,
+    evidence_jsonl_in: (if ($evidence_jsonl_in | length) > 0 then $evidence_jsonl_in else null end),
     require_production_soak: $require_production_soak,
     generated_at: $generated_at
   }' > "${ENVIRONMENT_JSON}"
@@ -380,7 +407,7 @@ cat > "${REPLAY_SH}" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd "${REPO_ROOT}"
-RUN_ID="${RUN_ID}" OUT_ROOT="${OUT_ROOT}" RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" REQUIRE_PRODUCTION_SOAK="${REQUIRE_PRODUCTION_SOAK}" \\
+RUN_ID="${RUN_ID}" OUT_ROOT="${OUT_ROOT}" RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" REQUIRE_PRODUCTION_SOAK="${REQUIRE_PRODUCTION_SOAK}" EVIDENCE_JSONL_IN="${EVIDENCE_JSONL_IN}" \\
   bash scripts/e2e/connector_prewarm_cold_start_verification.sh \\
   --run-id "${RUN_ID}" \\
   --out-root "${OUT_ROOT}"

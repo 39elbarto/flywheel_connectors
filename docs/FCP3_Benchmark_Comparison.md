@@ -67,7 +67,11 @@ deterministic smoke evidence with `execution_mode=smoke` and
 `--require-production-soak` or
 `REQUIRE_PRODUCTION_SOAK=1`, which rejects offline policy records and requires
 host-backed or live soak evidence through production `fcp-host`/`fcp-sandbox`
-boundaries.
+boundaries. Operators can validate an externally collected production-soak
+JSONL bundle without rerunning the smoke Cargo lane by passing
+`--evidence-jsonl <path>` together with `--require-production-soak`; this uses
+the same scenario coverage, boundary, resource, percentile, and redaction checks
+as the default verifier.
 
 ## Environment Capture For Final Review
 

@@ -1186,7 +1186,7 @@ fwc export-tools --offline --format openai --risk-max medium --output tools.json
 The most impactful tuning the workspace ships today:
 
 - **`fcp-core`** — `IndexedZoneKeyManifest` O(1) recipient lookups (`d2oa0`).
-- **`fcp-store`** — repair queue `Vec` → `BinaryHeap` O(log n); WAL + cursor benches.
+- **`fcp-store`** — repair queue moved from sorted `Vec` to an O(log n) ordered structure (`BTreeMap<RepairQueueKey, QueuedRepair>`); WAL + cursor benches.
 - **`fcp-cbor`** — `canonicalize_map` arena allocator (one arena `Vec<u8>` vs per-entry).
 - **`fcp-raptorq`** — repair-tail decode coalesce; per-pivot Gaussian elimination heap allocation reduction; hot-path benches.
 - **`fcp-webhook`** — precomputed routing index O(1) lookup.
@@ -3708,7 +3708,7 @@ A non-exhaustive list of the concrete optimization patterns the workspace uses, 
 | Technique | Where Applied | Effect |
 |-----------|---------------|--------|
 | **O(1) indexed lookups** | `IndexedZoneKeyManifest` (`d2oa0`) — replaced linear search with HashMap | Recipient-key lookup in zone manifests went from O(n) to O(1) |
-| **Heap-based priority queue** | `fcp-store` repair queue (`u97n8`) — `Vec` → `BinaryHeap` | Repair-deficit ordering went from O(n) to O(log n) per insert |
+| **Ordered priority queue** | `fcp-store` repair queue (`u97n8`) — sorted `Vec` → `BTreeMap` keyed by `RepairQueueKey` | Repair-deficit ordering went from O(n) to O(log n) per insert |
 | **Arena allocators** | `canonicalize_map` in `fcp-cbor` (`m7aoz`) — single arena `Vec<u8>` vs per-entry allocations | Map canonicalization allocation overhead amortized |
 | **Pre-computed routing index** | `fcp-webhook` route dispatch (`7j7fa`) — HashMap of provider → handler | Per-request route lookup went from O(n) linear scan to O(1) |
 | **Cursor-advance parsing** | `fcp-streaming` SSE parser (`gqpn5`) — advance read pointer instead of full rescan | Frame parsing avoids re-walking already-consumed bytes |

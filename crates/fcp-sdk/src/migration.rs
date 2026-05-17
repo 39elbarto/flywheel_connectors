@@ -26,9 +26,8 @@
 //!
 //! Runtime bootstrap helpers graduated to [`crate::runtime::ConnectorRuntime`],
 //! and the connector error-mapping contract graduated to
-//! [`crate::error_mapping`]. This module temporarily re-exports the error
-//! mapping names while older connector call sites migrate to the canonical SDK
-//! surface.
+//! [`crate::error_mapping`]. Connector authors should import
+//! [`crate::ConnectorErrorMapping`] from the SDK root.
 //!
 //! ## Retry & Error Mapping
 //!
@@ -114,10 +113,10 @@
 //!
 //! ```ignore
 //! // connectors/openai/src/client.rs — AFTER migration
-//! use fcp_sdk::ConnectorRuntime;
+//! use fcp_sdk::{ConnectorErrorMapping, ConnectorRuntime};
 //! use fcp_sdk::migration::{
-//!     AttemptOutcome, ConnectorErrorMapping, HttpRetryConfig, RetryLoop,
-//!     classify_http_status, map_async_to_fcp_error,
+//!     AttemptOutcome, HttpRetryConfig, RetryLoop, classify_http_status,
+//!     map_async_to_fcp_error,
 //! };
 //!
 //! // In OpenAIClient:
@@ -207,7 +206,8 @@ use fcp_manifest::{
 use tracing::{debug, warn};
 
 use crate::FcpError;
-pub use crate::error_mapping::{ConnectorErrorMapping, map_async_to_fcp_error};
+use crate::error_mapping::ConnectorErrorMapping;
+pub use crate::error_mapping::map_async_to_fcp_error;
 use crate::retry::{RetryDecision, RetryPolicy};
 
 #[cfg(test)]

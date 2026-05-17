@@ -77,7 +77,7 @@ machine-readable inventory.
 
 | Shim | Location | Purpose | Delete After | Status |
 |------|----------|---------|-------------|--------|
-| ConnectorErrorMapping | fcp-sdk/src/error_mapping.rs | First-class SDK error mapping contract | legacy `fcp_sdk::migration` imports removed | MIGRATING (`flywheel_connectors-angoc.3.7`) |
+| ConnectorErrorMapping | fcp-sdk/src/error_mapping.rs | First-class SDK error mapping contract | legacy `fcp_sdk::migration` trait re-export removed | MIGRATED (`flywheel_connectors-angoc.3.7`) |
 | ConnectorRuntime | fcp-sdk/src/runtime.rs | First-class SDK lifecycle helper | migrated out of migration namespace | MIGRATED (`flywheel_connectors-angoc.3.6`) |
 
 ---

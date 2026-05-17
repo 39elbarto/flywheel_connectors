@@ -77,6 +77,8 @@ During the FCP3 transition, all code changes must be evaluated against these gua
 **Why**: Compatibility APIs are scheduled for deletion. Extending them increases migration debt.
 
 **Review check**: Is this API using types from `fcp_sdk::migration`? If yes, consider the v3 native path instead.
+`ConnectorErrorMapping` is intentionally not exported from `fcp_sdk::migration`;
+new callers must use `fcp_sdk::ConnectorErrorMapping`.
 
 ---
 

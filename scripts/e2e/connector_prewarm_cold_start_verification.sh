@@ -100,6 +100,7 @@ target_dir="${PREWARM_CARGO_TARGET_DIR:-/tmp/fcp-prewarm-cold-start-${RUN_ID}}"
 test_status="passed"
 evidence_status="passed"
 validation_status="passed"
+redaction_status="passed"
 overall_status="passed"
 skip_reason=""
 exit_code=0
@@ -305,8 +306,9 @@ if [[ "${overall_status}" == "passed" ]]; then
   fi
 fi
 
-if [[ "${overall_status}" == "passed" ]]; then
+if [[ -s "${EVIDENCE_JSONL}" ]]; then
   if grep -aE '(sk-live-|Bearer[[:space:]]+|super-secret-value|secret_seed|private_key)' "${EVIDENCE_JSONL}" >/dev/null; then
+    redaction_status="failed"
     overall_status="failed"
     validation_status="failed"
     exit_code=1
@@ -346,6 +348,7 @@ jq -n \
   --arg test_status "${test_status}" \
   --arg evidence_status "${evidence_status}" \
   --arg validation_status "${validation_status}" \
+  --arg redaction_status "${redaction_status}" \
   --arg skip_reason "${skip_reason}" \
   --argjson evidence_count "${evidence_count}" \
   --arg test_log "${TEST_LOG}" \
@@ -360,6 +363,7 @@ jq -n \
     test_status: $test_status,
     evidence_status: $evidence_status,
     validation_status: $validation_status,
+    redaction_status: $redaction_status,
     require_production_soak: $require_production_soak,
     skip_reason: (if ($skip_reason | length) > 0 then $skip_reason else null end),
     evidence_count: $evidence_count,

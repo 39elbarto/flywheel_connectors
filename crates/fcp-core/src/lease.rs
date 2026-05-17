@@ -1815,12 +1815,6 @@ mod tests {
             got: LeasePurpose::Migration,
         };
         assert!(purpose.to_string().contains("purpose mismatch"));
-
-        let coordinator = LeaseValidationError::CoordinatorMismatch {
-            expected: test_node("a"),
-            got: test_node("b"),
-        };
-        assert!(coordinator.to_string().contains("coordinator mismatch"));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -159,10 +159,6 @@ fn all_lease_validation_error_variants_have_distinct_display() {
             held_seq: 1,
             current_seq: 2,
         },
-        LeaseValidationError::CoordinatorMismatch {
-            expected: node("a"),
-            got: node("b"),
-        },
         LeaseValidationError::InsufficientQuorum {
             required: 1,
             got: 0,

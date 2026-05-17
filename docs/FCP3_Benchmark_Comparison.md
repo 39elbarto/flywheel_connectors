@@ -85,7 +85,10 @@ also records a latency summary with the worst current p50/p95/p99, worst
 baseline p50/p95/p99, minimum per-percentile improvement, and any scenarios
 with no p99 improvement, plus the observed execution/source classes and
 `fcp-host::`/`fcp-sandbox::` boundary names. That makes before/after promotion
-evidence auditable without scraping every JSONL row by hand.
+evidence auditable without scraping every JSONL row by hand. Synthetic checkout
+evidence from `ConnectorPrewarmConfig::decide_checkout` is rejected even when
+the boundary is padded or embedded inside a wrapper label, so fixture-derived
+smoke records cannot be reclassified as production soak input.
 
 ## Environment Capture For Final Review
 

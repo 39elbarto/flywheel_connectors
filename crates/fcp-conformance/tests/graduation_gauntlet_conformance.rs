@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
@@ -58,6 +59,7 @@ where
     S: AsRef<std::ffi::OsStr>,
 {
     Command::new("bash")
+        .current_dir(workspace_root())
         .arg(gauntlet_runner())
         .args(args)
         .output()
@@ -298,6 +300,14 @@ fn batch1_status_runner_writes_status_markdown() {
         fs::read_to_string(&status_path).expect("batch1 status markdown should be written");
     assert!(status_doc.contains("# Batch 1 Graduation Status"));
     assert!(status_doc.contains("scripts/graduation/run_gauntlet.sh --batch batch1"));
+    assert!(status_doc.contains("Summary: `7/7` Batch 1 connectors currently pass"));
+    assert!(status_doc.contains("PROVEN promotion proof bundle"));
+    assert!(status_doc.contains("not just the presence-only gauntlet checks"));
+    assert!(status_doc.contains("all_proven_connectors_pass_gauntlet"));
+    assert!(
+        !status_doc.contains("Add connector-local `tests/local_non_mock.rs` acceptance coverage"),
+        "7/7 mechanical status should not emit stale pre-gauntlet blocker guidance"
+    );
     for connector in [
         "connectors/postgresql",
         "connectors/stripe",
@@ -314,8 +324,46 @@ fn batch1_status_runner_writes_status_markdown() {
     }
 
     let jsonl = fs::read_to_string(&jsonl_path).expect("batch1 JSONL should be written");
-    assert!(jsonl.contains("\"connector\":\"connectors/postgresql\""));
-    assert!(jsonl.contains("\"check\":\"connector_path\""));
+    let records = jsonl
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSONL record"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 7 * EXPECTED_CHECKS.len());
+    assert!(
+        records
+            .iter()
+            .all(|record| record["verdict"].as_str() == Some("pass")),
+        "Batch 1 status JSONL should have no failed mechanical gauntlet rows: {jsonl}"
+    );
+
+    let connectors = records
+        .iter()
+        .filter_map(|record| record["connector"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        connectors,
+        BTreeSet::from([
+            "connectors/github",
+            "connectors/gmail",
+            "connectors/kubernetes",
+            "connectors/postgresql",
+            "connectors/slack",
+            "connectors/stripe",
+            "connectors/telegram",
+        ])
+    );
+
+    let checks = records
+        .iter()
+        .filter_map(|record| record["check"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        checks,
+        EXPECTED_CHECKS
+            .iter()
+            .map(|(check, _)| *check)
+            .collect::<BTreeSet<_>>()
+    );
 }
 
 #[test]

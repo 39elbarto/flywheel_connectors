@@ -149,7 +149,7 @@ impl WindowsSandbox {
             warn!(
                 env = FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV,
                 "AppContainer not active (br-3hrw3 fail-closed default); enforcement is job-objects + integrity-level + firewall only. \
-                 Set the env var to 1 to opt into the AppContainer code path once it is wired."
+                 Set the env var to 1 only when using the dedicated STARTUPINFOEX AppContainer launch path."
             );
         }
 
@@ -162,7 +162,7 @@ impl WindowsSandbox {
     /// Whether AppContainer is *actually active* for this process.
     ///
     /// Pre-br-3hrw3 the sandbox unconditionally claimed AppContainer
-    /// availability even though no `CreateProcessAsUser`-based wiring
+    /// availability even though no dedicated child-process launch path
     /// existed; this getter exposes the post-fix truth so conformance
     /// tests and observability surfaces can assert against it.
     #[must_use]
@@ -627,9 +627,9 @@ impl Sandbox for WindowsSandbox {
             warn!(error = %e, "Failed to configure firewall");
         }
 
-        // Note: Full AppContainer requires spawning a new process with
-        // CreateProcessAsUser and an AppContainer token. For in-process
-        // sandboxing, we rely on job objects and integrity levels.
+        // AppContainer enforcement is only available through the dedicated
+        // STARTUPINFOEX child-process launch path. The in-process apply()
+        // path still relies on job objects, integrity levels, and firewall.
 
         info!("Windows sandbox applied successfully");
         Ok(())
@@ -1045,37 +1045,34 @@ unsafe extern "system" {
 // Helper Functions
 // ============================================================================
 
-/// Environment variable that opts the process into the future
-/// AppContainer code path.
+/// Environment variable that opts the process into the Windows
+/// AppContainer child-process launch path.
 ///
-/// AppContainer requires spawning a new process via `CreateProcessAsUser`
-/// with an AppContainer token (see the inline note inside
-/// [`WindowsSandbox::apply`] at line 351). That code path is **not yet
-/// wired** in this crate — only job-object + integrity-level + firewall
-/// enforcement is active. Until the real implementation lands, the
-/// availability flag must be honest with downstream observers (logs,
-/// metrics, conformance harness) and report `false` so that callers do
-/// not assume AppContainer is protecting the process when it is not.
+/// AppContainer enforcement cannot be retrofitted onto an already-running
+/// process or an arbitrary [`std::process::Command`]. Callers that need
+/// AppContainer must use [`WindowsSandbox::spawn_appcontainer_process`],
+/// which launches a child process with `STARTUPINFOEX` security capabilities
+/// before it is resumed. The availability flag remains an explicit opt-in so
+/// generic readiness surfaces do not infer AppContainer protection from
+/// kernel support alone.
 ///
-/// Operators who land the real CreateProcessAsUser-based implementation
-/// can flip this env var to `1` (or `true`) without re-rolling the
-/// stub function. This keeps the opt-in gate in user-controlled
-/// configuration rather than a code change once the implementation
-/// exists.
+/// Operators running the Windows-gated proof lane can flip this env var to
+/// `1` (or `true`) when the dedicated launch entrypoint is the execution path
+/// under test.
 pub const FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV: &str = "FCP_SANDBOX_WINDOWS_APPCONTAINER";
 
 /// Check if AppContainer is *actually wired* and active for this
 /// process (NOT just available on the kernel).
 ///
 /// Pre-fix this returned `true` unconditionally on the assumption that
-/// AppContainer was present on Windows 8+. That was a stub: the
-/// downstream `apply()` path never invokes the AppContainer code (no
-/// `CreateProcessAsUser`, no AppContainer token), so reporting `true`
-/// gave the rest of the system a false sense of process isolation —
+/// AppContainer was present on Windows 8+. That was wrong: the downstream
+/// `apply()` and `apply_to_command()` paths still cannot attach AppContainer
+/// to the current process or mutate a generic command, so reporting `true`
+/// by default gave the rest of the system a false sense of process isolation —
 /// br-flywheel_connectors-3hrw3.
 ///
-/// Until the real AppContainer integration lands, we fail closed and
-/// require explicit operator opt-in via
+/// We fail closed unless a Windows operator explicitly opts into the dedicated
+/// AppContainer child-process launch path via
 /// [`FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV`].
 fn check_appcontainer_available() -> bool {
     matches!(
@@ -1545,8 +1542,8 @@ mod tests {
     }
 
     /// br-3hrw3 regression: AppContainer must NOT report itself as
-    /// active by default, because no `CreateProcessAsUser`-based wiring
-    /// exists yet. Pre-fix, `check_appcontainer_available()` returned
+    /// active by default, because generic sandbox application cannot attach
+    /// AppContainer to the current process. Pre-fix, `check_appcontainer_available()` returned
     /// `true` unconditionally and the constructor logged "AppContainer
     /// available for process isolation" — giving downstream observers a
     /// false sense of process isolation that the rest of `apply()`
@@ -1564,8 +1561,8 @@ mod tests {
         let sandbox = WindowsSandbox::new();
         assert!(
             !sandbox.appcontainer_active(),
-            "br-3hrw3: AppContainer must default to INACTIVE until the \
-             CreateProcessAsUser code path is wired"
+            "br-3hrw3: AppContainer must default to INACTIVE unless the \
+             dedicated child-process launch path is explicitly enabled"
         );
         // Restore the prior value to keep the test environment clean
         // for any sibling test that may run after us in the same process.
@@ -1577,8 +1574,8 @@ mod tests {
     }
 
     /// br-3hrw3 companion: an explicit operator opt-in via the env var
-    /// flips `appcontainer_active()` to true so the eventual real
-    /// implementation can be enabled without re-rolling the stub.
+    /// flips `appcontainer_active()` to true for the dedicated child-process
+    /// launch path.
     #[test]
     fn appcontainer_active_when_env_opt_in_set() {
         let prev = std::env::var(FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV).ok();

@@ -41,13 +41,25 @@ still must prove the replay command uses the canonical `rch exec --` shape.
 EOF
 }
 
+require_option_value() {
+  local option="$1"
+  local value="${2:-}"
+  if [[ -z "${value}" || "${value}" == --* ]]; then
+    echo "${option} requires a value" >&2
+    usage >&2
+    exit 2
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --run-id)
+      require_option_value "$1" "${2:-}"
       RUN_ID="$2"
       shift 2
       ;;
     --out-root)
+      require_option_value "$1" "${2:-}"
       OUT_ROOT="$2"
       shift 2
       ;;
@@ -56,6 +68,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --evidence-jsonl)
+      require_option_value "$1" "${2:-}"
       EVIDENCE_JSONL_IN="$2"
       shift 2
       ;;

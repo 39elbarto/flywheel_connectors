@@ -611,8 +611,8 @@ impl LlmRouterConnector {
         }))
     }
 
-    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
-        let operations = vec![
+    fn operations_info() -> Vec<OperationInfo> {
+        vec![
             OperationInfo {
                 id: OperationId::from_static("llm-router.route"),
                 summary: "Select a provider/model and return a routing decision".to_string(),
@@ -692,10 +692,12 @@ impl LlmRouterConnector {
                 rate_limit: None,
                 requires_approval: None,
             },
-        ];
+        ]
+    }
 
+    pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         let introspection = Introspection {
-            operations,
+            operations: Self::operations_info(),
             events: Vec::new(),
             resource_types: Vec::new(),
             auth_caps: None,
@@ -2136,6 +2138,22 @@ mod tests {
         assert!(op_ids.contains(&"llm-router.list_providers"));
         assert!(op_ids.contains(&"llm-router.get_usage"));
         assert!(op_ids.contains(&"llm-router.get_budget"));
+    }
+
+    #[test]
+    fn operations_info_source_covers_runtime_catalog() {
+        let operations = LlmRouterConnector::operations_info();
+        let op_ids: Vec<&str> = operations.iter().map(|op| op.id.as_ref()).collect();
+        assert_eq!(
+            op_ids,
+            vec![
+                "llm-router.route",
+                "llm-router.estimate_cost",
+                "llm-router.list_providers",
+                "llm-router.get_usage",
+                "llm-router.get_budget",
+            ]
+        );
     }
 
     #[fcp_async_core::runtime::test]

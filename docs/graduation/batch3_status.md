@@ -10,8 +10,8 @@ Summary: `0/4` Batch 3 connectors currently pass the graduation gauntlet.
 |-----------|--------|---------------------|------------------------------|--------|
 | `connectors/huggingface` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/deepseek` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
-| `connectors/llm-router` | `blocked` | `operations_info` | `1` | missing operations_info source metadata |
-| `connectors/google-ai` | `blocked` | `operations_info` | `1` | missing operations_info source metadata |
+| `connectors/llm-router` | `blocked` | `local_non_mock` | `6` | missing tests/local_non_mock.rs |
+| `connectors/google-ai` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 
 ## Current Next Actions
 

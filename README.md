@@ -1777,14 +1777,15 @@ Proof anchors for deployment claims:
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `FWC_FORMAT` | Default output format (`toon`, `json`, `table`, `csv`, `markdown`) | `toon` |
-| `FCP_HOST` | Default `fcp-host` endpoint URL | None (requires `--host` or context) |
-| `FCP_HOST_BIND` | `fcp-host` listen address | `127.0.0.1:8787` |
+| `FWC_HOST` | Default `fcp-host` endpoint URL (`fwc` consults this first) | None (requires `--host` or context) |
+| `FCP_HOST_ENDPOINT` | Alternate name for the `fcp-host` endpoint URL (`fwc` consults this second) | None |
+| `FCP_HOST_BIND` | `fcp-host` listen address (also used by `fwc` as a third fallback for endpoint resolution) | `127.0.0.1:8787` |
 | `FCP_HOST_CONNECTORS_FILE` | Live connector inventory file mutated by `fcp-host` | None |
 | `FCP_HOST_LIFECYCLE_STATE_FILE` | Local admin-state snapshot for `fcp-host` | None |
-| `FCP_ZONE` | Default zone for operations | None |
-| `FCP_CONFIG_DIR` | FCP configuration directory | `~/.fcp` |
+| `FCP_CONFIG_DIR` | FCP configuration directory; also resolves `HOME` / `USERPROFILE` as fallbacks | `~/.fcp` |
 | `FCP_CONNECTOR_STATE` | Connector state directory | `$FCP_CONFIG_DIR/state` |
 | `RUST_LOG` | Standard Rust logging filter | `info` |
+| `SOURCE_DATE_EPOCH` | Reproducible-build timestamp source (consumed at compile time via `option_env!`) | None |
 
 ---
 

@@ -171,6 +171,18 @@ fn test_span_fields_byte_equivalent_to_audit() {
         serde_json::json!("1715630400000000000.0")
     );
     assert_eq!(
+        span.attributes["fcp.audit.entry.hlc.l"],
+        serde_json::json!(entry.hlc.physical_ms.saturating_mul(1_000_000))
+    );
+    assert_eq!(
+        span.attributes["fcp.audit.entry.hlc.c"],
+        serde_json::json!(entry.hlc.logical)
+    );
+    assert_eq!(
+        span.attributes["fcp.audit.entry.hlc.node_id"],
+        serde_json::json!(&entry.hlc.node_id)
+    );
+    assert_eq!(
         span.attributes["fcp.audit.entry.zone"],
         serde_json::json!(entry.zone_id)
     );

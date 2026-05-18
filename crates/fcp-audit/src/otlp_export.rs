@@ -101,7 +101,8 @@ impl AuditOtlpSpan {
     /// Build the parity span body for an audit entry.
     #[must_use]
     pub fn from_entry(entry: &AuditEntry, resource: AuditOtlpResource) -> Self {
-        let (physical_ns, counter) = hlc_parts(entry);
+        let physical_ns = entry.hlc.physical_ms.saturating_mul(1_000_000);
+        let counter = entry.hlc.logical;
         let decision = decision_for_entry(entry);
         let reason_code = reason_code_for_entry(entry, decision);
         let status = if decision == "accepted" {
@@ -124,6 +125,12 @@ impl AuditOtlpSpan {
         attributes.insert(
             "fcp.audit.entry.hlc".to_string(),
             json!(format!("{physical_ns}.{counter}")),
+        );
+        attributes.insert("fcp.audit.entry.hlc.l".to_string(), json!(physical_ns));
+        attributes.insert("fcp.audit.entry.hlc.c".to_string(), json!(counter));
+        attributes.insert(
+            "fcp.audit.entry.hlc.node_id".to_string(),
+            json!(&entry.hlc.node_id),
         );
         attributes.insert("fcp.audit.entry.zone".to_string(), json!(&entry.zone_id));
         attributes.insert("fcp.audit.entry.decision".to_string(), json!(decision));
@@ -472,18 +479,6 @@ fn entry_id_prefix(entry: &AuditEntry) -> String {
     }
 }
 
-fn hlc_parts(entry: &AuditEntry) -> (u64, u64) {
-    if let Some(raw_hlc) = metadata_string(entry, "hlc") {
-        if let Some((physical, counter)) = raw_hlc.split_once('.') {
-            if let (Ok(physical), Ok(counter)) = (physical.parse(), counter.parse()) {
-                return (physical, counter);
-            }
-        }
-    }
-
-    (entry.occurred_at.saturating_mul(1_000_000_000), 0)
-}
-
 fn decision_for_entry(entry: &AuditEntry) -> &'static str {
     if let Some(decision) = metadata_string(entry, "decision") {
         return match decision {
@@ -639,6 +634,19 @@ mod tests {
         assert_eq!(span.status.message, "");
         assert_eq!(span.start_time_unix_nano, 1_715_630_400_000_000_000);
         assert_eq!(span.end_time_unix_nano, 1_715_630_400_000_001_000);
+        assert_eq!(
+            span.attributes["fcp.audit.entry.hlc"],
+            json!("1715630400000000000.0")
+        );
+        assert_eq!(
+            span.attributes["fcp.audit.entry.hlc.l"],
+            json!(1_715_630_400_000_000_000u64)
+        );
+        assert_eq!(span.attributes["fcp.audit.entry.hlc.c"], json!(0));
+        assert_eq!(
+            span.attributes["fcp.audit.entry.hlc.node_id"],
+            json!("agent:test")
+        );
         assert_eq!(span.attributes["fcp.audit.entry.zone"], json!("z:work"));
         assert_eq!(
             span.attributes["fcp.audit.entry.decision"],

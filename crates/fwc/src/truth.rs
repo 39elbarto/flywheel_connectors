@@ -37,6 +37,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -111,6 +112,23 @@ impl KnowledgeState {
         }
     }
 
+    /// Operator-facing `_truth_source` tag for read-only command output.
+    ///
+    /// This intentionally differs from [`Self::label`] for the live sources:
+    /// command JSON uses compact `mesh`/`host` tags, while resolver internals
+    /// keep the more explicit `mesh-backed`/`host-backed` taxonomy.
+    #[must_use]
+    pub const fn operator_truth_source(self) -> &'static str {
+        match self {
+            Self::MeshBacked => "mesh",
+            Self::HostBacked => "host",
+            Self::NodeLocal => "node-local",
+            Self::Offline => "offline",
+            Self::Degraded => "degraded",
+            Self::FallbackDerived => "fallback-derived",
+        }
+    }
+
     /// Confidence score (0.0–1.0) representing how much weight to give
     /// answers in this state. Higher is more trustworthy.
     #[must_use]
@@ -149,6 +167,94 @@ impl fmt::Display for KnowledgeState {
         f.write_str(self.label())
     }
 }
+
+/// Schema version for read-only `fwc` command truth-source envelopes.
+pub const TRUTH_SOURCE_SCHEMA_VERSION: &str = "fcp.fwc.truth-source.v1";
+
+/// Minimum truth source accepted by `--require-source`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum RequiredTruthSource {
+    /// Require mesh-backed distributed truth.
+    Mesh,
+    /// Require mesh-backed or host-backed live truth.
+    MeshOrHost,
+    /// Require any live, non-offline truth source.
+    AnyLive,
+}
+
+impl RequiredTruthSource {
+    /// CLI/JSON label for this requirement.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Mesh => "mesh",
+            Self::MeshOrHost => "mesh-or-host",
+            Self::AnyLive => "any-live",
+        }
+    }
+
+    /// Whether this requirement accepts the resolved source.
+    #[must_use]
+    pub const fn accepts(self, actual: KnowledgeState) -> bool {
+        match self {
+            Self::Mesh => matches!(actual, KnowledgeState::MeshBacked),
+            Self::MeshOrHost => matches!(
+                actual,
+                KnowledgeState::MeshBacked | KnowledgeState::HostBacked
+            ),
+            Self::AnyLive => actual.is_live(),
+        }
+    }
+
+    /// Validate a resolved source against this requirement.
+    pub fn validate(self, actual: KnowledgeState) -> Result<(), TruthSourceUnavailable> {
+        if self.accepts(actual) {
+            Ok(())
+        } else {
+            Err(TruthSourceUnavailable {
+                required: self,
+                actual,
+            })
+        }
+    }
+
+    /// Validate a full truth resolution against this requirement.
+    pub fn validate_resolution<T>(
+        self,
+        resolution: &TruthResolution<T>,
+    ) -> Result<(), TruthSourceUnavailable> {
+        self.validate(resolution.knowledge_state)
+    }
+}
+
+impl fmt::Display for RequiredTruthSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// A command resolved from a weaker source than the operator allowed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TruthSourceUnavailable {
+    /// Required source floor.
+    pub required: RequiredTruthSource,
+    /// Actual resolved source.
+    pub actual: KnowledgeState,
+}
+
+impl fmt::Display for TruthSourceUnavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "truth source unavailable: required {}, actual {}",
+            self.required.label(),
+            self.actual.operator_truth_source()
+        )
+    }
+}
+
+impl std::error::Error for TruthSourceUnavailable {}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Truth Freshness
@@ -1663,6 +1769,22 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_state_operator_truth_source_tags_match_cli_contract() {
+        assert_eq!(KnowledgeState::MeshBacked.operator_truth_source(), "mesh");
+        assert_eq!(KnowledgeState::HostBacked.operator_truth_source(), "host");
+        assert_eq!(
+            KnowledgeState::NodeLocal.operator_truth_source(),
+            "node-local"
+        );
+        assert_eq!(KnowledgeState::Offline.operator_truth_source(), "offline");
+        assert_eq!(KnowledgeState::Degraded.operator_truth_source(), "degraded");
+        assert_eq!(
+            KnowledgeState::FallbackDerived.operator_truth_source(),
+            "fallback-derived"
+        );
+    }
+
+    #[test]
     fn knowledge_state_confidence_ordering() {
         assert!(KnowledgeState::MeshBacked.confidence() > KnowledgeState::HostBacked.confidence());
         assert!(KnowledgeState::HostBacked.confidence() > KnowledgeState::NodeLocal.confidence());
@@ -1718,6 +1840,71 @@ mod tests {
             format!("{}", KnowledgeState::FallbackDerived),
             "fallback-derived"
         );
+    }
+
+    // ── RequiredTruthSource ─────────────────────────────────────────────
+
+    #[test]
+    fn required_truth_source_labels_match_cli_contract() {
+        assert_eq!(RequiredTruthSource::Mesh.label(), "mesh");
+        assert_eq!(RequiredTruthSource::MeshOrHost.label(), "mesh-or-host");
+        assert_eq!(RequiredTruthSource::AnyLive.label(), "any-live");
+        assert_eq!(format!("{}", RequiredTruthSource::AnyLive), "any-live");
+    }
+
+    #[test]
+    fn required_truth_source_acceptance_matrix() {
+        let states = [
+            KnowledgeState::MeshBacked,
+            KnowledgeState::HostBacked,
+            KnowledgeState::NodeLocal,
+            KnowledgeState::Offline,
+            KnowledgeState::Degraded,
+            KnowledgeState::FallbackDerived,
+        ];
+
+        let accepted = |requirement: RequiredTruthSource| {
+            states
+                .into_iter()
+                .filter(|state| requirement.accepts(*state))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            accepted(RequiredTruthSource::Mesh),
+            vec![KnowledgeState::MeshBacked]
+        );
+        assert_eq!(
+            accepted(RequiredTruthSource::MeshOrHost),
+            vec![KnowledgeState::MeshBacked, KnowledgeState::HostBacked]
+        );
+        assert_eq!(
+            accepted(RequiredTruthSource::AnyLive),
+            vec![KnowledgeState::MeshBacked, KnowledgeState::HostBacked]
+        );
+    }
+
+    #[test]
+    fn required_truth_source_validate_reports_required_and_actual() {
+        let error = RequiredTruthSource::Mesh
+            .validate(KnowledgeState::HostBacked)
+            .unwrap_err();
+
+        assert_eq!(error.required, RequiredTruthSource::Mesh);
+        assert_eq!(error.actual, KnowledgeState::HostBacked);
+        assert_eq!(
+            error.to_string(),
+            "truth source unavailable: required mesh, actual host"
+        );
+    }
+
+    #[test]
+    fn required_truth_source_serde_roundtrip_uses_kebab_case() {
+        let json = serde_json::to_string(&RequiredTruthSource::MeshOrHost).unwrap();
+        assert_eq!(json, "\"mesh-or-host\"");
+
+        let back: RequiredTruthSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, RequiredTruthSource::MeshOrHost);
     }
 
     #[test]

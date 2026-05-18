@@ -374,6 +374,9 @@ use crate::readiness::{
 use crate::render::{
     ExtractRender, OutputFormat, RenderOptions, TemplateRender, render_with_options, token_stats,
 };
+use crate::truth::{
+    KnowledgeState, RequiredTruthSource, TRUTH_SOURCE_SCHEMA_VERSION, TruthSourceUnavailable,
+};
 
 const ABOUT: &str =
     "Standalone Flywheel connector console with TOON-first, progressive-disclosure output.";
@@ -1451,6 +1454,10 @@ struct ListArgs {
     /// Include connectors hidden from default catalog flows such as incubating or quarantined entries.
     #[arg(long, default_value_t = false)]
     include_hidden: bool,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -6966,6 +6973,12 @@ fn attach_tool_inventory_provenance(
 }
 
 fn list_dispatch_host(args: &ListArgs, host: &str) -> Result<DispatchOutcome> {
+    if let Some(outcome) =
+        enforce_required_truth_source("list", args.require_source, KnowledgeState::HostBacked)
+    {
+        return Ok(outcome);
+    }
+
     let client = HostAdminClient::new(host)?;
     let filter = HostDiscoveryFilter {
         category: args.category.clone(),
@@ -7003,6 +7016,7 @@ fn list_dispatch_host(args: &ListArgs, host: &str) -> Result<DispatchOutcome> {
         "list",
         catalog::DiscoveryDataSource::LiveHostInventory,
     );
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -7416,9 +7430,10 @@ fn list_dispatch(args: &ListArgs, host: Option<&str>) -> Result<DispatchOutcome>
             "list",
             json!({
                 "filters": {
-                    "zone": args.zone,
-                    "category": args.category,
+                    "zone": args.zone.clone(),
+                    "category": args.category.clone(),
                     "include_hidden": args.include_hidden,
+                    "require_source": args.require_source.map(RequiredTruthSource::label),
                 },
             }),
             vec![
@@ -7426,6 +7441,12 @@ fn list_dispatch(args: &ListArgs, host: Option<&str>) -> Result<DispatchOutcome>
                 "fwc list --offline".to_owned(),
             ],
         ));
+    }
+
+    if let Some(outcome) =
+        enforce_required_truth_source("list", args.require_source, KnowledgeState::Offline)
+    {
+        return Ok(outcome);
     }
 
     let catalog = DiscoveryCatalog::load()?;
@@ -7481,6 +7502,7 @@ fn list_dispatch(args: &ListArgs, host: Option<&str>) -> Result<DispatchOutcome>
         "list",
         catalog::DiscoveryDataSource::WorkspaceManifest,
     );
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
@@ -23040,6 +23062,61 @@ fn missing_host_dispatch(
     }
 }
 
+fn inject_truth_source_metadata(payload: &mut Value, source: KnowledgeState) {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "_truth_source".to_owned(),
+            Value::String(source.operator_truth_source().to_owned()),
+        );
+        object
+            .entry("schema_version".to_owned())
+            .or_insert_with(|| Value::String(TRUTH_SOURCE_SCHEMA_VERSION.to_owned()));
+    }
+}
+
+fn truth_source_unavailable_dispatch(
+    command: &str,
+    error: TruthSourceUnavailable,
+) -> DispatchOutcome {
+    let envelope = CommandEnvelope::new(CommandAvailability::Unavailable, command);
+    let mut payload = json!({
+        "status": "error",
+        "command": command,
+        "schema_version": TRUTH_SOURCE_SCHEMA_VERSION,
+        "_truth_source": error.actual.operator_truth_source(),
+        "error": {
+            "type": "truth-source-unavailable",
+            "required": error.required.label(),
+            "actual": error.actual.operator_truth_source(),
+            "message": format!(
+                "`fwc {command}` resolved from `{}` truth, which does not satisfy `--require-source {}`.",
+                error.actual.operator_truth_source(),
+                error.required.label(),
+            ),
+            "recoverable": true,
+        },
+        "next_actions": [
+            "Retry after the required live truth source is reachable.".to_owned(),
+            format!("Relax the requirement if `{}` truth is acceptable for this workflow.", error.actual.operator_truth_source()),
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Transport,
+    }
+}
+
+fn enforce_required_truth_source(
+    command: &str,
+    requirement: Option<RequiredTruthSource>,
+    actual: KnowledgeState,
+) -> Option<DispatchOutcome> {
+    requirement
+        .and_then(|required| required.validate(actual).err())
+        .map(|error| truth_source_unavailable_dispatch(command, error))
+}
+
 fn conflicting_catalog_mode_dispatch(command: &str) -> DispatchOutcome {
     let envelope = CommandEnvelope::new(CommandAvailability::Denied, command);
     let mut payload = json!({
@@ -29552,11 +29629,12 @@ mod tests {
         ApprovalMode, Cli, CliExitCode, Commands, ConnectorManifest, DoctorLocalCheck, DoctorProbe,
         HostConnectorCatalog, LiveAuthArgs, LiveTruthKnowledgeState, LiveTruthResolverBranch,
         MetadataField, PACKAGE_OUTPUT_FILENAME, PackageBuildMetadata, PackageOutput,
-        PrepareCliError, ResolvedHostConfig, ResolvedHostOperation, catalog,
-        doctor_hlc_probe_warnings, doctor_iblt_probe_warnings, doctor_migration_probe_warnings,
-        execute, host_discovered_connector, host_discovered_operation, host_mcp_tool_definitions,
-        host_tool_summary_entry, host_tool_when_to_use, live_pipeline_operation_metadata,
-        mcp_tool_invoke_args, normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
+        PrepareCliError, ResolvedHostConfig, ResolvedHostOperation, TRUTH_SOURCE_SCHEMA_VERSION,
+        catalog, doctor_hlc_probe_warnings, doctor_iblt_probe_warnings,
+        doctor_migration_probe_warnings, execute, host_discovered_connector,
+        host_discovered_operation, host_mcp_tool_definitions, host_tool_summary_entry,
+        host_tool_when_to_use, live_pipeline_operation_metadata, mcp_tool_invoke_args,
+        normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
         resolve_install_activation_truth, resolve_mesh_live_truth, serve_mcp,
         try_host_mcp_tool_definitions, try_host_tool_operation_info, validate_registry_binary_name,
     };
@@ -32958,11 +33036,15 @@ deny_ptrace = true
             "z:work",
             "--category",
             "code",
+            "--require-source",
+            "mesh-or-host",
         ]);
 
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_discovery_provenance(&payload, "live_host_inventory", true, "live-inventory");
         assert_eq!(payload["filters"]["category"], "code");
         assert_eq!(payload["filters"]["zone"], "z:work");
@@ -36063,6 +36145,8 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "list");
         assert_eq!(payload["source"], "workspace-manifests");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
         assert!(
             payload["connectors"]
@@ -36081,16 +36165,48 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_list_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "list",
+            "--offline",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "list");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
     fn execute_list_offline_hides_non_live_connectors_by_default() {
         let (exit_code, payload) = execute_json(&["fwc", "--json", "list", "--offline"]);
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert!(payload["hidden_by_default_omitted"].as_u64().unwrap_or(0) >= 3);
-        assert!(payload["connectors"].as_array().unwrap().iter().all(
-            |connector| connector["slug"] != "tlon"
-                && connector["slug"] != "zalo"
-                && connector["slug"] != "zalouser"
-        ));
+        let connectors = payload["connectors"].as_array().unwrap();
+        assert!(
+            connectors
+                .iter()
+                .all(|connector| connector["hidden_by_default"] == false)
+        );
+        assert!(
+            connectors
+                .iter()
+                .all(|connector| connector["slug"] != "tlon" && connector["slug"] != "zalouser")
+        );
+        let zalo = connectors
+            .iter()
+            .find(|connector| connector["slug"] == "zalo")
+            .expect("experimental connectors should remain visible by default");
+        assert_eq!(zalo["status"], "experimental");
+        assert_eq!(zalo["hidden_by_default"], false);
     }
 
     #[test]

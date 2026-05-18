@@ -50,6 +50,19 @@ jobs:
         run: bash scripts/ci/readme_drift_check.sh
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # Workspace hygiene: fail on ignored backup artifacts in source roots
+  # ─────────────────────────────────────────────────────────────────────────────
+  source-hygiene:
+    name: Source Hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check source roots for backup artifacts
+        run: bash scripts/ci/workspace_source_hygiene.sh
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # Lint: Format + Clippy
   # ─────────────────────────────────────────────────────────────────────────────
   lint:

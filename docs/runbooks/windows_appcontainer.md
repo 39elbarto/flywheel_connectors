@@ -10,7 +10,9 @@ profile SID, capability decision, launch mechanism, and Job Object attachment.
 ## Verify AppContainer Is Functioning
 
 1. Run the Windows workflow from GitHub Actions or a Windows worker.
-2. Confirm the artifact path:
+2. Confirm the artifact path. The local script default is
+   `artifacts/e2e/windows-appcontainer/<run-id>/`; the GitHub Actions lane may
+   place the process-launch bundle under:
 
 ```text
 artifacts/e2e/windows_appcontainer/<run-id>/
@@ -28,11 +30,19 @@ artifacts/e2e/windows_appcontainer/<run-id>/
   "sid_present": true,
   "job_object_attached": true,
   "redaction_scope": "public",
+  "test_status": "passed",
+  "worker_execution_class": "remote",
+  "fallback_decision": "not_needed",
   "action_result": "launched"
 }
 ```
 
 Profile creation by itself is not enough to claim `ProfileLevel`.
+When the script runs through `rch`, passing evidence must include a remote
+summary in `rch_summary`. A missing worker fleet is recorded as
+`skip_reason:"rch_remote_prerequisite_unavailable"` with
+`test_status:"skipped"`; it is useful evidence about the proof lane but not
+AppContainer readiness.
 
 ## Rollback
 
@@ -71,19 +81,20 @@ Do not promote Windows readiness to `ProfileLevel` after a failed launch.
 | `CreateAppContainerProfile failed` | Windows rejected profile creation or the profile API is unavailable. | Keep the failure artifact and check OS edition, account policy, and profile name validity. |
 | `DeriveCapabilitySidsFromName(...) failed` | Capability name is invalid for Windows. | Update the capability map and policy compiler together, or deny the FCP capability. |
 | `AssignProcessToJobObject(child) failed` | Child process launched but could not receive resource limits. | Treat as fail-closed; do not claim AppContainer enforcement for that run. |
+| `rch_remote_prerequisite_unavailable` | The script required remote `rch` execution, but no admissible worker was available. | Keep the structured skip artifact and rerun after the worker fleet recovers or on the Windows Actions lane. |
 
 ## Redacted Log Examples
 
 Successful launch:
 
 ```json
-{"schema_version":"1.0.0","record_type":"windows_appcontainer_process_launch_e2e","bead_id":"flywheel_connectors-r4qcg.1.1","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","profile_name_hash":"8d7c...","sid_present":true,"launch_mechanism":"startupinfoex_security_capabilities","job_object_attached":true,"action_result":"launched","final_readiness_layer":"process_limit"}
+{"schema_version":"1.0.0","record_type":"windows_appcontainer_process_launch_e2e","bead_id":"flywheel_connectors-r4qcg.1.1","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","profile_name_hash":"8d7c...","sid_present":true,"launch_mechanism":"startupinfoex_security_capabilities","job_object_attached":true,"test_status":"passed","worker_execution_class":"remote","fallback_decision":"not_needed","action_result":"launched","final_readiness_layer":"process_limit"}
 ```
 
 Skipped lane:
 
 ```json
-{"schema_version":"1.0.0","record_type":"windows_appcontainer_process_launch_e2e","bead_id":"flywheel_connectors-r4qcg.1.1","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","skip_reason":"windows_appcontainer_env_opt_in_missing","action_result":"structured_skip","final_readiness_layer":"process_limit"}
+{"schema_version":"1.0.0","record_type":"windows_appcontainer_process_launch_e2e","bead_id":"flywheel_connectors-r4qcg.1.1","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","test_status":"skipped","worker_execution_class":"local_fallback_refused","fallback_decision":"rch_local_fallback_refused","skip_reason":"rch_remote_prerequisite_unavailable","action_result":"structured_skip","final_readiness_layer":"process_limit"}
 ```
 
 Denied capability:

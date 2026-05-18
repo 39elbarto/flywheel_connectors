@@ -26,8 +26,14 @@ Agents in this repository should offload heavy compile and test work through
 same target and feature flags are visible:
 
 ```bash
-rch exec -- cargo check -p fcp-sandbox --target x86_64-pc-windows-gnu --features windows-appcontainer --all-targets
+RCH_REQUIRE_REMOTE=1 RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose \
+  rch exec -- cargo check -p fcp-sandbox --target x86_64-pc-windows-gnu --features windows-appcontainer --all-targets
 ```
+
+The process-launch verifier defaults to the same remote-only posture. If `rch`
+cannot assign an admissible worker, the script must emit a structured skip with
+`skip_reason:"rch_remote_prerequisite_unavailable"` instead of silently running
+Cargo locally or dropping the JSONL artifact.
 
 On a Windows runner, use:
 
@@ -41,6 +47,10 @@ FCP_SANDBOX_WINDOWS_APPCONTAINER=1 \
 FCP_SANDBOX_WINDOWS_APPCONTAINER_E2E=1 \
 bash scripts/e2e/windows_appcontainer_process_launch_verification.sh
 ```
+
+`RCH_BIN=direct` is reserved for the Windows runner because AppContainer launch
+and Job Object attachment are OS-enforced. Non-Windows agents should keep the
+default `rch` runner and treat direct local execution as out of scope.
 
 ## Linux Host Prerequisites
 
@@ -75,6 +85,7 @@ evidence under
 | target not installed | Rust target missing | Add the target with `rustup target add ...`. |
 | linker not found | MinGW/MSVC linker missing | Use a Windows runner or install the host linker. |
 | AppContainer test skipped | Live Windows prerequisites not enabled | Inspect the uploaded skip artifact for the exact reason. |
+| `rch_remote_prerequisite_unavailable` | Remote-only `rch` could not assign an admissible worker. | Preserve the structured skip and rerun after the worker fleet recovers; do not convert it into a local Cargo proof. |
 | AppContainer launch fails | OS policy or privilege issue | Keep the failure artifact; do not convert it into a passing skip. |
 
 ## CI Lane

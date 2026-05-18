@@ -51,12 +51,21 @@ fn manifest_declares_required_operations_and_network_policy() {
         );
     }
 
-    assert_eq!(
+    let embeddings_description = operations
+        .get("cerebras.embeddings.create")
+        .and_then(|op| op.get("description"))
+        .and_then(toml::Value::as_str)
+        .expect("embeddings operation should document not-supported status");
+    assert!(
+        embeddings_description.contains("does not currently expose embeddings"),
+        "embeddings operation should document that provider support is unavailable"
+    );
+    assert!(
         operations
             .get("cerebras.embeddings.create")
             .and_then(|op| op.get("availability"))
-            .and_then(toml::Value::as_str),
-        Some("not_supported")
+            .is_none(),
+        "availability is not part of the supported manifest schema"
     );
     assert_eq!(
         manifest

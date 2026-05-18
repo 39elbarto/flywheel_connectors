@@ -3,7 +3,7 @@
 > **Status**: manifest/runtime contract documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/cerebras_connector_verification.sh`
 > **Primary upstream**: https://inference-docs.cerebras.ai/
 
 ## Purpose
@@ -159,7 +159,7 @@ The deterministic integration evidence is anchored on WireMock and connector-loc
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/cerebras_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The dedicated `scripts/e2e/cerebras_connector_verification.sh` bundle records the closeout surface for this connector.
 
 The verification surface captures:
 
@@ -167,6 +167,7 @@ The verification surface captures:
 - deterministic WireMock integration coverage
 - base URL, auth, rate-limit, and redaction tests
 - formatting, check, and clippy proof through `rch`
+- extracted local non-mock JSONL evidence with prompt, response, API key, and loopback endpoint redaction checks
 - UBS on changed files before commit
 
 ## Operator Guidance
@@ -199,6 +200,7 @@ The verification surface captures:
 
 **Rerun commands**:
 
+- `RUN_ID=manual-cerebras OUT_ROOT=/Volumes/trj-data/fcp-artifacts/cerebras/manual-cerebras CARGO_TARGET_PREFIX=/Volumes/trj-data/tmp/fcp-cerebras-manual scripts/e2e/cerebras_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-cerebras-e2e cargo check -p fcp-cerebras --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-cerebras-e2e cargo test -p fcp-cerebras --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-cerebras-e2e cargo clippy -p fcp-cerebras --all-targets --no-deps -- -D warnings`

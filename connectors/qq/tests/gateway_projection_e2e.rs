@@ -1377,6 +1377,51 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         &media_type_denied,
     );
 
+    let media_type_malformed = invoke_projection(
+        &media_type_connector,
+        &signing_key,
+        &media_type_instance_id,
+        "qq-gateway-media-type-malformed",
+        json!({
+            "op": 0,
+            "s": 2,
+            "t": "GROUP_AT_MESSAGE_CREATE",
+            "id": "evt-media-type-malformed",
+            "d": {
+                "id": "msg-media-type-malformed",
+                "content": "bot-openid malformed media type",
+                "group_openid": "group-media-type",
+                "group_member_openid": "member-media-type",
+                "attachments": [
+                    {
+                        "url": "https://cdn.qq.example/private/malformed.png",
+                        "filename": "malformed.png",
+                        "content_type": "image/png/extra",
+                        "size": 512
+                    }
+                ]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(media_type_malformed["accepted"], false);
+    assert_eq!(
+        media_type_malformed["reason_code"],
+        "attachment_content_type_missing"
+    );
+    assert_eq!(
+        media_type_malformed["policy"]["reason_code"],
+        "attachment_content_type_missing"
+    );
+    assert_eq!(media_type_malformed["runtime"]["accepted_events"], 0);
+    assert_eq!(media_type_malformed["runtime"]["queue_depth"], 0);
+    log_projection_step(
+        &mut logs,
+        "media_content_type_malformed_drop",
+        "ok",
+        &media_type_malformed,
+    );
+
     let media_type_allowed = invoke_projection(
         &media_type_connector,
         &signing_key,
@@ -1384,7 +1429,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "qq-gateway-media-type-allowed",
         json!({
             "op": 0,
-            "s": 2,
+            "s": 3,
             "t": "GROUP_AT_MESSAGE_CREATE",
             "id": "evt-media-type-allowed",
             "d": {
@@ -2188,6 +2233,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "oversized.bin",
         "missing-size.pdf",
         "disallowed.exe",
+        "malformed.png",
         "allowed.png",
     ] {
         assert!(
@@ -2210,6 +2256,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert!(log_contents.contains("attachment_bytes_exceeded"));
     assert!(log_contents.contains("attachment_size_unknown"));
     assert!(log_contents.contains("attachment_content_type_not_allowed"));
+    assert!(log_contents.contains("attachment_content_type_missing"));
+    assert!(log_contents.contains("media_content_type_malformed_drop"));
     assert!(log_contents.contains("media_content_type_policy_allowed"));
     assert!(log_contents.contains("queue_full_policy_denied"));
     assert!(log_contents.contains("queue_full_backpressure_drop"));

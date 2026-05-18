@@ -350,6 +350,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           "oversized_media_policy_drop",
           "unknown_media_size_policy_drop",
           "media_content_type_policy_drop",
+          "media_content_type_malformed_drop",
           "media_content_type_policy_allowed",
           "reply_media_projection",
           "voice_asr_projection",
@@ -459,6 +460,17 @@ if [[ "${overall_status}" == "passed" ]]; then
             and .details.accepted == false
             and .details.reason_code == "attachment_content_type_not_allowed"
             and .details.policy.reason_code == "attachment_content_type_not_allowed"
+            and .details.normalized.has_attachments == true
+            and (.details.normalized.attachment_content_types | type) == "array"
+            and (.details.normalized.attachment_content_types | length) == 1
+            and .details.runtime.accepted_events == 0
+            and .details.runtime.queue_depth == 0
+          )
+          and any(.[];
+            .step == "media_content_type_malformed_drop"
+            and .details.accepted == false
+            and .details.reason_code == "attachment_content_type_missing"
+            and .details.policy.reason_code == "attachment_content_type_missing"
             and .details.normalized.has_attachments == true
             and (.details.normalized.attachment_content_types | type) == "array"
             and (.details.normalized.attachment_content_types | length) == 1

@@ -69,7 +69,10 @@ repeatable artifact bundle under `artifacts/e2e/connector-prewarm-cold-start/`.
 The script keeps Cargo execution behind `rch`, forces verbose RCH visibility,
 requires its embedded proof run to finish with an observed `[RCH] remote`
 summary, extracts the emitted JSONL proof, validates the required scenarios, and
-writes a structured skip artifact when a remote worker is unavailable. A
+writes a structured skip artifact when a remote worker is unavailable. Operator
+provided run ids must be redaction-safe label tokens using only ASCII letters,
+digits, `.`, `_`, and `-`, so artifact paths cannot be shaped with slashes,
+traversal, or private-path fragments. A
 successful embedded run that reports `[RCH] local` or emits no RCH summary fails
 closed instead of being reusable shared-worker evidence. Remote prerequisite
 skips are acceptable only for the default deterministic smoke lane, and their

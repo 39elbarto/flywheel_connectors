@@ -84,6 +84,13 @@ require_cmd() {
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+validate_run_id() {
+  if [[ ! "${RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "RUN_ID must use only A-Z, a-z, 0-9, '.', '_', and '-': ${RUN_ID}" >&2
+    exit 2
+  fi
+}
+
 hash_text_sha256() {
   printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
 }
@@ -147,6 +154,8 @@ case "${REQUIRE_PRODUCTION_SOAK}" in
     exit 2
     ;;
 esac
+
+validate_run_id
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 

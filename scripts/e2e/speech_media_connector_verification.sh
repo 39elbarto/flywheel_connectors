@@ -6,11 +6,16 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/speech-media/${RUN_ID}}"
 TARGET_DIR="${SPEECH_MEDIA_CARGO_TARGET_DIR:-/tmp/fcp-speech-media-e2e-target}"
+RCH_BIN="${RCH_BIN:-rch}"
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+REMOTE_RUNNER="rch:remote-required"
+export RCH_FORCE_REMOTE=1
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
 OVERALL_STATUS="ok"
 EXIT_CODE=0
+LAST_STEP_STATUS="not_run"
 
 promote_overall_status() {
   local next_status="$1"
@@ -30,44 +35,78 @@ promote_overall_status() {
 
 classify_failure() {
   local log_path="$1"
-  if grep -Eq 'timeout: failed to execute process|No such file or directory|RCH-E|missing worker|No space left on device' "${log_path}"; then
+  if grep -Eq 'timeout: failed to execute process|No such file or directory|RCH-E|remote required; refusing local fallback|rch command did not produce remote proof|\[RCH\] local|missing worker|No space left on device|Backend unavailable|unable to update registry|spurious network error|failed to get successful HTTP response' "${log_path}"; then
     echo "infra_blocked"
   else
     echo "failed"
   fi
 }
 
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required command: $1" >&2
+    exit 1
+  fi
+}
+
+require_rch_remote_proof() {
+  local name="$1"
+  local log_path="$2"
+
+  if grep -Fq "[RCH] remote" "${log_path}"; then
+    return 0
+  fi
+
+  echo "[speech-media-verification] ${name}: rch command did not produce remote proof" >&2
+  echo "rch command did not produce remote proof" >>"${log_path}"
+  return 1
+}
+
 run_logged() {
   local name="$1"
   shift
   local log_path="${OUT_ROOT}/logs/${name}.log"
+  local rc
+
   echo "[speech-media-verification] ${name}: $*" >&2
   (
-    cd "${REPO_ROOT}"
+    cd "${REPO_ROOT}" || exit
     "$@"
   ) >"${log_path}" 2>&1
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && ! require_rch_remote_proof "${name}" "${log_path}"; then
+    return 1
+  fi
+  return "${rc}"
 }
 
 run_step() {
   local name="$1"
   shift
   if run_logged "${name}" "$@"; then
-    echo "passed"
+    LAST_STEP_STATUS="passed"
   else
     local status
     status="$(classify_failure "${OUT_ROOT}/logs/${name}.log")"
     promote_overall_status "${status}"
-    echo "${status}"
+    LAST_STEP_STATUS="${status}"
   fi
 }
 
 git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
-cargo_check_status="$(run_step cargo_check rch exec -- bash -lc "env CARGO_TARGET_DIR=${TARGET_DIR} cargo check -p fcp-deepgram -p fcp-elevenlabs --all-targets")"
-format_check_status="$(run_step format_check rch exec -- cargo fmt -p fcp-deepgram -p fcp-elevenlabs -p fcp-e2e -- --check)"
-e2e_status="$(run_step e2e_fixture rch exec -- bash -lc "env CARGO_TARGET_DIR=${TARGET_DIR} cargo test -p fcp-e2e --no-default-features --features deepgram,elevenlabs --test speech_media_provider_e2e -- --nocapture")"
-clippy_status="$(run_step clippy rch exec -- bash -lc "env CARGO_TARGET_DIR=${TARGET_DIR} cargo clippy -p fcp-deepgram -p fcp-elevenlabs --all-targets --no-deps -- -D warnings")"
-e2e_clippy_status="$(run_step e2e_clippy rch exec -- bash -lc "env CARGO_TARGET_DIR=${TARGET_DIR} cargo clippy -p fcp-e2e --no-default-features --features deepgram,elevenlabs --test speech_media_provider_e2e --no-deps -- -D warnings")"
+require_cmd "${RCH_BIN}"
+
+run_step cargo_check env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo check -p fcp-deepgram -p fcp-elevenlabs --all-targets
+cargo_check_status="${LAST_STEP_STATUS}"
+run_step format_check env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo fmt -p fcp-deepgram -p fcp-elevenlabs -p fcp-e2e -- --check
+format_check_status="${LAST_STEP_STATUS}"
+run_step e2e_fixture env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-e2e --no-default-features --features deepgram,elevenlabs --test speech_media_provider_e2e -- --nocapture
+e2e_status="${LAST_STEP_STATUS}"
+run_step clippy env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo clippy -p fcp-deepgram -p fcp-elevenlabs --all-targets --no-deps -- -D warnings
+clippy_status="${LAST_STEP_STATUS}"
+run_step e2e_clippy env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo clippy -p fcp-e2e --no-default-features --features deepgram,elevenlabs --test speech_media_provider_e2e --no-deps -- -D warnings
+e2e_clippy_status="${LAST_STEP_STATUS}"
 
 if grep -a '^SPEECH_MEDIA_FIXTURE_JSONL ' "${OUT_ROOT}/logs/e2e_fixture.log" \
   | sed 's/^SPEECH_MEDIA_FIXTURE_JSONL //' >"${OUT_ROOT}/evidence/fixture_boundary.jsonl"
@@ -100,20 +139,27 @@ cat >"${OUT_ROOT}/environment.json" <<EOF
   "verification_script": "scripts/e2e/speech_media_connector_verification.sh",
   "artifact_root": "${OUT_ROOT}",
   "cargo_target_dir": "${TARGET_DIR}",
+  "rch_bin": "${RCH_BIN}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
   "git_revision": "${git_revision}",
   "scope": "deterministic loopback for prerecorded Deepgram Listen plus ElevenLabs voices/TTS; realtime streaming remains out of this proof slice"
 }
 EOF
 
-cat >"${OUT_ROOT}/replay.sh" <<'EOF'
+cat >"${OUT_ROOT}/replay.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-SPEECH_MEDIA_CARGO_TARGET_DIR="${SPEECH_MEDIA_CARGO_TARGET_DIR:-/tmp/fcp-speech-media-e2e-target}"
-rch exec -- bash -lc "env CARGO_TARGET_DIR=${SPEECH_MEDIA_CARGO_TARGET_DIR} cargo check -p fcp-deepgram -p fcp-elevenlabs --all-targets"
-rch exec -- cargo fmt -p fcp-deepgram -p fcp-elevenlabs -p fcp-e2e -- --check
-rch exec -- bash -lc "env CARGO_TARGET_DIR=${SPEECH_MEDIA_CARGO_TARGET_DIR} cargo test -p fcp-e2e --no-default-features --features deepgram,elevenlabs --test speech_media_provider_e2e -- --nocapture"
-rch exec -- bash -lc "env CARGO_TARGET_DIR=${SPEECH_MEDIA_CARGO_TARGET_DIR} cargo clippy -p fcp-deepgram -p fcp-elevenlabs --all-targets --no-deps -- -D warnings"
-rch exec -- bash -lc "env CARGO_TARGET_DIR=${SPEECH_MEDIA_CARGO_TARGET_DIR} cargo clippy -p fcp-e2e --no-default-features --features deepgram,elevenlabs --test speech_media_provider_e2e --no-deps -- -D warnings"
+SPEECH_MEDIA_CARGO_TARGET_DIR="\${SPEECH_MEDIA_CARGO_TARGET_DIR:-${TARGET_DIR}}"
+RCH_BIN="\${RCH_BIN:-${RCH_BIN}}"
+REPO_TOOLCHAIN="\${REPO_TOOLCHAIN:-${REPO_TOOLCHAIN}}"
+export RCH_FORCE_REMOTE=1
+
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${SPEECH_MEDIA_CARGO_TARGET_DIR}" cargo check -p fcp-deepgram -p fcp-elevenlabs --all-targets
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${SPEECH_MEDIA_CARGO_TARGET_DIR}" cargo fmt -p fcp-deepgram -p fcp-elevenlabs -p fcp-e2e -- --check
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${SPEECH_MEDIA_CARGO_TARGET_DIR}" cargo test -p fcp-e2e --no-default-features --features deepgram,elevenlabs --test speech_media_provider_e2e -- --nocapture
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${SPEECH_MEDIA_CARGO_TARGET_DIR}" cargo clippy -p fcp-deepgram -p fcp-elevenlabs --all-targets --no-deps -- -D warnings
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${SPEECH_MEDIA_CARGO_TARGET_DIR}" cargo clippy -p fcp-e2e --no-default-features --features deepgram,elevenlabs --test speech_media_provider_e2e --no-deps -- -D warnings
 EOF
 chmod +x "${OUT_ROOT}/replay.sh"
 
@@ -122,6 +168,8 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
   "run_id": "${RUN_ID}",
   "overall_status": "${OVERALL_STATUS}",
   "artifacts_root": "${OUT_ROOT}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
   "steps": {
     "cargo_check": "${cargo_check_status}",
     "format_check": "${format_check_status}",

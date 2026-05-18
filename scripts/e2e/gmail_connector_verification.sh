@@ -6,6 +6,9 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-/tmp/fcp-gmail-e2e/${RUN_ID}}"
 TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-gmail-e2e-target}"
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+REMOTE_RUNNER="rch:remote-required"
+export RCH_FORCE_REMOTE=1
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
@@ -36,7 +39,7 @@ classify_failure() {
     return
   fi
   # shellcheck disable=SC2016
-  if grep -Eq 'No space left on device|timeout: failed to execute process|RCH-E|no admissible workers|remote required; refusing local fallback|no worker assigned|connection reset by peer|missing worker system package|failed to execute process|failed to get successful HTTP response from `https://index\.crates\.io/|Backend unavailable|unable to update registry `crates-io`|spurious network error' "${log_path}"; then
+  if grep -Eq 'No space left on device|timeout: failed to execute process|RCH-E|no admissible workers|remote required; refusing local fallback|rch command did not produce remote proof|\[RCH\] local|no worker assigned|connection reset by peer|missing worker system package|failed to execute process|failed to get successful HTTP response from `https://index\.crates\.io/|Backend unavailable|unable to update registry `crates-io`|spurious network error' "${log_path}"; then
     echo "infra_blocked"
   else
     echo "failed"
@@ -85,13 +88,31 @@ run_absence_scan() {
   fi
 }
 
+rch_remote_summary_present() {
+  local log_path="$1"
+  grep -Fq "[RCH] remote" "${log_path}"
+}
+
 run_rch_cargo_step() {
   local name="$1"
   shift
-  run_step "${name}" env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
+  run_step "${name}" env \
+    RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" \
+    RCH_FORCE_REMOTE=1 \
+    RCH_VISIBILITY=verbose \
+    rch exec -- env \
+    "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" \
     CARGO_TARGET_DIR="${TARGET_DIR}" \
     CARGO_INCREMENTAL=0 \
     "$@"
+  if [[ "${LAST_STEP_STATUS}" == "passed" ]]; then
+    if ! rch_remote_summary_present "${OUT_ROOT}/logs/${name}.log"; then
+      echo "[gmail-verification] ${name}: rch command did not produce remote proof" >&2
+      echo "rch command did not produce remote proof" >>"${OUT_ROOT}/logs/${name}.log"
+      promote_status infra_blocked
+      LAST_STEP_STATUS="infra_blocked"
+    fi
+  fi
 }
 
 git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -125,6 +146,8 @@ cat >"${OUT_ROOT}/environment.json" <<EOF
   "artifact_root": "${OUT_ROOT}",
   "git_revision": "${git_revision}",
   "target_dir": "${TARGET_DIR}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
   "fixture_mode": "no-live-credential Gmail REST loopback",
   "redaction": "no access token, refresh token, credential secret, email address, message id, thread id, subject, snippet, body text, or provider payload is emitted; evidence carries operation IDs, path classes, counts, and outcome enums"
 }
@@ -136,6 +159,8 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
   "connector": "fcp-gmail",
   "overall_status": "${OVERALL_STATUS}",
   "artifacts_root": "${OUT_ROOT}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
   "steps": {
     "graduation_gauntlet": "${graduation_gauntlet_status}",
     "format_check": "${format_check_status}",
@@ -148,10 +173,31 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
   },
   "artifacts": {
     "environment": "${OUT_ROOT}/environment.json",
+    "replay": "${OUT_ROOT}/replay.sh",
     "logs": "${OUT_ROOT}/logs"
   }
 }
 EOF
+
+cat >"${OUT_ROOT}/replay.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+export RCH_FORCE_REMOTE=1
+REPO_TOOLCHAIN="\${REPO_TOOLCHAIN:-${REPO_TOOLCHAIN}}"
+TARGET_DIR="\${CARGO_TARGET_DIR:-${TARGET_DIR}}"
+
+cd "${REPO_ROOT}"
+scripts/graduation/run_gauntlet.sh connectors/gmail
+env RCH_REQUIRE_REMOTE="\${RCH_REQUIRE_REMOTE:-1}" RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" CARGO_INCREMENTAL=0 cargo fmt -p fcp-gmail -- --check
+env RCH_REQUIRE_REMOTE="\${RCH_REQUIRE_REMOTE:-1}" RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" CARGO_INCREMENTAL=0 cargo test -p fcp-gmail --test local_non_mock -- --nocapture
+env RCH_REQUIRE_REMOTE="\${RCH_REQUIRE_REMOTE:-1}" RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" CARGO_INCREMENTAL=0 cargo test -p fcp-gmail --test conformance_contract -- --nocapture
+env RCH_REQUIRE_REMOTE="\${RCH_REQUIRE_REMOTE:-1}" RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" CARGO_INCREMENTAL=0 cargo clippy -p fcp-gmail --test local_non_mock --test conformance_contract --no-deps -- -D warnings
+git diff --check -- connectors/gmail/Cargo.toml connectors/gmail/manifest.toml connectors/gmail/src/connector.rs connectors/gmail/tests/local_non_mock.rs connectors/gmail/README.md scripts/e2e/gmail_connector_verification.sh
+! rg -n '\\bmaster\\b' connectors/gmail/README.md
+! rg -n 'ya29\\.|refresh_token|client_secret|Authorization: Bearer|loopback@example\\.invalid|Local acceptance snippet|msg-local-acceptance|thread-local-acceptance' "${OUT_ROOT}/logs"
+EOF
+chmod +x "${OUT_ROOT}/replay.sh"
 
 echo "Gmail verification artifacts written to ${OUT_ROOT}"
 exit "${EXIT_CODE}"

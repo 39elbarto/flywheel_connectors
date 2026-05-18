@@ -503,7 +503,9 @@ redaction-scan records identify the case-insensitive policy version instead of
 echoing the raw forbidden marker list, so the scan records themselves do not
 make the finished artifact fail its own redaction checks. That policy covers
 private paths, raw operation/principal/zone labels, secret material,
-auth/header markers, provider-body markers, and reviewer-contact markers.
+auth/header markers, provider-body markers, reviewer-contact markers, and the
+host-dispatcher fixture literals `send_message`, `agent-alpha`, and
+`agent-beta`.
 Its command records carry the same execution-proof fields as the top-level
 gauntlet: non-`rch` lanes must report `fallback_decision:"not_needed"`,
 `worker_execution_class:"not_applicable"`, and `rch_summary:null`; `rch`-backed

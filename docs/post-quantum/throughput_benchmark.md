@@ -468,6 +468,10 @@ it requires exact Lean theorem/assumption ID arrays, stable command log hashes,
 an explicit redaction-scan pass record, the expected `SMALL_TEST` and
 `V4_REFERENCE` summary profiles, one consistent run id and git revision, and a
 separate final artifact SHA printed after the validation record is appended.
+The standalone formal script also treats Lean/Lake proof as mandatory: a missing
+`lake` binary fails `prerequisite_lake`, and the self-contract requires passing
+`lean_lake_workspace_probe` and `lean_lake_build` command records instead of
+accepting a skip record.
 The summary record must name the actual formal-correspondence JSONL artifact
 being emitted, and both run-id-derived and operator-supplied artifact paths are
 limited to a single relative `target/fcp-crypto-pq/*.jsonl` file before the

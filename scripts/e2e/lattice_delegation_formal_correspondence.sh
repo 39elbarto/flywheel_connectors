@@ -311,13 +311,11 @@ validate_formal_script_contract() {
         (.details.cleanup_result | type == "string"));
     def lean_lake_step:
       any(.[]; .step == "lean_lake_build" and
-        ((.result == "skip" and .details.skip_reason == "lake_not_available" and
-          (.details.cleanup_result | type == "string")) or
-         (.result == "pass" and
-          (.details.log_hash | sha256_hash) and
-          .details.log_artifact_class == "relative-target-log" and
-          execution_proof_contract and
-          (.details.cleanup_result | type == "string"))));
+        .result == "pass" and
+        (.details.log_hash | sha256_hash) and
+        .details.log_artifact_class == "relative-target-log" and
+        execution_proof_contract and
+        (.details.cleanup_result | type == "string"));
     def top_level_provenance_consistent:
       ([.[] | .run_id] | unique | length == 1) and
       ([.[] | .git_revision] | unique | length == 1);
@@ -328,16 +326,16 @@ validate_formal_script_contract() {
       .script == "scripts/e2e/lattice_delegation_formal_correspondence.sh" and
       (.run_id | type == "string") and
       (.step | type == "string") and
-      (.result == "pass" or .result == "fail" or .result == "skip") and
+      .result == "pass" and
       (.git_revision | type == "string") and
-      (.details | type == "object") and
-      (if .result == "skip" then (.details.skip_reason | type == "string") else true end)) and
+      (.details | type == "object")) and
     any(.[]; .step == "validate_lean_ids" and .result == "pass" and
       (.details.theorem_names | type == "array" and
         ((. | sort) == (required_theorem_names | sort))) and
       (.details.assumption_ids | type == "array" and
         ((. | sort) == (required_assumption_ids | sort))) and
       (.details.cleanup_result | type == "string")) and
+    command_step("lean_lake_workspace_probe") and
     lean_lake_step and
     command_step("rust_crypto_correspondence") and
     command_step("rust_policy_correspondence") and
@@ -385,12 +383,12 @@ done
 append_json "validate_lean_ids" "pass" "$(jq -cn \
   '{theorem_names:["lattice_delegation_chain_corruption_rejected","lattice_delegation_sis_assumption_boundary_complete","lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions"],assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1","FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1","FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1","FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"],cleanup_result:"not_applicable"}')"
 
-if command -v lake >/dev/null 2>&1; then
-  run_and_capture "lean_lake_build" lake build
-else
-  append_json "lean_lake_build" "skip" "$(jq -cn \
-    '{skip_reason:"lake_not_available",cleanup_result:"not_applicable"}')"
+if ! command -v lake >/dev/null 2>&1; then
+  fail_step "prerequisite_lake" "$(jq -cn \
+    '{missing:"lake",required_for:"lean_lake_build",cleanup_result:"not_applicable"}')"
 fi
+run_and_capture "lean_lake_workspace_probe" lake env lean --version
+run_and_capture "lean_lake_build" lake build
 
 if ! command -v "${RCH_BIN}" >/dev/null 2>&1; then
   fail_step "prerequisite_rch" "$(jq -cn --arg missing "${RCH_BIN}" \

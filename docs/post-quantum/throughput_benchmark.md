@@ -450,8 +450,9 @@ reviewer evidence contract.
 The redaction scan treats raw zone, operation, and principal labels plus
 authorization headers, bearer strings, access or refresh tokens, exact or child
 `/tmp` and `/private/tmp` paths, `/private/var/`, `/var/folders/`, `/Volumes/`,
-and the host dispatcher fixture literals `send_message`, `agent-alpha`, and
-`agent-beta` as failures.
+macOS `/Users/`, Linux worker `/home/` and `/data/projects/`, Windows
+`C:\Users\`, and the host dispatcher fixture literals `send_message`,
+`agent-alpha`, and `agent-beta` as failures.
 Because the summary record is appended after the normal redaction scan, the
 script scans the finished JSONL again and requires a `final_redaction_scan`
 pass record before printing the artifact path and final hash. The self-contract

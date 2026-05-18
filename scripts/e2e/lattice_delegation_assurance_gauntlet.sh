@@ -422,12 +422,15 @@ scan_jsonl_artifact() {
   local path="$1"
   local forbidden
   for forbidden in \
+    "/home/" \
+    "/data/projects/" \
     "/Users/" \
     "/Volumes/" \
     "/private/var/" \
     "/var/folders/" \
     "/tmp" \
     "/private/tmp" \
+    "C:\\\\Users\\\\" \
     "trapdoor_material" \
     "trapdoor_coefficients" \
     "secret_seed" \

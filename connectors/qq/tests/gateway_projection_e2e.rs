@@ -290,7 +290,10 @@ fn evidence_hash(raw: &str) -> String {
 }
 
 fn typed_evidence_hash(raw: &str) -> String {
-    format!("sha256:{}", evidence_hash(raw))
+    let mut hasher = Sha256::new();
+    hasher.update(b"fcp-qq-gateway-metadata-v1:");
+    hasher.update(raw.as_bytes());
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 fn git_revision() -> String {
@@ -2346,9 +2349,9 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
             .expect("QQ gateway log_start hash field exists");
         assert!(
             hash.strip_prefix("sha256:").is_some_and(|digest| {
-                digest.len() == 24 && digest.chars().all(|ch| ch.is_ascii_hexdigit())
+                digest.len() == 64 && digest.chars().all(|ch| ch.is_ascii_hexdigit())
             }),
-            "QQ gateway log_start field `{field}` must be a typed short SHA-256 digest"
+            "QQ gateway log_start field `{field}` must be a full SHA-256 digest"
         );
     }
     assert!(

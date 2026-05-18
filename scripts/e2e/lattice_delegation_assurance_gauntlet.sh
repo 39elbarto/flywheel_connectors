@@ -51,10 +51,10 @@ json_string_or_null() {
 
 target_dir_class() {
   case "${TARGET_DIR}" in
-    /tmp/*|/private/tmp/*)
+    /tmp|/tmp/*|/private/tmp|/private/tmp/*)
       printf 'ephemeral_tmp'
       ;;
-    target/*)
+    target|target/*)
       printf 'repo_relative_target'
       ;;
     *)
@@ -423,8 +423,11 @@ scan_jsonl_artifact() {
   local forbidden
   for forbidden in \
     "/Users/" \
-    "/tmp/" \
-    "/private/tmp/" \
+    "/Volumes/" \
+    "/private/var/" \
+    "/var/folders/" \
+    "/tmp" \
+    "/private/tmp" \
     "trapdoor_material" \
     "trapdoor_coefficients" \
     "secret_seed" \
@@ -448,7 +451,9 @@ scan_jsonl_artifact() {
     "bearer" \
     "agent:" \
     "op:" \
+    "operation:" \
     "principal:" \
+    "zone:" \
     "token=" \
     "z:" \
     "access_token" \

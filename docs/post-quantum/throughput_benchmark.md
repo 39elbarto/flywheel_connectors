@@ -413,10 +413,11 @@ all JSONL records so reviewer evidence cannot be stitched together from
 different runs. The top-level and component artifact revisions must be actual
 7- to 40-character hexadecimal Git commit ids; `unknown` is a preflight or
 contract failure, not reusable evidence. Top-level target-dir classes are
-limited to `ephemeral_tmp`, `repo_relative_target`, or `custom_hashed`; the
-host dispatcher component artifact is limited to `tmp_absolute`, `absolute`,
-`relative`, or `unset`, so a novel label cannot bypass target-dir provenance
-review.
+limited to `ephemeral_tmp`, `repo_relative_target`, or `custom_hashed`; exact
+`/tmp`, `/private/tmp`, and `target` roots are classified the same way as their
+children. The host dispatcher component artifact is limited to `tmp_absolute`,
+`absolute`, `relative`, or `unset`, so a novel label cannot bypass target-dir
+provenance review.
 The narrower `scripts/e2e/lattice_delegation_formal_correspondence.sh` proof
 script also validates its own JSONL envelope before printing the artifact path:
 it requires exact Lean theorem/assumption ID arrays, stable command log hashes,
@@ -441,9 +442,10 @@ gauntlet to be represented by a passing command-run record, including Lean, Rust
 test, Criterion, format, check, clippy, diff-check, and UBS lanes, so a partial
 artifact cannot pass by carrying only a summary and materialized hashes.
 The redaction scan treats raw zone, operation, and principal labels plus
-authorization headers, bearer strings, access or refresh tokens, and the host
-dispatcher fixture literals `send_message`, `agent-alpha`, and `agent-beta` as
-failures.
+authorization headers, bearer strings, access or refresh tokens, exact or child
+`/tmp` and `/private/tmp` paths, `/private/var/`, `/var/folders/`, `/Volumes/`,
+and the host dispatcher fixture literals `send_message`, `agent-alpha`, and
+`agent-beta` as failures.
 Because the summary record is appended after the normal redaction scan, the
 script scans the finished JSONL again and requires a `final_redaction_scan`
 pass record before printing the artifact path and final hash. The self-contract

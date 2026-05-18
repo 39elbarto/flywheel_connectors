@@ -12,24 +12,25 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use fcp_evidence::{
     ClaimId, ClaimNode, ClaimStatus, EvidenceKind, EvidenceNode, ObservedProofArtifact,
     ProofBundleRegistry, ProofBundleValidationReport, ProofBundleValidator, ProofGapStatus,
     ProofGraph, ProofGraphCorpus, ProofGraphIndexer, ProofValidationStatus,
-    RCH_REMOTE_PROOF_EVIDENCE_SCHEMA, RchRemoteProofBlockerReason, RchRemoteProofClassification,
-    RchRemoteProofEvidence, RchRemoteProofExitKind, RchRemoteProofRedaction,
-    RchRemoteProofRedactionFlag, RchRemoteProofSummary, RchRemoteProofSummaryLocation,
-    RerunCommand, SupportEdge, SupportRelationship,
+    RchRemoteProofBlockerReason, RchRemoteProofClassification, RchRemoteProofEvidence,
+    RchRemoteProofExitKind, RchRemoteProofRedaction, RchRemoteProofRedactionFlag,
+    RchRemoteProofSummary, RchRemoteProofSummaryLocation, RerunCommand, SupportEdge,
+    SupportRelationship, RCH_REMOTE_PROOF_EVIDENCE_SCHEMA,
 };
 use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::readiness::{idempotency_label, risk_level_label, safety_tier_label};
 
 const CAPABILITY_PASSPORT_SCHEMA: &str = "fcp.capability-passport.v1";
+const RCH_STATUS_SCHEMA: &str = "fcp.fwc.proof.rch-status.v1";
 const DEFAULT_NEXT_LIMIT: usize = 10;
 const DEFAULT_OUTPUT_PREVIEW_BYTES: usize = 16 * 1024;
 
@@ -55,6 +56,9 @@ pub enum ProofCommand {
     Passport(ProofPassportArgs),
     /// Validate proof-bundle freshness and artifact status as deterministic JSON.
     Status(ProofStatusArgs),
+    /// Normalize RCH worker telemetry into a remote-proof capacity decision.
+    #[command(name = "rch-status")]
+    RchStatus(ProofRchStatusArgs),
 }
 
 /// Shared corpus loader arguments.
@@ -146,6 +150,26 @@ pub struct ProofStatusArgs {
     pub now_unix_ms: Option<u64>,
 }
 
+/// Arguments for `fwc proof rch-status`.
+#[derive(Args, Debug, Clone, Serialize)]
+pub struct ProofRchStatusArgs {
+    /// Read-only JSON captured from `rch status --json`.
+    #[arg(long = "status-json", value_name = "PATH")]
+    pub status_json: Option<PathBuf>,
+
+    /// Read-only JSON captured from `rch diagnose`.
+    #[arg(long = "diagnose-json", value_name = "PATH")]
+    pub diagnose_json: Option<PathBuf>,
+
+    /// Read-only JSON captured from `rch workers probe --all --json`.
+    #[arg(long = "workers-json", value_name = "PATH")]
+    pub workers_json: Option<PathBuf>,
+
+    /// RCH summary line to classify, e.g. `[RCH] remote worker-7 ...`.
+    #[arg(long = "summary-line", value_name = "LINE")]
+    pub summary_lines: Vec<String>,
+}
+
 /// Structured result returned to the main dispatcher.
 #[derive(Debug)]
 pub(crate) struct ProofCommandResult {
@@ -229,6 +253,24 @@ struct ExecutedRchProof {
     preserved_exit_code: Option<i32>,
     evidence: RchRemoteProofEvidence,
     jsonl_record: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct RchCapacityReport {
+    schema_version: &'static str,
+    decision: &'static str,
+    remote_required_allowed: bool,
+    healthy_workers: usize,
+    admissible_workers: usize,
+    total_slots: usize,
+    available_slots: usize,
+    selected_worker: Option<String>,
+    local_fallback_detected: bool,
+    stale_tooling_detected: bool,
+    blockers: Vec<String>,
+    warnings: Vec<String>,
+    telemetry_parse_errors: Vec<String>,
+    next_actions: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -395,6 +437,7 @@ pub fn run(args: &ProofArgs) -> Result<ProofCommandResult> {
         ProofCommand::Run(args) => run_known_command(args),
         ProofCommand::Passport(args) => passport(args),
         ProofCommand::Status(args) => status(args),
+        ProofCommand::RchStatus(args) => rch_status(args),
     }
 }
 
@@ -626,6 +669,51 @@ fn status(args: &ProofStatusArgs) -> Result<ProofCommandResult> {
     Ok(ProofCommandResult { payload, success })
 }
 
+fn rch_status(args: &ProofRchStatusArgs) -> Result<ProofCommandResult> {
+    let mut telemetry_parse_errors = Vec::new();
+    let status_doc = load_optional_rch_json(
+        args.status_json.as_deref(),
+        "rch_status",
+        &mut telemetry_parse_errors,
+    );
+    let diagnose_doc = load_optional_rch_json(
+        args.diagnose_json.as_deref(),
+        "rch_diagnose",
+        &mut telemetry_parse_errors,
+    );
+    let workers_doc = load_optional_rch_json(
+        args.workers_json.as_deref(),
+        "rch_workers",
+        &mut telemetry_parse_errors,
+    );
+    let report = build_rch_capacity_report(
+        status_doc.as_ref(),
+        diagnose_doc.as_ref(),
+        workers_doc.as_ref(),
+        &args.summary_lines,
+        telemetry_parse_errors,
+    );
+    let success = report.telemetry_parse_errors.is_empty();
+    let mut payload = json!({
+        "status": if success { "ok" } else { "error" },
+        "command": "proof",
+        "subcommand": "rch-status",
+        "schema_version": RCH_STATUS_SCHEMA,
+        "source": {
+            "status_json": args.status_json.as_ref().map(|path| path.display().to_string()),
+            "diagnose_json": args.diagnose_json.as_ref().map(|path| path.display().to_string()),
+            "workers_json": args.workers_json.as_ref().map(|path| path.display().to_string()),
+            "summary_lines": args.summary_lines.len(),
+        },
+        "capacity": report,
+    });
+    insert_toon(
+        &mut payload,
+        "Normalized read-only RCH telemetry into a remote-proof capacity decision.",
+    );
+    Ok(ProofCommandResult { payload, success })
+}
+
 fn load_graph(args: &ProofCorpusArgs) -> Result<LoadedProofGraph> {
     let file = File::open(&args.corpus)
         .with_context(|| format!("opening ProofGraph corpus `{}`", args.corpus.display()))?;
@@ -657,6 +745,419 @@ fn load_observed_artifacts(path: Option<&Path>) -> Result<BTreeMap<String, Obser
         .with_context(|| format!("opening proof artifact catalog `{}`", path.display()))?;
     serde_json::from_reader(file)
         .with_context(|| format!("parsing proof artifact catalog `{}`", path.display()))
+}
+
+fn load_optional_rch_json(
+    path: Option<&Path>,
+    label: &str,
+    telemetry_parse_errors: &mut Vec<String>,
+) -> Option<Value> {
+    let Some(path) = path else {
+        return None;
+    };
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            telemetry_parse_errors.push(format!(
+                "{label}: telemetry_read_error: `{}`: {error}",
+                path.display()
+            ));
+            return None;
+        }
+    };
+    match serde_json::from_reader(file) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            telemetry_parse_errors.push(format!(
+                "{label}: telemetry_parse_error: `{}`: {error}",
+                path.display()
+            ));
+            None
+        }
+    }
+}
+
+fn build_rch_capacity_report(
+    status_doc: Option<&Value>,
+    diagnose_doc: Option<&Value>,
+    workers_doc: Option<&Value>,
+    summary_lines: &[String],
+    telemetry_parse_errors: Vec<String>,
+) -> RchCapacityReport {
+    let docs = [status_doc, diagnose_doc, workers_doc];
+    let mut healthy_workers = max_usize_from_docs(&docs, &["healthy_workers"]);
+    let mut admissible_workers = max_usize_from_docs(&docs, &["admissible_workers"]);
+    let mut total_slots = max_usize_from_docs(&docs, &["total_slots", "slots_total"]);
+    let mut available_slots = max_usize_from_docs(&docs, &["available_slots", "slots_available"]);
+    let mut selected_worker =
+        diagnose_doc.and_then(|value| find_path_string(value, &["worker_selection", "worker"]));
+    let mut blockers = BTreeSet::new();
+    let mut warnings = BTreeSet::new();
+    let mut stale_tooling_detected = false;
+    let mut local_fallback_detected = false;
+
+    for doc in docs.into_iter().flatten() {
+        let summary = summarize_worker_doc(doc);
+        healthy_workers = healthy_workers.max(summary.healthy_workers);
+        admissible_workers = admissible_workers.max(summary.admissible_workers);
+        total_slots = total_slots.max(summary.total_slots);
+        available_slots = available_slots.max(summary.available_slots);
+        stale_tooling_detected |= summary.stale_tooling_detected;
+        for blocker in summary.blockers {
+            blockers.insert(blocker);
+        }
+        for warning in summary.warnings {
+            warnings.insert(warning);
+        }
+    }
+
+    for line in summary_lines {
+        let lower = line.to_ascii_lowercase();
+        local_fallback_detected |= lower.contains("[rch] local");
+        stale_tooling_detected |= lower.contains("stale");
+        let blocker = blocker_reason_from_summary(Some(line)).as_str().to_owned();
+        if lower.contains("[rch] local")
+            || lower.contains("no admissible")
+            || lower.contains("pressure")
+        {
+            blockers.insert(blocker);
+        }
+        if let Some(summary) = RchRemoteProofSummary::parse_final_summary_line(line) {
+            if summary.location == RchRemoteProofSummaryLocation::Remote {
+                selected_worker = summary.worker_id.or(selected_worker);
+                admissible_workers = admissible_workers.max(1);
+            }
+        }
+    }
+
+    if diagnose_doc.is_some()
+        && selected_worker.is_none()
+        && find_path_value(
+            diagnose_doc.expect("checked"),
+            &["worker_selection", "worker"],
+        )
+        .is_some()
+    {
+        blockers.insert(
+            RchRemoteProofBlockerReason::NoAdmissibleWorkers
+                .as_str()
+                .to_owned(),
+        );
+    }
+    if stale_tooling_detected {
+        warnings.insert("stale_tooling_or_telemetry".to_owned());
+    }
+    let decision = rch_capacity_decision(
+        !telemetry_parse_errors.is_empty(),
+        local_fallback_detected,
+        stale_tooling_detected,
+        &blockers,
+        selected_worker.as_deref(),
+        healthy_workers,
+        admissible_workers,
+        available_slots,
+        status_doc.is_some()
+            || diagnose_doc.is_some()
+            || workers_doc.is_some()
+            || !summary_lines.is_empty(),
+    );
+    let remote_required_allowed = decision == "admissible";
+    RchCapacityReport {
+        schema_version: RCH_STATUS_SCHEMA,
+        decision,
+        remote_required_allowed,
+        healthy_workers,
+        admissible_workers,
+        total_slots,
+        available_slots,
+        selected_worker,
+        local_fallback_detected,
+        stale_tooling_detected,
+        blockers: blockers.into_iter().collect(),
+        warnings: warnings.into_iter().collect(),
+        telemetry_parse_errors,
+        next_actions: rch_capacity_next_actions(decision),
+    }
+}
+
+#[derive(Debug, Default)]
+struct WorkerDocSummary {
+    healthy_workers: usize,
+    admissible_workers: usize,
+    total_slots: usize,
+    available_slots: usize,
+    stale_tooling_detected: bool,
+    blockers: BTreeSet<String>,
+    warnings: BTreeSet<String>,
+}
+
+fn summarize_worker_doc(value: &Value) -> WorkerDocSummary {
+    let mut summary = WorkerDocSummary::default();
+    summarize_worker_value(value, &mut summary);
+    summary
+}
+
+fn summarize_worker_value(value: &Value, summary: &mut WorkerDocSummary) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                summarize_worker_value(item, summary);
+            }
+        }
+        Value::Object(map) => {
+            summarize_worker_object(value, summary);
+            for (key, child) in map {
+                summarize_key_value(key, child, summary);
+                summarize_worker_value(child, summary);
+            }
+        }
+        Value::String(text) => summarize_text_signal(text, summary),
+        _ => {}
+    }
+}
+
+fn summarize_worker_object(value: &Value, summary: &mut WorkerDocSummary) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    let looks_like_worker = object.contains_key("worker")
+        || object.contains_key("worker_id")
+        || object.contains_key("id")
+        || object.contains_key("host")
+        || object.contains_key("reachable")
+        || object.contains_key("healthy");
+    if !looks_like_worker {
+        return;
+    }
+    let healthy = object_bool(object, &["healthy", "reachable", "ok"]).unwrap_or_else(|| {
+        object
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| matches!(status, "ok" | "healthy" | "reachable" | "idle"))
+    });
+    let stale = object_text_contains(object, "stale");
+    let pressure = object_text_contains(object, "critical_pressure")
+        || object_text_contains(object, "critical pressure")
+        || object_text_contains(object, "pressure");
+    let available = object_usize(
+        object,
+        &["available_slots", "slots_available", "free_slots"],
+    )
+    .unwrap_or(usize::from(healthy && !pressure && !stale));
+    let total = object_usize(object, &["total_slots", "slots_total", "slots"]).unwrap_or(available);
+
+    if healthy {
+        summary.healthy_workers += 1;
+    }
+    if healthy && !stale && !pressure && available > 0 {
+        summary.admissible_workers += 1;
+    }
+    summary.available_slots += available;
+    summary.total_slots += total;
+    summary.stale_tooling_detected |= stale;
+    if stale {
+        summary.warnings.insert("stale_worker_telemetry".to_owned());
+    }
+    if pressure {
+        summary.blockers.insert(
+            RchRemoteProofBlockerReason::WorkerPressure
+                .as_str()
+                .to_owned(),
+        );
+    }
+}
+
+fn summarize_key_value(key: &str, value: &Value, summary: &mut WorkerDocSummary) {
+    let normalized = key.replace('-', "_");
+    match normalized.as_str() {
+        "healthy_workers" => {
+            summary.healthy_workers = summary.healthy_workers.max(value_usize(value))
+        }
+        "admissible_workers" => {
+            summary.admissible_workers = summary.admissible_workers.max(value_usize(value));
+        }
+        "total_slots" | "slots_total" => {
+            summary.total_slots = summary.total_slots.max(value_usize(value));
+        }
+        "available_slots" | "slots_available" => {
+            summary.available_slots = summary.available_slots.max(value_usize(value));
+        }
+        "no_admissible_workers" if !value.is_null() => {
+            summary.blockers.insert(
+                RchRemoteProofBlockerReason::NoAdmissibleWorkers
+                    .as_str()
+                    .to_owned(),
+            );
+            summarize_text_signal(&value.to_string(), summary);
+        }
+        _ => summarize_text_signal(&value.to_string(), summary),
+    }
+}
+
+fn summarize_text_signal(text: &str, summary: &mut WorkerDocSummary) {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("critical_pressure") || lower.contains("critical pressure") {
+        summary.blockers.insert(
+            RchRemoteProofBlockerReason::WorkerPressure
+                .as_str()
+                .to_owned(),
+        );
+    }
+    if lower.contains("no admissible") || lower.contains("no_admissible_workers") {
+        summary.blockers.insert(
+            RchRemoteProofBlockerReason::NoAdmissibleWorkers
+                .as_str()
+                .to_owned(),
+        );
+    }
+    if lower.contains("topology") || lower.contains("preflight") {
+        summary.blockers.insert(
+            RchRemoteProofBlockerReason::TopologyPreflightFailure
+                .as_str()
+                .to_owned(),
+        );
+    }
+    if lower.contains("stale") {
+        summary.stale_tooling_detected = true;
+        summary
+            .warnings
+            .insert("stale_tooling_or_telemetry".to_owned());
+    }
+}
+
+fn rch_capacity_decision(
+    has_telemetry_parse_errors: bool,
+    local_fallback_detected: bool,
+    stale_tooling_detected: bool,
+    blockers: &BTreeSet<String>,
+    selected_worker: Option<&str>,
+    healthy_workers: usize,
+    admissible_workers: usize,
+    available_slots: usize,
+    has_input: bool,
+) -> &'static str {
+    if has_telemetry_parse_errors {
+        "telemetry_parse_error"
+    } else if local_fallback_detected
+        || blockers
+            .iter()
+            .any(|blocker| blocker != "ambiguous_rch_summary")
+    {
+        "proof_infra_blocked"
+    } else if stale_tooling_detected {
+        "degraded_stale_tooling"
+    } else if selected_worker.is_some() || admissible_workers > 0 || available_slots > 0 {
+        "admissible"
+    } else if healthy_workers > 0 {
+        "queued"
+    } else if has_input {
+        "unknown"
+    } else {
+        "missing_input"
+    }
+}
+
+fn rch_capacity_next_actions(decision: &str) -> Vec<&'static str> {
+    match decision {
+        "admissible" => vec![
+            "Remote-required proof may run with RCH_REQUIRE_REMOTE=1.",
+            "Keep Cargo target dirs isolated per bead or proof lane.",
+        ],
+        "queued" => vec![
+            "Wait for a remote worker slot; do not run local Cargo fallback.",
+            "Retry status before starting the proof lane.",
+        ],
+        "proof_infra_blocked" => vec![
+            "Treat this as proof infrastructure evidence, not code failure.",
+            "Do not claim Cargo proof until a remote RCH lane is admissible.",
+        ],
+        "degraded_stale_tooling" => vec![
+            "Refresh or verify RCH tooling through an operator-approved path.",
+            "Do not overwrite installed RCH binaries without explicit approval.",
+        ],
+        "missing_input" => {
+            vec!["Provide --status-json, --diagnose-json, --workers-json, or --summary-line."]
+        }
+        "telemetry_parse_error" => {
+            vec!["Fix or refresh malformed RCH telemetry JSON before using this decision."]
+        }
+        _ => vec!["Inspect RCH telemetry shape and add a fixture before relying on this status."],
+    }
+}
+
+fn max_usize_from_docs(docs: &[Option<&Value>], keys: &[&str]) -> usize {
+    docs.iter()
+        .flatten()
+        .map(|doc| max_usize_for_keys(doc, keys))
+        .max()
+        .unwrap_or(0)
+}
+
+fn max_usize_for_keys(value: &Value, keys: &[&str]) -> usize {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .map(|(key, child)| {
+                let own = keys
+                    .iter()
+                    .any(|wanted| key.replace('-', "_") == *wanted)
+                    .then(|| value_usize(child))
+                    .unwrap_or(0);
+                own.max(max_usize_for_keys(child, keys))
+            })
+            .max()
+            .unwrap_or(0),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| max_usize_for_keys(item, keys))
+            .max()
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn find_path_value<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut current = value;
+    for key in path {
+        current = current.as_object()?.get(*key)?;
+    }
+    Some(current)
+}
+
+fn find_path_string(value: &Value, path: &[&str]) -> Option<String> {
+    match find_path_value(value, path)? {
+        Value::String(text) if !text.trim().is_empty() => Some(text.clone()),
+        Value::Null => None,
+        other => Some(other.to_string()),
+    }
+}
+
+fn object_bool(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<bool> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_bool))
+}
+
+fn object_usize(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<usize> {
+    keys.iter()
+        .find_map(|key| object.get(*key).map(value_usize))
+}
+
+fn object_text_contains(object: &serde_json::Map<String, Value>, needle: &str) -> bool {
+    let needle = needle.to_ascii_lowercase();
+    object.values().any(|value| {
+        value
+            .as_str()
+            .map_or_else(|| value.to_string(), str::to_owned)
+            .to_ascii_lowercase()
+            .contains(&needle)
+    })
+}
+
+fn value_usize(value: &Value) -> usize {
+    value
+        .as_u64()
+        .and_then(|raw| usize::try_from(raw).ok())
+        .unwrap_or(0)
 }
 
 fn load_passport_manifests(paths: &[PathBuf]) -> Result<Vec<LoadedManifest>> {
@@ -1888,7 +2389,8 @@ fn build_rerun_plan(target: &str, known: &KnownProofCommand) -> PlannedRerunComm
         argv,
         working_directory: known.command.working_directory.clone(),
         required_env_keys: known.command.required_env_keys.clone(),
-        refusal_boundary: "Only redaction-safe commands already present in the ProofGraph corpus are accepted.",
+        refusal_boundary:
+            "Only redaction-safe commands already present in the ProofGraph corpus are accepted.",
     }
 }
 
@@ -2285,9 +2787,9 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use fcp_evidence::{
-        BeadIssueRecord, BeadProofComment, EvidenceBundleRecord, PROOF_GRAPH_INDEXER_CORPUS_SCHEMA,
-        ReadinessMatrixRow, ReadmeFeatureRow, SourceLocation, TruthSource,
-        VerificationScriptRecord,
+        BeadIssueRecord, BeadProofComment, EvidenceBundleRecord, ReadinessMatrixRow,
+        ReadmeFeatureRow, SourceLocation, TruthSource, VerificationScriptRecord,
+        PROOF_GRAPH_INDEXER_CORPUS_SCHEMA,
     };
     use tempfile::NamedTempFile;
 
@@ -2454,6 +2956,174 @@ mod tests {
         }
         std::fs::write(file.path(), body).expect("write evidence bundle");
         file
+    }
+
+    fn write_json_value(value: &Value) -> NamedTempFile {
+        let file = NamedTempFile::new().expect("create temp json");
+        std::fs::write(
+            file.path(),
+            serde_json::to_vec(value).expect("serialize json fixture"),
+        )
+        .expect("write json fixture");
+        file
+    }
+
+    fn write_text_file(body: &str) -> NamedTempFile {
+        let file = NamedTempFile::new().expect("create temp text");
+        std::fs::write(file.path(), body).expect("write text fixture");
+        file
+    }
+
+    #[test]
+    fn rch_status_admits_healthy_remote_capacity() {
+        let workers = serde_json::json!({
+            "workers": [
+                {"id": "worker-a", "healthy": true, "available_slots": 3, "total_slots": 8},
+                {"id": "worker-b", "status": "healthy", "available_slots": 1, "total_slots": 4}
+            ]
+        });
+        let report = build_rch_capacity_report(None, None, Some(&workers), &[], Vec::new());
+
+        assert_eq!(report.decision, "admissible");
+        assert!(report.remote_required_allowed);
+        assert_eq!(report.healthy_workers, 2);
+        assert_eq!(report.admissible_workers, 2);
+        assert_eq!(report.available_slots, 4);
+        assert!(report.blockers.is_empty());
+    }
+
+    #[test]
+    fn rch_status_refuses_local_fallback_not_greenwashed() {
+        let diagnose = serde_json::json!({
+            "worker_selection": {"worker": null},
+            "no_admissible_workers": "critical_pressure=5"
+        });
+        let summary_lines =
+            vec!["[RCH] local (no admissible workers: critical_pressure=5)".to_owned()];
+        let report =
+            build_rch_capacity_report(None, Some(&diagnose), None, &summary_lines, Vec::new());
+
+        assert_eq!(report.decision, "proof_infra_blocked");
+        assert!(!report.remote_required_allowed);
+        assert!(report.local_fallback_detected);
+        assert!(
+            report.blockers.contains(
+                &RchRemoteProofBlockerReason::WorkerPressure
+                    .as_str()
+                    .to_owned()
+            ) || report.blockers.contains(
+                &RchRemoteProofBlockerReason::NoAdmissibleWorkers
+                    .as_str()
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn rch_status_marks_stale_tooling_as_degraded() {
+        let workers = serde_json::json!({
+            "workers": [
+                {"id": "worker-a", "healthy": true, "available_slots": 3, "status": "stale telemetry"}
+            ]
+        });
+        let report = build_rch_capacity_report(None, None, Some(&workers), &[], Vec::new());
+
+        assert_eq!(report.decision, "degraded_stale_tooling");
+        assert!(!report.remote_required_allowed);
+        assert!(report.stale_tooling_detected);
+        assert!(report
+            .warnings
+            .contains(&"stale_worker_telemetry".to_owned()));
+    }
+
+    #[test]
+    fn rch_status_queues_when_workers_have_no_available_slots() {
+        let workers = serde_json::json!({
+            "workers": [
+                {"id": "worker-a", "healthy": true, "available_slots": 0, "total_slots": 4}
+            ]
+        });
+        let report = build_rch_capacity_report(None, None, Some(&workers), &[], Vec::new());
+
+        assert_eq!(report.decision, "queued");
+        assert!(!report.remote_required_allowed);
+        assert_eq!(report.healthy_workers, 1);
+        assert_eq!(report.admissible_workers, 0);
+        assert_eq!(report.available_slots, 0);
+    }
+
+    #[test]
+    fn rch_status_blocks_critical_pressure_without_local_fallback() {
+        let workers = serde_json::json!({
+            "workers": [
+                {"id": "worker-a", "healthy": true, "available_slots": 0, "pressure": "critical_pressure=5"}
+            ]
+        });
+        let report = build_rch_capacity_report(None, None, Some(&workers), &[], Vec::new());
+
+        assert_eq!(report.decision, "proof_infra_blocked");
+        assert!(!report.remote_required_allowed);
+        assert!(report.blockers.contains(
+            &RchRemoteProofBlockerReason::WorkerPressure
+                .as_str()
+                .to_owned()
+        ));
+    }
+
+    #[test]
+    fn rch_status_malformed_json_is_structured_and_redacted() {
+        let workers = write_text_file("{ not-json-token SECRET_VALUE");
+        let result = run(&ProofArgs {
+            command: ProofCommand::RchStatus(ProofRchStatusArgs {
+                status_json: None,
+                diagnose_json: None,
+                workers_json: Some(workers.path().to_path_buf()),
+                summary_lines: Vec::new(),
+            }),
+        })
+        .expect("run malformed rch status");
+
+        assert!(!result.success);
+        assert_eq!(result.payload["status"], "error");
+        assert_eq!(
+            result.payload["capacity"]["decision"],
+            "telemetry_parse_error"
+        );
+        assert!(!result.payload["capacity"]["remote_required_allowed"]
+            .as_bool()
+            .expect("remote required allowed bool"));
+        assert!(!result.payload["capacity"]["telemetry_parse_errors"]
+            .as_array()
+            .expect("parse errors array")
+            .is_empty());
+        let serialized =
+            serde_json::to_string(&result.payload).expect("serialize malformed status payload");
+        assert!(!serialized.contains("SECRET_VALUE"));
+    }
+
+    #[test]
+    fn proof_rch_status_command_reads_json_without_running_cargo() {
+        let workers = write_json_value(&serde_json::json!({
+            "workers": [
+                {"id": "worker-a", "healthy": true, "available_slots": 2, "total_slots": 8}
+            ]
+        }));
+        let result = run(&ProofArgs {
+            command: ProofCommand::RchStatus(ProofRchStatusArgs {
+                status_json: None,
+                diagnose_json: None,
+                workers_json: Some(workers.path().to_path_buf()),
+                summary_lines: vec!["[RCH] remote worker-a (cargo test passed)".to_owned()],
+            }),
+        })
+        .expect("run rch status");
+
+        assert!(result.success);
+        assert_eq!(result.payload["schema_version"], RCH_STATUS_SCHEMA);
+        assert_eq!(result.payload["subcommand"], "rch-status");
+        assert_eq!(result.payload["capacity"]["decision"], "admissible");
+        assert_eq!(result.payload["capacity"]["remote_required_allowed"], true);
+        assert_eq!(result.payload["capacity"]["selected_worker"], "worker-a");
     }
 
     fn assert_redaction_safe(value: &Value) {
@@ -3158,13 +3828,11 @@ related = []
 
         assert!(!result.success);
         assert_eq!(result.payload["error"]["type"], "unknown-claim");
-        assert!(
-            result.payload["error"]["known_claim_ids"]
-                .as_array()
-                .expect("known claims array")
-                .iter()
-                .any(|value| value == "claim:latency-proof")
-        );
+        assert!(result.payload["error"]["known_claim_ids"]
+            .as_array()
+            .expect("known claims array")
+            .iter()
+            .any(|value| value == "claim:latency-proof"));
     }
 
     #[test]
@@ -3210,10 +3878,9 @@ related = []
         assert!(!argv.contains(&"RCH_FORCE_REMOTE=true"));
         assert!(argv.contains(&"rch"));
         assert!(argv.contains(&"CARGO_INCREMENTAL=0"));
-        assert!(
-            argv.iter()
-                .any(|arg| arg.starts_with("CARGO_TARGET_DIR=/tmp/fwc-proof-"))
-        );
+        assert!(argv
+            .iter()
+            .any(|arg| arg.starts_with("CARGO_TARGET_DIR=/tmp/fwc-proof-")));
     }
 
     #[test]
@@ -3254,12 +3921,10 @@ related = []
 
         assert!(result.success);
         assert_eq!(result.payload["plan"]["requires_remote"], true);
-        assert!(
-            result.payload["plan"]["command_id"]
-                .as_str()
-                .expect("command id")
-                .contains("slack_connector_verification.sh")
-        );
+        assert!(result.payload["plan"]["command_id"]
+            .as_str()
+            .expect("command id")
+            .contains("slack_connector_verification.sh"));
         let argv = result.payload["plan"]["argv"]
             .as_array()
             .expect("argv array")
@@ -3746,23 +4411,19 @@ related = []
 
         assert_eq!(stale_explain.payload["status"], "stale");
         assert_eq!(skipped_explain.payload["status"], "skipped_with_reason");
-        assert!(
-            skipped_explain.payload["claim"]["status"]["reason"]
-                .as_str()
-                .expect("skip reason")
-                .contains("skipped")
-        );
+        assert!(skipped_explain.payload["claim"]["status"]["reason"]
+            .as_str()
+            .expect("skip reason")
+            .contains("skipped"));
         let skipped_text =
             serde_json::to_string(&skipped_explain.payload).expect("skipped explain json");
         assert!(skipped_text.contains("provider sandbox unavailable"));
 
         assert_eq!(blocked_explain.payload["status"], "blocked");
-        assert!(
-            blocked_explain.payload["claim"]["statement"]
-                .as_str()
-                .expect("blocked statement")
-                .contains("Blocked by upstream host route wiring")
-        );
+        assert!(blocked_explain.payload["claim"]["statement"]
+            .as_str()
+            .expect("blocked statement")
+            .contains("Blocked by upstream host route wiring"));
 
         let mesh_text = serde_json::to_string(&mesh_explain.payload).expect("mesh explain json");
         assert!(mesh_text.contains("single-host-downgrade-warning"));
@@ -3997,11 +4658,9 @@ related = []
             assert_eq!(event["cleanup_result"]["deleted_paths"], 0);
             assert!(event["ci_guard"].is_object());
         }
-        assert!(
-            parsed_events
-                .iter()
-                .any(|event| { event["scenario"] == "stale-claim" && event["status"] == "stale" })
-        );
+        assert!(parsed_events
+            .iter()
+            .any(|event| { event["scenario"] == "stale-claim" && event["status"] == "stale" }));
         assert!(parsed_events.iter().any(|event| {
             event["scenario"] == "remote-only-local-refused"
                 && event["ci_guard"]["local_fallback_refused"] == true
@@ -4060,13 +4719,11 @@ related = []
             passport["operations"][0]["ai_hints_state"]["state"],
             "declared"
         );
-        assert!(
-            passport["proof_state"]["matched_claim_ids"]
-                .as_array()
-                .expect("matched claim ids")
-                .iter()
-                .any(|value| value == "claim:github")
-        );
+        assert!(passport["proof_state"]["matched_claim_ids"]
+            .as_array()
+            .expect("matched claim ids")
+            .iter()
+            .any(|value| value == "claim:github"));
         assert_eq!(passport["proof_state"]["state"], "missing");
         assert_eq!(
             passport["proof_state"]["evidence_by_kind"]["host_integration"],
@@ -4220,16 +4877,12 @@ related = []
         assert_eq!(network["host_allow_count"], 1);
         assert_eq!(network["port_allow"][0], 443);
         assert!(network["deny_localhost"].as_bool().expect("deny localhost"));
-        assert!(
-            network["deny_private_ranges"]
-                .as_bool()
-                .expect("deny private ranges")
-        );
-        assert!(
-            network["deny_tailnet_ranges"]
-                .as_bool()
-                .expect("deny tailnet ranges")
-        );
+        assert!(network["deny_private_ranges"]
+            .as_bool()
+            .expect("deny private ranges"));
+        assert!(network["deny_tailnet_ranges"]
+            .as_bool()
+            .expect("deny tailnet ranges"));
         assert!(network["require_sni"].as_bool().expect("require sni"));
         assert_eq!(passport["risk_summary"]["network_posture_gap_count"], 0);
     }

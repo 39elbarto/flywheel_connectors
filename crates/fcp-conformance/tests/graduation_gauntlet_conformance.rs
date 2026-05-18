@@ -34,6 +34,13 @@ const BATCH2_CONNECTORS: [&str; 9] = [
     "connectors/google-workspace-events",
 ];
 
+const BATCH3_CONNECTORS: [&str; 4] = [
+    "connectors/deepseek",
+    "connectors/google-ai",
+    "connectors/huggingface",
+    "connectors/llm-router",
+];
+
 #[derive(Clone, Copy)]
 struct FixtureOptions {
     status: &'static str,
@@ -500,6 +507,100 @@ fn batch2_status_runner_writes_status_markdown() {
     assert_eq!(
         checks,
         EXPECTED_CHECKS[0..2]
+            .iter()
+            .map(|(check, _)| *check)
+            .collect::<BTreeSet<_>>()
+    );
+}
+
+#[test]
+fn batch3_status_runner_writes_status_markdown() {
+    let fixture_root = unique_fixture_root("batch3-status");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be creatable");
+    let status_path = fixture_root.join("batch3_status.md");
+    let jsonl_path = fixture_root.join("batch3_status.jsonl");
+    let output = run_gauntlet(vec![
+        OsString::from("--jsonl"),
+        jsonl_path.as_os_str().to_os_string(),
+        OsString::from("--batch"),
+        OsString::from("batch3"),
+        OsString::from("--status-md"),
+        status_path.as_os_str().to_os_string(),
+    ]);
+    assert!(
+        output.status.success(),
+        "batch3 status run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let status_doc =
+        fs::read_to_string(&status_path).expect("batch3 status markdown should be written");
+    assert!(status_doc.contains("# Batch 3 Graduation Status"));
+    assert!(status_doc.contains("scripts/graduation/run_gauntlet.sh --batch batch3"));
+    assert!(status_doc.contains("Summary: `0/4` Batch 3 connectors currently pass"));
+    assert!(status_doc.contains("Add or restore connector-local `operations_info` metadata"));
+    assert!(status_doc.contains("Add connector-local `tests/local_non_mock.rs`"));
+    assert!(
+        !status_doc.contains("Pre-promotion status:"),
+        "Batch 3 should not look pre-promotion-complete while metadata/tests are missing"
+    );
+    for connector in BATCH3_CONNECTORS {
+        assert!(
+            status_doc.contains(connector),
+            "status doc should mention {connector}"
+        );
+    }
+
+    let jsonl = fs::read_to_string(&jsonl_path).expect("batch3 JSONL should be written");
+    let records = jsonl
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSONL record"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 13);
+    assert!(
+        records
+            .iter()
+            .filter(|record| record_str(record, "check") == Some("connector_path"))
+            .all(|record| record_str(record, "verdict") == Some("pass")),
+        "Batch 3 connector paths should exist: {jsonl}"
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                record_str(record, "check") == Some("operations_info")
+                    && record_str(record, "verdict") == Some("fail")
+            })
+            .count(),
+        3,
+        "Batch 3 should have three operations_info blockers: {jsonl}"
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                record_str(record, "check") == Some("local_non_mock")
+                    && record_str(record, "verdict") == Some("fail")
+            })
+            .count(),
+        1,
+        "Batch 3 should have one local_non_mock blocker: {jsonl}"
+    );
+
+    let connectors = records
+        .iter()
+        .filter_map(|record| record_str(record, "connector"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(connectors, BTreeSet::from(BATCH3_CONNECTORS));
+
+    let checks = records
+        .iter()
+        .filter_map(|record| record_str(record, "check"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        checks,
+        EXPECTED_CHECKS[0..7]
             .iter()
             .map(|(check, _)| *check)
             .collect::<BTreeSet<_>>()

@@ -35,6 +35,13 @@ BATCH2_CONNECTORS=(
   "connectors/google-workspace-events"
 )
 
+BATCH3_CONNECTORS=(
+  "connectors/huggingface"
+  "connectors/deepseek"
+  "connectors/llm-router"
+  "connectors/google-ai"
+)
+
 BATCH_STATUS_CONNECTORS=()
 BATCH_STATUS_VERDICTS=()
 BATCH_STATUS_FAILED_CHECKS=()
@@ -48,7 +55,7 @@ usage() {
   cat <<'EOF'
 Usage:
   scripts/graduation/run_gauntlet.sh [--jsonl <path>] <connector-path>
-  scripts/graduation/run_gauntlet.sh [--jsonl <path>] --batch batch1|batch2 --status-md <path>
+  scripts/graduation/run_gauntlet.sh [--jsonl <path>] --batch batch1|batch2|batch3 --status-md <path>
   scripts/graduation/run_gauntlet.sh --list-checks
 EOF
 }
@@ -107,6 +114,9 @@ batch_display_name() {
       ;;
     batch2)
       printf '%s\n' "Batch 2"
+      ;;
+    batch3)
+      printf '%s\n' "Batch 3"
       ;;
     *)
       printf '%s\n' "${batch}"
@@ -295,6 +305,9 @@ run_batch_status() {
       ;;
     batch2)
       batch_connectors=("${BATCH2_CONNECTORS[@]}")
+      ;;
+    batch3)
+      batch_connectors=("${BATCH3_CONNECTORS[@]}")
       ;;
     *)
       echo "unknown batch: ${batch}" >&2

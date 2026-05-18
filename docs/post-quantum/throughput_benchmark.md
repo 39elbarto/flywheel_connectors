@@ -476,7 +476,9 @@ The critical proof steps must appear exactly once in the top-level JSONL:
 `tool_versions`, `validate_lean_ids`, every named command lane, every
 materialized artifact hash lane, `jsonl_contract_validation`, `redaction_scan`,
 `summary`, and `final_redaction_scan`. Duplicate critical records fail the
-self-contract instead of being treated as harmless extra evidence.
+self-contract instead of being treated as harmless extra evidence. Unexpected
+top-level gauntlet steps also fail the self-contract, so a passing artifact
+cannot carry unreviewed supplemental records before the summary.
 Benchmark coverage is also checked from the command records, not just the final
 summary: the Criterion command record must report observed `trap_gen`,
 `delegate`, `sample_pre`, `verify`, and `full_crypto_route` groups from its log,

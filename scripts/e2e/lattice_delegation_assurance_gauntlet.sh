@@ -1097,6 +1097,10 @@ validate_gauntlet_contract() {
       . as $records |
       all(required_singleton_steps[]; . as $step |
         ([ $records[] | select(.step == $step) ] | length) == 1);
+    def allowed_steps_only:
+      . as $records |
+      all($records[]; .step as $step |
+        (required_singleton_steps | index($step)) != null);
     def populated_tool_version:
       type == "string" and length > 0 and . != "unavailable";
     def positive_test_count:
@@ -1199,6 +1203,7 @@ validate_gauntlet_contract() {
       ([.[] | .worker_host_class] | unique | length == 1);
     length > 0 and
     top_level_provenance_consistent and
+    allowed_steps_only and
     critical_steps_singleton and
     all(.[]; type == "object" and
       .schema == "fcp.lattice_delegation.assurance_gauntlet.v1" and

@@ -148,6 +148,53 @@ run_logged() {
   record_step "${name}" "${status}" "${duration_ms}" "${log_path}" "$@"
 }
 
+graduation_gauntlet_pre_promotion_pending() {
+  local jsonl_path="$1"
+
+  if [[ ! -f "${jsonl_path}" ]]; then
+    return 1
+  fi
+
+  jq -s -e '
+    [.[] | select(.verdict == "fail")] as $failures
+    | ($failures | length) == 1
+      and $failures[0].check == "readme_status_match"
+  ' "${jsonl_path}" >/dev/null
+}
+
+run_graduation_gauntlet_step() {
+  local jsonl_path="${OUT_ROOT}/evidence/graduation_gauntlet.jsonl"
+  local log_path="${OUT_ROOT}/logs/graduation_gauntlet.log"
+  local start_seconds end_seconds duration_ms rc status
+
+  echo "[github-verification] graduation_gauntlet: scripts/graduation/run_gauntlet.sh --jsonl ${jsonl_path} connectors/github" >&2
+  start_seconds="$(date -u +%s)"
+  (
+    cd "${REPO_ROOT}" || exit
+    scripts/graduation/run_gauntlet.sh --jsonl "${jsonl_path}" connectors/github
+  ) >"${log_path}" 2>&1
+  rc="$?"
+
+  if [[ "${rc}" -eq 0 ]]; then
+    status="passed"
+  elif graduation_gauntlet_pre_promotion_pending "${jsonl_path}"; then
+    status="pre_promotion_pending"
+    echo "pre-promotion gauntlet reached only readme_status_match; PROVEN status has not been claimed yet" >>"${log_path}"
+  else
+    status="$(classify_failure "${log_path}")"
+    promote_status "${status}"
+  fi
+
+  end_seconds="$(date -u +%s)"
+  duration_ms="$(((end_seconds - start_seconds) * 1000))"
+  record_step \
+    graduation_gauntlet \
+    "${status}" \
+    "${duration_ms}" \
+    "${log_path}" \
+    scripts/graduation/run_gauntlet.sh --jsonl "${jsonl_path}" connectors/github
+}
+
 run_no_match() {
   local name="$1"
   local pattern="$2"
@@ -215,11 +262,7 @@ done
 
 git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
-run_logged \
-  graduation_gauntlet \
-  scripts/graduation/run_gauntlet.sh \
-    --jsonl "${OUT_ROOT}/evidence/graduation_gauntlet.jsonl" \
-    connectors/github
+run_graduation_gauntlet_step
 
 run_logged \
   diff_check \

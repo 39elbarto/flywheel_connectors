@@ -10,8 +10,10 @@ mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
 OVERALL_STATUS="ok"
 EXIT_CODE=0
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
 export RCH_FORCE_REMOTE=1
-REMOTE_TARGET_BASE="/tmp/rch-fcp-line-${RUN_ID}"
+REMOTE_TARGET_BASE="${REMOTE_TARGET_BASE:-/tmp/rch-fcp-line-${RUN_ID}}"
 
 manifest_status="pending"
 manifest_note=""
@@ -36,16 +38,62 @@ require_cmd() {
   fi
 }
 
+rch_remote_summary_present() {
+  local execution_logs=("$@")
+  local accepted=0
+
+  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
+    return 0
+  fi
+
+  for execution_log in "${execution_logs[@]}"; do
+    if [[ ! -f "${execution_log}" ]]; then
+      continue
+    fi
+    if grep -Eq '^\[RCH\].*(local|refusing local fallback|no admissible workers)' "${execution_log}"; then
+      echo "Missing accepted remote rch summary in ${execution_logs[*]}" >&2
+      echo "rch remote proof is required; refusing local fallback" >&2
+      return 2
+    fi
+    if grep -Eq '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}"; then
+      accepted=1
+    fi
+  done
+
+  if (( accepted )); then
+    return 0
+  fi
+
+  echo "Missing accepted remote rch summary in ${execution_logs[*]}" >&2
+  echo "rch remote proof is required; refusing local fallback" >&2
+  return 2
+}
+
 run_logged() {
   local name="$1"
   shift
   local log_path="${OUT_ROOT}/logs/${name}.log"
+  local require_remote_summary=0
+  if [[ "${1:-}" == "${RCH_BIN}" ]]; then
+    require_remote_summary=1
+  fi
 
   echo "[line-verification] ${name}: $*"
-  (
+  if ! (
     cd "${REPO_ROOT}"
     "$@"
-  ) >"${log_path}" 2>&1
+  ) >"${log_path}" 2>&1; then
+    return 1
+  fi
+
+  if (( require_remote_summary )); then
+    local remote_error=""
+    if ! remote_error="$(rch_remote_summary_present "${log_path}" 2>&1)"; then
+      printf '%s\n' "${remote_error}" >> "${log_path}"
+      printf '%s\n' "${remote_error}" >&2
+      return 1
+    fi
+  fi
 }
 
 run_capture_stdout() {
@@ -53,12 +101,27 @@ run_capture_stdout() {
   local stdout_path="$2"
   shift 2
   local log_path="${OUT_ROOT}/logs/${name}.log"
+  local require_remote_summary=0
+  if [[ "${1:-}" == "${RCH_BIN}" ]]; then
+    require_remote_summary=1
+  fi
 
   echo "[line-verification] ${name}: $*"
-  (
+  if ! (
     cd "${REPO_ROOT}"
     "$@"
-  ) >"${stdout_path}" 2>"${log_path}"
+  ) >"${stdout_path}" 2>"${log_path}"; then
+    return 1
+  fi
+
+  if (( require_remote_summary )); then
+    local remote_error=""
+    if ! remote_error="$(rch_remote_summary_present "${stdout_path}" "${log_path}" 2>&1)"; then
+      printf '%s\n' "${remote_error}" >> "${log_path}"
+      printf '%s\n' "${remote_error}" >&2
+      return 1
+    fi
+  fi
 }
 
 promote_overall_status() {
@@ -79,6 +142,7 @@ promote_overall_status() {
 
 classify_manifest_failure() {
   local log_path="$1"
+  # shellcheck disable=SC2016 # diagnostic regex intentionally matches literal backtick text.
   if grep -Eq 'missing worker system package dbus-1\.pc|The system library `dbus-1` required|pkg-config --libs --cflags dbus-1' "${log_path}"; then
     echo "infra_blocked"
   else
@@ -86,11 +150,10 @@ classify_manifest_failure() {
   fi
 }
 
-require_cmd rch
-require_cmd cargo
+require_cmd "${RCH_BIN}"
 
 manifest_check_cmd=(
-  rch
+  "${RCH_BIN}"
   exec
   --
   env
@@ -136,7 +199,7 @@ fi
 
 if run_logged \
   cargo_check \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-check" cargo check -p fcp-line --all-targets
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-check" cargo check -p fcp-line --all-targets
 then
   cargo_check_status="passed"
 else
@@ -146,7 +209,7 @@ fi
 
 if run_logged \
   format_check \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-fmt" cargo fmt --manifest-path connectors/line/Cargo.toml --check
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-fmt" cargo fmt --manifest-path connectors/line/Cargo.toml --check
 then
   format_check_status="passed"
 else
@@ -156,7 +219,7 @@ fi
 
 if run_logged \
   health_guidance_evidence \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-line --test integration health_unconfigured_includes_guidance -- --nocapture
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-line --test integration health_unconfigured_includes_guidance -- --nocapture
 then
   health_guidance_status="passed"
 else
@@ -166,7 +229,7 @@ fi
 
 if run_logged \
   doctor_guidance_evidence \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-line --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-line --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
 then
   doctor_guidance_status="passed"
 else
@@ -176,7 +239,7 @@ fi
 
 if run_logged \
   self_check_evidence \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-line --test integration self_check_ready_with_mock_line_api_and_evidence -- --nocapture
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-line --test integration self_check_ready_with_mock_line_api_and_evidence -- --nocapture
 then
   self_check_status="passed"
 else
@@ -186,7 +249,7 @@ fi
 
 if run_logged \
   retryable_self_check_evidence \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-line --test integration self_check_retryable_line_failure_reports_degraded -- --nocapture
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-line --test integration self_check_retryable_line_failure_reports_degraded -- --nocapture
 then
   retryable_self_check_status="passed"
 else
@@ -196,7 +259,7 @@ fi
 
 if run_logged \
   pagination_evidence \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-line --test integration invoke_group_members_preserves_pagination_evidence -- --nocapture
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-line --test integration invoke_group_members_preserves_pagination_evidence -- --nocapture
 then
   pagination_evidence_status="passed"
 else
@@ -206,7 +269,7 @@ fi
 
 if run_logged \
   dangerous_delete_evidence \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-line --test integration invoke_rich_menu_delete_emits_destructive_evidence -- --nocapture
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-line --test integration invoke_rich_menu_delete_emits_destructive_evidence -- --nocapture
 then
   dangerous_delete_status="passed"
 else
@@ -216,7 +279,7 @@ fi
 
 if run_logged \
   compliance_evidence \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-line --test integration introspection_emits_v3_compliance_evidence -- --nocapture
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-line --test integration introspection_emits_v3_compliance_evidence -- --nocapture
 then
   compliance_status="passed"
 else
@@ -226,7 +289,7 @@ fi
 
 if run_logged \
   integration_suite \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-line --test integration -- --nocapture
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-integration" cargo test -p fcp-line --test integration -- --nocapture
 then
   integration_suite_status="passed"
 else
@@ -236,7 +299,7 @@ fi
 
 if run_logged \
   crate_suite \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-crate" cargo test -p fcp-line -- --nocapture
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-crate" cargo test -p fcp-line -- --nocapture
 then
   crate_suite_status="passed"
 else
@@ -246,7 +309,7 @@ fi
 
 if run_logged \
   clippy \
-  rch exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-clippy" cargo clippy -p fcp-line --all-targets -- -D warnings
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${REMOTE_TARGET_BASE}-clippy" cargo clippy -p fcp-line --all-targets -- -D warnings
 then
   clippy_status="passed"
 else

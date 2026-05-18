@@ -5,6 +5,10 @@ SCRIPT_NAME="e2e_targeted_repair_flow"
 SEED="0xDEC0DE"
 OUT_DIR="${OUT_DIR:-./out/${SCRIPT_NAME}}"
 LOG_JSONL="${LOG_JSONL:-${OUT_DIR}/${SCRIPT_NAME}.jsonl}"
+TARGET_DIR="${TARGETED_REPAIR_TARGET_DIR:-/tmp/fcp-targeted-repair-flow}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+export RCH_FORCE_REMOTE=1
 
 EXPECTED_FAILURE=""
 ACTUAL_FAILURE=""
@@ -18,19 +22,30 @@ require_cmd() {
 }
 
 run_cargo() {
-  if command -v rch >/dev/null 2>&1; then
-    rch exec -- cargo "$@"
-    return $?
-  fi
-  cargo "$@"
+  env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose \
+    "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo "$@"
 }
 
-run_fcp_e2e() {
-  if command -v fcp-e2e >/dev/null 2>&1; then
-    fcp-e2e "$@"
-    return $?
+rch_remote_summary_present() {
+  local log_path="$1"
+  local summary
+  summary="$(grep -aE '\[RCH\][[:space:]]+(remote|local|failed)' "${log_path}" | tail -n 1 || true)"
+  [[ "${summary}" =~ \[RCH\][[:space:]]+remote ]]
+}
+
+run_cargo_logged() {
+  local log_path="$1"
+  shift
+  local rc
+
+  run_cargo "$@" > "${log_path}" 2>&1
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && ! rch_remote_summary_present "${log_path}"; then
+    echo "${SCRIPT_NAME}: rch command did not produce remote proof; see ${log_path}" >&2
+    echo "rch command did not produce remote proof" >> "${log_path}"
+    return 2
   fi
-  run_cargo run -q -p fcp-e2e --bin fcp-e2e -- "$@"
+  return "${rc}"
 }
 
 now_ms() {
@@ -168,42 +183,45 @@ step_prepare() {
 }
 
 step_run_symbol_request_tests() {
-  run_cargo test -p fcp-mesh --test mesh_integration meshnode_symbol_ -- --nocapture
+  run_cargo_logged "${OUT_DIR}/symbol_request_tests.execution.log" \
+    test -p fcp-mesh --test mesh_integration meshnode_symbol_ -- --nocapture || return
 }
 
 step_run_decode_status_tests() {
-  run_cargo test -p fcp-mesh --test mesh_integration meshnode_decode_status -- --nocapture
+  run_cargo_logged "${OUT_DIR}/decode_status_tests.execution.log" \
+    test -p fcp-mesh --test mesh_integration meshnode_decode_status -- --nocapture || return
 }
 
 step_run_store_adversarial_tests() {
-  run_cargo test -p fcp-store --test store_repair_integration adversarial_ -- --nocapture
+  run_cargo_logged "${OUT_DIR}/store_adversarial_tests.execution.log" \
+    test -p fcp-store --test store_repair_integration adversarial_ -- --nocapture || return
 }
 
-require_cmd cargo
+require_cmd "${RCH_BIN}"
 
 run_step "prepare_output" 1 "[]" "" "{}" step_prepare
 run_step \
   "run_symbol_request_tests" \
   2 \
-  '["crate:fcp-mesh","target:mesh_integration","filter:meshnode_symbol_"]' \
+  "[\"crate:fcp-mesh\",\"target:mesh_integration\",\"filter:meshnode_symbol_\",\"${OUT_DIR}/symbol_request_tests.execution.log\"]" \
   "" \
   '{"category":"symbol_request","purpose":"targeted_repair"}' \
   step_run_symbol_request_tests
 run_step \
   "run_decode_status_tests" \
   3 \
-  '["crate:fcp-mesh","target:mesh_integration","filter:meshnode_decode_status"]' \
+  "[\"crate:fcp-mesh\",\"target:mesh_integration\",\"filter:meshnode_decode_status\",\"${OUT_DIR}/decode_status_tests.execution.log\"]" \
   "" \
   '{"category":"decode_status","purpose":"targeted_repair"}' \
   step_run_decode_status_tests
 run_step \
   "run_store_adversarial_tests" \
   4 \
-  '["crate:fcp-store","target:store_repair_integration","filter:adversarial_"]' \
+  "[\"crate:fcp-store\",\"target:store_repair_integration\",\"filter:adversarial_\",\"${OUT_DIR}/store_adversarial_tests.execution.log\"]" \
   "" \
   '{"category":"store_repair","purpose":"adversarial_recovery"}' \
   step_run_store_adversarial_tests
 
-run_fcp_e2e --validate-log "${LOG_JSONL}"
+run_cargo_logged "${OUT_DIR}/validate_log.execution.log" run -q -p fcp-e2e --bin fcp-e2e -- --validate-log "${LOG_JSONL}"
 
 echo "${SCRIPT_NAME} complete. Logs: ${LOG_JSONL}"

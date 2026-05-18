@@ -7,6 +7,11 @@ SEED="${SEED:-0x7R4CEREP}"
 TRACE_ID="${TRACE_ID:-trace-e2e-replay}"
 OUT_DIR="${OUT_DIR:-./out/${SCRIPT_NAME}}"
 LOG_JSONL="${LOG_JSONL:-${OUT_DIR}/${SCRIPT_NAME}.jsonl}"
+TARGET_DIR="${TRACE_REPLAY_TARGET_DIR:-/tmp/fcp-trace-replay-flow}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+export RCH_FORCE_REMOTE=1
+
 FLOW_JSONL="${OUT_DIR}/${SCRIPT_NAME}.trace_flow.jsonl"
 MESH_TEST_LOG="${OUT_DIR}/mesh_trace_capture.log"
 MESH_STAGE_JSONL="${OUT_DIR}/mesh_trace_capture_events.jsonl"
@@ -14,12 +19,11 @@ TRACE_JSON="${OUT_DIR}/captured_trace.json"
 TRACE_MISMATCH_JSON="${OUT_DIR}/captured_trace_mismatch.json"
 REPLAY_REPORT_JSON="${OUT_DIR}/replay_report.json"
 REPLAY_MISMATCH_REPORT_JSON="${OUT_DIR}/replay_report_mismatch.json"
+REPLAY_EXECUTION_LOG="${OUT_DIR}/trace_replay.execution.log"
+REPLAY_MISMATCH_EXECUTION_LOG="${OUT_DIR}/trace_replay_mismatch.execution.log"
 
 STEP_MISMATCHES=0
 STEP_DETAILS="null"
-CARGO_CMD="${CARGO_CMD:-rch exec -- cargo}"
-read -r -a CARGO_CMD_ARR <<< "${CARGO_CMD}"
-CARGO_BIN="${CARGO_CMD_ARR[0]}"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -29,15 +33,38 @@ require_cmd() {
 }
 
 run_cargo() {
-  "${CARGO_CMD_ARR[@]}" "$@"
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo "$@"
 }
 
-run_fcp_e2e() {
-  if command -v fcp-e2e >/dev/null 2>&1; then
-    fcp-e2e "$@"
-    return $?
+rch_remote_summary_present() {
+  local execution_log="$1"
+
+  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
+    return 0
   fi
-  run_cargo run -q -p fcp-e2e --bin fcp-e2e -- "$@"
+
+  grep -Eq '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}" && return 0
+
+  echo "Missing accepted remote rch summary in ${execution_log}" >&2
+  echo "rch remote proof is required; refusing local fallback" >&2
+  return 2
+}
+
+run_cargo_logged() {
+  local execution_log="$1"
+  shift
+
+  run_cargo "$@" > "${execution_log}" 2>&1 || return
+  rch_remote_summary_present "${execution_log}"
+}
+
+run_cargo_json_logged() {
+  local json_output="$1"
+  local execution_log="$2"
+  shift 2
+
+  run_cargo "$@" > "${json_output}" 2> "${execution_log}" || return
+  rch_remote_summary_present "${execution_log}"
 }
 
 now_ms() {
@@ -128,7 +155,8 @@ step_prepare() {
 }
 
 step_run_known_decisions() {
-  run_cargo test -p fcp-mesh --test mesh_integration meshnode_trace_capture_replay_multinode_staged_logs -- --nocapture | tee "${MESH_TEST_LOG}"
+  run_cargo_logged "${MESH_TEST_LOG}" \
+    test -p fcp-mesh --test mesh_integration meshnode_trace_capture_replay_multinode_staged_logs -- --nocapture || return
   awk '/^\{/{print}' "${MESH_TEST_LOG}" \
     | jq -c 'select(.test_name == "meshnode_trace_capture_replay_multinode_staged_logs")' \
     > "${MESH_STAGE_JSONL}"
@@ -193,8 +221,8 @@ step_capture_trace() {
 }
 
 step_replay_trace() {
-  run_cargo run -q -p fcp-cli --bin fcp -- \
-    trace replay "${TRACE_JSON}" --format json --json > "${REPLAY_REPORT_JSON}"
+  run_cargo_json_logged "${REPLAY_REPORT_JSON}" "${REPLAY_EXECUTION_LOG}" \
+    run -q -p fcp-cli --bin fcp -- trace replay "${TRACE_JSON}" --format json --json || return
 
   jq -e '.source_trace_id == "'"${TRACE_ID}"'"' "${REPLAY_REPORT_JSON}" >/dev/null
   jq -e '.replayed_events == .input_events' "${REPLAY_REPORT_JSON}" >/dev/null
@@ -216,8 +244,8 @@ step_compare_decisions() {
 step_replay_mutated_trace() {
   jq '.events[1].decision = "deny"' "${TRACE_JSON}" > "${TRACE_MISMATCH_JSON}"
 
-  run_cargo run -q -p fcp-cli --bin fcp -- \
-    trace replay "${TRACE_MISMATCH_JSON}" --format json --json > "${REPLAY_MISMATCH_REPORT_JSON}"
+  run_cargo_json_logged "${REPLAY_MISMATCH_REPORT_JSON}" "${REPLAY_MISMATCH_EXECUTION_LOG}" \
+    run -q -p fcp-cli --bin fcp -- trace replay "${TRACE_MISMATCH_JSON}" --format json --json || return
 
   STEP_MISMATCHES="$(jq -r '.summary.mismatched_events + .summary.mismatched_decisions' "${REPLAY_MISMATCH_REPORT_JSON}")"
   if [[ "${STEP_MISMATCHES}" -ne 0 ]]; then
@@ -234,7 +262,7 @@ step_teardown() {
   true
 }
 
-require_cmd "${CARGO_BIN}"
+require_cmd "${RCH_BIN}"
 require_cmd jq
 
 run_step "prepare" 1 "[]" \
@@ -259,7 +287,8 @@ run_step "teardown" 7 "[]" \
   '{"purpose":"no-op teardown"}' \
   step_teardown
 
-run_fcp_e2e --validate-log "${LOG_JSONL}"
+run_cargo_logged "${OUT_DIR}/validate_log.execution.log" \
+  run -q -p fcp-e2e --bin fcp-e2e -- --validate-log "${LOG_JSONL}"
 
 echo "${SCRIPT_NAME} complete. Logs: ${LOG_JSONL}"
 echo "Replay report: ${REPLAY_REPORT_JSON}"

@@ -833,6 +833,8 @@ validate_artifact_contracts() {
           . == "relative" or
           . == "unset"
         );
+      def stable_lattice_error_mapping:
+        type == "string" and test("^LATTICE_[A-Z0-9_]+$");
       def required_scenarios:
         [
           "allow_small_test",
@@ -882,7 +884,17 @@ validate_artifact_contracts() {
         has("receipt_id_hash") and
         (.receipt_id_hash == null or (.receipt_id_hash | hex_hash)) and
         (.dispatcher_decision | type == "string") and
-        has("error_mapping") and
+        (if .dispatcher_decision == "allow" then
+          .verifier_result == "ok"
+          and .error_mapping == null
+          and (.receipt_id_hash | hex_hash)
+        elif .dispatcher_decision == "deny" then
+          (.verifier_result | stable_lattice_error_mapping)
+          and .error_mapping == .verifier_result
+          and .receipt_id_hash == null
+        else
+          false
+        end) and
         (.benchmark_summary | type == "string") and
         (.cleanup_result | type == "string") and
         has("skip_reason")) and

@@ -394,6 +394,9 @@ emitted by `lattice_policy_dispatcher_e2e`: both allow profiles, forged
 preimage denials, zone/period/operation/principal mismatch denials, malformed
 preimage denial, missing-certificate denial, incomplete/too-deep chain denials,
 and SMALL_TEST plus V4 trust-set replay denials.
+It also fails closed unless every allow row reports `verifier_result="ok"` with
+no `error_mapping`, and every deny row reports a stable `LATTICE_*` mapping that
+exactly matches `verifier_result` with no receipt id.
 The route artifact contract likewise requires exactly one record for the two
 successful primitive profiles and each explicit denial scenario. The public
 matrix artifact contract requires exactly one record for the two successful

@@ -71,6 +71,41 @@ run_step() {
   fi
 }
 
+graduation_gauntlet_pre_promotion_pending() {
+  local jsonl_path="$1"
+
+  if [[ ! -f "${jsonl_path}" ]]; then
+    return 1
+  fi
+
+  jq -s -e '
+    [.[] | select(.verdict == "fail")] as $failures
+    | ($failures | length) == 1
+      and $failures[0].check == "readme_status_match"
+  ' "${jsonl_path}" >/dev/null
+}
+
+run_graduation_gauntlet_step() {
+  local jsonl_path="${OUT_ROOT}/evidence/graduation_gauntlet.jsonl"
+  local log_path="${OUT_ROOT}/logs/graduation_gauntlet.log"
+
+  echo "[gmail-verification] graduation_gauntlet: scripts/graduation/run_gauntlet.sh --jsonl ${jsonl_path} connectors/gmail" >&2
+  if (
+    cd "${REPO_ROOT}" || exit
+    scripts/graduation/run_gauntlet.sh --jsonl "${jsonl_path}" connectors/gmail
+  ) >"${log_path}" 2>&1; then
+    LAST_STEP_STATUS="passed"
+  elif graduation_gauntlet_pre_promotion_pending "${jsonl_path}"; then
+    echo "pre-promotion gauntlet reached only readme_status_match; PROVEN status has not been claimed yet" >>"${log_path}"
+    LAST_STEP_STATUS="pre_promotion_pending"
+  else
+    local status
+    status="$(classify_failure "${log_path}")"
+    promote_status "${status}"
+    LAST_STEP_STATUS="${status}"
+  fi
+}
+
 run_absence_scan() {
   local name="$1"
   shift
@@ -117,7 +152,7 @@ run_rch_cargo_step() {
 
 git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
-run_step graduation_gauntlet scripts/graduation/run_gauntlet.sh connectors/gmail
+run_graduation_gauntlet_step
 graduation_gauntlet_status="${LAST_STEP_STATUS}"
 run_rch_cargo_step format_check cargo fmt -p fcp-gmail -- --check
 format_check_status="${LAST_STEP_STATUS}"
@@ -172,6 +207,7 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
     "redaction_scan": "${redaction_scan_status}"
   },
   "artifacts": {
+    "graduation_gauntlet": "${OUT_ROOT}/evidence/graduation_gauntlet.jsonl",
     "environment": "${OUT_ROOT}/environment.json",
     "replay": "${OUT_ROOT}/replay.sh",
     "logs": "${OUT_ROOT}/logs"
@@ -183,19 +219,14 @@ cat >"${OUT_ROOT}/replay.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
-export RCH_FORCE_REMOTE=1
-REPO_TOOLCHAIN="\${REPO_TOOLCHAIN:-${REPO_TOOLCHAIN}}"
-TARGET_DIR="\${CARGO_TARGET_DIR:-${TARGET_DIR}}"
-
 cd "${REPO_ROOT}"
-scripts/graduation/run_gauntlet.sh connectors/gmail
-env RCH_REQUIRE_REMOTE="\${RCH_REQUIRE_REMOTE:-1}" RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" CARGO_INCREMENTAL=0 cargo fmt -p fcp-gmail -- --check
-env RCH_REQUIRE_REMOTE="\${RCH_REQUIRE_REMOTE:-1}" RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" CARGO_INCREMENTAL=0 cargo test -p fcp-gmail --test local_non_mock -- --nocapture
-env RCH_REQUIRE_REMOTE="\${RCH_REQUIRE_REMOTE:-1}" RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" CARGO_INCREMENTAL=0 cargo test -p fcp-gmail --test conformance_contract -- --nocapture
-env RCH_REQUIRE_REMOTE="\${RCH_REQUIRE_REMOTE:-1}" RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" CARGO_INCREMENTAL=0 cargo clippy -p fcp-gmail --test local_non_mock --test conformance_contract --no-deps -- -D warnings
-git diff --check -- connectors/gmail/Cargo.toml connectors/gmail/manifest.toml connectors/gmail/src/connector.rs connectors/gmail/tests/local_non_mock.rs connectors/gmail/README.md scripts/e2e/gmail_connector_verification.sh
-! rg -n '\\bmaster\\b' connectors/gmail/README.md
-! rg -n 'ya29\\.|refresh_token|client_secret|Authorization: Bearer|loopback@example\\.invalid|Local acceptance snippet|msg-local-acceptance|thread-local-acceptance' "${OUT_ROOT}/logs"
+RUN_ID="${RUN_ID}" \\
+OUT_ROOT="${OUT_ROOT}" \\
+CARGO_TARGET_DIR="${TARGET_DIR}" \\
+RCH_REQUIRE_REMOTE="\${RCH_REQUIRE_REMOTE:-1}" \\
+RCH_FORCE_REMOTE=1 \\
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN}" \\
+scripts/e2e/gmail_connector_verification.sh
 EOF
 chmod +x "${OUT_ROOT}/replay.sh"
 

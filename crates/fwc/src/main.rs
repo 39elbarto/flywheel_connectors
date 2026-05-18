@@ -1525,6 +1525,10 @@ struct SearchArgs {
     /// Include connectors hidden from default catalog flows such as incubating or quarantined entries.
     #[arg(long, default_value_t = false)]
     include_hidden: bool,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -12016,6 +12020,7 @@ fn search_dispatch_host(args: &SearchArgs, host: &str) -> Result<DispatchOutcome
         catalog::DiscoveryDataSource::LiveHostIntrospection,
     );
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -12026,12 +12031,25 @@ fn search_dispatch(args: &SearchArgs, host: Option<&str>) -> Result<DispatchOutc
     let resolved_host = resolve_host_config(host)?;
     if args.offline {
         if resolved_host.is_some() {
-            return Ok(conflicting_catalog_mode_dispatch("search"));
+            let mut outcome = conflicting_catalog_mode_dispatch("search");
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
         }
     } else if let Some(host) = resolved_host {
+        if let Some(outcome) =
+            enforce_required_truth_source("search", args.require_source, KnowledgeState::HostBacked)
+        {
+            return Ok(outcome);
+        }
         return search_dispatch_host(args, &host.endpoint);
     } else {
-        return Ok(missing_host_dispatch(
+        if let Some(outcome) =
+            enforce_required_truth_source("search", args.require_source, KnowledgeState::Offline)
+        {
+            return Ok(outcome);
+        }
+
+        let mut outcome = missing_host_dispatch(
             "search",
             json!({
                 "query": &args.query,
@@ -12045,13 +12063,22 @@ fn search_dispatch(args: &SearchArgs, host: Option<&str>) -> Result<DispatchOutc
                     "category": args.category,
                     "idempotent": args.idempotent,
                     "include_hidden": args.include_hidden,
+                    "require_source": args.require_source.map(RequiredTruthSource::label),
                 },
             }),
             vec![
                 "fwc search <query> --host <endpoint>".to_owned(),
                 "fwc search <query> --offline".to_owned(),
             ],
-        ));
+        );
+        inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+        return Ok(outcome);
+    }
+
+    if let Some(outcome) =
+        enforce_required_truth_source("search", args.require_source, KnowledgeState::Offline)
+    {
+        return Ok(outcome);
     }
 
     let catalog = DiscoveryCatalog::load_for_connector_filter(args.connector.as_deref())?;
@@ -12134,6 +12161,7 @@ fn search_dispatch(args: &SearchArgs, host: Option<&str>) -> Result<DispatchOutc
         catalog::DiscoveryDataSource::WorkspaceManifest,
     );
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -38386,10 +38414,53 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "search");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
         assert!(payload["results"].as_array().unwrap().iter().any(|result| {
             result["connector"] == "github" && result["operation"] == "github.create_issue"
         }));
+    }
+
+    #[test]
+    fn execute_search_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "search",
+            "github issue",
+            "--offline",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "search");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn execute_search_missing_host_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "search",
+            "github issue",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "search");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
     }
 
     #[test]
@@ -38442,6 +38513,8 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "search");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_discovery_provenance(
             &payload,
             "live_host_introspection",
@@ -38451,6 +38524,28 @@ deny_ptrace = true
         assert!(payload["results"].as_array().unwrap().iter().any(|result| {
             result["connector"] == "github" && result["operation"] == "github.create_issue"
         }));
+    }
+
+    #[test]
+    fn execute_search_host_require_mesh_fails_truth_source_unavailable_without_network() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            "http://127.0.0.1:9",
+            "search",
+            "github issue",
+            "--require-source",
+            "mesh",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "search");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "host");
     }
 
     #[test]

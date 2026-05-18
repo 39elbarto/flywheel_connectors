@@ -263,14 +263,15 @@ rch_summary_line() {
 }
 
 if [[ -n "${EVIDENCE_JSONL_IN}" ]]; then
+  provided_evidence_path_hash="sha256:$(hash_text_sha256 "${EVIDENCE_JSONL_IN}")"
   if [[ ! -s "${EVIDENCE_JSONL_IN}" ]]; then
-    echo "Evidence JSONL input does not exist or is empty: ${EVIDENCE_JSONL_IN}" >&2
+    echo "Evidence JSONL input does not exist or is empty: path_hash=${provided_evidence_path_hash}" >&2
     exit 2
   fi
-  echo "[connector-prewarm-cold-start] validating provided evidence JSONL ${EVIDENCE_JSONL_IN}"
+  echo "[connector-prewarm-cold-start] validating provided evidence JSONL path_hash=${provided_evidence_path_hash}"
   test_status="provided"
   cp "${EVIDENCE_JSONL_IN}" "${EVIDENCE_JSONL}"
-  printf 'validated provided evidence JSONL: %s\n' "${EVIDENCE_JSONL_IN}" >"${TEST_LOG}"
+  printf 'validated provided evidence JSONL path_hash=%s\n' "${provided_evidence_path_hash}" >"${TEST_LOG}"
 else
   echo "[connector-prewarm-cold-start] running fcp-e2e prewarm evidence lane"
   if ! (
@@ -833,6 +834,16 @@ if [[ -s "${SKIP_JSONL}" ]]; then
     overall_status="failed"
     validation_status="failed"
     mark_validation_redaction_failed "skip_artifact_contract_failed"
+    exit_code=1
+  fi
+fi
+
+if [[ -n "${EVIDENCE_JSONL_IN}" && -s "${TEST_LOG}" ]]; then
+  if grep -aEi "$(redaction_pattern)" "${TEST_LOG}" >/dev/null; then
+    redaction_status="failed"
+    overall_status="failed"
+    validation_status="failed"
+    mark_validation_redaction_failed "provided_test_log_secret_or_private_path_marker"
     exit_code=1
   fi
 fi

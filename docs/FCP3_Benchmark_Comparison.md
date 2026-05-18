@@ -146,10 +146,12 @@ while separately recording the `sha256:<64 lowercase hex>` content digest of
 the copied evidence JSONL bundle. `summary.json` names bundle artifacts by
 relative path only and repeats the evidence JSONL content digest so reviewers
 can tie validation results to the exact replay input without exposing the
-operator's local source path. Both metadata JSON files are scanned for the same
-secret and private-path markers as the evidence rows before the verifier exits.
-The
-verifier and typed serializer both require positive p50, p95, and p99
+operator's local source path. In provided-evidence mode, the test log records
+only a `sha256:<64 lowercase hex>` fingerprint for the input path and is scanned
+for the same private-path markers before the verifier exits. Both metadata JSON
+files are scanned for the same secret and private-path markers as the evidence
+rows before the verifier exits.
+The verifier and typed serializer both require positive p50, p95, and p99
 improvement deltas for production-soak warm-hit, shutdown-cleanup, and
 concurrent-swarm-startup promotion scenarios; fallback and rejection scenarios
 may still report zero improvement with their measured rationale. Every provided

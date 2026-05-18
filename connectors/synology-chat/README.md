@@ -14,6 +14,10 @@
 > - https://www.synology.com/en-id/dsm/7.2/software_spec/chat
 > - https://www.synology.com
 
+## Verification Handoff
+
+Verification script: `scripts/e2e/synology_chat_connector_verification.sh`
+
 ## Purpose
 
 This document fixes the accepted first V3 slice for `fcp.synology-chat` and records the first inbound follow-on that now exists, so later work stays aligned with the connector that actually ships instead of assuming a full bidirectional bot runtime already exists.

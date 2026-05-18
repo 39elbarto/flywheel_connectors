@@ -48,6 +48,9 @@ profile/boundary, `CARGO_TARGET_DIR`, connector fixture id, pool size,
 admission decision, warm-checkout flag, execution mode, source kind, error
 mapping, and cleanup result. That keeps cold-start comparisons tied to the
 explicit evidence class instead of a latency-only artifact.
+Verifier-provided JSONL must use the same stable labels as the typed evidence:
+`execution_mode` is `smoke` or `soak`, and `source_kind` is `offline`,
+`host_backed`, or `live`.
 The replayable top-level row exposes current p50/p95/p99 activation latency,
 baseline p50/p95/p99 activation latency, and per-percentile improvement deltas
 so before/after promotion gates do not need to parse nested evidence payloads.

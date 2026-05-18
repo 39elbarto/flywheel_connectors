@@ -310,6 +310,10 @@ if [[ "${overall_status}" == "passed" ]]; then
         type == "string" and test("^[0-9a-f]{7,40}$");
       def worker_id_label:
         type == "string" and test("^[A-Za-z0-9._-]{1,128}$");
+      def execution_mode_label:
+        type == "string" and (. == "smoke" or . == "soak");
+      def source_kind_label:
+        type == "string" and (. == "offline" or . == "host_backed" or . == "live");
       def canonical_boundary_label:
         type == "string" and test("^[-A-Za-z0-9_.:]+$");
       def latency_percentile_object_ok:
@@ -479,8 +483,8 @@ if [[ "${overall_status}" == "passed" ]]; then
         schema_ok: all(.[]; .schema_version == "swarm-prewarm-cold-start/v2"),
         record_type_ok: all(.[]; .record_type == "swarm_prewarm_cold_start_evidence"),
         execution_mode_shape_ok: all(.[];
-          (.execution_mode | type) == "string"
-          and (.source_kind | type) == "string"
+          (.execution_mode | execution_mode_label)
+          and (.source_kind | source_kind_label)
         ),
         command_provenance_ok: all(.[];
           rch_command_line_ok

@@ -1684,6 +1684,10 @@ struct DoctorArgs {
     #[arg(long, default_value_t = false)]
     fix: bool,
 
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
+
     #[command(subcommand)]
     command: Option<DoctorCommand>,
 }
@@ -12637,6 +12641,16 @@ fn examples_dispatch(args: &ExampleArgs, host: Option<&str>) -> Result<DispatchO
 }
 
 fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
+    let uses_local_doctor_source =
+        args.check.is_some() || args.probe.is_some() || args.command.is_some();
+    if uses_local_doctor_source {
+        if let Some(outcome) =
+            enforce_required_truth_source("doctor", args.require_source, KnowledgeState::Offline)
+        {
+            return Ok(outcome);
+        }
+    }
+
     if matches!(args.check, Some(DoctorLocalCheck::Lean)) {
         return doctor_lean_dispatch();
     }
@@ -12662,7 +12676,13 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
     }
 
     let Some(zone_arg) = args.zone.as_deref() else {
-        return Ok(DispatchOutcome {
+        if let Some(outcome) =
+            enforce_required_truth_source("doctor", args.require_source, KnowledgeState::Offline)
+        {
+            return Ok(outcome);
+        }
+
+        let mut outcome = DispatchOutcome {
             payload: json!({
                 "status": "error",
                 "command": "doctor",
@@ -12679,11 +12699,19 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
                 ],
             }),
             exit_code: CliExitCode::Validation,
-        });
+        };
+        inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+        return Ok(outcome);
     };
 
     let Some(host) = resolve_host_config(explicit_host)? else {
-        return Ok(missing_host_dispatch(
+        if let Some(outcome) =
+            enforce_required_truth_source("doctor", args.require_source, KnowledgeState::Offline)
+        {
+            return Ok(outcome);
+        }
+
+        let mut outcome = missing_host_dispatch(
             "doctor",
             serde_json::to_value(args)?,
             vec![
@@ -12691,10 +12719,18 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
                 "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
                     .to_owned(),
             ],
-        ));
+        );
+        inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+        return Ok(outcome);
     };
+    if let Some(outcome) =
+        enforce_required_truth_source("doctor", args.require_source, KnowledgeState::HostBacked)
+    {
+        return Ok(outcome);
+    }
+
     if args.self_check && args.connector.is_empty() {
-        return Ok(DispatchOutcome {
+        let mut outcome = DispatchOutcome {
             payload: json!({
                 "status": "error",
                 "command": "doctor",
@@ -12710,13 +12746,15 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
                 ],
             }),
             exit_code: CliExitCode::Validation,
-        });
+        };
+        inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+        return Ok(outcome);
     }
 
     let zone = match zone_arg.parse::<ZoneId>() {
         Ok(zone) => zone,
         Err(error) => {
-            return Ok(DispatchOutcome {
+            let mut outcome = DispatchOutcome {
                 payload: json!({
                     "status": "error",
                     "command": "doctor",
@@ -12734,7 +12772,9 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
                     ],
                 }),
                 exit_code: CliExitCode::Validation,
-            });
+            };
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+            return Ok(outcome);
         }
     };
 
@@ -12746,7 +12786,11 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
         for selector in &args.connector {
             let connector = match catalog.resolve_connector(selector) {
                 Ok(connector) => connector,
-                Err(error) => return Ok(connector_resolution_dispatch("doctor", selector, &error)),
+                Err(error) => {
+                    let mut outcome = connector_resolution_dispatch("doctor", selector, &error);
+                    inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+                    return Ok(outcome);
+                }
             };
             requested_connectors.push(json!({
                 "selector": selector,
@@ -12871,6 +12915,7 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
         })],
     );
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -12887,22 +12932,21 @@ fn doctor_lean_dispatch() -> Result<DispatchOutcome> {
         CliExitCode::Validation
     };
 
-    Ok(DispatchOutcome {
-        payload: json!({
-            "status": status,
-            "command": "doctor",
-            "check": "lean",
-            "source": "local-workspace",
-            "message": if report.healthy {
-                "Lean formal-proof gate is healthy."
-            } else {
-                "Lean formal-proof gate has missing or failing evidence."
-            },
-            "workspace_root": root.display().to_string(),
-            "report": report,
-        }),
-        exit_code,
-    })
+    let mut payload = json!({
+        "status": status,
+        "command": "doctor",
+        "check": "lean",
+        "source": "local-workspace",
+        "message": if report.healthy {
+            "Lean formal-proof gate is healthy."
+        } else {
+            "Lean formal-proof gate has missing or failing evidence."
+        },
+        "workspace_root": root.display().to_string(),
+        "report": report,
+    });
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
+    Ok(DispatchOutcome { payload, exit_code })
 }
 
 const HLC_PROBE_SKEW_WARN_MS: u64 = 2_000;
@@ -12956,6 +13000,7 @@ fn doctor_hlc_probe_dispatch() -> Result<DispatchOutcome> {
         ],
     });
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome { payload, exit_code })
 }
 
@@ -13089,6 +13134,7 @@ fn doctor_iblt_probe_dispatch() -> Result<DispatchOutcome> {
         ],
     });
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome { payload, exit_code })
 }
 
@@ -13276,6 +13322,7 @@ fn doctor_migration_probe_dispatch() -> Result<DispatchOutcome> {
         ],
     });
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome { payload, exit_code })
 }
 
@@ -13450,6 +13497,7 @@ fn doctor_self_test_dispatch(args: &DoctorSelfTestArgs) -> Result<DispatchOutcom
         ],
     });
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -34256,9 +34304,85 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "doctor");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_live_host_admin_contract(&payload, "zone-diagnostics", false, "doctor-report");
         assert_eq!(payload["report"]["zone_id"], "z:work");
         assert_eq!(payload["summary"]["overall_status"], "OK");
+    }
+
+    #[test]
+    fn execute_doctor_without_zone_reports_offline_truth_metadata() {
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "doctor"]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "missing-zone");
+    }
+
+    #[test]
+    fn execute_doctor_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "doctor",
+            "--zone",
+            "z:work",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn execute_doctor_host_require_mesh_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            "http://127.0.0.1:1",
+            "doctor",
+            "--zone",
+            "z:work",
+            "--require-source",
+            "mesh",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "host");
+    }
+
+    #[test]
+    fn execute_doctor_local_probe_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "doctor",
+            "--probe",
+            "hlc",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
     }
 
     #[test]
@@ -34329,6 +34453,8 @@ deny_ptrace = true
         assert_eq!(payload["command"], "doctor");
         assert_eq!(payload["probe"], "hlc");
         assert_eq!(payload["source"], "local-algorithm-probe");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["report"]["schema_version"], "fcp.fwc.doctor.hlc.v1");
 
         let metrics = &payload["report"]["metrics"];

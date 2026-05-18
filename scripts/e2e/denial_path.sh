@@ -8,6 +8,9 @@ SEED="0xDEADBEEF"
 OUT_DIR="${OUT_DIR:-./out/${SCRIPT_NAME}}"
 LOG_JSONL="${LOG_JSONL:-${OUT_DIR}/${SCRIPT_NAME}.jsonl}"
 TARGET_DIR="${DENIAL_PATH_TARGET_DIR:-/tmp/fcp-denial-path-flow}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+export RCH_FORCE_REMOTE=1
 
 PREFLIGHT_DENY_TEST="budget_engine_with_policies_preflight_integration"
 PREFLIGHT_DENY_INTEGRATION="no_mock_integration"
@@ -73,19 +76,29 @@ require_cmd() {
 }
 
 run_cargo() {
-  if command -v rch >/dev/null 2>&1; then
-    rch exec -- cargo "$@"
-    return $?
-  fi
-  cargo "$@"
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo "$@"
 }
 
-run_fcp_e2e() {
-  if command -v fcp-e2e >/dev/null 2>&1; then
-    fcp-e2e "$@"
-    return $?
+rch_remote_summary_present() {
+  local execution_log="$1"
+
+  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
+    return 0
   fi
-  run_cargo run --target-dir "${TARGET_DIR}" -q -p fcp-e2e --bin fcp-e2e -- "$@"
+
+  grep -Eq '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}" && return 0
+
+  echo "Missing accepted remote rch summary in ${execution_log}" >&2
+  echo "rch remote proof is required; refusing local fallback" >&2
+  return 2
+}
+
+run_cargo_logged() {
+  local execution_log="$1"
+  shift
+
+  run_cargo "$@" > "${execution_log}" 2>&1 || return
+  rch_remote_summary_present "${execution_log}"
 }
 
 log_step() {
@@ -153,7 +166,8 @@ run_exact_lib_test() {
   (
     cd "${REPO_ROOT}"
     run_cargo test --target-dir "${TARGET_DIR}" -p "${package}" "${test_name}" --lib -- --nocapture
-  ) > "${log_path}" 2>&1
+  ) > "${log_path}" 2>&1 || return
+  rch_remote_summary_present "${log_path}"
 }
 
 run_exact_integration_test() {
@@ -166,7 +180,8 @@ run_exact_integration_test() {
   (
     cd "${REPO_ROOT}"
     run_cargo test --target-dir "${TARGET_DIR}" -p "${package}" --test "${integration_test}" "${test_name}" -- --exact --nocapture
-  ) > "${log_path}" 2>&1
+  ) > "${log_path}" 2>&1 || return
+  rch_remote_summary_present "${log_path}"
 }
 
 run_exact_bin_test() {
@@ -179,7 +194,8 @@ run_exact_bin_test() {
   (
     cd "${REPO_ROOT}"
     run_cargo test --target-dir "${TARGET_DIR}" -p "${package}" --bin "${bin_name}" "${test_name}" -- --nocapture
-  ) > "${log_path}" 2>&1
+  ) > "${log_path}" 2>&1 || return
+  rch_remote_summary_present "${log_path}"
 }
 
 step_verify_preflight_deny_policy() {
@@ -274,9 +290,9 @@ step_verify_explain_denial_reports() {
       ],
       test_name: "explain denial suite"
     }')"
-  run_exact_bin_test "fcp-cli" "fcp" "${EXPLAIN_HINT_TEST}" "${EXPLAIN_HINT_LOG}"
-  run_exact_bin_test "fcp-cli" "fcp" "${REVOKED_RECEIPT_TEST}" "${REVOKED_RECEIPT_LOG}"
-  run_exact_bin_test "fcp-cli" "fcp" "${ZONE_RECEIPT_TEST}" "${ZONE_RECEIPT_LOG}"
+  run_exact_bin_test "fcp-cli" "fcp" "${EXPLAIN_HINT_TEST}" "${EXPLAIN_HINT_LOG}" || return
+  run_exact_bin_test "fcp-cli" "fcp" "${REVOKED_RECEIPT_TEST}" "${REVOKED_RECEIPT_LOG}" || return
+  run_exact_bin_test "fcp-cli" "fcp" "${ZONE_RECEIPT_TEST}" "${ZONE_RECEIPT_LOG}" || return
 }
 
 step_verify_expired_receipt_explanation() {
@@ -400,7 +416,7 @@ step_emit_contract_summary() {
     }')"
 }
 
-require_cmd cargo
+require_cmd "${RCH_BIN}"
 require_cmd jq
 
 mkdir -p "${OUT_DIR}"
@@ -412,6 +428,7 @@ run_step "verify_explain_denial_reports" 4 "[\"${EXPLAIN_HINT_LOG}\",\"${REVOKED
 run_step "verify_expired_receipt_explanation" 5 "[\"${EXPIRED_RECEIPT_LOG}\"]" step_verify_expired_receipt_explanation
 run_step "emit_contract_summary" 6 "[\"${VERIFICATION_SUMMARY}\"]" step_emit_contract_summary
 
-run_fcp_e2e --validate-log "${LOG_JSONL}"
+run_cargo_logged "${OUT_DIR}/validate_log.execution.log" \
+  run --target-dir "${TARGET_DIR}" -q -p fcp-e2e --bin fcp-e2e -- --validate-log "${LOG_JSONL}"
 
 echo "${SCRIPT_NAME} complete. Logs: ${LOG_JSONL}"

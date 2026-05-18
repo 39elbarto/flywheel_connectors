@@ -295,6 +295,9 @@ scan_jsonl_artifact() {
     "raw_operation" \
     "raw_principal" \
     "raw_zone" \
+    "send_message" \
+    "agent-alpha" \
+    "agent-beta" \
     "trapdoor_material" \
     "trapdoor_coefficients" \
     "secret_seed" \

@@ -28,8 +28,10 @@ const ACCEPTANCE_SUITE_CLASS: &str = "local_non_mock";
 const OP_SEND_CHANNEL: &str = "qq.messages.send_channel";
 const OP_SEND_GROUP: &str = "qq.messages.send_group";
 const OP_SEND_C2C: &str = "qq.messages.send_c2c";
+const OP_GET_GATEWAY: &str = "qq.gateway.get";
 const OP_HEALTH: &str = "qq.health";
 const CAP_MESSAGES_WRITE: &str = "qq.messages.write";
+const CAP_GATEWAY_READ: &str = "qq.gateway.read";
 const CAP_HEALTH_READ: &str = "qq.health.read";
 const ACCESS_MATERIAL: &str = "qq-local-access-material";
 const EXPIRED_ACCESS_MATERIAL: &str = "qq-local-expired-material";
@@ -183,6 +185,7 @@ fn handshake_request(host_public_key: [u8; 32], instance_id: InstanceId) -> Hand
         nonce: [9_u8; 32],
         capabilities_requested: vec![
             CapabilityId::from_static(CAP_MESSAGES_WRITE),
+            CapabilityId::from_static(CAP_GATEWAY_READ),
             CapabilityId::from_static(CAP_HEALTH_READ),
         ],
         host: None,
@@ -286,6 +289,26 @@ fn c2c_send_request(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -
             "content": "hello from QQ c2c refresh"
         }),
         capability_token: build_token(signing_key, instance_id, CAP_MESSAGES_WRITE, OP_SEND_C2C),
+        holder_proof: None,
+        context: None,
+        idempotency_key: None,
+        lease_seq: None,
+        deadline_ms: None,
+        correlation_id: None,
+        provenance: None,
+        approval_tokens: Vec::new(),
+    }
+}
+
+fn gateway_get_request(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -> InvokeRequest {
+    InvokeRequest {
+        r#type: "invoke".into(),
+        id: RequestId::new("qq-local-gateway-refresh"),
+        connector_id: ConnectorId::from_static("fcp.qq"),
+        operation: OperationId::from_static(OP_GET_GATEWAY),
+        zone_id: ZoneId::work(),
+        input: json!({}),
+        capability_token: build_token(signing_key, instance_id, CAP_GATEWAY_READ, OP_GET_GATEWAY),
         holder_proof: None,
         context: None,
         idempotency_key: None,
@@ -894,6 +917,130 @@ async fn local_non_mock_send_stops_after_one_unauthorized_refresh_retry() {
             "refresh_attempts": 1,
             "second_unauthorized_failed_closed": true,
             "token_cache_path": "memory_only"
+        },
+        "cleanup": "connector_shutdown_and_fixture_thread_joined",
+        "result": "passed"
+    });
+    println!("{artifact}");
+}
+
+#[fcp_async_core::runtime::test]
+async fn local_non_mock_gateway_get_refreshes_expired_access_token_once() {
+    let qq = LoopbackQq::start(vec![
+        HttpResponse {
+            status: "200 OK",
+            body: r#"{"access_token":"qq-local-expired-material","expires_in":7200}"#,
+        },
+        HttpResponse {
+            status: "403 Forbidden",
+            body: r#"{"message":"expired gateway discovery access material"}"#,
+        },
+        HttpResponse {
+            status: "200 OK",
+            body: r#"{"access_token":"qq-local-fresh-material","expires_in":7200}"#,
+        },
+        HttpResponse {
+            status: "200 OK",
+            body: r#"{"url":"wss://gateway.qq.example/ws"}"#,
+        },
+    ]);
+    let app_credential = "gateway-refresh-credential";
+    let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
+
+    let mut connector = QqConnector::new();
+    connector
+        .configure(json!({
+            "base_url": qq.base_url(),
+            "token_base_url": qq.base_url(),
+            "app_id": "qq-gateway-refresh-app",
+            "client_secret": app_credential,
+            "request_timeout_ms": 5_000
+        }))
+        .await
+        .expect("configure QQ connector");
+    connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            instance_id.clone(),
+        ))
+        .await
+        .expect("handshake QQ connector");
+
+    let response = connector
+        .invoke(gateway_get_request(&signing_key, &instance_id))
+        .await
+        .expect("run QQ gateway discovery through loopback fixture");
+    assert!(matches!(response.status, InvokeStatus::Ok));
+    let result = response
+        .result
+        .expect("QQ gateway discovery result should be present");
+    assert_eq!(result["url"], "wss://gateway.qq.example/ws");
+
+    connector
+        .shutdown(ShutdownRequest {
+            r#type: "shutdown".into(),
+            deadline_ms: 1_000,
+            drain: true,
+            reason: Some("qq-local-gateway-refresh-complete".into()),
+        })
+        .await
+        .expect("shutdown QQ connector");
+
+    let requests = qq.join();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        requests[0].request_line,
+        "POST /app/getAppAccessToken HTTP/1.1"
+    );
+    assert_eq!(
+        requests[0].body.as_ref().expect("token body present")["clientSecret"],
+        app_credential
+    );
+    assert_eq!(requests[1].request_line, "GET /gateway HTTP/1.1");
+    assert!(header_equals(
+        &requests[1].headers,
+        "authorization",
+        &format!("QQBot {EXPIRED_ACCESS_MATERIAL}")
+    ));
+    assert_eq!(
+        requests[2].request_line,
+        "POST /app/getAppAccessToken HTTP/1.1"
+    );
+    assert_eq!(requests[3].request_line, "GET /gateway HTTP/1.1");
+    assert!(header_equals(
+        &requests[3].headers,
+        "authorization",
+        &format!("QQBot {FRESH_ACCESS_MATERIAL}")
+    ));
+
+    let artifact = json!({
+        "connector": "qq",
+        "suite_class": ACCEPTANCE_SUITE_CLASS,
+        "acceptance_suite_class": ACCEPTANCE_SUITE_CLASS,
+        "bead_id": "flywheel_connectors-6n7.12.3",
+        "command": "cargo test -p fcp-qq --test local_non_mock local_non_mock_gateway_get_refreshes_expired_access_token_once -- --nocapture",
+        "git_revision": option_env!("GIT_REVISION").unwrap_or("worktree"),
+        "fixture_mode": "loopback_http",
+        "provider_class": "local_sufficient",
+        "operation": "qq.gateway.get",
+        "request_response_boundaries": [
+            { "method": "POST", "path": "/app/getAppAccessToken", "purpose": "initial_access_token" },
+            { "method": "GET", "path": "/gateway", "purpose": "expired_token_gateway_discovery" },
+            { "method": "POST", "path": "/app/getAppAccessToken", "purpose": "refresh_after_gateway_forbidden" },
+            { "method": "GET", "path": "/gateway", "purpose": "fresh_token_gateway_discovery_retry" }
+        ],
+        "auth_gate": {
+            "mode": "qqbot_access_token",
+            "authorization_header_verified": true,
+            "refresh_after_unauthorized_verified": true,
+            "refresh_attempts": 1,
+            "retry_reused_original_gateway_request": true,
+            "token_cache_path": "memory_only"
+        },
+        "redaction": {
+            "raw_access_material_logged": false,
+            "raw_client_secret_logged": false
         },
         "cleanup": "connector_shutdown_and_fixture_thread_joined",
         "result": "passed"

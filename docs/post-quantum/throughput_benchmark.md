@@ -447,15 +447,19 @@ all JSONL records so reviewer evidence cannot be stitched together from
 different runs. Run ids and worker host classes must be non-empty
 redaction-safe label tokens using only ASCII letters, digits, `.`, `_`, and
 `-`; `..` is rejected by the self-contract. Run ids containing secret, provider
-payload, reviewer-contact, trapdoor, preimage, or credential marker names are
-rejected before the script creates artifact directories or JSONL files, and
-stderr reports only a `sha256:<64 lowercase hex>` hash of the rejected value.
+payload, reviewer-contact, trapdoor, preimage, credential, raw-label, or
+host-dispatcher fixture-literal marker names are rejected before the script
+creates artifact directories or JSONL files, and stderr reports only a
+`sha256:<64 lowercase hex>` hash of the rejected value.
 The top-level build profile must be `dev-test-bench`. Because command records are contracted
 to `target/fcp-crypto-pq/<run_id>.<step>.log`, `OUT_DIR` must remain
 `target/fcp-crypto-pq`; an override fails before the script creates evidence
 directories. The staged remote evidence root is likewise pinned to
 `target/fcp-crypto-pq/rch-lattice-evidence/<run_id>` so private absolute staging
 paths cannot influence evidence materialization before redaction checks. The
+operator-supplied top-level artifact filename is rejected against the same
+redaction-sensitive marker policy before evidence directories are created, and
+rejected paths are reported only by SHA-256 hash. The
 top-level and component artifact revisions must be actual 7- to 40-character
 hexadecimal Git commit ids; `unknown` is a preflight or contract failure, not
 reusable evidence. Top-level target-dir classes are limited to `ephemeral_tmp`,
@@ -481,14 +485,16 @@ The summary record must name the actual formal-correspondence JSONL artifact
 being emitted, and both run-id-derived and operator-supplied artifact paths are
 limited to a single relative `target/fcp-crypto-pq/*.jsonl` file before the
 script creates or truncates evidence. The standalone formal script applies the
-same redaction-sensitive run-id marker preflight as the top-level gauntlet.
+same redaction-sensitive run-id and artifact-filename marker preflight as the
+top-level gauntlet, including raw-label and host-dispatcher fixture-literal
+markers.
 It also pins `OUT_DIR` to `target/fcp-crypto-pq` before creating log or evidence
 directories, matching the command-record contract that every local log is a
 target-relative evidence artifact rather than a private absolute path.
 Operator-supplied artifact filenames are also rejected if they contain the same
-secret, provider-payload, reviewer-contact, trapdoor, preimage, or credential
-marker names; the failure message reports only a SHA-256 hash of the rejected
-path.
+secret, provider-payload, reviewer-contact, trapdoor, preimage, credential,
+raw-label, or fixture-literal marker names; the failure message reports only a
+SHA-256 hash of the rejected path.
 Its command records must name their exact log artifact as
 `target/fcp-crypto-pq/<run_id>.<step>.log`, and the standalone self-contract
 rejects passing command records whose `log_artifact` does not match the

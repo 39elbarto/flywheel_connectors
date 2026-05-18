@@ -12,6 +12,7 @@ pub mod criu;
 
 pub use criu::dirty_tracker::{
     DirtyPageBitmap, DirtyTracker, DirtyTrackerError, DirtyTrackerHealth, DirtyTrackerMode,
+    SoftDirtyPageState, SoftDirtyProc, SoftDirtyReader, StaticSoftDirtyReader, virtual_page_index,
 };
 pub use criu::postcopy::{
     DEFAULT_PAGE_FAULT_TIMEOUT_MS, PageFaultSource, PageFetch, PostCopyDecision,

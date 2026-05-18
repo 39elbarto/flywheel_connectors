@@ -10,7 +10,7 @@ Summary: `0/23` Batch 4 connectors currently pass the graduation gauntlet.
 |-----------|--------|---------------------|------------------------------|--------|
 | `connectors/anthropic-vertex` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/azure-speech` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
-| `connectors/inworld` | `blocked` | `verification_script_declared` | `4` | README does not declare a scripts/e2e verification script |
+| `connectors/inworld` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/microsoft-foundry` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/amplitude` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/posthog` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
@@ -19,7 +19,7 @@ Summary: `0/23` Batch 4 connectors currently pass the graduation gauntlet.
 | `connectors/circleci` | `blocked` | `verification_script_declared` | `4` | README does not declare a scripts/e2e verification script |
 | `connectors/package-registry` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/paypal` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
-| `connectors/irc` | `blocked` | `verification_script_declared` | `4` | README does not declare a scripts/e2e verification script |
+| `connectors/irc` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/line` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/qq` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/synology-chat` | `blocked` | `verification_script_declared` | `4` | README does not declare a scripts/e2e verification script |

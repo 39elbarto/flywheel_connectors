@@ -52,6 +52,8 @@ fixture JSONL.
 
 ## Verification
 
+Verification script: `scripts/e2e/inworld_connector_verification.sh`.
+
 Targeted proof for this connector should run through `rch` once the workspace
 manifest includes `connectors/inworld`:
 

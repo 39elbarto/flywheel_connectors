@@ -821,6 +821,13 @@ validate_artifact_contracts() {
     "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl" '
       def hex_hash:
         type == "string" and test("^[0-9a-f]{64}$");
+      def host_target_dir_class:
+        type == "string" and (
+          . == "tmp_absolute" or
+          . == "absolute" or
+          . == "relative" or
+          . == "unset"
+        );
       def required_scenarios:
         [
           "allow_small_test",
@@ -847,7 +854,7 @@ validate_artifact_contracts() {
         (.git_revision | (type == "string" and test("^[0-9a-f]{7,40}$"))) and
         (.build_profile | type == "string") and
         (.cargo_target_dir_hash | hex_hash) and
-        (.cargo_target_dir_class | type == "string") and
+        (.cargo_target_dir_class | host_target_dir_class) and
         (.worker_host_class | type == "string") and
         (.timing_sample_count | type == "number") and
         .artifact_path == "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl" and
@@ -892,6 +899,12 @@ validate_gauntlet_contract() {
       type == "string" and test("^sha256:[0-9a-f]{64}$");
     def git_revision_hash:
       type == "string" and test("^[0-9a-f]{7,40}$");
+    def gauntlet_target_dir_class:
+      type == "string" and (
+        . == "ephemeral_tmp" or
+        . == "repo_relative_target" or
+        . == "custom_hashed"
+      );
     def required_host_scenarios:
       [
         "allow_small_test",
@@ -1019,7 +1032,7 @@ validate_gauntlet_contract() {
       (.step | type == "string") and
       .result == "pass" and
       (.git_revision | git_revision_hash) and
-      (.cargo_target_dir_class | type == "string") and
+      (.cargo_target_dir_class | gauntlet_target_dir_class) and
       (.cargo_target_dir_hash | sha256_hash) and
       (.build_profile | type == "string") and
       (.worker_host_class | type == "string") and

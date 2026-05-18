@@ -412,7 +412,11 @@ git revision, target-dir class/hash, build profile, and worker host class across
 all JSONL records so reviewer evidence cannot be stitched together from
 different runs. The top-level and component artifact revisions must be actual
 7- to 40-character hexadecimal Git commit ids; `unknown` is a preflight or
-contract failure, not reusable evidence.
+contract failure, not reusable evidence. Top-level target-dir classes are
+limited to `ephemeral_tmp`, `repo_relative_target`, or `custom_hashed`; the
+host dispatcher component artifact is limited to `tmp_absolute`, `absolute`,
+`relative`, or `unset`, so a novel label cannot bypass target-dir provenance
+review.
 The narrower `scripts/e2e/lattice_delegation_formal_correspondence.sh` proof
 script also validates its own JSONL envelope before printing the artifact path:
 it requires exact Lean theorem/assumption ID arrays, stable command log hashes,

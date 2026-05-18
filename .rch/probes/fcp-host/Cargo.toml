@@ -1,0 +1,11 @@
+[package]
+name = "fcp-rch-probe-fcp-host"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+resolver = "2"
+
+[dependencies]
+fcp-host = { path = "../../../crates/fcp-host" }

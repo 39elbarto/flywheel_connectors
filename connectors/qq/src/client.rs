@@ -402,9 +402,11 @@ impl QqGatewayRuntime {
     ///
     /// # Errors
     ///
-    /// Returns an error only when a dispatch event looks like a QQ message event but the
-    /// message payload is malformed or exceeds parser bounds.
+    /// Returns an error when the gateway envelope is malformed or when a dispatch event
+    /// looks like a QQ message event but the message payload is malformed or exceeds
+    /// parser bounds.
     pub fn project_event(&mut self, event: QqGatewayEvent) -> QqResult<QqGatewayEventProjection> {
+        validate_gateway_event_envelope(&event)?;
         if !self.config.enabled {
             return Ok(self.dropped_projection(event.s, event.id, "gateway_disabled"));
         }
@@ -756,6 +758,37 @@ fn gateway_event_id(event: &QqGatewayEvent) -> Option<String> {
                 .map(str::to_string)
         })
         .filter(|id| !id.trim().is_empty())
+}
+
+/// Validate top-level gateway frame fields before they can affect runtime state.
+///
+/// # Errors
+///
+/// Returns an error when bounded envelope fields exceed parser limits or contain
+/// invalid event-type characters.
+pub fn validate_gateway_event_envelope(event: &QqGatewayEvent) -> QqResult<()> {
+    validate_optional_chars(
+        "gateway event id",
+        event.id.as_deref(),
+        QQ_GATEWAY_ID_MAX_CHARS,
+    )?;
+    if let Some(event_type) = event.t.as_deref() {
+        validate_event_type_component(event_type)?;
+    }
+    if event.op == 10
+        && let Some(session_id) = event
+            .d
+            .as_ref()
+            .and_then(|data| data.get("session_id"))
+            .and_then(Value::as_str)
+    {
+        validate_optional_chars(
+            "gateway session id",
+            Some(session_id),
+            QQ_GATEWAY_ID_MAX_CHARS,
+        )?;
+    }
+    Ok(())
 }
 
 #[must_use]
@@ -1312,7 +1345,8 @@ pub fn normalize_message_event(event: &QqGatewayEvent) -> QqResult<NormalizedQqE
 }
 
 fn validate_event_type_component(event_type: &str) -> QqResult<()> {
-    if event_type.chars().count() > QQ_GATEWAY_EVENT_TYPE_MAX_CHARS
+    if event_type.is_empty()
+        || event_type.chars().count() > QQ_GATEWAY_EVENT_TYPE_MAX_CHARS
         || !event_type
             .chars()
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
@@ -2298,6 +2332,47 @@ mod tests {
             matches!(drain_error, QqError::Async(ref message) if message.contains("shut down")),
             "unexpected drain error: {drain_error:?}"
         );
+    }
+
+    #[test]
+    fn gateway_runtime_rejects_malformed_control_frame_envelope() {
+        let mut runtime = QqGatewayRuntime::new(QqGatewayRuntimeConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        let oversized_event_id = "x".repeat(QQ_GATEWAY_ID_MAX_CHARS + 1);
+
+        let event_id_error = runtime
+            .project_event(QqGatewayEvent {
+                op: 7,
+                s: None,
+                t: None,
+                d: None,
+                id: Some(oversized_event_id),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(event_id_error, QqError::InvalidInput(ref message) if message.contains("gateway event id exceeds parser bounds")),
+            "unexpected control event-id error: {event_id_error:?}"
+        );
+        assert_eq!(runtime.snapshot().reconnect_attempts, 0);
+
+        let oversized_session_id = "s".repeat(QQ_GATEWAY_ID_MAX_CHARS + 1);
+        let session_error = runtime
+            .project_event(QqGatewayEvent {
+                op: 10,
+                s: None,
+                t: None,
+                d: Some(json!({ "session_id": oversized_session_id })),
+                id: Some("evt-hello".into()),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(session_error, QqError::InvalidInput(ref message) if message.contains("gateway session id exceeds parser bounds")),
+            "unexpected control session-id error: {session_error:?}"
+        );
+        assert_eq!(runtime.snapshot().session_id, None);
+        assert_eq!(runtime.snapshot().last_sequence, 0);
     }
 
     // ─── Event normalization tests ──────────────────────────────

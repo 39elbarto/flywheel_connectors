@@ -388,7 +388,7 @@ async fn try_invoke_projection(
             approval_tokens: Vec::new(),
         })
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{}: {error}", error.error_code()))?;
     if response.status != InvokeStatus::Ok {
         return Err(format!(
             "projection status {:?}: {:?}",
@@ -980,6 +980,41 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(hello["lifecycle"]["resume_session_id"], "session-1");
     assert_eq!(hello["lifecycle"]["resume_sequence"], 0);
     log_projection_step(&mut logs, "hello_session_restore", "ok", &hello);
+
+    let malformed_control_id = "x".repeat(257);
+    let malformed_control = try_invoke_projection(
+        &connector,
+        &signing_key,
+        &instance_id,
+        "qq-gateway-malformed-control-envelope",
+        json!({
+            "op": 10,
+            "id": malformed_control_id,
+            "d": { "session_id": "session-should-not-stick" }
+        }),
+    )
+    .await;
+    let malformed_control_error =
+        malformed_control.expect_err("malformed control envelope should fail closed");
+    assert!(
+        malformed_control_error.contains("FCP-1005"),
+        "malformed control envelope should map to FCP-1005: {malformed_control_error}"
+    );
+    assert!(
+        malformed_control_error.contains("gateway event id exceeds parser bounds"),
+        "malformed control envelope should report a bounded parser failure: {malformed_control_error}"
+    );
+    log_step(
+        &mut logs,
+        "malformed_control_envelope_denied",
+        "ok",
+        &json!({
+            "project_denied": true,
+            "error_code_present": malformed_control_error.contains("FCP-1005"),
+            "error_mentions_bounds": malformed_control_error.contains("gateway event id exceeds parser bounds"),
+            "raw_event_logged": false,
+        }),
+    );
 
     let accepted = invoke_projection(
         &connector,
@@ -2049,6 +2084,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "test-secret",
         "session-1",
         "restored-session",
+        "session-should-not-stick",
         "hello-1",
         "evt-accepted",
         "evt-untyped-message-id",

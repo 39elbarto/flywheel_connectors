@@ -275,6 +275,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           "queue_full_policy_denied",
           "queue_full_backpressure_drop",
           "hello_session_restore",
+          "malformed_control_envelope_denied",
           "allowed_group_mention",
           "missing_group_mention_drop",
           "untyped_message_id_not_mention",
@@ -368,6 +369,13 @@ if [[ "${overall_status}" == "passed" ]]; then
           and any(.[]; .step == "structured_group_mention" and .details.accepted == true and .details.policy.mentioned_bot == true)
           and any(.[]; .step == "text_substring_not_mention" and .details.accepted == false and .details.reason_code == "missing_group_mention" and .details.policy.mentioned_bot == false)
           and any(.[]; .step == "explicit_text_group_mention" and .details.accepted == true and .details.policy.reason_code == "group_allowed" and .details.policy.mentioned_bot == true)
+        ),
+        malformed_control_shape_ok: any(.[];
+          .step == "malformed_control_envelope_denied"
+          and .details.project_denied == true
+          and .details.error_code_present == true
+          and .details.error_mentions_bounds == true
+          and .details.raw_event_logged == false
         ),
         reply_shape_ok: any(.[];
           .step == "reply_media_projection"
@@ -477,7 +485,7 @@ if [[ "${overall_status}" == "passed" ]]; then
       } as $v
       | $v
       | .status = (
-          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.log_start_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.c2c_shape_ok and $v.queue_shape_ok and $v.group_policy_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.restore_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok)
+          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.log_start_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.c2c_shape_ok and $v.queue_shape_ok and $v.group_policy_shape_ok and $v.malformed_control_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.restore_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok)
           then "passed"
           else "failed"
           end
@@ -517,6 +525,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "test-secret" \
     "session-1" \
     "restored-session" \
+    "session-should-not-stick" \
     "hello-1" \
     "evt-accepted" \
     "evt-untyped-message-id" \

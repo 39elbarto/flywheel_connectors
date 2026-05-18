@@ -21,7 +21,7 @@ use tracing::warn;
 
 use crate::client::{
     QqClient, channel_message_body, direct_message_body, normalize_message_event,
-    sanitize_path_segment,
+    sanitize_path_segment, validate_gateway_event_envelope,
 };
 use crate::error::QqError;
 use crate::types::{
@@ -1250,6 +1250,7 @@ fn validate_simulate_input(operation: &str, input: &Value) -> FcpResult<()> {
                     code: 1005,
                     message: format!("invalid gateway event: {e}"),
                 })?;
+            validate_gateway_event_envelope(&gateway_event).map_err(|e| e.to_fcp_error())?;
             normalize_message_event(&gateway_event).map_err(|e| e.to_fcp_error())?;
         }
         OP_GATEWAY_PROJECT_EVENT => validate_gateway_project_input(input)?,
@@ -1268,6 +1269,7 @@ fn validate_simulate_input(operation: &str, input: &Value) -> FcpResult<()> {
 
 fn validate_gateway_project_input(input: &Value) -> FcpResult<()> {
     let gateway_event = parse_gateway_event(input)?;
+    validate_gateway_event_envelope(&gateway_event).map_err(|e| e.to_fcp_error())?;
     if gateway_event.op != 0 {
         return Ok(());
     }
@@ -2496,6 +2498,33 @@ mod tests {
 
         assert!(!response.would_succeed);
         assert_eq!(response.denial_code.as_deref(), Some("FCP-1005"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_gateway_project_event_rejects_malformed_control_envelope() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = ready_connector(&signing_key).await;
+        let oversized_event_id = "x".repeat(257);
+        let response = connector
+            .simulate(simulate_request(
+                &signing_key,
+                &connector.base.instance_id,
+                CAP_EVENTS_READ,
+                OP_GATEWAY_PROJECT_EVENT,
+                json!({"event": {"op": 10, "id": oversized_event_id}}),
+            ))
+            .await
+            .unwrap();
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-1005"));
+        assert!(
+            response.failure_reason.as_deref().is_some_and(|reason| {
+                reason.contains("gateway event id exceeds parser bounds")
+            }),
+            "unexpected simulate denial reason: {:?}",
+            response.failure_reason
+        );
     }
 
     #[fcp_async_core::runtime::test]

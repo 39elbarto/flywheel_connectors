@@ -3,6 +3,7 @@
 > **Status**: planning contract
 > **Bead**: `flywheel_connectors-j05nu.7.1`
 > **Unblocks**: `flywheel_connectors-j05nu.7.2`
+> **Verification script**: `scripts/e2e/microsoft365_connector_verification.sh`
 > **Primary upstream**: Microsoft Graph v1.0 at `https://graph.microsoft.com/v1.0`
 
 ## Purpose
@@ -168,3 +169,25 @@ This contract is grounded in the current connector implementation and manifest, 
 - `connectors/microsoft365/src/client.rs` defines the actual Graph paths for messages, attachments, replies, forwards, `calendarView`, events, and `getSchedule`.
 - `connectors/microsoft365/src/connector.rs` defines the auth modes, readiness behavior, and the exposed `OperationInfo` safety/risk/idempotency metadata.
 - `connectors/microsoft365/manifest.toml` already declares the same mail/calendar capability families and network constraints used by the runtime.
+
+## Operator Guidance
+
+**Prerequisites**:
+
+- Use a dedicated Microsoft 365 developer or test tenant for live verification.
+- Use an app registration or delegated token whose consent scope matches the operation family being verified.
+- Keep `credential_id` deployments behind the host credential injection layer; direct connector logs must never contain access tokens, tenant IDs, client secrets, user IDs, message IDs, file paths, or provider error bodies.
+- Use the local non-mock test for loopback request-shape acceptance before running the live sandbox verifier.
+
+**Verification surface**:
+
+- `connectors/microsoft365/tests/local_non_mock.rs` drives real loopback HTTP through the connector for mailbox read and send request construction.
+- `connectors/microsoft365/tests/live_verification.rs` is the gated Tier B sandbox proof and is skipped unless `FCP_LIVE_SANDBOX=1` plus the Microsoft 365 sandbox environment is complete.
+- `scripts/e2e/microsoft365_connector_verification.sh` is the operator closeout script. It writes redaction-safe evidence under `artifacts/e2e/microsoft365_connector/<run-id>` and requires `rch` proof for Cargo lanes.
+
+**Rerun commands**:
+
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-microsoft365-readme cargo test -p fcp-microsoft365 --test local_non_mock -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-microsoft365-readme cargo test -p fcp-microsoft365 --test integration -- --nocapture`
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-microsoft365-readme cargo clippy -p fcp-microsoft365 --all-targets -- -D warnings`
+- `scripts/e2e/microsoft365_connector_verification.sh --run-id <redacted-run-id>`

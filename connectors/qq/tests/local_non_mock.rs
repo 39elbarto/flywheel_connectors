@@ -17,7 +17,7 @@ use std::{
 use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_prelude::{
-    CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
+    CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector, FcpError,
     HandshakeRequest, InstanceId, InvokeRequest, InvokeStatus, OperationId, RequestId,
     ShutdownRequest, ZoneId,
 };
@@ -769,6 +769,130 @@ async fn local_non_mock_group_and_c2c_sends_refresh_expired_access_tokens_once()
             "group_refresh_attempts": 1,
             "c2c_refresh_attempts": 1,
             "retry_reused_original_send_body": true,
+            "token_cache_path": "memory_only"
+        },
+        "cleanup": "connector_shutdown_and_fixture_thread_joined",
+        "result": "passed"
+    });
+    println!("{artifact}");
+}
+
+#[fcp_async_core::runtime::test]
+async fn local_non_mock_send_stops_after_one_unauthorized_refresh_retry() {
+    let qq = LoopbackQq::start(vec![
+        HttpResponse {
+            status: "200 OK",
+            body: r#"{"access_token":"qq-local-expired-material","expires_in":7200}"#,
+        },
+        HttpResponse {
+            status: "401 Unauthorized",
+            body: r#"{"message":"expired access material"}"#,
+        },
+        HttpResponse {
+            status: "200 OK",
+            body: r#"{"access_token":"qq-local-fresh-material","expires_in":7200}"#,
+        },
+        HttpResponse {
+            status: "401 Unauthorized",
+            body: r#"{"message":"fresh access material still rejected"}"#,
+        },
+    ]);
+    let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
+
+    let mut connector = QqConnector::new();
+    connector
+        .configure(json!({
+            "base_url": qq.base_url(),
+            "token_base_url": qq.base_url(),
+            "app_id": "qq-send-final-failure-app",
+            "client_secret": "send-final-failure-credential",
+            "request_timeout_ms": 5_000
+        }))
+        .await
+        .expect("configure QQ connector");
+    connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            instance_id.clone(),
+        ))
+        .await
+        .expect("handshake QQ connector");
+
+    let err = connector
+        .invoke(channel_send_request(&signing_key, &instance_id))
+        .await
+        .expect_err("second unauthorized send after refresh should fail closed");
+    let FcpError::Unauthorized { message, .. } = err else {
+        panic!("expected unauthorized final failure, got {err:?}");
+    };
+    assert!(message.contains("401"));
+    assert!(message.contains("fresh access material still rejected"));
+
+    connector
+        .shutdown(ShutdownRequest {
+            r#type: "shutdown".into(),
+            deadline_ms: 1_000,
+            drain: true,
+            reason: Some("qq-local-send-final-failure-complete".into()),
+        })
+        .await
+        .expect("shutdown QQ connector");
+
+    let requests = qq.join();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        requests[0].request_line,
+        "POST /app/getAppAccessToken HTTP/1.1"
+    );
+    assert_eq!(
+        requests[1].request_line,
+        "POST /channels/channel-local-1/messages HTTP/1.1"
+    );
+    assert!(header_equals(
+        &requests[1].headers,
+        "authorization",
+        &format!("QQBot {EXPIRED_ACCESS_MATERIAL}")
+    ));
+    assert_eq!(
+        requests[2].request_line,
+        "POST /app/getAppAccessToken HTTP/1.1"
+    );
+    assert_eq!(
+        requests[3].request_line,
+        "POST /channels/channel-local-1/messages HTTP/1.1"
+    );
+    assert!(header_equals(
+        &requests[3].headers,
+        "authorization",
+        &format!("QQBot {FRESH_ACCESS_MATERIAL}")
+    ));
+    assert_eq!(
+        requests[3].body.as_ref().expect("retry send body present")["content"],
+        "hello from QQ local acceptance"
+    );
+
+    let artifact = json!({
+        "connector": "qq",
+        "suite_class": ACCEPTANCE_SUITE_CLASS,
+        "acceptance_suite_class": ACCEPTANCE_SUITE_CLASS,
+        "bead_id": "flywheel_connectors-6n7.12.3",
+        "command": "cargo test -p fcp-qq --test local_non_mock local_non_mock_send_stops_after_one_unauthorized_refresh_retry -- --nocapture",
+        "git_revision": option_env!("GIT_REVISION").unwrap_or("worktree"),
+        "fixture_mode": "loopback_http",
+        "provider_class": "local_sufficient",
+        "request_response_boundaries": [
+            { "method": "POST", "path": "/app/getAppAccessToken", "purpose": "initial_access_token" },
+            { "method": "POST", "path": "/channels/channel-local-1/messages", "purpose": "expired_token_send_attempt" },
+            { "method": "POST", "path": "/app/getAppAccessToken", "purpose": "refresh_after_unauthorized" },
+            { "method": "POST", "path": "/channels/channel-local-1/messages", "purpose": "fresh_token_final_failure" }
+        ],
+        "auth_gate": {
+            "mode": "qqbot_access_token",
+            "authorization_header_verified": true,
+            "refresh_after_unauthorized_verified": true,
+            "refresh_attempts": 1,
+            "second_unauthorized_failed_closed": true,
             "token_cache_path": "memory_only"
         },
         "cleanup": "connector_shutdown_and_fixture_thread_joined",

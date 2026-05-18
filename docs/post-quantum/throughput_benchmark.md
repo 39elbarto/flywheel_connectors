@@ -453,17 +453,21 @@ summary: the Criterion command record must report observed `trap_gen`,
 and the host dispatcher e2e command record must report the
 `host_dispatcher_pipeline` coverage source before the self-contract can pass.
 The redaction scan treats raw zone, operation, and principal labels plus
-authorization headers, bearer strings, access or refresh tokens, exact or child
-`/tmp` and `/private/tmp` paths, `/private/var/`, `/var/folders/`, `/Volumes/`,
-macOS `/Users/`, Linux worker `/home/` and `/data/projects/`, Windows
-`C:\Users\`, and the host dispatcher fixture literals `send_message`,
+authorization headers, bearer strings, access, refresh, or ID tokens, common
+credential/key fields (`client_secret`, `api_key`, `private_key`,
+`secret_key`, `password`, cookies, and credential key/value markers), exact or
+child `/tmp` and `/private/tmp` paths, `/private/var/`, `/var/folders/`,
+`/Volumes/`, macOS `/Users/`, Linux worker `/home/` and `/data/projects/`,
+Windows `C:\Users\`, provider body payload markers, reviewer private-contact
+markers, and the host dispatcher fixture literals `send_message`,
 `agent-alpha`, and `agent-beta` as failures.
 Because the summary record is appended after the normal redaction scan, the
 script scans the finished JSONL again and requires a `final_redaction_scan`
 pass record before printing the artifact path and final hash. The self-contract
 requires the normal redaction scan to cover all eight expected JSONL artifacts
 and requires the final redaction scan to cover the summary-bearing gauntlet
-artifact.
+artifact by exact path, after the summary record, with a
+`post_summary_artifact_hash` over the summary-bearing artifact state.
 The script prints both the JSONL path and final JSONL SHA-256 on stdout. The
 summary record's embedded `pre_summary_artifact_hash` intentionally covers only
 the records before the summary, avoiding a misleading self-referential hash.

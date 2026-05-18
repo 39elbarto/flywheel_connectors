@@ -482,6 +482,7 @@ scan_jsonl_artifact() {
     "preimage_bytes" \
     "raw_operation" \
     "raw_principal" \
+    "raw_zone" \
     "send_message" \
     "agent-alpha" \
     "agent-beta" \
@@ -503,7 +504,20 @@ scan_jsonl_artifact() {
     "token=" \
     "z:" \
     "access_token" \
-    "refresh_token"; do
+    "refresh_token" \
+    "id_token" \
+    "client_secret" \
+    "api_key" \
+    "private_key" \
+    "secret_key" \
+    "password" \
+    "cookie" \
+    "credential=" \
+    "credential:" \
+    "provider_response_body" \
+    "provider_payload_body" \
+    "reviewer_email" \
+    "reviewer_phone"; do
     if grep -Fqi "${forbidden}" "${path}"; then
       fail_step "redaction_scan" "$(jq -cn --arg artifact "${path}" --arg forbidden "${forbidden}" \
         '{artifact_path:$artifact,forbidden_case_insensitive:$forbidden,cleanup_result:"not_applicable"}')"
@@ -519,7 +533,7 @@ append_redaction_scan() {
     scanned=$((scanned + 1))
   done
   append_json "redaction_scan" "pass" "$(jq -cn --argjson scanned "${scanned}" \
-    '{scanned_jsonl_artifacts:$scanned,trapdoor_payload:"absent",preimage_payload:"absent",rng_seed_payload:"absent",operation_plaintext:"absent",principal_plaintext:"absent",zone_label_plaintext:"absent",auth_header_values:"absent",local_private_paths:"absent",provider_payloads:"absent",reviewer_private_data:"absent",cleanup_result:"not_applicable"}')"
+    '{scanned_jsonl_artifacts:$scanned,trapdoor_payload:"absent",preimage_payload:"absent",rng_seed_payload:"absent",operation_plaintext:"absent",principal_plaintext:"absent",zone_label_plaintext:"absent",auth_header_values:"absent",credential_markers:"absent",local_private_paths:"absent",provider_payloads:"absent",reviewer_private_data:"absent",cleanup_result:"not_applicable"}')"
 }
 
 validate_jsonl_contract() {
@@ -1112,6 +1126,23 @@ validate_gauntlet_contract() {
         .details.benchmark_group_source == "host_dispatcher_e2e" and
         (.details.benchmark_groups_observed | type == "array") and
         (.details.benchmark_groups_observed | index("host_dispatcher_pipeline") != null));
+    def final_redaction_scan_covers_summary_artifact:
+      . as $records |
+      ([range(0; length) as $i |
+        select($records[$i].step == "summary" and $records[$i].result == "pass") |
+        {index:$i, artifact_path:$records[$i].details.artifact_path}][-1]) as $summary |
+      ([range(0; length) as $i |
+        select($records[$i].step == "final_redaction_scan" and $records[$i].result == "pass") |
+        {index:$i, record:$records[$i]}][-1]) as $final_scan |
+      ($summary != null) and
+      ($final_scan != null) and
+      ($summary.artifact_path | type == "string") and
+      ($final_scan.index > $summary.index) and
+      ($final_scan.record.details.scanned_jsonl_artifacts == 1) and
+      ($final_scan.record.details.summary_record == "covered") and
+      ($final_scan.record.details.scanned_artifact_path == $summary.artifact_path) and
+      ($final_scan.record.details.post_summary_artifact_hash | sha256_hash) and
+      ($final_scan.record.details.cleanup_result | type == "string");
     def top_level_provenance_consistent:
       ([.[] | .run_id] | unique | length == 1) and
       ([.[] | .git_revision] | unique | length == 1) and
@@ -1156,14 +1187,12 @@ validate_gauntlet_contract() {
       .details.principal_plaintext == "absent" and
       .details.zone_label_plaintext == "absent" and
       .details.auth_header_values == "absent" and
+      .details.credential_markers == "absent" and
       .details.local_private_paths == "absent" and
       .details.provider_payloads == "absent" and
       .details.reviewer_private_data == "absent" and
       (.details.cleanup_result | type == "string")) and
-    any(.[]; .step == "final_redaction_scan" and .result == "pass" and
-      .details.scanned_jsonl_artifacts == 1 and
-      .details.summary_record == "covered" and
-      (.details.cleanup_result | type == "string")) and
+    final_redaction_scan_covers_summary_artifact and
     any(.[]; .step == "summary" and .result == "pass" and
       (.details.pre_summary_artifact_hash | sha256_hash) and
       .details.final_artifact_hash_output == "stdout:LATTICE_ASSURANCE_GAUNTLET_SHA256" and
@@ -1318,8 +1347,11 @@ append_json "summary" "pass" "$(jq -cn \
 # The summary is appended after the normal redaction_scan record, so scan the
 # finished artifact before success output can name it as reusable evidence.
 scan_jsonl_artifact "${ARTIFACT}"
+post_summary_artifact_hash="$(sha256_file "${ARTIFACT}")"
 append_json "final_redaction_scan" "pass" "$(jq -cn \
-  '{scanned_jsonl_artifacts:1,summary_record:"covered",cleanup_result:"not_applicable"}')"
+  --arg artifact "${ARTIFACT}" \
+  --arg post_summary_artifact_hash "sha256:${post_summary_artifact_hash}" \
+  '{scanned_jsonl_artifacts:1,summary_record:"covered",scanned_artifact_path:$artifact,post_summary_artifact_hash:$post_summary_artifact_hash,cleanup_result:"not_applicable"}')"
 scan_jsonl_artifact "${ARTIFACT}"
 
 validate_gauntlet_contract

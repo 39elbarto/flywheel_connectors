@@ -2923,6 +2923,11 @@ fn validate_prewarm_required_fields(
             return Err(SwarmPrewarmColdStartEvidenceError::EmptyField { field });
         }
     }
+    if evidence.git_revision.eq_ignore_ascii_case("unknown") {
+        return Err(SwarmPrewarmColdStartEvidenceError::UnknownGitRevision {
+            git_revision: evidence.git_revision.clone(),
+        });
+    }
     Ok(())
 }
 
@@ -3696,6 +3701,11 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         /// Field name.
         field: &'static str,
     },
+    /// Git revision provenance could not be resolved.
+    UnknownGitRevision {
+        /// Observed git revision label.
+        git_revision: String,
+    },
     /// Reproduction command line was empty or contained an empty part.
     EmptyCommandLine,
     /// Reproduction command line did not prove Cargo was run through rch.
@@ -3894,6 +3904,10 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
             Self::EmptyField { field } => {
                 write!(f, "swarm prewarm field '{field}' is empty")
             }
+            Self::UnknownGitRevision { git_revision } => write!(
+                f,
+                "swarm prewarm git revision must be resolved before evidence export, got '{git_revision}'"
+            ),
             Self::EmptyCommandLine => write!(f, "swarm prewarm command line is empty"),
             Self::CommandLineDoesNotUseRch { command_line } => write!(
                 f,
@@ -10260,6 +10274,15 @@ mod tests {
                     field: "pool_size"
                 }
             )
+        );
+
+        let mut unknown_git_revision = prewarm_cold_start_evidence_fixture();
+        unknown_git_revision.git_revision = "unknown".to_string();
+        assert_eq!(
+            unknown_git_revision.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::UnknownGitRevision {
+                git_revision: "unknown".to_string()
+            })
         );
 
         let mut unverified_shutdown_cleanup = prewarm_cold_start_evidence_fixture();

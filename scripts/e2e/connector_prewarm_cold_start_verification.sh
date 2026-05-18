@@ -432,6 +432,10 @@ if [[ "${overall_status}" == "passed" ]]; then
           and nonempty_string("error_mapping")
           and nonempty_string("cleanup_result")
         ),
+        git_revision_provenance_ok: all(.[];
+          nonempty_string("git_revision")
+          and ((.git_revision | ascii_downcase) != "unknown")
+        ),
         resource_fields_ok: all(.[];
           positive_number("pool_size")
           and positive_number("activation_latency_ms")
@@ -559,6 +563,7 @@ if [[ "${overall_status}" == "passed" ]]; then
             and $v.command_provenance_ok
             and $v.target_dir_provenance_ok
             and $v.required_fields_ok
+            and $v.git_revision_provenance_ok
             and $v.resource_fields_ok
             and $v.decision_shape_ok
             and $v.cleanup_shape_ok

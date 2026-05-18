@@ -1,5 +1,8 @@
 # IRC Connector V3 Contract
 
+> **Status**: incubating first-slice contract
+> **Verification script**: `scripts/e2e/irc_connector_verification.sh`
+
 ## Purpose
 
 `fcp-irc` is a bounded IRC connector for short-lived connect, register, join, send, transcript-sample, and health-check flows.
@@ -89,3 +92,12 @@ The connector is intentionally narrow. It favors one-shot operator or agent acti
 - Prefer dedicated bot or service identities for automation instead of a human nick.
 - Treat channel names, nicknames, message content, and sampled transcripts as potentially sensitive community data.
 - Run `irc.health` before `irc.channels.join` or `irc.messages.send` when validating a fresh configuration.
+
+## Verification Surface
+
+The tracked verification entry point is `scripts/e2e/irc_connector_verification.sh`. It runs the IRC crate check, formatting check, explicit `local_non_mock` loopback target, full connector test suite, clippy, and a redaction scan over the generated evidence. The script requires remote `rch` proof for Cargo-backed lanes; if no admissible worker is available, it emits `infra_blocked` rather than treating local fallback as proof.
+
+Rerun commands:
+
+- `RCH_REQUIRE_REMOTE=1 RCH_FORCE_REMOTE=1 bash scripts/e2e/irc_connector_verification.sh`
+- `scripts/graduation/run_gauntlet.sh connectors/irc`

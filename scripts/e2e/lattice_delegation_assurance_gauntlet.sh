@@ -1100,6 +1100,7 @@ validate_gauntlet_contract() {
       ];
     def required_command_steps:
       [
+        "lean_lake_workspace_probe",
         "lean_lake_build",
         "crypto_representation_profile_tests",
         "crypto_v4_unit_tests",
@@ -1378,6 +1379,7 @@ done
 append_json "validate_lean_ids" "pass" "$(jq -cn \
   '{theorem_names:["lattice_delegation_chain_corruption_rejected","lattice_delegation_sis_assumption_boundary_complete","lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions"],assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1","FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1","FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1","FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"],cleanup_result:"not_applicable"}')"
 
+run_and_capture "lean_lake_workspace_probe" "lake env lean --version" lake env lean --version
 run_and_capture "lean_lake_build" "lake build" lake build
 
 run_rch_cargo "crypto_representation_profile_tests" \

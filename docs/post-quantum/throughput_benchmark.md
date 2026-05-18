@@ -476,6 +476,11 @@ requires every named command lane in the
 gauntlet to be represented by a passing command-run record, including Lean, Rust
 test, Criterion, format, check, clippy, diff-check, and UBS lanes, so a partial
 artifact cannot pass by carrying only a summary and materialized hashes. The
+Lean lane first runs `lake env lean --version` as a workspace/load preflight
+before `lake build`, so filesystem-level Lake configuration failures such as
+unsupported file locking are attributed to a precise probe step rather than
+being collapsed into the proof build itself. Both Lean command records are
+required for reusable evidence. The
 Cargo test command lanes must also carry a positive parsed `passed_tests` count
 before the gauntlet can pass, so a truncated or non-test log cannot satisfy the
 reviewer evidence contract.

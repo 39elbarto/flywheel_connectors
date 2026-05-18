@@ -396,7 +396,11 @@ representation and route/material versions are positive integers, timings and
 duration fields are non-negative integer milliseconds or seconds as named, norm
 squares are non-negative integers, and timing sample counts are positive
 integers. Fractional JSON numbers fail the contract instead of being rounded by
-review tooling. The
+review tooling. The nested representation, route, public-matrix, SamplePre, and
+host-dispatcher objects are also shape-checked: matrix dimensions, encoded
+lengths, allocation estimates, public material summaries, and crypto primitive
+timing objects must carry the typed integer fields emitted by their Rust
+fixtures, not only an arbitrary JSON object. The
 representation profile contract requires exactly one `SMALL_TEST` record and
 one `V4_REFERENCE` record. The host dispatcher contract applies the same strict
 shape to every consumed `*_hash` field, including the optional receipt hash when

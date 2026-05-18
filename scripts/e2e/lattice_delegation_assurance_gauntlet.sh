@@ -625,6 +625,29 @@ validate_artifact_contracts() {
         type == "number" and . == floor and . >= 0;
       def positive_integer:
         nonnegative_integer and . > 0;
+      def matrix_dimensions_shape:
+        type == "object" and
+        (.n | positive_integer) and
+        (.m | positive_integer) and
+        (.q | positive_integer) and
+        (.coefficient_bytes | positive_integer);
+      def encoded_public_lengths_shape:
+        type == "object" and
+        (.master_public_seed_bytes | positive_integer) and
+        (.zone_period_public_seed_bytes | positive_integer) and
+        (.operation_hash_bytes | positive_integer);
+      def encoded_lengths_shape:
+        type == "object" and
+        (.public_matrix_seed_bytes | positive_integer) and
+        (.public_matrix_expanded_bytes | positive_integer) and
+        (.trapdoor_storage_bytes | positive_integer) and
+        (.preimage_encoded_bytes | positive_integer);
+      def allocation_estimate_shape:
+        type == "object" and
+        (.public_matrix_expanded_bytes | positive_integer) and
+        (.max_public_matrix_expanded_bytes | positive_integer) and
+        (.preimage_encoded_bytes | positive_integer) and
+        (.max_preimage_encoded_bytes | positive_integer);
       length > 0 and
       ((representation_profile_ids | sort) == (required_representation_profiles | sort)) and
       all(.[]; type == "object" and
@@ -635,7 +658,10 @@ validate_artifact_contracts() {
         (.profile | type == "string") and
         (.representation_version | positive_integer) and
         (.params | type == "object") and
-        (.matrix_dimensions | type == "object") and
+        (.matrix_dimensions | matrix_dimensions_shape) and
+        (.encoded_public_lengths | encoded_public_lengths_shape) and
+        (.encoded_lengths | encoded_lengths_shape) and
+        (.allocation_estimate | allocation_estimate_shape) and
         (.relation_check_result | type == "object") and
         (.trapdoor_norm_quality_bucket | type == "object") and
         (.secret_storage_len_bucket | type == "object") and
@@ -653,6 +679,23 @@ validate_artifact_contracts() {
         type == "number" and . == floor and . >= 0;
       def positive_integer:
         nonnegative_integer and . > 0;
+      def matrix_dimensions_shape:
+        type == "object" and
+        (.n | positive_integer) and
+        (.m | positive_integer) and
+        (.q | positive_integer) and
+        (.coefficient_bytes | positive_integer);
+      def allocation_estimate_shape:
+        type == "object" and
+        (.public_matrix_expanded_bytes | positive_integer) and
+        (.max_public_matrix_expanded_bytes | positive_integer) and
+        (.preimage_encoded_bytes | positive_integer) and
+        (.max_preimage_encoded_bytes | positive_integer);
+      def route_timings_shape:
+        type == "object" and
+        (.trap_gen | nonnegative_integer) and
+        (.delegate | nonnegative_integer) and
+        (.relation_checks | nonnegative_integer);
       def required_route_scenarios:
         [
           "passed:SMALL_TEST",
@@ -688,8 +731,9 @@ validate_artifact_contracts() {
         (.fixture_id | type == "string") and
         (.zone_id_hash | hex_hash) and
         (.period_id_hash | hex_hash) and
-        (.matrix_dimensions | type == "object") and
-        (.primitive_timings_ms | type == "object") and
+        (.matrix_dimensions | matrix_dimensions_shape) and
+        (.allocation_summary | allocation_estimate_shape) and
+        (.primitive_timings_ms | route_timings_shape) and
         (.timing_ms | nonnegative_integer) and
         (.cleanup | type == "string") and
         (.result | type == "string") and
@@ -707,6 +751,25 @@ validate_artifact_contracts() {
         nonnegative_integer and . > 0;
       def optional_hex_hash:
         . == null or hex_hash;
+      def matrix_dimensions_shape:
+        type == "object" and
+        (.n | positive_integer) and
+        (.m | positive_integer) and
+        (.q | positive_integer) and
+        (.coefficient_bytes | positive_integer);
+      def public_material_summary_shape:
+        type == "object" and
+        (.kind | type == "string") and
+        (.public_seed_bytes | positive_integer) and
+        (.tail_coefficients_bytes | nonnegative_integer) and
+        (.binding_hash_hex | hex_hash) and
+        (.material_digest_hex | optional_hex_hash);
+      def allocation_estimate_shape:
+        type == "object" and
+        (.public_matrix_expanded_bytes | positive_integer) and
+        (.max_public_matrix_expanded_bytes | positive_integer) and
+        (.preimage_encoded_bytes | positive_integer) and
+        (.max_preimage_encoded_bytes | positive_integer);
       def required_public_matrix_scenarios:
         [
           "passed:SMALL_TEST",
@@ -744,12 +807,10 @@ validate_artifact_contracts() {
         (.fixture_id | type == "string") and
         (.zone_id_hash | hex_hash) and
         (.period_id_hash | hex_hash) and
-        (.public_material_summary | type == "object") and
-        (.public_material_summary.binding_hash_hex | hex_hash) and
-        (.public_material_summary.material_digest_hex | optional_hex_hash) and
-        (.matrix_dimensions | type == "object") and
+        (.public_material_summary | public_material_summary_shape) and
+        (.matrix_dimensions | matrix_dimensions_shape) and
         (.reconstruction_result | type == "string") and
-        (.allocation_summary | type == "object") and
+        (.allocation_summary | allocation_estimate_shape) and
         (.timing_ms | nonnegative_integer) and
         (.result | type == "string") and
         has("skip_reason") and
@@ -767,6 +828,18 @@ validate_artifact_contracts() {
         type == "number" and . == floor and . >= 0;
       def positive_integer:
         nonnegative_integer and . > 0;
+      def matrix_dimensions_shape:
+        type == "object" and
+        (.n | positive_integer) and
+        (.m | positive_integer) and
+        (.q | positive_integer) and
+        (.coefficient_bytes | positive_integer);
+      def primitive_timings_shape:
+        type == "object" and
+        (.trap_gen | nonnegative_integer) and
+        (.delegate | nonnegative_integer) and
+        (.sample_pre | nonnegative_integer) and
+        (.verify | nonnegative_integer);
       def sample_pre_scenarios($profile):
         [
           "passed:" + $profile + ":success",
@@ -802,11 +875,11 @@ validate_artifact_contracts() {
         (.zone_id_hash | hex_hash) and
         (.period_id_hash | hex_hash) and
         (.h_fixture_id | tagged_hash) and
-        (.matrix_dimensions | type == "object") and
+        (.matrix_dimensions | matrix_dimensions_shape) and
         (.norm_bound_squared | nonnegative_integer) and
         (.observed_norm_squared | nonnegative_integer) and
         (.observed_norm_bucket | type == "string") and
-        (.primitive_timings_ms | type == "object") and
+        (.primitive_timings_ms | primitive_timings_shape) and
         (.verify_outcome | type == "string") and
         has("error_mapping") and
         (.timeout_cancel_result | type == "string") and
@@ -828,6 +901,19 @@ validate_artifact_contracts() {
         type == "number" and . == floor and . >= 0;
       def positive_integer:
         nonnegative_integer and . > 0;
+      def matrix_dimensions_shape:
+        type == "object" and
+        (.n | positive_integer) and
+        (.m | positive_integer) and
+        (.q | positive_integer) and
+        (.coefficient_bytes | positive_integer);
+      def public_material_summary_shape:
+        type == "object" and
+        (.kind | type == "string") and
+        (.public_seed_bytes | positive_integer) and
+        (.tail_coefficients_bytes | nonnegative_integer) and
+        (.binding_hash_hex | hex_hash) and
+        (.material_digest_hex | optional_hex_hash);
       def required_formal_profiles:
         [
           "SMALL_TEST",
@@ -873,10 +959,8 @@ validate_artifact_contracts() {
         (.public_matrix_material_version | positive_integer) and
         (.zone_id_hash | hex_hash) and
         (.period_id_hash | hex_hash) and
-        (.public_material_summary | type == "object") and
-        (.public_material_summary.binding_hash_hex | hex_hash) and
-        (.public_material_summary.material_digest_hex | optional_hex_hash) and
-        (.matrix_dimensions | type == "object") and
+        (.public_material_summary | public_material_summary_shape) and
+        (.matrix_dimensions | matrix_dimensions_shape) and
         (.checks | type == "object") and
         .checks.public_material_reconstruction == true and
         .checks.route_profile_domain_separation == true and
@@ -972,6 +1056,12 @@ validate_artifact_contracts() {
         type == "number" and . == floor and . >= 0;
       def positive_integer:
         nonnegative_integer and . > 0;
+      def host_matrix_dimensions_shape:
+        type == "object" and
+        (.n | positive_integer) and
+        (.m | positive_integer) and
+        (.q_bits | positive_integer) and
+        (.depth | positive_integer);
       def host_target_dir_class:
         type == "string" and (
           . == "tmp_absolute" or
@@ -1022,7 +1112,7 @@ validate_artifact_contracts() {
         (.operation_id_hash | hex_hash) and
         (.principal_id_hash | hex_hash) and
         (.request_binding_result | type == "string") and
-        (.matrix_dimensions | type == "object") and
+        (.matrix_dimensions | host_matrix_dimensions_shape) and
         (.primitive_timings | type == "object") and
         (.pipeline_checks | type == "array") and
         (.norm_bound_bucket | type == "string") and

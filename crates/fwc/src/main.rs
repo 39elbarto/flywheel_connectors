@@ -815,14 +815,21 @@ struct ContextArgs {
     command: ContextCommand,
 }
 
+#[derive(Args, Clone, Copy, Debug, Default, Serialize)]
+struct ContextReadOnlyArgs {
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
+}
+
 #[derive(Subcommand, Debug, Serialize)]
 #[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
 enum ContextCommand {
     /// List configured contexts and show the active one.
-    List,
+    List(ContextReadOnlyArgs),
 
     /// Show the current active context.
-    Current,
+    Current(ContextReadOnlyArgs),
 
     /// Switch the active context.
     Use(ContextNameArgs),
@@ -10642,7 +10649,15 @@ fn mesh_known_nodes(state: &MeshTargetState, default_zone: Option<&str>) -> Vec<
 #[allow(clippy::too_many_lines)]
 fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
     match &args.command {
-        ContextCommand::List => {
+        ContextCommand::List(args) => {
+            if let Some(outcome) = enforce_required_truth_source(
+                "context list",
+                args.require_source,
+                KnowledgeState::NodeLocal,
+            ) {
+                return Ok(outcome);
+            }
+
             let (path, config) = load_context_config()?;
             let contexts = config
                 .contexts
@@ -10674,12 +10689,21 @@ fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
                 ],
             });
             envelope.inject_into(&mut payload);
+            inject_truth_source_metadata(&mut payload, KnowledgeState::NodeLocal);
             Ok(DispatchOutcome {
                 payload,
                 exit_code: CliExitCode::Success,
             })
         }
-        ContextCommand::Current => {
+        ContextCommand::Current(args) => {
+            if let Some(outcome) = enforce_required_truth_source(
+                "context current",
+                args.require_source,
+                KnowledgeState::NodeLocal,
+            ) {
+                return Ok(outcome);
+            }
+
             let (path, config) = load_context_config()?;
             let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "context");
             let mut payload = json!({
@@ -10701,6 +10725,7 @@ fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
                 ],
             });
             envelope.inject_into(&mut payload);
+            inject_truth_source_metadata(&mut payload, KnowledgeState::NodeLocal);
             Ok(DispatchOutcome {
                 payload,
                 exit_code: CliExitCode::Success,
@@ -30398,6 +30423,78 @@ max_state_replication_staleness_secs = 120
             super::normalize_host_endpoint("https://host.example").unwrap(),
             "https://host.example"
         );
+    }
+
+    #[test]
+    fn execute_context_current_returns_node_local_truth_source() {
+        let (_tempdir, _path, _guard) = temp_context_config();
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "context", "current"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "context");
+        assert_eq!(payload["subcommand"], "current");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "node-local");
+        assert_eq!(payload["current_context"], "local");
+    }
+
+    #[test]
+    fn execute_context_list_returns_node_local_truth_source() {
+        let (_tempdir, _path, _guard) = temp_context_config();
+
+        let (exit_code, payload) = execute_json(&["fwc", "--json", "context", "list"]);
+
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "context");
+        assert_eq!(payload["subcommand"], "list");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "node-local");
+        assert_eq!(payload["contexts"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn execute_context_current_require_any_live_fails_truth_source_unavailable() {
+        let (_tempdir, _path, _guard) = temp_context_config();
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "context",
+            "current",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "context current");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "node-local");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "node-local");
+    }
+
+    #[test]
+    fn execute_context_list_require_mesh_fails_truth_source_unavailable() {
+        let (_tempdir, _path, _guard) = temp_context_config();
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "context",
+            "list",
+            "--require-source",
+            "mesh",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "context list");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "node-local");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "node-local");
     }
 
     #[test]

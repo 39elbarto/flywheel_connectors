@@ -3,6 +3,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECKS_FILE="${SCRIPT_DIR}/checks/core.sh"
+BATCH4_INVENTORY="${SCRIPT_DIR}/batch4_inventory.sh"
 
 # shellcheck source=scripts/graduation/checks/core.sh
 source "${CHECKS_FILE}"
@@ -55,7 +56,7 @@ usage() {
   cat <<'EOF'
 Usage:
   scripts/graduation/run_gauntlet.sh [--jsonl <path>] <connector-path>
-  scripts/graduation/run_gauntlet.sh [--jsonl <path>] --batch batch1|batch2|batch3 --status-md <path>
+  scripts/graduation/run_gauntlet.sh [--jsonl <path>] --batch batch1|batch2|batch3|batch4 --status-md <path>
   scripts/graduation/run_gauntlet.sh --list-checks
 EOF
 }
@@ -117,6 +118,9 @@ batch_display_name() {
       ;;
     batch3)
       printf '%s\n' "Batch 3"
+      ;;
+    batch4)
+      printf '%s\n' "Batch 4"
       ;;
     *)
       printf '%s\n' "${batch}"
@@ -308,6 +312,16 @@ run_batch_status() {
       ;;
     batch3)
       batch_connectors=("${BATCH3_CONNECTORS[@]}")
+      ;;
+    batch4)
+      if [[ ! -x "${BATCH4_INVENTORY}" ]]; then
+        echo "batch4 inventory script missing or not executable: ${BATCH4_INVENTORY}" >&2
+        exit 1
+      fi
+      while IFS= read -r connector; do
+        [[ -n "${connector}" ]] || continue
+        batch_connectors+=("${connector}")
+      done < <("${BATCH4_INVENTORY}")
       ;;
     *)
       echo "unknown batch: ${batch}" >&2

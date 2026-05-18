@@ -53,6 +53,13 @@ Batch 3 status is generated with:
 scripts/graduation/run_gauntlet.sh --batch batch3 --status-md docs/graduation/batch3_status.md
 ```
 
+Batch 4 status is generated from the scanner-derived long-tail inventory:
+
+```bash
+scripts/graduation/batch4_inventory.sh --markdown
+scripts/graduation/run_gauntlet.sh --batch batch4 --status-md docs/graduation/batch4_status.md
+```
+
 The batch mode runs the same checks against the Phase G connector batch and
 writes a Markdown status artifact. It does not graduate or demote connectors;
 it records the first blocking check for each connector so follow-up work can be

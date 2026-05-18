@@ -41,6 +41,32 @@ const BATCH3_CONNECTORS: [&str; 4] = [
     "connectors/llm-router",
 ];
 
+const BATCH4_CONNECTORS: [&str; 23] = [
+    "connectors/amplitude",
+    "connectors/anthropic-vertex",
+    "connectors/azure-speech",
+    "connectors/circleci",
+    "connectors/coda",
+    "connectors/confluence",
+    "connectors/feishu",
+    "connectors/inworld",
+    "connectors/irc",
+    "connectors/line",
+    "connectors/microsoft-foundry",
+    "connectors/microsoft365",
+    "connectors/package-registry",
+    "connectors/paypal",
+    "connectors/plivo",
+    "connectors/posthog",
+    "connectors/qq",
+    "connectors/roam",
+    "connectors/synology-chat",
+    "connectors/telnyx",
+    "connectors/tlon",
+    "connectors/twitch",
+    "connectors/wecom",
+];
+
 #[derive(Clone, Copy)]
 struct FixtureOptions {
     status: &'static str,
@@ -70,6 +96,10 @@ fn workspace_root() -> PathBuf {
 
 fn gauntlet_runner() -> PathBuf {
     workspace_root().join("scripts/graduation/run_gauntlet.sh")
+}
+
+fn batch4_inventory_runner() -> PathBuf {
+    workspace_root().join("scripts/graduation/batch4_inventory.sh")
 }
 
 fn record_str<'a>(record: &'a serde_json::Value, key: &str) -> Option<&'a str> {
@@ -605,6 +635,142 @@ fn batch3_status_runner_writes_status_markdown() {
             .map(|(check, _)| *check)
             .collect::<BTreeSet<_>>()
     );
+}
+
+#[test]
+fn batch4_inventory_scans_current_long_tail() {
+    let count_output = Command::new("bash")
+        .current_dir(workspace_root())
+        .arg(batch4_inventory_runner())
+        .arg("--count")
+        .output()
+        .expect("batch4 inventory runner should execute");
+    assert!(
+        count_output.status.success(),
+        "batch4 inventory --count failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&count_output.stdout),
+        String::from_utf8_lossy(&count_output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&count_output.stdout).trim(), "23");
+
+    let list_output = Command::new("bash")
+        .current_dir(workspace_root())
+        .arg(batch4_inventory_runner())
+        .output()
+        .expect("batch4 inventory runner should list connectors");
+    assert!(
+        list_output.status.success(),
+        "batch4 inventory list failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&list_output.stdout),
+        String::from_utf8_lossy(&list_output.stderr)
+    );
+    let list_stdout = String::from_utf8_lossy(&list_output.stdout);
+    let connectors = list_stdout.lines().collect::<BTreeSet<_>>();
+    assert_eq!(connectors, BTreeSet::from(BATCH4_CONNECTORS));
+
+    let markdown_output = Command::new("bash")
+        .current_dir(workspace_root())
+        .arg(batch4_inventory_runner())
+        .arg("--markdown")
+        .output()
+        .expect("batch4 inventory markdown should execute");
+    assert!(
+        markdown_output.status.success(),
+        "batch4 inventory --markdown failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&markdown_output.stdout),
+        String::from_utf8_lossy(&markdown_output.stderr)
+    );
+    let markdown = String::from_utf8_lossy(&markdown_output.stdout);
+    assert!(markdown.contains("| `ai-ml` | `connectors/anthropic-vertex` | NO_STATUS |"));
+    assert!(
+        markdown.contains("| `messaging-social` | `connectors/tlon` | implemented runtime surface; incubating provider maturity |")
+    );
+}
+
+#[test]
+fn batch4_status_runner_writes_status_markdown() {
+    let fixture_root = unique_fixture_root("batch4-status");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be creatable");
+    let status_path = fixture_root.join("batch4_status.md");
+    let jsonl_path = fixture_root.join("batch4_status.jsonl");
+    let output = run_gauntlet(vec![
+        OsString::from("--jsonl"),
+        jsonl_path.as_os_str().to_os_string(),
+        OsString::from("--batch"),
+        OsString::from("batch4"),
+        OsString::from("--status-md"),
+        status_path.as_os_str().to_os_string(),
+    ]);
+    assert!(
+        output.status.success(),
+        "batch4 status run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let status_doc =
+        fs::read_to_string(&status_path).expect("batch4 status markdown should be written");
+    assert!(status_doc.contains("# Batch 4 Graduation Status"));
+    assert!(status_doc.contains("scripts/graduation/run_gauntlet.sh --batch batch4"));
+    assert!(status_doc.contains("Summary: `0/23` Batch 4 connectors currently pass"));
+    assert!(status_doc.contains("Add or restore connector-local `operations_info` metadata"));
+    assert!(status_doc.contains("Add redaction-safe `scripts/e2e/...`"));
+    assert!(
+        !status_doc.contains("Pre-promotion status:"),
+        "Batch 4 should not look pre-promotion-complete while mixed blockers remain"
+    );
+    for connector in BATCH4_CONNECTORS {
+        assert!(
+            status_doc.contains(connector),
+            "status doc should mention {connector}"
+        );
+    }
+
+    let jsonl = fs::read_to_string(&jsonl_path).expect("batch4 JSONL should be written");
+    let records = jsonl
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSONL record"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 121);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                record_str(record, "check") == Some("operations_info")
+                    && record_str(record, "verdict") == Some("fail")
+            })
+            .count(),
+        7,
+        "Batch 4 should have seven operations_info blockers: {jsonl}"
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                record_str(record, "check") == Some("verification_script_declared")
+                    && record_str(record, "verdict") == Some("fail")
+            })
+            .count(),
+        7,
+        "Batch 4 should have seven verification-script blockers: {jsonl}"
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| {
+                record_str(record, "check") == Some("readme_status_match")
+                    && record_str(record, "verdict") == Some("fail")
+            })
+            .count(),
+        9,
+        "Batch 4 should have nine PROVEN-status blockers: {jsonl}"
+    );
+
+    let connectors = records
+        .iter()
+        .filter_map(|record| record_str(record, "connector"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(connectors, BTreeSet::from(BATCH4_CONNECTORS));
 }
 
 #[test]

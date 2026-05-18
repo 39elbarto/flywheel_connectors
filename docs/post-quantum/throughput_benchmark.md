@@ -391,6 +391,12 @@ guardrails. The component JSONL contracts also validate the hash-bearing fields
 they consume: raw digest fields must be exactly 64 lowercase hex characters,
 existing tagged fixture IDs must be `hash:<64 lowercase hex>`,
 and optional material digests may only be null or exact lowercase hex. The
+numeric fields consumed by the component contracts are integer quantities:
+representation and route/material versions are positive integers, timings and
+duration fields are non-negative integer milliseconds or seconds as named, norm
+squares are non-negative integers, and timing sample counts are positive
+integers. Fractional JSON numbers fail the contract instead of being rounded by
+review tooling. The
 representation profile contract requires exactly one `SMALL_TEST` record and
 one `V4_REFERENCE` record. The host dispatcher contract applies the same strict
 shape to every consumed `*_hash` field, including the optional receipt hash when

@@ -621,6 +621,10 @@ validate_artifact_contracts() {
         ];
       def representation_profile_ids:
         map(.profile);
+      def nonnegative_integer:
+        type == "number" and . == floor and . >= 0;
+      def positive_integer:
+        nonnegative_integer and . > 0;
       length > 0 and
       ((representation_profile_ids | sort) == (required_representation_profiles | sort)) and
       all(.[]; type == "object" and
@@ -629,14 +633,14 @@ validate_artifact_contracts() {
         .artifact_path == "target/fcp-crypto-pq/representation-profile-evidence.jsonl" and
         (.fixture_id | type == "string") and
         (.profile | type == "string") and
-        (.representation_version | type == "number") and
+        (.representation_version | positive_integer) and
         (.params | type == "object") and
         (.matrix_dimensions | type == "object") and
         (.relation_check_result | type == "object") and
         (.trapdoor_norm_quality_bucket | type == "object") and
         (.secret_storage_len_bucket | type == "object") and
         (.redaction | type == "object") and
-        (.timing_ms | type == "number") and
+        (.timing_ms | nonnegative_integer) and
         (.result | type == "string") and
         has("skip_reason"))
     '
@@ -645,6 +649,10 @@ validate_artifact_contracts() {
     "target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl" '
       def hex_hash:
         type == "string" and test("^[0-9a-f]{64}$");
+      def nonnegative_integer:
+        type == "number" and . == floor and . >= 0;
+      def positive_integer:
+        nonnegative_integer and . > 0;
       def required_route_scenarios:
         [
           "passed:SMALL_TEST",
@@ -674,15 +682,15 @@ validate_artifact_contracts() {
         (.command_line | type == "string") and
         (.git_revision | (type == "string" and test("^[0-9a-f]{7,40}$"))) and
         (.primitive_route_id | type == "string") and
-        (.primitive_route_revision | type == "number") and
-        (.representation_version | type == "number") and
+        (.primitive_route_revision | positive_integer) and
+        (.representation_version | positive_integer) and
         (.parameter_profile | type == "string") and
         (.fixture_id | type == "string") and
         (.zone_id_hash | hex_hash) and
         (.period_id_hash | hex_hash) and
         (.matrix_dimensions | type == "object") and
         (.primitive_timings_ms | type == "object") and
-        (.timing_ms | type == "number") and
+        (.timing_ms | nonnegative_integer) and
         (.cleanup | type == "string") and
         (.result | type == "string") and
         has("skip_reason") and
@@ -693,6 +701,10 @@ validate_artifact_contracts() {
     "target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl" '
       def hex_hash:
         type == "string" and test("^[0-9a-f]{64}$");
+      def nonnegative_integer:
+        type == "number" and . == floor and . >= 0;
+      def positive_integer:
+        nonnegative_integer and . > 0;
       def optional_hex_hash:
         . == null or hex_hash;
       def required_public_matrix_scenarios:
@@ -725,9 +737,9 @@ validate_artifact_contracts() {
         (.command_line | type == "string") and
         (.git_revision | (type == "string" and test("^[0-9a-f]{7,40}$"))) and
         (.primitive_route_id | type == "string") and
-        (.primitive_route_revision | type == "number") and
-        (.representation_version | type == "number") and
-        (.public_matrix_material_version | type == "number") and
+        (.primitive_route_revision | positive_integer) and
+        (.representation_version | positive_integer) and
+        (.public_matrix_material_version | positive_integer) and
         (.parameter_profile | type == "string") and
         (.fixture_id | type == "string") and
         (.zone_id_hash | hex_hash) and
@@ -738,7 +750,7 @@ validate_artifact_contracts() {
         (.matrix_dimensions | type == "object") and
         (.reconstruction_result | type == "string") and
         (.allocation_summary | type == "object") and
-        (.timing_ms | type == "number") and
+        (.timing_ms | nonnegative_integer) and
         (.result | type == "string") and
         has("skip_reason") and
         (.skip_reason == null or (.skip_reason | type == "string")))
@@ -751,6 +763,10 @@ validate_artifact_contracts() {
         type == "string" and test("^[0-9a-f]{64}$");
       def tagged_hash:
         type == "string" and test("^hash:[0-9a-f]{64}$");
+      def nonnegative_integer:
+        type == "number" and . == floor and . >= 0;
+      def positive_integer:
+        nonnegative_integer and . > 0;
       def sample_pre_scenarios($profile):
         [
           "passed:" + $profile + ":success",
@@ -779,16 +795,16 @@ validate_artifact_contracts() {
         (.command_line | type == "string") and
         (.git_revision | (type == "string" and test("^[0-9a-f]{7,40}$"))) and
         (.primitive_route_id | type == "string") and
-        (.primitive_route_revision | type == "number") and
-        (.representation_version | type == "number") and
+        (.primitive_route_revision | positive_integer) and
+        (.representation_version | positive_integer) and
         (.parameter_profile | type == "string") and
         (.fixture_id | type == "string") and
         (.zone_id_hash | hex_hash) and
         (.period_id_hash | hex_hash) and
         (.h_fixture_id | tagged_hash) and
         (.matrix_dimensions | type == "object") and
-        (.norm_bound_squared | type == "number") and
-        (.observed_norm_squared | type == "number") and
+        (.norm_bound_squared | nonnegative_integer) and
+        (.observed_norm_squared | nonnegative_integer) and
         (.observed_norm_bucket | type == "string") and
         (.primitive_timings_ms | type == "object") and
         (.verify_outcome | type == "string") and
@@ -808,6 +824,10 @@ validate_artifact_contracts() {
         type == "string" and test("^hash:[0-9a-f]{64}$");
       def optional_hex_hash:
         . == null or hex_hash;
+      def nonnegative_integer:
+        type == "number" and . == floor and . >= 0;
+      def positive_integer:
+        nonnegative_integer and . > 0;
       def required_formal_profiles:
         [
           "SMALL_TEST",
@@ -848,9 +868,9 @@ validate_artifact_contracts() {
         .fixture_category == "deterministic-public-correspondence" and
         (.parameter_profile | type == "string") and
         (.primitive_route_id | type == "string") and
-        (.primitive_route_revision | type == "number") and
-        (.representation_version | type == "number") and
-        (.public_matrix_material_version | type == "number") and
+        (.primitive_route_revision | positive_integer) and
+        (.representation_version | positive_integer) and
+        (.public_matrix_material_version | positive_integer) and
         (.zone_id_hash | hex_hash) and
         (.period_id_hash | hex_hash) and
         (.public_material_summary | type == "object") and
@@ -868,7 +888,7 @@ validate_artifact_contracts() {
         (.artifact_hashes | type == "object") and
         (.artifact_hashes.public_seed_hash_hex | hex_hash) and
         (.artifact_hashes.public_material_digest_hex | optional_hex_hash) and
-        (.duration_ms | type == "number") and
+        (.duration_ms | nonnegative_integer) and
         .result == "passed" and
         has("skip_reason") and
         .skip_reason == null)
@@ -878,6 +898,10 @@ validate_artifact_contracts() {
     "target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl" '
       def hex_hash:
         type == "string" and test("^[0-9a-f]{64}$");
+      def nonnegative_integer:
+        type == "number" and . == floor and . >= 0;
+      def positive_integer:
+        nonnegative_integer and . > 0;
       def required_formal_profiles:
         [
           "SMALL_TEST",
@@ -916,9 +940,9 @@ validate_artifact_contracts() {
           else false end) and
         (.fixture_id_hash | hex_hash) and
         (.parameter_profile | type == "string") and
-        (.route_revision | type == "number") and
-        (.representation_version | type == "number") and
-        (.public_matrix_material_version | type == "number") and
+        (.route_revision | positive_integer) and
+        (.representation_version | positive_integer) and
+        (.public_matrix_material_version | positive_integer) and
         (.zone_id_hash | hex_hash) and
         (.period_id_hash | hex_hash) and
         (.certificate_id_hash | hex_hash) and
@@ -934,7 +958,7 @@ validate_artifact_contracts() {
         .checks.trust_set_replay_denied == true and
         .checks.stale_route_revision_rejected == true and
         .checks.certificate_envelope_rejected == true and
-        (.duration_ms | type == "number") and
+        (.duration_ms | nonnegative_integer) and
         .result == "passed" and
         has("skip_reason") and
         .skip_reason == null)
@@ -944,6 +968,10 @@ validate_artifact_contracts() {
     "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl" '
       def hex_hash:
         type == "string" and test("^[0-9a-f]{64}$");
+      def nonnegative_integer:
+        type == "number" and . == floor and . >= 0;
+      def positive_integer:
+        nonnegative_integer and . > 0;
       def host_target_dir_class:
         type == "string" and (
           . == "tmp_absolute" or
@@ -981,7 +1009,7 @@ validate_artifact_contracts() {
         (.cargo_target_dir_hash | hex_hash) and
         (.cargo_target_dir_class | host_target_dir_class) and
         (.worker_host_class | type == "string") and
-        (.timing_sample_count | type == "number") and
+        (.timing_sample_count | positive_integer) and
         .artifact_path == "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl" and
         (.parameter_profile | type == "string") and
         (.fixture_id_hash | hex_hash) and
@@ -1158,10 +1186,8 @@ validate_gauntlet_contract() {
       type == "string" and length > 0 and . != "unavailable";
     def positive_test_count:
       type == "string" and test("^[1-9][0-9]*$");
-    def nonnegative_number:
-      type == "number" and . >= 0;
     def nonnegative_integer:
-      nonnegative_number and floor == .;
+      type == "number" and . == floor and . >= 0;
     def nonempty_string:
       type == "string" and length > 0;
     def safe_relative_jsonl_artifact_path:
@@ -1208,7 +1234,7 @@ validate_gauntlet_contract() {
         (.details.command_line | nonempty_string) and
         .details.log_artifact == expected_command_log_artifact and
         (.details.log_hash | sha256_hash) and
-        (.details.duration_seconds | nonnegative_number) and
+        (.details.duration_seconds | nonnegative_integer) and
         (.details.retry_count | nonnegative_integer) and
         (non_rch_command_proof or rch_command_proof) and
         .details.cache_decision == "cargo_target_dir_hashed" and

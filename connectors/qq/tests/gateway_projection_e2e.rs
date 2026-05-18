@@ -1756,20 +1756,32 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         &stale_sequence,
     );
 
-    let heartbeat = invoke_projection(
+    let unmatched_heartbeat_ack = invoke_projection(
         &connector,
         &signing_key,
         &instance_id,
-        "qq-gateway-heartbeat",
+        "qq-gateway-unmatched-heartbeat-ack",
         json!({
             "op": 11
         }),
     )
     .await;
-    assert_eq!(heartbeat["reason_code"], "heartbeat_ack");
-    assert_eq!(heartbeat["runtime"]["heartbeat_ack_count"], 1);
-    assert_eq!(heartbeat["lifecycle"]["action"], "none");
-    log_projection_step(&mut logs, "heartbeat_ack", "ok", &heartbeat);
+    assert_eq!(
+        unmatched_heartbeat_ack["reason_code"],
+        "heartbeat_ack_unmatched"
+    );
+    assert_eq!(
+        unmatched_heartbeat_ack["runtime"]["heartbeat_sent_count"],
+        0
+    );
+    assert_eq!(unmatched_heartbeat_ack["runtime"]["heartbeat_ack_count"], 0);
+    assert_eq!(unmatched_heartbeat_ack["lifecycle"]["action"], "none");
+    log_projection_step(
+        &mut logs,
+        "heartbeat_ack_unmatched",
+        "ok",
+        &unmatched_heartbeat_ack,
+    );
 
     let heartbeat_request = invoke_projection(
         &connector,
@@ -1784,7 +1796,25 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(heartbeat_request["reason_code"], "heartbeat_request");
     assert_eq!(heartbeat_request["lifecycle"]["action"], "send_heartbeat");
     assert_eq!(heartbeat_request["lifecycle"]["resume_sequence"], 7);
+    assert_eq!(heartbeat_request["runtime"]["heartbeat_sent_count"], 1);
+    assert_eq!(heartbeat_request["runtime"]["heartbeat_ack_count"], 0);
     log_projection_step(&mut logs, "heartbeat_request", "ok", &heartbeat_request);
+
+    let heartbeat = invoke_projection(
+        &connector,
+        &signing_key,
+        &instance_id,
+        "qq-gateway-heartbeat",
+        json!({
+            "op": 11
+        }),
+    )
+    .await;
+    assert_eq!(heartbeat["reason_code"], "heartbeat_ack");
+    assert_eq!(heartbeat["runtime"]["heartbeat_sent_count"], 1);
+    assert_eq!(heartbeat["runtime"]["heartbeat_ack_count"], 1);
+    assert_eq!(heartbeat["lifecycle"]["action"], "none");
+    log_projection_step(&mut logs, "heartbeat_ack", "ok", &heartbeat);
 
     let reconnect = invoke_projection(
         &connector,

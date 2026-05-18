@@ -452,6 +452,13 @@ impl QqGatewayRuntime {
                 Ok(self.reconnect_projection(event.s, event.id, reason_code, resumable))
             }
             11 => {
+                if self.session.heartbeat_seq() <= self.session.ack_seq() {
+                    return Ok(self.dropped_projection(
+                        event.s,
+                        event.id,
+                        "heartbeat_ack_unmatched",
+                    ));
+                }
                 self.session.record_heartbeat_ack(Instant::now());
                 self.heartbeat_ack_count = self.heartbeat_ack_count.saturating_add(1);
                 Ok(self.dropped_projection(event.s, event.id, "heartbeat_ack"))
@@ -4281,7 +4288,7 @@ mod tests {
         assert_eq!(stale.reason_code, "stale_sequence");
         assert_eq!(stale.runtime.stale_sequence_events, 1);
 
-        let heartbeat = runtime
+        let unmatched_heartbeat_ack = runtime
             .project_event(QqGatewayEvent {
                 op: 11,
                 s: None,
@@ -4290,9 +4297,16 @@ mod tests {
                 id: None,
             })
             .unwrap();
-        assert_eq!(heartbeat.reason_code, "heartbeat_ack");
-        assert_eq!(heartbeat.lifecycle.action, QQ_GATEWAY_ACTION_NONE);
-        assert_eq!(heartbeat.runtime.heartbeat_ack_count, 1);
+        assert_eq!(
+            unmatched_heartbeat_ack.reason_code,
+            "heartbeat_ack_unmatched"
+        );
+        assert_eq!(
+            unmatched_heartbeat_ack.lifecycle.action,
+            QQ_GATEWAY_ACTION_NONE
+        );
+        assert_eq!(unmatched_heartbeat_ack.runtime.heartbeat_sent_count, 0);
+        assert_eq!(unmatched_heartbeat_ack.runtime.heartbeat_ack_count, 0);
 
         let heartbeat_request = runtime
             .project_event(QqGatewayEvent {
@@ -4309,6 +4323,22 @@ mod tests {
             QQ_GATEWAY_ACTION_SEND_HEARTBEAT
         );
         assert_eq!(heartbeat_request.lifecycle.resume_sequence, 10);
+        assert_eq!(heartbeat_request.runtime.heartbeat_sent_count, 1);
+        assert_eq!(heartbeat_request.runtime.heartbeat_ack_count, 0);
+
+        let heartbeat = runtime
+            .project_event(QqGatewayEvent {
+                op: 11,
+                s: None,
+                t: None,
+                d: None,
+                id: None,
+            })
+            .unwrap();
+        assert_eq!(heartbeat.reason_code, "heartbeat_ack");
+        assert_eq!(heartbeat.lifecycle.action, QQ_GATEWAY_ACTION_NONE);
+        assert_eq!(heartbeat.runtime.heartbeat_sent_count, 1);
+        assert_eq!(heartbeat.runtime.heartbeat_ack_count, 1);
     }
 
     #[test]

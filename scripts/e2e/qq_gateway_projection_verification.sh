@@ -359,6 +359,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           "slash_approval_projection",
           "duplicate_drop",
           "stale_sequence_replay_drop",
+          "heartbeat_ack_unmatched",
           "heartbeat_ack",
           "heartbeat_request",
           "reconnect_requested",
@@ -538,8 +539,9 @@ if [[ "${overall_status}" == "passed" ]]; then
           )
         ),
         heartbeat_shape_ok: (
-          any(.[]; .step == "heartbeat_ack" and .details.reason_code == "heartbeat_ack")
-          and any(.[]; .step == "heartbeat_request" and .details.reason_code == "heartbeat_request" and .details.lifecycle.action == "send_heartbeat")
+          any(.[]; .step == "heartbeat_ack_unmatched" and .details.reason_code == "heartbeat_ack_unmatched" and .details.runtime.heartbeat_sent_count == 0 and .details.runtime.heartbeat_ack_count == 0)
+          and any(.[]; .step == "heartbeat_request" and .details.reason_code == "heartbeat_request" and .details.lifecycle.action == "send_heartbeat" and .details.runtime.heartbeat_sent_count == 1 and .details.runtime.heartbeat_ack_count == 0)
+          and any(.[]; .step == "heartbeat_ack" and .details.reason_code == "heartbeat_ack" and .details.runtime.heartbeat_sent_count == 1 and .details.runtime.heartbeat_ack_count == 1)
         ),
         reconnect_shape_ok: (
           any(.[]; .step == "reconnect_requested" and .details.reason_code == "reconnect_requested" and .details.runtime.reconnect_attempts == 1 and .details.runtime.terminal_reconnect_failures == 0)

@@ -61,8 +61,18 @@ validate_artifact_path
 mkdir -p "${OUT_DIR}"
 : > "${ARTIFACT}"
 
+repo_root() {
+  pwd -P 2>/dev/null || pwd
+}
+
+git_safe() {
+  local root
+  root="$(repo_root)"
+  git -c "safe.directory=${root}" -C "${root}" "$@"
+}
+
 raw_git_revision() {
-  git rev-parse HEAD 2>/dev/null || printf 'unknown'
+  git_safe rev-parse HEAD 2>/dev/null || printf 'unknown'
 }
 
 FORMAL_GIT_REVISION="${FCP_LATTICE_GIT_REVISION:-$(raw_git_revision)}"

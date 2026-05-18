@@ -37,8 +37,16 @@ validate_artifact_path() {
   esac
 }
 
+validate_out_dir() {
+  if [ "${OUT_DIR}" != "target/fcp-crypto-pq" ]; then
+    printf 'invalid OUT_DIR: assurance gauntlet evidence logs must use target/fcp-crypto-pq\n' >&2
+    exit 64
+  fi
+}
+
 validate_run_id
 validate_artifact_path
+validate_out_dir
 mkdir -p "${OUT_DIR}" "${ARTIFACT_STAGE_ROOT}"
 : > "${ARTIFACT}"
 

@@ -422,10 +422,13 @@ different runs. Run ids and worker host classes must be non-empty
 redaction-safe label tokens using only ASCII letters, digits, `.`, `_`, and
 `-`; `..` is rejected by the self-contract, and unsafe run ids are rejected
 before the script creates artifact directories or JSONL files. The top-level
-build profile must be `dev-test-bench`. The top-level and component artifact
-revisions must be actual 7- to 40-character hexadecimal Git commit ids;
-`unknown` is a preflight or contract failure, not reusable evidence. Top-level
-target-dir classes are limited to `ephemeral_tmp`,
+build profile must be `dev-test-bench`. Because command records are contracted
+to `target/fcp-crypto-pq/<run_id>.<step>.log`, `OUT_DIR` must remain
+`target/fcp-crypto-pq`; an override fails before the script creates evidence
+directories. The top-level and component artifact revisions must be actual 7-
+to 40-character hexadecimal Git commit ids; `unknown` is a preflight or
+contract failure, not reusable evidence. Top-level target-dir classes are
+limited to `ephemeral_tmp`,
 `repo_relative_target`, or `custom_hashed`; exact `/tmp`, `/private/tmp`, and
 `target` roots are classified the same way as their children. The host
 dispatcher component artifact is limited to `tmp_absolute`, `absolute`,

@@ -1317,7 +1317,7 @@ impl M365Connector {
     /// Handle introspect method.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         let introspection = Introspection {
-            operations: build_operations(),
+            operations: operations_info(),
             events: vec![],
             resource_types: vec![],
             auth_caps: None,
@@ -3506,7 +3506,7 @@ fn op_info(
 }
 
 fn operation_info_for(operation: &str) -> FcpResult<OperationInfo> {
-    build_operations()
+    operations_info()
         .into_iter()
         .find(|operation_info| operation_info.id.as_str() == operation)
         .ok_or_else(|| FcpError::OperationNotGranted {
@@ -3579,6 +3579,11 @@ fn validate_simulate_input(
     }
 
     Ok(())
+}
+
+#[must_use]
+fn operations_info() -> Vec<OperationInfo> {
+    build_operations()
 }
 
 fn build_operations() -> Vec<OperationInfo> {
@@ -5498,7 +5503,7 @@ mod tests {
 
     #[test]
     fn all_operations_have_input_and_output_schemas() {
-        let ops = build_operations();
+        let ops = operations_info();
         for op in &ops {
             assert_eq!(
                 op.input_schema["type"], "object",
@@ -5515,7 +5520,7 @@ mod tests {
 
     #[test]
     fn all_operations_have_summaries() {
-        let ops = build_operations();
+        let ops = operations_info();
         for op in &ops {
             assert!(
                 !op.summary.is_empty(),
@@ -5527,7 +5532,7 @@ mod tests {
 
     #[test]
     fn read_operations_have_safe_risk_levels() {
-        let ops = build_operations();
+        let ops = operations_info();
         let safe_ops = [
             "m365.mail.list_messages",
             "m365.mail.get_message",
@@ -5570,7 +5575,7 @@ mod tests {
 
     #[test]
     fn dangerous_operations_have_high_risk() {
-        let ops = build_operations();
+        let ops = operations_info();
         let dangerous_ops = [
             "m365.mail.send_message",
             "m365.mail.reply_message",
@@ -5601,8 +5606,8 @@ mod tests {
 
     #[test]
     fn operations_are_deterministic() {
-        let ops1 = build_operations();
-        let ops2 = build_operations();
+        let ops1 = operations_info();
+        let ops2 = operations_info();
         assert_eq!(ops1.len(), ops2.len());
         for (a, b) in ops1.iter().zip(ops2.iter()) {
             assert_eq!(a.id, b.id);
@@ -5612,7 +5617,7 @@ mod tests {
 
     #[test]
     fn operation_count_matches_expected() {
-        let ops = build_operations();
+        let ops = operations_info();
         // Mail: 10, Files: 7, Word: 6, OneNote: 7, Calendar: 6, Tasks: 3, Subscriptions: 3, Notifications: 1, Delta: 1 = 44
         assert_eq!(ops.len(), 44);
     }

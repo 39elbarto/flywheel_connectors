@@ -1330,7 +1330,8 @@ impl WeComConnector {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn operations() -> Vec<OperationInfo> {
+    #[must_use]
+    pub fn operations_info() -> Vec<OperationInfo> {
         vec![
             operation(
                 OP_SEND_TEXT,
@@ -1783,7 +1784,7 @@ impl FcpConnector for WeComConnector {
 
     fn introspect(&self) -> Introspection {
         Introspection {
-            operations: Self::operations(),
+            operations: Self::operations_info(),
             events: Vec::new(),
             resource_types: Vec::new(),
             auth_caps: None,
@@ -2797,7 +2798,7 @@ mod tests {
             "manifest operation inventory should match expected schema coverage"
         );
 
-        let runtime_operations = WeComConnector::operations();
+        let runtime_operations = WeComConnector::operations_info();
         assert_eq!(
             runtime_operations.len(),
             EXPECTED_MANIFEST_SCHEMA_OPS.len(),
@@ -3060,7 +3061,7 @@ mod tests {
 
     #[test]
     fn operations_advertise_image_file_and_duplicate_check_inputs() {
-        let operations = WeComConnector::operations();
+        let operations = WeComConnector::operations_info();
 
         let send_text = operations
             .iter()

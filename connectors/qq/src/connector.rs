@@ -788,7 +788,8 @@ impl QqConnector {
 
     // Keep the QQ operation catalog contiguous so introspection metadata stays auditable.
     #[allow(clippy::too_many_lines)]
-    fn operations() -> Vec<OperationInfo> {
+    #[must_use]
+    pub fn operations_info() -> Vec<OperationInfo> {
         vec![
             operation(
                 OP_SEND_CHANNEL,
@@ -1137,7 +1138,7 @@ impl FcpConnector for QqConnector {
 
     fn introspect(&self) -> Introspection {
         Introspection {
-            operations: Self::operations(),
+            operations: Self::operations_info(),
             events: qq_events_info(),
             resource_types: Vec::new(),
             auth_caps: None,
@@ -1849,7 +1850,7 @@ mod tests {
     fn manifest_operation_schemas_compile_and_validate_core_payloads() -> Result<(), String> {
         let manifest = qq_manifest()?;
         let operations = manifest_operations(&manifest)?;
-        let operation_catalog = QqConnector::operations();
+        let operation_catalog = QqConnector::operations_info();
 
         for (operation_id, manifest_key) in EXPECTED_MANIFEST_SCHEMA_OPS {
             assert!(
@@ -2639,7 +2640,7 @@ mod tests {
 
     #[test]
     fn operations_have_correct_capabilities() {
-        let ops = QqConnector::operations();
+        let ops = QqConnector::operations_info();
         let send_ops: Vec<_> = ops
             .iter()
             .filter(|op| op.id.as_str().starts_with("qq.messages."))
@@ -2663,7 +2664,7 @@ mod tests {
 
     #[test]
     fn operations_have_agent_hints() {
-        let ops = QqConnector::operations();
+        let ops = QqConnector::operations_info();
         for op in &ops {
             assert!(!op.ai_hints.when_to_use.is_empty());
             assert!(!op.ai_hints.common_mistakes.is_empty());
@@ -2680,7 +2681,7 @@ mod tests {
 
     #[test]
     fn events_normalize_operation_has_correct_properties() {
-        let ops = QqConnector::operations();
+        let ops = QqConnector::operations_info();
         let normalize_op = ops
             .iter()
             .find(|op| op.id.as_str() == OP_EVENTS_NORMALIZE)

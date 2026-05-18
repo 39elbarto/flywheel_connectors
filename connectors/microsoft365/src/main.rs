@@ -99,15 +99,15 @@ async fn handle_message(connector: &mut M365Connector, message: &str) -> serde_j
     match result {
         Ok(value) => {
             let mut response = serde_json::json!({ "jsonrpc": "2.0", "result": value });
-            if let Some(id) = id {
-                response.as_object_mut().unwrap().insert("id".to_string(), id);
+            if let (Some(id), Some(object)) = (id, response.as_object_mut()) {
+                object.insert("id".to_string(), id);
             }
             response
         }
         Err(e) => {
             let mut response = serde_json::json!({ "jsonrpc": "2.0", "error": e.to_response() });
-            if let Some(id) = id {
-                response.as_object_mut().unwrap().insert("id".to_string(), id);
+            if let (Some(id), Some(object)) = (id, response.as_object_mut()) {
+                object.insert("id".to_string(), id);
             }
             response
         }

@@ -7,6 +7,9 @@ RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/fireworks/${RUN_ID}}"
 TARGET_DIR="${FCP_FIREWORKS_TARGET_DIR:-/tmp/fcp-fireworks-e2e}"
 RCH_BIN="${RCH_BIN:-rch}"
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+REMOTE_RUNNER="rch:remote-required"
+export RCH_FORCE_REMOTE=1
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
@@ -41,7 +44,7 @@ promote_overall_status() {
 
 classify_failure() {
   local log_path="$1"
-  if grep -Eq 'timeout: failed to execute process|RCH-E|missing worker|No space left on device|dbus-1\.pc|connection reset by peer' "${log_path}"; then
+  if grep -Eq 'timeout: failed to execute process|RCH-E|remote required; refusing local fallback|rch command did not produce remote proof|\[RCH\] local|missing worker|No space left on device|dbus-1\.pc|connection reset by peer' "${log_path}"; then
     echo "infra_blocked"
   else
     echo "failed"
@@ -52,12 +55,31 @@ run_logged() {
   local name="$1"
   shift
   local log_path="${OUT_ROOT}/logs/${name}.log"
+  local rc
 
   echo "[fireworks-verification] ${name}: $*" >&2
   (
-    cd "${REPO_ROOT}"
+    cd "${REPO_ROOT}" || exit
     "$@"
   ) >"${log_path}" 2>&1
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && ! require_rch_remote_proof "${name}" "${log_path}"; then
+    return 1
+  fi
+  return "${rc}"
+}
+
+require_rch_remote_proof() {
+  local name="$1"
+  local log_path="$2"
+
+  if grep -Fq "[RCH] remote" "${log_path}"; then
+    return 0
+  fi
+
+  echo "[fireworks-verification] ${name}: rch command did not produce remote proof" >&2
+  echo "rch command did not produce remote proof" >>"${log_path}"
+  return 1
 }
 
 run_step() {
@@ -75,44 +97,29 @@ run_step() {
 
 git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
-FWC_MANIFEST_BIN="${FWC_MANIFEST_BIN:-fwc}"
-if command -v "${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
-  manifest_check_runner="local:${FWC_MANIFEST_BIN}"
-  if run_logged \
-    manifest_check \
-    "${FWC_MANIFEST_BIN}" manifest fix connectors/fireworks/manifest.toml --check --json
-  then
+manifest_check_runner="${REMOTE_RUNNER}:cargo-run"
+if run_logged \
+  manifest_check \
+  env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env \
+    "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" \
+    CARGO_TARGET_DIR="${TARGET_DIR}" \
+    cargo run -q -p fwc -- manifest fix connectors/fireworks/manifest.toml --check --json
+then
     manifest_status="passed"
     cp "${OUT_ROOT}/logs/manifest_check.log" "${OUT_ROOT}/evidence/manifest_check.json"
-  else
-    manifest_status="$(classify_failure "${OUT_ROOT}/logs/manifest_check.log")"
-    promote_overall_status "${manifest_status}"
-    cat >"${OUT_ROOT}/evidence/manifest_check.json" <<EOF
-{"status":"${manifest_status}","log":"${OUT_ROOT}/logs/manifest_check.log"}
-EOF
-  fi
 else
-  manifest_check_runner="rch:cargo-run"
-  if run_logged \
-    manifest_check \
-    "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo run -q -p fwc -- manifest fix connectors/fireworks/manifest.toml --check --json
-  then
-    manifest_status="passed"
-    cp "${OUT_ROOT}/logs/manifest_check.log" "${OUT_ROOT}/evidence/manifest_check.json"
-  else
-    manifest_status="$(classify_failure "${OUT_ROOT}/logs/manifest_check.log")"
-    promote_overall_status "${manifest_status}"
-    cat >"${OUT_ROOT}/evidence/manifest_check.json" <<EOF
+  manifest_status="$(classify_failure "${OUT_ROOT}/logs/manifest_check.log")"
+  promote_overall_status "${manifest_status}"
+  cat >"${OUT_ROOT}/evidence/manifest_check.json" <<EOF
 {"status":"${manifest_status}","log":"${OUT_ROOT}/logs/manifest_check.log"}
 EOF
-  fi
 fi
 
-cargo_check_status="$(run_step cargo_check "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo check -p fcp-fireworks --all-targets)"
-format_check_status="$(run_step format_check "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo fmt --package fcp-fireworks --check)"
-loopback_status="$(run_step loopback_jsonl "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" FIREWORKS_E2E_GIT_REVISION="${git_revision}" cargo test -p fcp-fireworks --test integration fireworks_loopback_e2e_jsonl_matrix -- --nocapture)"
-live_status="$(run_step live_jsonl "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" FIREWORKS_E2E_GIT_REVISION="${git_revision}" cargo test -p fcp-fireworks --test live_verification fireworks_live_smoke_or_structured_skip_jsonl -- --nocapture)"
-clippy_status="$(run_step clippy "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo clippy -p fcp-fireworks --all-targets --no-deps -- -D warnings)"
+cargo_check_status="$(run_step cargo_check env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo check -p fcp-fireworks --all-targets)"
+format_check_status="$(run_step format_check env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo fmt --package fcp-fireworks --check)"
+loopback_status="$(run_step loopback_jsonl env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" FIREWORKS_E2E_GIT_REVISION="${git_revision}" cargo test -p fcp-fireworks --test integration fireworks_loopback_e2e_jsonl_matrix -- --nocapture)"
+live_status="$(run_step live_jsonl env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" FIREWORKS_E2E_GIT_REVISION="${git_revision}" cargo test -p fcp-fireworks --test live_verification fireworks_live_smoke_or_structured_skip_jsonl -- --nocapture)"
+clippy_status="$(run_step clippy env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo clippy -p fcp-fireworks --all-targets --no-deps -- -D warnings)"
 
 if grep -a '^FIREWORKS_E2E_JSONL ' "${OUT_ROOT}/logs/loopback_jsonl.log" \
   | sed 's/^FIREWORKS_E2E_JSONL //' \
@@ -161,6 +168,8 @@ cat >"${OUT_ROOT}/environment.json" <<EOF
   "artifact_root": "${OUT_ROOT}",
   "git_revision": "${git_revision}",
   "target_dir": "${TARGET_DIR}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
   "manifest_check_runner": "${manifest_check_runner}",
   "rch_bin": "${RCH_BIN}",
   "fixture_mode": "wiremock",
@@ -175,18 +184,15 @@ set -euo pipefail
 
 TARGET_DIR="\${FCP_FIREWORKS_TARGET_DIR:-${TARGET_DIR}}"
 RCH_BIN="\${RCH_BIN:-${RCH_BIN}}"
-FWC_MANIFEST_BIN="\${FWC_MANIFEST_BIN:-fwc}"
-if command -v "\${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
-  "\${FWC_MANIFEST_BIN}" manifest fix connectors/fireworks/manifest.toml --check --json
-else
-  "\${RCH_BIN}" exec -- env CARGO_TARGET_DIR="\${TARGET_DIR}" cargo run -q -p fwc -- manifest fix connectors/fireworks/manifest.toml --check --json
-fi
-"\${RCH_BIN}" exec -- env CARGO_TARGET_DIR="\${TARGET_DIR}" cargo check -p fcp-fireworks --all-targets
-"\${RCH_BIN}" exec -- env CARGO_TARGET_DIR="\${TARGET_DIR}" cargo fmt --package fcp-fireworks --check
+REPO_TOOLCHAIN="\${REPO_TOOLCHAIN:-${REPO_TOOLCHAIN}}"
+export RCH_FORCE_REMOTE=1
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo run -q -p fwc -- manifest fix connectors/fireworks/manifest.toml --check --json
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo check -p fcp-fireworks --all-targets
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo fmt --package fcp-fireworks --check
 git_revision="\$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-"\${RCH_BIN}" exec -- env CARGO_TARGET_DIR="\${TARGET_DIR}" FIREWORKS_E2E_GIT_REVISION="\${git_revision}" cargo test -p fcp-fireworks --test integration fireworks_loopback_e2e_jsonl_matrix -- --nocapture
-"\${RCH_BIN}" exec -- env CARGO_TARGET_DIR="\${TARGET_DIR}" FIREWORKS_E2E_GIT_REVISION="\${git_revision}" cargo test -p fcp-fireworks --test live_verification fireworks_live_smoke_or_structured_skip_jsonl -- --nocapture
-"\${RCH_BIN}" exec -- env CARGO_TARGET_DIR="\${TARGET_DIR}" cargo clippy -p fcp-fireworks --all-targets --no-deps -- -D warnings
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" FIREWORKS_E2E_GIT_REVISION="\${git_revision}" cargo test -p fcp-fireworks --test integration fireworks_loopback_e2e_jsonl_matrix -- --nocapture
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" FIREWORKS_E2E_GIT_REVISION="\${git_revision}" cargo test -p fcp-fireworks --test live_verification fireworks_live_smoke_or_structured_skip_jsonl -- --nocapture
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo clippy -p fcp-fireworks --all-targets --no-deps -- -D warnings
 EOF
 chmod +x "${OUT_ROOT}/replay.sh"
 
@@ -195,6 +201,7 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
   "run_id": "${RUN_ID}",
   "connector": "fcp-fireworks",
   "overall_status": "${OVERALL_STATUS}",
+  "runner": "${REMOTE_RUNNER}",
   "artifacts_root": "${OUT_ROOT}",
   "steps": {
     "manifest_check": "${manifest_status}",

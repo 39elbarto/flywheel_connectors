@@ -2792,6 +2792,10 @@ struct HistoryArgs {
     /// Maximum number of entries to return.
     #[arg(long, default_value_t = 20)]
     limit: usize,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -23669,22 +23673,30 @@ fn cancel_dispatch(args: &CancelArgs, explicit_host: Option<&str>) -> Result<Dis
 
 #[allow(clippy::option_if_let_else)]
 fn history_dispatch(args: &HistoryArgs) -> Result<DispatchOutcome> {
+    if let Some(outcome) =
+        enforce_required_truth_source("history", args.require_source, KnowledgeState::Offline)
+    {
+        return Ok(outcome);
+    }
+
     let store = cli_history_store()?;
 
     // Single entry lookup.
     if let Some(ref entry_id) = args.entry_id {
         return store.get(entry_id)?.map_or_else(
             || {
+                let mut payload = json!({
+                    "status": "error",
+                    "command": "history",
+                    "error": {
+                        "type": "not-found",
+                        "message": format!("No history entry with ID '{entry_id}'."),
+                    },
+                    "next_actions": ["fwc history"],
+                });
+                inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
                 Ok(DispatchOutcome {
-                    payload: json!({
-                        "status": "error",
-                        "command": "history",
-                        "error": {
-                            "type": "not-found",
-                            "message": format!("No history entry with ID '{entry_id}'."),
-                        },
-                        "next_actions": ["fwc history"],
-                    }),
+                    payload,
                     exit_code: CliExitCode::UnknownCommand,
                 })
             },
@@ -23698,6 +23710,7 @@ fn history_dispatch(args: &HistoryArgs) -> Result<DispatchOutcome> {
                     "entry": entry,
                 });
                 envelope.inject_into(&mut payload);
+                inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
                 Ok(DispatchOutcome {
                     payload,
                     exit_code: CliExitCode::Success,
@@ -23744,6 +23757,7 @@ fn history_dispatch(args: &HistoryArgs) -> Result<DispatchOutcome> {
         ],
     });
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -45903,6 +45917,8 @@ require_attestation_types = ["in-toto"]"#,
         assert_eq!(payload["status"], "ok");
         assert_eq!(payload["command"], "history");
         assert_eq!(payload["scope"], "list");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["total_entries"], 0);
         assert_eq!(payload["returned"], 0);
         assert!(
@@ -46085,7 +46101,31 @@ require_attestation_types = ["in-toto"]"#,
         assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
         assert_eq!(payload["status"], "error");
         assert_eq!(payload["command"], "history");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["error"]["type"], "not-found");
+    }
+
+    #[test]
+    fn history_require_any_live_fails_truth_source_unavailable() {
+        let root = std::env::temp_dir().join(format!(
+            "fwc-hist-require-live-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let history_path = root.join("history.jsonl");
+        let _guard = super::install_test_history_path(history_path);
+
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "history", "--require-source", "any-live"]);
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["status"], "error");
+        assert_eq!(payload["command"], "history");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
     }
 
     #[test]

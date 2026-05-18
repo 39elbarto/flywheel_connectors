@@ -488,6 +488,12 @@ Operator-supplied artifact filenames are also rejected if they contain the same
 secret, provider-payload, reviewer-contact, trapdoor, preimage, or credential
 marker names; the failure message reports only a SHA-256 hash of the rejected
 path.
+Its command records must name their exact log artifact as
+`target/fcp-crypto-pq/<run_id>.<step>.log`, and the standalone self-contract
+rejects passing command records whose `log_artifact` does not match the
+record's own run id and step. The older `log_artifact_class` marker remains a
+coarse review label, but it is not enough by itself to make a formal
+correspondence command record reusable evidence.
 Its command records carry the same execution-proof fields as the top-level
 gauntlet: non-`rch` lanes must report `fallback_decision:"not_needed"`,
 `worker_execution_class:"not_applicable"`, and `rch_summary:null`; `rch`-backed

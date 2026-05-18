@@ -206,6 +206,7 @@ run_and_capture() {
   local step="$1"
   shift
   local log="${OUT_DIR}/${RUN_ID}.${step}.log"
+  local log_artifact="target/fcp-crypto-pq/${RUN_ID}.${step}.log"
   local require_remote_rch=0
   if [[ "${1:-}" == "${RCH_BIN}" ]]; then
     require_remote_rch=1
@@ -221,13 +222,14 @@ run_and_capture() {
       rch_summary_json="$(json_string_or_null "${rch_summary}")"
       if [ "${worker_execution_class}" != "remote" ]; then
         fail_step "${step}" "$(jq -cn \
+          --arg log_artifact "${log_artifact}" \
           --arg log_hash "sha256:${hash}" \
           --arg log_artifact_class "relative-target-log" \
           --arg fallback_decision "${fallback_decision}" \
           --arg worker_execution_class "${worker_execution_class}" \
           --argjson rch_summary "${rch_summary_json}" \
           --arg cleanup_result "not_applicable" \
-          '{log_hash:$log_hash,log_artifact_class:$log_artifact_class,fallback_decision:$fallback_decision,worker_execution_class:$worker_execution_class,rch_summary:$rch_summary,required_worker_execution_class:"remote",cleanup_result:$cleanup_result}')"
+          '{log_artifact:$log_artifact,log_hash:$log_hash,log_artifact_class:$log_artifact_class,fallback_decision:$fallback_decision,worker_execution_class:$worker_execution_class,rch_summary:$rch_summary,required_worker_execution_class:"remote",cleanup_result:$cleanup_result}')"
       fi
     else
       fallback_decision="not_needed"
@@ -236,13 +238,14 @@ run_and_capture() {
     fi
     assert_stable_revision "stable_revision_after_${step}"
     append_json "${step}" "pass" "$(jq -cn \
+      --arg log_artifact "${log_artifact}" \
       --arg log_hash "sha256:${hash}" \
       --arg log_artifact_class "relative-target-log" \
       --arg fallback_decision "${fallback_decision}" \
       --arg worker_execution_class "${worker_execution_class}" \
       --argjson rch_summary "${rch_summary_json}" \
       --arg cleanup_result "not_applicable" \
-      '{log_hash:$log_hash,log_artifact_class:$log_artifact_class,fallback_decision:$fallback_decision,worker_execution_class:$worker_execution_class,rch_summary:$rch_summary,cleanup_result:$cleanup_result}')"
+      '{log_artifact:$log_artifact,log_hash:$log_hash,log_artifact_class:$log_artifact_class,fallback_decision:$fallback_decision,worker_execution_class:$worker_execution_class,rch_summary:$rch_summary,cleanup_result:$cleanup_result}')"
   else
     local hash fallback_decision worker_execution_class rch_summary rch_summary_json
     hash="$(shasum -a 256 "${log}" | awk '{print $1}')"
@@ -257,13 +260,14 @@ run_and_capture() {
       rch_summary_json="null"
     fi
     fail_step "${step}" "$(jq -cn \
+      --arg log_artifact "${log_artifact}" \
       --arg log_hash "sha256:${hash}" \
       --arg log_artifact_class "relative-target-log" \
       --arg fallback_decision "${fallback_decision}" \
       --arg worker_execution_class "${worker_execution_class}" \
       --argjson rch_summary "${rch_summary_json}" \
       --arg cleanup_result "not_applicable" \
-      '{log_hash:$log_hash,log_artifact_class:$log_artifact_class,fallback_decision:$fallback_decision,worker_execution_class:$worker_execution_class,rch_summary:$rch_summary,cleanup_result:$cleanup_result}')"
+      '{log_artifact:$log_artifact,log_hash:$log_hash,log_artifact_class:$log_artifact_class,fallback_decision:$fallback_decision,worker_execution_class:$worker_execution_class,rch_summary:$rch_summary,cleanup_result:$cleanup_result}')"
   fi
 }
 
@@ -343,8 +347,11 @@ validate_formal_script_contract() {
       (.details.rch_summary | type == "string" and contains("[RCH] remote") and (contains("remote required") | not) and (contains("refusing local fallback") | not));
     def execution_proof_contract:
       non_rch_command_proof or rch_remote_proof;
+    def expected_command_log_artifact:
+      "target/fcp-crypto-pq/" + .run_id + "." + .step + ".log";
     def command_step($step):
       any(.[]; .step == $step and .result == "pass" and
+        .details.log_artifact == expected_command_log_artifact and
         (.details.log_hash | sha256_hash) and
         .details.log_artifact_class == "relative-target-log" and
         execution_proof_contract and
@@ -352,6 +359,7 @@ validate_formal_script_contract() {
     def lean_lake_step:
       any(.[]; .step == "lean_lake_build" and
         .result == "pass" and
+        .details.log_artifact == expected_command_log_artifact and
         (.details.log_hash | sha256_hash) and
         .details.log_artifact_class == "relative-target-log" and
         execution_proof_contract and

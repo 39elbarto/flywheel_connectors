@@ -13,6 +13,38 @@ export RCH_REQUIRE_REMOTE
 export RCH_FORCE_REMOTE=1
 export RCH_VISIBILITY
 
+validate_run_id() {
+  case "${RUN_ID}" in
+    ""|*/*|*\\*|*..*|*[!A-Za-z0-9._-]*)
+      printf 'invalid RUN_ID: use only ASCII letters, digits, dot, underscore, or hyphen; path separators and .. are forbidden\n' >&2
+      exit 64
+      ;;
+  esac
+}
+
+validate_artifact_path() {
+  case "${ARTIFACT}" in
+    target/fcp-crypto-pq/*/*.jsonl)
+      printf 'invalid ARTIFACT: reusable evidence path must be a single JSONL file directly under target/fcp-crypto-pq\n' >&2
+      exit 64
+      ;;
+    target/fcp-crypto-pq/*.jsonl) ;;
+    *)
+      printf 'invalid ARTIFACT: reusable evidence path must be a relative target/fcp-crypto-pq/*.jsonl path\n' >&2
+      exit 64
+      ;;
+  esac
+
+  case "${ARTIFACT}" in
+    ""|/*|*\\*|*..*|*//*|*[!A-Za-z0-9._/-]*)
+      printf 'invalid ARTIFACT: reusable evidence path must be relative, redaction-safe, and free of traversal\n' >&2
+      exit 64
+      ;;
+  esac
+}
+
+validate_run_id
+validate_artifact_path
 mkdir -p "${OUT_DIR}"
 : > "${ARTIFACT}"
 
@@ -218,6 +250,14 @@ validate_formal_script_contract() {
   validate_jsonl_contract "validate_formal_script_contract" "${ARTIFACT}" '
     def sha256_hash:
       type == "string" and test("^sha256:[0-9a-f]{64}$");
+    def safe_relative_jsonl_artifact_path:
+      type == "string" and
+      test("^[A-Za-z0-9._/-]+[.]jsonl$") and
+      startswith("target/fcp-crypto-pq/") and
+      ((sub("^target/fcp-crypto-pq/"; "") | contains("/")) | not) and
+      (startswith("/") | not) and
+      (contains("..") | not) and
+      (contains("//") | not);
     def required_profile_ids:
       [
         "SMALL_TEST",
@@ -312,7 +352,7 @@ validate_formal_script_contract() {
       .details.request_plaintext == "absent" and
       (.details.cleanup_result | type == "string")) and
     any(.[]; .step == "summary" and .result == "pass" and
-      .details.artifact_path == "target/fcp-crypto-pq/lattice-delegation-formal-correspondence-proof.jsonl" and
+      (.details.artifact_path | safe_relative_jsonl_artifact_path) and
       (.details.pre_summary_artifact_hash | sha256_hash) and
       .details.final_artifact_hash_output == "stdout:LATTICE_FORMAL_CORRESPONDENCE_SHA256" and
       (.details.profile_ids | type == "array" and
@@ -411,7 +451,7 @@ append_json "redaction_scan" "pass" "$(jq -cn \
 
 pre_summary_artifact_hash="$(shasum -a 256 "${ARTIFACT}" | awk '{print $1}')"
 append_json "summary" "pass" "$(jq -cn \
-  --arg artifact "target/fcp-crypto-pq/lattice-delegation-formal-correspondence-proof.jsonl" \
+  --arg artifact "${ARTIFACT}" \
   --arg pre_summary_artifact_hash "sha256:${pre_summary_artifact_hash}" \
   '{artifact_path:$artifact,pre_summary_artifact_hash:$pre_summary_artifact_hash,final_artifact_hash_output:"stdout:LATTICE_FORMAL_CORRESPONDENCE_SHA256",profile_ids:["SMALL_TEST","V4_REFERENCE"],route_revision:1,cleanup_result:"not_applicable_generated_artifact"}')"
 

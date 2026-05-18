@@ -468,6 +468,10 @@ it requires exact Lean theorem/assumption ID arrays, stable command log hashes,
 an explicit redaction-scan pass record, the expected `SMALL_TEST` and
 `V4_REFERENCE` summary profiles, one consistent run id and git revision, and a
 separate final artifact SHA printed after the validation record is appended.
+The summary record must name the actual formal-correspondence JSONL artifact
+being emitted, and both run-id-derived and operator-supplied artifact paths are
+limited to a single relative `target/fcp-crypto-pq/*.jsonl` file before the
+script creates or truncates evidence.
 Its command records carry the same execution-proof fields as the top-level
 gauntlet: non-`rch` lanes must report `fallback_decision:"not_needed"`,
 `worker_execution_class:"not_applicable"`, and `rch_summary:null`; `rch`-backed

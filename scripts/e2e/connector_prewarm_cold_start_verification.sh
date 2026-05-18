@@ -910,17 +910,42 @@ if grep -aEi "$(redaction_pattern)" "${SUMMARY_JSON}" >/dev/null; then
   exit_code=1
 fi
 
+# shellcheck disable=SC2016 # The generated replay script expands these values at replay time.
 {
   printf '%s\n' '#!/usr/bin/env bash'
   printf '%s\n' 'set -euo pipefail'
-  printf 'cd %q\n' "${REPO_ROOT}"
-  printf 'RUN_ID=%q OUT_ROOT=%q RCH_BIN=%q RCH_REQUIRE_REMOTE=%q RCH_FORCE_REMOTE=%q REQUIRE_PRODUCTION_SOAK=%q EVIDENCE_JSONL_IN=%q \\\n' \
-    "${RUN_ID}" "${OUT_ROOT}" "${RCH_BIN}" "${RCH_REQUIRE_REMOTE}" "${RCH_FORCE_REMOTE:-1}" "${REQUIRE_PRODUCTION_SOAK}" "${EVIDENCE_JSONL_IN}"
+  printf '%s\n' 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+  printf '%s\n' 'REPO_ROOT="${FCP_REPO_ROOT:-}"'
+  printf '%s\n' 'if [[ -z "${REPO_ROOT}" ]]; then'
+  printf '%s\n' '  candidate="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"'
+  printf '%s\n' '  if [[ -x "${candidate}/scripts/e2e/connector_prewarm_cold_start_verification.sh" ]]; then'
+  printf '%s\n' '    REPO_ROOT="${candidate}"'
+  printf '%s\n' '  else'
+  printf '%s\n' '    echo "Set FCP_REPO_ROOT to the flywheel_connectors checkout" >&2'
+  printf '%s\n' '    exit 2'
+  printf '%s\n' '  fi'
+  printf '%s\n' 'fi'
+  printf '%s\n' 'cd "${REPO_ROOT}"'
+  if [[ -n "${EVIDENCE_JSONL_IN}" ]]; then
+    printf '%s\n' 'EVIDENCE_JSONL_IN="${SCRIPT_DIR}/evidence/prewarm-cold-start.jsonl"'
+  else
+    printf '%s\n' 'EVIDENCE_JSONL_IN=""'
+  fi
+  printf 'RUN_ID=%q OUT_ROOT="${SCRIPT_DIR}/replay" RCH_BIN="${RCH_BIN:-%s}" RCH_REQUIRE_REMOTE=%q RCH_FORCE_REMOTE=%q REQUIRE_PRODUCTION_SOAK=%q EVIDENCE_JSONL_IN="${EVIDENCE_JSONL_IN}" \\\n' \
+    "${RUN_ID}" "$(display_rch_bin)" "${RCH_REQUIRE_REMOTE}" "${RCH_FORCE_REMOTE:-1}" "${REQUIRE_PRODUCTION_SOAK}"
   printf '  bash scripts/e2e/connector_prewarm_cold_start_verification.sh \\\n'
   printf '  --run-id %q \\\n' "${RUN_ID}"
-  printf '  --out-root %q\n' "${OUT_ROOT}"
+  printf '%s\n' '  --out-root "${SCRIPT_DIR}/replay"'
 } > "${REPLAY_SH}"
 chmod +x "${REPLAY_SH}"
+
+if grep -aEi "$(redaction_pattern)" "${REPLAY_SH}" >/dev/null; then
+  redaction_status="failed"
+  overall_status="failed"
+  validation_status="failed"
+  mark_validation_redaction_failed "replay_script_secret_or_private_path_marker"
+  exit_code=1
+fi
 
 echo "Connector prewarm cold-start artifacts written to ${OUT_ROOT}"
 exit "${exit_code}"

@@ -92,9 +92,7 @@ async fn handle_message(connector: &mut VoyageConnector, message: &str) -> serde
                 "jsonrpc": "2.0",
                 "result": value
             });
-            if let Some(id) = id {
-                response.as_object_mut().unwrap().insert("id".to_string(), id);
-            }
+            attach_jsonrpc_id(&mut response, id);
             response
         }
         Err(error) => {
@@ -102,10 +100,14 @@ async fn handle_message(connector: &mut VoyageConnector, message: &str) -> serde
                 "jsonrpc": "2.0",
                 "error": error.to_response()
             });
-            if let Some(id) = id {
-                response.as_object_mut().unwrap().insert("id".to_string(), id);
-            }
+            attach_jsonrpc_id(&mut response, id);
             response
         }
+    }
+}
+
+fn attach_jsonrpc_id(response: &mut serde_json::Value, id: Option<serde_json::Value>) {
+    if let (Some(response), Some(id)) = (response.as_object_mut(), id) {
+        response.insert("id".to_string(), id);
     }
 }

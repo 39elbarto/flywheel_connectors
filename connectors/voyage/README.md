@@ -3,7 +3,7 @@
 > **Status**: manifest/runtime contract documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/voyage_connector_verification.sh`
 > **Primary upstream**: https://docs.voyageai.com/
 
 ## Purpose
@@ -167,7 +167,7 @@ The deterministic integration evidence is anchored on WireMock and connector-loc
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/voyage_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+`scripts/e2e/voyage_connector_verification.sh` is the dedicated closeout bundle for this connector. It writes a summary, environment metadata, raw logs, integration JSONL, and redaction-safe local non-mock evidence under its artifact root.
 
 The verification surface captures:
 
@@ -209,6 +209,7 @@ The verification surface captures:
 
 **Rerun commands**:
 
+- `RUN_ID=voyage-local OUT_ROOT=/tmp/fcp-voyage-e2e scripts/e2e/voyage_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-voyage-e2e cargo check -p fcp-voyage --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-voyage-e2e cargo test -p fcp-voyage --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-voyage-e2e cargo clippy -p fcp-voyage --all-targets --no-deps -- -D warnings`

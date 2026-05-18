@@ -33,7 +33,7 @@ use serde_json::{Value, json};
 
 const CONNECTOR: &str = "voyage";
 const PACKAGE: &str = "fcp-voyage";
-const BEAD_ID: &str = "flywheel_connectors-bky21.3.6.23";
+const BEAD_ID: &str = "flywheel_connectors-4kw5f.12";
 const ACCEPTANCE_SUITE_CLASS: &str = "local_non_mock";
 const API_KEY: &str = "local_voyage_api_key";
 
@@ -363,27 +363,40 @@ async fn local_non_mock_embeddings_posts_body_and_maps_output() {
     assert_eq!(result["data"][0]["index"], 0);
     assert_number_array(&result["data"][0]["embedding"], &[0.11, 0.22, 0.33]);
 
+    let input_count = observation.body["input"]
+        .as_array()
+        .map_or(0, std::vec::Vec::len);
     let artifact = json!({
         "connector": CONNECTOR,
         "package": PACKAGE,
         "bead_id": BEAD_ID,
         "suite_class": ACCEPTANCE_SUITE_CLASS,
         "acceptance_suite_class": ACCEPTANCE_SUITE_CLASS,
-        "fixture_mode": "raw_tcp_loopback_http",
+        "case": "embeddings",
+        "fixture_mode": "loopback_http",
+        "provider_class": "local_sufficient",
         "operation": OP_EMBEDDINGS,
-        "method": "POST",
-        "path": "/v1/embeddings",
-        "request_body": observation.body,
+        "request_response_boundary": {
+            "method": "POST",
+            "path": "/v1/embeddings",
+            "input_count": input_count,
+            "input_type": observation.body["input_type"].as_str().unwrap_or("<missing>"),
+            "output_dimension": observation.body["output_dimension"].as_u64().unwrap_or_default(),
+            "model": observation.body["model"].as_str().unwrap_or("<missing>"),
+            "raw_input_logged": false
+        },
         "auth_gate": {
-            "mode": "bearer",
+            "mode": "bearer_api_key",
+            "credentials_used": true,
             "authorization_header_verified": observation.authorization_seen,
-            "secret_redacted": true
+            "secret_material_logged": false
         },
         "cleanup": "fixture_thread_joined",
         "result": "passed"
     });
     let rendered = artifact.to_string();
     assert!(!rendered.contains(API_KEY));
+    assert!(!rendered.contains("local acceptance document"));
     println!("{artifact}");
 }
 
@@ -430,27 +443,43 @@ async fn local_non_mock_rerank_posts_body_and_maps_output() {
     assert_eq!(result["raw"]["data"][0]["index"], 1);
     assert_eq!(result["raw"]["data"][0]["relevance_score"], 0.91);
 
+    let document_count = observation.body["documents"]
+        .as_array()
+        .map_or(0, std::vec::Vec::len);
     let artifact = json!({
         "connector": CONNECTOR,
         "package": PACKAGE,
         "bead_id": BEAD_ID,
         "suite_class": ACCEPTANCE_SUITE_CLASS,
         "acceptance_suite_class": ACCEPTANCE_SUITE_CLASS,
-        "fixture_mode": "raw_tcp_loopback_http",
+        "case": "rerank",
+        "fixture_mode": "loopback_http",
+        "provider_class": "local_sufficient",
         "operation": OP_RERANK,
-        "method": "POST",
-        "path": "/v1/rerank",
-        "request_body": observation.body,
+        "request_response_boundary": {
+            "method": "POST",
+            "path": "/v1/rerank",
+            "document_count": document_count,
+            "top_k": observation.body["top_k"].as_u64().unwrap_or_default(),
+            "return_documents": observation.body["return_documents"].as_bool().unwrap_or_default(),
+            "model": observation.body["model"].as_str().unwrap_or("<missing>"),
+            "raw_query_logged": false,
+            "raw_documents_logged": false
+        },
         "auth_gate": {
-            "mode": "bearer",
+            "mode": "bearer_api_key",
+            "credentials_used": true,
             "authorization_header_verified": observation.authorization_seen,
-            "secret_redacted": true
+            "secret_material_logged": false
         },
         "cleanup": "fixture_thread_joined",
         "result": "passed"
     });
     let rendered = artifact.to_string();
     assert!(!rendered.contains(API_KEY));
+    assert!(!rendered.contains("local query"));
+    assert!(!rendered.contains("first document"));
+    assert!(!rendered.contains("second document"));
     println!("{artifact}");
 }
 
@@ -495,11 +524,19 @@ async fn local_non_mock_wrong_capability_fails_before_egress() {
         "bead_id": BEAD_ID,
         "suite_class": ACCEPTANCE_SUITE_CLASS,
         "acceptance_suite_class": ACCEPTANCE_SUITE_CLASS,
-        "fixture_mode": "no_egress_loopback_listener",
+        "case": "wrong_capability_no_egress",
+        "fixture_mode": "loopback_http",
+        "provider_class": "local_sufficient",
         "operation": OP_EMBEDDINGS,
         "wrong_capability": CAP_MODELS,
-        "egress_attempted": false,
+        "request_response_boundary": {
+            "method": "none",
+            "path": "none",
+            "egress_observed": false
+        },
         "result": "passed"
     });
+    let rendered = artifact.to_string();
+    assert!(!rendered.contains("should never reach loopback"));
     println!("{artifact}");
 }

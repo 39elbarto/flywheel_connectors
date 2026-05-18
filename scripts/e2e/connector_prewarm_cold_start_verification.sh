@@ -511,6 +511,30 @@ if [[ "${overall_status}" == "passed" ]]; then
         and same_optional("unsafe_rejection_reason")
         and same_optional("skip_reason")
         and same("shutdown_cleanup_verified");
+      def pool_state_consistency_ok:
+        if .admission_decision == "admit_warm" then
+          .pool_state == "warm_hit"
+        elif .admission_decision == "fallback_on_demand" then
+          if .fallback_reason == "empty_pool" then
+            .pool_state == "empty"
+          elif .fallback_reason == "warm_entry_stale" then
+            .pool_state == "stale"
+          elif .fallback_reason == "crash_before_checkout" then
+            .pool_state == "crash_before_checkout"
+          elif .fallback_reason == "sandbox_limits_unavailable" then
+            .sandbox_layer == "limits_unavailable"
+          else
+            true
+          end
+        elif .admission_decision == "reject_unsafe" then
+          if .unsafe_rejection_reason == "warm_entry_rejected" then
+            .pool_state == "rejected"
+          else
+            true
+          end
+        else
+          false
+        end;
       def required:
         [
           "prewarm_empty_pool",
@@ -678,6 +702,9 @@ if [[ "${overall_status}" == "passed" ]]; then
             false
           end
         ),
+        pool_state_consistency_ok: all(.[];
+          pool_state_consistency_ok
+        ),
         cleanup_shape_ok: all(.[];
           .shutdown_cleanup_verified == true
           and .cleanup_result == "verified"
@@ -803,6 +830,7 @@ if [[ "${overall_status}" == "passed" ]]; then
             and $v.target_dir_class_ok
             and $v.resource_fields_ok
             and $v.decision_shape_ok
+            and $v.pool_state_consistency_ok
             and $v.cleanup_shape_ok
             and $v.boundary_shape_ok
             and $v.nested_evidence_ok

@@ -3348,9 +3348,32 @@ fn validate_prewarm_error_mapping(
     )
 }
 
+fn validate_prewarm_expected_field(
+    evidence: &SwarmPrewarmColdStartEvidence,
+    actual: &str,
+    expected: &str,
+    reason: &'static str,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if actual == expected {
+        return Ok(());
+    }
+    Err(
+        SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+            decision: evidence.admission_decision.clone(),
+            reason,
+        },
+    )
+}
+
 fn validate_prewarm_admit_warm(
     evidence: &SwarmPrewarmColdStartEvidence,
 ) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    validate_prewarm_expected_field(
+        evidence,
+        &evidence.pool_state,
+        "warm_hit",
+        "admit_warm requires pool_state=warm_hit",
+    )?;
     if !evidence.warm_checkout {
         return Err(
             SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
@@ -3377,6 +3400,39 @@ fn validate_prewarm_admit_warm(
     }
     validate_prewarm_error_mapping(evidence, "ok", "admit_warm requires error_mapping=ok")?;
     Ok(())
+}
+
+fn validate_prewarm_fallback_reason_consistency(
+    evidence: &SwarmPrewarmColdStartEvidence,
+    fallback_reason: &str,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    match fallback_reason {
+        "empty_pool" => validate_prewarm_expected_field(
+            evidence,
+            &evidence.pool_state,
+            "empty",
+            "fallback_on_demand empty_pool requires pool_state=empty",
+        ),
+        "warm_entry_stale" => validate_prewarm_expected_field(
+            evidence,
+            &evidence.pool_state,
+            "stale",
+            "fallback_on_demand warm_entry_stale requires pool_state=stale",
+        ),
+        "crash_before_checkout" => validate_prewarm_expected_field(
+            evidence,
+            &evidence.pool_state,
+            "crash_before_checkout",
+            "fallback_on_demand crash_before_checkout requires pool_state=crash_before_checkout",
+        ),
+        "sandbox_limits_unavailable" => validate_prewarm_expected_field(
+            evidence,
+            &evidence.sandbox_layer,
+            "limits_unavailable",
+            "fallback_on_demand sandbox_limits_unavailable requires sandbox_layer=limits_unavailable",
+        ),
+        _ => Ok(()),
+    }
 }
 
 fn validate_prewarm_fallback_on_demand(
@@ -3411,12 +3467,28 @@ fn validate_prewarm_fallback_on_demand(
         );
     }
     let fallback_reason = evidence.fallback_reason.as_deref().unwrap_or_default();
+    validate_prewarm_fallback_reason_consistency(evidence, fallback_reason)?;
     let expected_error_mapping = format!("fallback_on_demand:{fallback_reason}");
     validate_prewarm_error_mapping(
         evidence,
         &expected_error_mapping,
         "fallback_on_demand requires error_mapping=fallback_on_demand:<fallback_reason>",
     )
+}
+
+fn validate_prewarm_unsafe_reason_consistency(
+    evidence: &SwarmPrewarmColdStartEvidence,
+    unsafe_rejection_reason: &str,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    match unsafe_rejection_reason {
+        "warm_entry_rejected" => validate_prewarm_expected_field(
+            evidence,
+            &evidence.pool_state,
+            "rejected",
+            "reject_unsafe warm_entry_rejected requires pool_state=rejected",
+        ),
+        _ => Ok(()),
+    }
 }
 
 fn validate_prewarm_reject_unsafe(
@@ -3454,6 +3526,7 @@ fn validate_prewarm_reject_unsafe(
         .unsafe_rejection_reason
         .as_deref()
         .unwrap_or_default();
+    validate_prewarm_unsafe_reason_consistency(evidence, unsafe_rejection_reason)?;
     let expected_error_mapping = format!("reject_unsafe:{unsafe_rejection_reason}");
     validate_prewarm_error_mapping(
         evidence,
@@ -10899,6 +10972,75 @@ mod tests {
     }
 
     #[test]
+    fn swarm_prewarm_cold_start_evidence_enforces_pool_state_consistency() {
+        let mut warm_without_warm_pool_state = prewarm_cold_start_evidence_fixture();
+        warm_without_warm_pool_state.pool_state = "empty".to_string();
+        assert_eq!(
+            warm_without_warm_pool_state.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "admit_warm".to_string(),
+                    reason: "admit_warm requires pool_state=warm_hit"
+                }
+            )
+        );
+
+        let mut mapped_empty_pool_fallback = prewarm_cold_start_evidence_fixture();
+        mapped_empty_pool_fallback.pool_state = "empty".to_string();
+        mapped_empty_pool_fallback.admission_decision = "fallback_on_demand".to_string();
+        mapped_empty_pool_fallback.warm_checkout = false;
+        mapped_empty_pool_fallback.fallback_reason = Some("empty_pool".to_string());
+        mapped_empty_pool_fallback.error_mapping = "fallback_on_demand:empty_pool".to_string();
+        assert_eq!(mapped_empty_pool_fallback.validate(), Ok(()));
+
+        let mut empty_pool_fallback_wrong_state = mapped_empty_pool_fallback;
+        empty_pool_fallback_wrong_state.pool_state = "warm_hit".to_string();
+        assert_eq!(
+            empty_pool_fallback_wrong_state.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "fallback_on_demand".to_string(),
+                    reason: "fallback_on_demand empty_pool requires pool_state=empty"
+                }
+            )
+        );
+
+        let mut sandbox_fallback_wrong_layer = prewarm_cold_start_evidence_fixture();
+        sandbox_fallback_wrong_layer.admission_decision = "fallback_on_demand".to_string();
+        sandbox_fallback_wrong_layer.warm_checkout = false;
+        sandbox_fallback_wrong_layer.fallback_reason =
+            Some("sandbox_limits_unavailable".to_string());
+        sandbox_fallback_wrong_layer.error_mapping =
+            "fallback_on_demand:sandbox_limits_unavailable".to_string();
+        assert_eq!(
+            sandbox_fallback_wrong_layer.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "fallback_on_demand".to_string(),
+                    reason: "fallback_on_demand sandbox_limits_unavailable requires sandbox_layer=limits_unavailable"
+                }
+            )
+        );
+
+        let mut rejected_entry_wrong_pool_state = prewarm_cold_start_evidence_fixture();
+        rejected_entry_wrong_pool_state.admission_decision = "reject_unsafe".to_string();
+        rejected_entry_wrong_pool_state.warm_checkout = false;
+        rejected_entry_wrong_pool_state.unsafe_rejection_reason =
+            Some("warm_entry_rejected".to_string());
+        rejected_entry_wrong_pool_state.error_mapping =
+            "reject_unsafe:warm_entry_rejected".to_string();
+        assert_eq!(
+            rejected_entry_wrong_pool_state.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "reject_unsafe".to_string(),
+                    reason: "reject_unsafe warm_entry_rejected requires pool_state=rejected"
+                }
+            )
+        );
+    }
+
+    #[test]
     fn swarm_prewarm_cold_start_evidence_enforces_error_mapping() {
         let mut warm_with_wrong_error_mapping = prewarm_cold_start_evidence_fixture();
         warm_with_wrong_error_mapping.error_mapping = "fallback_on_demand:pool_empty".to_string();
@@ -11051,6 +11193,7 @@ mod tests {
         fallback_soak.scenario_id = "prewarm_sandbox_limits_unavailable".to_string();
         fallback_soak.admission_decision = "fallback_on_demand".to_string();
         fallback_soak.warm_checkout = false;
+        fallback_soak.sandbox_layer = "limits_unavailable".to_string();
         fallback_soak.fallback_reason = Some("sandbox_limits_unavailable".to_string());
         fallback_soak.error_mapping = "fallback_on_demand:sandbox_limits_unavailable".to_string();
         assert_eq!(fallback_soak.validate(), Ok(()));

@@ -112,7 +112,14 @@ unsafe-rejection reason; `fallback_on_demand` must carry
 `fallback_reason` with `error_mapping="fallback_on_demand:<fallback_reason>"`,
 and `reject_unsafe` must carry `warm_checkout=false` plus a non-empty
 `unsafe_rejection_reason` with
-`error_mapping="reject_unsafe:<unsafe_rejection_reason>"`. Its default lane is
+`error_mapping="reject_unsafe:<unsafe_rejection_reason>"`. Warm admissions must
+also report `pool_state="warm_hit"`. Pool-derived fallback and rejection reasons
+must preserve the host decision model in replayable evidence: `empty_pool`
+requires `pool_state="empty"`, `warm_entry_stale` requires
+`pool_state="stale"`, `crash_before_checkout` requires
+`pool_state="crash_before_checkout"`, `sandbox_limits_unavailable` requires
+`sandbox_layer="limits_unavailable"`, and `warm_entry_rejected` requires
+`pool_state="rejected"`. Its default lane is
 deterministic smoke
 evidence with `execution_mode=smoke` and `source_kind=offline`; final
 production-soak acceptance must run with

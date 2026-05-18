@@ -5,14 +5,14 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = ["streaming"]
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:ollama-oai-compat"
+interface_hash = "blake3-256:fcp.interface.v2:dd099dcba6d814da672299ef8ac68c2170b5ef4dd2bef0590c22985a9a1668ae"
 
 [connector]
 id = "fcp.ollama"
 name = "Ollama"
 version = "0.1.0"
 description = "Mesh-sovereign Ollama local and tailnet LLM connector using the OpenAI-compatible /v1 chat, streaming, embeddings, and model-list APIs"
-archetypes = ["request-response", "streaming"]
+archetypes = ["operational", "streaming"]
 format = "native"
 
 [connector.state]
@@ -37,7 +37,7 @@ forbidden = ["system.exec", "network.listen"]
 # in allowed_hosts. The connector never calls Ollama-native /api/pull or other
 # model-management endpoints, so it cannot auto-pull models.
 [sandbox]
-profile = "local-services"
+profile = "moderate"
 memory_mb = 128
 cpu_percent = 25
 wall_clock_timeout_ms = 300000
@@ -128,7 +128,3 @@ when_to_use = "Use for a bounded readiness check before dispatching local model 
 common_mistakes = ["Do not treat absent optional auth as a failed connector; local Ollama is unauthenticated by default."]
 examples = ["{}"]
 related = ["ollama.models.list"]
-
-[metadata.privacy]
-zone_guidance = "Default home zone is z:owner because local/tailnet Ollama is usually used for private, no-cloud inference. Deployments may route z:private, z:work, or z:project:* callers when the operator configures that policy explicitly."
-logging = "Never log prompts, completions, embedding input, vectors, API keys, or full base URLs. Evidence logs use base_url_class, model hashes, byte counts, status, retry decision, and cleanup result."

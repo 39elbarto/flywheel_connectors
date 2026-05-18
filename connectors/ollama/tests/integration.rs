@@ -639,7 +639,7 @@ async fn ollama_local_smoke_or_structured_skip_jsonl() {
             "skipped",
             json!({
                 "base_url_class": "loopback",
-                "skip_reason": "Ollama is not listening on 127.0.0.1:11434",
+                "skip_reason": "Ollama default loopback endpoint is not listening",
                 "cleanup_result": "not_started_by_test"
             }),
         );

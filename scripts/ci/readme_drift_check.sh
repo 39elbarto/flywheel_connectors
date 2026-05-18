@@ -35,6 +35,9 @@ SUPPORTED_EXTENSIONS = {
     ".yml",
 }
 SKIP_HINT = "drift-check:skip"
+IGNORE_LINE_RE = re.compile(
+    r"^(?P<kind>path|symbol)\s+(?P<value>\S+)\s+--\s+(?P<justification>.+)$"
+)
 
 
 @dataclass(frozen=True)
@@ -44,12 +47,28 @@ class Reference:
     line: int
 
 
+@dataclass(frozen=True)
+class IgnoreEntry:
+    kind: str
+    value: str
+    justification: str
+    line: int
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Check README inline code references for stale repo paths and Rust symbols."
     )
     parser.add_argument("--readme", default="README.md")
     parser.add_argument("--repo-root", default=os.environ.get("FCP_REPO_ROOT", "."))
+    parser.add_argument(
+        "--ignore-file",
+        default=None,
+        help=(
+            "Optional drift allowlist. Defaults to docs/.readme-drift-ignore "
+            "when present. Each entry must be: path|symbol <reference> -- <justification>."
+        ),
+    )
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args()
 
@@ -93,6 +112,48 @@ def extract_references(readme_path: pathlib.Path) -> list[Reference]:
                 if value.count("::") >= 1:
                     references.append(Reference("symbol", value, line_no))
     return references
+
+
+def default_ignore_file(repo_root: pathlib.Path) -> pathlib.Path:
+    return repo_root / "docs" / ".readme-drift-ignore"
+
+
+def parse_ignore_line(line: str, line_no: int) -> IgnoreEntry | str | None:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return None
+    match = IGNORE_LINE_RE.match(stripped)
+    if match is None:
+        return (
+            f"line {line_no}: expected 'path <reference> -- <justification>' "
+            "or 'symbol <reference> -- <justification>'"
+        )
+
+    kind = match.group("kind")
+    value = match.group("value")
+    if kind == "path":
+        value = normalize_path_token(value)
+    justification = match.group("justification").strip()
+    if not justification:
+        return f"line {line_no}: ignore entry for {kind} {value} has no justification"
+    return IgnoreEntry(kind, value, justification, line_no)
+
+
+def load_ignore_entries(ignore_path: pathlib.Path) -> tuple[list[IgnoreEntry], list[str]]:
+    if not ignore_path.exists():
+        return [], []
+
+    entries: list[IgnoreEntry] = []
+    errors: list[str] = []
+    for line_no, line in enumerate(ignore_path.read_text(encoding="utf-8").splitlines(), 1):
+        parsed = parse_ignore_line(line, line_no)
+        if parsed is None:
+            continue
+        if isinstance(parsed, str):
+            errors.append(parsed)
+        else:
+            entries.append(parsed)
+    return entries, errors
 
 
 def crate_source_root(symbol: str, repo_root: pathlib.Path) -> pathlib.Path | None:
@@ -152,12 +213,25 @@ def main() -> int:
     args = parse_args()
     repo_root = resolve_path(args.repo_root, pathlib.Path.cwd()).resolve()
     readme_path = resolve_path(args.readme, repo_root).resolve()
+    ignore_path = (
+        resolve_path(args.ignore_file, repo_root).resolve()
+        if args.ignore_file
+        else default_ignore_file(repo_root).resolve()
+    )
     references = extract_references(readme_path)
+    ignore_entries, ignore_errors = load_ignore_entries(ignore_path)
+    if ignore_errors:
+        for error in ignore_errors:
+            print(f"{ignore_path}: invalid_ignore_entry: {error}", file=sys.stderr)
+        return 2
+    ignore_lookup = {(entry.kind, entry.value): entry for entry in ignore_entries}
 
     paths_checked = 0
     paths_missing: list[Reference] = []
+    paths_ignored: list[tuple[Reference, IgnoreEntry]] = []
     symbols_checked = 0
     symbols_missing: list[Reference] = []
+    symbols_ignored: list[tuple[Reference, IgnoreEntry]] = []
 
     for reference in references:
         if reference.kind == "path":
@@ -169,7 +243,11 @@ def main() -> int:
                     file=sys.stderr,
                 )
             if not ok:
-                paths_missing.append(reference)
+                ignore_entry = ignore_lookup.get((reference.kind, reference.value))
+                if ignore_entry is None:
+                    paths_missing.append(reference)
+                else:
+                    paths_ignored.append((reference, ignore_entry))
         elif reference.kind == "symbol":
             ok = symbol_exists(reference.value, repo_root)
             if ok is None:
@@ -181,7 +259,11 @@ def main() -> int:
                     file=sys.stderr,
                 )
             if not ok:
-                symbols_missing.append(reference)
+                ignore_entry = ignore_lookup.get((reference.kind, reference.value))
+                if ignore_entry is None:
+                    symbols_missing.append(reference)
+                else:
+                    symbols_ignored.append((reference, ignore_entry))
 
     for reference in paths_missing:
         print(
@@ -193,15 +275,25 @@ def main() -> int:
             f"{readme_path}:{reference.line}: missing_symbol={reference.value}",
             file=sys.stderr,
         )
+    for reference, ignore_entry in paths_ignored + symbols_ignored:
+        print(
+            f"WARNING {readme_path}:{reference.line}: ignored_{reference.kind}={reference.value} "
+            f"ignore_line={ignore_entry.line} justification={ignore_entry.justification}",
+            file=sys.stderr,
+        )
 
     log = {
         "level": "INFO",
         "span": "fcp.cadence.readme_drift",
         "readme_path": str(readme_path),
+        "ignore_file": str(ignore_path),
+        "ignore_entries": len(ignore_entries),
         "paths_checked": paths_checked,
         "paths_missing": len(paths_missing),
+        "paths_ignored": len(paths_ignored),
         "symbols_checked": symbols_checked,
         "symbols_missing": len(symbols_missing),
+        "symbols_ignored": len(symbols_ignored),
     }
     print(json.dumps(log, sort_keys=True))
     return 1 if paths_missing or symbols_missing else 0

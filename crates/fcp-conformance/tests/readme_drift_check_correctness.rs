@@ -74,15 +74,64 @@ fn test_skip_hint_honored() {
     assert!(stdout.contains("\"paths_missing\": 0"), "{stdout}");
 }
 
+#[test]
+fn test_justified_ignore_file_honored_with_warning() {
+    let ignore_file = fixture_arg("ignore.txt");
+    let output =
+        run_drift_check_with_extra("bad_path.md", &["--ignore-file", ignore_file.as_str()]);
+
+    assert!(
+        output.status.success(),
+        "justified ignore entry should suppress drift failure: {}",
+        output_text(&output)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"paths_missing\": 0"), "{stdout}");
+    assert!(stdout.contains("\"paths_ignored\": 1"), "{stdout}");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("WARNING") && stderr.contains("documented stale path fixture"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn test_ignore_file_requires_justification() {
+    let ignore_file = fixture_arg("bad_ignore.txt");
+    let output =
+        run_drift_check_with_extra("bad_path.md", &["--ignore-file", ignore_file.as_str()]);
+
+    assert!(
+        !output.status.success(),
+        "unjustified ignore entry should fail closed: {}",
+        output_text(&output)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid_ignore_entry"), "{stderr}");
+    assert!(stderr.contains("expected"), "{stderr}");
+}
+
 fn run_drift_check(fixture_name: &str) -> Output {
-    Command::new("bash")
+    run_drift_check_with_extra(fixture_name, &[])
+}
+
+fn run_drift_check_with_extra(fixture_name: &str, extra_args: &[&str]) -> Output {
+    let mut command = Command::new("bash");
+    command
         .arg(repo_root().join("scripts/ci/readme_drift_check.sh"))
         .arg("--readme")
         .arg(fixture(fixture_name))
         .arg("--repo-root")
-        .arg(repo_root())
-        .output()
-        .expect("run readme drift check")
+        .arg(repo_root());
+    for arg in extra_args {
+        command.arg(arg);
+    }
+    command.output().expect("run readme drift check")
+}
+
+fn fixture_arg(name: &str) -> String {
+    fixture(name).display().to_string()
 }
 
 fn fixture(name: &str) -> PathBuf {

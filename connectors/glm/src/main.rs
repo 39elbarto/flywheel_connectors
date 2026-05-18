@@ -89,24 +89,28 @@ async fn handle_message(connector: &mut GlmConnector, message: &str) -> serde_js
 
     match result {
         Ok(value) => {
-            let mut response = serde_json::json!({
+            let response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "result": value
             });
-            if let Some(id) = id {
-                response.as_object_mut().unwrap().insert("id".to_string(), id);
-            }
-            response
+            attach_jsonrpc_id(response, id)
         }
         Err(error) => {
-            let mut response = serde_json::json!({
+            let response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "error": error.to_response()
             });
-            if let Some(id) = id {
-                response.as_object_mut().unwrap().insert("id".to_string(), id);
-            }
-            response
+            attach_jsonrpc_id(response, id)
         }
     }
+}
+
+fn attach_jsonrpc_id(
+    mut response: serde_json::Value,
+    id: Option<serde_json::Value>,
+) -> serde_json::Value {
+    if let (Some(id), Some(object)) = (id, response.as_object_mut()) {
+        object.insert("id".to_string(), id);
+    }
+    response
 }

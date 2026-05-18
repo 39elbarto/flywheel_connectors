@@ -5,14 +5,14 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = ["streaming"]
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:glm-oai-compat"
+interface_hash = "blake3-256:fcp.interface.v2:e0de9fe526a64da47865388eea80ec8c696cd7240331efe68f3d9acae6ee6bcc"
 
 [connector]
 id = "fcp.glm"
 name = "GLM"
 version = "0.1.0"
 description = "Zhipu AI GLM connector using BigModel chat, streaming, embeddings, and JWT-capable auth"
-archetypes = ["request-response", "streaming"]
+archetypes = ["operational", "streaming"]
 format = "native"
 
 [connector.state]

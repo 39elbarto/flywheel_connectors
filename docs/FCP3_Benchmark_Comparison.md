@@ -106,7 +106,9 @@ reject unresolved `git_revision="unknown"` provenance, non-hex Git revision
 labels outside the 7-to-40 character short/full object-id range, unredacted live-token,
 bearer, private-key, secret-seed, private-user-path, private-var-path,
 mounted-volume-path, raw `operation:` or `zone:` labels, and
-`private_absolute` target-dir evidence before export;
+`private_absolute` target-dir evidence before export. Evidence also cannot use
+the exact shared target roots `/tmp`, `/private/tmp`, `target`, or `./target`;
+use a dedicated child directory so the target-dir hash identifies one proof run;
 `cargo_target_dir_class` must be one of the stable export labels `tmp`,
 `absolute`, or `relative`, so novel labels cannot bypass the redaction gate.
 `validation.json` records `redaction_scan_ok=true` when that final scan passes

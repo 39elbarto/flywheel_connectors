@@ -615,6 +615,12 @@ if [[ -s "${EVIDENCE_JSONL}" ]]; then
     validation_status="failed"
     mark_validation_redaction_failed "private_absolute_target_dir"
     exit_code=1
+  elif jq -s -e 'any(.[]; .cargo_target_dir == "/tmp" or .cargo_target_dir == "/private/tmp" or .cargo_target_dir == "target" or .cargo_target_dir == "./target")' "${EVIDENCE_JSONL}" >/dev/null; then
+    redaction_status="failed"
+    overall_status="failed"
+    validation_status="failed"
+    mark_validation_redaction_failed "shared_target_dir_root"
+    exit_code=1
   else
     mark_validation_redaction_passed
   fi

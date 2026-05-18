@@ -2965,6 +2965,14 @@ fn validate_prewarm_redaction(
             },
         );
     }
+    if is_unsafe_prewarm_target_root(&evidence.cargo_target_dir) {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                field: "cargo_target_dir",
+                marker: "shared target dir root",
+            },
+        );
+    }
 
     for (field, value) in prewarm_redaction_fields(evidence) {
         if let Some(marker) = prewarm_sensitive_marker(value) {
@@ -3047,6 +3055,13 @@ fn prewarm_sensitive_marker(value: &str) -> Option<&'static str> {
         return Some("Bearer token");
     }
     None
+}
+
+fn is_unsafe_prewarm_target_root(cargo_target_dir: &str) -> bool {
+    matches!(
+        cargo_target_dir,
+        "/tmp" | "/private/tmp" | "target" | "./target"
+    )
 }
 
 fn validate_prewarm_command_and_target(
@@ -10747,6 +10762,28 @@ mod tests {
                 }
             )
         );
+
+        for target_dir in ["/tmp", "/private/tmp", "target", "./target"] {
+            let mut unsafe_target_root = prewarm_cold_start_evidence_fixture();
+            unsafe_target_root.cargo_target_dir = target_dir.to_string();
+            unsafe_target_root.cargo_target_dir_class = if target_dir.starts_with('/') {
+                "tmp".to_string()
+            } else {
+                "relative".to_string()
+            };
+            unsafe_target_root.command_line = prewarm_command_line(target_dir);
+            unsafe_target_root.cargo_target_dir_hash = prewarm_cargo_target_dir_hash(target_dir);
+            assert_eq!(
+                unsafe_target_root.validate(),
+                Err(
+                    SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                        field: "cargo_target_dir",
+                        marker: "shared target dir root"
+                    }
+                ),
+                "{target_dir} should not be accepted as an evidence target root"
+            );
+        }
 
         let mut private_target_dir = prewarm_cold_start_evidence_fixture();
         private_target_dir.cargo_target_dir = "/Users/alice/fcp-target".to_string();

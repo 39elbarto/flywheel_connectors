@@ -2695,16 +2695,27 @@ fn is_synthetic_prewarm_host_boundary(host_boundary: &str) -> bool {
         || trimmed.contains("ConnectorPrewarmConfig::decide_checkout")
 }
 
+fn is_canonical_prewarm_boundary_label(boundary: &str) -> bool {
+    !boundary.is_empty()
+        && boundary.trim() == boundary
+        && boundary
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'_' | b'-' | b'.'))
+}
+
 fn is_production_prewarm_host_boundary(host_boundary: &str) -> bool {
     let trimmed = host_boundary.trim();
-    trimmed.starts_with(PRODUCTION_PREWARM_HOST_BOUNDARY_PREFIX)
+    trimmed == host_boundary
+        && is_canonical_prewarm_boundary_label(trimmed)
+        && trimmed.starts_with(PRODUCTION_PREWARM_HOST_BOUNDARY_PREFIX)
         && !is_synthetic_prewarm_host_boundary(trimmed)
 }
 
 fn is_production_prewarm_sandbox_boundary(sandbox_boundary: &str) -> bool {
-    sandbox_boundary
-        .trim()
-        .starts_with(PRODUCTION_PREWARM_SANDBOX_BOUNDARY_PREFIX)
+    let trimmed = sandbox_boundary.trim();
+    trimmed == sandbox_boundary
+        && is_canonical_prewarm_boundary_label(trimmed)
+        && trimmed.starts_with(PRODUCTION_PREWARM_SANDBOX_BOUNDARY_PREFIX)
 }
 
 /// Replayable JSONL evidence for connector prewarm cold-start behavior.
@@ -10944,6 +10955,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Keep the redaction marker matrix visible in one audit fixture.
     fn swarm_prewarm_cold_start_evidence_rejects_unredacted_fields() {
         let mut live_token_leak = prewarm_cold_start_evidence_fixture();
         live_token_leak.credential_mode = "deferred Bearer sk-live-example".to_string();
@@ -11196,6 +11208,22 @@ mod tests {
             )
         );
 
+        let mut prose_sandbox_boundary = prewarm_cold_start_evidence_fixture();
+        prose_sandbox_boundary.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        prose_sandbox_boundary.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        prose_sandbox_boundary.host_boundary =
+            "fcp-host::supervisor::ConnectorSupervisor::activate_connector".to_string();
+        prose_sandbox_boundary.sandbox_boundary =
+            "fcp-sandbox::strict-profile-limits verified".to_string();
+        assert_eq!(
+            prose_sandbox_boundary.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresSandboxBoundary {
+                    sandbox_boundary: "fcp-sandbox::strict-profile-limits verified".to_string()
+                }
+            )
+        );
+
         let mut production_soak = prewarm_cold_start_evidence_fixture();
         production_soak.execution_mode = SwarmEvidenceExecutionMode::Soak;
         production_soak.source_kind = SwarmEvidenceSourceKind::HostBacked;
@@ -11326,6 +11354,20 @@ mod tests {
             Err(
                 SwarmPrewarmColdStartEvidenceError::SoakRequiresProductionHostBoundary {
                     host_boundary: wrapped_host_soak.host_boundary
+                }
+            )
+        );
+
+        let mut suffix_prose_host_soak = prewarm_cold_start_evidence_fixture();
+        suffix_prose_host_soak.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        suffix_prose_host_soak.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        suffix_prose_host_soak.host_boundary =
+            "fcp-host::supervisor::ConnectorSupervisor::activate_connector via-wrapper".to_string();
+        assert_eq!(
+            suffix_prose_host_soak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresProductionHostBoundary {
+                    host_boundary: suffix_prose_host_soak.host_boundary
                 }
             )
         );

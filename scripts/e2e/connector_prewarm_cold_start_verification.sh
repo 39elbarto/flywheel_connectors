@@ -288,6 +288,8 @@ if [[ "${overall_status}" == "passed" ]]; then
         type == "string" and test("^blake3:[0-9a-f]{64}$");
       def git_object_id:
         type == "string" and test("^[0-9a-f]{7,40}$");
+      def canonical_boundary_label:
+        type == "string" and test("^[-A-Za-z0-9_.:]+$");
       def latency_percentile_object_ok:
         type == "object"
         and (.p50_ms | type) == "number"
@@ -308,6 +310,7 @@ if [[ "${overall_status}" == "passed" ]]; then
         .[$key] == (.evidence[$key] // null);
       def production_host_boundary_ok:
         (.host_boundary | type) == "string"
+        and (.host_boundary | canonical_boundary_label)
         and (.host_boundary | startswith("fcp-host::"))
         and ((.host_boundary | gsub("^\\s+|\\s+$"; "")) != "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout")
         and ((.host_boundary | contains("ConnectorPrewarmConfig::decide_checkout")) | not);
@@ -529,8 +532,10 @@ if [[ "${overall_status}" == "passed" ]]; then
         ),
         boundary_shape_ok: all(.[];
           (.host_boundary | type) == "string"
+          and (.host_boundary | canonical_boundary_label)
           and (.host_boundary | startswith("fcp-host::"))
           and (.sandbox_boundary | type) == "string"
+          and (.sandbox_boundary | canonical_boundary_label)
           and (.sandbox_boundary | startswith("fcp-sandbox::"))
         ),
         nested_evidence_ok: all(.[];
@@ -554,6 +559,7 @@ if [[ "${overall_status}" == "passed" ]]; then
               and (.source_kind == "host_backed" or .source_kind == "live")
               and production_host_boundary_ok
               and (.sandbox_boundary | type) == "string"
+              and (.sandbox_boundary | canonical_boundary_label)
               and (.sandbox_boundary | startswith("fcp-sandbox::"))
             )
           else true end

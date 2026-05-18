@@ -46,7 +46,7 @@ Important implementation truths from `connector.rs`, `main.rs`, and `manifest.to
 - Group sends call `POST /v2/groups/{group_openid}/messages`.
 - C2C sends call `POST /v2/users/{openid}/messages`.
 - Outbound channel, group, and C2C sends claim SDK chat ownership before the QQ HTTP call and append redacted `coordination` audit records on successful dispatch.
-- The current send bodies only expose plain `content`; they do not surface the broader QQ message-type matrix even though the upstream API supports markdown, ark, embed, keyboard, and media payloads.
+- The current send bodies only expose plain `content`; simulate and invoke reject unsupported passive-reply or rich-payload fields instead of silently dropping them, because the connector does not yet surface the broader QQ message-type matrix even though the upstream API supports markdown, ark, embed, keyboard, and media payloads.
 - Direct and group sends currently hard-code `msg_type = 0` and `msg_seq = 1`, and only optionally thread through `msg_id`.
 - `qq.gateway.get` is a plain `GET /gateway` discovery call. The connector does not actually open the websocket session yet.
 - `qq.events.normalize` decodes a raw gateway message dispatch into channel/group/C2C routing, quote context, sender metadata, and attachment presence.

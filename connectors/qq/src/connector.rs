@@ -39,14 +39,28 @@ struct QqSendOperationSpec {
     path_prefix: &'static str,
     target_kind: &'static str,
     log_operation: &'static str,
+    allowed_fields: &'static [&'static str],
     body: fn(&str, Option<&str>) -> Value,
 }
+
+#[derive(Debug)]
+struct ParsedQqSendInput<'a> {
+    target_id: &'a str,
+    path: String,
+    content: &'a str,
+    msg_id: Option<&'a str>,
+}
+
+const CHANNEL_SEND_FIELDS: &[&str] = &["channel_id", "content", "msg_id"];
+const GROUP_SEND_FIELDS: &[&str] = &["group_openid", "content", "msg_id"];
+const C2C_SEND_FIELDS: &[&str] = &["openid", "content", "msg_id"];
 
 const QQ_SEND_CHANNEL_SPEC: QqSendOperationSpec = QqSendOperationSpec {
     target_field: "channel_id",
     path_prefix: "/channels/",
     target_kind: "channel",
     log_operation: "send_channel",
+    allowed_fields: CHANNEL_SEND_FIELDS,
     body: channel_message_body,
 };
 
@@ -55,6 +69,7 @@ const QQ_SEND_GROUP_SPEC: QqSendOperationSpec = QqSendOperationSpec {
     path_prefix: "/v2/groups/",
     target_kind: "group",
     log_operation: "send_group",
+    allowed_fields: GROUP_SEND_FIELDS,
     body: direct_message_body,
 };
 
@@ -63,6 +78,7 @@ const QQ_SEND_C2C_SPEC: QqSendOperationSpec = QqSendOperationSpec {
     path_prefix: "/v2/users/",
     target_kind: "c2c",
     log_operation: "send_c2c",
+    allowed_fields: C2C_SEND_FIELDS,
     body: direct_message_body,
 };
 
@@ -933,11 +949,9 @@ impl QqConnector {
         input: &Value,
         spec: QqSendOperationSpec,
     ) -> FcpResult<Value> {
-        let target_id = required_string(input, spec.target_field)?;
-        let path = message_path(spec.path_prefix, target_id, spec.target_field)?;
-        let content = required_string(input, "content")?;
-        let msg_id = optional_string(input, "msg_id")?;
-        let (claim_channel_id, thread_id) = qq_claim_target(spec.target_kind, target_id, msg_id);
+        let parsed = parse_send_message_input(input, &spec)?;
+        let (claim_channel_id, thread_id) =
+            qq_claim_target(spec.target_kind, parsed.target_id, parsed.msg_id);
         let (zone_id, claimant_agent_id) = self.chat_coordination_context();
         let coordination = self
             .claim_before_qq_send(
@@ -959,8 +973,8 @@ impl QqConnector {
         let mut output = client
             .api_request(
                 reqwest::Method::POST,
-                &path,
-                Some((spec.body)(content, msg_id)),
+                &parsed.path,
+                Some((spec.body)(parsed.content, parsed.msg_id)),
             )
             .await
             .map_err(|e| e.to_fcp_error())?;
@@ -1216,22 +1230,13 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
 fn validate_simulate_input(operation: &str, input: &Value) -> FcpResult<()> {
     match operation {
         OP_SEND_CHANNEL => {
-            let channel_id = required_string(input, "channel_id")?;
-            let _path = message_path("/channels/", channel_id, "channel_id")?;
-            required_string(input, "content")?;
-            optional_string(input, "msg_id")?;
+            parse_send_message_input(input, &QQ_SEND_CHANNEL_SPEC)?;
         }
         OP_SEND_GROUP => {
-            let group_openid = required_string(input, "group_openid")?;
-            let _path = message_path("/v2/groups/", group_openid, "group_openid")?;
-            required_string(input, "content")?;
-            optional_string(input, "msg_id")?;
+            parse_send_message_input(input, &QQ_SEND_GROUP_SPEC)?;
         }
         OP_SEND_C2C => {
-            let openid = required_string(input, "openid")?;
-            let _path = message_path("/v2/users/", openid, "openid")?;
-            required_string(input, "content")?;
-            optional_string(input, "msg_id")?;
+            parse_send_message_input(input, &QQ_SEND_C2C_SPEC)?;
         }
         OP_GET_GATEWAY | OP_HEALTH => {}
         OP_EVENTS_NORMALIZE => {
@@ -1458,6 +1463,43 @@ fn operation(
         rate_limit: None,
         requires_approval: Some(ApprovalMode::None),
     }
+}
+
+fn parse_send_message_input<'a>(
+    input: &'a Value,
+    spec: &QqSendOperationSpec,
+) -> FcpResult<ParsedQqSendInput<'a>> {
+    reject_unexpected_fields(input, spec.allowed_fields)?;
+    let target_id = required_string(input, spec.target_field)?;
+    let path = message_path(spec.path_prefix, target_id, spec.target_field)?;
+    let content = required_string(input, "content")?;
+    let msg_id = optional_string(input, "msg_id")?;
+    Ok(ParsedQqSendInput {
+        target_id,
+        path,
+        content,
+        msg_id,
+    })
+}
+
+fn reject_unexpected_fields(value: &Value, allowed_fields: &[&str]) -> FcpResult<()> {
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1005,
+        message: "QQ send input must be an object".into(),
+    })?;
+    if let Some(field) = object
+        .keys()
+        .find(|field| !allowed_fields.contains(&field.as_str()))
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!(
+                "unsupported QQ send field `{field}`; supported fields are {}",
+                allowed_fields.join(", ")
+            ),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2322,6 +2364,36 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn simulate_send_channel_rejects_unsupported_passive_reply_field() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = ready_connector(&signing_key).await;
+        let response = connector
+            .simulate(simulate_request(
+                &signing_key,
+                &connector.base.instance_id,
+                CAP_MESSAGES_WRITE,
+                OP_SEND_CHANNEL,
+                json!({
+                    "channel_id": "channel-1",
+                    "content": "hello",
+                    "event_id": "evt-passive-reply"
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-1005"));
+        assert!(
+            response
+                .failure_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("event_id")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn simulate_events_normalize_missing_event_denied() {
         let signing_key = Ed25519SigningKey::generate();
         let connector = ready_connector(&signing_key).await;
@@ -2501,6 +2573,27 @@ mod tests {
         assert!(message_path("/channels/", "../admin", "channel_id").is_err());
         assert!(message_path("/v2/groups/", "group/other", "group_openid").is_err());
         assert!(message_path("/v2/users/", "user%2Fother", "openid").is_err());
+    }
+
+    #[test]
+    fn parse_send_message_input_rejects_rich_payload_fields() {
+        let err = parse_send_message_input(
+            &serde_json::json!({
+                "openid": "user-42",
+                "content": "hello",
+                "media": {"file_id": "media-1"}
+            }),
+            &QQ_SEND_C2C_SPEC,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+        assert!(err.to_string().contains("media"));
+    }
+
+    #[test]
+    fn reject_unexpected_fields_requires_object() {
+        assert!(reject_unexpected_fields(&serde_json::json!([]), CHANNEL_SEND_FIELDS).is_err());
     }
 
     #[test]

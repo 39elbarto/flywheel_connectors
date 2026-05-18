@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use fcp_prelude::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
+use fcp_prelude::{
+    AgentHint, ApprovalMode, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError,
+    FcpResult, IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+};
 use fcp_sdk::migration::HttpRetryConfig;
 use fcp_sdk::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::{Value, json};
@@ -22,6 +25,9 @@ const OP_TEXT_GENERATION: &str = "huggingface.inference.text_generation";
 const OP_SUMMARIZATION: &str = "huggingface.inference.summarization";
 const OP_MODEL_LIST: &str = "huggingface.models.list";
 const OP_MODEL_INFO: &str = "huggingface.models.info";
+
+const CAP_INFERENCE: &str = "huggingface.inference";
+const CAP_MODELS: &str = "huggingface.models";
 
 const DEFAULT_TEXT_GEN_MODEL: &str = "gpt2";
 const DEFAULT_SUMMARIZATION_MODEL: &str = "facebook/bart-large-cnn";
@@ -138,6 +144,183 @@ fn safe_u32(v: u64) -> Option<u32> {
     u32::try_from(v).ok()
 }
 
+#[allow(clippy::too_many_lines)]
+fn operations_info() -> Vec<OperationInfo> {
+    vec![
+        OperationInfo {
+            id: OperationId::from_static(OP_TEXT_GENERATION),
+            summary: "Run text generation inference via Hugging Face Inference API".into(),
+            description: Some(
+                "Posts a prompt to the selected Hugging Face text-generation model and returns the provider response array.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["prompt"],
+                "properties": {
+                    "model_id": { "type": "string" },
+                    "prompt": { "type": "string" },
+                    "inputs": { "type": "string" },
+                    "max_new_tokens": { "type": "integer", "minimum": 1 },
+                    "temperature": { "type": "number" },
+                    "top_p": { "type": "number" },
+                    "top_k": { "type": "integer" },
+                    "repetition_penalty": { "type": "number" },
+                    "do_sample": { "type": "boolean" },
+                    "return_full_text": { "type": "boolean" }
+                }
+            }),
+            output_schema: json!({
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "generated_text": { "type": "string" }
+                    }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_INFERENCE),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "Use for bounded text generation against a selected Hugging Face model.".into(),
+                common_mistakes: vec![
+                    "Do not send secrets or private user data in prompts.".into(),
+                    "Use models.list or models.info before invoking unfamiliar model ids.".into(),
+                ],
+                examples: vec![
+                    r#"{"prompt":"hello","model_id":"gpt2","max_new_tokens":32}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static(OP_MODEL_LIST),
+                    CapabilityId::from_static(OP_MODEL_INFO),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_SUMMARIZATION),
+            summary: "Run summarization inference via Hugging Face Inference API".into(),
+            description: Some(
+                "Posts source text to the selected Hugging Face summarization model and returns the provider response array.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["text"],
+                "properties": {
+                    "model_id": { "type": "string" },
+                    "text": { "type": "string" },
+                    "inputs": { "type": "string" },
+                    "max_length": { "type": "integer", "minimum": 1 },
+                    "min_length": { "type": "integer", "minimum": 0 }
+                }
+            }),
+            output_schema: json!({
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "summary_text": { "type": "string" }
+                    }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_INFERENCE),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "Use for bounded summarization against a selected Hugging Face model.".into(),
+                common_mistakes: vec![
+                    "The connector does not persist source text.".into(),
+                    "Prefer an explicit model_id when reproducibility matters.".into(),
+                ],
+                examples: vec![
+                    r#"{"text":"Long text to summarize","model_id":"facebook/bart-large-cnn"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static(OP_MODEL_LIST),
+                    CapabilityId::from_static(OP_MODEL_INFO),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_MODEL_LIST),
+            summary: "List Hugging Face Hub models with bounded catalog filters".into(),
+            description: Some(
+                "Queries the Hugging Face Hub model catalog with optional search and pipeline filters, capped by connector validation.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "search": { "type": "string" },
+                    "pipeline_tag": { "type": "string" },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_MODEL_LIST_LIMIT
+                    }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["models", "catalog", "limit"],
+                "properties": {
+                    "models": { "type": "array" },
+                    "catalog": { "type": "string" },
+                    "limit": { "type": "integer" }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_MODELS),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use before inference when discovering public Hub models by task or search term.".into(),
+                common_mistakes: vec![
+                    "Do not request an unbounded catalog; the connector caps limit.".into(),
+                ],
+                examples: vec![r#"{"search":"bart","pipeline_tag":"summarization","limit":5}"#.into()],
+                related: vec![CapabilityId::from_static(OP_MODEL_INFO)],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_MODEL_INFO),
+            summary: "Get Hugging Face Hub model metadata".into(),
+            description: Some("Fetches metadata for one caller-selected Hugging Face Hub model.".into()),
+            input_schema: json!({
+                "type": "object",
+                "required": ["model_id"],
+                "properties": {
+                    "model_id": { "type": "string" }
+                }
+            }),
+            output_schema: json!({ "type": "object" }),
+            capability: CapabilityId::from_static(CAP_MODELS),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to inspect a specific Hub model before invoking it.".into(),
+                common_mistakes: vec![
+                    "model_id is caller-selected; there is no global default for metadata lookup.".into(),
+                ],
+                examples: vec![r#"{"model_id":"facebook/bart-large-cnn"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static(OP_MODEL_LIST),
+                    CapabilityId::from_static(OP_TEXT_GENERATION),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+    ]
+}
+
 #[allow(clippy::missing_errors_doc, clippy::unused_async)]
 impl HuggingfaceConnector {
     #[must_use]
@@ -198,7 +381,7 @@ impl HuggingfaceConnector {
             "connector_id": CONNECTOR_ID,
             "connector_version": CONNECTOR_VERSION,
             "protocol_version": "2.0",
-            "capabilities": ["huggingface.inference", "huggingface.models"],
+            "capabilities": [CAP_INFERENCE, CAP_MODELS],
             "surface_status": "incubating",
             "surface_status_rationale": "Runtime path is incomplete or lacks production evidence"
         }))
@@ -344,44 +527,7 @@ impl HuggingfaceConnector {
         Ok(json!({
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
-            "operations": [
-                {
-                    "id": OP_TEXT_GENERATION,
-                    "summary": "Run text generation inference via Hugging Face Inference API",
-                    "capability": "huggingface.inference",
-                    "risk_level": "medium",
-                    "safety_tier": "safe",
-                    "idempotency": "none",
-                    "implemented": true
-                },
-                {
-                    "id": OP_SUMMARIZATION,
-                    "summary": "Run text summarization via Hugging Face Inference API",
-                    "capability": "huggingface.inference",
-                    "risk_level": "medium",
-                    "safety_tier": "safe",
-                    "idempotency": "none",
-                    "implemented": true
-                },
-                {
-                    "id": OP_MODEL_LIST,
-                    "summary": "List Hugging Face Hub models with bounded catalog filters",
-                    "capability": "huggingface.models",
-                    "risk_level": "low",
-                    "safety_tier": "safe",
-                    "idempotency": "strict",
-                    "implemented": true
-                },
-                {
-                    "id": OP_MODEL_INFO,
-                    "summary": "Get model metadata from Hugging Face Hub",
-                    "capability": "huggingface.models",
-                    "risk_level": "low",
-                    "safety_tier": "safe",
-                    "idempotency": "strict",
-                    "implemented": true
-                }
-            ],
+            "operations": operations_info(),
             "surface_status": "incubating",
             "surface_status_rationale": "Runtime path is incomplete or lacks production evidence",
             "events": [],
@@ -806,8 +952,28 @@ mod tests {
         assert_eq!(intro["surface_status"], "incubating");
         let ops = intro["operations"].as_array().unwrap();
         assert_eq!(ops.len(), 4);
-        assert!(ops.iter().all(|o| o["implemented"] == true));
-        assert!(ops.iter().any(|o| o["id"] == OP_MODEL_LIST));
+        assert!(ops.iter().all(|o| o.get("input_schema").is_some()));
+        assert!(ops.iter().all(|o| o.get("ai_hints").is_some()));
+        assert!(
+            ops.iter()
+                .any(|o| o["id"] == OP_MODEL_LIST && o["capability"] == CAP_MODELS)
+        );
+    }
+
+    #[test]
+    fn operations_info_covers_runtime_operations() {
+        let ops = operations_info();
+        let ids: Vec<&str> = ops.iter().map(|op| op.id.as_ref()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                OP_TEXT_GENERATION,
+                OP_SUMMARIZATION,
+                OP_MODEL_LIST,
+                OP_MODEL_INFO
+            ]
+        );
+        assert!(ops.iter().all(|op| !op.ai_hints.when_to_use.is_empty()));
     }
 
     #[fcp_async_core::runtime::test]

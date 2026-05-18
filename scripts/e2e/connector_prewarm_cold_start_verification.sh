@@ -123,6 +123,15 @@ json_null_or_sha256() {
   fi
 }
 
+json_bool_nonempty() {
+  local value="$1"
+  if [[ -n "${value}" ]]; then
+    printf 'true'
+  else
+    printf 'false'
+  fi
+}
+
 cargo_target_dir_class() {
   local path="$1"
   case "${path}" in
@@ -797,7 +806,8 @@ jq -n \
   --arg rch_force_remote "${RCH_FORCE_REMOTE:-1}" \
   --arg remote_proof_status "${remote_proof_status}" \
   --arg remote_proof_reason "${remote_proof_reason}" \
-  --arg remote_proof_summary "${remote_proof_summary}" \
+  --argjson remote_proof_summary_present "$(json_bool_nonempty "${remote_proof_summary}")" \
+  --argjson remote_proof_summary_hash "$(json_null_or_sha256 "${remote_proof_summary}")" \
   --argjson evidence_jsonl_in_hash "$(json_null_or_sha256 "${EVIDENCE_JSONL_IN}")" \
   --argjson evidence_jsonl_in_path_redacted "$(evidence_jsonl_in_path_redacted)" \
   --argjson require_production_soak "${require_production_soak_json}" \
@@ -820,7 +830,8 @@ jq -n \
     remote_proof: {
       status: $remote_proof_status,
       reason: (if ($remote_proof_reason | length) > 0 then $remote_proof_reason else null end),
-      rch_summary: (if ($remote_proof_summary | length) > 0 then $remote_proof_summary else null end)
+      rch_summary_present: $remote_proof_summary_present,
+      rch_summary_hash: $remote_proof_summary_hash
     },
     evidence_jsonl_in_path_redacted: $evidence_jsonl_in_path_redacted,
     evidence_jsonl_in_hash: $evidence_jsonl_in_hash,
@@ -850,7 +861,8 @@ jq -n \
   --arg redaction_status "${redaction_status}" \
   --arg remote_proof_status "${remote_proof_status}" \
   --arg remote_proof_reason "${remote_proof_reason}" \
-  --arg remote_proof_summary "${remote_proof_summary}" \
+  --argjson remote_proof_summary_present "$(json_bool_nonempty "${remote_proof_summary}")" \
+  --argjson remote_proof_summary_hash "$(json_null_or_sha256 "${remote_proof_summary}")" \
   --arg skip_reason "${skip_reason}" \
   --argjson evidence_count "${evidence_count}" \
   --argjson require_production_soak "${require_production_soak_json}" \
@@ -863,7 +875,8 @@ jq -n \
     redaction_status: $redaction_status,
     remote_proof_status: $remote_proof_status,
     remote_proof_reason: (if ($remote_proof_reason | length) > 0 then $remote_proof_reason else null end),
-    remote_proof_summary: (if ($remote_proof_summary | length) > 0 then $remote_proof_summary else null end),
+    remote_proof_summary_present: $remote_proof_summary_present,
+    remote_proof_summary_hash: $remote_proof_summary_hash,
     require_production_soak: $require_production_soak,
     skip_reason: (if ($skip_reason | length) > 0 then $skip_reason else null end),
     evidence_count: $evidence_count,

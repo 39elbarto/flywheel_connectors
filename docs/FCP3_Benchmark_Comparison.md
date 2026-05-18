@@ -164,8 +164,10 @@ use a dedicated child directory so the target-dir hash identifies one proof run;
 `validation.json` records `redaction_scan_ok=true` when that final scan passes
 or `redaction_scan_ok=false` with a reason when it rejects the bundle. The
 verifier's environment and summary artifacts record `remote_proof_status`, the
-observed RCH summary, and any remote-proof failure reason so operators can
-distinguish remote execution from refused local fallback. The verifier's
+presence and `sha256:<64 lowercase hex>` fingerprint of the observed RCH
+summary, and any stable remote-proof failure reason so operators can distinguish
+remote execution from refused local fallback without copying a raw log line into
+reusable metadata. The verifier's
 `validation.json`
 also records a latency summary with the worst current p50/p95/p99, worst
 baseline p50/p95/p99, minimum per-percentile improvement, and any scenarios

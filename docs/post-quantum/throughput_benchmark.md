@@ -484,6 +484,10 @@ same redaction-sensitive run-id marker preflight as the top-level gauntlet.
 It also pins `OUT_DIR` to `target/fcp-crypto-pq` before creating log or evidence
 directories, matching the command-record contract that every local log is a
 target-relative evidence artifact rather than a private absolute path.
+Operator-supplied artifact filenames are also rejected if they contain the same
+secret, provider-payload, reviewer-contact, trapdoor, preimage, or credential
+marker names; the failure message reports only a SHA-256 hash of the rejected
+path.
 Its command records carry the same execution-proof fields as the top-level
 gauntlet: non-`rch` lanes must report `fallback_decision:"not_needed"`,
 `worker_execution_class:"not_applicable"`, and `rch_summary:null`; `rch`-backed

@@ -21,6 +21,10 @@ run_id_sha256() {
   printf '%s' "${RUN_ID}" | shasum -a 256 | awk '{print $1}'
 }
 
+artifact_path_sha256() {
+  printf '%s' "${ARTIFACT}" | shasum -a 256 | awk '{print $1}'
+}
+
 validate_run_id() {
   case "${RUN_ID}" in
     ""|*/*|*\\*|*..*|*[!A-Za-z0-9._-]*)
@@ -54,6 +58,11 @@ validate_artifact_path() {
       exit 64
       ;;
   esac
+
+  if printf '%s' "${ARTIFACT}" | grep -aEi "$(run_id_redaction_pattern)" >/dev/null; then
+    printf 'invalid ARTIFACT: contains redaction-sensitive marker; artifact_path_hash=sha256:%s\n' "$(artifact_path_sha256)" >&2
+    exit 64
+  fi
 }
 
 validate_out_dir() {

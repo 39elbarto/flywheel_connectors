@@ -1520,10 +1520,12 @@ id = "fcp.myservice"
 name = "MyService Connector"
 version = "0.1.0"
 archetypes = ["operational"]
+format = "native"
 
 [zones]
 home = "z:work"
 allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
 forbidden = ["z:public"]
 
 [capabilities]
@@ -1532,19 +1534,32 @@ forbidden = ["system.exec", "network.listen"]
 
 [sandbox]
 profile = "strict"
-memory_limit_mb = 128
-cpu_limit_percent = 25
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 120000
 deny_exec = true
+deny_ptrace = true
 
-[[provides]]
-id = "myservice.search"
-summary = "Search items"
+[provides.operations."myservice.search"]
+description = "Search items"
 capability = "myservice.read"
 risk_level = "low"
 safety_tier = "safe"
 idempotency = "strict"
+revocation_freshness = "warn"
 
-[provides.network_constraints]
+[provides.operations."myservice.search".input_schema]
+required = ["query"]
+type = "object"
+
+[provides.operations."myservice.search".input_schema.properties.query]
+type = "string"
+description = "Search query string"
+
+[provides.operations."myservice.search".output_schema]
+type = "object"
+
+[provides.operations."myservice.search".network_constraints]
 host_allow = ["api.myservice.com"]
 port_allow = [443]
 require_sni = true
@@ -1552,14 +1567,12 @@ deny_localhost = true
 deny_private_ranges = true
 deny_tailnet_ranges = true
 
-[provides.rate_limit]
-pool_name = "myservice.read"
+[[rate_limits.pools]]
+id = "myservice.read"
 requests = 100
-window = "60s"
-
-[provides.operations.myservice_search]
-input_schema = "schemas/myservice_search_input.json"
-output_schema = "schemas/myservice_search_output.json"
+window_ms = 60000
+burst = 10
+scope = "instance"
 ```
 
 Every connector must declare `[provides.operations.*]` for each operation it implements; the conformance scanner catches drift between `const OP_*` literals and manifest declarations.

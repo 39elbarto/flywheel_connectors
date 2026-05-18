@@ -11,6 +11,16 @@ LOG_PREFIX="${OUT_DIR}/${RUN_ID}"
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
 
+validate_run_id() {
+  case "${RUN_ID}" in
+    ""|*/*|*\\*|*..*|*[!A-Za-z0-9._-]*)
+      printf 'invalid RUN_ID: use only ASCII letters, digits, dot, underscore, or hyphen; path separators and .. are forbidden\n' >&2
+      exit 64
+      ;;
+  esac
+}
+
+validate_run_id
 mkdir -p "${OUT_DIR}" "${ARTIFACT_STAGE_ROOT}"
 : > "${ARTIFACT}"
 
@@ -986,7 +996,7 @@ validate_gauntlet_contract() {
     def git_revision_hash:
       type == "string" and test("^[0-9a-f]{7,40}$");
     def safe_label:
-      type == "string" and test("^[A-Za-z0-9._-]+$");
+      type == "string" and test("^[A-Za-z0-9._-]+$") and (contains("..") | not);
     def gauntlet_build_profile:
       . == "dev-test-bench";
     def gauntlet_target_dir_class:

@@ -289,6 +289,10 @@ fn evidence_hash(raw: &str) -> String {
     hex::encode(prefix)
 }
 
+fn typed_evidence_hash(raw: &str) -> String {
+    format!("sha256:{}", evidence_hash(raw))
+}
+
 fn git_revision() -> String {
     Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
@@ -450,13 +454,17 @@ async fn try_invoke_drain(
 async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     let (mut logs, log_path) = open_jsonl_log();
     println!("qq_gateway_projection_e2e_log={}", log_path.display());
+    let artifact_path = log_path.display().to_string();
+    let command_line = std::env::args().collect::<Vec<_>>();
     log_step(
         &mut logs,
         "log_start",
         "ok",
         &json!({
-            "path": log_path.display().to_string(),
-            "command_line": std::env::args().collect::<Vec<_>>(),
+            "artifact_path_hash": typed_evidence_hash(&artifact_path),
+            "artifact_path_class": "temp_jsonl",
+            "command_line_hash": typed_evidence_hash(&command_line.join("\0")),
+            "command_arg_count": command_line.len(),
             "git_revision": git_revision(),
         }),
     );
@@ -1645,7 +1653,70 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     );
 
     let log_contents = read_to_string(&log_path).expect("read QQ gateway e2e log");
+    let log_records = log_contents
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("QQ gateway log line is JSON"))
+        .collect::<Vec<_>>();
+    let log_start = log_records
+        .iter()
+        .find(|record| record.get("step").and_then(Value::as_str) == Some("log_start"))
+        .expect("QQ gateway log_start record exists");
+    let log_start_details = log_start
+        .get("details")
+        .and_then(Value::as_object)
+        .expect("QQ gateway log_start details are an object");
+    assert!(
+        !log_start_details.contains_key("path"),
+        "QQ gateway log_start must not include a raw artifact path"
+    );
+    assert!(
+        !log_start_details.contains_key("command_line"),
+        "QQ gateway log_start must not include raw command-line arguments"
+    );
+    assert_eq!(
+        log_start_details
+            .get("artifact_path_class")
+            .and_then(Value::as_str),
+        Some("temp_jsonl")
+    );
+    for field in ["artifact_path_hash", "command_line_hash"] {
+        let hash = log_start_details
+            .get(field)
+            .and_then(Value::as_str)
+            .expect("QQ gateway log_start hash field exists");
+        assert!(
+            hash.strip_prefix("sha256:").is_some_and(|digest| {
+                digest.len() == 24 && digest.chars().all(|ch| ch.is_ascii_hexdigit())
+            }),
+            "QQ gateway log_start field `{field}` must be a typed short SHA-256 digest"
+        );
+    }
+    assert!(
+        log_start_details
+            .get("command_arg_count")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count > 0),
+        "QQ gateway log_start must record a nonzero command arg count"
+    );
     for forbidden in [
+        "/Users/",
+        "/home/",
+        "/data/projects/",
+        "/private/var/",
+        "/var/folders/",
+        "/Volumes/",
+        "C:\\Users\\",
+        "Bearer",
+        "Authorization",
+        "authorization",
+        "access_token",
+        "refresh_token",
+        "token=",
+        "sk-live-",
+        "AKIA",
+        "-----BEGIN",
+        "principal:",
+        "provider_body",
         "test-secret",
         "session-1",
         "hello-1",

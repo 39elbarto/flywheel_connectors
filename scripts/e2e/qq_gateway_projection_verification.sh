@@ -179,6 +179,19 @@ if [[ "${overall_status}" == "passed" ]]; then
         missing_steps: missing,
         status_ok: all(.[]; .status == "ok"),
         redaction_shape_ok: all(.[]; (.step | type) == "string" and (.details | type) == "object"),
+        log_start_shape_ok: any(.[];
+          .step == "log_start"
+          and (.details.artifact_path_hash | type) == "string"
+          and (.details.artifact_path_hash | test("^sha256:[0-9a-f]{24}$"))
+          and .details.artifact_path_class == "temp_jsonl"
+          and (.details.command_line_hash | type) == "string"
+          and (.details.command_line_hash | test("^sha256:[0-9a-f]{24}$"))
+          and (.details.command_arg_count | type) == "number"
+          and .details.command_arg_count >= 1
+          and (.details.git_revision | type) == "string"
+          and ((.details | has("path")) | not)
+          and ((.details | has("command_line")) | not)
+        ),
         disabled_shape_ok: any(.[]; .step == "gateway_disabled_drop" and .details.accepted == false and .details.reason_code == "gateway_disabled" and .details.normalized == null and .details.policy == null and .details.lifecycle.action == "none"),
         binding_shape_ok: (
           any(.[]; .step == "missing_route_binding_drop" and .details.reason_code == "group_sender_missing" and .details.policy.reason_code == "group_sender_missing")
@@ -285,7 +298,7 @@ if [[ "${overall_status}" == "passed" ]]; then
       } as $v
       | $v
       | .status = (
-          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.c2c_shape_ok and $v.queue_shape_ok and $v.group_policy_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok)
+          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.log_start_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.c2c_shape_ok and $v.queue_shape_ok and $v.group_policy_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok)
           then "passed"
           else "failed"
           end
@@ -304,6 +317,24 @@ fi
 
 if [[ "${overall_status}" == "passed" ]]; then
   for forbidden in \
+    "/Users/" \
+    "/home/" \
+    "/data/projects/" \
+    "/private/var/" \
+    "/var/folders/" \
+    "/Volumes/" \
+    "C:\\Users\\" \
+    "Bearer" \
+    "Authorization" \
+    "authorization" \
+    "access_token" \
+    "refresh_token" \
+    "token=" \
+    "sk-live-" \
+    "AKIA" \
+    "-----BEGIN" \
+    "principal:" \
+    "provider_body" \
     "test-secret" \
     "session-1" \
     "hello-1" \

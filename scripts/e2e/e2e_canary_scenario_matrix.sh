@@ -48,6 +48,10 @@ OUT_ROOT=""
 DRY_RUN=false
 CI_MODE="${CI:-false}"
 ONLY_STAGES=""
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+CANARY_TARGET_DIR="${CANARY_TARGET_DIR:-/tmp/fcp-canary-matrix}"
+export RCH_FORCE_REMOTE=1
 
 declare -i GATE_PASS=0
 declare -i GATE_FAIL=0
@@ -162,6 +166,30 @@ should_run_stage() {
   return 1
 }
 
+run_cargo() {
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${CANARY_TARGET_DIR}" cargo "$@"
+}
+
+rch_remote_summary_present() {
+  local execution_log="$1"
+
+  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
+    return 0
+  fi
+
+  if grep -Eq '^\[RCH\].*(local|refusing local fallback|no admissible workers)' "${execution_log}"; then
+    echo "Missing accepted remote rch summary in ${execution_log}" >&2
+    echo "rch remote proof is required; refusing local fallback" >&2
+    return 2
+  fi
+
+  grep -Eq '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}" && return 0
+
+  echo "Missing accepted remote rch summary in ${execution_log}" >&2
+  echo "rch remote proof is required; refusing local fallback" >&2
+  return 2
+}
+
 run_cargo_check() {
   local label="$1"
   local crate="$2"
@@ -186,8 +214,14 @@ run_cargo_check() {
   start=$(now_ms)
   local cmd_args=(-p "${crate}" --lib)
   [[ -n "${test_filter}" ]] && cmd_args+=(-- "${test_filter}")
-  if cargo test "${cmd_args[@]}" > "${log_file}" 2>&1; then
-    status="pass"
+  if run_cargo test "${cmd_args[@]}" > "${log_file}" 2>&1; then
+    local remote_error=""
+    if remote_error="$(rch_remote_summary_present "${log_file}" 2>&1)"; then
+      status="pass"
+    else
+      printf '%s\n' "${remote_error}" >> "${log_file}"
+      status="fail"
+    fi
   else
     status="fail"
   fi
@@ -234,7 +268,7 @@ STEPS_FILE="${OUT_ROOT}/steps.jsonl"
 : > "${STEPS_FILE}"
 
 require_cmd jq
-require_cmd cargo
+require_cmd "${RCH_BIN}"
 
 log_step "INIT" "Canary Scenario Matrix v1 — run_id=${RUN_ID}"
 log_step "INIT" "Output: ${OUT_ROOT}"
@@ -867,4 +901,8 @@ REPORT
 
   record_step "canary_matrix.verdict" "gate_verdict" "${GATE_VERDICT}" 0 \
     "contract.canary_matrix_gate"
+
+  if [[ "${GATE_VERDICT}" == "abort" ]]; then
+    exit 1
+  fi
 fi

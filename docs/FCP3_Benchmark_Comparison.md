@@ -127,7 +127,10 @@ JSONL bundle without rerunning the smoke Cargo lane by passing
 the same scenario coverage, boundary, resource, percentile, nested evidence, and
 redaction checks as the default verifier. The verifier and typed bundle
 validator require exactly one record for each required prewarm scenario so
-evidence bundles cannot be stitched from duplicate scenario records. The
+evidence bundles cannot be stitched from duplicate scenario records. The typed
+record validator rejects non-canonical prewarm scenario ids before
+serialization, so single-row artifacts cannot bypass the same scenario
+allowlist that the bundle verifier enforces. The
 environment metadata records only the selected `RCH_BIN` basename plus a
 `sha256:<64 lowercase hex>` fingerprint of the configured value; private patched
 binary paths are redacted from the evidence JSON. `replay.sh` is self-locating

@@ -2834,7 +2834,7 @@ const SWARM_PREWARM_REDACTION_MARKERS: [(&str, &str); 33] = [
     ("sk-live-", "sk-live-"),
     ("bearer ", "Bearer token"),
     ("authorization:", "authorization header"),
-    ("token=", "token assignment"),
+    ("token=", "token assignment"), // ubs:ignore - redaction denylist literal, not a credential
     ("access_token", "access token field"),
     ("refresh_token", "refresh token field"),
     ("id_token", "id token field"),
@@ -2957,6 +2957,18 @@ fn is_canonical_prewarm_worker_id(worker_id: &str) -> bool {
         && worker_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn validate_prewarm_scenario_id(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if SWARM_PREWARM_COLD_START_REQUIRED_SCENARIOS.contains(&evidence.scenario_id.as_str()) {
+        return Ok(());
+    }
+
+    Err(SwarmPrewarmColdStartEvidenceError::InvalidScenario {
+        scenario_id: evidence.scenario_id.clone(),
+    })
 }
 
 fn validate_prewarm_required_fields(
@@ -3642,6 +3654,7 @@ impl SwarmPrewarmColdStartEvidence {
         }
         validate_prewarm_execution_source(self.execution_mode, self.source_kind)?;
         validate_prewarm_required_fields(self)?;
+        validate_prewarm_scenario_id(self)?;
         validate_prewarm_redaction(self)?;
         validate_prewarm_worker_id(self)?;
         validate_prewarm_soak_boundaries(self)?;
@@ -3694,13 +3707,6 @@ pub fn validate_swarm_prewarm_cold_start_evidence_bundle(
 
     let mut seen = BTreeSet::new();
     for record in records {
-        record.validate().map_err(|source| {
-            SwarmPrewarmColdStartEvidenceBundleError::InvalidRecord {
-                scenario_id: record.scenario_id.clone(),
-                source,
-            }
-        })?;
-
         if !SWARM_PREWARM_COLD_START_REQUIRED_SCENARIOS.contains(&record.scenario_id.as_str()) {
             return Err(
                 SwarmPrewarmColdStartEvidenceBundleError::UnexpectedScenario {
@@ -3716,6 +3722,13 @@ pub fn validate_swarm_prewarm_cold_start_evidence_bundle(
                 },
             );
         }
+
+        record.validate().map_err(|source| {
+            SwarmPrewarmColdStartEvidenceBundleError::InvalidRecord {
+                scenario_id: record.scenario_id.clone(),
+                source,
+            }
+        })?;
 
         if require_production_soak
             && (record.execution_mode != SwarmEvidenceExecutionMode::Soak
@@ -3868,6 +3881,11 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         scenario_id: String,
         /// Observed skip reason.
         skip_reason: String,
+    },
+    /// Scenario was not one of the required prewarm evidence scenarios.
+    InvalidScenario {
+        /// Observed scenario id.
+        scenario_id: String,
     },
     /// A required string field was empty.
     EmptyField {
@@ -4106,6 +4124,10 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
             } => write!(
                 f,
                 "swarm prewarm production scenario '{scenario_id}' cannot carry skip_reason '{skip_reason}'"
+            ),
+            Self::InvalidScenario { scenario_id } => write!(
+                f,
+                "swarm prewarm scenario '{scenario_id}' is not in the required prewarm evidence set"
             ),
             Self::EmptyField { field } => {
                 write!(f, "swarm prewarm field '{field}' is empty")
@@ -10507,6 +10529,24 @@ mod tests {
     }
 
     #[test]
+    fn swarm_prewarm_cold_start_evidence_rejects_unexpected_scenario_id() {
+        let mut unexpected = prewarm_cold_start_evidence_fixture();
+        unexpected.scenario_id = "prewarm_partial_bundle".to_string();
+        assert_eq!(
+            unexpected.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidScenario {
+                scenario_id: "prewarm_partial_bundle".to_string()
+            })
+        );
+        assert!(matches!(
+            unexpected.to_jsonl_value(),
+            Err(SwarmPrewarmColdStartEvidenceJsonError::Validation(
+                SwarmPrewarmColdStartEvidenceError::InvalidScenario { .. }
+            ))
+        ));
+    }
+
+    #[test]
     fn swarm_prewarm_cold_start_evidence_rejects_latency_and_resource_regressions() {
         let mut regressed = prewarm_cold_start_evidence_fixture();
         regressed.activation_latency_ms = 120;
@@ -11042,7 +11082,7 @@ mod tests {
         let mut command_leak = prewarm_cold_start_evidence_fixture();
         command_leak
             .command_line
-            .push("TOKEN=Bearer\tsecret".to_string());
+            .push("TOKEN=Bearer\tsecret".to_string()); // ubs:ignore - redaction test fixture, not a credential
         assert_eq!(
             command_leak.validate(),
             Err(

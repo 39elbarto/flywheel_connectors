@@ -12,6 +12,9 @@ SEED="0xCAFEBABE"
 OUT_DIR="${OUT_DIR:-./out/${SCRIPT_NAME}}"
 LOG_JSONL="${LOG_JSONL:-${OUT_DIR}/${SCRIPT_NAME}.jsonl}"
 TARGET_DIR="${CAP_USAGE_TARGET_DIR:-/tmp/fcp-cap-usage-flow}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+export RCH_FORCE_REMOTE=1
 
 REPORT_JSON="${OUT_DIR}/report.json"
 SUGGEST_JSON="${OUT_DIR}/suggest.json"
@@ -30,19 +33,38 @@ require_cmd() {
 }
 
 run_cargo() {
-  if command -v rch >/dev/null 2>&1; then
-    rch exec -- cargo "$@"
-    return $?
-  fi
-  cargo "$@"
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo "$@"
 }
 
-run_fcp() {
-  if command -v fcp >/dev/null 2>&1; then
-    fcp "$@"
-    return $?
+rch_remote_summary_present() {
+  local execution_log="$1"
+
+  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
+    return 0
   fi
-  run_cargo run --target-dir "${TARGET_DIR}" -q -p fcp-cli --bin fcp -- "$@"
+
+  grep -Eq '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}" && return 0
+
+  echo "Missing accepted remote rch summary in ${execution_log}" >&2
+  echo "rch remote proof is required; refusing local fallback" >&2
+  return 2
+}
+
+run_cargo_logged() {
+  local execution_log="$1"
+  shift
+
+  run_cargo "$@" > "${execution_log}" 2>&1 || return
+  rch_remote_summary_present "${execution_log}"
+}
+
+run_fcp_json_logged() {
+  local json_output="$1"
+  local execution_log="$2"
+  shift 2
+
+  run_cargo run -q -p fcp-cli --bin fcp -- "$@" > "${json_output}" 2> "${execution_log}" || return
+  rch_remote_summary_present "${execution_log}"
 }
 
 now_ms() {
@@ -145,7 +167,8 @@ step_run_capabilities_unit_tests() {
   (
     cd "${REPO_ROOT}"
     run_cargo test --target-dir "${TARGET_DIR}" -p fcp-cli -- capabilities --nocapture
-  ) > "${log_path}" 2>&1
+  ) > "${log_path}" 2>&1 || return
+  rch_remote_summary_present "${log_path}" || return
   local test_count
   test_count=$(grep -c '^test capabilities::' "${log_path}" || echo "0")
   STEP_CONTEXT="$(jq -cn --argjson tc "${test_count}" '{test_count: $tc}')"
@@ -158,7 +181,8 @@ step_generate_report_json() {
   STEP_MODULE="fcp-cli::capabilities::report"
   STEP_TEST="report_json_output"
   mkdir -p "${OUT_DIR}"
-  run_fcp capabilities report --json > "${REPORT_JSON}"
+  run_fcp_json_logged "${REPORT_JSON}" "${OUT_DIR}/report.execution.log" \
+    capabilities report --json || return
   # Validate the report has expected structure
   jq -e '.schema_version' "${REPORT_JSON}" > /dev/null
   jq -e '.zones | length > 0' "${REPORT_JSON}" > /dev/null
@@ -177,7 +201,8 @@ step_generate_report_json() {
 step_generate_suggest_json() {
   STEP_MODULE="fcp-cli::capabilities::suggest"
   STEP_TEST="suggest_json_output"
-  run_fcp capabilities suggest --json > "${SUGGEST_JSON}"
+  run_fcp_json_logged "${SUGGEST_JSON}" "${OUT_DIR}/suggest.execution.log" \
+    capabilities suggest --json || return
   # Validate suggestions structure
   jq -e '.schema_version' "${SUGGEST_JSON}" > /dev/null
   jq -e '.summary' "${SUGGEST_JSON}" > /dev/null
@@ -218,7 +243,8 @@ step_verify_unused_flagged() {
 step_export_raw_aggregates() {
   STEP_MODULE="fcp-cli::capabilities::export"
   STEP_TEST="export_json_output"
-  run_fcp capabilities export > "${EXPORT_JSON}"
+  run_fcp_json_logged "${EXPORT_JSON}" "${OUT_DIR}/export.execution.log" \
+    capabilities export || return
   # Validate export has entries
   jq -e '.schema_version' "${EXPORT_JSON}" > /dev/null
   jq -e '.aggregates | length > 0' "${EXPORT_JSON}" > /dev/null
@@ -234,7 +260,8 @@ step_verify_zone_filter() {
   STEP_MODULE="fcp-cli::capabilities::suggest"
   STEP_TEST="zone_filter_narrows_results"
   local filtered_json="${OUT_DIR}/suggest_filtered.json"
-  run_fcp capabilities suggest --json --zone "z:work" > "${filtered_json}"
+  run_fcp_json_logged "${filtered_json}" "${OUT_DIR}/suggest_filtered.execution.log" \
+    capabilities suggest --json --zone "z:work" || return
   local filtered_total unfiltered_total
   filtered_total=$(jq '[.recommendations[]] | length' "${filtered_json}")
   unfiltered_total=$(jq '[.recommendations[]] | length' "${SUGGEST_JSON}")
@@ -251,7 +278,8 @@ step_verify_determinism() {
   STEP_MODULE="fcp-cli::capabilities::suggest"
   STEP_TEST="suggestions_deterministic"
   local run2_json="${OUT_DIR}/suggest_run2.json"
-  run_fcp capabilities suggest --json > "${run2_json}"
+  run_fcp_json_logged "${run2_json}" "${OUT_DIR}/suggest_run2.execution.log" \
+    capabilities suggest --json || return
   # Recommendations should be identical
   local diff_count
   diff_count=$(diff <(jq -S '.recommendations' "${SUGGEST_JSON}") <(jq -S '.recommendations' "${run2_json}") | wc -l || true)
@@ -265,8 +293,8 @@ step_verify_determinism() {
 generate_summary() {
   local total_steps="$1"
   local pass_count fail_count
-  pass_count=$(grep -c '"result":"pass"' "${LOG_JSONL}" || echo "0")
-  fail_count=$(grep -c '"result":"fail"' "${LOG_JSONL}" || echo "0")
+  pass_count=$(grep -c '"result":"pass"' "${LOG_JSONL}" || true)
+  fail_count=$(grep -c '"result":"fail"' "${LOG_JSONL}" || true)
   jq -cn \
     --arg script "${SCRIPT_NAME}" \
     --arg seed "${SEED}" \
@@ -289,10 +317,10 @@ generate_summary() {
 # ---------------------------------------------------------------------------
 main() {
   require_cmd jq
-  require_cmd cargo
+  require_cmd "${RCH_BIN}"
 
-  rm -rf "${OUT_DIR}"
   mkdir -p "${OUT_DIR}"
+  : > "${LOG_JSONL}"
 
   echo "=== Capability Usage -> Suggestion Flow ==="
   echo "  Seed:    ${SEED}"

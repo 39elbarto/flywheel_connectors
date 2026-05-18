@@ -6,6 +6,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/cloudflare_connector/${RUN_ID}}"
 REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+REMOTE_RUNNER="rch:remote-required"
+export RCH_FORCE_REMOTE=1
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
@@ -186,6 +188,7 @@ require_rch_remote_proof() {
 require_cmd jq
 require_cmd rch
 
+manifest_check_runner="${REMOTE_RUNNER}:cargo-run"
 manifest_check_cmd=(
   env
   RCH_VISIBILITY=verbose
@@ -303,14 +306,18 @@ jq -n \
   --arg repo_root "${REPO_ROOT}" \
   --arg verification_script "scripts/e2e/cloudflare_connector_verification.sh" \
   --arg artifact_root "${OUT_ROOT}" \
+  --arg runner "${REMOTE_RUNNER}" \
   --arg toolchain "${REPO_TOOLCHAIN}" \
+  --arg manifest_check_runner "${manifest_check_runner}" \
   '{
     run_id: $run_id,
     connector: $connector,
     repo_root: $repo_root,
     verification_script: $verification_script,
     artifact_root: $artifact_root,
-    toolchain: $toolchain
+    runner: $runner,
+    toolchain: $toolchain,
+    manifest_check_runner: $manifest_check_runner
   }' > "${OUT_ROOT}/environment.json"
 
 {
@@ -318,6 +325,7 @@ jq -n \
   printf '%s\n' 'set -euo pipefail'
   printf '%s\n' ''
   printf '%s\n' "REPO_TOOLCHAIN=\"\${REPO_TOOLCHAIN:-${REPO_TOOLCHAIN}}\""
+  printf '%s\n' 'export RCH_FORCE_REMOTE=1'
   printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo run -q -p fwc -- manifest fix connectors/cloudflare/manifest.toml --check --json"
   printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo check -p fcp-cloudflare"
   printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo fmt --check -p fcp-cloudflare"
@@ -333,6 +341,7 @@ jq -n \
   --arg connector "fcp-cloudflare" \
   --arg overall_status "${OVERALL_STATUS}" \
   --arg artifacts_root "${OUT_ROOT}" \
+  --arg runner "${REMOTE_RUNNER}" \
   --arg manifest_status "${manifest_status}" \
   --arg manifest_note "${manifest_note}" \
   --arg cargo_check "${cargo_check_status}" \
@@ -354,6 +363,7 @@ jq -n \
     run_id: $run_id,
     connector: $connector,
     overall_status: $overall_status,
+    runner: $runner,
     artifacts_root: $artifacts_root,
     steps: {
       manifest_check: {

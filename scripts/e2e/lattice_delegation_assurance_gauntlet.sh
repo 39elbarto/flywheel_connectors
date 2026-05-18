@@ -9,6 +9,7 @@ TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-lattice-assurance-${RUN_ID}}"
 ARTIFACT_STAGE_ROOT="${ARTIFACT_STAGE_ROOT:-${OUT_DIR}/rch-lattice-evidence/${RUN_ID}}"
 LOG_PREFIX="${OUT_DIR}/${RUN_ID}"
 RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
 
 mkdir -p "${OUT_DIR}" "${ARTIFACT_STAGE_ROOT}"
 : > "${ARTIFACT}"
@@ -368,7 +369,7 @@ run_rch_cargo() {
   local display_command="$2"
   shift 2
   run_and_capture "${step}" "${display_command}" \
-    env RCH_VISIBILITY=verbose \
+    env RCH_VISIBILITY=verbose RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" RCH_FORCE_REMOTE=1 \
     "${RCH_BIN}" exec -- env \
       CARGO_TARGET_DIR="${TARGET_DIR}" \
       CARGO_PROFILE_DEV_DEBUG=0 \

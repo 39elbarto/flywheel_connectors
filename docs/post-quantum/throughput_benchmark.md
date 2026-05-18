@@ -434,12 +434,14 @@ an explicit redaction-scan pass record, the expected `SMALL_TEST` and
 separate final artifact SHA printed after the validation record is appended.
 For each `rch exec` lane the JSONL records include the observed `[RCH]` summary,
 worker execution class, and fallback decision. Local fallback and remote-worker
-failure summaries are still recorded in the failure artifact, but they are not
-reusable gauntlet proof: a command that was requested through `rch exec` must
-finish with `worker_execution_class:"remote"` before the script can append a
-passing command record. The gauntlet self-contract requires every command-run
-record, local or `rch`-backed, to carry a stable log artifact,
-`sha256:<64 lowercase hex>` log hash, duration, retry count, fallback decision,
+failure summaries are still recorded in the failure artifact when they occur,
+but the gauntlet sets `RCH_REQUIRE_REMOTE=1` and `RCH_FORCE_REMOTE=1` for every
+Cargo-backed lane so local fallback is refused before expensive Cargo work can
+start. They are not reusable gauntlet proof: a command that was requested
+through `rch exec` must finish with `worker_execution_class:"remote"` before
+the script can append a passing command record. The gauntlet self-contract
+requires every command-run record, local or `rch`-backed, to carry a stable log
+artifact, `sha256:<64 lowercase hex>` log hash, duration, retry count, fallback decision,
 worker execution class, cache decision, cleanup result, and the RCH summary
 field. Non-`rch` command records must report `fallback_decision:"not_needed"`,
 `worker_execution_class:"not_applicable"`, and `rch_summary:null`. Passing

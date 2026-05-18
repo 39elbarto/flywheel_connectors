@@ -294,6 +294,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           "heartbeat_request",
           "reconnect_requested",
           "invalid_session_resumable",
+          "restored_session_reconnect_resume",
           "reconnect_attempts_exhausted",
           "gateway_drain_first_batch",
           "gateway_drain_final_batch",
@@ -433,6 +434,23 @@ if [[ "${overall_status}" == "passed" ]]; then
           and any(.[]; .step == "invalid_session_resumable" and .details.reason_code == "invalid_session_resumable" and .details.runtime.reconnect_attempts == 2)
           and any(.[]; .step == "reconnect_attempts_exhausted" and .details.reason_code == "reconnect_attempts_exhausted" and .details.runtime.max_reconnect_attempts == 1 and .details.runtime.terminal_reconnect_failures == 1 and .details.lifecycle.action == "stop_reconnect")
         ),
+        restore_shape_ok: any(.[];
+          .step == "restored_session_reconnect_resume"
+          and .details.accepted == false
+          and .details.reason_code == "reconnect_requested"
+          and .details.normalized == null
+          and .details.policy == null
+          and .details.lifecycle.action == "reconnect_resume"
+          and (.details.lifecycle.resume_session_id_hash | type) == "string"
+          and (.details.lifecycle.resume_session_id_hash | test("^[0-9a-f]{24}$"))
+          and .details.lifecycle.resume_sequence == 44
+          and .details.lifecycle.reconnect_after_ms == 125
+          and (.details.runtime.session_id_hash | type) == "string"
+          and (.details.runtime.session_id_hash | test("^[0-9a-f]{24}$"))
+          and .details.runtime.last_sequence == 44
+          and .details.runtime.reconnect_attempts == 1
+          and .details.runtime.terminal_reconnect_failures == 0
+        ),
         drain_shape_ok: (
           any(.[]; .step == "gateway_drain_first_batch" and .details.drained_count == 2 and .details.remaining_count == 1)
           and any(.[]; .step == "gateway_drain_final_batch" and .details.drained_count == 1 and .details.remaining_count == 0 and .details.runtime.queue_depth == 0)
@@ -448,7 +466,7 @@ if [[ "${overall_status}" == "passed" ]]; then
       } as $v
       | $v
       | .status = (
-          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.log_start_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.c2c_shape_ok and $v.queue_shape_ok and $v.group_policy_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok)
+          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.log_start_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.c2c_shape_ok and $v.queue_shape_ok and $v.group_policy_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.restore_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok)
           then "passed"
           else "failed"
           end
@@ -487,6 +505,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "provider_body" \
     "test-secret" \
     "session-1" \
+    "restored-session" \
     "hello-1" \
     "evt-accepted" \
     "evt-untyped-message-id" \
@@ -514,6 +533,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "evt-stale-sequence" \
     "evt-reconnect-requested" \
     "evt-invalid-session" \
+    "evt-restored-reconnect" \
     "evt-reconnect-cap-first" \
     "evt-reconnect-exhausted" \
     "evt-after-shutdown" \

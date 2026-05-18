@@ -1671,6 +1671,71 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         &invalid_session,
     );
 
+    let restored_instance_id = InstanceId::new();
+    let mut restored_connector = QqConnector::new();
+    restored_connector
+        .configure(json!({
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999",
+            "app_id": "qq-app",
+            "client_secret": "test-secret",
+            "gateway": {
+                "enabled": true,
+                "restore_session_id": "restored-session",
+                "restore_sequence": 44,
+                "reconnect_backoff_ms": 125,
+                "max_reconnect_backoff_ms": 500,
+                "max_reconnect_attempts": 3,
+                "policy": {
+                    "group_require_mention": false
+                }
+            }
+        }))
+        .await
+        .expect("configure restored session QQ connector");
+    restored_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            restored_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake restored session QQ connector");
+    let restored_reconnect = invoke_projection(
+        &restored_connector,
+        &signing_key,
+        &restored_instance_id,
+        "qq-gateway-restored-reconnect",
+        json!({
+            "op": 7,
+            "id": "evt-restored-reconnect"
+        }),
+    )
+    .await;
+    assert_eq!(restored_reconnect["accepted"], false);
+    assert_eq!(restored_reconnect["reason_code"], "reconnect_requested");
+    assert_eq!(
+        restored_reconnect["lifecycle"]["action"],
+        "reconnect_resume"
+    );
+    assert_eq!(
+        restored_reconnect["lifecycle"]["resume_session_id"],
+        "restored-session"
+    );
+    assert_eq!(restored_reconnect["lifecycle"]["resume_sequence"], 44);
+    assert_eq!(restored_reconnect["lifecycle"]["reconnect_after_ms"], 125);
+    assert_eq!(
+        restored_reconnect["runtime"]["session_id"],
+        "restored-session"
+    );
+    assert_eq!(restored_reconnect["runtime"]["last_sequence"], 44);
+    assert_eq!(restored_reconnect["runtime"]["reconnect_attempts"], 1);
+    log_projection_step(
+        &mut logs,
+        "restored_session_reconnect_resume",
+        "ok",
+        &restored_reconnect,
+    );
+
     let reconnect_cap_instance_id = InstanceId::new();
     let mut reconnect_cap_connector = QqConnector::new();
     reconnect_cap_connector
@@ -1918,6 +1983,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "provider_body",
         "test-secret",
         "session-1",
+        "restored-session",
         "hello-1",
         "evt-accepted",
         "evt-untyped-message-id",
@@ -1943,6 +2009,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-stale-sequence",
         "evt-reconnect-requested",
         "evt-invalid-session",
+        "evt-restored-reconnect",
         "evt-reconnect-cap-first",
         "evt-reconnect-exhausted",
         "evt-after-shutdown",

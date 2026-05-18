@@ -3875,6 +3875,48 @@ mod tests {
     }
 
     #[test]
+    fn gateway_runtime_reconnect_uses_restored_session_and_sequence() {
+        let mut runtime = QqGatewayRuntime::new(QqGatewayRuntimeConfig {
+            enabled: true,
+            restore_session_id: Some("restored-session".into()),
+            restore_sequence: Some(44),
+            reconnect_backoff_ms: 125,
+            max_reconnect_backoff_ms: 500,
+            max_reconnect_attempts: 3,
+            ..QqGatewayRuntimeConfig::default()
+        });
+
+        let reconnect = runtime
+            .project_event(QqGatewayEvent {
+                op: 7,
+                s: None,
+                t: None,
+                d: None,
+                id: Some("evt-restored-reconnect".into()),
+            })
+            .unwrap();
+
+        assert_eq!(reconnect.reason_code, "reconnect_requested");
+        assert_eq!(
+            reconnect.lifecycle.action,
+            QQ_GATEWAY_ACTION_RECONNECT_RESUME
+        );
+        assert_eq!(
+            reconnect.lifecycle.resume_session_id.as_deref(),
+            Some("restored-session")
+        );
+        assert_eq!(reconnect.lifecycle.resume_sequence, 44);
+        assert_eq!(reconnect.lifecycle.reconnect_after_ms, Some(125));
+        assert_eq!(
+            reconnect.runtime.session_id.as_deref(),
+            Some("restored-session")
+        );
+        assert_eq!(reconnect.runtime.last_sequence, 44);
+        assert_eq!(reconnect.runtime.reconnect_attempts, 1);
+        assert_eq!(reconnect.runtime.terminal_reconnect_failures, 0);
+    }
+
+    #[test]
     fn gateway_runtime_caps_reconnect_backoff_delay() {
         let mut runtime = QqGatewayRuntime::new(QqGatewayRuntimeConfig {
             enabled: true,

@@ -28,6 +28,21 @@ pub const EXACT_OVERLAP_PROVIDER_IDS: &[&str] = &[
     "tavily",
 ];
 
+/// Architectural provider overlap named by the broad OpenClaw/Hermes parity plan.
+///
+/// These providers are not part of the first exact-name migration pass, but the
+/// plan tracks them as adjacent SDK/setup/model-catalog surfaces that should use
+/// the same provider-contract proof obligations when their connector slices move.
+pub const ADJACENT_OVERLAP_PROVIDER_IDS: &[&str] = &[
+    "deepseek",
+    "groq",
+    "ollama",
+    "perplexity-search",
+    "qwen",
+    "together",
+    "xai",
+];
+
 /// One actionable provider-contract failure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderContractViolation {
@@ -1127,6 +1142,8 @@ fn is_provider_id(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use serde_json::json;
 
     use super::*;
@@ -1345,18 +1362,35 @@ mod tests {
     }
 
     #[test]
-    fn exact_overlap_provider_targets_are_stable_and_unique() {
+    fn overlap_provider_targets_are_stable_unique_and_connector_backed() {
         let values = EXACT_OVERLAP_PROVIDER_IDS
             .iter()
+            .chain(ADJACENT_OVERLAP_PROVIDER_IDS)
             .map(|value| (*value).to_owned())
             .collect::<Vec<_>>();
         let mut sorted = values.clone();
         sorted.sort();
         sorted.dedup();
 
-        assert_eq!(values.len(), 10);
+        assert_eq!(EXACT_OVERLAP_PROVIDER_IDS.len(), 10);
+        assert_eq!(ADJACENT_OVERLAP_PROVIDER_IDS.len(), 7);
         assert_eq!(values.len(), sorted.len());
         assert!(values.contains(&"openai".to_owned()));
         assert!(values.contains(&"tavily".to_owned()));
+        assert!(values.contains(&"deepseek".to_owned()));
+        assert!(values.contains(&"xai".to_owned()));
+
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for provider_id in values {
+            let manifest = workspace_root
+                .join("connectors")
+                .join(&provider_id)
+                .join("manifest.toml");
+            assert!(
+                manifest.is_file(),
+                "OpenClaw/Hermes provider parity target `{provider_id}` must map to a connector manifest at {}",
+                manifest.display()
+            );
+        }
     }
 }

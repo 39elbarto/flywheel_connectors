@@ -3810,6 +3810,67 @@ fn fmt_prewarm_command_target_dir_mismatch(
     )
 }
 
+fn fmt_prewarm_measurement_error(
+    err: &SwarmPrewarmColdStartEvidenceError,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    match err {
+        SwarmPrewarmColdStartEvidenceError::MissingLatencyMeasurement => {
+            write!(f, "swarm prewarm latency measurement is missing")
+        }
+        SwarmPrewarmColdStartEvidenceError::InvalidLatencyPercentiles => {
+            write!(f, "swarm prewarm latency percentiles are invalid")
+        }
+        SwarmPrewarmColdStartEvidenceError::LatencyRegression {
+            activation_ms,
+            baseline_ms,
+        } => write!(
+            f,
+            "swarm prewarm activation latency {activation_ms} exceeds baseline {baseline_ms}"
+        ),
+        SwarmPrewarmColdStartEvidenceError::MissingProductionImprovement {
+            scenario_id,
+            percentile,
+            activation_ms,
+            baseline_ms,
+        } => write!(
+            f,
+            "swarm prewarm production scenario '{scenario_id}' requires positive {percentile} improvement, got activation {activation_ms} and baseline {baseline_ms}"
+        ),
+        SwarmPrewarmColdStartEvidenceError::ShutdownCleanupUnverified {
+            scenario_id,
+            cleanup_result,
+        } => write!(
+            f,
+            "swarm prewarm scenario '{scenario_id}' requires verified shutdown cleanup, got '{cleanup_result}'"
+        ),
+        SwarmPrewarmColdStartEvidenceError::InvalidCleanupResult {
+            scenario_id,
+            cleanup_result,
+        } => write!(
+            f,
+            "swarm prewarm scenario '{scenario_id}' requires cleanup_result='verified', got '{cleanup_result}'"
+        ),
+        SwarmPrewarmColdStartEvidenceError::PrivateCargoTargetDirClass {
+            cargo_target_dir_class,
+        } => write!(
+            f,
+            "swarm prewarm cargo target directory class must be export-safe, got '{cargo_target_dir_class}'"
+        ),
+        SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker { field, marker } => write!(
+            f,
+            "swarm prewarm field '{field}' contains unredacted marker '{marker}'"
+        ),
+        SwarmPrewarmColdStartEvidenceError::MissingResourceMeasurement { field } => {
+            write!(f, "swarm prewarm resource field '{field}' is missing")
+        }
+        SwarmPrewarmColdStartEvidenceError::EmptyConcurrentStartupCount => {
+            write!(f, "swarm prewarm concurrent startup count is zero")
+        }
+        _ => unreachable!("prewarm measurement formatter called with structural error"),
+    }
+}
+
 impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -3867,58 +3928,16 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
                 f,
                 "swarm prewarm admission decision '{decision}' is inconsistent: {reason}"
             ),
-            Self::MissingLatencyMeasurement => {
-                write!(f, "swarm prewarm latency measurement is missing")
-            }
-            Self::InvalidLatencyPercentiles => {
-                write!(f, "swarm prewarm latency percentiles are invalid")
-            }
-            Self::LatencyRegression {
-                activation_ms,
-                baseline_ms,
-            } => write!(
-                f,
-                "swarm prewarm activation latency {activation_ms} exceeds baseline {baseline_ms}"
-            ),
-            Self::MissingProductionImprovement {
-                scenario_id,
-                percentile,
-                activation_ms,
-                baseline_ms,
-            } => write!(
-                f,
-                "swarm prewarm production scenario '{scenario_id}' requires positive {percentile} improvement, got activation {activation_ms} and baseline {baseline_ms}"
-            ),
-            Self::ShutdownCleanupUnverified {
-                scenario_id,
-                cleanup_result,
-            } => write!(
-                f,
-                "swarm prewarm scenario '{scenario_id}' requires verified shutdown cleanup, got '{cleanup_result}'"
-            ),
-            Self::InvalidCleanupResult {
-                scenario_id,
-                cleanup_result,
-            } => write!(
-                f,
-                "swarm prewarm scenario '{scenario_id}' requires cleanup_result='verified', got '{cleanup_result}'"
-            ),
-            Self::PrivateCargoTargetDirClass {
-                cargo_target_dir_class,
-            } => write!(
-                f,
-                "swarm prewarm cargo target directory class must be export-safe, got '{cargo_target_dir_class}'"
-            ),
-            Self::SensitiveRedactionMarker { field, marker } => write!(
-                f,
-                "swarm prewarm field '{field}' contains unredacted marker '{marker}'"
-            ),
-            Self::MissingResourceMeasurement { field } => {
-                write!(f, "swarm prewarm resource field '{field}' is missing")
-            }
-            Self::EmptyConcurrentStartupCount => {
-                write!(f, "swarm prewarm concurrent startup count is zero")
-            }
+            Self::MissingLatencyMeasurement
+            | Self::InvalidLatencyPercentiles
+            | Self::LatencyRegression { .. }
+            | Self::MissingProductionImprovement { .. }
+            | Self::ShutdownCleanupUnverified { .. }
+            | Self::InvalidCleanupResult { .. }
+            | Self::PrivateCargoTargetDirClass { .. }
+            | Self::SensitiveRedactionMarker { .. }
+            | Self::MissingResourceMeasurement { .. }
+            | Self::EmptyConcurrentStartupCount => fmt_prewarm_measurement_error(self, f),
         }
     }
 }

@@ -150,7 +150,10 @@ operator's local source path. In provided-evidence mode, the test log records
 only a `sha256:<64 lowercase hex>` fingerprint for the input path and is scanned
 for the same private-path markers before the verifier exits. Both metadata JSON
 files are scanned for the same secret and private-path markers as the evidence
-rows before the verifier exits.
+rows before the verifier exits. The verifier resolves the checkout revision
+with a per-command Git safe-directory override, so NFS or shared-owner
+checkouts still emit a concrete git revision without changing global Git
+configuration.
 The verifier and typed serializer both require positive p50, p95, and p99
 improvement deltas for production-soak warm-hit, shutdown-cleanup, and
 concurrent-swarm-startup promotion scenarios; fallback and rejection scenarios

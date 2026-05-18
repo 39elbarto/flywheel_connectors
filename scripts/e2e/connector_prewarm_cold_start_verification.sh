@@ -245,7 +245,10 @@ SUMMARY_JSON="${OUT_ROOT}/summary.json"
 ENVIRONMENT_JSON="${OUT_ROOT}/environment.json"
 REPLAY_SH="${OUT_ROOT}/replay.sh"
 
-git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+git_revision="$(
+  git -C "${REPO_ROOT}" -c "safe.directory=${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null \
+    || echo unknown
+)"
 target_dir="${PREWARM_CARGO_TARGET_DIR:-/tmp/fcp-prewarm-cold-start-${RUN_ID}}"
 test_status="passed"
 evidence_status="passed"

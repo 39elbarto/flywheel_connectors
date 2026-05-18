@@ -1159,18 +1159,45 @@ fn attachment_policy_denial(
 }
 
 fn canonical_attachment_content_type(raw: &str) -> Option<String> {
+    if raw.chars().any(|ch| ch.is_ascii_control()) {
+        return None;
+    }
     let media_type = raw.split(';').next()?.trim();
-    if media_type.is_empty()
-        || !media_type
-            .split_once('/')
-            .is_some_and(|(kind, subtype)| !kind.is_empty() && !subtype.is_empty())
-        || media_type
-            .chars()
-            .any(|ch| ch.is_ascii_control() || ch.is_ascii_whitespace())
+    let (kind, subtype) = media_type.split_once('/')?;
+    if kind.is_empty()
+        || subtype.is_empty()
+        || subtype.contains('/')
+        || !kind.chars().all(is_mime_token_char)
+        || !subtype.chars().all(is_mime_token_char)
     {
         return None;
     }
-    Some(media_type.to_ascii_lowercase())
+    Some(format!(
+        "{}/{}",
+        kind.to_ascii_lowercase(),
+        subtype.to_ascii_lowercase()
+    ))
+}
+
+const fn is_mime_token_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric()
+        || matches!(
+            ch,
+            '!' | '#'
+                | '$'
+                | '%'
+                | '&'
+                | '\''
+                | '*'
+                | '+'
+                | '-'
+                | '.'
+                | '^'
+                | '_'
+                | '`'
+                | '|'
+                | '~'
+        )
 }
 
 fn validate_host(raw: &str, allowed_hosts: &[&str]) -> QqResult<()> {
@@ -1922,16 +1949,48 @@ mod tests {
 
     #[test]
     fn rejects_noncanonical_attachment_content_type_allowlist() {
-        let mut config = localhost_config();
-        config.gateway.policy.allowed_attachment_content_types =
-            vec!["image/png; charset=utf-8".into()];
-        let error =
-            QqClient::new(config).expect_err("parameterized content type should fail config");
-        assert!(
-            error
-                .to_string()
-                .contains("allowed_attachment_content_types")
+        for content_type in [
+            "image/png; charset=utf-8",
+            "image/png/extra",
+            "image/pn@g",
+            "image/(png)",
+            "text/plain,application/json",
+        ] {
+            let mut config = localhost_config();
+            config.gateway.policy.allowed_attachment_content_types = vec![content_type.into()];
+            let error = QqClient::new(config).expect_err("invalid content type should fail config");
+            assert!(
+                error
+                    .to_string()
+                    .contains("allowed_attachment_content_types"),
+                "{content_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_attachment_content_type_enforces_token_syntax() {
+        assert_eq!(
+            canonical_attachment_content_type("IMAGE/PNG; charset=binary").as_deref(),
+            Some("image/png")
         );
+        assert_eq!(
+            canonical_attachment_content_type("application/vnd.qq+json").as_deref(),
+            Some("application/vnd.qq+json")
+        );
+
+        for content_type in [
+            "image/png/extra",
+            "image/pn@g",
+            "image/(png)",
+            "image/png\n",
+            "text/plain,application/json",
+        ] {
+            assert!(
+                canonical_attachment_content_type(content_type).is_none(),
+                "{content_type}"
+            );
+        }
     }
 
     #[test]
@@ -3591,6 +3650,29 @@ mod tests {
         assert!(uncapped.accepted);
     }
 
+    fn group_attachment_gateway_event(
+        sequence: u64,
+        message_id: &str,
+        event_id: &str,
+        content: &str,
+        attachment: Value,
+    ) -> QqGatewayEvent {
+        let attachments = vec![attachment];
+        QqGatewayEvent {
+            op: 0,
+            s: Some(sequence),
+            t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+            d: Some(json!({
+                "id": message_id,
+                "content": content,
+                "group_openid": "group-1",
+                "group_member_openid": "member-1",
+                "attachments": attachments
+            })),
+            id: Some(event_id.into()),
+        }
+    }
+
     #[test]
     fn gateway_runtime_enforces_attachment_content_type_policy() {
         let mut config = QqGatewayRuntimeConfig {
@@ -3602,25 +3684,17 @@ mod tests {
         let mut runtime = QqGatewayRuntime::new(config);
 
         let allowed = runtime
-            .project_event(QqGatewayEvent {
-                op: 0,
-                s: Some(1),
-                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
-                d: Some(json!({
-                    "id": "msg-attachment-type-ok",
-                    "content": "bot see png",
-                    "group_openid": "group-1",
-                    "group_member_openid": "member-1",
-                    "attachments": [
-                        {
-                            "url": "https://example.com/allowed.png",
-                            "content_type": "IMAGE/PNG; charset=binary",
-                            "size": 1024
-                        }
-                    ]
-                })),
-                id: Some("evt-attachment-type-ok".into()),
-            })
+            .project_event(group_attachment_gateway_event(
+                1,
+                "msg-attachment-type-ok",
+                "evt-attachment-type-ok",
+                "bot see png",
+                json!({
+                    "url": "https://example.com/allowed.png",
+                    "content_type": "IMAGE/PNG; charset=binary",
+                    "size": 1024
+                }),
+            ))
             .unwrap();
         assert!(allowed.accepted);
         assert_eq!(
@@ -3629,25 +3703,17 @@ mod tests {
         );
 
         let disallowed = runtime
-            .project_event(QqGatewayEvent {
-                op: 0,
-                s: Some(2),
-                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
-                d: Some(json!({
-                    "id": "msg-attachment-type-denied",
-                    "content": "bot see exe",
-                    "group_openid": "group-1",
-                    "group_member_openid": "member-1",
-                    "attachments": [
-                        {
-                            "url": "https://example.com/denied.exe",
-                            "content_type": "application/x-msdownload",
-                            "size": 1024
-                        }
-                    ]
-                })),
-                id: Some("evt-attachment-type-denied".into()),
-            })
+            .project_event(group_attachment_gateway_event(
+                2,
+                "msg-attachment-type-denied",
+                "evt-attachment-type-denied",
+                "bot see exe",
+                json!({
+                    "url": "https://example.com/denied.exe",
+                    "content_type": "application/x-msdownload",
+                    "size": 1024
+                }),
+            ))
             .unwrap();
         assert!(!disallowed.accepted);
         assert_eq!(
@@ -3660,27 +3726,35 @@ mod tests {
         );
 
         let missing = runtime
-            .project_event(QqGatewayEvent {
-                op: 0,
-                s: Some(3),
-                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
-                d: Some(json!({
-                    "id": "msg-attachment-type-missing",
-                    "content": "bot see unknown",
-                    "group_openid": "group-1",
-                    "group_member_openid": "member-1",
-                    "attachments": [
-                        {
-                            "url": "https://example.com/unknown.bin",
-                            "size": 1024
-                        }
-                    ]
-                })),
-                id: Some("evt-attachment-type-missing".into()),
-            })
+            .project_event(group_attachment_gateway_event(
+                3,
+                "msg-attachment-type-missing",
+                "evt-attachment-type-missing",
+                "bot see unknown",
+                json!({
+                    "url": "https://example.com/unknown.bin",
+                    "size": 1024
+                }),
+            ))
             .unwrap();
         assert!(!missing.accepted);
         assert_eq!(missing.reason_code, "attachment_content_type_missing");
+
+        let malformed = runtime
+            .project_event(group_attachment_gateway_event(
+                4,
+                "msg-attachment-type-malformed",
+                "evt-attachment-type-malformed",
+                "bot see malformed",
+                json!({
+                    "url": "https://example.com/malformed.png",
+                    "content_type": "image/png/extra",
+                    "size": 1024
+                }),
+            ))
+            .unwrap();
+        assert!(!malformed.accepted);
+        assert_eq!(malformed.reason_code, "attachment_content_type_missing");
     }
 
     #[test]

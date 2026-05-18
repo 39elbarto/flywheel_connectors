@@ -2,6 +2,7 @@
 
 > **Status**: planning contract
 > **Bead**: `flywheel_connectors-j05nu.4.2.1`
+> **Verification script**: `scripts/e2e/circleci_connector_verification.sh`
 > **Unblocks**: `flywheel_connectors-j05nu.4.2.2`
 > **Primary upstreams**:
 > - https://circleci.com/docs/guides/toolkit/api-developers-guide/
@@ -133,6 +134,24 @@ These are excluded on purpose:
 ## Live Verification Bundle
 
 Verification script: `scripts/e2e/circleci_connector_verification.sh`
+
+The tracked deterministic verifier runs the CircleCI crate check, formatting
+check, local no-mock test, full connector test suite, clippy, and a redaction
+scan over its JSONL/log artifacts. The script requires accepted `rch` remote
+worker execution for each Cargo step; local fallback is classified as
+`infra_blocked` rather than proof.
+
+`connectors/circleci/tests/local_non_mock.rs` covers the production connector boundary against a raw TCP loopback CircleCI API fixture. It exercises `circleci.projects.list`, `circleci.pipelines.list`, `circleci.pipelines.trigger`, `circleci.health`, `Circle-Token` forwarding, trigger parameter body preservation, `429 Retry-After` mapping, and redaction-safe evidence logs without live CircleCI credentials.
+
+Focused proof for this connector:
+
+```bash
+OUT_ROOT=/tmp/fcp-circleci-e2e bash scripts/e2e/circleci_connector_verification.sh
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-circleci-readme cargo test -p fcp-circleci --test local_non_mock -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-circleci-readme cargo test -p fcp-circleci -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-circleci-readme cargo clippy -p fcp-circleci --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-circleci-readme cargo fmt -p fcp-circleci -- --check
+```
 
 The live suite is sandbox-required and must gated-skip unless `FCP_LIVE_SANDBOX=1`
 is set with all of these values:

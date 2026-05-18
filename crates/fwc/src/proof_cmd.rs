@@ -852,11 +852,10 @@ fn build_rch_capacity_report(
         }
         if blocker_reason != RchRemoteProofBlockerReason::LocalFallbackRefused
             && let Some(summary) = RchRemoteProofSummary::parse_final_summary_line(line)
+            && summary.location == RchRemoteProofSummaryLocation::Remote
         {
-            if summary.location == RchRemoteProofSummaryLocation::Remote {
-                selected_worker = summary.worker_id.or(selected_worker);
-                admissible_workers = admissible_workers.max(1);
-            }
+            selected_worker = summary.worker_id.or(selected_worker);
+            admissible_workers = admissible_workers.max(1);
         }
     }
 
@@ -1152,11 +1151,11 @@ fn max_usize_for_keys(value: &Value, keys: &[&str]) -> usize {
         Value::Object(map) => map
             .iter()
             .map(|(key, child)| {
-                let own = keys
-                    .iter()
-                    .any(|wanted| key.replace('-', "_") == *wanted)
-                    .then(|| value_usize(child))
-                    .unwrap_or(0);
+                let own = if keys.iter().any(|wanted| key.replace('-', "_") == *wanted) {
+                    value_usize(child)
+                } else {
+                    0
+                };
                 own.max(max_usize_for_keys(child, keys))
             })
             .max()

@@ -44,9 +44,18 @@ validate_out_dir() {
   fi
 }
 
+validate_artifact_stage_root() {
+  local expected_stage_root="${OUT_DIR}/rch-lattice-evidence/${RUN_ID}"
+  if [ "${ARTIFACT_STAGE_ROOT}" != "${expected_stage_root}" ]; then
+    printf 'invalid ARTIFACT_STAGE_ROOT: assurance gauntlet staged evidence must use %s\n' "${expected_stage_root}" >&2
+    exit 64
+  fi
+}
+
 validate_run_id
 validate_artifact_path
 validate_out_dir
+validate_artifact_stage_root
 mkdir -p "${OUT_DIR}" "${ARTIFACT_STAGE_ROOT}"
 : > "${ARTIFACT}"
 

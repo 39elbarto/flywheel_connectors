@@ -106,6 +106,23 @@ rch_bin_path_redacted() {
   esac
 }
 
+evidence_jsonl_in_path_redacted() {
+  if [[ -n "${EVIDENCE_JSONL_IN}" ]]; then
+    printf 'true'
+  else
+    printf 'false'
+  fi
+}
+
+json_null_or_sha256() {
+  local value="$1"
+  if [[ -n "${value}" ]]; then
+    jq -n --arg hash "sha256:$(hash_text_sha256 "${value}")" '$hash'
+  else
+    printf 'null'
+  fi
+}
+
 cargo_target_dir_class() {
   local path="$1"
   case "${path}" in
@@ -767,10 +784,12 @@ fi
 jq -n \
   --arg run_id "${RUN_ID}" \
   --arg script "scripts/e2e/connector_prewarm_cold_start_verification.sh" \
-  --arg repo_root "${REPO_ROOT}" \
-  --arg artifact_root "${OUT_ROOT}" \
+  --arg repo_root_hash "sha256:$(hash_text_sha256 "${REPO_ROOT}")" \
+  --arg artifact_root_class "$(cargo_target_dir_class "${OUT_ROOT}")" \
+  --arg artifact_root_hash "sha256:$(hash_text_sha256 "${OUT_ROOT}")" \
   --arg git_revision "${git_revision}" \
-  --arg target_dir "${target_dir}" \
+  --arg cargo_target_dir_class "$(cargo_target_dir_class "${target_dir}")" \
+  --arg cargo_target_dir_hash "sha256:$(hash_text_sha256 "${target_dir}")" \
   --arg rch_bin "$(display_rch_bin)" \
   --arg rch_bin_hash "sha256:$(hash_text_sha256 "${RCH_BIN}")" \
   --argjson rch_bin_path_redacted "$(rch_bin_path_redacted)" \
@@ -779,16 +798,20 @@ jq -n \
   --arg remote_proof_status "${remote_proof_status}" \
   --arg remote_proof_reason "${remote_proof_reason}" \
   --arg remote_proof_summary "${remote_proof_summary}" \
-  --arg evidence_jsonl_in "${EVIDENCE_JSONL_IN}" \
+  --argjson evidence_jsonl_in_hash "$(json_null_or_sha256 "${EVIDENCE_JSONL_IN}")" \
+  --argjson evidence_jsonl_in_path_redacted "$(evidence_jsonl_in_path_redacted)" \
   --argjson require_production_soak "${require_production_soak_json}" \
   --arg generated_at "$(now_iso)" \
   '{
     run_id: $run_id,
     script: $script,
-    repo_root: $repo_root,
-    artifact_root: $artifact_root,
+    repo_root_redacted: true,
+    repo_root_hash: $repo_root_hash,
+    artifact_root_class: $artifact_root_class,
+    artifact_root_hash: $artifact_root_hash,
     git_revision: $git_revision,
-    cargo_target_dir: $target_dir,
+    cargo_target_dir_class: $cargo_target_dir_class,
+    cargo_target_dir_hash: $cargo_target_dir_hash,
     rch_bin: $rch_bin,
     rch_bin_hash: $rch_bin_hash,
     rch_bin_path_redacted: $rch_bin_path_redacted,
@@ -799,10 +822,19 @@ jq -n \
       reason: (if ($remote_proof_reason | length) > 0 then $remote_proof_reason else null end),
       rch_summary: (if ($remote_proof_summary | length) > 0 then $remote_proof_summary else null end)
     },
-    evidence_jsonl_in: (if ($evidence_jsonl_in | length) > 0 then $evidence_jsonl_in else null end),
+    evidence_jsonl_in_path_redacted: $evidence_jsonl_in_path_redacted,
+    evidence_jsonl_in_hash: $evidence_jsonl_in_hash,
     require_production_soak: $require_production_soak,
     generated_at: $generated_at
   }' > "${ENVIRONMENT_JSON}"
+
+if grep -aEi "$(redaction_pattern)" "${ENVIRONMENT_JSON}" >/dev/null; then
+  redaction_status="failed"
+  overall_status="failed"
+  validation_status="failed"
+  mark_validation_redaction_failed "metadata_secret_or_private_path_marker"
+  exit_code=1
+fi
 
 evidence_count="0"
 if [[ -s "${EVIDENCE_JSONL}" ]]; then
@@ -821,11 +853,6 @@ jq -n \
   --arg remote_proof_summary "${remote_proof_summary}" \
   --arg skip_reason "${skip_reason}" \
   --argjson evidence_count "${evidence_count}" \
-  --arg test_log "${TEST_LOG}" \
-  --arg evidence_jsonl "${EVIDENCE_JSONL}" \
-  --arg validation_json "${VALIDATION_JSON}" \
-  --arg skip_jsonl "${SKIP_JSONL}" \
-  --arg environment_json "${ENVIRONMENT_JSON}" \
   --argjson require_production_soak "${require_production_soak_json}" \
   '{
     run_id: $run_id,
@@ -841,13 +868,21 @@ jq -n \
     skip_reason: (if ($skip_reason | length) > 0 then $skip_reason else null end),
     evidence_count: $evidence_count,
     artifacts: {
-      test_log: $test_log,
-      evidence_jsonl: $evidence_jsonl,
-      validation_json: $validation_json,
-      skip_jsonl: $skip_jsonl,
-      environment_json: $environment_json
+      test_log: "logs/prewarm-cold-start-test.log",
+      evidence_jsonl: "evidence/prewarm-cold-start.jsonl",
+      validation_json: "evidence/validation.json",
+      skip_jsonl: "evidence/prewarm-cold-start-skip.jsonl",
+      environment_json: "environment.json"
     }
   }' > "${SUMMARY_JSON}"
+
+if grep -aEi "$(redaction_pattern)" "${SUMMARY_JSON}" >/dev/null; then
+  redaction_status="failed"
+  overall_status="failed"
+  validation_status="failed"
+  mark_validation_redaction_failed "metadata_secret_or_private_path_marker"
+  exit_code=1
+fi
 
 {
   printf '%s\n' '#!/usr/bin/env bash'

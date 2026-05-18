@@ -127,7 +127,13 @@ evidence bundles cannot be stitched from duplicate scenario records. The
 environment metadata records only the selected `RCH_BIN` basename plus a
 `sha256:<64 lowercase hex>` fingerprint of the configured value; private patched
 binary paths are redacted from the evidence JSON while `replay.sh` keeps the
-local rerun command for the operator who produced the bundle. The
+local rerun command for the operator who produced the bundle. The metadata
+artifacts follow the same rule for repository root, artifact root,
+`CARGO_TARGET_DIR`, and provided-evidence input paths: `environment.json` stores
+classes and `sha256:<64 lowercase hex>` fingerprints instead of absolute paths,
+and `summary.json` names bundle artifacts by relative path only. Both metadata
+JSON files are scanned for the same secret and private-path markers as the
+evidence rows before the verifier exits. The
 verifier and typed serializer both require positive p50, p95, and p99
 improvement deltas for production-soak warm-hit, shutdown-cleanup, and
 concurrent-swarm-startup promotion scenarios; fallback and rejection scenarios

@@ -6,6 +6,9 @@ RUN_ID="${RUN_ID:-lattice-delegation-formal-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_DIR="${OUT_DIR:-target/fcp-crypto-pq}"
 ARTIFACT="${ARTIFACT:-${OUT_DIR}/lattice-delegation-formal-correspondence-proof.${RUN_ID}.jsonl}"
 TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-lattice-formal-${RUN_ID}}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+export RCH_FORCE_REMOTE=1
 
 mkdir -p "${OUT_DIR}"
 : > "${ARTIFACT}"
@@ -72,12 +75,50 @@ require_text() {
   fi
 }
 
+rch_remote_summary_present() {
+  local execution_log="$1"
+
+  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
+    return 0
+  fi
+
+  if grep -Eq '^\[RCH\].*(local|refusing local fallback|no admissible workers)' "${execution_log}"; then
+    echo "Missing accepted remote rch summary in ${execution_log}" >&2
+    echo "rch remote proof is required; refusing local fallback" >&2
+    return 2
+  fi
+
+  grep -Eq '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}" && return 0
+
+  echo "Missing accepted remote rch summary in ${execution_log}" >&2
+  echo "rch remote proof is required; refusing local fallback" >&2
+  return 2
+}
+
 run_and_capture() {
   local step="$1"
   shift
   local log="${OUT_DIR}/${RUN_ID}.${step}.log"
+  local require_remote_summary=0
+  if [[ "${1:-}" == "${RCH_BIN}" ]]; then
+    require_remote_summary=1
+  fi
   assert_stable_revision "stable_revision_before_${step}"
   if "$@" >"${log}" 2>&1; then
+    if (( require_remote_summary )); then
+      local remote_error=""
+      if ! remote_error="$(rch_remote_summary_present "${log}" 2>&1)"; then
+        printf '%s\n' "${remote_error}" >> "${log}"
+        local hash
+        hash="$(shasum -a 256 "${log}" | awk '{print $1}')"
+        fail_step "${step}" "$(jq -cn \
+          --arg log_hash "sha256:${hash}" \
+          --arg log_artifact_class "relative-target-log" \
+          --arg remote_error "${remote_error}" \
+          --arg cleanup_result "not_applicable" \
+          '{log_hash:$log_hash,log_artifact_class:$log_artifact_class,remote_error:$remote_error,cleanup_result:$cleanup_result}')"
+      fi
+    fi
     local hash
     hash="$(shasum -a 256 "${log}" | awk '{print $1}')"
     assert_stable_revision "stable_revision_after_${step}"
@@ -242,12 +283,13 @@ else
     '{skip_reason:"lake_not_available",cleanup_result:"not_applicable"}')"
 fi
 
-if ! command -v rch >/dev/null 2>&1; then
-  fail_step "prerequisite_rch" "$(jq -cn '{missing:"rch",cleanup_result:"not_applicable"}')"
+if ! command -v "${RCH_BIN}" >/dev/null 2>&1; then
+  fail_step "prerequisite_rch" "$(jq -cn --arg missing "${RCH_BIN}" \
+    '{missing:$missing,cleanup_result:"not_applicable"}')"
 fi
 
 run_and_capture "rust_crypto_correspondence" \
-  rch exec -- env \
+  "${RCH_BIN}" exec -- env \
     CARGO_TARGET_DIR="${TARGET_DIR}" \
     CARGO_PROFILE_DEV_DEBUG=0 \
     CARGO_PROFILE_TEST_DEBUG=0 \
@@ -259,7 +301,7 @@ run_and_capture "rust_crypto_correspondence" \
       lean_sis_assumption_boundary_correspondence_fixture_jsonl_is_secret_free -- --nocapture
 
 run_and_capture "rust_policy_correspondence" \
-  rch exec -- env \
+  "${RCH_BIN}" exec -- env \
     CARGO_TARGET_DIR="${TARGET_DIR}" \
     CARGO_PROFILE_DEV_DEBUG=0 \
     CARGO_PROFILE_TEST_DEBUG=0 \
@@ -271,7 +313,7 @@ run_and_capture "rust_policy_correspondence" \
       lattice_delegation_formal_correspondence_fixture_jsonl_is_secret_free -- --nocapture
 
 run_and_capture "rust_crypto_existing_v4" \
-  rch exec -- env \
+  "${RCH_BIN}" exec -- env \
     CARGO_TARGET_DIR="${TARGET_DIR}" \
     CARGO_PROFILE_DEV_DEBUG=0 \
     CARGO_PROFILE_TEST_DEBUG=0 \

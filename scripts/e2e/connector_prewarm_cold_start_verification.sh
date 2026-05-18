@@ -254,6 +254,8 @@ if [[ "${overall_status}" == "passed" ]]; then
         (.[$key] | type) == "number" and .[$key] > 0;
       def blake3_hash:
         type == "string" and test("^blake3:[0-9a-f]{64}$");
+      def git_object_id:
+        type == "string" and test("^[0-9a-f]{7,40}$");
       def same($key):
         .[$key] == .evidence[$key];
       def same_optional($key):
@@ -433,8 +435,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           and nonempty_string("cleanup_result")
         ),
         git_revision_provenance_ok: all(.[];
-          nonempty_string("git_revision")
-          and ((.git_revision | ascii_downcase) != "unknown")
+          (.git_revision | git_object_id)
         ),
         target_dir_class_ok: all(.[];
           .cargo_target_dir_class == "tmp"

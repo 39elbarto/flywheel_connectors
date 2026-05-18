@@ -102,7 +102,8 @@ latency exactly, and each row must explicitly set
 `shutdown_cleanup_verified=true` with `cleanup_result="verified"`. The typed
 validator and shell verifier also require the replay command to carry the same
 `CARGO_TARGET_DIR=<cargo_target_dir>` value exported in the evidence row, and
-reject unresolved `git_revision="unknown"` provenance, unredacted live-token,
+reject unresolved `git_revision="unknown"` provenance, non-hex Git revision
+labels outside the 7-to-40 character short/full object-id range, unredacted live-token,
 bearer, private-key, secret-seed,
 private-user-path, and `private_absolute` target-dir evidence before export;
 `cargo_target_dir_class` must be one of the stable export labels `tmp`,

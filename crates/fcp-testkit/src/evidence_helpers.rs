@@ -2887,6 +2887,13 @@ fn prewarm_cargo_target_dir_hash(cargo_target_dir: &str) -> String {
     )
 }
 
+fn is_resolved_git_revision(git_revision: &str) -> bool {
+    (7..=40).contains(&git_revision.len())
+        && git_revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn validate_prewarm_required_fields(
     evidence: &SwarmPrewarmColdStartEvidence,
 ) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
@@ -2927,6 +2934,11 @@ fn validate_prewarm_required_fields(
     }
     if evidence.git_revision.eq_ignore_ascii_case("unknown") {
         return Err(SwarmPrewarmColdStartEvidenceError::UnknownGitRevision {
+            git_revision: evidence.git_revision.clone(),
+        });
+    }
+    if !is_resolved_git_revision(&evidence.git_revision) {
+        return Err(SwarmPrewarmColdStartEvidenceError::InvalidGitRevision {
             git_revision: evidence.git_revision.clone(),
         });
     }
@@ -3715,6 +3727,11 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         /// Observed git revision label.
         git_revision: String,
     },
+    /// Git revision provenance was not a short or full lowercase hex object id.
+    InvalidGitRevision {
+        /// Observed git revision label.
+        git_revision: String,
+    },
     /// Reproduction command line was empty or contained an empty part.
     EmptyCommandLine,
     /// Reproduction command line did not prove Cargo was run through rch.
@@ -3927,6 +3944,10 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
             Self::UnknownGitRevision { git_revision } => write!(
                 f,
                 "swarm prewarm git revision must be resolved before evidence export, got '{git_revision}'"
+            ),
+            Self::InvalidGitRevision { git_revision } => write!(
+                f,
+                "swarm prewarm git revision must be a lowercase hex Git object id between 7 and 40 characters, got '{git_revision}'"
             ),
             Self::EmptyCommandLine => write!(f, "swarm prewarm command line is empty"),
             Self::CommandLineDoesNotUseRch { command_line } => write!(
@@ -9986,7 +10007,7 @@ mod tests {
                 "swarm_gauntlet_e2e".to_string(),
                 "prewarm".to_string(),
             ],
-            git_revision: "abc123".to_string(),
+            git_revision: "abc1234".to_string(),
             worker_id: "rch-worker-64c".to_string(),
             cargo_target_dir: cargo_target_dir.to_string(),
             cargo_target_dir_class: "tmp".to_string(),
@@ -10209,7 +10230,7 @@ mod tests {
                 .as_str()
                 .is_some_and(|hash| hash.starts_with("blake3:"))
         );
-        assert_eq!(record["git_revision"], "abc123");
+        assert_eq!(record["git_revision"], "abc1234");
         assert_eq!(record["worker_id"], "rch-worker-64c");
         assert_eq!(
             record["connector_fixture_id"],
@@ -10303,6 +10324,24 @@ mod tests {
             unknown_git_revision.validate(),
             Err(SwarmPrewarmColdStartEvidenceError::UnknownGitRevision {
                 git_revision: "unknown".to_string()
+            })
+        );
+
+        let mut branch_name_git_revision = prewarm_cold_start_evidence_fixture();
+        branch_name_git_revision.git_revision = "main".to_string();
+        assert_eq!(
+            branch_name_git_revision.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidGitRevision {
+                git_revision: "main".to_string()
+            })
+        );
+
+        let mut short_git_revision = prewarm_cold_start_evidence_fixture();
+        short_git_revision.git_revision = "abc123".to_string();
+        assert_eq!(
+            short_git_revision.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidGitRevision {
+                git_revision: "abc123".to_string()
             })
         );
 

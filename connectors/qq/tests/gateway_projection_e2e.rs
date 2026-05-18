@@ -1016,6 +1016,42 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         }),
     );
 
+    let malformed_data_event_id = format!("evt-malformed-data-id-{}", "d".repeat(257));
+    let malformed_data_event = try_invoke_projection(
+        &connector,
+        &signing_key,
+        &instance_id,
+        "qq-gateway-malformed-data-event-id",
+        json!({
+            "op": 0,
+            "s": 2,
+            "t": "THREAD_CREATE",
+            "d": { "id": malformed_data_event_id }
+        }),
+    )
+    .await;
+    let malformed_data_event_error =
+        malformed_data_event.expect_err("malformed data event id should fail closed");
+    assert!(
+        malformed_data_event_error.contains("FCP-1005"),
+        "malformed data event id should map to FCP-1005: {malformed_data_event_error}"
+    );
+    assert!(
+        malformed_data_event_error.contains("gateway event id exceeds parser bounds"),
+        "malformed data event id should report a bounded parser failure: {malformed_data_event_error}"
+    );
+    log_step(
+        &mut logs,
+        "malformed_data_id_envelope_denied",
+        "ok",
+        &json!({
+            "project_denied": true,
+            "error_code_present": malformed_data_event_error.contains("FCP-1005"),
+            "error_mentions_bounds": malformed_data_event_error.contains("gateway event id exceeds parser bounds"),
+            "raw_event_logged": false,
+        }),
+    );
+
     let accepted = invoke_projection(
         &connector,
         &signing_key,

@@ -769,6 +769,18 @@ pub fn validate_gateway_event_envelope(event: &QqGatewayEvent) -> QqResult<()> {
         event.id.as_deref(),
         QQ_GATEWAY_ID_MAX_CHARS,
     )?;
+    if let Some(data_event_id) = event
+        .d
+        .as_ref()
+        .and_then(|data| data.get("id"))
+        .and_then(Value::as_str)
+    {
+        validate_optional_chars(
+            "gateway event id",
+            Some(data_event_id),
+            QQ_GATEWAY_ID_MAX_CHARS,
+        )?;
+    }
     if let Some(event_type) = event.t.as_deref() {
         validate_event_type_component(event_type)?;
     }
@@ -2492,6 +2504,22 @@ mod tests {
             "unexpected control event-id error: {event_id_error:?}"
         );
         assert_eq!(runtime.snapshot().reconnect_attempts, 0);
+
+        let oversized_data_event_id = "d".repeat(QQ_GATEWAY_ID_MAX_CHARS + 1);
+        let data_event_id_error = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some("THREAD_CREATE".into()),
+                d: Some(json!({ "id": oversized_data_event_id })),
+                id: None,
+            })
+            .unwrap_err();
+        assert!(
+            matches!(data_event_id_error, QqError::InvalidInput(ref message) if message.contains("gateway event id exceeds parser bounds")),
+            "unexpected data event-id error: {data_event_id_error:?}"
+        );
+        assert_eq!(runtime.snapshot().last_sequence, 0);
 
         let oversized_session_id = "s".repeat(QQ_GATEWAY_ID_MAX_CHARS + 1);
         let session_error = runtime

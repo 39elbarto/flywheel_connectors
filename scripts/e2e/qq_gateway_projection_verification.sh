@@ -341,6 +341,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           "queue_full_backpressure_drop",
           "hello_session_restore",
           "malformed_control_envelope_denied",
+          "malformed_data_id_envelope_denied",
           "allowed_group_mention",
           "missing_group_mention_drop",
           "untyped_message_id_not_mention",
@@ -442,6 +443,12 @@ if [[ "${overall_status}" == "passed" ]]; then
         ),
         malformed_control_shape_ok: any(.[];
           .step == "malformed_control_envelope_denied"
+          and .details.project_denied == true
+          and .details.error_code_present == true
+          and .details.error_mentions_bounds == true
+          and .details.raw_event_logged == false
+        ) and any(.[];
+          .step == "malformed_data_id_envelope_denied"
           and .details.project_denied == true
           and .details.error_code_present == true
           and .details.error_mentions_bounds == true
@@ -665,6 +672,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "evt-unknown-size-media" \
     "evt-media-type-denied" \
     "evt-media-type-allowed" \
+    "evt-malformed-data-id" \
     "evt-disabled" \
     "evt-missing-binding" \
     "evt-missing-message-id" \

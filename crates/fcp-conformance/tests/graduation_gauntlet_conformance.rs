@@ -53,6 +53,10 @@ fn gauntlet_runner() -> PathBuf {
     workspace_root().join("scripts/graduation/run_gauntlet.sh")
 }
 
+fn record_str<'a>(record: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    record.get(key).and_then(serde_json::Value::as_str)
+}
+
 fn run_gauntlet<I, S>(args: I) -> Output
 where
     I: IntoIterator<Item = S>,
@@ -292,6 +296,28 @@ fn test_gauntlet_fail_on_manifest_status_mismatch() {
 }
 
 #[test]
+fn test_gauntlet_requires_actual_proven_status() {
+    let fixture_root = unique_fixture_root("non-proven-status");
+    let connector = write_fixture_connector(
+        &fixture_root,
+        FixtureOptions {
+            status: "runtime contract documented",
+            manifest_status: "ready",
+            ..FixtureOptions::default()
+        },
+    );
+
+    let output = run_gauntlet([connector.as_os_str()]);
+    assert_failed_with(&output, 8, "readme_status_match");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("README and manifest must both declare PROVEN/proven"),
+        "stderr should explain that matching non-PROVEN statuses are not enough: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn batch1_status_runner_writes_status_markdown() {
     let fixture_root = unique_fixture_root("batch1-status");
     fs::create_dir_all(&fixture_root).expect("fixture root should be creatable");
@@ -316,13 +342,13 @@ fn batch1_status_runner_writes_status_markdown() {
         fs::read_to_string(&status_path).expect("batch1 status markdown should be written");
     assert!(status_doc.contains("# Batch 1 Graduation Status"));
     assert!(status_doc.contains("scripts/graduation/run_gauntlet.sh --batch batch1"));
-    assert!(status_doc.contains("Summary: `7/7` Batch 1 connectors currently pass"));
-    assert!(status_doc.contains("PROVEN promotion proof bundle"));
-    assert!(status_doc.contains("not just the presence-only gauntlet checks"));
+    assert!(status_doc.contains("Summary: `0/7` Batch 1 connectors currently pass"));
+    assert!(status_doc.contains("Pre-promotion status: `7/7` Batch 1 connectors pass"));
+    assert!(status_doc.contains("every connector is still blocked at `readme_status_match`"));
     assert!(status_doc.contains("all_proven_connectors_pass_gauntlet"));
     assert!(
         !status_doc.contains("Add connector-local `tests/local_non_mock.rs` acceptance coverage"),
-        "7/7 mechanical status should not emit stale pre-gauntlet blocker guidance"
+        "pre-promotion-complete status should not emit stale local_non_mock guidance"
     );
     for connector in [
         "connectors/postgresql",
@@ -344,17 +370,25 @@ fn batch1_status_runner_writes_status_markdown() {
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSONL record"))
         .collect::<Vec<_>>();
-    assert_eq!(records.len(), 7 * EXPECTED_CHECKS.len());
+    assert_eq!(records.len(), 7 * 8);
     assert!(
         records
             .iter()
-            .all(|record| record["verdict"].as_str() == Some("pass")),
-        "Batch 1 status JSONL should have no failed mechanical gauntlet rows: {jsonl}"
+            .filter(|record| record_str(record, "check") == Some("readme_status_match"))
+            .all(|record| record_str(record, "verdict") == Some("fail")),
+        "Batch 1 status JSONL should fail only at PROVEN status promotion: {jsonl}"
+    );
+    assert!(
+        records
+            .iter()
+            .filter(|record| record_str(record, "check") != Some("readme_status_match"))
+            .all(|record| record_str(record, "verdict") == Some("pass")),
+        "Batch 1 status JSONL should pass checks before readme_status_match: {jsonl}"
     );
 
     let connectors = records
         .iter()
-        .filter_map(|record| record["connector"].as_str())
+        .filter_map(|record| record_str(record, "connector"))
         .collect::<BTreeSet<_>>();
     assert_eq!(
         connectors,
@@ -371,11 +405,11 @@ fn batch1_status_runner_writes_status_markdown() {
 
     let checks = records
         .iter()
-        .filter_map(|record| record["check"].as_str())
+        .filter_map(|record| record_str(record, "check"))
         .collect::<BTreeSet<_>>();
     assert_eq!(
         checks,
-        EXPECTED_CHECKS
+        EXPECTED_CHECKS[0..8]
             .iter()
             .map(|(check, _)| *check)
             .collect::<BTreeSet<_>>()

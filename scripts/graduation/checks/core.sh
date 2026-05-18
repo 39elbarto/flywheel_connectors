@@ -137,7 +137,11 @@ graduation_check_readme_status_match() {
   fi
 
   if [[ "${readme_proven}" -eq "${manifest_proven}" ]]; then
-    return 0
+    if [[ "${readme_proven}" -eq 1 ]]; then
+      return 0
+    fi
+    echo "README and manifest must both declare PROVEN/proven for graduation"
+    return 1
   fi
 
   if [[ "${readme_proven}" -eq 1 ]]; then

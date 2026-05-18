@@ -84,6 +84,29 @@ require_cmd() {
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+hash_text_sha256() {
+  printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+}
+
+cargo_target_dir_class() {
+  local path="$1"
+  case "${path}" in
+    /tmp|/tmp/*|/private/tmp|/private/tmp/*)
+      printf 'tmp'
+      ;;
+    /*)
+      printf 'absolute'
+      ;;
+    *)
+      printf 'relative'
+      ;;
+  esac
+}
+
+redaction_pattern() {
+  printf '%s' '(sk-live-|bearer[[:space:]]+|authorization:|token=|access_token|refresh_token|id_token|client_secret|api_key|super-secret-value|secret_seed|private_key|secret_key|password|cookie|credential=|credential:|/users/|/home/|/data/projects/|/private/var/|/var/folders/|/volumes/|c:\\\\users\\\\|operation:|principal:|zone:|z:|provider_body|provider_response_body|provider_payload_body|reviewer_email|reviewer_phone)'
+}
+
 mark_validation_redaction_failed() {
   local reason="$1"
   if [[ -s "${VALIDATION_JSON}" ]]; then
@@ -107,6 +130,7 @@ mark_validation_redaction_passed() {
 }
 
 require_cmd jq
+require_cmd shasum
 if [[ -z "${EVIDENCE_JSONL_IN}" ]]; then
   require_cmd "${RCH_BIN}"
 fi
@@ -199,18 +223,20 @@ if [[ "${test_status}" == "failed" ]]; then
       --arg run_id "${RUN_ID}" \
       --arg git_revision "${git_revision}" \
       --arg worker_id "rch-unavailable" \
-      --arg target_dir "${target_dir}" \
+      --arg cargo_target_dir_class "$(cargo_target_dir_class "${target_dir}")" \
+      --arg cargo_target_dir_hash "sha256:$(hash_text_sha256 "${target_dir}")" \
       --arg skip_reason "${skip_reason}" \
-      --arg log_path "${TEST_LOG}" \
+      --arg log_artifact "logs/prewarm-cold-start-test.log" \
       '{
         record_type: $record_type,
         schema_version: $schema_version,
         run_id: $run_id,
         git_revision: $git_revision,
         worker_id: $worker_id,
-        cargo_target_dir: $target_dir,
+        cargo_target_dir_class: $cargo_target_dir_class,
+        cargo_target_dir_hash: $cargo_target_dir_hash,
         skip_reason: $skip_reason,
-        log_path: $log_path
+        log_artifact: $log_artifact
       }' > "${SKIP_JSONL}"
   else
     overall_status="failed"
@@ -626,7 +652,7 @@ if [[ "${overall_status}" == "passed" ]]; then
 fi
 
 if [[ -s "${EVIDENCE_JSONL}" ]]; then
-  if grep -aEi '(sk-live-|bearer[[:space:]]+|authorization:|token=|access_token|refresh_token|id_token|client_secret|api_key|super-secret-value|secret_seed|private_key|secret_key|password|cookie|credential=|credential:|/users/|/home/|/data/projects/|/private/var/|/var/folders/|/volumes/|c:\\\\users\\\\|operation:|principal:|zone:|z:|provider_body|provider_response_body|provider_payload_body|reviewer_email|reviewer_phone)' "${EVIDENCE_JSONL}" >/dev/null; then
+  if grep -aEi "$(redaction_pattern)" "${EVIDENCE_JSONL}" >/dev/null; then
     redaction_status="failed"
     overall_status="failed"
     validation_status="failed"
@@ -646,6 +672,32 @@ if [[ -s "${EVIDENCE_JSONL}" ]]; then
     exit_code=1
   else
     mark_validation_redaction_passed
+  fi
+fi
+
+if [[ -s "${SKIP_JSONL}" ]]; then
+  if grep -aEi "$(redaction_pattern)" "${SKIP_JSONL}" >/dev/null; then
+    redaction_status="failed"
+    overall_status="failed"
+    validation_status="failed"
+    mark_validation_redaction_failed "skip_artifact_secret_or_private_path_marker"
+    exit_code=1
+  elif ! jq -s -e '
+    all(.[]; .record_type == "swarm_prewarm_cold_start_skip"
+      and .schema_version == "swarm-prewarm-cold-start/v2"
+      and (.git_revision | test("^[0-9a-f]{7,40}$"))
+      and (.cargo_target_dir_class == "tmp" or .cargo_target_dir_class == "absolute" or .cargo_target_dir_class == "relative")
+      and (.cargo_target_dir_hash | test("^sha256:[0-9a-f]{64}$"))
+      and .log_artifact == "logs/prewarm-cold-start-test.log"
+      and (.skip_reason | type == "string" and length > 0)
+      and (has("cargo_target_dir") | not)
+      and (has("log_path") | not))
+  ' "${SKIP_JSONL}" >/dev/null; then
+    redaction_status="failed"
+    overall_status="failed"
+    validation_status="failed"
+    mark_validation_redaction_failed "skip_artifact_contract_failed"
+    exit_code=1
   fi
 fi
 

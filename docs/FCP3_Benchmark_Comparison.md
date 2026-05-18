@@ -65,7 +65,10 @@ summary, extracts the emitted JSONL proof, validates the required scenarios, and
 writes a structured skip artifact when a remote worker is unavailable. A
 successful embedded run that reports `[RCH] local` or emits no RCH summary fails
 closed instead of being reusable shared-worker evidence. Remote prerequisite
-skips are acceptable only for the default deterministic smoke lane; final
+skips are acceptable only for the default deterministic smoke lane, and their
+skip JSONL stores only the target-dir class, a `sha256:<64 lowercase hex>`
+target-dir fingerprint, and the relative test-log artifact name. It does not
+write raw target or local log paths into the skip evidence. Final
 production-soak gating fails closed when host-backed or live evidence cannot be
 collected. Operators can set `RCH_BIN=/path/to/rch` to validate a patched RCH
 binary, while `RCH_FORCE_REMOTE=1` is exported by the script so fallback stays

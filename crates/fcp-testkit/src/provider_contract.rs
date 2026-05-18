@@ -1363,6 +1363,39 @@ mod tests {
 
     #[test]
     fn overlap_provider_targets_are_stable_unique_and_connector_backed() {
+        let mut exact_values = EXACT_OVERLAP_PROVIDER_IDS.to_vec();
+        exact_values.sort_unstable();
+        assert_eq!(
+            exact_values,
+            vec![
+                "anthropic",
+                "deepgram",
+                "elevenlabs",
+                "exa",
+                "firecrawl",
+                "huggingface",
+                "mistral",
+                "openai",
+                "openrouter",
+                "tavily",
+            ]
+        );
+
+        let mut adjacent_values = ADJACENT_OVERLAP_PROVIDER_IDS.to_vec();
+        adjacent_values.sort_unstable();
+        assert_eq!(
+            adjacent_values,
+            vec![
+                "deepseek",
+                "groq",
+                "ollama",
+                "perplexity-search",
+                "qwen",
+                "together",
+                "xai",
+            ]
+        );
+
         let values = EXACT_OVERLAP_PROVIDER_IDS
             .iter()
             .chain(ADJACENT_OVERLAP_PROVIDER_IDS)
@@ -1372,13 +1405,7 @@ mod tests {
         sorted.sort();
         sorted.dedup();
 
-        assert_eq!(EXACT_OVERLAP_PROVIDER_IDS.len(), 10);
-        assert_eq!(ADJACENT_OVERLAP_PROVIDER_IDS.len(), 7);
         assert_eq!(values.len(), sorted.len());
-        assert!(values.contains(&"openai".to_owned()));
-        assert!(values.contains(&"tavily".to_owned()));
-        assert!(values.contains(&"deepseek".to_owned()));
-        assert!(values.contains(&"xai".to_owned()));
 
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         for provider_id in values {

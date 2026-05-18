@@ -26,6 +26,8 @@ use serde_json::{Value, json};
 
 const ACCEPTANCE_SUITE_CLASS: &str = "local_non_mock";
 const OP_SEND_CHANNEL: &str = "qq.messages.send_channel";
+const OP_SEND_GROUP: &str = "qq.messages.send_group";
+const OP_SEND_C2C: &str = "qq.messages.send_c2c";
 const OP_HEALTH: &str = "qq.health";
 const CAP_MESSAGES_WRITE: &str = "qq.messages.write";
 const CAP_HEALTH_READ: &str = "qq.health.read";
@@ -238,6 +240,52 @@ fn channel_send_request(
             CAP_MESSAGES_WRITE,
             OP_SEND_CHANNEL,
         ),
+        holder_proof: None,
+        context: None,
+        idempotency_key: None,
+        lease_seq: None,
+        deadline_ms: None,
+        correlation_id: None,
+        provenance: None,
+        approval_tokens: Vec::new(),
+    }
+}
+
+fn group_send_request(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -> InvokeRequest {
+    InvokeRequest {
+        r#type: "invoke".into(),
+        id: RequestId::new("qq-local-group-refresh"),
+        connector_id: ConnectorId::from_static("fcp.qq"),
+        operation: OperationId::from_static(OP_SEND_GROUP),
+        zone_id: ZoneId::work(),
+        input: json!({
+            "group_openid": "group-local-1",
+            "content": "hello from QQ group refresh"
+        }),
+        capability_token: build_token(signing_key, instance_id, CAP_MESSAGES_WRITE, OP_SEND_GROUP),
+        holder_proof: None,
+        context: None,
+        idempotency_key: None,
+        lease_seq: None,
+        deadline_ms: None,
+        correlation_id: None,
+        provenance: None,
+        approval_tokens: Vec::new(),
+    }
+}
+
+fn c2c_send_request(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -> InvokeRequest {
+    InvokeRequest {
+        r#type: "invoke".into(),
+        id: RequestId::new("qq-local-c2c-refresh"),
+        connector_id: ConnectorId::from_static("fcp.qq"),
+        operation: OperationId::from_static(OP_SEND_C2C),
+        zone_id: ZoneId::work(),
+        input: json!({
+            "openid": "user-local-1",
+            "content": "hello from QQ c2c refresh"
+        }),
+        capability_token: build_token(signing_key, instance_id, CAP_MESSAGES_WRITE, OP_SEND_C2C),
         holder_proof: None,
         context: None,
         idempotency_key: None,
@@ -496,6 +544,230 @@ async fn local_non_mock_channel_send_refreshes_expired_access_token_once() {
             "authorization_header_verified": true,
             "refresh_after_unauthorized_verified": true,
             "refresh_attempts": 1,
+            "retry_reused_original_send_body": true,
+            "token_cache_path": "memory_only"
+        },
+        "cleanup": "connector_shutdown_and_fixture_thread_joined",
+        "result": "passed"
+    });
+    println!("{artifact}");
+}
+
+#[fcp_async_core::runtime::test]
+async fn local_non_mock_group_and_c2c_sends_refresh_expired_access_tokens_once() {
+    let qq = LoopbackQq::start(vec![
+        HttpResponse {
+            status: "200 OK",
+            body: r#"{"access_token":"qq-local-expired-material","expires_in":7200}"#,
+        },
+        HttpResponse {
+            status: "403 Forbidden",
+            body: r#"{"message":"expired group access material"}"#,
+        },
+        HttpResponse {
+            status: "200 OK",
+            body: r#"{"access_token":"qq-local-fresh-material","expires_in":7200}"#,
+        },
+        HttpResponse {
+            status: "200 OK",
+            body: r#"{"id":"msg-local-group-refresh","timestamp":"2026-05-18T00:00:02Z"}"#,
+        },
+        HttpResponse {
+            status: "200 OK",
+            body: r#"{"access_token":"qq-local-expired-material","expires_in":7200}"#,
+        },
+        HttpResponse {
+            status: "401 Unauthorized",
+            body: r#"{"message":"expired c2c access material"}"#,
+        },
+        HttpResponse {
+            status: "200 OK",
+            body: r#"{"access_token":"qq-local-fresh-material","expires_in":7200}"#,
+        },
+        HttpResponse {
+            status: "200 OK",
+            body: r#"{"id":"msg-local-c2c-refresh","timestamp":"2026-05-18T00:00:03Z"}"#,
+        },
+    ]);
+    let app_credential = "send-refresh-credential";
+    let signing_key = Ed25519SigningKey::generate();
+
+    let group_instance_id = InstanceId::new();
+    let mut group_connector = QqConnector::new();
+    group_connector
+        .configure(json!({
+            "base_url": qq.base_url(),
+            "token_base_url": qq.base_url(),
+            "app_id": "qq-route-refresh-app",
+            "client_secret": app_credential,
+            "request_timeout_ms": 5_000
+        }))
+        .await
+        .expect("configure group QQ connector");
+    group_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            group_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake group QQ connector");
+    let group_response = group_connector
+        .invoke(group_send_request(&signing_key, &group_instance_id))
+        .await
+        .expect("send QQ group message through refresh loopback fixture");
+    assert!(matches!(group_response.status, InvokeStatus::Ok));
+    assert_eq!(
+        group_response
+            .result
+            .expect("QQ group send result should be present")["id"],
+        "msg-local-group-refresh"
+    );
+    group_connector
+        .shutdown(ShutdownRequest {
+            r#type: "shutdown".into(),
+            deadline_ms: 1_000,
+            drain: true,
+            reason: Some("qq-local-group-refresh-complete".into()),
+        })
+        .await
+        .expect("shutdown group QQ connector");
+
+    let c2c_instance_id = InstanceId::new();
+    let mut c2c_connector = QqConnector::new();
+    c2c_connector
+        .configure(json!({
+            "base_url": qq.base_url(),
+            "token_base_url": qq.base_url(),
+            "app_id": "qq-route-refresh-app",
+            "client_secret": app_credential,
+            "request_timeout_ms": 5_000
+        }))
+        .await
+        .expect("configure C2C QQ connector");
+    c2c_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            c2c_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake C2C QQ connector");
+    let c2c_response = c2c_connector
+        .invoke(c2c_send_request(&signing_key, &c2c_instance_id))
+        .await
+        .expect("send QQ C2C message through refresh loopback fixture");
+    assert!(matches!(c2c_response.status, InvokeStatus::Ok));
+    assert_eq!(
+        c2c_response
+            .result
+            .expect("QQ C2C send result should be present")["id"],
+        "msg-local-c2c-refresh"
+    );
+    c2c_connector
+        .shutdown(ShutdownRequest {
+            r#type: "shutdown".into(),
+            deadline_ms: 1_000,
+            drain: true,
+            reason: Some("qq-local-c2c-refresh-complete".into()),
+        })
+        .await
+        .expect("shutdown C2C QQ connector");
+
+    let requests = qq.join();
+    assert_eq!(requests.len(), 8);
+    assert_eq!(
+        requests[0].request_line,
+        "POST /app/getAppAccessToken HTTP/1.1"
+    );
+    assert_eq!(
+        requests[1].request_line,
+        "POST /v2/groups/group-local-1/messages HTTP/1.1"
+    );
+    assert!(header_equals(
+        &requests[1].headers,
+        "authorization",
+        &format!("QQBot {EXPIRED_ACCESS_MATERIAL}")
+    ));
+    assert_eq!(
+        requests[1].body.as_ref().expect("group send body present")["content"],
+        "hello from QQ group refresh"
+    );
+    assert_eq!(
+        requests[2].request_line,
+        "POST /app/getAppAccessToken HTTP/1.1"
+    );
+    assert_eq!(
+        requests[3].request_line,
+        "POST /v2/groups/group-local-1/messages HTTP/1.1"
+    );
+    assert!(header_equals(
+        &requests[3].headers,
+        "authorization",
+        &format!("QQBot {FRESH_ACCESS_MATERIAL}")
+    ));
+    assert_eq!(
+        requests[3].body.as_ref().expect("group retry body present")["content"],
+        "hello from QQ group refresh"
+    );
+    assert_eq!(
+        requests[4].request_line,
+        "POST /app/getAppAccessToken HTTP/1.1"
+    );
+    assert_eq!(
+        requests[5].request_line,
+        "POST /v2/users/user-local-1/messages HTTP/1.1"
+    );
+    assert!(header_equals(
+        &requests[5].headers,
+        "authorization",
+        &format!("QQBot {EXPIRED_ACCESS_MATERIAL}")
+    ));
+    assert_eq!(
+        requests[5].body.as_ref().expect("C2C send body present")["content"],
+        "hello from QQ c2c refresh"
+    );
+    assert_eq!(
+        requests[6].request_line,
+        "POST /app/getAppAccessToken HTTP/1.1"
+    );
+    assert_eq!(
+        requests[7].request_line,
+        "POST /v2/users/user-local-1/messages HTTP/1.1"
+    );
+    assert!(header_equals(
+        &requests[7].headers,
+        "authorization",
+        &format!("QQBot {FRESH_ACCESS_MATERIAL}")
+    ));
+    assert_eq!(
+        requests[7].body.as_ref().expect("C2C retry body present")["content"],
+        "hello from QQ c2c refresh"
+    );
+
+    let artifact = json!({
+        "connector": "qq",
+        "suite_class": ACCEPTANCE_SUITE_CLASS,
+        "acceptance_suite_class": ACCEPTANCE_SUITE_CLASS,
+        "bead_id": "flywheel_connectors-6n7.12.3",
+        "command": "cargo test -p fcp-qq --test local_non_mock local_non_mock_group_and_c2c_sends_refresh_expired_access_tokens_once -- --nocapture",
+        "git_revision": option_env!("GIT_REVISION").unwrap_or("worktree"),
+        "fixture_mode": "loopback_http",
+        "provider_class": "local_sufficient",
+        "request_response_boundaries": [
+            { "method": "POST", "path": "/app/getAppAccessToken", "purpose": "group_initial_access_token" },
+            { "method": "POST", "path": "/v2/groups/group-local-1/messages", "purpose": "expired_token_group_send_attempt" },
+            { "method": "POST", "path": "/app/getAppAccessToken", "purpose": "group_refresh_after_forbidden" },
+            { "method": "POST", "path": "/v2/groups/group-local-1/messages", "purpose": "fresh_token_group_send_retry" },
+            { "method": "POST", "path": "/app/getAppAccessToken", "purpose": "c2c_initial_access_token" },
+            { "method": "POST", "path": "/v2/users/user-local-1/messages", "purpose": "expired_token_c2c_send_attempt" },
+            { "method": "POST", "path": "/app/getAppAccessToken", "purpose": "c2c_refresh_after_unauthorized" },
+            { "method": "POST", "path": "/v2/users/user-local-1/messages", "purpose": "fresh_token_c2c_send_retry" }
+        ],
+        "auth_gate": {
+            "mode": "qqbot_access_token",
+            "authorization_header_verified": true,
+            "refresh_after_unauthorized_verified": true,
+            "group_refresh_attempts": 1,
+            "c2c_refresh_attempts": 1,
             "retry_reused_original_send_body": true,
             "token_cache_path": "memory_only"
         },

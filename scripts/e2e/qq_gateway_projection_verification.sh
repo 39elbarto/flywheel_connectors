@@ -352,6 +352,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           "unknown_media_size_policy_drop",
           "media_content_type_policy_drop",
           "media_content_type_malformed_drop",
+          "media_url_policy_drop",
           "media_content_type_policy_allowed",
           "reply_media_projection",
           "voice_asr_projection",
@@ -485,6 +486,17 @@ if [[ "${overall_status}" == "passed" ]]; then
             and .details.normalized.has_attachments == true
             and (.details.normalized.attachment_content_types | type) == "array"
             and (.details.normalized.attachment_content_types | length) == 1
+            and .details.runtime.accepted_events == 0
+            and .details.runtime.queue_depth == 0
+          )
+          and any(.[];
+            .step == "media_url_policy_drop"
+            and .details.accepted == false
+            and .details.reason_code == "attachment_url_not_allowed"
+            and .details.policy.reason_code == "attachment_url_not_allowed"
+            and .details.normalized.has_attachments == true
+            and (.details.normalized.attachment_url_hashes | type) == "array"
+            and (.details.normalized.attachment_url_hashes | length) == 1
             and .details.runtime.accepted_events == 0
             and .details.runtime.queue_depth == 0
           )
@@ -671,6 +683,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "evt-oversized-media" \
     "evt-unknown-size-media" \
     "evt-media-type-denied" \
+    "evt-media-url-denied" \
     "evt-media-type-allowed" \
     "evt-malformed-data-id" \
     "evt-disabled" \
@@ -705,6 +718,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "msg-oversized-media" \
     "msg-unknown-size-media" \
     "msg-media-type-denied" \
+    "msg-media-url-denied" \
     "msg-media-type-allowed" \
     "msg-disabled" \
     "msg-missing-binding" \
@@ -763,17 +777,20 @@ if [[ "${overall_status}" == "passed" ]]; then
     "too large" \
     "missing size metadata" \
     "blocked media type" \
+    "unsafe media url" \
     "allowed media type" \
     "after shutdown should deny" \
     "approve deployment from voice" \
     "/approve rollout-42" \
     "rollout-42" \
     "cdn.qq.example" \
+    "user:secret" \
     "trace.png" \
     "voice.amr" \
     "oversized.bin" \
     "missing-size.pdf" \
     "disallowed.exe" \
+    "credentialed.png" \
     "allowed.png"
   do
     if grep -aF -- "${forbidden}" "${EVIDENCE_JSONL}" >/dev/null; then

@@ -1129,6 +1129,17 @@ fn attachment_policy_denial(
         return None;
     }
 
+    for attachment in attachments {
+        if let Some(raw_url) = attachment
+            .get("url")
+            .and_then(Value::as_str)
+            .and_then(nonblank_trimmed)
+            && !attachment_url_is_fanout_safe(raw_url)
+        {
+            return Some("attachment_url_not_allowed");
+        }
+    }
+
     if let Some(max_attachment_bytes) = policy.max_attachment_bytes {
         let mut total_bytes = 0_u64;
         for attachment in attachments {
@@ -1168,6 +1179,17 @@ fn attachment_policy_denial(
     }
 
     None
+}
+
+fn attachment_url_is_fanout_safe(raw: &str) -> bool {
+    let Ok(url) = Url::parse(raw.trim()) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none()
 }
 
 fn canonical_attachment_content_type(raw: &str) -> Option<String> {
@@ -3783,6 +3805,60 @@ mod tests {
             .unwrap();
         assert!(!malformed.accepted);
         assert_eq!(malformed.reason_code, "attachment_content_type_missing");
+    }
+
+    #[test]
+    fn gateway_runtime_rejects_attachment_urls_unsafe_for_fanout() {
+        let mut config = QqGatewayRuntimeConfig {
+            enabled: true,
+            max_queue_depth: 8,
+            ..QqGatewayRuntimeConfig::default()
+        };
+        config.policy.allowed_attachment_content_types = vec!["image/png".into()];
+        let mut runtime = QqGatewayRuntime::new(config);
+
+        let unsafe_scheme = runtime
+            .project_event(group_attachment_gateway_event(
+                1,
+                "msg-attachment-file-url",
+                "evt-attachment-file-url",
+                "bot see local file",
+                json!({
+                    "url": "file:///private/qq/trace.png",
+                    "content_type": "image/png",
+                    "size": 512
+                }),
+            ))
+            .unwrap();
+        assert!(!unsafe_scheme.accepted);
+        assert_eq!(unsafe_scheme.reason_code, "attachment_url_not_allowed");
+        assert_eq!(
+            unsafe_scheme
+                .policy
+                .as_ref()
+                .map(|policy| policy.reason_code),
+            Some("attachment_url_not_allowed")
+        );
+        assert_eq!(unsafe_scheme.runtime.accepted_events, 0);
+        assert_eq!(unsafe_scheme.runtime.queue_depth, 0);
+
+        let credentialed_url = runtime
+            .project_event(group_attachment_gateway_event(
+                2,
+                "msg-attachment-credential-url",
+                "evt-attachment-credential-url",
+                "bot see credentialed url",
+                json!({
+                    "url": "https://user:secret@example.com/trace.png",
+                    "content_type": "image/png",
+                    "size": 512
+                }),
+            ))
+            .unwrap();
+        assert!(!credentialed_url.accepted);
+        assert_eq!(credentialed_url.reason_code, "attachment_url_not_allowed");
+        assert_eq!(credentialed_url.runtime.accepted_events, 0);
+        assert_eq!(credentialed_url.runtime.queue_depth, 0);
     }
 
     #[test]

@@ -850,7 +850,8 @@ async fn local_non_mock_send_stops_after_one_unauthorized_refresh_retry() {
         panic!("expected unauthorized final failure, got {err:?}");
     };
     assert!(message.contains("401"));
-    assert!(message.contains("fresh access material still rejected"));
+    assert!(message.contains("response body redacted"));
+    assert!(!message.contains("fresh access material"));
 
     connector
         .shutdown(ShutdownRequest {
@@ -916,6 +917,7 @@ async fn local_non_mock_send_stops_after_one_unauthorized_refresh_retry() {
             "refresh_after_unauthorized_verified": true,
             "refresh_attempts": 1,
             "second_unauthorized_failed_closed": true,
+            "final_failure_body_redacted": true,
             "token_cache_path": "memory_only"
         },
         "cleanup": "connector_shutdown_and_fixture_thread_joined",

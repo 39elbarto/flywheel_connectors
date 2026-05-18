@@ -224,7 +224,7 @@ impl QqClient {
             let status = response.status().as_u16();
             let headers = response.headers().clone();
             let body = response.text().await.unwrap_or_default();
-            return Err(http_status_error(status, &headers, body));
+            return Err(http_status_error(status, &headers, &body));
         }
 
         let body: Value = response
@@ -306,11 +306,8 @@ impl QqClient {
             let status = response.status().as_u16();
             let headers = response.headers().clone();
             let body = response.text().await.unwrap_or_default();
-            return Err(http_status_error(
-                status,
-                &headers,
-                format!("QQ API request failed [{status}]: {body}"),
-            ));
+            let message = format!("QQ API request failed [{status}]: {body}");
+            return Err(http_status_error(status, &headers, &message));
         }
 
         response.json().await.map_err(QqError::Http)
@@ -1530,12 +1527,8 @@ fn validate_optional_chars(label: &str, value: Option<&str>, limit: usize) -> Qq
     Ok(())
 }
 
-fn http_status_error(status: u16, headers: &HeaderMap, body: String) -> QqError {
-    let message = if body.trim().is_empty() {
-        format!("QQ HTTP request failed with status {status}")
-    } else {
-        body
-    };
+fn http_status_error(status: u16, headers: &HeaderMap, body: &str) -> QqError {
+    let message = http_status_message(status, body);
     match status {
         401 | 403 => QqError::Unauthorized(message),
         429 => QqError::RateLimited {
@@ -1546,6 +1539,68 @@ fn http_status_error(status: u16, headers: &HeaderMap, body: String) -> QqError 
             message,
         },
     }
+}
+
+fn http_status_message(status: u16, body: &str) -> String {
+    let prefix = format!("QQ HTTP request failed with status {status}");
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return prefix;
+    }
+
+    if contains_sensitive_error_marker(trimmed) {
+        return format!("{prefix}; response body redacted");
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed)
+        && let Some(message) = provider_error_message(&value)
+    {
+        return format!("{prefix}: {}", truncate_error_message(message));
+    }
+
+    format!("{prefix}: {}", truncate_error_message(trimmed))
+}
+
+fn provider_error_message(value: &Value) -> Option<&str> {
+    let object = value.as_object()?;
+    ["message", "msg", "error_description", "error"]
+        .into_iter()
+        .filter_map(|field| object.get(field).and_then(Value::as_str))
+        .map(str::trim)
+        .find(|message| !message.is_empty())
+}
+
+fn truncate_error_message(message: &str) -> String {
+    const MAX_ERROR_MESSAGE_CHARS: usize = 256;
+    let mut chars = message.chars();
+    let truncated = chars
+        .by_ref()
+        .take(MAX_ERROR_MESSAGE_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
+fn contains_sensitive_error_marker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "access material",
+        "access_token",
+        "authorization",
+        "bearer",
+        "client_secret",
+        "clientsecret",
+        "password",
+        "qqbot",
+        "refresh_token",
+        "secret",
+        "token",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 fn retry_after_ms(headers: &HeaderMap) -> Option<u64> {
@@ -2148,13 +2203,35 @@ mod tests {
         let err = client.access_token().await.unwrap_err();
         match err {
             QqError::Unauthorized(message) => {
-                assert!(message.contains("invalid bot secret"));
+                assert!(message.contains("401"));
+                assert!(message.contains("response body redacted"));
+                assert!(!message.contains("invalid bot secret"));
             }
             other => assert!(
                 matches!(other, QqError::Unauthorized(_)),
                 "expected Unauthorized"
             ),
         }
+    }
+
+    #[test]
+    fn http_status_message_preserves_safe_provider_message() {
+        let message = http_status_message(500, r#"{"message":"quota exceeded"}"#);
+        assert!(message.contains("500"));
+        assert!(message.contains("quota exceeded"));
+        assert!(!message.contains("response body redacted"));
+    }
+
+    #[test]
+    fn http_status_message_redacts_sensitive_provider_body() {
+        let message = http_status_message(
+            403,
+            r#"{"message":"denied","access_token":"qq-secret-token"}"#,
+        );
+        assert!(message.contains("403"));
+        assert!(message.contains("response body redacted"));
+        assert!(!message.contains("qq-secret-token"));
+        assert!(!message.contains("access_token"));
     }
 
     #[fcp_async_core::runtime::test]

@@ -1105,6 +1105,8 @@ validate_gauntlet_contract() {
       type == "number" and . >= 0;
     def nonnegative_integer:
       nonnegative_number and floor == .;
+    def nonempty_string:
+      type == "string" and length > 0;
     def required_tool_versions:
       any(.[]; .step == "tool_versions" and .result == "pass" and
         (.details.cargo | populated_tool_version) and
@@ -1136,8 +1138,8 @@ validate_gauntlet_contract() {
       rch_remote_proof;
     def command_record_contract:
       if (.details | has("command_line")) then
-        (.details.command_line | type == "string") and
-        (.details.log_artifact | type == "string") and
+        (.details.command_line | nonempty_string) and
+        (.details.log_artifact | nonempty_string) and
         (.details.log_hash | sha256_hash) and
         (.details.duration_seconds | nonnegative_number) and
         (.details.retry_count | nonnegative_integer) and

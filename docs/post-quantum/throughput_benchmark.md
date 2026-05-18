@@ -452,9 +452,10 @@ command that was requested through `rch exec` must finish with
 `worker_execution_class:"remote"` before the script can append a passing command
 record. The gauntlet self-contract
 requires every command-run record, local or `rch`-backed, to carry a stable log
-artifact, `sha256:<64 lowercase hex>` log hash, duration, retry count, fallback decision,
-worker execution class, cache decision, cleanup result, and the RCH summary
-field. The duration must be non-negative, and retry count must be a
+artifact, non-empty command line, `sha256:<64 lowercase hex>` log hash,
+duration, retry count, fallback decision, worker execution class, cache
+decision, cleanup result, and the RCH summary field. The duration must be
+non-negative, and retry count must be a
 non-negative integer. Non-`rch` command records must report
 `fallback_decision:"not_needed"`,
 `worker_execution_class:"not_applicable"`, and `rch_summary:null`. Passing

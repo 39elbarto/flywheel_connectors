@@ -5,6 +5,11 @@ SCRIPT_NAME="e2e_meshnode_control_plane"
 SEED="0xC0NTR0L"
 OUT_DIR="${OUT_DIR:-./out/${SCRIPT_NAME}}"
 LOG_JSONL="${LOG_JSONL:-${OUT_DIR}/${SCRIPT_NAME}.jsonl}"
+CARGO_LOG="${CARGO_LOG:-${OUT_DIR}/meshnode_control_plane_cargo.log}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+MESHNODE_TARGET_DIR="${MESHNODE_TARGET_DIR:-/tmp/fcp-meshnode-control-plane}"
+export RCH_FORCE_REMOTE=1
 
 EXPECTED_FAILURE=""
 ACTUAL_FAILURE=""
@@ -122,23 +127,60 @@ run_step() {
   fi
 }
 
+run_cargo() {
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${MESHNODE_TARGET_DIR}" cargo "$@"
+}
+
+rch_remote_summary_present() {
+  local execution_log="$1"
+
+  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
+    return 0
+  fi
+
+  if grep -Eq '^\[RCH\].*(local|refusing local fallback|no admissible workers)' "${execution_log}"; then
+    echo "Missing accepted remote rch summary in ${execution_log}" >&2
+    echo "rch remote proof is required; refusing local fallback" >&2
+    return 2
+  fi
+
+  grep -Eq '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}" && return 0
+
+  echo "Missing accepted remote rch summary in ${execution_log}" >&2
+  echo "rch remote proof is required; refusing local fallback" >&2
+  return 2
+}
+
 step_prepare() {
   mkdir -p "${OUT_DIR}"
 }
 
 step_run_meshnode_tests() {
-  cargo test -p fcp-mesh --test mesh_integration meshnode_ -- --nocapture \
+  local remote_error=""
+
+  if ! run_cargo test -p fcp-mesh --test mesh_integration meshnode_ -- --nocapture \
     --skip meshnode_symbol_ \
-    --skip meshnode_decode_status_stops_transfer
+    --skip meshnode_decode_status_stops_transfer > "${CARGO_LOG}" 2>&1; then
+    tail -40 "${CARGO_LOG}" >&2 || true
+    return 1
+  fi
+
+  if remote_error="$(rch_remote_summary_present "${CARGO_LOG}" 2>&1)"; then
+    return 0
+  fi
+
+  printf '%s\n' "${remote_error}" >> "${CARGO_LOG}"
+  printf '%s\n' "${remote_error}" >&2
+  return 1
 }
 
-require_cmd cargo
+require_cmd "${RCH_BIN}"
 
 run_step "prepare_output" 1 "{}" "" "{}" step_prepare
 run_step \
   "run_meshnode_control_plane_tests" \
   2 \
-  '{"crate":"fcp-mesh","target":"mesh_integration","filter":"meshnode_ (skipping symbol_ + decode_status)"}' \
+  '{"crate":"fcp-mesh","target":"mesh_integration","filter":"meshnode_ (skipping symbol_ + decode_status)","log":"meshnode_control_plane_cargo.log"}' \
   "" \
   '{"category":"meshnode","purpose":"control_plane_multi_node"}' \
   step_run_meshnode_tests

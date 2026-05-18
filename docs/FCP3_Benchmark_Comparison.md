@@ -71,7 +71,10 @@ collected. Verifier validation and the typed
 `SwarmPrewarmColdStartEvidence::validate()` contract both require
 `CARGO_TARGET_DIR` provenance and connector manifest identity to carry
 `blake3:<64 lowercase hex>` hashes, not just free-form labels or prefix-only
-markers. They also enforce the same admission-decision shape: `admit_warm`
+markers. The typed validator also recomputes the `CARGO_TARGET_DIR` Blake3
+hash from the recorded target directory before serialization succeeds, so
+replay rows cannot spoof target-dir provenance with an unrelated valid-looking
+digest. They also enforce the same admission-decision shape: `admit_warm`
 must carry `warm_checkout=true` with no fallback or unsafe-rejection reason,
 `fallback_on_demand` must carry `warm_checkout=false` plus a non-empty
 `fallback_reason`, and `reject_unsafe` must carry `warm_checkout=false` plus a

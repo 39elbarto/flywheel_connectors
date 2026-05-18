@@ -2878,6 +2878,13 @@ fn is_redaction_safe_blake3_hash(hash: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn prewarm_cargo_target_dir_hash(cargo_target_dir: &str) -> String {
+    format!(
+        "blake3:{}",
+        blake3::hash(cargo_target_dir.as_bytes()).to_hex()
+    )
+}
+
 fn validate_prewarm_required_fields(
     evidence: &SwarmPrewarmColdStartEvidence,
 ) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
@@ -3068,6 +3075,16 @@ fn validate_prewarm_command_and_target(
         return Err(
             SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirHash {
                 hash: evidence.cargo_target_dir_hash.clone(),
+            },
+        );
+    }
+    let expected_target_dir_hash = prewarm_cargo_target_dir_hash(&evidence.cargo_target_dir);
+    if evidence.cargo_target_dir_hash != expected_target_dir_hash {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::CargoTargetDirHashMismatch {
+                cargo_target_dir: evidence.cargo_target_dir.clone(),
+                expected_hash: expected_target_dir_hash,
+                actual_hash: evidence.cargo_target_dir_hash.clone(),
             },
         );
     }
@@ -3698,6 +3715,15 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         /// Observed hash value.
         hash: String,
     },
+    /// Cargo target directory hash did not match the recorded target directory.
+    CargoTargetDirHashMismatch {
+        /// Recorded Cargo target directory.
+        cargo_target_dir: String,
+        /// Expected hash for the recorded target directory.
+        expected_hash: String,
+        /// Observed hash value.
+        actual_hash: String,
+    },
     /// Connector manifest hash did not use the expected redaction-safe form.
     InvalidManifestHash {
         /// Observed hash value.
@@ -3820,6 +3846,14 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
             Self::InvalidCargoTargetDirHash { hash } => write!(
                 f,
                 "swarm prewarm cargo target directory hash must be 'blake3:' followed by 64 lowercase hex characters, got '{hash}'"
+            ),
+            Self::CargoTargetDirHashMismatch {
+                cargo_target_dir,
+                expected_hash,
+                actual_hash,
+            } => write!(
+                f,
+                "swarm prewarm cargo target directory hash for '{cargo_target_dir}' must be '{expected_hash}', got '{actual_hash}'"
             ),
             Self::InvalidManifestHash { hash } => write!(
                 f,
@@ -9873,10 +9907,7 @@ mod tests {
 
     fn prewarm_cold_start_evidence_fixture() -> SwarmPrewarmColdStartEvidence {
         let cargo_target_dir = "/tmp/fcp-prewarm-e2e";
-        let cargo_target_dir_hash = format!(
-            "blake3:{}",
-            blake3::hash(cargo_target_dir.as_bytes()).to_hex()
-        );
+        let cargo_target_dir_hash = prewarm_cargo_target_dir_hash(cargo_target_dir);
         let manifest_hash = format!(
             "blake3:{}",
             blake3::hash(b"fcp-test-connector:request-response:strict-prewarm").to_hex()
@@ -10262,6 +10293,20 @@ mod tests {
             )
         );
 
+        let mut mismatched_target_dir_hash = prewarm_cold_start_evidence_fixture();
+        let actual_hash = prewarm_cargo_target_dir_hash("/tmp/other-prewarm-target");
+        mismatched_target_dir_hash.cargo_target_dir_hash = actual_hash.clone();
+        assert_eq!(
+            mismatched_target_dir_hash.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::CargoTargetDirHashMismatch {
+                    cargo_target_dir: "/tmp/fcp-prewarm-e2e".to_string(),
+                    expected_hash: prewarm_cargo_target_dir_hash("/tmp/fcp-prewarm-e2e"),
+                    actual_hash
+                }
+            )
+        );
+
         let mut bad_manifest_hash = prewarm_cold_start_evidence_fixture();
         bad_manifest_hash.manifest_hash = "blake3:manifest".to_string();
         assert_eq!(
@@ -10565,10 +10610,8 @@ mod tests {
         let mut private_target_dir = prewarm_cold_start_evidence_fixture();
         private_target_dir.cargo_target_dir = "/Users/alice/fcp-target".to_string();
         private_target_dir.cargo_target_dir_class = "private_absolute".to_string();
-        private_target_dir.cargo_target_dir_hash = format!(
-            "blake3:{}",
-            blake3::hash(private_target_dir.cargo_target_dir.as_bytes()).to_hex()
-        );
+        private_target_dir.cargo_target_dir_hash =
+            prewarm_cargo_target_dir_hash(&private_target_dir.cargo_target_dir);
         assert_eq!(
             private_target_dir.validate(),
             Err(

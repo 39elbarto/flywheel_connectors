@@ -298,8 +298,6 @@ validate_jsonl_contract() {
       --arg validation_error "${diagnostic}" \
       '{artifact_path:$artifact,validation_error:$validation_error,cleanup_result:"not_applicable"}')"
   fi
-  append_json "${step}" "pass" "$(jq -cn --arg artifact "${path}" \
-    '{artifact_path:$artifact,cleanup_result:"not_applicable"}')"
 }
 
 validate_formal_script_contract() {

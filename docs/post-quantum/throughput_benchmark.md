@@ -469,7 +469,8 @@ script also validates its own JSONL envelope before printing the artifact path:
 it requires exact Lean theorem/assumption ID arrays, stable command log hashes,
 an explicit redaction-scan pass record, the expected `SMALL_TEST` and
 `V4_REFERENCE` summary profiles, one consistent run id and git revision, and a
-separate final artifact SHA printed after the validation record is appended. Its
+separate final artifact SHA printed only after the final self-contract validates
+the finished JSONL envelope. Its
 Git revision probe also applies the checkout root as a per-command
 `safe.directory`, matching the top-level gauntlet on shared or external volumes.
 The standalone formal script also treats Lean/Lake proof as mandatory: a missing

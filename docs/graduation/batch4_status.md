@@ -25,7 +25,7 @@ Summary: `0/23` Batch 4 connectors currently pass the graduation gauntlet.
 | `connectors/synology-chat` | `blocked` | `verification_script_declared` | `4` | README does not declare a scripts/e2e verification script |
 | `connectors/tlon` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/twitch` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
-| `connectors/wecom` | `blocked` | `verification_script_declared` | `4` | README does not declare a scripts/e2e verification script |
+| `connectors/wecom` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/feishu` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/coda` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/confluence` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |

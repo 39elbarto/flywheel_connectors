@@ -144,6 +144,8 @@ This slice is intentionally closer to "tenant-bound enterprise app automation" t
 
 ## Verification Handoff
 
+Verification script: `scripts/e2e/wecom_connector_verification.sh`
+
 - Deterministic unit coverage now exercises:
   - outbound send payload shaping for text and image messages, including duplicate-check hints
   - outbound send ownership claims, redacted coordination audit records, and duplicate-owner denial before provider HTTP

@@ -15,10 +15,11 @@ pub use criu::dirty_tracker::{
     SoftDirtyPageState, SoftDirtyProc, SoftDirtyReader, StaticSoftDirtyReader, virtual_page_index,
 };
 pub use criu::postcopy::{
-    DEFAULT_PAGE_FAULT_TIMEOUT_MS, PageFaultSource, PageFetch, PostCopyDecision,
-    PostCopyFallbackDecision, PostCopyForwarder, PostCopyOutcome,
+    DEFAULT_PAGE_FAULT_TIMEOUT_MS, POSTCOPY_PAGE_FAULT_OTLP_SPAN, PageFaultSource, PageFetch,
+    PostCopyDecision, PostCopyFallbackDecision, PostCopyFaultTrace, PostCopyForwarder,
+    PostCopyOutcome,
 };
 pub use criu::precopy::{
-    Bandwidth, PreCopyController, PreCopyDecision, PreCopyOutcome, PreCopyReport, PreCopyRoundLog,
-    Workload, run_precopy,
+    Bandwidth, PRECOPY_ROUND_OTLP_SPAN, PreCopyController, PreCopyDecision, PreCopyOutcome,
+    PreCopyReport, PreCopyRoundJsonLog, PreCopyRoundLog, Workload, run_precopy,
 };

@@ -3700,6 +3700,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "blake3",
+ "br-tools",
  "bytes",
  "chrono",
  "ciborium",
@@ -5490,6 +5491,7 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "tracing",
 ]

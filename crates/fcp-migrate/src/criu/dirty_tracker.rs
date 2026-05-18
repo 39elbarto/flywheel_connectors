@@ -370,6 +370,14 @@ impl DirtyTracker {
         for logical_page_idx in 0..self.page_count {
             let state =
                 reader.read_page_state(first_virtual_page_idx.saturating_add(logical_page_idx))?;
+            tracing::debug!(
+                target: "fcp.criu",
+                virtual_page_idx = state.page_idx,
+                logical_page_idx,
+                present = state.present,
+                soft_dirty = state.soft_dirty,
+                "CRIU dirty-page residency lookup"
+            );
             if state.soft_dirty {
                 self.mark_page(logical_page_idx);
                 refreshed = refreshed.saturating_add(1);

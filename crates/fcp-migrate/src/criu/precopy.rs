@@ -6,6 +6,7 @@ const DEFAULT_DIRTY_THRESHOLD_PCT: u8 = 80;
 const DEFAULT_MAX_ROUNDS: u8 = 5;
 const DEFAULT_BANDWIDTH_MIB_PER_SECOND: u64 = 100;
 const MIB: u64 = 1024 * 1024;
+pub const PRECOPY_ROUND_OTLP_SPAN: &str = "fcp.criu.precopy_round";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bandwidth {
@@ -93,11 +94,123 @@ pub struct PreCopyRoundLog {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreCopyRoundJsonLog {
+    pub timestamp: String,
+    pub op_id: String,
+    pub round_idx: u8,
+    pub dirty_pages_this_round: u64,
+    pub bandwidth_estimate_mbps: u64,
+    pub dirty_rate_mbps: u64,
+    pub decision: PreCopyDecision,
+}
+
+impl PreCopyRoundLog {
+    #[must_use]
+    pub const fn bandwidth_estimate_mbps(&self) -> u64 {
+        bytes_per_second_to_mibps(self.bandwidth_estimate_bytes_per_second)
+    }
+
+    #[must_use]
+    pub const fn dirty_rate_mbps(&self) -> u64 {
+        bytes_per_second_to_mibps(self.dirty_rate_bytes_per_second)
+    }
+
+    #[must_use]
+    pub const fn fallback_triggered(&self) -> bool {
+        matches!(
+            self.decision,
+            PreCopyDecision::StopAndCheckpoint | PreCopyDecision::Aborted
+        )
+    }
+
+    #[must_use]
+    pub fn json_log(
+        &self,
+        timestamp: impl Into<String>,
+        op_id: impl Into<String>,
+    ) -> PreCopyRoundJsonLog {
+        PreCopyRoundJsonLog {
+            timestamp: timestamp.into(),
+            op_id: op_id.into(),
+            round_idx: self.round_idx,
+            dirty_pages_this_round: self.dirty_pages_this_round,
+            bandwidth_estimate_mbps: self.bandwidth_estimate_mbps(),
+            dirty_rate_mbps: self.dirty_rate_mbps(),
+            decision: self.decision,
+        }
+    }
+
+    #[must_use]
+    pub fn otlp_span(&self, op_id: &str) -> tracing::Span {
+        tracing::info_span!(
+            PRECOPY_ROUND_OTLP_SPAN,
+            op_id,
+            round_idx = self.round_idx,
+            dirty_pages = self.dirty_pages_this_round,
+            dirty_pages_this_round = self.dirty_pages_this_round,
+            fallback_triggered = self.fallback_triggered(),
+            bandwidth_estimate_mbps = self.bandwidth_estimate_mbps(),
+            dirty_rate_mbps = self.dirty_rate_mbps(),
+            decision = ?self.decision,
+        )
+    }
+
+    pub fn emit_info(&self, op_id: &str) {
+        tracing::info!(
+            target: "fcp.criu",
+            op_id,
+            round_idx = self.round_idx,
+            dirty_pages = self.dirty_pages_this_round,
+            dirty_pages_this_round = self.dirty_pages_this_round,
+            fallback_triggered = self.fallback_triggered(),
+            bandwidth_estimate_mbps = self.bandwidth_estimate_mbps(),
+            dirty_rate_mbps = self.dirty_rate_mbps(),
+            decision = ?self.decision,
+            "CRIU pre-copy round"
+        );
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreCopyReport {
     pub rounds: u8,
     pub final_dirty_bytes: u64,
     pub dirty_rate_pct_of_bandwidth: u16,
     pub logs: Vec<PreCopyRoundLog>,
+}
+
+impl PreCopyReport {
+    #[must_use]
+    pub fn json_round_logs(&self, timestamp: &str, op_id: &str) -> Vec<PreCopyRoundJsonLog> {
+        self.logs
+            .iter()
+            .map(|log| log.json_log(timestamp, op_id))
+            .collect()
+    }
+
+    /// Serializes pre-copy round logs as newline-delimited JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serialization error if a round payload cannot be encoded.
+    pub fn jsonl_round_logs(
+        &self,
+        timestamp: &str,
+        op_id: &str,
+    ) -> Result<String, serde_json::Error> {
+        let mut jsonl = String::new();
+        for log in self.json_round_logs(timestamp, op_id) {
+            jsonl.push_str(&serde_json::to_string(&log)?);
+            jsonl.push('\n');
+        }
+        Ok(jsonl)
+    }
+
+    pub fn emit_info_logs(&self, op_id: &str) {
+        for log in &self.logs {
+            log.emit_info(op_id);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,4 +448,8 @@ const fn pages_for_bytes(bytes: u64, page_size_bytes: u64) -> u64 {
         return 0;
     }
     bytes.div_ceil(page_size_bytes)
+}
+
+const fn bytes_per_second_to_mibps(bytes_per_second: u64) -> u64 {
+    bytes_per_second / MIB
 }

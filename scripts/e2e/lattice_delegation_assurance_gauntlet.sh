@@ -533,13 +533,16 @@ scan_jsonl_artifact() {
 
 append_redaction_scan() {
   local scanned=0
+  local scanned_paths_json='[]'
   for artifact in "$@"; do
     require_artifact "redaction_scan_prerequisite" "${artifact}"
     scan_jsonl_artifact "${artifact}"
+    scanned_paths_json="$(jq -cn --argjson paths "${scanned_paths_json}" --arg artifact "${artifact}" \
+      '$paths + [$artifact]')"
     scanned=$((scanned + 1))
   done
-  append_json "redaction_scan" "pass" "$(jq -cn --argjson scanned "${scanned}" \
-    '{scanned_jsonl_artifacts:$scanned,trapdoor_payload:"absent",preimage_payload:"absent",rng_seed_payload:"absent",operation_plaintext:"absent",principal_plaintext:"absent",zone_label_plaintext:"absent",auth_header_values:"absent",credential_markers:"absent",local_private_paths:"absent",provider_payloads:"absent",reviewer_private_data:"absent",cleanup_result:"not_applicable"}')"
+  append_json "redaction_scan" "pass" "$(jq -cn --argjson scanned "${scanned}" --argjson scanned_paths "${scanned_paths_json}" \
+    '{scanned_jsonl_artifacts:$scanned,scanned_artifact_paths:$scanned_paths,trapdoor_payload:"absent",preimage_payload:"absent",rng_seed_payload:"absent",operation_plaintext:"absent",principal_plaintext:"absent",zone_label_plaintext:"absent",auth_header_values:"absent",credential_markers:"absent",local_private_paths:"absent",provider_payloads:"absent",reviewer_private_data:"absent",cleanup_result:"not_applicable"}')"
 }
 
 validate_jsonl_contract() {
@@ -1194,6 +1197,35 @@ validate_gauntlet_contract() {
       ($final_scan.record.details.scanned_artifact_path == $summary.artifact_path) and
       ($final_scan.record.details.post_summary_artifact_hash | sha256_hash) and
       ($final_scan.record.details.cleanup_result | type == "string");
+    def redaction_scan_covers_expected_artifacts:
+      . as $records |
+      ([ $records[] | select(.step == "summary" and .result == "pass") | .details.artifact_path ][0] // null) as $summary_artifact |
+      ($summary_artifact | type == "string") and
+      any($records[]; .step == "redaction_scan" and .result == "pass" and
+        .details.scanned_jsonl_artifacts == 8 and
+        (.details.scanned_artifact_paths | type == "array") and
+        ((.details.scanned_artifact_paths | sort) == ([
+          $summary_artifact,
+          "target/fcp-crypto-pq/representation-profile-evidence.jsonl",
+          "target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl",
+          "target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl",
+          "target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl",
+          "target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl",
+          "target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl",
+          "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"
+        ] | sort)) and
+        .details.trapdoor_payload == "absent" and
+        .details.preimage_payload == "absent" and
+        .details.rng_seed_payload == "absent" and
+        .details.operation_plaintext == "absent" and
+        .details.principal_plaintext == "absent" and
+        .details.zone_label_plaintext == "absent" and
+        .details.auth_header_values == "absent" and
+        .details.credential_markers == "absent" and
+        .details.local_private_paths == "absent" and
+        .details.provider_payloads == "absent" and
+        .details.reviewer_private_data == "absent" and
+        (.details.cleanup_result | type == "string"));
     def top_level_provenance_consistent:
       ([.[] | .run_id] | unique | length == 1) and
       ([.[] | .git_revision] | unique | length == 1) and
@@ -1231,20 +1263,7 @@ validate_gauntlet_contract() {
     required_artifact_hash("crypto_formal_artifact"; "target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl") and
     required_artifact_hash("policy_formal_artifact"; "target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl") and
     required_artifact_hash("host_dispatcher_artifact"; "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl") and
-    any(.[]; .step == "redaction_scan" and .result == "pass" and
-      .details.scanned_jsonl_artifacts == 8 and
-      .details.trapdoor_payload == "absent" and
-      .details.preimage_payload == "absent" and
-      .details.rng_seed_payload == "absent" and
-      .details.operation_plaintext == "absent" and
-      .details.principal_plaintext == "absent" and
-      .details.zone_label_plaintext == "absent" and
-      .details.auth_header_values == "absent" and
-      .details.credential_markers == "absent" and
-      .details.local_private_paths == "absent" and
-      .details.provider_payloads == "absent" and
-      .details.reviewer_private_data == "absent" and
-      (.details.cleanup_result | type == "string")) and
+    redaction_scan_covers_expected_artifacts and
     final_redaction_scan_covers_summary_artifact and
     any(.[]; .step == "summary" and .result == "pass" and
       (.details.pre_summary_artifact_hash | sha256_hash) and

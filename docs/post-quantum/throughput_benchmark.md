@@ -499,9 +499,11 @@ The standalone formal script now mirrors the top-level gauntlet's post-summary
 redaction posture: the first `redaction_scan` covers the command and proof
 records before `summary`, then `final_redaction_scan` scans the summary-bearing
 artifact before success output prints the reusable JSONL path and SHA. Passing
-redaction-scan records identify the policy version instead of echoing the raw
-forbidden marker list, so the scan records themselves do not make the finished
-artifact fail its own redaction checks.
+redaction-scan records identify the case-insensitive policy version instead of
+echoing the raw forbidden marker list, so the scan records themselves do not
+make the finished artifact fail its own redaction checks. That policy covers
+private paths, raw operation/principal/zone labels, secret material,
+auth/header markers, provider-body markers, and reviewer-contact markers.
 Its command records carry the same execution-proof fields as the top-level
 gauntlet: non-`rch` lanes must report `fallback_decision:"not_needed"`,
 `worker_execution_class:"not_applicable"`, and `rch_summary:null`; `rch`-backed

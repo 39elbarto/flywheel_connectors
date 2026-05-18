@@ -275,11 +275,54 @@ scan_jsonl_artifact() {
   local step="$1"
   local path="$2"
   local forbidden
-  for forbidden in "/Users/" "/tmp/" "trapdoor_coefficients" "secret_seed" "expanded_secret_matrix" \
-    "preimage_coefficients" "preimage_bytes" "bearer" "token=" "op:" "principal:" "z:"; do
-    if grep -Fq "${forbidden}" "${path}"; then
+  for forbidden in \
+    "/home/" \
+    "/data/projects/" \
+    "/users/" \
+    "/volumes/" \
+    "/private/var/" \
+    "/var/folders/" \
+    "/tmp" \
+    "/private/tmp" \
+    "c:\\\\users\\\\" \
+    "authorization:" \
+    "bearer" \
+    "agent:" \
+    "op:" \
+    "operation:" \
+    "principal:" \
+    "zone:" \
+    "raw_operation" \
+    "raw_principal" \
+    "raw_zone" \
+    "trapdoor_material" \
+    "trapdoor_coefficients" \
+    "secret_seed" \
+    "expanded_secret_matrix" \
+    "preimage_coefficients" \
+    "preimage_bytes" \
+    "access_token" \
+    "refresh_token" \
+    "id_token" \
+    "client_secret" \
+    "api_key" \
+    "private_key" \
+    "secret_key" \
+    "password" \
+    "cookie" \
+    "token=" \
+    "credential=" \
+    "credential:" \
+    "provider_body" \
+    "provider_response_body" \
+    "provider_payload_body" \
+    "reviewer_contact" \
+    "reviewer_email" \
+    "reviewer_phone" \
+    "z:"; do
+    if grep -Fqi "${forbidden}" "${path}"; then
       fail_step "${step}" "$(jq -cn --arg forbidden "${forbidden}" \
-        '{forbidden:$forbidden,cleanup_result:"not_applicable"}')"
+        '{forbidden_case_insensitive:$forbidden,cleanup_result:"not_applicable"}')"
     fi
   done
 }
@@ -405,11 +448,13 @@ validate_formal_script_contract() {
     command_step("rust_crypto_existing_v4") and
     command_step("ubs_touched_files") and
     any(.[]; .step == "redaction_scan" and .result == "pass" and
-      .details.forbidden_terms_policy == "formal_correspondence_v1" and
+      .details.forbidden_terms_policy == "formal_correspondence_v1_case_insensitive" and
       .details.local_private_paths == "absent" and
       .details.secret_material == "absent" and
       .details.auth_header_values == "absent" and
       .details.request_plaintext == "absent" and
+      .details.provider_payloads == "absent" and
+      .details.reviewer_private_data == "absent" and
       (.details.cleanup_result | type == "string")) and
     any(.[]; .step == "summary" and .result == "pass" and
       (.details.artifact_path | safe_relative_jsonl_artifact_path) and
@@ -502,7 +547,7 @@ run_and_capture "ubs_touched_files" \
 
 scan_jsonl_artifact "redaction_scan" "${ARTIFACT}"
 append_json "redaction_scan" "pass" "$(jq -cn \
-  '{forbidden_terms_policy:"formal_correspondence_v1",local_private_paths:"absent",secret_material:"absent",auth_header_values:"absent",request_plaintext:"absent",cleanup_result:"not_applicable"}')"
+  '{forbidden_terms_policy:"formal_correspondence_v1_case_insensitive",local_private_paths:"absent",secret_material:"absent",auth_header_values:"absent",request_plaintext:"absent",provider_payloads:"absent",reviewer_private_data:"absent",cleanup_result:"not_applicable"}')"
 
 pre_summary_artifact_hash="$(shasum -a 256 "${ARTIFACT}" | awk '{print $1}')"
 append_json "summary" "pass" "$(jq -cn \

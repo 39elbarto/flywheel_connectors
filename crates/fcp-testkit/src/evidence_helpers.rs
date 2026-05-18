@@ -2813,7 +2813,7 @@ const SWARM_PREWARM_COLD_START_PROMOTION_IMPROVEMENT_SCENARIOS: [&str; 3] = [
 
 const SWARM_PREWARM_CARGO_TARGET_DIR_CLASSES: [&str; 3] = ["tmp", "absolute", "relative"];
 
-const SWARM_PREWARM_REDACTION_MARKERS: [(&str, &str); 20] = [
+const SWARM_PREWARM_REDACTION_MARKERS: [(&str, &str); 21] = [
     ("sk-live-", "sk-live-"),
     ("bearer ", "Bearer token"),
     ("authorization:", "authorization header"),
@@ -2833,6 +2833,7 @@ const SWARM_PREWARM_REDACTION_MARKERS: [(&str, &str); 20] = [
     ("operation:", "raw operation label"),
     ("principal:", "raw principal label"),
     ("zone:", "raw zone label"),
+    ("z:", "raw zone label"),
     ("provider_body", "provider payload"),
 ];
 
@@ -2908,6 +2909,11 @@ fn prewarm_cargo_target_dir_hash(cargo_target_dir: &str) -> String {
         "blake3:{}",
         blake3::hash(cargo_target_dir.as_bytes()).to_hex()
     )
+}
+
+#[cfg(test)]
+fn prewarm_zone_hash(zone: &str) -> String {
+    format!("blake3:{}", blake3::hash(zone.as_bytes()).to_hex())
 }
 
 fn is_resolved_git_revision(git_revision: &str) -> bool {
@@ -3159,6 +3165,11 @@ fn validate_prewarm_command_and_target(
     if !is_redaction_safe_blake3_hash(&evidence.manifest_hash) {
         return Err(SwarmPrewarmColdStartEvidenceError::InvalidManifestHash {
             hash: evidence.manifest_hash.clone(),
+        });
+    }
+    if !is_redaction_safe_blake3_hash(&evidence.zone) {
+        return Err(SwarmPrewarmColdStartEvidenceError::InvalidZoneHash {
+            zone: evidence.zone.clone(),
         });
     }
     Ok(())
@@ -3858,6 +3869,11 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         /// Observed hash value.
         hash: String,
     },
+    /// Zone evidence did not use a redaction-safe hash reference.
+    InvalidZoneHash {
+        /// Observed zone value.
+        zone: String,
+    },
     /// Admission decision was not one of the stable evidence states.
     InvalidAdmissionDecision {
         /// Observed decision label.
@@ -4074,6 +4090,10 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
             Self::InvalidManifestHash { hash } => write!(
                 f,
                 "swarm prewarm manifest hash must be 'blake3:' followed by 64 lowercase hex characters, got '{hash}'"
+            ),
+            Self::InvalidZoneHash { zone } => write!(
+                f,
+                "swarm prewarm zone evidence must be 'blake3:' followed by 64 lowercase hex characters, got '{zone}'"
             ),
             Self::InvalidAdmissionDecision { decision } => write!(
                 f,
@@ -10116,7 +10136,7 @@ mod tests {
             host_boundary: "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout"
                 .to_string(),
             manifest_hash,
-            zone: "z:project:swarm".to_string(),
+            zone: prewarm_zone_hash("z:project:swarm"),
             strategy: "warm_pool".to_string(),
             pool_state: "warm_hit".to_string(),
             pool_size: 256,
@@ -10387,7 +10407,10 @@ mod tests {
                 .as_str()
                 .is_some_and(is_redaction_safe_blake3_hash)
         );
-        assert_eq!(record["zone"], "z:project:swarm");
+        let zone_hash = record["zone"]
+            .as_str()
+            .expect("zone evidence should be recorded");
+        assert!(is_redaction_safe_blake3_hash(zone_hash));
         assert_eq!(record["pool_state"], "warm_hit");
         assert_eq!(record["pool_size"], 256);
         assert_eq!(record["admission_decision"], "admit_warm");
@@ -10580,6 +10603,41 @@ mod tests {
             })
         );
 
+        let mut raw_zone = prewarm_cold_start_evidence_fixture();
+        raw_zone.zone = "z:project:swarm".to_string();
+        assert_eq!(
+            raw_zone.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "zone",
+                    marker: "raw zone label"
+                }
+            )
+        );
+
+        let mut short_zone_hash = prewarm_cold_start_evidence_fixture();
+        short_zone_hash.zone = "blake3:abc123".to_string();
+        assert_eq!(
+            short_zone_hash.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidZoneHash {
+                zone: "blake3:abc123".to_string()
+            })
+        );
+
+        let uppercase_zone_hash =
+            "blake3:ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD".to_string();
+        let mut uppercase_zone_hash_evidence = prewarm_cold_start_evidence_fixture();
+        uppercase_zone_hash_evidence.zone = uppercase_zone_hash.clone();
+        assert_eq!(
+            uppercase_zone_hash_evidence.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidZoneHash {
+                zone: uppercase_zone_hash
+            })
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_rejects_invalid_percentiles() {
         let mut bad_percentiles = prewarm_cold_start_evidence_fixture();
         bad_percentiles.latency.p99_ms = 10;
         assert_eq!(
@@ -10962,7 +11020,10 @@ mod tests {
                 }
             )
         );
+    }
 
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_rejects_raw_labels_and_target_dir_classes() {
         let mut raw_operation_leak = prewarm_cold_start_evidence_fixture();
         raw_operation_leak.error_mapping = "operation:prewarm_checkout".to_string();
         assert_eq!(

@@ -71,10 +71,13 @@ collected. Verifier validation and the typed
 `SwarmPrewarmColdStartEvidence::validate()` contract both require
 `CARGO_TARGET_DIR` provenance and connector manifest identity to carry
 `blake3:<64 lowercase hex>` hashes, not just free-form labels or prefix-only
-markers. The typed validator also recomputes the `CARGO_TARGET_DIR` Blake3
-hash from the recorded target directory before serialization succeeds, so
-replay rows cannot spoof target-dir provenance with an unrelated valid-looking
-digest. They also enforce the same admission-decision shape: `admit_warm`
+markers. The same hash-shape rule applies to the exported `zone` field, so
+production artifacts identify the requested zone by a stable redaction-safe
+digest instead of leaking raw `z:project:*` labels. The typed validator also
+recomputes the `CARGO_TARGET_DIR` Blake3 hash from the recorded target
+directory before serialization succeeds, so replay rows cannot spoof target-dir
+provenance with an unrelated valid-looking digest. They also enforce the same
+admission-decision shape: `admit_warm`
 must carry `warm_checkout=true`, `error_mapping="ok"`, and no fallback or
 unsafe-rejection reason; `fallback_on_demand` must carry
 `warm_checkout=false` plus a non-empty
@@ -113,8 +116,8 @@ labels outside the 7-to-40 character short/full object-id range, unredacted live
 bearer, authorization, access-token, refresh-token, private-key, secret-seed,
 macOS/Linux/Windows private-user paths, Linux project checkout paths,
 private-var-path, mounted-volume-path, raw `operation:`, `principal:`, or `zone:`
-labels, provider payload markers, and `private_absolute` target-dir evidence
-before export. Evidence also cannot use
+labels, raw `z:` zone labels, provider payload markers, and
+`private_absolute` target-dir evidence before export. Evidence also cannot use
 the exact shared target roots `/tmp`, `/private/tmp`, `target`, or `./target`;
 use a dedicated child directory so the target-dir hash identifies one proof run;
 `cargo_target_dir_class` must be one of the stable export labels `tmp`,

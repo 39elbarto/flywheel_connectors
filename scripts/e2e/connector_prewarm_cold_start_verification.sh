@@ -423,7 +423,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           and nonempty_string("connector_fixture_id")
           and nonempty_string("host_boundary")
           and nonempty_string("manifest_hash")
-          and nonempty_string("zone")
+          and (.zone | blake3_hash)
           and nonempty_string("strategy")
           and nonempty_string("pool_state")
           and nonempty_string("admission_decision")
@@ -487,6 +487,10 @@ if [[ "${overall_status}" == "passed" ]]; then
         manifest_hash_shape_ok: all(.[];
           (.manifest_hash | blake3_hash)
           and (.evidence.manifest_hash | blake3_hash)
+        ),
+        zone_hash_shape_ok: all(.[];
+          (.zone | blake3_hash)
+          and (.evidence.zone | blake3_hash)
         ),
         production_soak_ok: (
           if $require_production_soak then
@@ -588,6 +592,7 @@ if [[ "${overall_status}" == "passed" ]]; then
             and $v.boundary_shape_ok
             and $v.nested_evidence_ok
             and $v.manifest_hash_shape_ok
+            and $v.zone_hash_shape_ok
             and $v.production_soak_ok
             and $v.production_skip_reason_ok
             and $v.production_improvement_ok
@@ -615,7 +620,7 @@ if [[ "${overall_status}" == "passed" ]]; then
 fi
 
 if [[ -s "${EVIDENCE_JSONL}" ]]; then
-  if grep -aEi '(sk-live-|bearer[[:space:]]+|authorization:|token=|access_token|refresh_token|super-secret-value|secret_seed|private_key|/users/|/home/|/data/projects/|/private/var/|/var/folders/|/volumes/|c:\\\\users\\\\|operation:|principal:|zone:|provider_body)' "${EVIDENCE_JSONL}" >/dev/null; then
+  if grep -aEi '(sk-live-|bearer[[:space:]]+|authorization:|token=|access_token|refresh_token|super-secret-value|secret_seed|private_key|/users/|/home/|/data/projects/|/private/var/|/var/folders/|/volumes/|c:\\\\users\\\\|operation:|principal:|zone:|z:|provider_body)' "${EVIDENCE_JSONL}" >/dev/null; then
     redaction_status="failed"
     overall_status="failed"
     validation_status="failed"

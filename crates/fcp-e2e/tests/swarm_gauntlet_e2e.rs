@@ -891,6 +891,13 @@ fn prewarm_manifest_hash() -> String {
     )
 }
 
+fn prewarm_zone_hash() -> String {
+    format!(
+        "blake3:{}",
+        blake3::hash(b"z:project:swarm-prewarm").to_hex()
+    )
+}
+
 fn prewarm_command_line(cargo_target_dir: &str) -> Vec<String> {
     vec![
         "rch".to_string(),
@@ -1023,7 +1030,7 @@ fn prewarm_evidence(
         scenario_id: case.scenario_id.to_string(),
         connector_id: "fcp.github:utility:1.0.0".to_string(),
         command_line: prewarm_command_line(&cargo_target_dir),
-        git_revision: "e2e-smoke-revision".to_string(),
+        git_revision: "abc1234".to_string(),
         worker_id: "offline-e2e-runner".to_string(),
         cargo_target_dir,
         cargo_target_dir_class,
@@ -1031,7 +1038,7 @@ fn prewarm_evidence(
         connector_fixture_id: "fcp-test-connector:request-response".to_string(),
         host_boundary: "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout".to_string(),
         manifest_hash: prewarm_manifest_hash(),
-        zone: "z:project:swarm-prewarm".to_string(),
+        zone: prewarm_zone_hash(),
         strategy: serde_label(&case.config.strategy)?,
         pool_state: serde_label(&case.observation.pool_state)?,
         pool_size: case.config.max_idle,
@@ -1594,7 +1601,7 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
     assert_eq!(warm_hit["execution_mode"], "smoke");
     assert_eq!(warm_hit["source_kind"], "offline");
     assert_eq!(warm_hit["connector_id"], "fcp.github:utility:1.0.0");
-    assert_eq!(warm_hit["git_revision"], "e2e-smoke-revision");
+    assert_eq!(warm_hit["git_revision"], "abc1234");
     assert_eq!(warm_hit["worker_id"], "offline-e2e-runner");
     let cargo_target_dir = warm_hit["cargo_target_dir"]
         .as_str()
@@ -1629,7 +1636,18 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     );
-    assert_eq!(warm_hit["zone"], "z:project:swarm-prewarm");
+    let warm_zone = warm_hit["zone"]
+        .as_str()
+        .ok_or("zone hash should be recorded")?;
+    let warm_zone_hex = warm_zone
+        .strip_prefix("blake3:")
+        .ok_or("zone hash should use blake3 prefix")?;
+    assert_eq!(warm_zone_hex.len(), 64);
+    assert!(
+        warm_zone_hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
     assert_eq!(warm_hit["strategy"], "warm_pool");
     assert_eq!(warm_hit["pool_state"], "warm_hit");
     assert_eq!(warm_hit["pool_size"], 256);

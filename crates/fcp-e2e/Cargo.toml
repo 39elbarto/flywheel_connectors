@@ -364,3 +364,4 @@ fcp-oauth = { workspace = true }
 # both referenced by `tests/capability_enforcement_concurrent_e2e.rs`.
 fcp-cbor = { workspace = true }
 semver = { workspace = true }
+br-tools = { path = "../br-tools" }

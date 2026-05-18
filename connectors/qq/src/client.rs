@@ -3917,6 +3917,46 @@ mod tests {
     }
 
     #[test]
+    fn gateway_runtime_identifies_after_nonresumable_invalid_session() {
+        let mut runtime = QqGatewayRuntime::new(QqGatewayRuntimeConfig {
+            enabled: true,
+            max_reconnect_attempts: 3,
+            reconnect_backoff_ms: 250,
+            restore_session_id: Some("session-before-invalid-session".into()),
+            restore_sequence: Some(42),
+            ..QqGatewayRuntimeConfig::default()
+        });
+
+        let invalid_session = runtime
+            .project_event(QqGatewayEvent {
+                op: 9,
+                s: None,
+                t: None,
+                d: Some(json!(false)),
+                id: Some("evt-invalid-identify-required".into()),
+            })
+            .unwrap();
+
+        assert_eq!(
+            invalid_session.reason_code,
+            "invalid_session_identify_required"
+        );
+        assert_eq!(
+            invalid_session.lifecycle.action,
+            QQ_GATEWAY_ACTION_RECONNECT_IDENTIFY
+        );
+        assert_eq!(invalid_session.lifecycle.resume_session_id.as_deref(), None);
+        assert_eq!(invalid_session.lifecycle.resume_sequence, 42);
+        assert_eq!(invalid_session.lifecycle.reconnect_after_ms, Some(250));
+        assert_eq!(invalid_session.runtime.reconnect_attempts, 1);
+        assert_eq!(invalid_session.runtime.terminal_reconnect_failures, 0);
+        assert_eq!(
+            invalid_session.runtime.session_id.as_deref(),
+            Some("session-before-invalid-session")
+        );
+    }
+
+    #[test]
     fn gateway_runtime_caps_reconnect_backoff_delay() {
         let mut runtime = QqGatewayRuntime::new(QqGatewayRuntimeConfig {
             enabled: true,

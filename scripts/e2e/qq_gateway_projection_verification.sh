@@ -295,6 +295,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           "reconnect_requested",
           "invalid_session_resumable",
           "restored_session_reconnect_resume",
+          "invalid_session_identify_required",
           "reconnect_attempts_exhausted",
           "gateway_drain_first_batch",
           "gateway_drain_final_batch",
@@ -432,6 +433,16 @@ if [[ "${overall_status}" == "passed" ]]; then
         ),
         reconnect_shape_ok: (any(.[]; .step == "reconnect_requested" and .details.reason_code == "reconnect_requested" and .details.runtime.reconnect_attempts == 1 and .details.runtime.terminal_reconnect_failures == 0)
           and any(.[]; .step == "invalid_session_resumable" and .details.reason_code == "invalid_session_resumable" and .details.runtime.reconnect_attempts == 2)
+          and any(.[];
+            .step == "invalid_session_identify_required"
+            and .details.reason_code == "invalid_session_identify_required"
+            and .details.runtime.reconnect_attempts == 1
+            and .details.runtime.terminal_reconnect_failures == 0
+            and .details.lifecycle.action == "reconnect_identify"
+            and .details.lifecycle.resume_session_id == null
+            and .details.lifecycle.resume_sequence == 12
+            and .details.lifecycle.reconnect_after_ms == 300
+          )
           and any(.[]; .step == "reconnect_attempts_exhausted" and .details.reason_code == "reconnect_attempts_exhausted" and .details.runtime.max_reconnect_attempts == 1 and .details.runtime.terminal_reconnect_failures == 1 and .details.lifecycle.action == "stop_reconnect")
         ),
         restore_shape_ok: any(.[];

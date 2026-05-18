@@ -1736,6 +1736,71 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         &restored_reconnect,
     );
 
+    let identify_required_instance_id = InstanceId::new();
+    let mut identify_required_connector = QqConnector::new();
+    identify_required_connector
+        .configure(json!({
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999",
+            "app_id": "qq-app",
+            "client_secret": "test-secret",
+            "gateway": {
+                "enabled": true,
+                "restore_session_id": "session-identify-before",
+                "restore_sequence": 12,
+                "max_reconnect_attempts": 2,
+                "reconnect_backoff_ms": 300,
+                "max_reconnect_backoff_ms": 900
+            }
+        }))
+        .await
+        .expect("configure invalid-session identify QQ connector");
+    identify_required_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            identify_required_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake invalid-session identify QQ connector");
+    let identify_required = invoke_projection(
+        &identify_required_connector,
+        &signing_key,
+        &identify_required_instance_id,
+        "qq-gateway-invalid-session-identify-required",
+        json!({
+            "op": 9,
+            "id": "evt-invalid-session-identify-required",
+            "d": false
+        }),
+    )
+    .await;
+    assert_eq!(identify_required["accepted"], false);
+    assert_eq!(
+        identify_required["reason_code"],
+        "invalid_session_identify_required"
+    );
+    assert_eq!(
+        identify_required["lifecycle"]["action"],
+        "reconnect_identify"
+    );
+    assert_eq!(
+        identify_required["lifecycle"]["resume_session_id"],
+        Value::Null
+    );
+    assert_eq!(identify_required["lifecycle"]["resume_sequence"], 12);
+    assert_eq!(identify_required["lifecycle"]["reconnect_after_ms"], 300);
+    assert_eq!(identify_required["runtime"]["reconnect_attempts"], 1);
+    assert_eq!(
+        identify_required["runtime"]["terminal_reconnect_failures"],
+        0
+    );
+    log_projection_step(
+        &mut logs,
+        "invalid_session_identify_required",
+        "ok",
+        &identify_required,
+    );
+
     let reconnect_cap_instance_id = InstanceId::new();
     let mut reconnect_cap_connector = QqConnector::new();
     reconnect_cap_connector

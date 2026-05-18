@@ -2813,7 +2813,7 @@ const SWARM_PREWARM_COLD_START_PROMOTION_IMPROVEMENT_SCENARIOS: [&str; 3] = [
 
 const SWARM_PREWARM_CARGO_TARGET_DIR_CLASSES: [&str; 3] = ["tmp", "absolute", "relative"];
 
-const SWARM_PREWARM_REDACTION_MARKERS: [(&str, &str); 7] = [
+const SWARM_PREWARM_REDACTION_MARKERS: [(&str, &str); 10] = [
     ("sk-live-", "sk-live-"),
     ("Bearer ", "Bearer token"),
     ("super-secret-value", "super-secret-value"),
@@ -2821,6 +2821,9 @@ const SWARM_PREWARM_REDACTION_MARKERS: [(&str, &str); 7] = [
     ("private_key", "private_key"),
     ("/Users/", "private user path"),
     ("/private/var/", "private var path"),
+    ("/Volumes/", "mounted volume path"),
+    ("operation:", "raw operation label"),
+    ("zone:", "raw zone label"),
 ];
 
 fn validate_prewarm_execution_source(
@@ -10705,6 +10708,42 @@ mod tests {
                 SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
                     field: "command_line",
                     marker: "Bearer token"
+                }
+            )
+        );
+
+        let mut mounted_volume_leak = prewarm_cold_start_evidence_fixture();
+        mounted_volume_leak.worker_id = "worker:/Volumes/ProdSSD/fcp".to_string();
+        assert_eq!(
+            mounted_volume_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "worker_id",
+                    marker: "mounted volume path"
+                }
+            )
+        );
+
+        let mut raw_operation_leak = prewarm_cold_start_evidence_fixture();
+        raw_operation_leak.error_mapping = "operation:prewarm_checkout".to_string();
+        assert_eq!(
+            raw_operation_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "error_mapping",
+                    marker: "raw operation label"
+                }
+            )
+        );
+
+        let mut raw_zone_leak = prewarm_cold_start_evidence_fixture();
+        raw_zone_leak.skip_reason = Some("zone:z:owner".to_string());
+        assert_eq!(
+            raw_zone_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "skip_reason",
+                    marker: "raw zone label"
                 }
             )
         );

@@ -603,7 +603,7 @@ if [[ "${overall_status}" == "passed" ]]; then
 fi
 
 if [[ -s "${EVIDENCE_JSONL}" ]]; then
-  if grep -aE '(sk-live-|Bearer[[:space:]]+|super-secret-value|secret_seed|private_key|/Users/|/private/var/)' "${EVIDENCE_JSONL}" >/dev/null; then
+  if grep -aE '(sk-live-|Bearer[[:space:]]+|super-secret-value|secret_seed|private_key|/Users/|/private/var/|/Volumes/|operation:|zone:)' "${EVIDENCE_JSONL}" >/dev/null; then
     redaction_status="failed"
     overall_status="failed"
     validation_status="failed"

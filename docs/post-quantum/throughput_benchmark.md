@@ -555,8 +555,10 @@ child `/tmp` and `/private/tmp` paths, `/private/var/`, `/var/folders/`,
 Windows `C:\Users\`, provider body payload markers, reviewer private-contact
 markers, and the host dispatcher fixture literals `send_message`,
 `agent-alpha`, and `agent-beta` as failures.
-Private path markers are checked case-insensitively, so normalized lowercase
-macOS or Windows user paths cannot pass as reusable JSONL evidence.
+Private path markers, raw-label markers, secret material markers, provider-body
+markers, and reviewer-contact markers are checked case-insensitively, so
+normalized lowercase macOS or Windows user paths and differently cased payload
+labels cannot pass as reusable JSONL evidence.
 Because the summary record is appended after the normal redaction scan, the
 script scans the finished JSONL again and requires a `final_redaction_scan`
 pass record before printing the artifact path and final hash. The self-contract

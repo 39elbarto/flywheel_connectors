@@ -135,9 +135,13 @@ layout; it is scanned with the same secret/private-path pattern before exit. The
 artifacts follow the same rule for repository root, artifact root,
 `CARGO_TARGET_DIR`, and provided-evidence input paths: `environment.json` stores
 classes and `sha256:<64 lowercase hex>` fingerprints instead of absolute paths,
-and `summary.json` names bundle artifacts by relative path only. Both metadata
-JSON files are scanned for the same secret and private-path markers as the
-evidence rows before the verifier exits. The
+while separately recording the `sha256:<64 lowercase hex>` content digest of
+the copied evidence JSONL bundle. `summary.json` names bundle artifacts by
+relative path only and repeats the evidence JSONL content digest so reviewers
+can tie validation results to the exact replay input without exposing the
+operator's local source path. Both metadata JSON files are scanned for the same
+secret and private-path markers as the evidence rows before the verifier exits.
+The
 verifier and typed serializer both require positive p50, p95, and p99
 improvement deltas for production-soak warm-hit, shutdown-cleanup, and
 concurrent-swarm-startup promotion scenarios; fallback and rejection scenarios

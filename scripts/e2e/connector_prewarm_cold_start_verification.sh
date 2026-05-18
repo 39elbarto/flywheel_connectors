@@ -108,6 +108,10 @@ hash_text_sha256() {
   printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
 }
 
+hash_file_sha256() {
+  shasum -a 256 "$1" | awk '{print $1}'
+}
+
 display_rch_bin() {
   basename "${RCH_BIN}"
 }
@@ -131,6 +135,23 @@ json_null_or_sha256() {
   local value="$1"
   if [[ -n "${value}" ]]; then
     jq -n --arg hash "sha256:$(hash_text_sha256 "${value}")" '$hash'
+  else
+    printf 'null'
+  fi
+}
+
+json_null_or_file_sha256() {
+  local path="$1"
+  if [[ -n "${path}" && -s "${path}" ]]; then
+    jq -n --arg hash "sha256:$(hash_file_sha256 "${path}")" '$hash'
+  else
+    printf 'null'
+  fi
+}
+
+json_null_or_provided_evidence_sha256() {
+  if [[ -n "${EVIDENCE_JSONL_IN}" ]]; then
+    json_null_or_file_sha256 "${EVIDENCE_JSONL}"
   else
     printf 'null'
   fi
@@ -823,6 +844,8 @@ jq -n \
   --argjson remote_proof_summary_hash "$(json_null_or_sha256 "${remote_proof_summary}")" \
   --argjson evidence_jsonl_in_hash "$(json_null_or_sha256 "${EVIDENCE_JSONL_IN}")" \
   --argjson evidence_jsonl_in_path_redacted "$(evidence_jsonl_in_path_redacted)" \
+  --argjson evidence_jsonl_sha256 "$(json_null_or_file_sha256 "${EVIDENCE_JSONL}")" \
+  --argjson provided_evidence_jsonl_sha256 "$(json_null_or_provided_evidence_sha256)" \
   --argjson require_production_soak "${require_production_soak_json}" \
   --arg generated_at "$(now_iso)" \
   '{
@@ -848,6 +871,8 @@ jq -n \
     },
     evidence_jsonl_in_path_redacted: $evidence_jsonl_in_path_redacted,
     evidence_jsonl_in_hash: $evidence_jsonl_in_hash,
+    evidence_jsonl_sha256: $evidence_jsonl_sha256,
+    provided_evidence_jsonl_sha256: $provided_evidence_jsonl_sha256,
     require_production_soak: $require_production_soak,
     generated_at: $generated_at
   }' > "${ENVIRONMENT_JSON}"
@@ -879,6 +904,7 @@ jq -n \
   --arg skip_reason "${skip_reason}" \
   --argjson evidence_count "${evidence_count}" \
   --argjson require_production_soak "${require_production_soak_json}" \
+  --argjson evidence_jsonl_sha256 "$(json_null_or_file_sha256 "${EVIDENCE_JSONL}")" \
   '{
     run_id: $run_id,
     status: $status,
@@ -896,6 +922,7 @@ jq -n \
     artifacts: {
       test_log: "logs/prewarm-cold-start-test.log",
       evidence_jsonl: "evidence/prewarm-cold-start.jsonl",
+      evidence_jsonl_sha256: $evidence_jsonl_sha256,
       validation_json: "evidence/validation.json",
       skip_jsonl: "evidence/prewarm-cold-start-skip.jsonl",
       environment_json: "environment.json"

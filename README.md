@@ -1416,9 +1416,9 @@ Agent ──"search my Gmail for invoices"──> fwc plan
                                             ▼
                                     Intent Compiler
                                     ├─ Resolve connector: gmail
-                                    ├─ Resolve operation: gmail.search_messages
+                                    ├─ Resolve operation: gmail.list_messages
                                     ├─ Check capability: gmail.read
-                                    └─ Build: fwc invoke gmail search_messages --file payload.json
+                                    └─ Build: fwc invoke gmail list_messages --file payload.json
                                             │
                                             ▼
                                     fwc invoke (CLI)

@@ -20,7 +20,25 @@ validate_run_id() {
   esac
 }
 
+validate_artifact_path() {
+  case "${ARTIFACT}" in
+    *.jsonl) ;;
+    *)
+      printf 'invalid ARTIFACT: reusable evidence path must be a relative .jsonl path\n' >&2
+      exit 64
+      ;;
+  esac
+
+  case "${ARTIFACT}" in
+    ""|/*|*\\*|*..*|*//*|*[!A-Za-z0-9._/-]*)
+      printf 'invalid ARTIFACT: reusable evidence path must be relative, redaction-safe, and free of traversal\n' >&2
+      exit 64
+      ;;
+  esac
+}
+
 validate_run_id
+validate_artifact_path
 mkdir -p "${OUT_DIR}" "${ARTIFACT_STAGE_ROOT}"
 : > "${ARTIFACT}"
 

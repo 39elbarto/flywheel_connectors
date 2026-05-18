@@ -502,8 +502,9 @@ requires the normal redaction scan to cover all eight expected JSONL artifacts
 by exact path, not just by count, and requires the final redaction scan to cover
 the summary-bearing gauntlet artifact by exact path. The summary artifact path
 must be a redaction-safe relative `.jsonl` path, never an absolute local/private
-path or a `..` traversal. The final scan must appear immediately after the
-summary record and as the final JSONL record, with a
+path or a `..` traversal; an unsafe `ARTIFACT` override is rejected before the
+script creates the artifact directory or JSONL file. The final scan must appear
+immediately after the summary record and as the final JSONL record, with a
 `post_summary_artifact_hash` over the summary-bearing artifact state. This keeps
 omitted component scans, duplicate scan-count padding, absolute-path echoing,
 and append-only records after the final scan from passing the reusable-evidence

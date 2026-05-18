@@ -22,6 +22,18 @@ const EXPECTED_CHECKS: [(&str, i32); 12] = [
     ("operator_guidance", 12),
 ];
 
+const BATCH2_CONNECTORS: [&str; 9] = [
+    "connectors/google-admin-reports",
+    "connectors/google-calendar",
+    "connectors/google-chat",
+    "connectors/google-docs",
+    "connectors/google-drive",
+    "connectors/google-meet",
+    "connectors/google-people",
+    "connectors/google-sheets",
+    "connectors/google-workspace-events",
+];
+
 #[derive(Clone, Copy)]
 struct FixtureOptions {
     status: &'static str,
@@ -410,6 +422,84 @@ fn batch1_status_runner_writes_status_markdown() {
     assert_eq!(
         checks,
         EXPECTED_CHECKS[0..8]
+            .iter()
+            .map(|(check, _)| *check)
+            .collect::<BTreeSet<_>>()
+    );
+}
+
+#[test]
+fn batch2_status_runner_writes_status_markdown() {
+    let fixture_root = unique_fixture_root("batch2-status");
+    fs::create_dir_all(&fixture_root).expect("fixture root should be creatable");
+    let status_path = fixture_root.join("batch2_status.md");
+    let jsonl_path = fixture_root.join("batch2_status.jsonl");
+    let output = run_gauntlet(vec![
+        OsString::from("--jsonl"),
+        jsonl_path.as_os_str().to_os_string(),
+        OsString::from("--batch"),
+        OsString::from("batch2"),
+        OsString::from("--status-md"),
+        status_path.as_os_str().to_os_string(),
+    ]);
+    assert!(
+        output.status.success(),
+        "batch2 status run failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let status_doc =
+        fs::read_to_string(&status_path).expect("batch2 status markdown should be written");
+    assert!(status_doc.contains("# Batch 2 Graduation Status"));
+    assert!(status_doc.contains("scripts/graduation/run_gauntlet.sh --batch batch2"));
+    assert!(status_doc.contains("Summary: `0/9` Batch 2 connectors currently pass"));
+    assert!(status_doc.contains("Add or restore connector-local `operations_info` metadata"));
+    assert!(
+        !status_doc.contains("Pre-promotion status:"),
+        "Batch 2 should not look pre-promotion-complete while operations_info is missing"
+    );
+    for connector in BATCH2_CONNECTORS {
+        assert!(
+            status_doc.contains(connector),
+            "status doc should mention {connector}"
+        );
+    }
+
+    let jsonl = fs::read_to_string(&jsonl_path).expect("batch2 JSONL should be written");
+    let records = jsonl
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSONL record"))
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), BATCH2_CONNECTORS.len() * 2);
+    assert!(
+        records
+            .iter()
+            .filter(|record| record_str(record, "check") == Some("connector_path"))
+            .all(|record| record_str(record, "verdict") == Some("pass")),
+        "Batch 2 connector paths should exist: {jsonl}"
+    );
+    assert!(
+        records
+            .iter()
+            .filter(|record| record_str(record, "check") == Some("operations_info"))
+            .all(|record| record_str(record, "verdict") == Some("fail")),
+        "Batch 2 should currently stop at operations_info: {jsonl}"
+    );
+
+    let connectors = records
+        .iter()
+        .filter_map(|record| record_str(record, "connector"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(connectors, BTreeSet::from(BATCH2_CONNECTORS));
+
+    let checks = records
+        .iter()
+        .filter_map(|record| record_str(record, "check"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        checks,
+        EXPECTED_CHECKS[0..2]
             .iter()
             .map(|(check, _)| *check)
             .collect::<BTreeSet<_>>()

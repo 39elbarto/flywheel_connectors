@@ -41,7 +41,13 @@ Batch 1 status is generated with:
 scripts/graduation/run_gauntlet.sh --batch batch1 --status-md docs/graduation/batch1_status.md
 ```
 
-The batch mode runs the same checks against the seven Phase G.1 connectors and
+Batch 2 status is generated with:
+
+```bash
+scripts/graduation/run_gauntlet.sh --batch batch2 --status-md docs/graduation/batch2_status.md
+```
+
+The batch mode runs the same checks against the Phase G connector batch and
 writes a Markdown status artifact. It does not graduate or demote connectors;
 it records the first blocking check for each connector so follow-up work can be
 split without claiming PROVEN status prematurely.

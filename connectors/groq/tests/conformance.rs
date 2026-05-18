@@ -44,9 +44,18 @@ fn manifest_declares_required_operations_and_network_policy() {
     assert_eq!(
         operations
             .get("groq.embeddings.create")
-            .and_then(|op| op.get("availability"))
+            .and_then(|op| op.get("description"))
             .and_then(toml::Value::as_str),
-        Some("not_supported")
+        Some(
+            "Declared for introspection honesty. Groq does not currently expose embeddings through the first-party Groq API."
+        )
+    );
+    assert_eq!(
+        operations
+            .get("groq.completions.legacy")
+            .and_then(|op| op.get("description"))
+            .and_then(toml::Value::as_str),
+        Some("Minimal deprecated legacy /completions support for older OpenAI-compatible clients.")
     );
 }
 

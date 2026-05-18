@@ -8,6 +8,9 @@ OUT_ROOT="${OUT_ROOT:-/tmp/fcp-kubernetes-e2e/${RUN_ID}}"
 TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-kubernetes-e2e-target}"
 STATUS_JSONL="${OUT_ROOT}/evidence/verification_steps.jsonl"
 RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+REMOTE_RUNNER="rch:remote-required"
+export RCH_FORCE_REMOTE=1
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
@@ -38,7 +41,7 @@ classify_failure() {
     return
   fi
 
-  if grep -Eqi 'RCH-E|remote required; refusing local fallback|No space left on device|connection reset by peer|Backend unavailable|unable to update registry|spurious network error|failed to get successful HTTP response|missing worker system package|timeout: failed to execute process' "${log_path}"; then
+  if grep -Eqi 'RCH-E|remote required; refusing local fallback|rch command did not produce remote proof|\[RCH\] local|No space left on device|connection reset by peer|Backend unavailable|unable to update registry|spurious network error|failed to get successful HTTP response|missing worker system package|timeout: failed to execute process' "${log_path}"; then
     echo "infra_blocked"
   else
     echo "failed"
@@ -89,6 +92,35 @@ record_step() {
     }' >>"${STATUS_JSONL}"
 }
 
+command_uses_rch_exec() {
+  local previous=""
+  for arg in "$@"; do
+    if [[ "${previous}" == "rch" && "${arg}" == "exec" ]]; then
+      return 0
+    fi
+    previous="${arg}"
+  done
+  return 1
+}
+
+require_rch_remote_proof() {
+  local name="$1"
+  local log_path="$2"
+  shift 2
+
+  if ! command_uses_rch_exec "$@"; then
+    return 0
+  fi
+
+  if grep -Fq "[RCH] remote" "${log_path}"; then
+    return 0
+  fi
+
+  echo "[kubernetes-verification] ${name}: rch command did not produce remote proof" >&2
+  echo "rch command did not produce remote proof" >>"${log_path}"
+  return 1
+}
+
 run_logged() {
   local name="$1"
   shift
@@ -103,6 +135,9 @@ run_logged() {
   ) >"${log_path}" 2>&1
   rc="$?"
   status="passed"
+  if [[ "${rc}" -eq 0 ]] && ! require_rch_remote_proof "${name}" "${log_path}" "$@"; then
+    rc=1
+  fi
   if [[ "${rc}" -ne 0 ]]; then
     status="$(classify_failure "${log_path}")"
     promote_status "${status}"
@@ -149,7 +184,12 @@ run_rch_cargo_step() {
   local name="$1"
   shift
 
-  run_logged "${name}" env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" rch exec -- env \
+  run_logged "${name}" env \
+    RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" \
+    RCH_FORCE_REMOTE=1 \
+    RCH_VISIBILITY=verbose \
+    rch exec -- env \
+    "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" \
     CARGO_TARGET_DIR="${TARGET_DIR}" \
     CARGO_INCREMENTAL=0 \
     "$@"
@@ -230,6 +270,8 @@ cat >"${OUT_ROOT}/environment.json" <<EOF
   "git_revision": "${git_revision}",
   "target_dir": "${TARGET_DIR}",
   "rch_require_remote": "${RCH_REQUIRE_REMOTE}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
   "fixture_mode": "local loopback HTTP Kubernetes API fixture plus connector integration fixtures",
   "redaction": "logs and JSONL must not contain bearer tokens, credential IDs, raw Authorization headers, secret values, provider payload bodies, or private cluster material"
 }
@@ -243,6 +285,8 @@ RUN_ID="${RUN_ID}" \\
 OUT_ROOT="${OUT_ROOT}" \\
 CARGO_TARGET_DIR="${TARGET_DIR}" \\
 RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" \\
+RCH_FORCE_REMOTE=1 \\
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN}" \\
 scripts/e2e/kubernetes_connector_verification.sh
 EOF
 chmod +x "${OUT_ROOT}/replay.sh"
@@ -254,6 +298,8 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
   "status": "${OVERALL_STATUS}",
   "exit_code": ${EXIT_CODE},
   "artifacts_root": "${OUT_ROOT}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
   "artifacts": {
     "status_jsonl": "${STATUS_JSONL}",
     "graduation_gauntlet": "${OUT_ROOT}/evidence/graduation_gauntlet.jsonl",

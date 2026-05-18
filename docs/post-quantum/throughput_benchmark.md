@@ -362,6 +362,11 @@ Run the full assurance gauntlet when preparing reviewer or closeout evidence:
 scripts/e2e/lattice_delegation_assurance_gauntlet.sh
 ```
 
+Operators can set `RCH_BIN=/path/to/rch` when validating a patched RCH build
+without overwriting the installed `rch` binary. The gauntlet still records the
+stable `rch exec` command shape and only captures the selected binary's
+`--version` output, not the private filesystem path.
+
 That script is the highest-level command bundle for the KYOPB lattice proof
 chain. It runs the Lean ID checks, Rust/Lean correspondence fixtures,
 `fcp-crypto-pq` representation and V4 unit coverage, the no-mock

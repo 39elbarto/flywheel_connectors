@@ -8,6 +8,7 @@ ARTIFACT="${ARTIFACT:-${OUT_DIR}/lattice-delegation-assurance-gauntlet.${RUN_ID}
 TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-lattice-assurance-${RUN_ID}}"
 ARTIFACT_STAGE_ROOT="${ARTIFACT_STAGE_ROOT:-${OUT_DIR}/rch-lattice-evidence/${RUN_ID}}"
 LOG_PREFIX="${OUT_DIR}/${RUN_ID}"
+RCH_BIN="${RCH_BIN:-rch}"
 
 mkdir -p "${OUT_DIR}" "${ARTIFACT_STAGE_ROOT}"
 : > "${ARTIFACT}"
@@ -167,7 +168,7 @@ append_tool_versions() {
     --arg rustc "$(tool_version rustc -V)" \
     --arg rustfmt "$(tool_version rustfmt -V)" \
     --arg clippy "$(tool_version clippy-driver -V)" \
-    --arg rch "$(tool_version rch --version)" \
+    --arg rch "$(tool_version "${RCH_BIN}" --version)" \
     --arg lake "$(tool_version lake --version)" \
     --arg jq "$(tool_version jq --version)" \
     --arg git "$(tool_version git --version)" \
@@ -368,7 +369,7 @@ run_rch_cargo() {
   shift 2
   run_and_capture "${step}" "${display_command}" \
     env RCH_VISIBILITY=verbose \
-    rch exec -- env \
+    "${RCH_BIN}" exec -- env \
       CARGO_TARGET_DIR="${TARGET_DIR}" \
       CARGO_PROFILE_DEV_DEBUG=0 \
       CARGO_PROFILE_TEST_DEBUG=0 \
@@ -1213,7 +1214,7 @@ validate_gauntlet_contract() {
 
 require_command jq
 require_command git
-require_command rch
+require_command "${RCH_BIN}"
 require_command ubs
 require_command shasum
 require_command cargo

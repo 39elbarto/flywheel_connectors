@@ -3773,7 +3773,7 @@ mod tests {
         let schema =
             fcp_cbor::SchemaId::new("fcp.test", "FetchedObject", semver::Version::new(1, 0, 0));
         let header = ObjectHeader {
-            schema: schema.clone(),
+            schema: schema,
             zone_id: zone_id.clone(),
             created_at: 1,
             provenance: Provenance::new(zone_id.clone()),
@@ -3838,7 +3838,7 @@ mod tests {
     fn test_core_lease(zone_id: &ZoneId, subject_object_id: ObjectId) -> fcp_prelude::Lease {
         let schema = fcp_cbor::SchemaId::new("fcp.lease", "lease", semver::Version::new(1, 0, 0));
         let header = ObjectHeader {
-            schema: schema.clone(),
+            schema: schema,
             zone_id: zone_id.clone(),
             created_at: 10,
             provenance: Provenance::new(zone_id.clone()),
@@ -3919,7 +3919,7 @@ mod tests {
         ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 2,
             first_symbol_at: 0,
         }
@@ -4099,7 +4099,7 @@ mod tests {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 2,
             first_symbol_at: 0,
         };
@@ -4230,7 +4230,7 @@ mod tests {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 2,
             first_symbol_at: 0,
         };
@@ -4291,7 +4291,7 @@ mod tests {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 2,
             first_symbol_at: 0,
         };
@@ -4354,7 +4354,7 @@ mod tests {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 2,
             first_symbol_at: 0,
         };
@@ -4419,7 +4419,7 @@ mod tests {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 2,
             first_symbol_at: 0,
         };
@@ -6549,7 +6549,7 @@ mod tests {
 
         let request = GossipRequest {
             from: TailscaleNodeId::new("requester-1"),
-            zone_id: zone_id.clone(),
+            zone_id: zone_id,
             object_ids: vec![fetched_object_id],
             symbols: vec![(symbol_object_id, 7)],
             timestamp: 1_000,
@@ -8778,7 +8778,7 @@ mod tests {
                 .put_object_meta(ObjectSymbolMeta {
                     object_id,
                     zone_id: zone_id.clone(),
-                    oti: ObjectTransmissionInfo::from(oti),
+                    oti: oti,
                     source_symbols: 4,
                     first_symbol_at: 0,
                 })

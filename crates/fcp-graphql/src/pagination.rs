@@ -719,7 +719,7 @@ mod tests {
             end_cursor: Some(String::new()),
             total_count: None,
         };
-        assert!(info.end_cursor.as_deref() == Some(""));
+        assert_eq!(info.end_cursor.as_deref(), Some(""));
     }
 
     #[test]

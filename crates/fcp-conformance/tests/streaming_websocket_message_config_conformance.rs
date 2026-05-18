@@ -26,9 +26,9 @@
 //! 6. **`WsCloseFrame::normal` = 1000 / "Normal closure"** (RFC 6455).
 //! 7. **`WsCloseFrame::going_away` = 1001 / "Going away"**.
 //! 8. **`WsConfig::default` documented values**:
-//!    connect_timeout=30s, ping_interval=Some(30s), pong_timeout=10s,
-//!    max_message_size=16 MiB, auto_reconnect=true,
-//!    max_reconnect_attempts=Some(10), reconnect_delay=1s.
+//!    `connect_timeout=30s`, `ping_interval=Some(30s)`, `pong_timeout=10s`,
+//!    `max_message_size=16` MiB, `auto_reconnect=true`,
+//!    `max_reconnect_attempts=Some(10)`, `reconnect_delay=1s`.
 //! 9. **`WsConfig::Debug` redacts header VALUES** (Bearer tokens
 //!    MUST NOT leak via Debug) but keeps keys visible.
 

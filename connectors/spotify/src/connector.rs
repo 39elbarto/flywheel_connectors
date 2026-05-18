@@ -3626,7 +3626,7 @@ mod tests {
         let json = serde_json::to_value(&recipe).unwrap();
         assert_eq!(json["id"], "spotify.oauth2_pkce");
         assert_eq!(json["version"], "1");
-        assert!(json["steps"].as_array().unwrap().len() == 2);
+        assert_eq!(json["steps"].as_array().unwrap().len(), 2);
     }
 
     #[test]

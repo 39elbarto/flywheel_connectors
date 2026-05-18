@@ -1,4 +1,4 @@
-//! `fcp_mesh::node` MeshNodeConfig builder + MeshNodeError variant
+//! `fcp_mesh::node` `MeshNodeConfig` builder + `MeshNodeError` variant
 //! Display contract conformance.
 //!
 //! `MeshNode` is the orchestration surface that integrates admission,
@@ -10,13 +10,13 @@
 //!
 //! 1. **`MeshNodeConfig::new(node_id)`** initialises with documented
 //!    defaults (admission/gossip/symbol-request/raptorq/trace_capture
-//!    all `default()`, sender_instance_id is randomly generated,
-//!    trace_capture_zones=None).
+//!    all `default()`, `sender_instance_id` is randomly generated,
+//!    `trace_capture_zones=None`).
 //! 2. **Builder methods** (`with_admission_policy`,
 //!    `with_gossip_config`, `with_symbol_request_policy`,
 //!    `with_raptorq_config`, `with_sender_instance_id`,
 //!    `with_trace_capture_config`, `with_trace_capture_zones`)
-//!    preserve the node_id and other untouched fields.
+//!    preserve the `node_id` and other untouched fields.
 //! 3. **`sender_instance_id` is non-deterministic by default** —
 //!    two fresh configs MAY differ (UUID/random per-construction,
 //!    reboot-safety).
@@ -27,17 +27,17 @@
 //!
 //! Audit-log Display invariants pinned for every variant:
 //!
-//! - PeerSigningKeyMissing → "missing peer signing key for ..."
-//! - PeerSignatureInvalid → "invalid {kind} signature from ..."
-//! - RecipientMismatch → "{kind} recipient mismatch: expected ..."
-//! - UnauthorizedZone → "..."
-//! - UnknownPeer → "peer ... has no registered peer state ..."
-//! - UnknownZoneOwner → "no zone-owner key registered for zone ..."
-//! - MissingOwnerSignature → "revocation push from ... missing owner signature ..."
-//! - InvalidOwnerSignature → "revocation push from ... has invalid owner signature ..."
-//! - TraceNotEnabled → "trace capture not enabled"
-//! - GossipDecode → "gossip payload decode error: ..."
-//! - GossipPayloadTooLarge → "gossip payload too large: ..."
+//! - `PeerSigningKeyMissing` → "missing peer signing key for ..."
+//! - `PeerSignatureInvalid` → "invalid {kind} signature from ..."
+//! - `RecipientMismatch` → "{kind} recipient mismatch: expected ..."
+//! - `UnauthorizedZone` → "..."
+//! - `UnknownPeer` → "peer ... has no registered peer state ..."
+//! - `UnknownZoneOwner` → "no zone-owner key registered for zone ..."
+//! - `MissingOwnerSignature` → "revocation push from ... missing owner signature ..."
+//! - `InvalidOwnerSignature` → "revocation push from ... has invalid owner signature ..."
+//! - `TraceNotEnabled` → "trace capture not enabled"
+//! - `GossipDecode` → "gossip payload decode error: ..."
+//! - `GossipPayloadTooLarge` → "gossip payload too large: ..."
 
 use fcp_mesh::{GossipConfig, MeshNodeConfig, MeshNodeError};
 

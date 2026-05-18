@@ -1,7 +1,7 @@
 //! E2E two-real-MeshNode handshake + zone-key + revocation
 //! (testing-perfect-e2e-integration-tests-with-logging-and-no-mocks).
 //!
-//! AmberLark, 2026-05-02 — alpha-domain coverage sweep.
+//! `AmberLark`, 2026-05-02 — alpha-domain coverage sweep.
 //!
 //! ## What this exercises
 //!
@@ -11,7 +11,7 @@
 //! register interaction between the two nodes and asserts that:
 //!
 //! 1. Each node tracks its own local state independently (zones,
-//!    peer count) — no leakage between MeshNode instances.
+//!    peer count) — no leakage between `MeshNode` instances.
 //! 2. After mutual peer registration, each node knows about the
 //!    other's signing key and can route a future
 //!    `handle_revocation_push` (signed by the registered key) without
@@ -254,7 +254,7 @@ fn e2e_two_real_mesh_nodes_register_peers_and_zones_independently() {
     info!(scenario_id, "test passed");
 }
 
-/// Pin that `register_zone_owner_key` is INDEPENDENT per MeshNode —
+/// Pin that `register_zone_owner_key` is INDEPENDENT per `MeshNode` —
 /// registering an owner key on node A must not appear on node B. This
 /// catches a future regression where zone-owner-key state leaks
 /// through a shared static.

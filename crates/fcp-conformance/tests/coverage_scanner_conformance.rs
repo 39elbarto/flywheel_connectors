@@ -305,7 +305,7 @@ fn test_no_new_gap_connectors() {
     let (_, rows) = run_scanner();
     let baseline: BTreeSet<String> = EXPECTED_GAP_CONNECTORS
         .iter()
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
     let actual_gaps: BTreeSet<String> = rows
         .iter()
@@ -325,7 +325,7 @@ fn test_no_stale_gap_entries_in_baseline() {
     let (_, rows) = run_scanner();
     let baseline: BTreeSet<String> = EXPECTED_GAP_CONNECTORS
         .iter()
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
     let actual_gaps: BTreeSet<String> = rows
         .iter()

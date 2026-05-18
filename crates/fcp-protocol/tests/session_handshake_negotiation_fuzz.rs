@@ -14,7 +14,7 @@
 //!
 //!   1. **Soundness**. Whenever `Some(suite)` is returned, that suite
 //!      MUST appear in BOTH the initiator and responder lists, AND
-//!      its rank MUST be ≥ MINIMUM_SUITE. A regression that
+//!      its rank MUST be ≥ `MINIMUM_SUITE`. A regression that
 //!      accidentally picks a suite missing from one side, or below
 //!      the floor, is caught here.
 //!
@@ -44,7 +44,7 @@
 //!   6. **Empty inputs**. Both empty lists, or one empty list, MUST
 //!      return `None`.
 //!
-//!   7. **Floor enforcement on ack via verify_ack_suite_against_floor**.
+//!   7. **Floor enforcement on ack via `verify_ack_suite_against_floor`**.
 //!      A responder that produces an ack carrying a sub-floor suite
 //!      MUST fail verification (`AckSuiteBelowMinimum`). An ack
 //!      carrying a suite NOT in the original hello set MUST fail
@@ -67,7 +67,7 @@ fn arb_suite() -> impl Strategy<Value = SessionCryptoSuite> {
 /// Reference rank for the responder-picks invariant. MUST agree with
 /// the production `suite_rank` in src/session.rs (which is private).
 /// If this drifts, the test pins the divergence.
-fn reference_rank(s: SessionCryptoSuite) -> u8 {
+const fn reference_rank(s: SessionCryptoSuite) -> u8 {
     match s {
         SessionCryptoSuite::Suite1 => 1,
         SessionCryptoSuite::Suite2 => 2,

@@ -1630,7 +1630,7 @@ mod tests {
         let verified = verify_hybrid_signed_fcps_frame(
             &signed,
             &signing_key.verifying_key(),
-            &pq_signing_key.verifying_key(),
+            pq_signing_key.verifying_key(),
             PqSigningPolicy::BothRequired,
             2000,
         )
@@ -1657,7 +1657,7 @@ mod tests {
         let err = verify_hybrid_signed_fcps_frame(
             &signed,
             &wrong_key.verifying_key(),
-            &pq_signing_key.verifying_key(),
+            pq_signing_key.verifying_key(),
             PqSigningPolicy::BothRequired,
             2000,
         )
@@ -1697,7 +1697,7 @@ mod tests {
         let verified = verify_hybrid_signed_fcps_frame(
             &decoded,
             &signing_key.verifying_key(),
-            &pq_signing_key.verifying_key(),
+            pq_signing_key.verifying_key(),
             PqSigningPolicy::BothRequired,
             2000,
         )
@@ -1772,7 +1772,7 @@ mod tests {
         verify_hybrid_signed_fcps_frame(
             &signed,
             &signing_key.verifying_key(),
-            &pq_signing_key.verifying_key(),
+            pq_signing_key.verifying_key(),
             PqSigningPolicy::BothRequired,
             2000,
         )
@@ -1800,7 +1800,7 @@ mod tests {
         verify_hybrid_signed_fcps_frame(
             &signed,
             &signing_key.verifying_key(),
-            &pq_signing_key.verifying_key(),
+            pq_signing_key.verifying_key(),
             PqSigningPolicy::BothRequired,
             2000,
         )
@@ -1822,7 +1822,7 @@ mod tests {
         let err = verify_hybrid_signed_fcps_frame(
             &signed,
             &signing_key.verifying_key(),
-            &pq_signing_key.verifying_key(),
+            pq_signing_key.verifying_key(),
             PqSigningPolicy::BothRequired,
             2000,
         )
@@ -1851,7 +1851,7 @@ mod tests {
         verify_hybrid_signed_fcps_frame(
             &signed,
             &signing_key.verifying_key(),
-            &pq_signing_key.verifying_key(),
+            pq_signing_key.verifying_key(),
             PqSigningPolicy::BothRequired,
             2000,
         )
@@ -2851,7 +2851,7 @@ mod tests {
             verify_hybrid_signed_fcps_frame(
                 &signed,
                 &signing_key.verifying_key(),
-                &pq_signing_key.verifying_key(),
+                pq_signing_key.verifying_key(),
                 PqSigningPolicy::BothRequired,
                 2000,
             )
@@ -2876,7 +2876,7 @@ mod tests {
             verify_hybrid_signed_fcps_frame(
                 &signed,
                 &signing_key.verifying_key(),
-                &pq_signing_key.verifying_key(),
+                pq_signing_key.verifying_key(),
                 PqSigningPolicy::BothRequired,
                 2000,
             )
@@ -2901,7 +2901,7 @@ mod tests {
             verify_hybrid_signed_fcps_frame(
                 &signed,
                 &signing_key.verifying_key(),
-                &pq_signing_key.verifying_key(),
+                pq_signing_key.verifying_key(),
                 PqSigningPolicy::BothRequired,
                 2000,
             )
@@ -3947,7 +3947,7 @@ mod tests {
         verify_hybrid_signed_fcps_frame(
             &signed,
             &signing_key.verifying_key(),
-            &pq_signing_key.verifying_key(),
+            pq_signing_key.verifying_key(),
             PqSigningPolicy::BothRequired,
             2000,
         )
@@ -3973,7 +3973,7 @@ mod tests {
         verify_hybrid_signed_fcps_frame(
             &signed,
             &signing_key.verifying_key(),
-            &pq_signing_key.verifying_key(),
+            pq_signing_key.verifying_key(),
             PqSigningPolicy::BothRequired,
             2000,
         )

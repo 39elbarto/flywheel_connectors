@@ -14,7 +14,7 @@
 //!
 //! 1. **Transcript binding** — every signed field must round-trip and
 //!    every tampered field must invalidate the signature, so a captured
-//!    DecodeStatus cannot be repurposed onto a different exchange or
+//!    `DecodeStatus` cannot be repurposed onto a different exchange or
 //!    progress claim.
 //!
 //! 2. **Anti-amplification guard** — `DecodeStatus::verify` rejects

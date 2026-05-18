@@ -24,7 +24,7 @@
 //!    score would have been.
 //!
 //! 4. **Cross-crate determinism** — same inputs produce identical
-//!    (node_id, score) ranking. The rank-1 candidate carries a
+//!    (`node_id`, score) ranking. The rank-1 candidate carries a
 //!    `DecisionReason::SelectedAsBest { rank: 1 }` reason on every
 //!    invocation.
 

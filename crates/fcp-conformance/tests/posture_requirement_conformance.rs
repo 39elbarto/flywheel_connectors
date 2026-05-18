@@ -12,12 +12,12 @@
 //!    enabled")
 //! - `RequireEqual` — must be present AND equal
 //! - `RequireOneOf` — must be present AND in the allowed list
-//! - `RequireMinVersion` — must be present AND >= min_version
-//! - `RequireMinValue` — must be present AND >= min_value
-//! - `RequireMaxValue` — must be present AND <= max_value
+//! - `RequireMinVersion` — must be present AND >= `min_version`
+//! - `RequireMinValue` — must be present AND >= `min_value`
+//! - `RequireMaxValue` — must be present AND <= `max_value`
 //!
 //! Plus `PostureAttestation` validity (schema = "fcp.posture.v1",
-//! is_valid = not-expired AND schema-matches, is_for_node, the
+//! `is_valid` = not-expired AND schema-matches, `is_for_node`, the
 //! attestation's getters).
 
 use std::collections::HashMap;

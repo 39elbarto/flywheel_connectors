@@ -1,6 +1,6 @@
 //! `LeaseCoordinator` `detect_conflicts` + `should_renew` conformance.
 //!
-//! Two LeaseCoordinator helpers that complement br-9nee8 (acquire /
+//! Two `LeaseCoordinator` helpers that complement br-9nee8 (acquire /
 //! renew / release):
 //!
 //! 1. **`detect_conflicts`** surfaces overlapping active leases for
@@ -25,7 +25,7 @@ fn obj() -> ObjectId {
     ObjectId::from_unscoped_bytes(b"subject")
 }
 
-fn purpose() -> LeasePurpose {
+const fn purpose() -> LeasePurpose {
     LeasePurpose::OperationExecution
 }
 

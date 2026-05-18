@@ -1019,7 +1019,7 @@ mod tests {
     /// Regression for br-sy5ks: a successful single-device bootstrap
     /// MUST hand the recovery phrase back to the caller. Before this
     /// fix the phrase was generated, logged as "generated" without
-    /// words, fed to a tracing::debug no-op `save_recovery_phrase`,
+    /// words, fed to a `tracing::debug` no-op `save_recovery_phrase`,
     /// then silently dropped — total device loss = total owner
     /// identity loss with no recovery path.
     #[fcp_async_core::runtime::test]

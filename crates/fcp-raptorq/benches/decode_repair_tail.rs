@@ -4,7 +4,7 @@ use std::time::Duration;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fcp_raptorq::{ObjectTransmissionInformation, RaptorQConfig, RaptorQDecoder, RaptorQEncoder};
 
-fn bench_config() -> RaptorQConfig {
+const fn bench_config() -> RaptorQConfig {
     RaptorQConfig {
         symbol_size: 64,
         repair_ratio_bps: 10_000,

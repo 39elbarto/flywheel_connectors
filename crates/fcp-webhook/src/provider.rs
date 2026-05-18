@@ -2174,15 +2174,14 @@ mod tests {
 
         let event = handler.verify_and_parse(&headers, &body).unwrap();
         assert_eq!(event.id, "large_del");
-        assert!(
+        assert_eq!(
             event
                 .payload
                 .get("commits")
                 .unwrap()
                 .as_array()
                 .unwrap()
-                .len()
-                == 100
+                .len(), 100
         );
     }
 

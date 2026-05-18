@@ -81,7 +81,7 @@ fn collect_forbidden_compat_matches(path: &Path, matches: &mut Vec<String>) {
         return;
     }
 
-    if !path.extension().is_some_and(|extension| extension == "rs") {
+    if path.extension().is_none_or(|extension| extension != "rs") {
         return;
     }
 

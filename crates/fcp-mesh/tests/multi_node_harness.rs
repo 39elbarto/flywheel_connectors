@@ -1453,15 +1453,13 @@ async fn seed_bulk_symbol_announcements(
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: fcp_store::ObjectTransmissionInfo::from(
-                fcp_raptorq::ObjectTransmissionInformation::new(
+            oti: fcp_raptorq::ObjectTransmissionInformation::new(
                     u64::from(source_symbols) * symbol_size_u64,
                     u16::try_from(symbol_size).expect("symbol_size fits in u16"),
                     1,
                     1,
                     1,
                 ),
-            ),
             source_symbols,
             first_symbol_at: 0,
         };
@@ -2349,9 +2347,7 @@ async fn multi_node_harness_supports_symbol_store_seeding() {
     let meta = ObjectSymbolMeta {
         object_id,
         zone_id: zone_id.clone(),
-        oti: fcp_store::ObjectTransmissionInfo::from(
-            fcp_raptorq::ObjectTransmissionInformation::new(256, 64, 1, 1, 1),
-        ),
+        oti: fcp_raptorq::ObjectTransmissionInformation::new(256, 64, 1, 1, 1),
         source_symbols: 3,
         first_symbol_at: 0,
     };
@@ -2548,15 +2544,13 @@ async fn symbol_distribution_across_three_nodes() {
     let meta = ObjectSymbolMeta {
         object_id,
         zone_id: zone_id.clone(),
-        oti: fcp_store::ObjectTransmissionInfo::from(
-            fcp_raptorq::ObjectTransmissionInformation::new(
+        oti: fcp_raptorq::ObjectTransmissionInformation::new(
                 u64::from(source_symbols) * (symbol_size as u64),
                 u16::try_from(symbol_size).expect("symbol_size fits in u16"),
                 1,
                 1,
                 1,
             ),
-        ),
         source_symbols,
         first_symbol_at: 0,
     };
@@ -2665,15 +2659,13 @@ async fn object_reconstruction_from_distributed_symbols() {
     let meta = ObjectSymbolMeta {
         object_id,
         zone_id: zone_id.clone(),
-        oti: fcp_store::ObjectTransmissionInfo::from(
-            fcp_raptorq::ObjectTransmissionInformation::new(
+        oti: fcp_raptorq::ObjectTransmissionInformation::new(
                 u64::from(source_symbols) * (symbol_size as u64),
                 u16::try_from(symbol_size).expect("symbol_size fits in u16"),
                 1,
                 1,
                 1,
             ),
-        ),
         source_symbols,
         first_symbol_at: 0,
     };

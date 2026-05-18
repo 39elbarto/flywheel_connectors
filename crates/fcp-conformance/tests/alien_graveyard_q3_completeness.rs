@@ -138,8 +138,7 @@ fn test_top5_bucket_set_matches_score_pipeline() {
     let after_header = start + header.len();
     let section_end = lower[after_header..]
         .find("\n## ")
-        .map(|relative| after_header + relative)
-        .unwrap_or(content.len());
+        .map_or(content.len(), |relative| after_header + relative);
     let section = &content[start..section_end];
     for bucket in &expected_top5 {
         assert!(

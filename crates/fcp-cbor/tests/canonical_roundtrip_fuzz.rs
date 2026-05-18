@@ -37,7 +37,7 @@
 //!      format exposed to untrusted input.
 //!
 //!   6. **Depth-limit guard**. A nested array of depth >
-//!      MAX_CANONICALIZATION_DEPTH MUST surface DepthExceeded, never
+//!      `MAX_CANONICALIZATION_DEPTH` MUST surface `DepthExceeded`, never
 //!      panic the canonicalizer's recursion. Builds the worst-case
 //!      input directly (proptest can't naturally generate 130 levels
 //!      of nesting) and asserts the documented error.
@@ -86,13 +86,13 @@ struct FuzzPayload {
     /// ordering (which the encoder MUST preserve insertion order
     /// for arrays, since arrays are sequences not unordered sets).
     items: Vec<FuzzScalar>,
-    /// String → scalar map. BTreeMap so insertion order doesn't
+    /// String → scalar map. `BTreeMap` so insertion order doesn't
     /// affect the in-memory representation (we test insertion-order
     /// independence in property 3 by constructing a HashMap-equiv).
     metadata: BTreeMap<String, FuzzScalar>,
     /// Nested payload, max 1 level of recursion. Two levels keeps
     /// proptest case sizes manageable while still exercising the
-    /// recursive canonicalize_value_in_place path.
+    /// recursive `canonicalize_value_in_place` path.
     nested: Option<Box<FuzzNested>>,
 }
 
@@ -364,7 +364,7 @@ proptest! {
 /// Property 6: depth-limit guard against adversarial nesting.
 ///
 /// Build a nested array of depth `MAX_CANONICALIZATION_DEPTH + 16`
-/// using ciborium::Value directly (proptest can't naturally produce
+/// using `ciborium::Value` directly (proptest can't naturally produce
 /// the exact depth required) and confirm the canonicalizer surfaces
 /// `DepthExceeded` rather than recursing past its stack budget.
 /// Pre-fix the canonicalizer had no depth guard and would stack-

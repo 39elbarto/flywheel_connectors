@@ -611,7 +611,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -703,7 +703,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -747,7 +747,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -818,7 +818,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -878,7 +878,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -940,7 +940,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -1001,7 +1001,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -1061,7 +1061,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -1122,7 +1122,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -1263,7 +1263,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -1353,7 +1353,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -1439,7 +1439,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -1612,7 +1612,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -1778,7 +1778,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -1883,7 +1883,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -2052,7 +2052,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -5699,7 +5699,7 @@ mod real_component_integration {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -5829,7 +5829,7 @@ mod real_component_integration {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 8,
             first_symbol_at: 0,
         };
@@ -5944,7 +5944,7 @@ mod real_component_integration {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 8,
             first_symbol_at: 0,
         };
@@ -6153,7 +6153,7 @@ mod real_component_integration {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -6351,7 +6351,7 @@ mod real_component_integration {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 8,
             first_symbol_at: 0,
         };
@@ -6468,7 +6468,7 @@ mod real_component_integration {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -6719,7 +6719,7 @@ mod real_component_integration {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -6863,7 +6863,7 @@ mod real_component_integration {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: ObjectTransmissionInfo::from(oti),
+            oti: oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };

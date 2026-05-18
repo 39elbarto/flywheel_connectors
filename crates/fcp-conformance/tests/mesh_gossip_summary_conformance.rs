@@ -4,13 +4,13 @@
 //! Flow Control for Anti-Entropy Protocols" (2008) as adapted by FCP:
 //!
 //!   MSH-GS-1 — summary is deterministic for a fixed zone state
-//!   MSH-GS-2 — signing_bytes detects any single-byte tamper
+//!   MSH-GS-2 — `signing_bytes` detects any single-byte tamper
 //!   MSH-GS-4 — two peers with identical state produce byte-identical
 //!              *payload* summaries (timestamp + from excluded)
-//!   MSH-GS-5 — differs_from only flags digest deltas, not metadata
+//!   MSH-GS-5 — `differs_from` only flags digest deltas, not metadata
 //!
 //! Cross-reference: 2ot4f audit (signature verification) closed MSH-GS-3
-//! via MeshNode::verify_summary_signature; forged-signature regression
+//! via `MeshNode::verify_summary_signature`; forged-signature regression
 //! tests already land in crates/fcp-mesh/src/node.rs.
 
 use fcp_mesh::admission::ObjectAdmissionClass;
@@ -112,7 +112,7 @@ fn msh_gs_2_signing_bytes_flips_when_any_payload_byte_changes() {
         summary
     };
     let mutate_from = {
-        let mut summary = reference.clone();
+        let mut summary = reference;
         summary.from = TailscaleNodeId::new("someone-else");
         summary
     };

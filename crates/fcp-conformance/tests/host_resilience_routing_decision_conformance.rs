@@ -10,24 +10,24 @@
 //!
 //! Properties pinned (NORMATIVE):
 //!
-//! 1. **`CircuitBreakerConfig::default`** — failure_threshold=3,
-//!    success_threshold=2, open_duration=5s, window=30s,
-//!    failure_predicate=AnyError. These four numbers ARE the host's
+//! 1. **`CircuitBreakerConfig::default`** — `failure_threshold=3`,
+//!    `success_threshold=2`, `open_duration=5s`, window=30s,
+//!    `failure_predicate=AnyError`. These four numbers ARE the host's
 //!    default tolerance to upstream flakiness.
-//! 2. **`BulkheadConfig::default`** — max_concurrent=16,
-//!    max_queued=32, queue_timeout=250ms.
-//! 3. **`HealthRouterConfig::default`** — unhealthy_threshold=3,
-//!    recovery_success_threshold=2, latency_degraded_threshold=750ms,
-//!    error_rate_degraded_threshold_per_mille=500,
-//!    probe_interval=5s, error_window=30s, latency_alpha_per_mille=200.
-//! 4. **`LoadShedConfig::default`** — shed_threshold_per_mille=850,
-//!    full_shed_threshold_per_mille=1000, sheddable_priorities=[Low,
+//! 2. **`BulkheadConfig::default`** — `max_concurrent=16`,
+//!    `max_queued=32`, `queue_timeout=250ms`.
+//! 3. **`HealthRouterConfig::default`** — `unhealthy_threshold=3`,
+//!    `recovery_success_threshold=2`, `latency_degraded_threshold=750ms`,
+//!    `error_rate_degraded_threshold_per_mille=500`,
+//!    `probe_interval=5s`, `error_window=30s`, `latency_alpha_per_mille=200`.
+//! 4. **`LoadShedConfig::default`** — `shed_threshold_per_mille=850`,
+//!    `full_shed_threshold_per_mille=1000`, `sheddable_priorities`=[Low,
 //!    Normal] (Critical and High are NEVER shed by default).
 //! 5. **`ResilienceConfig::default()::operation_timeout` is None**
 //!    — no per-op timeout unless the host opts in.
-//! 6. **`RoutingDecision` four variants**: Allow, AllowDegraded,
-//!    AllowProbe, Reject. Equality and cloning match.
-//! 7. **`CircuitState` three variants**: Closed, Open, HalfOpen.
+//! 6. **`RoutingDecision` four variants**: Allow, `AllowDegraded`,
+//!    `AllowProbe`, Reject. Equality and cloning match.
+//! 7. **`CircuitState` three variants**: Closed, Open, `HalfOpen`.
 //! 8. **`RequestPriority` four-level enum**: Critical, High, Normal,
 //!    Low — Hash + Copy + Eq.
 //! 9. **`ResilienceError` Display contract** — every variant produces

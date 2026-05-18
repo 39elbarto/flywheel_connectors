@@ -1,7 +1,7 @@
-//! Stateless HelloRetry cookie conformance.
+//! Stateless `HelloRetry` cookie conformance.
 //!
 //! `compute_cookie` and `verify_cookie` in `fcp_protocol::session` form
-//! the stateless anti-DoS MAC used for the HelloRetry challenge. The
+//! the stateless anti-DoS MAC used for the `HelloRetry` challenge. The
 //! responder issues a `MeshSessionHelloRetry { cookie }` and only
 //! commits resources once the initiator echoes back a Hello whose
 //! transcript still produces the same cookie under the responder's
@@ -91,7 +91,7 @@ fn cookie_binds_to_hello_from() {
     let hello_a = make_hello();
     let cookie = compute_cookie(&COOKIE_KEY_A, &hello_a).expect("compute cookie");
 
-    let mut hello_b = hello_a.clone();
+    let mut hello_b = hello_a;
     hello_b.from = TailscaleNodeId::new("node-other-initiator");
 
     let err = verify_cookie(&COOKIE_KEY_A, &hello_b, &cookie)
@@ -104,7 +104,7 @@ fn cookie_binds_to_hello_to() {
     let hello_a = make_hello();
     let cookie = compute_cookie(&COOKIE_KEY_A, &hello_a).expect("compute cookie");
 
-    let mut hello_b = hello_a.clone();
+    let mut hello_b = hello_a;
     hello_b.to = TailscaleNodeId::new("node-other-responder");
 
     let err =
@@ -120,7 +120,7 @@ fn cookie_binds_to_hello_eph_pubkey() {
     let hello_a = make_hello();
     let cookie = compute_cookie(&COOKIE_KEY_A, &hello_a).expect("compute cookie");
 
-    let mut hello_b = hello_a.clone();
+    let mut hello_b = hello_a;
     let other_eph = X25519SecretKey::generate();
     hello_b.eph_pubkey = other_eph.public_key();
 
@@ -134,7 +134,7 @@ fn cookie_binds_to_hello_nonce() {
     let hello_a = make_hello();
     let cookie = compute_cookie(&COOKIE_KEY_A, &hello_a).expect("compute cookie");
 
-    let mut hello_b = hello_a.clone();
+    let mut hello_b = hello_a;
     hello_b.nonce = SessionNonce([0x55; 16]);
 
     let err = verify_cookie(&COOKIE_KEY_A, &hello_b, &cookie)
@@ -164,7 +164,7 @@ fn cookie_binds_to_hello_suites() {
     let hello_a = make_hello();
     let cookie = compute_cookie(&COOKIE_KEY_A, &hello_a).expect("compute cookie");
 
-    let mut hello_b = hello_a.clone();
+    let mut hello_b = hello_a;
     hello_b.suites = vec![SessionCryptoSuite::Suite1];
 
     let err = verify_cookie(&COOKIE_KEY_A, &hello_b, &cookie)

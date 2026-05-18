@@ -1,43 +1,43 @@
 //! `fcp_host::supervisor` lifecycle + resource-limit conformance.
 //!
 //! Complement to `host_supervisor_restart_contract_conformance.rs`
-//! (TEST-CONFORMANCE-52) which pinned RestartPolicy / ProcessExit /
-//! RestartTracker / ExponentialBackoff. This test pins the rest of
+//! (TEST-CONFORMANCE-52) which pinned `RestartPolicy` / `ProcessExit` /
+//! `RestartTracker` / `ExponentialBackoff`. This test pins the rest of
 //! the supervisor module:
 //!
 //! Properties pinned (NORMATIVE):
 //!
-//! 1. **`ShutdownPhase` state machine** — NotStarted → GracefulWait
-//!    (start_graceful) → ForceKill (escalate after timeout) →
-//!    Complete (record_exit). `start_graceful` MUST NOT
+//! 1. **`ShutdownPhase` state machine** — `NotStarted` → `GracefulWait`
+//!    (`start_graceful`) → `ForceKill` (escalate after timeout) →
+//!    Complete (`record_exit`). `start_graceful` MUST NOT
 //!    re-trigger from non-NotStarted; `record_force_kill` only
-//!    transitions from GracefulWait.
+//!    transitions from `GracefulWait`.
 //! 2. **`should_force_kill` boundary** — true only after
 //!    `now - sent_at >= graceful_timeout` (inclusive ≥ boundary,
 //!    not strict >).
-//! 3. **`is_shutting_down` ⇔ {GracefulWait, ForceKill}**;
+//! 3. **`is_shutting_down` ⇔ {`GracefulWait`, `ForceKill`}**;
 //!    `is_complete` ⇔ Complete.
 //! 4. **`HealthCheckScheduler::is_due`** is true on first call (no
-//!    last_check) and after `interval` elapses. `record_success`
+//!    `last_check`) and after `interval` elapses. `record_success`
 //!    resets `consecutive_failures`; `record_failure` saturating-adds.
-//! 5. **`is_unhealthy` ⇔ consecutive_failures ≥ max_consecutive_failures**
+//! 5. **`is_unhealthy` ⇔ `consecutive_failures` ≥ `max_consecutive_failures`**
 //!    (default 3, configurable via `with_max_failures`).
 //! 6. **`time_until_next` saturates at zero** when overdue (saturating
 //!    sub).
-//! 7. **`ResourceLimits::default`** — memory=512 MiB, max_fds=1024,
-//!    max_processes=64; cpu_seconds and max_file_size unset by default.
+//! 7. **`ResourceLimits::default`** — memory=512 MiB, `max_fds=1024`,
+//!    `max_processes=64`; `cpu_seconds` and `max_file_size` unset by default.
 //! 8. **`ResourceLimits::unlimited`** — every field None.
 //! 9. **`merge_strict`** takes the LOWER (stricter) value per field;
 //!    None | Some(x) → Some(x); None | None → None.
 //! 10. **`ResourceUsage::violations`** emits `ResourceViolation` per
 //!     exceeded limit with correct `ResourceKind` and STRICT > limit
 //!     semantics (≤ limit is NOT a violation).
-//! 11. **`ResourceKind` Display** — snake_case strings ("memory" /
-//!     "cpu_time" / "file_descriptors" / "processes" / "file_size").
-//! 12. **`ConnectionTracker`**: try_acquire succeeds before drain,
-//!     returns None after start_drain; active_count tracks live
-//!     guards; ConnectionGuard Drop decrements; is_drained ⇔ draining
-//!     AND active_count==0.
+//! 11. **`ResourceKind` Display** — `snake_case` strings ("memory" /
+//!     "`cpu_time`" / "`file_descriptors`" / "processes" / "`file_size`").
+//! 12. **`ConnectionTracker`**: `try_acquire` succeeds before drain,
+//!     returns None after `start_drain`; `active_count` tracks live
+//!     guards; `ConnectionGuard` Drop decrements; `is_drained` ⇔ draining
+//!     AND `active_count==0`.
 
 use fcp_host::{
     ConnectionTracker, HealthCheckScheduler, ProcessExit, ResourceKind, ResourceLimits,

@@ -4004,7 +4004,7 @@ mod tests {
         assert_eq!(material.pair.certificate.label, "slightly-future-leaf");
     }
 
-    /// REVIEW fresh-eyes pin (cc_1): the accept-within-skew test at
+    /// REVIEW fresh-eyes pin (`cc_1)`: the accept-within-skew test at
     /// `select_cert_accepts_leaf_and_ca_not_before_within_bootstrap_skew`
     /// would silently keep passing if a future commit widened
     /// `BOOTSTRAP_CERT_NOT_BEFORE_SKEW_SECS` to a large value (e.g.
@@ -4040,7 +4040,7 @@ mod tests {
             matches!(
                 err,
                 TokenError::CertificateSelectionFailed(
-                    CertificateSelectionRefusal::NoVerifiedIssuerChain { .. }
+                    CertificateSelectionRefusal::NoVerifiedIssuerChain
                 )
             ),
             "expected NoVerifiedIssuerChain for leaf with not_before 10× beyond skew, got {err:?}"

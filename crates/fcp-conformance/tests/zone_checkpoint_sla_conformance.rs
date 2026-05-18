@@ -1,4 +1,4 @@
-//! Conformance: ZoneCheckpoint revocation freshness SLA evaluator
+//! Conformance: `ZoneCheckpoint` revocation freshness SLA evaluator
 //! (flywheel_connectors-pf6vc — references C1.4).
 //!
 //! `ZoneCheckpoint::revocation_freshness_sla_secs` declares the
@@ -50,7 +50,7 @@ fn test_zone() -> ZoneId {
     ZoneId::work()
 }
 
-fn test_object_id(seed: u8) -> ObjectId {
+const fn test_object_id(seed: u8) -> ObjectId {
     ObjectId::from_bytes([seed; 32])
 }
 
@@ -88,7 +88,7 @@ fn test_checkpoint(rev_seq: u64, sla_secs: u64) -> ZoneCheckpoint {
     }
 }
 
-fn checker(checkpoint_updated_at: u64, sla_secs: u64) -> RevocationSlaChecker {
+const fn checker(checkpoint_updated_at: u64, sla_secs: u64) -> RevocationSlaChecker {
     RevocationSlaChecker::new(0, checkpoint_updated_at, sla_secs)
 }
 

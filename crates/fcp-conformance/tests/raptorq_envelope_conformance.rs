@@ -1,9 +1,9 @@
 //! `fcp_raptorq::SymbolEnvelope` round-trip + binding conformance.
 //!
 //! `fcp-raptorq` carries a higher-level `SymbolEnvelope` type that
-//! wraps the AEAD primitive in a self-describing struct (object_id,
-//! esi, k, zone_id, zone_key_id, epoch_id, source_id,
-//! sender_instance_id, frame_seq, data, auth_tag). This is distinct
+//! wraps the AEAD primitive in a self-describing struct (`object_id`,
+//! esi, k, `zone_id`, `zone_key_id`, `epoch_id`, `source_id`,
+//! `sender_instance_id`, `frame_seq`, data, `auth_tag`). This is distinct
 //! from the lower-level `fcp-protocol` envelope pinned in
 //! br-2qkn0 — fcp-raptorq's variant adds a structured
 //! `ZoneKeyIdMismatch` fast-fail returned BEFORE the AEAD primitive
@@ -24,11 +24,11 @@ use fcp_tailscale::NodeId;
 const ZONE_KEY_BYTES: [u8; 32] = [0x42; 32];
 const ALT_ZONE_KEY_BYTES: [u8; 32] = [0x43; 32];
 
-fn zone_key() -> ZoneKey {
+const fn zone_key() -> ZoneKey {
     ZoneKey::from_bytes(ZONE_KEY_BYTES)
 }
 
-fn alt_zone_key() -> ZoneKey {
+const fn alt_zone_key() -> ZoneKey {
     ZoneKey::from_bytes(ALT_ZONE_KEY_BYTES)
 }
 

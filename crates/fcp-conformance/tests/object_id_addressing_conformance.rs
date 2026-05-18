@@ -22,11 +22,11 @@ use fcp_cbor::SchemaId;
 use fcp_prelude::{ObjectId, ObjectIdKey, ObjectIdParseError, ZoneId};
 use semver::Version;
 
-fn key_a() -> ObjectIdKey {
+const fn key_a() -> ObjectIdKey {
     ObjectIdKey::from_bytes([0xA1; 32])
 }
 
-fn key_b() -> ObjectIdKey {
+const fn key_b() -> ObjectIdKey {
     ObjectIdKey::from_bytes([0xB2; 32])
 }
 

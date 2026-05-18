@@ -1,9 +1,9 @@
-//! `fcp_mesh::planner` AdjustmentFactor + DecisionReason variant
-//! matrix + ScoreAdjustment + CandidateNode struct conformance.
+//! `fcp_mesh::planner` `AdjustmentFactor` + `DecisionReason` variant
+//! matrix + `ScoreAdjustment` + `CandidateNode` struct conformance.
 //!
 //! `planner_lease_causality_conformance.rs` already exercises
-//! ExecutionPlanner end-to-end with these types, but the FULL
-//! variant matrix (especially DecisionReason's 9 variants and
+//! `ExecutionPlanner` end-to-end with these types, but the FULL
+//! variant matrix (especially `DecisionReason`'s 9 variants and
 //! their payloads) is not pinned. These types appear directly in
 //! the audit/triage output every operator inspects when a planner
 //! decision needs explaining.
@@ -12,15 +12,15 @@
 //!
 //! 1. **`AdjustmentFactor` 5 variants** — `Connector`,
 //!    `DataLocality`, `LeaseConstraint`, `ZoneRestriction`,
-//!    `Custom(String)`. Hash + PartialEq for HashMap keying in
+//!    `Custom(String)`. Hash + `PartialEq` for `HashMap` keying in
 //!    score-aggregation paths.
 //! 2. **`DecisionReason` 9 variants** with their documented
 //!    payloads (the audit-trail explanations).
 //! 3. **`ScoreAdjustment`** 3-field construction (factor, delta,
 //!    explanation).
-//! 4. **`CandidateNode`** 7-field construction (node_id, score,
-//!    base_fitness, adjustments, eligible, decision_reasons, zones).
-//! 5. PartialEq + Hash semantics for AdjustmentFactor variants
+//! 4. **`CandidateNode`** 7-field construction (`node_id`, score,
+//!    `base_fitness`, adjustments, eligible, `decision_reasons`, zones).
+//! 5. `PartialEq` + Hash semantics for `AdjustmentFactor` variants
 //!    (including Custom payload disambiguation).
 
 use fcp_mesh::{AdjustmentFactor, CandidateNode, DecisionReason, ScoreAdjustment};
@@ -317,7 +317,7 @@ fn candidate_node_clone_preserves_all_fields() {
         decision_reasons: vec![],
         zones: vec![],
     };
-    let cloned = node.clone();
+    let cloned = node;
     assert_eq!(cloned.node_id.as_str(), "n");
     assert_eq!(cloned.adjustments.len(), 1);
     assert!(!cloned.eligible);

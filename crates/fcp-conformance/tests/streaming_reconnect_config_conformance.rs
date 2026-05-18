@@ -3,7 +3,7 @@
 //!
 //! `ReconnectConfig::delay_for_attempt` is the documented backoff
 //! function every streaming connector relies on. Its docstring
-//! (capability.rs::y54mi) names THREE NORMATIVE invariants:
+//! (`capability.rs::y54mi`) names THREE NORMATIVE invariants:
 //!
 //! 1. **Floor.** Never below `MIN_RECONNECT_DELAY` (100 ms) unless
 //!    the caller pinned `max_delay` even lower. A zero or

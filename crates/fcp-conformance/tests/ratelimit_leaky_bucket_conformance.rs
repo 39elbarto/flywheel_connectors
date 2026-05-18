@@ -193,7 +193,7 @@ async fn from_window_produces_equivalent_throughput_to_explicit_leak_rate() {
     // Allow a generous tolerance since wall clock between the two
     // .leak() calls advances by some small amount; the equivalence
     // claim is on the configured rate, not microsecond-perfect drain.
-    let diff = if w1 > w2 { w1 - w2 } else { w2 - w1 };
+    let diff = if w1 > w2 { w1.checked_sub(w2).unwrap() } else { w2.checked_sub(w1).unwrap() };
     assert!(
         diff < Duration::from_millis(50),
         "from_window and explicit-rate constructors must agree to within 50 ms; \

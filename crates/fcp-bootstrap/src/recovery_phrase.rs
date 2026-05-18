@@ -293,8 +293,7 @@ mod tests {
     fn test_invalid_mnemonic_error_redacts_unknown_words() {
         let secret_like_word = "correct-horse-battery-staple";
         let invalid_phrase = format!(
-            "{} abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art",
-            secret_like_word
+            "{secret_like_word} abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
         );
 
         let err = RecoveryPhrase::from_mnemonic(&invalid_phrase).unwrap_err();

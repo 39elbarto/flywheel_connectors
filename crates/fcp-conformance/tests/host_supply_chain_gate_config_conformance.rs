@@ -2,7 +2,7 @@
 //! conformance.
 //!
 //! `SupplyChainGate` is the host's connector-install-time gate:
-//! it wraps the evidence-owned VerificationPipeline with a result
+//! it wraps the evidence-owned `VerificationPipeline` with a result
 //! cache, audit events, and dev-mode override policy. Drift in
 //! its defaults silently changes how strict the host is at install
 //! time.

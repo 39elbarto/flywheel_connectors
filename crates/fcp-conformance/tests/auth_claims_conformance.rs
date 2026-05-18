@@ -9,7 +9,7 @@
 //!
 //! Also captures short golden hex vectors for minimal/full claim
 //! sets. The hex strings in these tests ARE the wire-format contract
-//! — any change to them is a schema_version bump (see
+//! — any change to them is a `schema_version` bump (see
 //! `docs/architecture/adr/8n0rm-claim-schema-versioning.md`).
 
 use chrono::{TimeZone, Utc};
@@ -51,8 +51,8 @@ fn auth_claims_canonical_cbor_survives_builder_roundtrip() {
 /// CBOR integer representations. All three labels here are "negative
 /// int in the 32-bit range" (major type 1, 5-byte encoding), so the
 /// byte-lex order is numerically-reversed on their absolute values:
-/// CAPABILITY_ID (-65537, `3A 00 01 00 00`) < ZONE_ID (-65538,
-/// `3A 00 01 00 01`) < SCHEMA_VERSION (-65552, `3A 00 01 00 0F`).
+/// `CAPABILITY_ID` (-65537, `3A 00 01 00 00`) < `ZONE_ID` (-65538,
+/// `3A 00 01 00 01`) < `SCHEMA_VERSION` (-65552, `3A 00 01 00 0F`).
 #[test]
 fn minimal_claims_golden_vector() {
     let claims = AuthClaims {
@@ -182,9 +182,9 @@ fn canonical_cbor_is_byte_deterministic() {
 // `schema_version` bump per
 // `docs/architecture/adr/8n0rm-claim-schema-versioning.md`.
 
-/// `AuthClaims::default()` (all `None`, schema_version=0) must still
+/// `AuthClaims::default()` (all `None`, `schema_version=0`) must still
 /// encode to a well-formed CBOR map carrying exactly one entry — the
-/// always-emitted SCHEMA_VERSION. This pins the minimum wire shape so
+/// always-emitted `SCHEMA_VERSION`. This pins the minimum wire shape so
 /// no optional field silently leaks into the default encoding.
 #[test]
 fn default_claims_encode_single_schema_version_entry() {
@@ -265,7 +265,7 @@ fn unknown_labels_silently_ignored_on_decode() {
 
 /// Boundary: `schema_version` is typed `u16`, so values 0 and
 /// `u16::MAX` must both survive a canonical CBOR round-trip. A value
-/// that overflows u16 on the wire (e.g. i64 = u16::MAX + 1) must
+/// that overflows u16 on the wire (e.g. i64 = `u16::MAX` + 1) must
 /// produce `SchemaError::OutOfRange` at decode, not silently truncate.
 #[test]
 fn schema_version_u16_boundary_round_trip() {

@@ -248,10 +248,10 @@ fn wasi_symlinked_preopens_fail_closed() {
     symlink(&writable_target, &writable_link).unwrap();
 
     let readonly_declared = readonly_link.join("mounted-readonly");
-    std::fs::create_dir_all(&readonly_target.join("mounted-readonly")).unwrap();
+    std::fs::create_dir_all(readonly_target.join("mounted-readonly")).unwrap();
 
     let readonly_runtime = WasiRuntime::new(WasiConfig {
-        readonly_paths: vec![readonly_declared.clone()],
+        readonly_paths: vec![readonly_declared],
         ..WasiConfig::default()
     })
     .unwrap();
@@ -266,7 +266,7 @@ fn wasi_symlinked_preopens_fail_closed() {
 
     let writable_declared = writable_link.join("mounted-writable");
     let writable_runtime = WasiRuntime::new(WasiConfig {
-        writable_paths: vec![writable_declared.clone()],
+        writable_paths: vec![writable_declared],
         ..WasiConfig::default()
     })
     .unwrap();
@@ -289,7 +289,7 @@ fn wasi_file_preopens_fail_closed() {
     std::fs::write(&writable_file, b"writable").unwrap();
 
     let readonly_err = match WasiRuntime::new(WasiConfig {
-        readonly_paths: vec![readonly_file.clone()],
+        readonly_paths: vec![readonly_file],
         ..WasiConfig::default()
     }) {
         Ok(_) => panic!("expected readonly file preopen to be rejected"),
@@ -301,7 +301,7 @@ fn wasi_file_preopens_fail_closed() {
     );
 
     let writable_err = match WasiRuntime::new(WasiConfig {
-        writable_paths: vec![writable_file.clone()],
+        writable_paths: vec![writable_file],
         ..WasiConfig::default()
     }) {
         Ok(_) => panic!("expected writable file preopen to be rejected"),

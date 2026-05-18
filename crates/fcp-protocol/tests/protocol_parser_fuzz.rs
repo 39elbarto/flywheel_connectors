@@ -18,8 +18,8 @@
 //!     pre-allocate proportionally before validation.
 //!
 //! (c) **Capability-token claim deserialization** — `CwtClaims::from_cbor`.
-//!     Schema-version oracle: a future schema_version (claim 6 set to
-//!     UINT::MAX or an unknown variant) MUST be rejected cleanly with
+//!     Schema-version oracle: a future `schema_version` (claim 6 set to
+//!     `UINT::MAX` or an unknown variant) MUST be rejected cleanly with
 //!     `CryptoError`. Authentication oracle: deserializing claim
 //!     bytes WITHOUT signature verification MUST NOT mark the token
 //!     authenticated — verification is a separate gate.
@@ -58,7 +58,7 @@ use fcp_protocol::{
 use proptest::prelude::*;
 
 /// Cap to keep proptest exec rate high. Anything past 64 KiB has
-/// already been rejected by every parser's PayloadTooLarge gate.
+/// already been rejected by every parser's `PayloadTooLarge` gate.
 const MAX_FUZZ_INPUT_BYTES: usize = 64 * 1024;
 
 fn arb_bytes(max: usize) -> impl Strategy<Value = Vec<u8>> {

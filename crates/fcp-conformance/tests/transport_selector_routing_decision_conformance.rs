@@ -1,6 +1,6 @@
 //! `fcp_mesh::TransportSelector` routing-decision conformance.
 //!
-//! `TransportSelector` is the NORMATIVE primitive every MeshNode
+//! `TransportSelector` is the NORMATIVE primitive every `MeshNode`
 //! consults to pick a transport for a peer-bound symbol. Three
 //! contracts matter:
 //!
@@ -9,12 +9,12 @@
 //!    for every routing decision in the system.
 //! 2. **Policy filtering and reason codes** — `ZoneTransportPolicy`
 //!    flags drop ineligible paths AND attach a specific
-//!    `DecisionReasonCode` (TransportLanForbidden /
-//!    TransportDerpForbidden / TransportFunnelForbidden). Operator
+//!    `DecisionReasonCode` (`TransportLanForbidden` /
+//!    `TransportDerpForbidden` / `TransportFunnelForbidden`). Operator
 //!    tooling reads these reason codes to explain refusals.
 //! 3. **Deterministic multipath fan-out** — `select_multipath`
 //!    uses `blake3(object_id || symbol_index_le || path_id)` as the
-//!    intra-priority-group tie-break, so two MeshNodes seeing the
+//!    intra-priority-group tie-break, so two `MeshNodes` seeing the
 //!    same (object, symbol) pick the same fan-out paths in the same
 //!    order. Without determinism, replication would race-fan and
 //!    waste bandwidth (or drop messages).
@@ -27,9 +27,9 @@
 //! - `transport_mode` mapping: Direct/Mesh→Lan, Derp→Derp,
 //!   Funnel→Funnel.
 //! - `rank_paths` deterministic sort keys: eligible desc → priority
-//!   desc → estimated_rtt_ms asc (None = u32::MAX) → path_id asc →
+//!   desc → `estimated_rtt_ms` asc (None = `u32::MAX`) → `path_id` asc →
 //!   peer asc.
-//! - `best_path` returns the first eligible RankedPath or None.
+//! - `best_path` returns the first eligible `RankedPath` or None.
 //! - Ineligible paths carry the documented `DecisionReasonCode`.
 //! - `select_multipath(fanout=0)` returns empty.
 //! - `select_multipath` filters ineligible paths entirely.
@@ -46,7 +46,7 @@ use fcp_prelude::{
 use fcp_tailscale::NodeId;
 use semver::Version;
 
-fn allow_all() -> ZoneTransportPolicy {
+const fn allow_all() -> ZoneTransportPolicy {
     ZoneTransportPolicy {
         allow_lan: true,
         allow_derp: true,
@@ -54,7 +54,7 @@ fn allow_all() -> ZoneTransportPolicy {
     }
 }
 
-fn lan_only() -> ZoneTransportPolicy {
+const fn lan_only() -> ZoneTransportPolicy {
     ZoneTransportPolicy {
         allow_lan: true,
         allow_derp: false,

@@ -328,7 +328,7 @@ fn invoke_request_from_simulate(request: &HostSimulateRequest) -> Result<InvokeR
         idempotency_key: None,
         lease_seq: None,
         deadline_ms: Some(request.deadline_ms),
-        correlation_id: simulate_request.correlation_id.clone(),
+        correlation_id: simulate_request.correlation_id,
         provenance: None,
         approval_tokens: request.approval_tokens.clone(),
     })

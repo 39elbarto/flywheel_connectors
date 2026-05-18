@@ -15,10 +15,10 @@
 //! 2. **`as_str` matches the serde rename.** Display, JSON
 //!    serialization, and the version-negotiation comparison must
 //!    all agree on the literal string.
-//! 3. **`latest()` returns V2025_03.** Bumping latest is a
+//! 3. **`latest()` returns `V2025_03`.** Bumping latest is a
 //!    deliberate cross-release coordination step, not a stealth
 //!    change.
-//! 4. **`supports_annotations` matrix.** V2025_03 yes, V2024_11
+//! 4. **`supports_annotations` matrix.** `V2025_03` yes, `V2024_11`
 //!    no — pins the documented capability gate.
 //! 5. **`Default == latest()`.**
 //! 6. **`Display` equals `as_str`.**

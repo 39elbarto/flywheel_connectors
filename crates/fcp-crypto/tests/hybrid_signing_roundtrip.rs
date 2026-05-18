@@ -38,12 +38,12 @@ impl PqPolicyDowngradeAuthorizer for MockHardwareToken {
     }
 
     fn authorize_pq_policy_downgrade(&self, reason: &str) -> CryptoResult<()> {
-        if !reason.is_empty() {
-            Ok(())
-        } else {
+        if reason.is_empty() {
             Err(CryptoError::TokenValidationError(
                 "mock hardware token rejected PQ downgrade".to_string(),
             ))
+        } else {
+            Ok(())
         }
     }
 }
@@ -113,7 +113,7 @@ fn assert_pq_only_roundtrip(kind: HybridSignedObjectKind, payload: FixturePayloa
             &signing_bytes,
             PqSigningPolicy::PqOnly,
             None,
-            Some(&pq_verifying_key),
+            Some(pq_verifying_key),
         )
         .expect("pq-only envelope verifies");
 
@@ -139,7 +139,7 @@ fn assert_both_sigs_roundtrip(kind: HybridSignedObjectKind, payload: FixturePayl
     let classical_verifying_key = classical_key.verifying_key();
     let pq_verifying_key = pq_key.verifying_key();
     let receipt = envelope
-        .verify(&signing_bytes, &classical_verifying_key, &pq_verifying_key)
+        .verify(&signing_bytes, &classical_verifying_key, pq_verifying_key)
         .expect("both-required envelope verifies");
 
     assert_eq!(&envelope.payload, &expected);
@@ -199,7 +199,7 @@ fn assert_both_required_policy_rejects_one(kind: HybridSignedObjectKind, payload
             &signing_bytes,
             PqSigningPolicy::BothRequired,
             Some(&classical_verifying_key),
-            Some(&pq_verifying_key),
+            Some(pq_verifying_key),
         )
         .expect_err("both-required rejects missing PQ signature");
 
@@ -465,13 +465,13 @@ fn migrated_signable_payload_normalizes_legacy_signature_field() {
     let pq_verifying_key = pq_key.verifying_key();
 
     envelope.payload.legacy_signature = vec![0xBB; 64];
-    let receipt = verify_signable(&envelope, &classical_verifying_key, &pq_verifying_key)
+    let receipt = verify_signable(&envelope, &classical_verifying_key, pq_verifying_key)
         .expect("legacy signature bytes are normalized out of hybrid transcript");
     assert!(receipt.signatures_verified.classical);
     assert!(receipt.signatures_verified.pq);
 
     envelope.payload.body.push_str(" tampered");
-    let err = verify_signable(&envelope, &classical_verifying_key, &pq_verifying_key)
+    let err = verify_signable(&envelope, &classical_verifying_key, pq_verifying_key)
         .expect_err("payload body remains signed");
     assert!(matches!(err, CryptoError::SignatureVerificationFailed));
 }

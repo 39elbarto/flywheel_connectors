@@ -13,7 +13,7 @@
 //!
 //! 2. **`gc_stale_peers`** is the periodic memory-bound cleanup
 //!    documented to prevent the per-peer tracking table from growing
-//!    unboundedly across attacker-controlled NodeIds. Critical
+//!    unboundedly across attacker-controlled `NodeIds`. Critical
 //!    invariant: peers with `inflight_decodes > 0` MUST be kept
 //!    regardless of staleness — otherwise an active decode would
 //!    lose its tracked inflight count and a future

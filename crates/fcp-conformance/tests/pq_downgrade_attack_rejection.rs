@@ -78,7 +78,7 @@ fn test_no_code_path_accepts_classical_only_under_steady_state() {
                     &signing_bytes,
                     PqSigningPolicy::BothRequired,
                     Some(&classical_verifying_key),
-                    Some(&pq_verifying_key),
+                    Some(pq_verifying_key),
                 )
                 .expect_err("steady-state verifier must reject classical-only envelopes");
 
@@ -107,7 +107,7 @@ fn test_no_code_path_accepts_classical_only_under_steady_state() {
                 &signing_bytes,
                 PqSigningPolicy::BothRequired,
                 Some(&classical_verifying_key),
-                Some(&pq_verifying_key),
+                Some(pq_verifying_key),
             )
             .expect_err("every signed-object kind rejects classical-only replay");
         assert!(matches!(err, CryptoError::MissingPqSignature { .. }));

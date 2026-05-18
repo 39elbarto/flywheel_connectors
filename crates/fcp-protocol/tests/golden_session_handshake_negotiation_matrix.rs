@@ -20,14 +20,14 @@
 //!
 //! Cells:
 //!
-//!   - 8 hand-picked (initiator_pref, responder_pref) combinations
+//!   - 8 hand-picked (`initiator_pref`, `responder_pref`) combinations
 //!     covering: empty intersection (both directions), single-suite
 //!     overlap, two-suite intersection with different responder
 //!     orders, adversarial worst-first initiator, duplicate-stuffed
 //!     initiator, single-element symmetric overlap.
 //!   - For each cell: the negotiated suite (or None), its numeric
 //!     id, and human label.
-//!   - The MINIMUM_SUITE floor itself, rendered as a separate row
+//!   - The `MINIMUM_SUITE` floor itself, rendered as a separate row
 //!     so a future bump becomes a single visible diff.
 //!
 //! Update flow:

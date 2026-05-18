@@ -10,23 +10,23 @@
 //! 1. **`BatchExecutor::validate` rejection contract**:
 //!    - empty operations → `InvalidFilter("batch has no operations")`
 //!    - duplicate operation id → `InvalidFilter("duplicate operation id: <id>")`
-//!    - max_parallelism=0 → `InvalidFilter("max_parallelism must be > 0")`
-//!    - unknown depends_on → `InvalidFilter("operation '<a>' depends on unknown operation '<b>'")`
+//!    - `max_parallelism=0` → `InvalidFilter("max_parallelism must be > 0")`
+//!    - unknown `depends_on` → `InvalidFilter("operation '<a>' depends on unknown operation '<b>'")`
 //!    - self-dependency → `InvalidFilter("operation '<a>' depends on itself")`
 //!    - dependency cycle → `InvalidFilter("dependency cycle detected ...")`
 //! 2. **`plan` topological tiering** — independent ops in tier 0;
 //!    A→B chain produces depth=2; diamond A→{B,C}→D produces
-//!    depth=3, max_width=2.
+//!    depth=3, `max_width=2`.
 //! 3. **`ExecutionPlan::depth`/`max_width`** — depth=tier count;
-//!    max_width=largest tier; empty plan max_width=0.
+//!    `max_width=largest` tier; empty plan `max_width=0`.
 //! 4. **`execute_sync` happy path** — handler returns success → all
-//!    operations complete in topological order; final BatchStatus is
+//!    operations complete in topological order; final `BatchStatus` is
 //!    Success; completed=N, failed=0, skipped=0.
-//! 5. **`execute_sync` stop_on_first_error** — first failure aborts;
+//! 5. **`execute_sync` `stop_on_first_error`** — first failure aborts;
 //!    downstream tiers Skipped; final BatchStatus=Aborted.
 //! 6. **`execute_sync` continue-on-failure** (default) — partial
-//!    failures yield BatchStatus::PartialSuccess.
-//! 7. **`ZoneRegistry`** — register/get_zone round-trip; absent tool
+//!    failures yield `BatchStatus::PartialSuccess`.
+//! 7. **`ZoneRegistry`** — `register/get_zone` round-trip; absent tool
 //!    returns None.
 
 use fcp_host::{
@@ -47,7 +47,7 @@ fn op(id: &str, depends_on: Vec<&str>) -> BatchOperation {
     }
 }
 
-fn req(operations: Vec<BatchOperation>, options: BatchOptions) -> BatchInvokeRequest {
+const fn req(operations: Vec<BatchOperation>, options: BatchOptions) -> BatchInvokeRequest {
     BatchInvokeRequest {
         operations,
         options,

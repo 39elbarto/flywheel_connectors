@@ -852,7 +852,7 @@ fn connector_names(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_owned()).collect()
 }
 
-fn expected_input_schema_gap_connectors() -> Vec<String> {
+const fn expected_input_schema_gap_connectors() -> Vec<String> {
     Vec::new()
 }
 

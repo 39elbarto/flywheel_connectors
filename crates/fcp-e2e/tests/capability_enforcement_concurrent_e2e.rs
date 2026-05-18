@@ -139,7 +139,7 @@ fn audit_context(zone: &str, op_index: usize, reason: &str) -> InvokeAuditContex
         zone_id: zone.into(),
         actor: "user:concurrent-cap-e2e".into(),
         connector_id: "fcp.test.concurrent".into(),
-        operation: format!("op_{reason}").into(),
+        operation: format!("op_{reason}"),
         operation_id: format!("op-cap-e2e-{reason}-{op_index}"),
         correlation_id: Some(format!("corr-{reason}-{op_index}")),
         occurred_at: 1_700_000_000 + op_index as u64,

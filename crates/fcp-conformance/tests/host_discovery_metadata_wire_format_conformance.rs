@@ -4,12 +4,12 @@
 //! agent-visible JSON shapes for caching, rate-limit hints, cost
 //! estimation, and example invocations:
 //!
-//! - `CacheMetadata` (etag + last_modified + max_age + optional
-//!   stale_while_revalidate) — the HTTP-cache contract for
+//! - `CacheMetadata` (etag + `last_modified` + `max_age` + optional
+//!   `stale_while_revalidate`) — the HTTP-cache contract for
 //!   discovery responses
 //! - `ResponseMeta` (status + optional message) — light status envelope
-//! - `PreflightRateLimit` (limited + remaining + optional reset_at)
-//! - `EstimatedCost` (api_calls + tokens + cost_cents — all optional)
+//! - `PreflightRateLimit` (limited + remaining + optional `reset_at`)
+//! - `EstimatedCost` (`api_calls` + tokens + `cost_cents` — all optional)
 //! - `ToolExample` (optional description + input + optional output)
 //!
 //! Properties pinned (NORMATIVE):
@@ -24,7 +24,7 @@
 //!    fields preserved through serde.
 //! 5. **`ToolExample`** preserves required `input` field; optional
 //!    description + output skip-when-None.
-//! 6. **Field-by-field PartialEq** for the structs that derive it
+//! 6. **Field-by-field `PartialEq`** for the structs that derive it
 //!    (`CacheMetadata`, `ResponseMeta`).
 
 use chrono::{DateTime, Utc};

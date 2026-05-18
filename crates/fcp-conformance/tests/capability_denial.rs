@@ -22,7 +22,7 @@ const CANONICAL_ZONES: &[fn() -> ZoneId] = &[
     ZoneId::public,
 ];
 
-/// Build a context that passes every check except (potentially) capability_verify.
+/// Build a context that passes every check except (potentially) `capability_verify`.
 ///
 /// All optional checks (holder proof, checkpoint, revocation, taint, budget,
 /// rate) are configured to Skip or Allow so the denial, when it happens, must

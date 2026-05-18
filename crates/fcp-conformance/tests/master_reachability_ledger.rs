@@ -60,8 +60,7 @@ impl LedgerRow {
             || self
                 .proof_path
                 .as_deref()
-                .map(|p| !p.trim().is_empty() && !p.trim_start().starts_with("(none"))
-                .unwrap_or(false)
+                .is_some_and(|p| !p.trim().is_empty() && !p.trim_start().starts_with("(none"))
             || self.pending.is_some()
     }
 }
@@ -88,8 +87,7 @@ fn parse_ledger() -> Vec<LedgerRow> {
             // Header is "### N. <claim title>".
             let after_number = rest
                 .split_once('.')
-                .map(|(_, rest)| rest.trim())
-                .unwrap_or(rest);
+                .map_or(rest, |(_, rest)| rest.trim());
             current_claim = Some(after_number.to_string());
         } else if trimmed.starts_with("- ") {
             if let Some((key, value)) = trimmed.trim_start_matches("- ").split_once(':') {
@@ -295,8 +293,7 @@ fn test_ledger_supersedes_quarterly_artifacts() {
             );
             if newest
                 .as_ref()
-                .map(|(existing_key, _)| key.as_str() > existing_key.as_str())
-                .unwrap_or(true)
+                .map_or(true, |(existing_key, _)| key.as_str() > existing_key.as_str())
             {
                 newest = Some((key, entry.path()));
             }

@@ -10,16 +10,16 @@
 //!
 //! Properties pinned (NORMATIVE):
 //!
-//! 1. **CredentialId is serde-transparent.** Serializes as a bare
+//! 1. **`CredentialId` is serde-transparent.** Serializes as a bare
 //!    UUID string — no wrapping object. Forward compat with bare-
 //!    UUID JSON readers.
-//! 2. **CredentialId::from_uuid round-trips with as_uuid.**
-//! 3. **CredentialId::parse rejects non-UUID strings.**
-//! 4. **Default == new() (random UUIDs)** — two `Default::default`
+//! 2. **`CredentialId::from_uuid` round-trips with `as_uuid`.**
+//! 3. **`CredentialId::parse` rejects non-UUID strings.**
+//! 4. **Default == `new()` (random UUIDs)** — two `Default::default`
 //!    calls MUST produce distinct ids (collision rate ≈ 2⁻¹²²).
 //! 5. **Display + parse round-trip.**
-//! 6. **CredentialApplication tag format.** `{"type":"<variant>"}`
-//!    in JSON, with snake_case rename.
+//! 6. **`CredentialApplication` tag format.** `{"type":"<variant>"}`
+//!    in JSON, with `snake_case` rename.
 //! 7. **HttpHeader.prefix is optional and omitted when None.**
 //! 8. **Each variant round-trips cleanly via JSON.**
 

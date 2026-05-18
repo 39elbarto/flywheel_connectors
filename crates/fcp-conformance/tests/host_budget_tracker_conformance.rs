@@ -1,6 +1,6 @@
 //! `fcp-host::BudgetTracker` per-zone usage accounting conformance.
 //!
-//! BudgetTracker is the per-zone usage budget enforcement that backs
+//! `BudgetTracker` is the per-zone usage budget enforcement that backs
 //! invoke-budget admission decisions. 129 inline tests cover internals
 //! but no cross-crate conformance pinned the contract that callers
 //! (the host gateway, admin reporting CLI, connector preflight)
@@ -9,13 +9,13 @@
 //! 1. **Within-budget** → `BudgetAction::Allow`.
 //! 2. **Exceeded under `BudgetEnforcement::Deny`** → `BudgetAction::Deny`,
 //!    and `to_error()` returns `Some(FcpError::BudgetExceeded)`
-//!    carrying the metric / used / limit / window_seconds — the
+//!    carrying the metric / used / limit / `window_seconds` — the
 //!    structured payload triagers grep for.
 //! 3. **Exceeded under `BudgetEnforcement::Warn`** → `BudgetAction::Warn`
 //!    and `to_error()` returns `None` (warn-only must NOT surface as
 //!    a denial error).
 //! 4. **Accumulating usage within a single window** sums correctly.
-//! 5. **Multiple metrics in one record_usage call** track independently.
+//! 5. **Multiple metrics in one `record_usage` call** track independently.
 //! 6. **Per-zone isolation** — one zone exhausting their budget MUST
 //!    NOT affect another zone's evaluation.
 
@@ -40,7 +40,7 @@ fn budget_for_metric(
     }
 }
 
-fn token_metric(amount: u64) -> UsageMetric {
+const fn token_metric(amount: u64) -> UsageMetric {
     UsageMetric::tokens(amount)
 }
 

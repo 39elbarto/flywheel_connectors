@@ -1748,7 +1748,7 @@ mod tests {
         let recipe = provisioning_recipe();
         let v = serde_json::to_value(&recipe).unwrap();
         assert_eq!(v["id"], "linkedin.oauth2_pkce");
-        assert!(v["steps"].as_array().unwrap().len() == 2);
+        assert_eq!(v["steps"].as_array().unwrap().len(), 2);
     }
 
     #[test]

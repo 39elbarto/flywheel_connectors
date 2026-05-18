@@ -122,7 +122,7 @@ fn negotiate_suite_malicious_initiator_cannot_downgrade() {
     );
 }
 
-/// Spec: "Suites weaker than [MINIMUM_SUITE] are refused even if both peers
+/// Spec: "Suites weaker than [`MINIMUM_SUITE`] are refused even if both peers
 /// still list them."
 ///
 /// The floor is currently `Suite1`. When another (stronger) suite exists
@@ -152,7 +152,7 @@ fn negotiate_suite_accepts_at_or_above_floor() {
     );
 }
 
-/// Spec: "MINIMUM_SUITE reflects the current weakest" (session-handshake.md §Suite list).
+/// Spec: "`MINIMUM_SUITE` reflects the current weakest" (session-handshake.md §Suite list).
 ///
 /// This is a structural invariant: the floor constant must equal the
 /// lowest-ranked variant of `SessionCryptoSuite`. If a new weaker suite
@@ -177,7 +177,7 @@ fn minimum_suite_equals_current_weakest() {
     );
 }
 
-/// Spec: "Returns None if there is no intersection at or above MINIMUM_SUITE."
+/// Spec: "Returns None if there is no intersection at or above `MINIMUM_SUITE`."
 #[test]
 fn negotiate_suite_no_overlap_returns_none() {
     let initiator = [SessionCryptoSuite::Suite1];

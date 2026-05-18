@@ -14,18 +14,18 @@
 //! Each test name is tagged with the expected `DecisionReasonCode`
 //! from the cross-zone surface.
 //!
-//! Scope: the following DecisionReasonCode variants exist in the
+//! Scope: the following `DecisionReasonCode` variants exist in the
 //! policy surface but are NOT emitted from `evaluate_invoke` for the
 //! cross-zone flow — they are filter-outputs applied inside
 //! `apply_declassification` / `apply_elevation` that silently drop
 //! the token and fall through to the generic "missing approval"
 //! code:
 //!
-//!   DecisionReasonCode::ApprovalExpired
-//!   DecisionReasonCode::ApprovalZoneMismatch
+//!   `DecisionReasonCode::ApprovalExpired`
+//!   `DecisionReasonCode::ApprovalZoneMismatch`
 //!
 //! An expired or zone-mismatched token is not exposed with a distinct
-//! code from evaluate_invoke itself — it surfaces as
+//! code from `evaluate_invoke` itself — it surfaces as
 //! `ApprovalMissingDeclassification` after being filtered out. The
 //! tests below pin that exact fall-through so a future change that
 //! wants to surface the distinct codes can't silently flip the
@@ -87,11 +87,11 @@ fn engine_for(zone: ZoneId) -> PolicyEngine {
 /// Build an invocation input rooted in `source_zone` heading to
 /// `target_zone`. `approval_tokens` lives outside the input so its
 /// reference lifetime tracks the caller's scope.
-fn cross_zone_input<'a>(
+fn cross_zone_input(
     source_zone: ZoneId,
     target_zone: ZoneId,
-    approval_tokens: &'a [ApprovalToken],
-) -> PolicyDecisionInput<'a> {
+    approval_tokens: &[ApprovalToken],
+) -> PolicyDecisionInput<'_> {
     static EMPTY_RECEIPTS: &[SanitizerReceipt] = &[];
     static EMPTY_OBJECTS: &[ObjectId] = &[];
     PolicyDecisionInput {

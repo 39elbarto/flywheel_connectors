@@ -1,16 +1,16 @@
 //! Property-based fuzz harness for the in-memory symbol store
-//! (paths VioletPine just touched in 4bca4bd75 — sparse-K eager-
+//! (paths `VioletPine` just touched in 4bca4bd75 — sparse-K eager-
 //! allocation cap).
 //!
 //! The existing inline `symbol_store_concurrency_proptest` covers
 //! one concurrent-op shape. This harness sweeps the *value space*
-//! that VioletPine's perf change touched and pins four contracts
+//! that `VioletPine`'s perf change touched and pins four contracts
 //! the cap must not silently drift:
 //!
 //! 1. **Round-trip preservation** — for any valid (K, esi-set,
-//!    symbol-bytes) tuple, put_object_meta + put_symbol +
-//!    get_symbol returns the exact bytes that were put. Tested
-//!    across K ∈ {1, 100, 1_024, 10_000, MAX_SOURCE_SYMBOLS} so
+//!    symbol-bytes) tuple, `put_object_meta` + `put_symbol` +
+//!    `get_symbol` returns the exact bytes that were put. Tested
+//!    across K ∈ {1, 100, `1_024`, `10_000`, `MAX_SOURCE_SYMBOLS`} so
 //!    both pre-cap and post-cap K values exercise the same
 //!    round-trip.
 //!
@@ -29,7 +29,7 @@
 //!
 //! 4. **Quota enforcement under sparse-K** — a high-K meta with
 //!    no symbols MUST NOT consume meaningful quota (the eager cap
-//!    means HashMap buckets, not symbol bytes, so the quota only
+//!    means `HashMap` buckets, not symbol bytes, so the quota only
 //!    increments when actual symbols arrive).
 
 use bytes::Bytes;
@@ -46,7 +46,7 @@ use proptest::prelude::*;
 const VALID_SYMBOL_SIZE: u16 = 64;
 const SYMBOL_PAYLOAD_LEN: usize = VALID_SYMBOL_SIZE as usize;
 
-fn object_id_from_seed(seed: u8) -> ObjectId {
+const fn object_id_from_seed(seed: u8) -> ObjectId {
     ObjectId::from_bytes([seed; 32])
 }
 
@@ -312,7 +312,7 @@ proptest! {
 
 // ── Targeted regression: cap value pinning ───────────────────────────
 
-/// br-4bca4bd75: a meta with K=MAX_SOURCE_SYMBOLS (56_403) followed
+/// br-4bca4bd75: a meta with `K=MAX_SOURCE_SYMBOLS` (`56_403`) followed
 /// by a SINGLE symbol put MUST succeed. Pre-fix the eager allocation
 /// might have hit a memory ceiling on resource-constrained hosts.
 /// This is a deterministic floor for the "pathological-K-but-actually-used"

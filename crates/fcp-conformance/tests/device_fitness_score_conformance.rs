@@ -25,7 +25,7 @@
 //!
 //! Properties pinned (NORMATIVE):
 //!
-//! 1. **Baseline (no penalties, no bonuses)** = BASE_SCORE = 100.0.
+//! 1. **Baseline (no penalties, no bonuses)** = `BASE_SCORE` = 100.0.
 //! 2. **Each penalty/bonus magnitude** observable via single-knob
 //!    delta against baseline.
 //! 3. **Eligibility gates short-circuit to score=0**:

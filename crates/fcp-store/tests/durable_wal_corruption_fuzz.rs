@@ -56,7 +56,7 @@ fn test_zone() -> ZoneId {
     ZoneId::work()
 }
 
-fn test_object_id(seed: u8) -> ObjectId {
+const fn test_object_id(seed: u8) -> ObjectId {
     ObjectId::from_bytes([seed; 32])
 }
 
@@ -85,8 +85,8 @@ fn test_object(seed: u8) -> StoredObject {
     }
 }
 
-/// Build a clean WAL with NUM_OBJECTS valid records inside `dir`.
-/// Returns the wal-file path and the original ordered (object_id,
+/// Build a clean WAL with `NUM_OBJECTS` valid records inside `dir`.
+/// Returns the wal-file path and the original ordered (`object_id`,
 /// seq) pairs the test should compare against post-corruption
 /// recovery.
 fn seed_clean_wal(root_dir: &PathBuf) -> (PathBuf, Vec<ObjectId>) {
@@ -167,16 +167,13 @@ proptest! {
                 DurableObjectStore::open(config)
             })
         });
-        let recovery = match result {
-            Ok(r) => r,
-            Err(_) => {
-                prop_assert!(
-                    false,
-                    "br-fuzz: WAL recovery panicked under random corruption — \
-                     unwrap on parsed-from-disk values escaped",
-                );
-                unreachable!("prop_assert! returns above");
-            }
+        let recovery = if let Ok(r) = result { r } else {
+            prop_assert!(
+                false,
+                "br-fuzz: WAL recovery panicked under random corruption — \
+                 unwrap on parsed-from-disk values escaped",
+            );
+            unreachable!("prop_assert! returns above");
         };
 
         // Open may succeed (truncation handled corruption) or fail

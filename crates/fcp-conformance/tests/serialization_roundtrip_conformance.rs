@@ -76,9 +76,9 @@ where
     }
 }
 
-/// FCPC control-plane frame round-trip (MessageFrame).
+/// FCPC control-plane frame round-trip (`MessageFrame`).
 ///
-/// Happy-path verify() was not exercised anywhere before this harness
+/// Happy-path `verify()` was not exercised anywhere before this harness
 /// landed. Tampering tests in `src/vectors/fcpc.rs` only assert that
 /// modified inputs FAIL; they never proved the unmodified golden inputs
 /// pass.
@@ -94,7 +94,7 @@ fn fcpc_message_frame_roundtrip_conformance() {
     assert_category_passes(&report);
 }
 
-/// FCPS symbol-plane frame round-trip (MessageFrame).
+/// FCPS symbol-plane frame round-trip (`MessageFrame`).
 ///
 /// Same gap as FCPC: the tampering tests covered negative paths only,
 /// the happy-path encode/decode round-trip had no integration assertion.
@@ -110,7 +110,7 @@ fn fcps_message_frame_roundtrip_conformance() {
     assert_category_passes(&report);
 }
 
-/// COSE_Sign1 capability token round-trip (CapabilityToken).
+/// `COSE_Sign1` capability token round-trip (`CapabilityToken`).
 #[test]
 fn capability_token_cose_roundtrip_conformance() {
     let report = run_category(
@@ -136,7 +136,7 @@ fn session_handshake_roundtrip_conformance() {
     assert_category_passes(&report);
 }
 
-/// Session-level control messages: HelloRetry + TransportLimits.
+/// Session-level control messages: `HelloRetry` + `TransportLimits`.
 #[test]
 fn session_messages_roundtrip_conformance() {
     let hello = run_category(
@@ -191,7 +191,7 @@ fn hpke_sealed_box_roundtrip_conformance() {
     assert_category_passes(&report);
 }
 
-/// HolderProof signing-bytes layout + signature round-trip.
+/// `HolderProof` signing-bytes layout + signature round-trip.
 #[test]
 fn holder_proof_roundtrip_conformance() {
     let report = run_category(
@@ -204,7 +204,7 @@ fn holder_proof_roundtrip_conformance() {
     assert_category_passes(&report);
 }
 
-/// Core object primitives: canonical CBOR payload + ObjectId derivation.
+/// Core object primitives: canonical CBOR payload + `ObjectId` derivation.
 #[test]
 fn core_object_roundtrip_conformance() {
     let payload = run_category(

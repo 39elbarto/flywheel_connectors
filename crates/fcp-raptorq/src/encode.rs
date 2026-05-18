@@ -466,7 +466,7 @@ mod tests {
     /// `encode_all` / `into_encode_all` previously computed each repair
     /// symbol ESI as `k_prime + i` with raw `u32 + u32`. In debug builds
     /// that panics on overflow, and in release builds it silently wraps
-    /// into the source-symbol ESI range [0, k_prime), producing duplicate
+    /// into the source-symbol ESI range [0, `k_prime`), producing duplicate
     /// ESIs that collide with the systematic source symbols. The fix caps
     /// `repair_count` at `u32::MAX - k_prime` and uses `checked_add`
     /// inline so the invariant is enforced at the use site rather than

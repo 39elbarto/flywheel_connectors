@@ -1026,7 +1026,7 @@ mod tests {
                         apply_symbol_store_concurrency_op(&worker_store, op).await;
                     }
                 })
-                .map(|_| ());
+                .map(|()| ());
                 worker_done
                     .send((worker, result))
                     .expect("send worker result");

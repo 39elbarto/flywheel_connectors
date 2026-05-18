@@ -18,9 +18,9 @@
 //!
 //! Properties pinned:
 //! - determinism (verifier and initiator must agree, twice)
-//! - three-key distinctness (k_mac_i2r, k_mac_r2i, k_ctx all differ)
-//! - input-binding for each of shared_secret, selected_suite, session_id,
-//!   initiator_node_id, responder_node_id, hello_nonce, ack_nonce
+//! - three-key distinctness (`k_mac_i2r`, `k_mac_r2i`, `k_ctx` all differ)
+//! - input-binding for each of `shared_secret`, `selected_suite`, `session_id`,
+//!   `initiator_node_id`, `responder_node_id`, `hello_nonce`, `ack_nonce`
 //! - role asymmetry (initiator/responder swap produces different keys)
 
 use fcp_crypto::{X25519SecretKey, X25519SharedSecret};

@@ -1,4 +1,4 @@
-//! Post-quantum conformance: ZoneKeyManifest V3 to V4 migration determinism.
+//! Post-quantum conformance: `ZoneKeyManifest` V3 to V4 migration determinism.
 
 use fcp_core::{
     NodeId, NodeSignature, ObjectHeader, ObjectIdKeyId, Provenance, TailscaleNodeId,
@@ -65,7 +65,7 @@ fn zone_key_manifest_v3_to_v4_migration_is_byte_deterministic() {
     // here.
     let first = source.migrated_to_v4(ZoneKemAlgorithm::XWing);
     let second = source.migrated_to_v4(ZoneKemAlgorithm::XWing);
-    let third = source.clone().migrated_to_v4(ZoneKemAlgorithm::XWing);
+    let third = source.migrated_to_v4(ZoneKemAlgorithm::XWing);
 
     assert_eq!(first.as_payload().kem, ZoneKemAlgorithm::XWing);
     assert_eq!(second.as_payload().kem, ZoneKemAlgorithm::XWing);

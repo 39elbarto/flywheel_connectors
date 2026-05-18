@@ -10,8 +10,8 @@
 //! Properties pinned (NORMATIVE):
 //!
 //! 1. **Wildcard allow = unrestricted.** `resource_allow = ["*"]`
-//!    accepts any URI, and accepts even the empty resource_uris slice.
-//! 2. **Non-wildcard allow requires resource_uris.** If the token
+//!    accepts any URI, and accepts even the empty `resource_uris` slice.
+//! 2. **Non-wildcard allow requires `resource_uris`.** If the token
 //!    declares a specific allow pattern but the caller forgets to
 //!    pass any URIs, the verifier MUST reject with
 //!    `ResourceNotAllowed` (defense-in-depth: prevents silent

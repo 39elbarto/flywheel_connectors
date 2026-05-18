@@ -1,7 +1,7 @@
 //! Adversarial fuzz harness — fcp-mesh gossip handlers
 //! (testing-fuzzing alpha-domain coverage).
 //!
-//! AmberLark, 2026-05-02. Complements CrimsonWolf's beta PQ-crypto
+//! `AmberLark`, 2026-05-02. Complements `CrimsonWolf`'s beta PQ-crypto
 //! sweep (commit 6f46e6a13).
 //!
 //! Feeds adversarial `GossipSummary` and `RevocationPushMessage`

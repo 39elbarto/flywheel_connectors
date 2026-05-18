@@ -6,7 +6,7 @@
 //!   2. The orchestrator script
 //!      `scripts/perf/collect_runtime_targets.sh` exists and is
 //!      executable.
-//!   3. For every (target, machine_class) pair (7 × 3 = 21), the
+//!   3. For every (target, `machine_class`) pair (7 × 3 = 21), the
 //!      `perf-results/runtime_targets/<machine_class>/<target>.jsonl`
 //!      file either exists with valid StatPack-shaped lines, OR the
 //!      doc explicitly labels that cell as `fixture` (acceptable
@@ -219,7 +219,7 @@ fn test_targets_align_with_perf_targets_toml() {
         .filter_map(|line| {
             let trimmed = line.trim();
             if let Some(rest) = trimmed.strip_prefix('[') {
-                rest.strip_suffix(']').map(|name| name.to_string())
+                rest.strip_suffix(']').map(std::string::ToString::to_string)
             } else {
                 None
             }

@@ -2,7 +2,7 @@
 //!
 //! `fcp_mesh::admission::AdmissionController` is the per-peer
 //! back-pressure gate every connector sits behind. It enforces
-//! NORMATIVE PeerBudget caps on bytes/min, symbols/min, decode
+//! NORMATIVE `PeerBudget` caps on bytes/min, symbols/min, decode
 //! capacity, and authentication state. Zero conformance coverage
 //! today (123 inline tests cover internals; the cross-crate
 //! contract has been unpinned).
@@ -16,7 +16,7 @@
 //!    documented back-pressure signal: callers must honour the
 //!    suggested retry delay rather than spinning.
 //! 3. **Symbol-budget exceeded surfaces `retry_after`.**
-//! 4. **AuthenticationRequired fires when the policy demands it
+//! 4. **`AuthenticationRequired` fires when the policy demands it
 //!    and the peer is unauthenticated.** This is the cheap
 //!    short-circuit reject path — admission never spends budget
 //!    cycles on unauthenticated peers when authentication is
@@ -24,10 +24,10 @@
 //! 5. **Per-peer isolation.** One peer exhausting their budget
 //!    MUST NOT affect another peer's admission status.
 //! 6. **Restrictive vs permissive presets give contrasting
-//!    limits.** PeerBudget::restrictive() must reject what
-//!    PeerBudget::permissive() admits.
+//!    limits.** `PeerBudget::restrictive()` must reject what
+//!    `PeerBudget::permissive()` admits.
 //!
-//! These tests use freshly-constructed AdmissionControllers so
+//! These tests use freshly-constructed `AdmissionControllers` so
 //! state from prior tests cannot leak.
 
 use std::time::Duration;

@@ -1,11 +1,11 @@
-//! `fcp_host` AgentSessionConfig + ToolCallError + helpful error
+//! `fcp_host` `AgentSessionConfig` + `ToolCallError` + helpful error
 //! response builders conformance.
 //!
 //! Three tightly-coupled agent-facing primitives:
 //!
 //! 1. **`AgentSessionConfig`** — session lifecycle bounds
-//!    (idle_timeout, max_lifetime, max_concurrent_calls,
-//!    rate_limit_per_minute). The `validate()` method gates a session
+//!    (`idle_timeout`, `max_lifetime`, `max_concurrent_calls`,
+//!    `rate_limit_per_minute`). The `validate()` method gates a session
 //!    config before use; documented defaults define how aggressively
 //!    sessions auto-expire and how much concurrent work an agent can
 //!    drive.
@@ -18,16 +18,16 @@
 //! Properties pinned (NORMATIVE):
 //!
 //! - `AgentSessionConfig::default` documented values:
-//!   idle_timeout=5min, max_lifetime=1h, max_concurrent_calls=10,
-//!   rate_limit_per_minute=60.
+//!   `idle_timeout=5min`, `max_lifetime=1h`, `max_concurrent_calls=10`,
+//!   `rate_limit_per_minute=60`.
 //! - `validate()` returns documented error strings for each invalid
-//!   condition (zero idle_timeout, zero max_lifetime, max < idle,
-//!   zero concurrent_calls, zero rate_limit).
+//!   condition (zero `idle_timeout`, zero `max_lifetime`, max < idle,
+//!   zero `concurrent_calls`, zero `rate_limit`).
 //! - `is_valid()` ⇔ `validate().is_empty()`.
 //! - `ToolCallError::new` constructs with code+message, data=None.
 //! - `ToolCallError::with_data` adds structured data.
 //! - `to_jsonrpc_error()` extracts numeric code + message + data
-//!   into the McpJsonRpcError envelope.
+//!   into the `McpJsonRpcError` envelope.
 //! - `Display` is `"[{code}] {message}"` exact format.
 //! - `build_error_response` produces jsonrpc="2.0", preserved id,
 //!   error with code+message and data=None.

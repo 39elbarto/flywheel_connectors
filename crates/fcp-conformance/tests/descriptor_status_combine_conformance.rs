@@ -11,9 +11,9 @@
 //!    to fold a list of statuses without grouping concerns.
 //! 2. **`From<&ConnectorHealth>` and `From<&SelfCheckReport>` are
 //!    cross-crate contracts.** Descriptor consumers receive
-//!    ConnectorHealth from the discovery layer and SelfCheckReport
+//!    `ConnectorHealth` from the discovery layer and `SelfCheckReport`
 //!    from the connector self-check; both must surface as the
-//!    correct DescriptorStatus.
+//!    correct `DescriptorStatus`.
 //!
 //! Documented mappings pinned:
 //!

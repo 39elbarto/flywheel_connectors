@@ -14,8 +14,8 @@
 //!    exit) pair across the 4 policies × 3 exit kinds (clean, code,
 //!    signal):
 //!    - Always → always true
-//!    - OnFailure → !is_clean (true on code≠0 OR signal)
-//!    - OnCrash → is_signal_terminated only
+//!    - `OnFailure` → !`is_clean` (true on code≠0 OR signal)
+//!    - `OnCrash` → `is_signal_terminated` only
 //!    - Never → always false
 //! 3. **`ProcessExit::clean()` / `with_code()` / `with_signal()`**
 //!    — predicates `is_clean` / `is_signal_terminated` agree with
@@ -24,27 +24,27 @@
 //!    "exit code N" / "signal N" / "exit code N, signal N" /
 //!    "unknown exit".
 //! 5. **`ProcessState::is_running` ⇔ Running variant**;
-//!    **`is_terminal` ⇔ Stopped|Failed**; `label()` snake_case match.
+//!    **`is_terminal` ⇔ Stopped|Failed**; `label()` `snake_case` match.
 //! 6. **`StopReason` Display strings** — operator log greps depend on
 //!    "requested" / "host shutdown" / "health check failed" /
 //!    "resource limit exceeded" / "upgrade".
 //! 7. **`SupervisorConfig::default` documented values**:
-//!    max_restarts=5, restart_window=5min, health_check_interval=30s,
-//!    health_check_timeout=10s, graceful_shutdown_timeout=30s,
-//!    initial_backoff=500ms, max_backoff=1min, multiplier=2.0.
+//!    `max_restarts=5`, `restart_window=5min`, `health_check_interval=30s`,
+//!    `health_check_timeout=10s`, `graceful_shutdown_timeout=30s`,
+//!    `initial_backoff=500ms`, `max_backoff=1min`, multiplier=2.0.
 //! 8. **`ExponentialBackoff` invariants**:
 //!    - first call (attempt=0) returns `initial`
 //!    - subsequent calls multiply by `multiplier`, capped at `max`
 //!    - multiplier < 1.0 normalizes to 2.0 (degenerate input guard)
 //!    - initial > max is clamped down to max
-//!    - reset() returns attempt counter to 0
-//!    - attempts() is the saturating counter
+//!    - `reset()` returns attempt counter to 0
+//!    - `attempts()` is the saturating counter
 //! 9. **`RestartTracker::evaluate_restart`**:
 //!    - `RestartPolicy::Never` always returns `PolicyDenied`
-//!    - max_restarts within window returns `MaxRestartsExceeded`
+//!    - `max_restarts` within window returns `MaxRestartsExceeded`
 //!      with count + window
 //!    - successful restart records history, advances backoff
-//!    - record_successful_start resets backoff but NOT history
+//!    - `record_successful_start` resets backoff but NOT history
 //! 10. **`RestartDenied` Display** — "restart policy denied" /
 //!     "max restarts exceeded: N restarts in Ws window".
 

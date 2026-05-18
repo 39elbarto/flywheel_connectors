@@ -11,16 +11,16 @@
 //!
 //! 1. **`HealthFilter` 4 lowercase variants**: `healthy` /
 //!    `degraded` / `available` / `all`.
-//! 2. **`ConnectorArchetype` 6 snake_case variants**: `unknown` /
+//! 2. **`ConnectorArchetype` 6 `snake_case` variants**: `unknown` /
 //!    `request_response` / `streaming` / `bidirectional` /
 //!    `polling` / `webhook`.
-//! 3. **`LatencyHint` 4 snake_case variants**: `fast` / `medium` /
+//! 3. **`LatencyHint` 4 `snake_case` variants**: `fast` / `medium` /
 //!    `slow` / `very_slow`.
 //! 4. **`HostHealthStatus` 3 lowercase variants**: `healthy` /
 //!    `degraded` / `unhealthy`.
-//! 5. **`MeshStatus` 4 snake_case variants**: `connected` /
+//! 5. **`MeshStatus` 4 `snake_case` variants**: `connected` /
 //!    `degraded` / `unreachable` / `not_configured`.
-//! 6. **`PolicyEngineStatus` 4 snake_case variants**: `active` /
+//! 6. **`PolicyEngineStatus` 4 `snake_case` variants**: `active` /
 //!    `partially_loaded` / `not_initialized` / `error`.
 //! 7. **`MeshStatus::is_operational`** is true ONLY for
 //!    `Connected | Degraded` (the documented operational set).

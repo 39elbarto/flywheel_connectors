@@ -14,16 +14,16 @@
 //!    - `allow_unsupported_self_check_promotion = true`
 //!    - `crash_loop_threshold = 3`
 //!    - `crash_loop_window_secs = 300` (5 minute window)
-//! 2. **`RolloutDecision` 4 snake_case variants** — `scheduled` /
+//! 2. **`RolloutDecision` 4 `snake_case` variants** — `scheduled` /
 //!    `hold` / `promote` / `rollback`.
-//! 3. **`RolloutDecision::as_str` returns the same snake_case
+//! 3. **`RolloutDecision::as_str` returns the same `snake_case`
 //!    string** as the serde wire form (logs ↔ JSON parity).
 //! 4. **`RolloutDecision` rejects unknown / mixed-case JSON values.**
 //! 5. **`RolloutDecision` Copy + Eq** — used in dashboard counters.
 //! 6. **`RolloutObservation::new`** initialises latency=None,
-//!    uptime=0, pinned=false, crashed=false, observed_at=now.
+//!    uptime=0, pinned=false, crashed=false, `observed_at=now`.
 //! 7. **`with_latency_ms` / `with_uptime_secs`** builders preserve
-//!    the policy + invocation_succeeded fields they carry through.
+//!    the policy + `invocation_succeeded` fields they carry through.
 
 use chrono::Utc;
 use fcp_host::{RolloutControllerConfig, RolloutDecision, RolloutObservation};
@@ -161,7 +161,7 @@ fn rollout_decision_four_variants_are_distinct() {
 fn rollout_observation_new_initialises_documented_defaults() {
     let policy = RolloutPolicy::default();
     let before = Utc::now();
-    let obs = RolloutObservation::new(true, policy.clone());
+    let obs = RolloutObservation::new(true, policy);
     let after = Utc::now();
 
     assert!(

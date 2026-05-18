@@ -315,7 +315,7 @@ fn symbol_first_e2e_three_node_split_lose_one_reconstruct_from_two() {
     );
 
     // Drop node B entirely — simulating a node failure or partition.
-    let surviving: Vec<(u32, Vec<u8>)> = node_a.into_iter().chain(node_c.into_iter()).collect();
+    let surviving: Vec<(u32, Vec<u8>)> = node_a.into_iter().chain(node_c).collect();
     log_event(
         scenario,
         "partition_failure",
@@ -579,9 +579,7 @@ fn symbol_first_e2e_lean_witness_registered_for_formal_gate() {
     let scenario = "carkm.lean_witness_gate";
     log_event(scenario, "setup", "started", None);
 
-    let registered = FORMAL_INVARIANT_THEOREMS
-        .iter()
-        .any(|t| *t == SYMBOL_LEAN_THEOREM);
+    let registered = FORMAL_INVARIANT_THEOREMS.contains(&SYMBOL_LEAN_THEOREM);
     assert!(
         registered,
         "Lean theorem {SYMBOL_LEAN_THEOREM} MUST be in FORMAL_INVARIANT_THEOREMS — \

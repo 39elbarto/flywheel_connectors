@@ -7,10 +7,10 @@
 //!
 //! Properties pinned (NORMATIVE):
 //!
-//! 1. **`AuthorityStatus` 3 snake_case variants** — `active` /
+//! 1. **`AuthorityStatus` 3 `snake_case` variants** — `active` /
 //!    `superseded` / `expired`. Drift here would silently change
 //!    every authority audit record's wire form.
-//! 2. **`AuthorityReasonCode` 9 snake_case variants**:
+//! 2. **`AuthorityReasonCode` 9 `snake_case` variants**:
 //!    - `active_authority` (winner)
 //!    - `superseded_by_preferred_lease` (loser to better candidate)
 //!    - `lease_expired`
@@ -21,13 +21,13 @@
 //!    - `coordinator_selected`
 //!    - `no_eligible_coordinator`
 //! 3. **Both enums reject unknown / mixed-case / empty-string
-//!    JSON values** (strict snake_case).
+//!    JSON values** (strict `snake_case`).
 //! 4. **`AuthorityRecord` serde roundtrip identity** — every field
 //!    survives JSON encode→decode, including the optional
 //!    coordinator field (which omits via `Option` semantics).
 //! 5. **`AuthorityTimelineEvent` serde roundtrip identity** —
-//!    optional fields (holder, coordinator, fencing_token,
-//!    expires_at) round-trip cleanly.
+//!    optional fields (holder, coordinator, `fencing_token`,
+//!    `expires_at`) round-trip cleanly.
 //! 6. **`ObservedLeaseAuthority::new`** preserves the holder + lease
 //!    fields verbatim and is `const fn`-friendly (compile-time
 //!    construction surface).

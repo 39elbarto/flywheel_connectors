@@ -529,7 +529,8 @@ fn assert_phase_invariants(scenario_id: &str, ledger: &MeshCompatibilityLedger) 
                 if !peer_allows_v3_for_safe(initiator) || !peer_allows_v3_for_safe(responder) {
                     continue;
                 }
-                for tier in [SafetyTier::Safe] {
+                {
+                    let tier = SafetyTier::Safe;
                     let d = decide_session(ledger, initiator, responder, tier);
                     assert_ne!(
                         d,

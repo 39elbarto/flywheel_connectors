@@ -1,7 +1,7 @@
 //! E2E truth-precedence + revocation interaction
 //! (testing-perfect-e2e-integration-tests-with-logging-and-no-mocks).
 //!
-//! AmberLark, 2026-05-02 — alpha-domain coverage sweep.
+//! `AmberLark`, 2026-05-02 — alpha-domain coverage sweep.
 //!
 //! ## What this exercises
 //!

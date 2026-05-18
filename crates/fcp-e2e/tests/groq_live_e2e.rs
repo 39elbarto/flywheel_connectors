@@ -75,7 +75,7 @@ async fn configured_connector(config: Value, capabilities: &[&'static str]) -> C
     let verifying_key = signing_key.verifying_key();
     let requested = capabilities
         .iter()
-        .map(|capability| CapabilityId::from_static(*capability))
+        .map(|capability| CapabilityId::from_static(capability))
         .collect();
     connector
         .handshake(test_handshake_request(requested, verifying_key.to_bytes()))

@@ -256,7 +256,7 @@ fn mr5_duplicate_symbols_are_idempotent() {
 ///      `surplus`.
 ///   4. `surplus == baseline == payload`.
 ///
-/// Because RaptorQ is a fountain code, the decoder is allowed to reach
+/// Because `RaptorQ` is a fountain code, the decoder is allowed to reach
 /// `Ok(Some(...))` as soon as enough independent symbols have arrived,
 /// which can be fewer than the total encoded stream. The contract we
 /// pin here is the observable one: *all* prefixes that are long enough
@@ -299,7 +299,7 @@ fn mr6_extra_symbols_over_threshold_decode_same_payload() {
 /// MR7 — encoder determinism.
 ///
 /// Maps to the user's MR5 ("same seed + same input → byte-identical
-/// encoding"). RaptorQ encoding is fully deterministic: it has no
+/// encoding"). `RaptorQ` encoding is fully deterministic: it has no
 /// internal RNG, it does not sample timestamps or pointers, and its
 /// symbol generation is a pure function of (payload, config). This
 /// test pins that contract by constructing two independent encoders

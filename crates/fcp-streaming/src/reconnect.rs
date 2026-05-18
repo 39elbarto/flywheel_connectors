@@ -720,7 +720,7 @@ mod tests {
         b.reset(); // second reset must be a no-op
         assert_eq!(a.attempts(), b.attempts());
         assert_eq!(a.attempts(), 0);
-        assert!(a.can_reconnect() == b.can_reconnect());
+        assert_eq!(a.can_reconnect(), b.can_reconnect());
     }
 
     #[test]

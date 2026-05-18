@@ -2,7 +2,7 @@
 //! semantics at verification time.
 //!
 //! Existing `auth_claims_conformance.rs` pins the wire-format CBOR but
-//! uses far-future `exp` (timestamp 2_000_000_000+) and far-past `nbf`,
+//! uses far-future `exp` (timestamp `2_000_000_000`+) and far-past `nbf`,
 //! so the at-boundary timing semantics are never exercised. This file
 //! locks in the verifier's behavior at the exact bounds where
 //! `validate_timing_with_clock_skew` toggles between accept and reject.
@@ -97,7 +97,7 @@ fn nbf_at_now_verifies() {
 }
 
 /// CONTRACT: a token whose `not_before` is inside the
-/// CAPABILITY_TOKEN_CLOCK_SKEW_SECS grace window in the future MUST
+/// `CAPABILITY_TOKEN_CLOCK_SKEW_SECS` grace window in the future MUST
 /// verify. The verifier intentionally tolerates operator clock drift up
 /// to the skew constant.
 #[test]
@@ -143,7 +143,7 @@ fn nbf_beyond_skew_rejected() {
 ///
 /// This pins the FCP-specific deviation from RFC 7519 §4.1.4, which
 /// requires "MUST NOT be processed on or after exp". FCP's verifier
-/// allows up to CAPABILITY_TOKEN_CLOCK_SKEW_SECS of grace past exp.
+/// allows up to `CAPABILITY_TOKEN_CLOCK_SKEW_SECS` of grace past exp.
 #[test]
 fn exp_at_now_verifies_within_skew() {
     let signing_key = Ed25519SigningKey::generate();

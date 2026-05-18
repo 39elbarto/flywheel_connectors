@@ -14,7 +14,7 @@
 //! Plus the builder methods MUST be deterministic, optional fields
 //! (`stream_key`, `ordering`) MUST be omitted when `None` for
 //! forward compat with v1.0 readers, and `OrderingPolicy` serde
-//! uses snake_case wire form (`gateway` / `per_key` / `unordered`).
+//! uses `snake_case` wire form (`gateway` / `per_key` / `unordered`).
 
 use fcp_cbor::SchemaId;
 use fcp_prelude::{

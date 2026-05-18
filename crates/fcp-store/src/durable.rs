@@ -2560,7 +2560,7 @@ mod tests {
     /// corrupt (size-mismatched) symbol. If the in-flight WAL op is
     /// `DeleteSymbol{esi}` for that exact corrupt symbol, the WAL entry is
     /// already on disk; `apply_delete_symbol` MUST converge on the
-    /// requested post-condition (esi absent) instead of returning NotFound,
+    /// requested post-condition (esi absent) instead of returning `NotFound`,
     /// otherwise the WAL replay path also fails on every restart.
     #[test]
     fn apply_delete_symbol_tolerates_already_scrubbed_target() {

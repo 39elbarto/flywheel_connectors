@@ -60,7 +60,7 @@ fn single_node_eligible_set_returns_that_node() {
 
     let coord = select_coordinator(&zone, &subject, &only);
     assert_eq!(
-        coord.as_ref().map(|n| n.as_str()),
+        coord.as_ref().map(fcp_prelude::TailscaleNodeId::as_str),
         Some("node-only"),
         "single-node eligible set MUST select that node"
     );

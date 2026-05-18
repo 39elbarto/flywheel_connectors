@@ -447,6 +447,11 @@ artifact cannot pass by carrying only a summary and materialized hashes. The
 Cargo test command lanes must also carry a positive parsed `passed_tests` count
 before the gauntlet can pass, so a truncated or non-test log cannot satisfy the
 reviewer evidence contract.
+Benchmark coverage is also checked from the command records, not just the final
+summary: the Criterion command record must report observed `trap_gen`,
+`delegate`, `sample_pre`, `verify`, and `full_crypto_route` groups from its log,
+and the host dispatcher e2e command record must report the
+`host_dispatcher_pipeline` coverage source before the self-contract can pass.
 The redaction scan treats raw zone, operation, and principal labels plus
 authorization headers, bearer strings, access or refresh tokens, exact or child
 `/tmp` and `/private/tmp` paths, `/private/var/`, `/var/folders/`, `/Volumes/`,

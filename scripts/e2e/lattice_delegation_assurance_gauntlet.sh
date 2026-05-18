@@ -180,6 +180,46 @@ extract_passed_tests() {
   sed -n 's/.*test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' "${log}" | tail -n 1
 }
 
+benchmark_groups_observed_for_log() {
+  local log="$1"
+  local -a groups=()
+  if grep -Fq "lattice_trapdoor_master_setup" "${log}"; then
+    groups+=("trap_gen")
+  fi
+  if grep -Fq "lattice_delegate_one_hop" "${log}"; then
+    groups+=("delegate")
+  fi
+  if grep -Fq "lattice_sample_pre_real_route" "${log}"; then
+    groups+=("sample_pre")
+  fi
+  if grep -Fq "lattice_verify_real_route" "${log}"; then
+    groups+=("verify")
+  fi
+  if grep -Fq "lattice_full_crypto_route" "${log}"; then
+    groups+=("full_crypto_route")
+  fi
+  printf '%s\n' "${groups[@]}" | sort -u | jq -R -s 'split("\n") | map(select(length > 0))'
+}
+
+benchmark_group_details_for_step() {
+  local step="$1"
+  local log="$2"
+  case "${step}" in
+    "criterion_lattice_crypto_bench")
+      jq -cn \
+        --argjson groups "$(benchmark_groups_observed_for_log "${log}")" \
+        '{benchmark_group_source:"criterion_log",benchmark_groups_observed:$groups}'
+      ;;
+    "host_lattice_dispatcher_e2e")
+      jq -cn \
+        '{benchmark_group_source:"host_dispatcher_e2e",benchmark_groups_observed:["host_dispatcher_pipeline"]}'
+      ;;
+    *)
+      printf '{}'
+      ;;
+  esac
+}
+
 rch_summary_line() {
   local log="$1"
   grep -E '\[RCH\] (remote|local|failed)' "${log}" | tail -n 1 || true
@@ -264,10 +304,11 @@ run_and_capture() {
   shift 2
   local log="${LOG_PREFIX}.${step}.log"
   local started
+  local fallback_decision worker_execution_class rch_summary rch_summary_json
   assert_stable_revision "stable_revision_before_${step}"
   started="$(date -u +%s)"
   if "$@" >"${log}" 2>&1; then
-    local ended duration hash passed_tests passed_tests_json
+    local ended duration hash passed_tests passed_tests_json benchmark_group_details
     ended="$(date -u +%s)"
     duration=$((ended - started))
     hash="$(sha256_file "${log}")"
@@ -277,6 +318,7 @@ run_and_capture() {
     worker_execution_class="$(worker_execution_class_for_log "${display_command}" "${log}")"
     rch_summary="$(rch_summary_line "${log}")"
     rch_summary_json="$(json_string_or_null "${rch_summary}")"
+    benchmark_group_details="$(benchmark_group_details_for_step "${step}" "${log}")"
     require_remote_rch_success \
       "${step}" \
       "${display_command}" \
@@ -297,7 +339,8 @@ run_and_capture() {
       --argjson duration_seconds "${duration}" \
       --argjson passed_tests "${passed_tests_json}" \
       --argjson rch_summary "${rch_summary_json}" \
-      '{command_line:$command_line,log_artifact:$log_artifact,log_hash:$log_hash,duration_seconds:$duration_seconds,passed_tests:$passed_tests,retry_count:0,fallback_decision:$fallback_decision,worker_execution_class:$worker_execution_class,rch_summary:$rch_summary,cache_decision:"cargo_target_dir_hashed",cleanup_result:"not_applicable"}')"
+      --argjson benchmark_group_details "${benchmark_group_details}" \
+      '{command_line:$command_line,log_artifact:$log_artifact,log_hash:$log_hash,duration_seconds:$duration_seconds,passed_tests:$passed_tests,retry_count:0,fallback_decision:$fallback_decision,worker_execution_class:$worker_execution_class,rch_summary:$rch_summary,cache_decision:"cargo_target_dir_hashed",cleanup_result:"not_applicable"} + $benchmark_group_details')"
   else
     local ended duration hash
     ended="$(date -u +%s)"
@@ -971,6 +1014,14 @@ validate_gauntlet_contract() {
         "full_crypto_route",
         "host_dispatcher_pipeline"
       ];
+    def required_criterion_benchmark_groups:
+      [
+        "trap_gen",
+        "delegate",
+        "sample_pre",
+        "verify",
+        "full_crypto_route"
+      ];
     def required_command_steps:
       [
         "lean_lake_build",
@@ -1051,6 +1102,16 @@ validate_gauntlet_contract() {
         any($records[]; .step == $step and .result == "pass" and
           (.details | has("command_line")) and
           (.details.passed_tests | positive_test_count)));
+    def benchmark_group_coverage_present:
+      . as $records |
+      any($records[]; .step == "criterion_lattice_crypto_bench" and .result == "pass" and
+        .details.benchmark_group_source == "criterion_log" and
+        (.details.benchmark_groups_observed | type == "array") and
+        ((.details.benchmark_groups_observed | sort) == (required_criterion_benchmark_groups | sort))) and
+      any($records[]; .step == "host_lattice_dispatcher_e2e" and .result == "pass" and
+        .details.benchmark_group_source == "host_dispatcher_e2e" and
+        (.details.benchmark_groups_observed | type == "array") and
+        (.details.benchmark_groups_observed | index("host_dispatcher_pipeline") != null));
     def top_level_provenance_consistent:
       ([.[] | .run_id] | unique | length == 1) and
       ([.[] | .git_revision] | unique | length == 1) and
@@ -1076,6 +1137,7 @@ validate_gauntlet_contract() {
     required_tool_versions and
     required_command_steps_present and
     required_test_counts_present and
+    benchmark_group_coverage_present and
     any(.[]; .step == "validate_lean_ids" and .result == "pass") and
     any(.[]; .step == "jsonl_contract_validation" and .result == "pass") and
     required_artifact_hash("crypto_representation_artifact"; "target/fcp-crypto-pq/representation-profile-evidence.jsonl") and

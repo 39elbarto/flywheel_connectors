@@ -456,14 +456,17 @@ if [[ "${overall_status}" == "passed" ]]; then
             .warm_checkout == true
             and (.fallback_reason == null)
             and (.unsafe_rejection_reason == null)
+            and .error_mapping == "ok"
           elif .admission_decision == "fallback_on_demand" then
             .warm_checkout == false
             and nonempty_string("fallback_reason")
             and (.unsafe_rejection_reason == null)
+            and .error_mapping == ("fallback_on_demand:" + .fallback_reason)
           elif .admission_decision == "reject_unsafe" then
             .warm_checkout == false
             and (.fallback_reason == null)
             and nonempty_string("unsafe_rejection_reason")
+            and .error_mapping == ("reject_unsafe:" + .unsafe_rejection_reason)
           else
             false
           end

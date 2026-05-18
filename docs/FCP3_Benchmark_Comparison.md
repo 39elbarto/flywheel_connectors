@@ -75,10 +75,14 @@ markers. The typed validator also recomputes the `CARGO_TARGET_DIR` Blake3
 hash from the recorded target directory before serialization succeeds, so
 replay rows cannot spoof target-dir provenance with an unrelated valid-looking
 digest. They also enforce the same admission-decision shape: `admit_warm`
-must carry `warm_checkout=true` with no fallback or unsafe-rejection reason,
-`fallback_on_demand` must carry `warm_checkout=false` plus a non-empty
-`fallback_reason`, and `reject_unsafe` must carry `warm_checkout=false` plus a
-non-empty `unsafe_rejection_reason`. Its default lane is deterministic smoke
+must carry `warm_checkout=true`, `error_mapping="ok"`, and no fallback or
+unsafe-rejection reason; `fallback_on_demand` must carry
+`warm_checkout=false` plus a non-empty
+`fallback_reason` with `error_mapping="fallback_on_demand:<fallback_reason>"`,
+and `reject_unsafe` must carry `warm_checkout=false` plus a non-empty
+`unsafe_rejection_reason` with
+`error_mapping="reject_unsafe:<unsafe_rejection_reason>"`. Its default lane is
+deterministic smoke
 evidence with `execution_mode=smoke` and `source_kind=offline`; final
 production-soak acceptance must run with
 `--require-production-soak` or

@@ -3217,105 +3217,149 @@ fn validate_prewarm_production_improvement(
     Ok(())
 }
 
+fn validate_prewarm_error_mapping(
+    evidence: &SwarmPrewarmColdStartEvidence,
+    expected_error_mapping: &str,
+    reason: &'static str,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if evidence.error_mapping == expected_error_mapping {
+        return Ok(());
+    }
+    Err(
+        SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+            decision: evidence.admission_decision.clone(),
+            reason,
+        },
+    )
+}
+
+fn validate_prewarm_admit_warm(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if !evidence.warm_checkout {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                decision: evidence.admission_decision.clone(),
+                reason: "admit_warm requires warm_checkout=true",
+            },
+        );
+    }
+    if evidence.fallback_reason.is_some() {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                decision: evidence.admission_decision.clone(),
+                reason: "admit_warm must not carry fallback_reason",
+            },
+        );
+    }
+    if evidence.unsafe_rejection_reason.is_some() {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                decision: evidence.admission_decision.clone(),
+                reason: "admit_warm must not carry unsafe_rejection_reason",
+            },
+        );
+    }
+    validate_prewarm_error_mapping(evidence, "ok", "admit_warm requires error_mapping=ok")?;
+    Ok(())
+}
+
+fn validate_prewarm_fallback_on_demand(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if evidence.warm_checkout {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                decision: evidence.admission_decision.clone(),
+                reason: "fallback_on_demand requires warm_checkout=false",
+            },
+        );
+    }
+    if evidence
+        .fallback_reason
+        .as_deref()
+        .is_none_or(|reason| reason.trim().is_empty())
+    {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                decision: evidence.admission_decision.clone(),
+                reason: "fallback_on_demand requires non-empty fallback_reason",
+            },
+        );
+    }
+    if evidence.unsafe_rejection_reason.is_some() {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                decision: evidence.admission_decision.clone(),
+                reason: "fallback_on_demand must not carry unsafe_rejection_reason",
+            },
+        );
+    }
+    let fallback_reason = evidence.fallback_reason.as_deref().unwrap_or_default();
+    let expected_error_mapping = format!("fallback_on_demand:{fallback_reason}");
+    validate_prewarm_error_mapping(
+        evidence,
+        &expected_error_mapping,
+        "fallback_on_demand requires error_mapping=fallback_on_demand:<fallback_reason>",
+    )
+}
+
+fn validate_prewarm_reject_unsafe(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if evidence.warm_checkout {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                decision: evidence.admission_decision.clone(),
+                reason: "reject_unsafe requires warm_checkout=false",
+            },
+        );
+    }
+    if evidence.fallback_reason.is_some() {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                decision: evidence.admission_decision.clone(),
+                reason: "reject_unsafe must not carry fallback_reason",
+            },
+        );
+    }
+    if evidence
+        .unsafe_rejection_reason
+        .as_deref()
+        .is_none_or(|reason| reason.trim().is_empty())
+    {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                decision: evidence.admission_decision.clone(),
+                reason: "reject_unsafe requires non-empty unsafe_rejection_reason",
+            },
+        );
+    }
+    let unsafe_rejection_reason = evidence
+        .unsafe_rejection_reason
+        .as_deref()
+        .unwrap_or_default();
+    let expected_error_mapping = format!("reject_unsafe:{unsafe_rejection_reason}");
+    validate_prewarm_error_mapping(
+        evidence,
+        &expected_error_mapping,
+        "reject_unsafe requires error_mapping=reject_unsafe:<unsafe_rejection_reason>",
+    )
+}
+
 fn validate_prewarm_admission_decision(
     evidence: &SwarmPrewarmColdStartEvidence,
 ) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
     match evidence.admission_decision.as_str() {
-        "admit_warm" => {
-            if !evidence.warm_checkout {
-                return Err(
-                    SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
-                        decision: evidence.admission_decision.clone(),
-                        reason: "admit_warm requires warm_checkout=true",
-                    },
-                );
-            }
-            if evidence.fallback_reason.is_some() {
-                return Err(
-                    SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
-                        decision: evidence.admission_decision.clone(),
-                        reason: "admit_warm must not carry fallback_reason",
-                    },
-                );
-            }
-            if evidence.unsafe_rejection_reason.is_some() {
-                return Err(
-                    SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
-                        decision: evidence.admission_decision.clone(),
-                        reason: "admit_warm must not carry unsafe_rejection_reason",
-                    },
-                );
-            }
-        }
-        "fallback_on_demand" => {
-            if evidence.warm_checkout {
-                return Err(
-                    SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
-                        decision: evidence.admission_decision.clone(),
-                        reason: "fallback_on_demand requires warm_checkout=false",
-                    },
-                );
-            }
-            if evidence
-                .fallback_reason
-                .as_deref()
-                .is_none_or(|reason| reason.trim().is_empty())
-            {
-                return Err(
-                    SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
-                        decision: evidence.admission_decision.clone(),
-                        reason: "fallback_on_demand requires non-empty fallback_reason",
-                    },
-                );
-            }
-            if evidence.unsafe_rejection_reason.is_some() {
-                return Err(
-                    SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
-                        decision: evidence.admission_decision.clone(),
-                        reason: "fallback_on_demand must not carry unsafe_rejection_reason",
-                    },
-                );
-            }
-        }
-        "reject_unsafe" => {
-            if evidence.warm_checkout {
-                return Err(
-                    SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
-                        decision: evidence.admission_decision.clone(),
-                        reason: "reject_unsafe requires warm_checkout=false",
-                    },
-                );
-            }
-            if evidence.fallback_reason.is_some() {
-                return Err(
-                    SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
-                        decision: evidence.admission_decision.clone(),
-                        reason: "reject_unsafe must not carry fallback_reason",
-                    },
-                );
-            }
-            if evidence
-                .unsafe_rejection_reason
-                .as_deref()
-                .is_none_or(|reason| reason.trim().is_empty())
-            {
-                return Err(
-                    SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
-                        decision: evidence.admission_decision.clone(),
-                        reason: "reject_unsafe requires non-empty unsafe_rejection_reason",
-                    },
-                );
-            }
-        }
-        decision => {
-            return Err(
-                SwarmPrewarmColdStartEvidenceError::InvalidAdmissionDecision {
-                    decision: decision.to_string(),
-                },
-            );
-        }
+        "admit_warm" => validate_prewarm_admit_warm(evidence),
+        "fallback_on_demand" => validate_prewarm_fallback_on_demand(evidence),
+        "reject_unsafe" => validate_prewarm_reject_unsafe(evidence),
+        decision => Err(
+            SwarmPrewarmColdStartEvidenceError::InvalidAdmissionDecision {
+                decision: decision.to_string(),
+            },
+        ),
     }
-    Ok(())
 }
 
 fn validate_prewarm_cleanup(
@@ -10075,6 +10119,42 @@ mod tests {
         }
     }
 
+    fn prewarm_command_line(cargo_target_dir: &str) -> Vec<String> {
+        vec![
+            "rch".to_string(),
+            "exec".to_string(),
+            "--".to_string(),
+            "env".to_string(),
+            format!("CARGO_TARGET_DIR={cargo_target_dir}"),
+            "cargo".to_string(),
+            "test".to_string(),
+            "-p".to_string(),
+            "fcp-e2e".to_string(),
+        ]
+    }
+
+    fn assert_prewarm_target_root_rejected(target_dir: &str) {
+        let mut unsafe_target_root = prewarm_cold_start_evidence_fixture();
+        unsafe_target_root.cargo_target_dir = target_dir.to_string();
+        unsafe_target_root.cargo_target_dir_class = if target_dir.starts_with('/') {
+            "tmp".to_string()
+        } else {
+            "relative".to_string()
+        };
+        unsafe_target_root.command_line = prewarm_command_line(target_dir);
+        unsafe_target_root.cargo_target_dir_hash = prewarm_cargo_target_dir_hash(target_dir);
+        assert_eq!(
+            unsafe_target_root.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "cargo_target_dir",
+                    marker: "shared target dir root"
+                }
+            ),
+            "{target_dir} should not be accepted as an evidence target root"
+        );
+    }
+
     fn prewarm_bundle_record(
         scenario_id: &str,
         pool_state: &str,
@@ -10090,6 +10170,12 @@ mod tests {
         record.warm_checkout = warm_checkout;
         record.fallback_reason = fallback_reason.map(str::to_string);
         record.unsafe_rejection_reason = unsafe_rejection_reason.map(str::to_string);
+        record.error_mapping = match (fallback_reason, unsafe_rejection_reason) {
+            (Some(reason), None) => format!("fallback_on_demand:{reason}"),
+            (None, Some(reason)) => format!("reject_unsafe:{reason}"),
+            (None, None) => "ok".to_string(),
+            (Some(fallback), Some(rejection)) => format!("ambiguous:{fallback}:{rejection}"),
+        };
         record
     }
 
@@ -10525,6 +10611,7 @@ mod tests {
         fallback.admission_decision = "fallback_on_demand".to_string();
         fallback.warm_checkout = false;
         fallback.fallback_reason = Some("pool_empty".to_string());
+        fallback.error_mapping = "fallback_on_demand:pool_empty".to_string();
         assert_eq!(fallback.validate(), Ok(()));
 
         let mut fallback_without_reason = fallback;
@@ -10544,6 +10631,8 @@ mod tests {
         unsafe_rejection.warm_checkout = false;
         unsafe_rejection.unsafe_rejection_reason =
             Some("zygote_startup_without_security_proof".to_string());
+        unsafe_rejection.error_mapping =
+            "reject_unsafe:zygote_startup_without_security_proof".to_string();
         assert_eq!(unsafe_rejection.validate(), Ok(()));
 
         let mut unsafe_rejection_with_fallback = unsafe_rejection;
@@ -10554,6 +10643,52 @@ mod tests {
                 SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
                     decision: "reject_unsafe".to_string(),
                     reason: "reject_unsafe must not carry fallback_reason"
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_enforces_error_mapping() {
+        let mut warm_with_wrong_error_mapping = prewarm_cold_start_evidence_fixture();
+        warm_with_wrong_error_mapping.error_mapping = "fallback_on_demand:pool_empty".to_string();
+        assert_eq!(
+            warm_with_wrong_error_mapping.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "admit_warm".to_string(),
+                    reason: "admit_warm requires error_mapping=ok"
+                }
+            )
+        );
+
+        let mut fallback_with_wrong_error_mapping = prewarm_cold_start_evidence_fixture();
+        fallback_with_wrong_error_mapping.admission_decision = "fallback_on_demand".to_string();
+        fallback_with_wrong_error_mapping.warm_checkout = false;
+        fallback_with_wrong_error_mapping.fallback_reason = Some("pool_empty".to_string());
+        fallback_with_wrong_error_mapping.error_mapping = "ok".to_string();
+        assert_eq!(
+            fallback_with_wrong_error_mapping.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "fallback_on_demand".to_string(),
+                    reason: "fallback_on_demand requires error_mapping=fallback_on_demand:<fallback_reason>"
+                }
+            )
+        );
+
+        let mut unsafe_rejection_with_wrong_error_mapping = prewarm_cold_start_evidence_fixture();
+        unsafe_rejection_with_wrong_error_mapping.admission_decision = "reject_unsafe".to_string();
+        unsafe_rejection_with_wrong_error_mapping.warm_checkout = false;
+        unsafe_rejection_with_wrong_error_mapping.unsafe_rejection_reason =
+            Some("zygote_startup_without_security_proof".to_string());
+        unsafe_rejection_with_wrong_error_mapping.error_mapping = "ok".to_string();
+        assert_eq!(
+            unsafe_rejection_with_wrong_error_mapping.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InconsistentAdmissionDecision {
+                    decision: "reject_unsafe".to_string(),
+                    reason: "reject_unsafe requires error_mapping=reject_unsafe:<unsafe_rejection_reason>"
                 }
             )
         );
@@ -10667,6 +10802,7 @@ mod tests {
         fallback_soak.admission_decision = "fallback_on_demand".to_string();
         fallback_soak.warm_checkout = false;
         fallback_soak.fallback_reason = Some("sandbox_limits_unavailable".to_string());
+        fallback_soak.error_mapping = "fallback_on_demand:sandbox_limits_unavailable".to_string();
         assert_eq!(fallback_soak.validate(), Ok(()));
     }
 
@@ -10764,25 +10900,7 @@ mod tests {
         );
 
         for target_dir in ["/tmp", "/private/tmp", "target", "./target"] {
-            let mut unsafe_target_root = prewarm_cold_start_evidence_fixture();
-            unsafe_target_root.cargo_target_dir = target_dir.to_string();
-            unsafe_target_root.cargo_target_dir_class = if target_dir.starts_with('/') {
-                "tmp".to_string()
-            } else {
-                "relative".to_string()
-            };
-            unsafe_target_root.command_line = prewarm_command_line(target_dir);
-            unsafe_target_root.cargo_target_dir_hash = prewarm_cargo_target_dir_hash(target_dir);
-            assert_eq!(
-                unsafe_target_root.validate(),
-                Err(
-                    SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
-                        field: "cargo_target_dir",
-                        marker: "shared target dir root"
-                    }
-                ),
-                "{target_dir} should not be accepted as an evidence target root"
-            );
+            assert_prewarm_target_root_rejected(target_dir);
         }
 
         let mut private_target_dir = prewarm_cold_start_evidence_fixture();

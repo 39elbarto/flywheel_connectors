@@ -1630,6 +1630,10 @@ struct WatchArgs {
 struct StatusArgs {
     /// Optional connector id. Omit for fleet status.
     connector: Option<String>,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -13478,19 +13482,35 @@ fn symptoms_from_connector_health(health: &ConnectorHealth, enabled: bool) -> do
 
 fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
     let Some(host) = resolve_host_config(explicit_host)? else {
-        return Ok(missing_host_dispatch(
+        if let Some(outcome) =
+            enforce_required_truth_source("status", args.require_source, KnowledgeState::Offline)
+        {
+            return Ok(outcome);
+        }
+
+        let mut outcome = missing_host_dispatch(
             "status",
             json!({
                 "scope": if args.connector.is_some() { "connector" } else { "fleet" },
                 "connector": args.connector.as_deref(),
+                "require_source": args.require_source.map(RequiredTruthSource::label),
             }),
             vec![
                 "fwc status --host <endpoint>".to_owned(),
                 "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context."
                     .to_owned(),
             ],
-        ));
+        );
+        inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+        return Ok(outcome);
     };
+
+    if let Some(outcome) =
+        enforce_required_truth_source("status", args.require_source, KnowledgeState::HostBacked)
+    {
+        return Ok(outcome);
+    }
+
     let client = HostAdminClient::new(&host.endpoint)?;
     let (catalog, discovery) = client.catalog(None)?;
     let health = client.health()?;
@@ -13498,7 +13518,11 @@ fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<Dis
     if let Some(selector) = args.connector.as_deref() {
         let connector = match catalog.resolve_connector(selector) {
             Ok(connector) => connector,
-            Err(error) => return Ok(connector_resolution_dispatch("status", selector, &error)),
+            Err(error) => {
+                let mut outcome = connector_resolution_dispatch("status", selector, &error);
+                inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+                return Ok(outcome);
+            }
         };
         let admin = client.connector_status(connector.summary.id.as_str())?;
         let pin = client.pin_status(connector.summary.id.as_str())?;
@@ -13515,6 +13539,7 @@ fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<Dis
             discovery.registry_version,
         ))?;
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
@@ -13573,6 +13598,7 @@ fn status_dispatch(args: &StatusArgs, explicit_host: Option<&str>) -> Result<Dis
         })],
     );
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -42941,6 +42967,8 @@ depends_on = ["missing"]
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["status"], "error");
         assert_eq!(payload["command"], "status");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
         assert!(payload["error"]["recoverable"].as_bool().unwrap_or(false));
         assert_eq!(payload["details"]["scope"], "fleet");
@@ -42954,9 +42982,46 @@ depends_on = ["missing"]
         assert_eq!(exit_code, CliExitCode::Transport.into());
         assert_eq!(payload["status"], "error");
         assert_eq!(payload["command"], "status");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
         assert_eq!(payload["details"]["scope"], "connector");
         assert_eq!(payload["details"]["connector"], "github");
+    }
+
+    #[test]
+    fn status_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) =
+            execute_json(&["fwc", "--json", "status", "--require-source", "any-live"]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "status");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn status_host_require_mesh_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            "http://127.0.0.1:1",
+            "status",
+            "--require-source",
+            "mesh",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "status");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "host");
     }
 
     #[test]
@@ -42988,6 +43053,8 @@ depends_on = ["missing"]
         assert_eq!(payload["command"], "status");
         assert_eq!(payload["scope"], "fleet");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_live_host_admin_contract(&payload, "fleet-status", false, "fleet-status");
         assert!(
             payload["connectors"]
@@ -43071,6 +43138,8 @@ depends_on = ["missing"]
         assert_eq!(payload["command"], "status");
         assert_eq!(payload["scope"], "connector");
         assert_eq!(payload["source"], "host-admin-api");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_live_host_admin_contract(&payload, "connector-status", false, "connector-status");
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["connector"]["canonical_id"], cid);
@@ -43114,6 +43183,8 @@ depends_on = ["missing"]
         server.join().expect("mock host thread should complete");
         assert_eq!(exit_code, CliExitCode::Validation.into());
         assert_eq!(payload["status"], "error");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
         assert_eq!(payload["error"]["type"], "connector-not-found");
     }
 

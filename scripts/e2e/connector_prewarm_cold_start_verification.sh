@@ -436,6 +436,11 @@ if [[ "${overall_status}" == "passed" ]]; then
           nonempty_string("git_revision")
           and ((.git_revision | ascii_downcase) != "unknown")
         ),
+        target_dir_class_ok: all(.[];
+          .cargo_target_dir_class == "tmp"
+          or .cargo_target_dir_class == "absolute"
+          or .cargo_target_dir_class == "relative"
+        ),
         resource_fields_ok: all(.[];
           positive_number("pool_size")
           and positive_number("activation_latency_ms")
@@ -564,6 +569,7 @@ if [[ "${overall_status}" == "passed" ]]; then
             and $v.target_dir_provenance_ok
             and $v.required_fields_ok
             and $v.git_revision_provenance_ok
+            and $v.target_dir_class_ok
             and $v.resource_fields_ok
             and $v.decision_shape_ok
             and $v.cleanup_shape_ok

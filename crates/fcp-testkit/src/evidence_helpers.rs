@@ -2811,6 +2811,8 @@ const SWARM_PREWARM_COLD_START_PROMOTION_IMPROVEMENT_SCENARIOS: [&str; 3] = [
     "prewarm_concurrent_swarm_startup",
 ];
 
+const SWARM_PREWARM_CARGO_TARGET_DIR_CLASSES: [&str; 3] = ["tmp", "absolute", "relative"];
+
 const SWARM_PREWARM_REDACTION_MARKERS: [(&str, &str); 7] = [
     ("sk-live-", "sk-live-"),
     ("Bearer ", "Bearer token"),
@@ -2937,6 +2939,13 @@ fn validate_prewarm_redaction(
     if evidence.cargo_target_dir_class == "private_absolute" {
         return Err(
             SwarmPrewarmColdStartEvidenceError::PrivateCargoTargetDirClass {
+                cargo_target_dir_class: evidence.cargo_target_dir_class.clone(),
+            },
+        );
+    }
+    if !SWARM_PREWARM_CARGO_TARGET_DIR_CLASSES.contains(&evidence.cargo_target_dir_class.as_str()) {
+        return Err(
+            SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirClass {
                 cargo_target_dir_class: evidence.cargo_target_dir_class.clone(),
             },
         );
@@ -3792,6 +3801,11 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         /// Observed target directory class.
         cargo_target_dir_class: String,
     },
+    /// Cargo target directory class was not one of the stable evidence labels.
+    InvalidCargoTargetDirClass {
+        /// Observed target directory class.
+        cargo_target_dir_class: String,
+    },
     /// Evidence contained a marker that must be redacted before export.
     SensitiveRedactionMarker {
         /// Field that contained the marker.
@@ -3866,6 +3880,12 @@ fn fmt_prewarm_measurement_error(
         } => write!(
             f,
             "swarm prewarm cargo target directory class must be export-safe, got '{cargo_target_dir_class}'"
+        ),
+        SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirClass {
+            cargo_target_dir_class,
+        } => write!(
+            f,
+            "swarm prewarm cargo target directory class must be tmp, absolute, or relative, got '{cargo_target_dir_class}'"
         ),
         SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker { field, marker } => write!(
             f,
@@ -3949,6 +3969,7 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
             | Self::ShutdownCleanupUnverified { .. }
             | Self::InvalidCleanupResult { .. }
             | Self::PrivateCargoTargetDirClass { .. }
+            | Self::InvalidCargoTargetDirClass { .. }
             | Self::SensitiveRedactionMarker { .. }
             | Self::MissingResourceMeasurement { .. }
             | Self::EmptyConcurrentStartupCount => fmt_prewarm_measurement_error(self, f),
@@ -10659,6 +10680,17 @@ mod tests {
             Err(
                 SwarmPrewarmColdStartEvidenceError::PrivateCargoTargetDirClass {
                     cargo_target_dir_class: "private_absolute".to_string()
+                }
+            )
+        );
+
+        let mut unknown_target_dir_class = prewarm_cold_start_evidence_fixture();
+        unknown_target_dir_class.cargo_target_dir_class = "export_safe".to_string();
+        assert_eq!(
+            unknown_target_dir_class.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::InvalidCargoTargetDirClass {
+                    cargo_target_dir_class: "export_safe".to_string()
                 }
             )
         );

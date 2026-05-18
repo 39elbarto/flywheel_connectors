@@ -105,6 +105,8 @@ validator and shell verifier also require the replay command to carry the same
 reject unresolved `git_revision="unknown"` provenance, unredacted live-token,
 bearer, private-key, secret-seed,
 private-user-path, and `private_absolute` target-dir evidence before export;
+`cargo_target_dir_class` must be one of the stable export labels `tmp`,
+`absolute`, or `relative`, so novel labels cannot bypass the redaction gate.
 `validation.json` records `redaction_scan_ok=true` when that final scan passes
 or `redaction_scan_ok=false` with a reason when it rejects the bundle. The
 verifier's environment and summary artifacts record `remote_proof_status`, the

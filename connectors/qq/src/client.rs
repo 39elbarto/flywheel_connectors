@@ -139,25 +139,40 @@ impl QqClient {
     ///
     /// # Errors
     ///
-    /// Returns an error only for malformed message dispatch payloads or invalid runtime
-    /// configuration. Non-message dispatches, duplicates, stale sequences, and policy denials
-    /// are represented as dropped projections.
+    /// Returns an error when the client runtime has shut down, or when a dispatch payload is
+    /// malformed. Non-message dispatches, duplicates, stale sequences, and policy denials are
+    /// represented as dropped projections.
     pub async fn project_gateway_event(
         &self,
         event: QqGatewayEvent,
     ) -> QqResult<QqGatewayEventProjection> {
-        self.gateway_runtime.lock().await.project_event(event)
+        let mut gateway_runtime = self.gateway_runtime.lock().await;
+        self.ensure_gateway_runtime_active()?;
+        gateway_runtime.project_event(event)
     }
 
-    pub async fn drain_gateway_events(&self, limit: usize) -> QqGatewayDrainResult {
-        self.gateway_runtime
-            .lock()
-            .await
-            .drain_accepted_events(limit)
+    /// Drain accepted gateway events for host fan-out.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the client runtime has shut down.
+    pub async fn drain_gateway_events(&self, limit: usize) -> QqResult<QqGatewayDrainResult> {
+        let mut gateway_runtime = self.gateway_runtime.lock().await;
+        self.ensure_gateway_runtime_active()?;
+        Ok(gateway_runtime.drain_accepted_events(limit))
     }
 
     pub fn shutdown(&self) {
         self.runtime.shutdown();
+    }
+
+    fn ensure_gateway_runtime_active(&self) -> QqResult<()> {
+        if self.runtime.is_shutting_down() {
+            return Err(QqError::Async(
+                "QQ gateway runtime is shut down; refusing event fan-out".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn api_url(&self, path: &str) -> QqResult<Url> {
@@ -2131,6 +2146,64 @@ mod tests {
             .api_request(reqwest::Method::GET, "/gateway", None)
             .await
             .unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn gateway_projection_and_drain_fail_after_client_shutdown() {
+        let mut config = localhost_config();
+        config.gateway.enabled = true;
+        config.gateway.policy.bot_user_id = Some("bot-openid".into());
+        let client = QqClient::new(config).unwrap();
+
+        let accepted = client
+            .project_gateway_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-before-shutdown",
+                    "content": "bot-openid keep this bounded",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1"
+                })),
+                id: Some("evt-before-shutdown".into()),
+            })
+            .await
+            .unwrap();
+        assert!(accepted.accepted);
+
+        let drained = client.drain_gateway_events(usize::MAX).await.unwrap();
+        assert_eq!(drained.drained_count, 1);
+        assert_eq!(drained.remaining_count, 0);
+
+        client.shutdown();
+        assert!(client.runtime().is_shutting_down());
+
+        let projection_error = client
+            .project_gateway_event(QqGatewayEvent {
+                op: 0,
+                s: Some(2),
+                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-after-shutdown",
+                    "content": "bot-openid must not fan out",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1"
+                })),
+                id: Some("evt-after-shutdown".into()),
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(projection_error, QqError::Async(ref message) if message.contains("shut down")),
+            "unexpected projection error: {projection_error:?}"
+        );
+
+        let drain_error = client.drain_gateway_events(usize::MAX).await.unwrap_err();
+        assert!(
+            matches!(drain_error, QqError::Async(ref message) if message.contains("shut down")),
+            "unexpected drain error: {drain_error:?}"
+        );
     }
 
     // ─── Event normalization tests ──────────────────────────────

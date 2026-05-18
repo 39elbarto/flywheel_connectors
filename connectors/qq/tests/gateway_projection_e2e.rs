@@ -835,7 +835,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "qq-gateway-queue-full",
         json!({
             "op": 0,
-            "s": 2,
+            "s": 3,
             "t": "GROUP_MESSAGE_CREATE",
             "id": "evt-queue-full",
             "d": {

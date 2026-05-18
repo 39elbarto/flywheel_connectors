@@ -910,7 +910,10 @@ impl QqConnector {
             }
             OP_GATEWAY_DRAIN_EVENTS => {
                 let limit = parse_gateway_drain_limit(&req.input)?;
-                let drained = client.drain_gateway_events(limit).await;
+                let drained = client
+                    .drain_gateway_events(limit)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
                 serialize_output(&drained, "drained gateway events")?
             }
             _ => {

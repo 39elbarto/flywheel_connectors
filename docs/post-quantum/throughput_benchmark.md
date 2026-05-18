@@ -463,6 +463,11 @@ artifact cannot pass by carrying only a summary and materialized hashes. The
 Cargo test command lanes must also carry a positive parsed `passed_tests` count
 before the gauntlet can pass, so a truncated or non-test log cannot satisfy the
 reviewer evidence contract.
+The critical proof steps must appear exactly once in the top-level JSONL:
+`tool_versions`, `validate_lean_ids`, every named command lane, every
+materialized artifact hash lane, `jsonl_contract_validation`, `redaction_scan`,
+`summary`, and `final_redaction_scan`. Duplicate critical records fail the
+self-contract instead of being treated as harmless extra evidence.
 Benchmark coverage is also checked from the command records, not just the final
 summary: the Criterion command record must report observed `trap_gen`,
 `delegate`, `sample_pre`, `verify`, and `full_crypto_route` groups from its log,

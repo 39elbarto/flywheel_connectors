@@ -1066,6 +1066,33 @@ validate_gauntlet_contract() {
         "policy_lattice_delegation_tests",
         "host_lattice_dispatcher_e2e"
       ];
+    def required_artifact_hash_steps:
+      [
+        "crypto_representation_artifact",
+        "crypto_route_artifact",
+        "crypto_public_matrix_artifact",
+        "crypto_sample_pre_artifact",
+        "crypto_formal_artifact",
+        "policy_formal_artifact",
+        "host_dispatcher_artifact"
+      ];
+    def required_singleton_steps:
+      [
+        "tool_versions",
+        "validate_lean_ids"
+      ] +
+      required_command_steps +
+      required_artifact_hash_steps +
+      [
+        "jsonl_contract_validation",
+        "redaction_scan",
+        "summary",
+        "final_redaction_scan"
+      ];
+    def critical_steps_singleton:
+      . as $records |
+      all(required_singleton_steps[]; . as $step |
+        ([ $records[] | select(.step == $step) ] | length) == 1);
     def populated_tool_version:
       type == "string" and length > 0 and . != "unavailable";
     def positive_test_count:
@@ -1158,6 +1185,7 @@ validate_gauntlet_contract() {
       ([.[] | .worker_host_class] | unique | length == 1);
     length > 0 and
     top_level_provenance_consistent and
+    critical_steps_singleton and
     all(.[]; type == "object" and
       .schema == "fcp.lattice_delegation.assurance_gauntlet.v1" and
       .script == "scripts/e2e/lattice_delegation_assurance_gauntlet.sh" and

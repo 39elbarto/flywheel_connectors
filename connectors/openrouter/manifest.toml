@@ -5,14 +5,14 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:openrouter-video-slice"
+interface_hash = "blake3-256:fcp.interface.v2:287fe61e8aab9852da94541e1caee0f07fe2d221ad4221f85d36c9b41b1f650c"
 
 [connector]
 id = "fcp.openrouter"
 name = "OpenRouter"
 version = "0.1.0"
 description = "OpenRouter request-response connector for non-streaming chat completions, model discovery, and bounded video generation"
-archetypes = ["request-response"]
+archetypes = ["operational"]
 format = "native"
 
 [connector.state]
@@ -28,7 +28,7 @@ forbidden = ["z:public"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = []
+optional = ["openrouter.chat", "openrouter.models", "openrouter.video"]
 forbidden = ["system.exec", "network.listen"]
 
 [sandbox]

@@ -1160,7 +1160,7 @@ fn operations_info() -> Vec<Value> {
                 "when_to_use": "Use for a bounded OpenRouter image-to-video or text-to-video job when the caller can accept a base64-encoded returned asset.",
                 "common_mistakes": [
                     "Do not pass video references; OpenRouter video-to-video is not exposed.",
-                    "Cross-origin polling and unsigned download URLs are fetched without bearer credentials."
+                    "Cross-origin polling and unsigned download URLs are fetched without provider credentials."
                 ],
                 "examples": [
                     "{\"prompt\":\"A chrome sphere glides across a quiet moonlit beach\",\"model\":\"google/veo-3.1-fast\",\"duration_seconds\":6,\"aspect_ratio\":\"16:9\",\"resolution\":\"720P\",\"poll_interval_ms\":0,\"max_poll_attempts\":3}"

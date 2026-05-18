@@ -2118,6 +2118,110 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(final_drain["runtime"]["known_reply_references"], 1);
     log_drain_step(&mut logs, "gateway_drain_final_batch", "ok", &final_drain);
 
+    let pending_shutdown_instance_id = InstanceId::new();
+    let mut pending_shutdown_connector = QqConnector::new();
+    pending_shutdown_connector
+        .configure(json!({
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999",
+            "app_id": "qq-app",
+            "client_secret": "test-secret",
+            "gateway": {
+                "enabled": true,
+                "max_queue_depth": 2,
+                "policy": {
+                    "group_policy": "open",
+                    "group_require_mention": false
+                }
+            }
+        }))
+        .await
+        .expect("configure pending-shutdown QQ connector");
+    pending_shutdown_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            pending_shutdown_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake pending-shutdown QQ connector");
+    let pending_before_shutdown = invoke_projection(
+        &pending_shutdown_connector,
+        &signing_key,
+        &pending_shutdown_instance_id,
+        "qq-gateway-pending-before-shutdown",
+        json!({
+            "op": 0,
+            "s": 1,
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": "evt-pending-before-shutdown",
+            "d": {
+                "id": "msg-pending-before-shutdown",
+                "content": "pending event must not orphan fan-out",
+                "group_openid": "group-pending-shutdown",
+                "group_member_openid": "member-pending-shutdown"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(pending_before_shutdown["accepted"], true);
+    assert_eq!(pending_before_shutdown["runtime"]["queue_depth"], 1);
+    assert_eq!(pending_before_shutdown["runtime"]["accepted_events"], 1);
+    pending_shutdown_connector
+        .shutdown(ShutdownRequest {
+            r#type: "shutdown".into(),
+            deadline_ms: 1_000,
+            drain: false,
+            reason: Some("qq-gateway-pending-drop-proof".into()),
+        })
+        .await
+        .expect("shutdown pending-queue QQ connector");
+    let pending_shutdown_health = pending_shutdown_connector.health().await;
+    let pending_shutdown_status = format!("{:?}", pending_shutdown_health.status);
+    let pending_shutdown_projection = try_invoke_projection(
+        &pending_shutdown_connector,
+        &signing_key,
+        &pending_shutdown_instance_id,
+        "qq-gateway-pending-after-shutdown-projection",
+        json!({
+            "op": 0,
+            "s": 2,
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": "evt-pending-after-shutdown",
+            "d": {
+                "id": "msg-pending-after-shutdown",
+                "content": "after shutdown must not fan out",
+                "group_openid": "group-pending-shutdown",
+                "group_member_openid": "member-pending-shutdown"
+            }
+        }),
+    )
+    .await;
+    let pending_shutdown_drain = try_invoke_drain(
+        &pending_shutdown_connector,
+        &signing_key,
+        &pending_shutdown_instance_id,
+        "qq-gateway-pending-after-shutdown-drain",
+        json!({}),
+    )
+    .await;
+    assert_eq!(pending_shutdown_status, "Starting");
+    assert!(pending_shutdown_health.details.is_none());
+    assert!(pending_shutdown_projection.is_err());
+    assert!(pending_shutdown_drain.is_err());
+    log_step(
+        &mut logs,
+        "shutdown_pending_queue_drop",
+        "ok",
+        &json!({
+            "accepted_before_shutdown": true,
+            "queued_before_shutdown": 1,
+            "health_status": pending_shutdown_status,
+            "gateway_runtime_present": pending_shutdown_health.details.is_some(),
+            "project_after_shutdown_denied": pending_shutdown_projection.is_err(),
+            "drain_after_shutdown_denied": pending_shutdown_drain.is_err(),
+        }),
+    );
+
     connector
         .shutdown(ShutdownRequest {
             r#type: "shutdown".into(),
@@ -2384,4 +2488,5 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert!(log_contents.contains("reconnect_backoff_capped"));
     assert!(log_contents.contains("reconnect_attempts_exhausted"));
     assert!(log_contents.contains("terminal_reconnect_failures"));
+    assert!(log_contents.contains("shutdown_pending_queue_drop"));
 }

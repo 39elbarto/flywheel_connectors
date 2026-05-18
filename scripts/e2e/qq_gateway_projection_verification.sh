@@ -369,6 +369,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           "post_hello_reconnect_resume",
           "gateway_drain_first_batch",
           "gateway_drain_final_batch",
+          "shutdown_pending_queue_drop",
           "shutdown"
         ];
       def steps: map(.step);
@@ -595,11 +596,21 @@ if [[ "${overall_status}" == "passed" ]]; then
           and .details.gateway_runtime_present == false
           and .details.project_after_shutdown_denied == true
           and .details.drain_after_shutdown_denied == true
+        ),
+        pending_shutdown_shape_ok: any(.[];
+          .step == "shutdown_pending_queue_drop"
+          and .status == "ok"
+          and .details.accepted_before_shutdown == true
+          and .details.queued_before_shutdown == 1
+          and .details.health_status == "Starting"
+          and .details.gateway_runtime_present == false
+          and .details.project_after_shutdown_denied == true
+          and .details.drain_after_shutdown_denied == true
         )
       } as $v
       | $v
       | .status = (
-          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.log_start_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.c2c_shape_ok and $v.queue_shape_ok and $v.group_policy_shape_ok and $v.malformed_control_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.restore_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok)
+          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.log_start_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.c2c_shape_ok and $v.queue_shape_ok and $v.group_policy_shape_ok and $v.malformed_control_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.restore_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok and $v.pending_shutdown_shape_ok)
           then "passed"
           else "failed"
           end

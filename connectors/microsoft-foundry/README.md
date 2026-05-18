@@ -43,15 +43,11 @@ Optional:
 
 ## Proof Lane
 
-Focused implementation proof:
+Focused implementation proof is anchored on `scripts/e2e/microsoft_foundry_connector_verification.sh`. It runs Cargo proof through `rch exec`, writes a summary plus redaction-checked JSONL artifacts, and should use `CARGO_TARGET_PREFIX` on a spacious volume when the local checkout is disk constrained.
 
 ```bash
-cargo fmt --package fcp-microsoft-foundry --check
-cargo test -p fcp-microsoft-foundry --all-targets -- --nocapture
-cargo check -p fcp-microsoft-foundry --all-targets
-cargo clippy -p fcp-microsoft-foundry --all-targets --no-deps -- -D warnings
-scripts/e2e/microsoft_foundry_connector_verification.sh
+RUN_ID=manual-microsoft-foundry OUT_ROOT=/Volumes/trj-data/fcp-artifacts/microsoft-foundry/manual-microsoft-foundry CARGO_TARGET_PREFIX=/Volumes/trj-data/tmp/fcp-microsoft-foundry-manual scripts/e2e/microsoft_foundry_connector_verification.sh
 ubs connectors/microsoft-foundry scripts/e2e/microsoft_foundry_connector_verification.sh Cargo.toml
 ```
 
-Shared-session proof should run the Cargo commands through `rch` with a connector-specific `CARGO_TARGET_DIR`.
+The bundle captures manifest schema/hash validation, formatting, check, conformance, WireMock integration, optional live smoke, local non-mock loopback acceptance, clippy, and redaction checks for secrets, prompts, completions, raw hostnames, and loopback endpoints.

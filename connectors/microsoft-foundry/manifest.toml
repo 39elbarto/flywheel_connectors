@@ -5,14 +5,14 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = ["streaming"]
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:microsoft-foundry-oai-responses"
+interface_hash = "blake3-256:fcp.interface.v2:dd5f28d4d0643e6695f6e38d8b835a760350b4d64dcd07ea1cb65ddba2182193"
 
 [connector]
 id = "fcp.microsoft-foundry"
 name = "Microsoft Foundry"
 version = "0.1.0"
 description = "Microsoft Foundry / Azure OpenAI v1 connector with deployment-aware chat, streaming, Responses API, embeddings, and Entra/API-key auth policy"
-archetypes = ["request-response", "streaming"]
+archetypes = ["operational", "streaming"]
 format = "native"
 
 [connector.state]
@@ -62,7 +62,7 @@ capability = "microsoft_foundry.responses"
 risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
-idempotency = "idempotent"
+idempotency = "best_effort"
 input_schema = { type = "object", required = ["response_id"], properties = { response_id = { type = "string" } } }
 output_schema = { type = "object" }
 network_constraints = { host_allow = ["*.openai.azure.com", "*.services.ai.azure.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }

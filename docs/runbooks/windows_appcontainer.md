@@ -31,7 +31,6 @@ artifacts/e2e/windows_appcontainer/<run-id>/
   "job_object_attached": true,
   "redaction_scope": "public",
   "test_status": "passed",
-  "worker_execution_class": "remote",
   "fallback_decision": "not_needed",
   "action_result": "launched"
 }
@@ -39,10 +38,12 @@ artifacts/e2e/windows_appcontainer/<run-id>/
 
 Profile creation by itself is not enough to claim `ProfileLevel`.
 When the script runs through `rch`, passing evidence must include a remote
-summary in `rch_summary`. A missing worker fleet is recorded as
-`skip_reason:"rch_remote_prerequisite_unavailable"` with
-`test_status:"skipped"`; it is useful evidence about the proof lane but not
-AppContainer readiness.
+summary in `rch_summary` and `worker_execution_class:"remote"`. The GitHub
+Windows lane sets `RCH_BIN=direct`, so its successful live-launch record uses
+`cargo_runner:"direct"`, `worker_execution_class:"not_applicable"`, and
+`rch_summary:null`. A missing worker fleet is recorded as
+`skip_reason:"rch_remote_prerequisite_unavailable"` with `test_status:"skipped"`;
+it is useful evidence about the proof lane but not AppContainer readiness.
 
 ## Rollback
 
@@ -88,7 +89,7 @@ Do not promote Windows readiness to `ProfileLevel` after a failed launch.
 Successful launch:
 
 ```json
-{"schema_version":"1.0.0","record_type":"windows_appcontainer_process_launch_e2e","bead_id":"flywheel_connectors-r4qcg.1.1","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","profile_name_hash":"8d7c...","sid_present":true,"launch_mechanism":"startupinfoex_security_capabilities","job_object_attached":true,"test_status":"passed","worker_execution_class":"remote","fallback_decision":"not_needed","action_result":"launched","final_readiness_layer":"process_limit"}
+{"schema_version":"1.0.0","record_type":"windows_appcontainer_process_launch_e2e","bead_id":"flywheel_connectors-r4qcg.1.1","actor":"host","redaction_scope":"public","correlation_id":"windows-appcontainer-ci","timestamp":"2026-05-10T12:00:00.000Z","cargo_runner":"direct","profile_name_hash":"8d7c...","sid_present":true,"launch_mechanism":"startupinfoex_security_capabilities","job_object_attached":true,"test_status":"passed","worker_execution_class":"not_applicable","fallback_decision":"not_needed","rch_summary":null,"action_result":"launched","final_readiness_layer":"process_limit"}
 ```
 
 Skipped lane:

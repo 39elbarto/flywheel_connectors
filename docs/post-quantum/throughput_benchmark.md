@@ -436,7 +436,9 @@ Its command records carry the same execution-proof fields as the top-level
 gauntlet: non-`rch` lanes must report `fallback_decision:"not_needed"`,
 `worker_execution_class:"not_applicable"`, and `rch_summary:null`; `rch`-backed
 lanes must report `worker_execution_class:"remote"` with an observed
-`[RCH] remote` summary before the formal correspondence self-contract can pass.
+accepted `[RCH] remote` summary before the formal correspondence self-contract
+can pass. Summaries such as `[RCH] remote required; refusing local fallback`
+are classified as refused local fallback, not remote execution proof.
 For each top-level gauntlet `rch exec` lane, the JSONL records include the
 observed `[RCH]` summary, worker execution class, and fallback decision. Local
 fallback and remote-worker failure summaries are still recorded in the failure
@@ -451,9 +453,10 @@ artifact, `sha256:<64 lowercase hex>` log hash, duration, retry count, fallback 
 worker execution class, cache decision, cleanup result, and the RCH summary
 field. Non-`rch` command records must report `fallback_decision:"not_needed"`,
 `worker_execution_class:"not_applicable"`, and `rch_summary:null`. Passing
-`rch exec` records must carry an observed `[RCH] remote` summary; unobserved,
-unclassified, local-fallback, or remote-failure RCH summaries are not reusable
-evidence. The same self-contract requires every named command lane in the
+`rch exec` records must carry an observed accepted `[RCH] remote` summary;
+unobserved, unclassified, local-fallback, refused-local-fallback, or
+remote-failure RCH summaries are not reusable evidence. The same self-contract
+requires every named command lane in the
 gauntlet to be represented by a passing command-run record, including Lean, Rust
 test, Criterion, format, check, clippy, diff-check, and UBS lanes, so a partial
 artifact cannot pass by carrying only a summary and materialized hashes. The

@@ -98,6 +98,8 @@ fallback_decision_for_log() {
   summary="$(rch_summary_line "${log}")"
   if [ -z "${summary}" ]; then
     printf 'rch_summary_unobserved'
+  elif printf '%s' "${summary}" | grep -Eq 'remote required; refusing local fallback|refus(ed|ing) local fallback'; then
+    printf 'rch_local_fallback_refused'
   elif printf '%s' "${summary}" | grep -Fq 'failed'; then
     printf 'rch_remote_failed'
   elif printf '%s' "${summary}" | grep -Fq '[RCH] local'; then
@@ -115,6 +117,8 @@ worker_execution_class_for_log() {
   summary="$(rch_summary_line "${log}")"
   if [ -z "${summary}" ]; then
     printf 'unknown'
+  elif printf '%s' "${summary}" | grep -Eq 'remote required; refusing local fallback|refus(ed|ing) local fallback'; then
+    printf 'local_fallback_refused'
   elif printf '%s' "${summary}" | grep -Fq 'failed'; then
     printf 'remote_failed'
   elif printf '%s' "${summary}" | grep -Fq '[RCH] local'; then
@@ -256,7 +260,7 @@ validate_formal_script_contract() {
     def rch_remote_proof:
       .details.fallback_decision == "not_needed" and
       .details.worker_execution_class == "remote" and
-      (.details.rch_summary | type == "string" and contains("[RCH] remote"));
+      (.details.rch_summary | type == "string" and contains("[RCH] remote") and (contains("remote required") | not) and (contains("refusing local fallback") | not));
     def execution_proof_contract:
       non_rch_command_proof or rch_remote_proof;
     def command_step($step):

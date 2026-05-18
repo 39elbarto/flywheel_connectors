@@ -237,6 +237,8 @@ fallback_decision_for_log() {
       *"rch exec"*) printf 'rch_summary_unobserved' ;;
       *) printf 'not_needed' ;;
     esac
+  elif printf '%s' "${summary}" | grep -Eq 'remote required; refusing local fallback|refus(ed|ing) local fallback'; then
+    printf 'rch_local_fallback_refused'
   elif printf '%s' "${summary}" | grep -Fq 'failed'; then
     printf 'rch_remote_failed'
   elif printf '%s' "${summary}" | grep -Fq '[RCH] local'; then
@@ -258,6 +260,8 @@ worker_execution_class_for_log() {
       *"rch exec"*) printf 'unknown' ;;
       *) printf 'not_applicable' ;;
     esac
+  elif printf '%s' "${summary}" | grep -Eq 'remote required; refusing local fallback|refus(ed|ing) local fallback'; then
+    printf 'local_fallback_refused'
   elif printf '%s' "${summary}" | grep -Fq 'failed'; then
     printf 'remote_failed'
   elif printf '%s' "${summary}" | grep -Fq '[RCH] local'; then
@@ -1091,7 +1095,7 @@ validate_gauntlet_contract() {
     def rch_remote_proof:
       .details.fallback_decision == "not_needed" and
       .details.worker_execution_class == "remote" and
-      (.details.rch_summary | type == "string" and contains("[RCH] remote"));
+      (.details.rch_summary | type == "string" and contains("[RCH] remote") and (contains("remote required") | not) and (contains("refusing local fallback") | not));
     def rch_command_proof:
       (.details.command_line | contains("rch exec")) and
       rch_remote_proof;

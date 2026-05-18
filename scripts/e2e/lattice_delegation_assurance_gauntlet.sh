@@ -982,6 +982,10 @@ validate_gauntlet_contract() {
       type == "string" and test("^sha256:[0-9a-f]{64}$");
     def git_revision_hash:
       type == "string" and test("^[0-9a-f]{7,40}$");
+    def safe_label:
+      type == "string" and test("^[A-Za-z0-9._-]+$");
+    def gauntlet_build_profile:
+      . == "dev-test-bench";
     def gauntlet_target_dir_class:
       type == "string" and (
         . == "ephemeral_tmp" or
@@ -1193,14 +1197,14 @@ validate_gauntlet_contract() {
     all(.[]; type == "object" and
       .schema == "fcp.lattice_delegation.assurance_gauntlet.v1" and
       .script == "scripts/e2e/lattice_delegation_assurance_gauntlet.sh" and
-      (.run_id | type == "string") and
+      (.run_id | safe_label) and
       (.step | type == "string") and
       .result == "pass" and
       (.git_revision | git_revision_hash) and
       (.cargo_target_dir_class | gauntlet_target_dir_class) and
       (.cargo_target_dir_hash | sha256_hash) and
-      (.build_profile | type == "string") and
-      (.worker_host_class | type == "string") and
+      (.build_profile | gauntlet_build_profile) and
+      (.worker_host_class | safe_label) and
       (.details | type == "object") and
       command_record_contract) and
     required_tool_versions and

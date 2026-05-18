@@ -10,7 +10,8 @@ use std::{
 
 use fcp_prelude::{
     BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
-    EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, OperationId, SessionId,
+    EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass,
+    OperationId, OperationInfo, RiskLevel, SafetyTier, SessionId,
 };
 use fcp_sdk::prelude::*;
 use reqwest::{Client, Response, StatusCode, header};
@@ -243,6 +244,43 @@ fn target_resolve_output_schema() -> Value {
             }
         }
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn operation(
+    id: &'static str,
+    summary: &str,
+    capability: &'static str,
+    risk_level: RiskLevel,
+    safety_tier: SafetyTier,
+    idempotency: IdempotencyClass,
+    input_schema: Value,
+    output_schema: Value,
+    when_to_use: &str,
+    common_mistakes: &[&str],
+) -> OperationInfo {
+    OperationInfo {
+        id: OperationId::from_static(id),
+        summary: summary.into(),
+        description: Some(summary.into()),
+        input_schema,
+        output_schema,
+        capability: CapabilityId::from_static(capability),
+        risk_level,
+        safety_tier,
+        idempotency,
+        ai_hints: AgentHint {
+            when_to_use: when_to_use.into(),
+            common_mistakes: common_mistakes
+                .iter()
+                .map(|mistake| (*mistake).into())
+                .collect(),
+            examples: Vec::new(),
+            related: Vec::new(),
+        },
+        rate_limit: None,
+        requires_approval: Some(ApprovalMode::None),
+    }
 }
 
 #[derive(Clone)]
@@ -537,6 +575,69 @@ impl TlonConnector {
         self
     }
 
+    #[must_use]
+    pub fn operations_info() -> Vec<OperationInfo> {
+        vec![
+            operation(
+                DM_SEND_OPERATION,
+                "Send a Tlon DM",
+                DM_CAPABILITY,
+                RiskLevel::Medium,
+                SafetyTier::Safe,
+                IdempotencyClass::BestEffort,
+                dm_send_input_schema(),
+                ok_output_schema(),
+                "When you need to send a direct message to a ship on the Tlon/Urbit network.",
+                &["Omitting the ~ prefix on ship names."],
+            ),
+            operation(
+                CHANNEL_SEND_OPERATION,
+                "Send a Tlon channel message",
+                CHANNEL_CAPABILITY,
+                RiskLevel::Medium,
+                SafetyTier::Safe,
+                IdempotencyClass::BestEffort,
+                channel_send_input_schema(),
+                ok_output_schema(),
+                "When you need to send a message into a Tlon/Urbit channel.",
+                &["Using a DM target where a channel path is required."],
+            ),
+            operation(
+                TARGET_RESOLVE_OPERATION,
+                "Resolve a Tlon DM or channel target",
+                CHANNEL_CAPABILITY,
+                RiskLevel::Low,
+                SafetyTier::Safe,
+                IdempotencyClass::Strict,
+                target_resolve_input_schema(),
+                target_resolve_output_schema(),
+                "When you need to normalize or validate a Tlon target before sending.",
+                &[],
+            ),
+        ]
+    }
+
+    fn operations_introspection_value() -> FcpResult<Value> {
+        let mut operations =
+            serde_json::to_value(Self::operations_info()).map_err(|error| FcpError::Internal {
+                message: format!("Failed to serialize Tlon operation catalog: {error}"),
+            })?;
+        let Some(operation_values) = operations.as_array_mut() else {
+            return Err(FcpError::Internal {
+                message: "Tlon operation catalog did not serialize as an array".into(),
+            });
+        };
+        for operation in operation_values {
+            let Some(operation) = operation.as_object_mut() else {
+                return Err(FcpError::Internal {
+                    message: "Tlon operation catalog entry did not serialize as an object".into(),
+                });
+            };
+            operation.insert("implemented".into(), Value::Bool(true));
+        }
+        Ok(operations)
+    }
+
     pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
         let chat_coordination_config = parse_tlon_chat_coordination_config(
             params.get("chat_coordination"),
@@ -696,62 +797,11 @@ impl TlonConnector {
     }
 
     pub async fn handle_introspect(&self) -> FcpResult<Value> {
+        let operations = Self::operations_introspection_value()?;
         Ok(json!({
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
-            "operations": [
-                {
-                    "id": DM_SEND_OPERATION,
-                    "summary": "Send a Tlon DM",
-                    "capability": DM_CAPABILITY,
-                    "risk_level": "medium",
-                    "safety_tier": "safe",
-                    "idempotency": "best_effort",
-                    "implemented": true,
-                    "input_schema": dm_send_input_schema(),
-                    "output_schema": ok_output_schema(),
-                    "ai_hints": {
-                        "when_to_use": "When you need to send a direct message to a ship on the Tlon/Urbit network.",
-                        "common_mistakes": ["Omitting the ~ prefix on ship names."],
-                        "examples": [],
-                        "related": []
-                    }
-                },
-                {
-                    "id": CHANNEL_SEND_OPERATION,
-                    "summary": "Send a Tlon channel message",
-                    "capability": CHANNEL_CAPABILITY,
-                    "risk_level": "medium",
-                    "safety_tier": "safe",
-                    "idempotency": "best_effort",
-                    "implemented": true,
-                    "input_schema": channel_send_input_schema(),
-                    "output_schema": ok_output_schema(),
-                    "ai_hints": {
-                        "when_to_use": "When you need to send a message into a Tlon/Urbit channel.",
-                        "common_mistakes": ["Using a DM target where a channel path is required."],
-                        "examples": [],
-                        "related": []
-                    }
-                },
-                {
-                    "id": TARGET_RESOLVE_OPERATION,
-                    "summary": "Resolve a Tlon DM or channel target",
-                    "capability": CHANNEL_CAPABILITY,
-                    "risk_level": "low",
-                    "safety_tier": "safe",
-                    "idempotency": "strict",
-                    "implemented": true,
-                    "input_schema": target_resolve_input_schema(),
-                    "output_schema": target_resolve_output_schema(),
-                    "ai_hints": {
-                        "when_to_use": "When you need to normalize or validate a Tlon target before sending.",
-                        "common_mistakes": [],
-                        "examples": [],
-                        "related": []
-                    }
-                }
-            ],
+            "operations": operations,
             "surface_status": "implemented",
             "surface_status_rationale": BOUNDARY,
             "events": [],
@@ -1371,6 +1421,48 @@ mod tests {
             .expect("self_check should succeed");
         assert_eq!(self_check["status"], "ok");
         assert_eq!(self_check["reason_code"], READY_REASON_CODE);
+    }
+
+    #[test]
+    fn operations_info_exposes_tlon_runtime_catalog() {
+        let operations = TlonConnector::operations_info();
+        let ids: Vec<&str> = operations
+            .iter()
+            .map(|operation| operation.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                DM_SEND_OPERATION,
+                CHANNEL_SEND_OPERATION,
+                TARGET_RESOLVE_OPERATION
+            ]
+        );
+
+        let dm_send = operations
+            .iter()
+            .find(|operation| operation.id.as_str() == DM_SEND_OPERATION);
+        assert!(dm_send.is_some());
+        let Some(dm_send) = dm_send else {
+            return;
+        };
+        assert_eq!(dm_send.capability.as_str(), DM_CAPABILITY);
+        assert_eq!(dm_send.risk_level, RiskLevel::Medium);
+        assert_eq!(dm_send.safety_tier, SafetyTier::Safe);
+        assert_eq!(dm_send.idempotency, IdempotencyClass::BestEffort);
+        assert_eq!(dm_send.input_schema["required"], json!(["ship", "message"]));
+
+        let resolve = operations
+            .iter()
+            .find(|operation| operation.id.as_str() == TARGET_RESOLVE_OPERATION);
+        assert!(resolve.is_some());
+        let Some(resolve) = resolve else {
+            return;
+        };
+        assert_eq!(resolve.capability.as_str(), CHANNEL_CAPABILITY);
+        assert_eq!(resolve.risk_level, RiskLevel::Low);
+        assert_eq!(resolve.idempotency, IdempotencyClass::Strict);
+        assert_eq!(resolve.input_schema["required"], json!(["target"]));
     }
 
     #[fcp_async_core::runtime::test]

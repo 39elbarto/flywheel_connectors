@@ -5485,6 +5485,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-migrate"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "fcp-mistral"
 version = "0.1.0"
 dependencies = [

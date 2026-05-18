@@ -23,6 +23,7 @@ members = [
     "crates/fcp-host",
     "crates/fcp-kernel",
     "crates/fcp-manifest",
+    "crates/fcp-migrate",
     "crates/fcp-mesh",
     "crates/fcp-openai-compat",
     "crates/fcp-policy",
@@ -236,6 +237,7 @@ default-members = [
     "crates/fcp-graphql",
     "crates/fcp-host",
     "crates/fcp-manifest",
+    "crates/fcp-migrate",
     "crates/fcp-mesh",
     "crates/fcp-protocol",
     "crates/fcp-raptorq",
@@ -370,6 +372,7 @@ fcp-voyage = { path = "connectors/voyage" }
 fcp-xai = { path = "connectors/xai" }
 fcp-kernel = { path = "crates/fcp-kernel" }
 fcp-manifest = { path = "crates/fcp-manifest" }
+fcp-migrate = { path = "crates/fcp-migrate" }
 fcp-mesh = { path = "crates/fcp-mesh" }
 fcp-openai-compat = { path = "crates/fcp-openai-compat" }
 fcp-oauth = { path = "crates/fcp-oauth" }

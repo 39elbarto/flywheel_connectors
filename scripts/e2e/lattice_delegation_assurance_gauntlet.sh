@@ -12,11 +12,15 @@ RCH_BIN="${RCH_BIN:-rch}"
 RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
 
 run_id_redaction_pattern() {
-  printf '%s' '(bearer|access_token|refresh_token|id_token|client_secret|api_key|secret_seed|private_key|secret_key|password|cookie|credential|provider_body|provider_response_body|provider_payload_body|reviewer_email|reviewer_phone|trapdoor_coefficients|preimage_coefficients|preimage_bytes|expanded_secret_matrix)'
+  printf '%s' '(bearer|access_token|refresh_token|id_token|client_secret|api_key|secret_seed|private_key|secret_key|password|cookie|credential|provider_body|provider_response_body|provider_payload_body|reviewer_contact|reviewer_email|reviewer_phone|trapdoor_material|trapdoor_coefficients|preimage_coefficients|preimage_bytes|expanded_secret_matrix|raw_operation|raw_principal|raw_zone|send_message|agent-alpha|agent-beta)'
 }
 
 run_id_sha256() {
   printf '%s' "${RUN_ID}" | shasum -a 256 | awk '{print $1}'
+}
+
+artifact_path_sha256() {
+  printf '%s' "${ARTIFACT}" | shasum -a 256 | awk '{print $1}'
 }
 
 validate_run_id() {
@@ -52,6 +56,11 @@ validate_artifact_path() {
       exit 64
       ;;
   esac
+
+  if printf '%s' "${ARTIFACT}" | grep -aEi "$(run_id_redaction_pattern)" >/dev/null; then
+    printf 'invalid ARTIFACT: contains redaction-sensitive marker; artifact_path_hash=sha256:%s\n' "$(artifact_path_sha256)" >&2
+    exit 64
+  fi
 }
 
 validate_out_dir() {

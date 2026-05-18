@@ -408,8 +408,7 @@ Trapdoor relation, trapdoor norm-quality, and secret-storage bucket fields are
 likewise limited to their serialized Rust enum labels; route, public-matrix,
 and SamplePre records must also use the stable result, cleanup, reconstruction,
 norm-bucket, and verifier outcome labels emitted by the evidence fixtures.
-The
-representation profile contract requires exactly one `SMALL_TEST` record and
+The representation profile contract requires exactly one `SMALL_TEST` record and
 one `V4_REFERENCE` record. The host dispatcher contract applies the same strict
 shape to every consumed `*_hash` field, including the optional receipt hash when
 present, and requires exactly one record for each of the 14 dispatcher scenarios
@@ -417,6 +416,15 @@ emitted by `lattice_policy_dispatcher_e2e`: both allow profiles, forged
 preimage denials, zone/period/operation/principal mismatch denials, malformed
 preimage denial, missing-certificate denial, incomplete/too-deep chain denials,
 and SMALL_TEST plus V4 trust-set replay denials.
+Host dispatcher records also use stable evidence labels: request binding is one
+of `match`, `not_reached`, `field_mismatch`, or `mismatch`; norm buckets are one
+of `within_quarter_bound`, `within_bound`, `exceeds_bound`, or
+`norm_unavailable`; cleanup is exactly `artifact_flushed`; skip reason is null;
+and the pipeline-check list must include a `capability_verify` record with a
+non-negative elapsed time. The primitive timing object must carry the concrete
+non-negative timing fields emitted by the host e2e, and benchmark summaries must
+name the standalone verifier, pipeline total, capability-verify, non-check, and
+duplicate-measurement fields rather than an arbitrary string.
 It also fails closed unless every allow row reports `verifier_result="ok"` with
 no `error_mapping`, and every deny row reports a stable `LATTICE_*` mapping that
 exactly matches `verifier_result` with no receipt id.

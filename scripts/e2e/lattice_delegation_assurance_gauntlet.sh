@@ -1184,8 +1184,58 @@ validate_artifact_contracts() {
           . == "relative" or
           . == "unset"
         );
+      def host_build_profile:
+        type == "string" and (. == "debug" or . == "release");
+      def request_binding_result_label:
+        type == "string" and (
+          . == "match" or
+          . == "not_reached" or
+          . == "field_mismatch" or
+          . == "mismatch"
+        );
+      def norm_bound_bucket_label:
+        type == "string" and (
+          . == "within_quarter_bound" or
+          . == "within_bound" or
+          . == "exceeds_bound" or
+          . == "norm_unavailable"
+        );
       def stable_lattice_error_mapping:
         type == "string" and test("^LATTICE_[A-Z0-9_]+$");
+      def nonnegative_number:
+        type == "number" and . >= 0;
+      def primitive_timings_shape:
+        type == "object" and
+        (.trap_gen_ms | nonnegative_number) and
+        (.delegate_ms | nonnegative_number) and
+        (.sample_pre_ms | nonnegative_number) and
+        (.policy_verify_ms | nonnegative_number) and
+        (.dispatcher_ms | nonnegative_number) and
+        (.pipeline_capability_verify_ms | nonnegative_number) and
+        (.pipeline_non_check_overhead_ms | nonnegative_number) and
+        (.duplicated_measurement_ms | nonnegative_number);
+      def pipeline_check_outcome:
+        type == "string" and (. == "allow" or . == "deny" or . == "skip");
+      def pipeline_check_shape:
+        type == "object" and
+        (.name | type == "string" and length > 0) and
+        (.outcome | pipeline_check_outcome) and
+        (.elapsed_ms | nonnegative_number);
+      def pipeline_checks_shape:
+        type == "array" and
+        length > 0 and
+        all(.[]; pipeline_check_shape) and
+        any(.[]; .name == "capability_verify");
+      def benchmark_summary_shape:
+        type == "string" and
+        contains("trap_gen_ms=") and
+        contains("delegate_ms=") and
+        contains("sample_pre_ms=") and
+        contains("standalone_policy_verify_ms=") and
+        contains("pipeline_total_ms=") and
+        contains("pipeline_capability_verify_ms=") and
+        contains("pipeline_non_check_overhead_ms=") and
+        contains("duplicated_measurement_ms=");
       def required_scenarios:
         [
           "allow_small_test",
@@ -1210,7 +1260,7 @@ validate_artifact_contracts() {
       all(.[]; type == "object" and
         (.command_line | type == "string") and
         (.git_revision | (type == "string" and test("^[0-9a-f]{7,40}$"))) and
-        (.build_profile | type == "string") and
+        (.build_profile | host_build_profile) and
         (.cargo_target_dir_hash | hex_hash) and
         (.cargo_target_dir_class | host_target_dir_class) and
         (.worker_host_class | type == "string") and
@@ -1226,11 +1276,11 @@ validate_artifact_contracts() {
         (.trust_set_source_hash | hex_hash) and
         (.operation_id_hash | hex_hash) and
         (.principal_id_hash | hex_hash) and
-        (.request_binding_result | type == "string") and
+        (.request_binding_result | request_binding_result_label) and
         (.matrix_dimensions | host_matrix_dimensions_shape) and
-        (.primitive_timings | type == "object") and
-        (.pipeline_checks | type == "array") and
-        (.norm_bound_bucket | type == "string") and
+        (.primitive_timings | primitive_timings_shape) and
+        (.pipeline_checks | pipeline_checks_shape) and
+        (.norm_bound_bucket | norm_bound_bucket_label) and
         (.verifier_result | type == "string") and
         has("receipt_id_hash") and
         (.receipt_id_hash == null or (.receipt_id_hash | hex_hash)) and
@@ -1246,9 +1296,10 @@ validate_artifact_contracts() {
         else
           false
         end) and
-        (.benchmark_summary | type == "string") and
-        (.cleanup_result | type == "string") and
-        has("skip_reason")) and
+        (.benchmark_summary | benchmark_summary_shape) and
+        .cleanup_result == "artifact_flushed" and
+        has("skip_reason") and
+        .skip_reason == null) and
       any(.[]; .scenario == "allow_v4_reference" and .dispatcher_decision == "allow" and .verifier_result == "ok") and
       any(.[]; .scenario == "deny_forged_v4_reference" and .dispatcher_decision == "deny" and .error_mapping == "LATTICE_VERIFICATION_EQUATION_FAILED") and
       any(.[]; .scenario == "deny_trust_set_replay_v4_reference" and .dispatcher_decision == "deny" and .error_mapping == "LATTICE_REQUEST_BINDING_MISMATCH") and
@@ -1257,7 +1308,7 @@ validate_artifact_contracts() {
     '
 
   append_json "jsonl_contract_validation" "pass" "$(jq -cn \
-    '{validated_artifacts:["target/fcp-crypto-pq/representation-profile-evidence.jsonl","target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl","target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl","target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl","target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl","target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl","target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"],required_representation_profiles:["SMALL_TEST","V4_REFERENCE"],representation_profile_cardinality:"exactly_once",required_route_scenarios:["passed:SMALL_TEST","passed:V4_REFERENCE","denied:malformed root basis","denied:malformed child basis","denied:wrong parent","denied:wrong zone","denied:wrong period","denied:wrong parameter profile","denied:unsupported custom profile","denied:fixture-only trapdoor used on production route"],route_scenario_cardinality:"exactly_once",required_public_matrix_scenarios:["passed:SMALL_TEST","passed:V4_REFERENCE","denied:malformed public tail","denied:wrong public binding hash","denied:wrong public seed","denied:wrong route revision","denied:V4 malformed public tail","denied:V4 wrong public binding hash","denied:V4 wrong public seed","denied:V4 wrong route revision","denied:unsupported custom profile"],public_matrix_scenario_cardinality:"exactly_once",sample_pre_scenario_cardinality:"exactly_once_per_profile",required_formal_profiles:["SMALL_TEST","V4_REFERENCE"],formal_profile_cardinality:"exactly_once_per_formal_artifact",required_formal_theorem_names:["Fcp.Invariants.LatticeDelegation.lattice_delegation_chain_corruption_rejected","Fcp.Invariants.LatticeDelegation.lattice_delegation_sis_assumption_boundary_complete","Fcp.Invariants.LatticeDelegation.lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions"],required_formal_assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1","FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1","FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1","FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"],crypto_formal_check_cardinality:"all_true_per_profile",policy_formal_check_cardinality:"all_true_per_profile",required_host_scenarios:["allow_small_test","allow_v4_reference","deny_forged_preimage","deny_forged_v4_reference","deny_mismatched_zone","deny_mismatched_period","deny_mismatched_operation","deny_mismatched_principal","deny_malformed_preimage","deny_missing_certificate","deny_incomplete_delegation_chain","deny_chain_too_deep","deny_trust_set_replay","deny_trust_set_replay_v4_reference"],host_scenario_cardinality:"exactly_once",cleanup_result:"not_applicable"}')"
+    '{validated_artifacts:["target/fcp-crypto-pq/representation-profile-evidence.jsonl","target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl","target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl","target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl","target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl","target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl","target/fcp-host/lattice-policy-dispatcher-evidence.jsonl"],required_representation_profiles:["SMALL_TEST","V4_REFERENCE"],representation_profile_cardinality:"exactly_once",required_route_scenarios:["passed:SMALL_TEST","passed:V4_REFERENCE","denied:malformed root basis","denied:malformed child basis","denied:wrong parent","denied:wrong zone","denied:wrong period","denied:wrong parameter profile","denied:unsupported custom profile","denied:fixture-only trapdoor used on production route"],route_scenario_cardinality:"exactly_once",required_public_matrix_scenarios:["passed:SMALL_TEST","passed:V4_REFERENCE","denied:malformed public tail","denied:wrong public binding hash","denied:wrong public seed","denied:wrong route revision","denied:V4 malformed public tail","denied:V4 wrong public binding hash","denied:V4 wrong public seed","denied:V4 wrong route revision","denied:unsupported custom profile"],public_matrix_scenario_cardinality:"exactly_once",sample_pre_scenario_cardinality:"exactly_once_per_profile",required_formal_profiles:["SMALL_TEST","V4_REFERENCE"],formal_profile_cardinality:"exactly_once_per_formal_artifact",required_formal_theorem_names:["Fcp.Invariants.LatticeDelegation.lattice_delegation_chain_corruption_rejected","Fcp.Invariants.LatticeDelegation.lattice_delegation_sis_assumption_boundary_complete","Fcp.Invariants.LatticeDelegation.lattice_trapdoor_capability_unforgeability_reduces_to_sis_assumptions"],required_formal_assumption_ids:["FCP-PQ-SIS-HARDNESS-V1","FCP-PQ-RANDOM-ORACLE-DOMAIN-SEPARATION-V1","FCP-PQ-MP12-CHKP-GPV-ROUTE-CORRESPONDENCE-V1","FCP-PQ-IMPLEMENTATION-ENCODING-CORRESPONDENCE-V1","FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1","FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"],crypto_formal_check_cardinality:"all_true_per_profile",policy_formal_check_cardinality:"all_true_per_profile",required_host_scenarios:["allow_small_test","allow_v4_reference","deny_forged_preimage","deny_forged_v4_reference","deny_mismatched_zone","deny_mismatched_period","deny_mismatched_operation","deny_mismatched_principal","deny_malformed_preimage","deny_missing_certificate","deny_incomplete_delegation_chain","deny_chain_too_deep","deny_trust_set_replay","deny_trust_set_replay_v4_reference"],host_scenario_cardinality:"exactly_once",host_request_binding_result_labels:["match","not_reached","field_mismatch","mismatch"],host_norm_bound_bucket_labels:["within_quarter_bound","within_bound","exceeds_bound","norm_unavailable"],host_cleanup_result:"artifact_flushed",host_pipeline_check_cardinality:"nonempty_with_capability_verify",cleanup_result:"not_applicable"}')"
 }
 
 validate_gauntlet_contract() {

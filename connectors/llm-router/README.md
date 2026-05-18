@@ -3,7 +3,7 @@
 > **Status**: runtime contract documented with routing-only dispatch semantics
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/llm_router_connector_verification.sh`
 > **OpenAI chat upstream**: https://developers.openai.com/api/reference/resources/chat
 > **Cloudflare AI Gateway upstream**: https://developers.cloudflare.com/ai-gateway/configuration/authentication/
 > **Vercel AI Gateway upstream**: https://vercel.com/docs/ai-gateway
@@ -214,7 +214,7 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/llm_router_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The dedicated closeout bundle is `scripts/e2e/llm_router_connector_verification.sh`. It runs the manifest check, focused `rch` check/fmt/integration/local-non-mock/clippy lanes, extracts redaction-safe local non-mock JSONL evidence, and writes a replay script plus summary artifact.
 
 The verification surface captures:
 
@@ -222,6 +222,7 @@ The verification surface captures:
 - deterministic provider catalog and routing behavior
 - auth, provider error, lifecycle, simulation, introspection, self-check, and doctor coverage
 - formatting, check, test, and clippy proof through `rch`
+- replayable verification artifacts under `artifacts/e2e/llm-router/<run-id>/`
 - UBS on changed files before commit
 
 ## Operator Guidance
@@ -260,6 +261,7 @@ The verification surface captures:
 
 **Rerun commands**:
 
+- `RUN_ID=manual-llm-router OUT_ROOT=artifacts/e2e/llm-router/manual-llm-router scripts/e2e/llm_router_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-llm-router-readme cargo check -p fcp-llm-router --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-llm-router-readme cargo test -p fcp-llm-router --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-llm-router-readme cargo clippy -p fcp-llm-router --all-targets --no-deps -- -D warnings`

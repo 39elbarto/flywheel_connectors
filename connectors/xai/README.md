@@ -153,13 +153,14 @@ The deterministic integration evidence is anchored on WireMock loopback runs cov
 
 The closeout bundle is anchored on `scripts/e2e/xai_connector_verification.sh`. It writes artifacts under `artifacts/e2e/xai/<run_id>` by default and extracts `XAI_CONNECTOR_E2E_JSONL` records.
 
-Important shared-session note: the script runs connector Cargo tests locally with `CARGO_TARGET_DIR=/tmp/fcp-xai-e2e-target`. In multi-agent sessions, use the `rch exec` commands below for Cargo proof, then use the script only in an isolated local verification lane when its local execution model is acceptable.
+Important shared-session note: the script runs Cargo proof through `rch exec` and writes a summary plus redaction-checked JSONL artifacts. Set `CARGO_TARGET_PREFIX` to place target directories on a spacious volume when the local checkout is disk constrained.
 
 The bundle captures:
 
 - WireMock JSONL loopback coverage
 - optional live smoke coverage gated by `XAI_API_KEY`
 - required operation records for chat, stream, model list, and Responses web search
+- manifest schema/hash validation, formatting, check, conformance, local non-mock, and clippy proof
 - citation-host validation for Responses web search
 - leakage checks for test token, prompt text, and citation URL paths
 - command line and git revision metadata
@@ -195,7 +196,7 @@ The bundle captures:
 
 **Rerun commands**:
 
-- `XAI_CONNECTOR_E2E_JSONL=/tmp/fcp-xai-e2e.jsonl scripts/e2e/xai_connector_verification.sh`
+- `RUN_ID=manual-xai OUT_ROOT=/Volumes/trj-data/fcp-artifacts/xai/manual-xai CARGO_TARGET_PREFIX=/Volumes/trj-data/tmp/fcp-xai-manual scripts/e2e/xai_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-xai-e2e cargo check -p fcp-xai --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-xai-e2e cargo test -p fcp-xai --test integration xai_connector_wiremock_e2e -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-xai-e2e cargo test -p fcp-xai --test integration xai_connector_live_smoke_e2e -- --nocapture`

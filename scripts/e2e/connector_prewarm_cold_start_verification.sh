@@ -85,8 +85,8 @@ require_cmd() {
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 validate_run_id() {
-  if [[ ! "${RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
-    echo "RUN_ID must use only A-Z, a-z, 0-9, '.', '_', and '-': ${RUN_ID}" >&2
+  if [[ ! "${RUN_ID}" =~ ^[A-Za-z0-9._-]+$ || "${RUN_ID}" == *..* ]]; then
+    echo "RUN_ID must use only A-Z, a-z, 0-9, '.', '_', and '-' and must not contain '..': ${RUN_ID}" >&2
     exit 2
   fi
 }

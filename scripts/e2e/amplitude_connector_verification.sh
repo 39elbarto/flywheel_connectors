@@ -6,6 +6,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/amplitude_connector/${RUN_ID}}"
 REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+REMOTE_RUNNER="rch:remote-required"
+export RCH_FORCE_REMOTE=1
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
@@ -189,7 +191,7 @@ require_rch_remote_proof() {
 require_cmd jq
 require_cmd rch
 
-manifest_check_runner="rch:cargo-run"
+manifest_check_runner="${REMOTE_RUNNER}:cargo-run"
 manifest_check_cmd=(
   env
   RCH_VISIBILITY=verbose
@@ -348,6 +350,7 @@ jq -n \
   --arg verification_script "scripts/e2e/amplitude_connector_verification.sh" \
   --arg artifact_root "${OUT_ROOT}" \
   --arg manifest_check_runner "${manifest_check_runner}" \
+  --arg runner "${REMOTE_RUNNER}" \
   --arg toolchain "${REPO_TOOLCHAIN}" \
   --arg scope_note "read-only Amplitude retrofit: chart query, cohort listing, event export, and readiness evidence" \
   '{
@@ -357,6 +360,7 @@ jq -n \
     verification_script: $verification_script,
     artifact_root: $artifact_root,
     manifest_check_runner: $manifest_check_runner,
+    runner: $runner,
     toolchain: $toolchain,
     scope_note: $scope_note
   }' > "${OUT_ROOT}/environment.json"
@@ -366,6 +370,7 @@ jq -n \
   printf '%s\n' 'set -euo pipefail'
   printf '%s\n' ''
   printf '%s\n' "REPO_TOOLCHAIN=\"\${REPO_TOOLCHAIN:-${REPO_TOOLCHAIN}}\""
+  printf '%s\n' 'export RCH_FORCE_REMOTE=1'
   printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo run -q -p fwc -- manifest fix connectors/amplitude/manifest.toml --check --json"
   printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo fmt --manifest-path connectors/amplitude/Cargo.toml --check"
   printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo check -p fcp-amplitude --all-targets"
@@ -384,6 +389,7 @@ jq -n \
   --arg run_id "${RUN_ID}" \
   --arg connector "fcp-amplitude" \
   --arg overall_status "${OVERALL_STATUS}" \
+  --arg runner "${REMOTE_RUNNER}" \
   --arg artifacts_root "${OUT_ROOT}" \
   --arg manifest_status "${manifest_status}" \
   --arg manifest_note "${manifest_note}" \
@@ -414,6 +420,7 @@ jq -n \
     run_id: $run_id,
     connector: $connector,
     overall_status: $overall_status,
+    runner: $runner,
     artifacts_root: $artifacts_root,
     steps: {
       manifest_check: {

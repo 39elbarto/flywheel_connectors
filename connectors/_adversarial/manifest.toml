@@ -29,24 +29,24 @@ forbidden = ["z:public", "z:community"]
 
 [capabilities]
 required = []
-optional = ["adversarial.inject"]
+optional = ["adversarial.emit"]
 forbidden = ["network.dns", "network.egress", "network.listen", "network.tls.sni", "storage.state", "system.exec"]
 
-[provides.operations."adversarial.trigger"]
+[provides.operations."adversarial.emit"]
 description = "Trigger one hostile response scenario and return the structured FCP error that caught it."
-capability = "adversarial.inject"
+capability = "adversarial.emit"
 risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "policy"
 idempotency = "strict"
 revocation_freshness = "critical"
 
-[provides.operations."adversarial.trigger".input_schema]
+[provides.operations."adversarial.emit".input_schema]
 type = "object"
 required = ["scenario"]
 additionalProperties = false
 
-[provides.operations."adversarial.trigger".input_schema.properties.scenario]
+[provides.operations."adversarial.emit".input_schema.properties.scenario]
 type = "string"
 enum = [
     "oversized_payload",
@@ -61,15 +61,15 @@ enum = [
     "crlf_injection",
 ]
 
-[provides.operations."adversarial.trigger".output_schema]
+[provides.operations."adversarial.emit".output_schema]
 type = "object"
 required = ["status"]
 additionalProperties = true
 
-[provides.operations."adversarial.trigger".output_schema.properties.status]
+[provides.operations."adversarial.emit".output_schema.properties.status]
 const = "never_successful"
 
-[provides.operations."adversarial.trigger".network_constraints]
+[provides.operations."adversarial.emit".network_constraints]
 host_allow = ["adversarial.invalid"]
 port_allow = [443]
 ip_allow = []
@@ -87,7 +87,7 @@ connect_timeout_ms = 1
 total_timeout_ms = 1
 max_response_bytes = 1
 
-[provides.operations."adversarial.trigger".ai_hints]
+[provides.operations."adversarial.emit".ai_hints]
 when_to_use = "Use only in FCP conformance tests that need a deliberate hostile connector response."
 common_mistakes = ["Do not deploy this connector in production.", "Do not treat a successful invocation as possible; every scenario must fail with a structured FCP error."]
 examples = ['{"scenario":"oversized_payload"}']

@@ -174,9 +174,13 @@ The bundle captures:
 
 ## Why this template exists
 
-Per `flywheel_connectors-4kw5f.12`, 146 of 172 connectors lack any `README.md`. The 26 that do are ad-hoc; some follow the calendly pattern, others diverge.
+Per `flywheel_connectors-4kw5f.12`, this template was introduced when most
+connector crates lacked `README.md` coverage. As of the 2026-05-18 audit, the
+live tree has 177 connector directories and each one carries a README.
 
-This template formalizes calendly's pattern as the workspace convention so future connector READMEs are consistent and operators can scan any connector's README to find the same information in the same place.
+This template formalizes the connector README pattern as the workspace
+convention so future connector READMEs stay consistent and operators can scan
+any connector's README to find the same information in the same place.
 
 ## Workflow expectations
 

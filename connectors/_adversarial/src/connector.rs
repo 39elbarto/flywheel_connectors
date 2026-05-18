@@ -384,7 +384,7 @@ fn operations_info() -> Vec<OperationInfo> {
         }),
         capability: CapabilityId::from_static(CAP_ADVERSARIAL_EMIT),
         risk_level: RiskLevel::High,
-        safety_tier: SafetyTier::Safe,
+        safety_tier: SafetyTier::Dangerous,
         idempotency: IdempotencyClass::Strict,
         ai_hints: AgentHint {
             when_to_use: "Use in layer tests that need a deterministic hostile provider response."
@@ -498,7 +498,7 @@ mod tests {
         assert_eq!(operation.id.as_str(), OP_ADVERSARIAL_EMIT);
         assert_eq!(operation.capability.as_str(), CAP_ADVERSARIAL_EMIT);
         assert_eq!(operation.risk_level, RiskLevel::High);
-        assert_eq!(operation.safety_tier, SafetyTier::Safe);
+        assert_eq!(operation.safety_tier, SafetyTier::Dangerous);
         assert_eq!(operation.idempotency, IdempotencyClass::Strict);
         assert_eq!(operation.requires_approval, Some(ApprovalMode::Interactive));
 

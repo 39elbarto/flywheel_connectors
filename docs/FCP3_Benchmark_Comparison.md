@@ -51,6 +51,11 @@ explicit evidence class instead of a latency-only artifact.
 The replayable top-level row exposes current p50/p95/p99 activation latency,
 baseline p50/p95/p99 activation latency, and per-percentile improvement deltas
 so before/after promotion gates do not need to parse nested evidence payloads.
+The nested typed `evidence.latency` and `evidence.baseline_latency` objects must
+still carry the full ordered p50/p95/p99/p999/max/mean shape required by
+`SwarmPrewarmColdStartEvidence::validate()`, and the verifier reports
+`nested_latency_shape_ok=false` when externally supplied evidence omits or
+misorders those fields.
 The command line must prove the Cargo lane ran through `rch exec --` instead of
 local Cargo so the artifact is usable as shared-worker evidence.
 The E2E JSONL bundle covers warm hit, empty pool, stale warm entry, crash before
@@ -111,8 +116,11 @@ concurrent-swarm-startup promotion scenarios; fallback and rejection scenarios
 may still report zero improvement with their measured rationale. Every provided
 evidence row must also keep p50 <= p95 <= p99 for both current and baseline
 latency, and current activation latency must not exceed the matching on-demand
-baseline. The top-level improvement fields must match baseline-minus-current
-latency exactly, and each row must explicitly set
+baseline. Its nested typed latency objects must also keep
+p50 <= p95 <= p99 <= p999 <= max and set a positive mean, so a provided JSONL
+bundle cannot pass with top-level summary fields while dropping the deeper
+typed latency contract. The top-level improvement fields must match
+baseline-minus-current latency exactly, and each row must explicitly set
 `shutdown_cleanup_verified=true` with `cleanup_result="verified"`. The typed
 validator and shell verifier also require the replay command to carry the same
 `CARGO_TARGET_DIR=<cargo_target_dir>` value exported in the evidence row, and

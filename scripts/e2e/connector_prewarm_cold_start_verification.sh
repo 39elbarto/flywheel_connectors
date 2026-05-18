@@ -288,6 +288,20 @@ if [[ "${overall_status}" == "passed" ]]; then
         type == "string" and test("^blake3:[0-9a-f]{64}$");
       def git_object_id:
         type == "string" and test("^[0-9a-f]{7,40}$");
+      def latency_percentile_object_ok:
+        type == "object"
+        and (.p50_ms | type) == "number"
+        and (.p95_ms | type) == "number"
+        and (.p99_ms | type) == "number"
+        and (.p999_ms | type) == "number"
+        and (.max_ms | type) == "number"
+        and (.mean_ms | type) == "number"
+        and .p50_ms > 0
+        and .p50_ms <= .p95_ms
+        and .p95_ms <= .p99_ms
+        and .p99_ms <= .p999_ms
+        and .p999_ms <= .max_ms
+        and .mean_ms > 0;
       def same($key):
         .[$key] == .evidence[$key];
       def same_optional($key):
@@ -297,6 +311,10 @@ if [[ "${overall_status}" == "passed" ]]; then
         and (.host_boundary | startswith("fcp-host::"))
         and ((.host_boundary | gsub("^\\s+|\\s+$"; "")) != "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout")
         and ((.host_boundary | contains("ConnectorPrewarmConfig::decide_checkout")) | not);
+      def nested_latency_shape_ok:
+        (.evidence | type) == "object"
+        and (.evidence.latency | latency_percentile_object_ok)
+        and (.evidence.baseline_latency | latency_percentile_object_ok);
       def nested_evidence_matches:
         (.evidence | type) == "object"
         and same("schema_version")
@@ -320,6 +338,7 @@ if [[ "${overall_status}" == "passed" ]]; then
         and same("warm_checkout")
         and same("activation_latency_ms")
         and same("baseline_on_demand_latency_ms")
+        and nested_latency_shape_ok
         and (.p50_activation_latency_ms == .evidence.latency.p50_ms)
         and (.p95_activation_latency_ms == .evidence.latency.p95_ms)
         and (.p99_activation_latency_ms == .evidence.latency.p99_ms)
@@ -516,6 +535,9 @@ if [[ "${overall_status}" == "passed" ]]; then
         nested_evidence_ok: all(.[];
           nested_evidence_matches
         ),
+        nested_latency_shape_ok: all(.[];
+          nested_latency_shape_ok
+        ),
         manifest_hash_shape_ok: all(.[];
           (.manifest_hash | blake3_hash)
           and (.evidence.manifest_hash | blake3_hash)
@@ -623,6 +645,7 @@ if [[ "${overall_status}" == "passed" ]]; then
             and $v.cleanup_shape_ok
             and $v.boundary_shape_ok
             and $v.nested_evidence_ok
+            and $v.nested_latency_shape_ok
             and $v.manifest_hash_shape_ok
             and $v.zone_hash_shape_ok
             and $v.production_soak_ok

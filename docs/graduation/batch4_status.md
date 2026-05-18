@@ -14,8 +14,8 @@ Summary: `0/23` Batch 4 connectors currently pass the graduation gauntlet.
 | `connectors/microsoft-foundry` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/amplitude` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/posthog` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
-| `connectors/plivo` | `blocked` | `operations_info` | `1` | missing operations_info source metadata |
-| `connectors/telnyx` | `blocked` | `operations_info` | `1` | missing operations_info source metadata |
+| `connectors/plivo` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
+| `connectors/telnyx` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/circleci` | `blocked` | `verification_script_declared` | `4` | README does not declare a scripts/e2e verification script |
 | `connectors/package-registry` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/paypal` | `blocked` | `verification_script_declared` | `4` | README does not declare a scripts/e2e verification script |

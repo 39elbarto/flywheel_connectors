@@ -323,7 +323,7 @@ impl PlivoConnector {
             event_caps: Some(EventCaps::default()),
             auth_caps: None,
             op_catalog_hash: Some(stable_redacted_hash(
-                &serde_json::to_string(&Self::operations()).unwrap_or_default(),
+                &serde_json::to_string(&Self::operations_info()).unwrap_or_default(),
             )),
         })
     }
@@ -380,7 +380,7 @@ impl PlivoConnector {
     /// Introspection.
     pub async fn handle_introspect(&self) -> FcpResult<Value> {
         serialize_result(Introspection {
-            operations: Self::operations(),
+            operations: Self::operations_info(),
             events: Vec::new(),
             resource_types: Vec::new(),
             auth_caps: None,
@@ -1041,7 +1041,7 @@ impl PlivoConnector {
     }
 
     async fn operation_metadata(&self, operation: &str) -> FcpResult<(CapabilityId, Value)> {
-        let op = Self::operations()
+        let op = Self::operations_info()
             .into_iter()
             .find(|operation_info| operation_info.id.as_str() == operation)
             .ok_or_else(|| FcpError::OperationNotGranted {
@@ -1068,7 +1068,9 @@ impl PlivoConnector {
         Ok(())
     }
 
-    fn operations() -> Vec<OperationInfo> {
+    /// Build the connector operation metadata exposed through introspection.
+    #[must_use]
+    pub fn operations_info() -> Vec<OperationInfo> {
         vec![
             op_info(
                 "plivo.call.initiate",
@@ -1992,6 +1994,31 @@ mod tests {
             "plivo.webhook.ingest_request",
         ] {
             assert!(ids.contains(&id), "{id} missing");
+        }
+    }
+
+    #[test]
+    fn operations_info_exposes_full_voice_and_webhook_catalog() {
+        let ops = PlivoConnector::operations_info();
+        assert_eq!(ops.len(), 11);
+        let ids = ops
+            .iter()
+            .map(|operation| operation.id.as_str())
+            .collect::<Vec<_>>();
+        for id in [
+            "plivo.call.initiate",
+            "plivo.call.continue",
+            "plivo.call.speak",
+            "plivo.call.end",
+            "plivo.call.status",
+            "plivo.call.transfer",
+            "plivo.call.gather",
+            "plivo.webhook.validate_signature",
+            "plivo.webhook.evaluate_inbound_policy",
+            "plivo.webhook.parse_event",
+            "plivo.webhook.ingest_request",
+        ] {
+            assert!(ids.contains(&id), "{id} missing from operations_info");
         }
     }
 

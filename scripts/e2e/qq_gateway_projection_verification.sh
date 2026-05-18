@@ -225,12 +225,30 @@ if [[ "${overall_status}" == "passed" ]]; then
           and any(.[]; .step == "untyped_message_id_not_mention" and .details.policy.mentioned_bot == false)
           and any(.[]; .step == "structured_group_mention" and .details.accepted == true and .details.policy.mentioned_bot == true)
         ),
-        reply_shape_ok: any(.[]; .step == "reply_media_projection" and .details.normalized.is_reply == true and (.details.normalized.reply_to_hash | type) == "string"),
+        reply_shape_ok: any(.[];
+          .step == "reply_media_projection"
+          and .details.normalized.is_reply == true
+          and (.details.normalized.reply_to_hash | type) == "string"
+          and (.details.normalized.attachment_filename_hashes | type) == "array"
+          and (.details.normalized.attachment_filename_hashes | length) == 1
+          and (.details.normalized.attachment_url_hashes | type) == "array"
+          and (.details.normalized.attachment_url_hashes | length) == 1
+        ),
         media_shape_ok: (
           any(.[]; .step == "oversized_media_policy_drop" and .details.reason_code == "attachment_bytes_exceeded")
           and any(.[]; .step == "unknown_media_size_policy_drop" and .details.reason_code == "attachment_size_unknown")
         ),
-        voice_shape_ok: any(.[]; .step == "voice_asr_projection" and .details.accepted == true and .details.normalized.has_attachments == true and (.details.normalized.text_len | type) == "number" and .details.normalized.text_len > 0),
+        voice_shape_ok: any(.[];
+          .step == "voice_asr_projection"
+          and .details.accepted == true
+          and .details.normalized.has_attachments == true
+          and (.details.normalized.text_len | type) == "number"
+          and .details.normalized.text_len > 0
+          and (.details.normalized.attachment_filename_hashes | type) == "array"
+          and (.details.normalized.attachment_filename_hashes | length) == 1
+          and (.details.normalized.attachment_url_hashes | type) == "array"
+          and (.details.normalized.attachment_url_hashes | length) == 1
+        ),
         slash_shape_ok: any(.[]; .step == "slash_approval_projection" and .details.accepted == true and .details.normalized.interaction_kind == "approval" and (.details.normalized.command_name_hash | type) == "string" and .details.normalized.approval_action == "approve"),
         replay_shape_ok: (
           any(.[]; .step == "duplicate_drop" and .details.reason_code == "duplicate_event")
@@ -301,9 +319,12 @@ if [[ "${overall_status}" == "passed" ]]; then
     "evt-missing-binding" \
     "evt-missing-message-id" \
     "evt-missing-reply-target" \
+    "evt-channel-denied" \
+    "evt-channel-allowed" \
     "evt-c2c-denied" \
     "evt-c2c-allowed" \
     "evt-queue-fill" \
+    "evt-queue-full-policy-denied" \
     "evt-queue-full" \
     "evt-stale-sequence" \
     "evt-reconnect-requested" \
@@ -323,9 +344,12 @@ if [[ "${overall_status}" == "passed" ]]; then
     "msg-missing-binding" \
     "msg-missing-message-id" \
     "msg-missing-reply-target" \
+    "msg-channel-denied" \
+    "msg-channel-allowed" \
     "msg-c2c-denied" \
     "msg-c2c-allowed" \
     "msg-queue-fill" \
+    "msg-queue-full-policy-denied" \
     "msg-queue-full" \
     "msg-stale-sequence" \
     "msg-after-shutdown" \
@@ -334,11 +358,18 @@ if [[ "${overall_status}" == "passed" ]]; then
     "group-slash" \
     "group-disabled" \
     "group-binding" \
+    "group-denied" \
     "group-queue" \
+    "group-voice" \
+    "channel-denied" \
+    "channel-allowed" \
+    "guild-denied" \
+    "sender-denied" \
     "member-1" \
     "member-slash" \
     "member-disabled" \
     "member-queue" \
+    "member-voice" \
     "member-c2c-denied" \
     "member-c2c-allowed" \
     "Alice" \
@@ -349,6 +380,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "c2c allowlist should deny" \
     "c2c allowlist should authorize" \
     "queue fill message" \
+    "queue should not hide denied sender policy" \
     "queue backpressure message" \
     "stale sequence should drop" \
     "deploy status" \

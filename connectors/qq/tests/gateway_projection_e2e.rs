@@ -138,6 +138,7 @@ fn redacted_normalized_event(event: &Value) -> Value {
         "attachment_count": attachment_count(event),
         "attachment_total_bytes": attachment_total_bytes(event),
         "attachment_content_types": attachment_content_types(event),
+        "attachment_filename_hashes": attachment_filename_hashes(event),
         "attachment_url_hashes": attachment_url_hashes(event),
     })
 }
@@ -250,6 +251,18 @@ fn attachment_url_hashes(event: &Value) -> Vec<String> {
             attachments
                 .iter()
                 .filter_map(|attachment| str_field(attachment, "url"))
+                .map(evidence_hash)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn attachment_filename_hashes(event: &Value) -> Vec<String> {
+    attachments(event)
+        .map(|attachments| {
+            attachments
+                .iter()
+                .filter_map(|attachment| str_field(attachment, "filename"))
                 .map(evidence_hash)
                 .collect()
         })
@@ -1648,9 +1661,12 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-missing-binding",
         "evt-missing-message-id",
         "evt-missing-reply-target",
+        "evt-channel-denied",
+        "evt-channel-allowed",
         "evt-c2c-denied",
         "evt-c2c-allowed",
         "evt-queue-fill",
+        "evt-queue-full-policy-denied",
         "evt-queue-full",
         "evt-stale-sequence",
         "evt-reconnect-requested",
@@ -1668,10 +1684,14 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "msg-unknown-size-media",
         "msg-disabled",
         "msg-missing-binding",
+        "msg-missing-message-id",
         "msg-missing-reply-target",
+        "msg-channel-denied",
+        "msg-channel-allowed",
         "msg-c2c-denied",
         "msg-c2c-allowed",
         "msg-queue-fill",
+        "msg-queue-full-policy-denied",
         "msg-queue-full",
         "msg-stale-sequence",
         "msg-after-shutdown",
@@ -1680,11 +1700,18 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "group-slash",
         "group-disabled",
         "group-binding",
+        "group-denied",
         "group-queue",
+        "group-voice",
+        "channel-denied",
+        "channel-allowed",
+        "guild-denied",
+        "sender-denied",
         "member-1",
         "member-slash",
         "member-disabled",
         "member-queue",
+        "member-voice",
         "member-c2c-denied",
         "member-c2c-allowed",
         "Alice",
@@ -1695,6 +1722,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "c2c allowlist should deny",
         "c2c allowlist should authorize",
         "queue fill message",
+        "queue should not hide denied sender policy",
         "queue backpressure message",
         "stale sequence should drop",
         "deploy status",
@@ -1729,6 +1757,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert!(log_contents.contains("slash_approval_projection"));
     assert!(log_contents.contains("attachment_count"));
     assert!(log_contents.contains("attachment_total_bytes"));
+    assert!(log_contents.contains("attachment_filename_hashes"));
     assert!(log_contents.contains("attachment_url_hashes"));
     assert!(log_contents.contains("attachment_bytes_exceeded"));
     assert!(log_contents.contains("attachment_size_unknown"));

@@ -446,9 +446,11 @@ git revision, target-dir class/hash, build profile, and worker host class across
 all JSONL records so reviewer evidence cannot be stitched together from
 different runs. Run ids and worker host classes must be non-empty
 redaction-safe label tokens using only ASCII letters, digits, `.`, `_`, and
-`-`; `..` is rejected by the self-contract, and unsafe run ids are rejected
-before the script creates artifact directories or JSONL files. The top-level
-build profile must be `dev-test-bench`. Because command records are contracted
+`-`; `..` is rejected by the self-contract. Run ids containing secret, provider
+payload, reviewer-contact, trapdoor, preimage, or credential marker names are
+rejected before the script creates artifact directories or JSONL files, and
+stderr reports only a `sha256:<64 lowercase hex>` hash of the rejected value.
+The top-level build profile must be `dev-test-bench`. Because command records are contracted
 to `target/fcp-crypto-pq/<run_id>.<step>.log`, `OUT_DIR` must remain
 `target/fcp-crypto-pq`; an override fails before the script creates evidence
 directories. The staged remote evidence root is likewise pinned to
@@ -475,7 +477,8 @@ accepting a skip record.
 The summary record must name the actual formal-correspondence JSONL artifact
 being emitted, and both run-id-derived and operator-supplied artifact paths are
 limited to a single relative `target/fcp-crypto-pq/*.jsonl` file before the
-script creates or truncates evidence.
+script creates or truncates evidence. The standalone formal script applies the
+same redaction-sensitive run-id marker preflight as the top-level gauntlet.
 Its command records carry the same execution-proof fields as the top-level
 gauntlet: non-`rch` lanes must report `fallback_decision:"not_needed"`,
 `worker_execution_class:"not_applicable"`, and `rch_summary:null`; `rch`-backed

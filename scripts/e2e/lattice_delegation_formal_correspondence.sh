@@ -13,6 +13,14 @@ export RCH_REQUIRE_REMOTE
 export RCH_FORCE_REMOTE=1
 export RCH_VISIBILITY
 
+run_id_redaction_pattern() {
+  printf '%s' '(bearer|access_token|refresh_token|id_token|client_secret|api_key|secret_seed|private_key|secret_key|password|cookie|credential|provider_body|provider_response_body|provider_payload_body|reviewer_email|reviewer_phone|trapdoor_coefficients|preimage_coefficients|preimage_bytes|expanded_secret_matrix)'
+}
+
+run_id_sha256() {
+  printf '%s' "${RUN_ID}" | shasum -a 256 | awk '{print $1}'
+}
+
 validate_run_id() {
   case "${RUN_ID}" in
     ""|*/*|*\\*|*..*|*[!A-Za-z0-9._-]*)
@@ -20,6 +28,11 @@ validate_run_id() {
       exit 64
       ;;
   esac
+
+  if printf '%s' "${RUN_ID}" | grep -aEi "$(run_id_redaction_pattern)" >/dev/null; then
+    printf 'invalid RUN_ID: contains redaction-sensitive marker; run_id_hash=sha256:%s\n' "$(run_id_sha256)" >&2
+    exit 64
+  fi
 }
 
 validate_artifact_path() {

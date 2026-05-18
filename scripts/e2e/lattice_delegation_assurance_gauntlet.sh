@@ -549,6 +549,15 @@ scan_jsonl_artifact() {
     fi
   done
   for forbidden in \
+    "/home/" \
+    "/data/projects/" \
+    "/users/" \
+    "/volumes/" \
+    "/private/var/" \
+    "/var/folders/" \
+    "/tmp" \
+    "/private/tmp" \
+    "c:\\\\users\\\\" \
     "authorization:" \
     "bearer" \
     "agent:" \

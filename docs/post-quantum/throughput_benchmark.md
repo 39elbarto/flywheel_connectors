@@ -462,6 +462,9 @@ non-negative integer. Non-`rch` command records must report
 `rch exec` records must carry an observed accepted `[RCH] remote` summary;
 unobserved, unclassified, local-fallback, refused-local-fallback, or
 remote-failure RCH summaries are not reusable evidence. The same self-contract
+also requires each command record's `log_artifact` to equal
+`target/fcp-crypto-pq/<run_id>.<step>.log`, matching the path emitted by the
+gauntlet itself instead of accepting an arbitrary non-empty label. It also
 requires every named command lane in the
 gauntlet to be represented by a passing command-run record, including Lean, Rust
 test, Criterion, format, check, clippy, diff-check, and UBS lanes, so a partial

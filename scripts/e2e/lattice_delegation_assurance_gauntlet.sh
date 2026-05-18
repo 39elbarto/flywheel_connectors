@@ -1136,10 +1136,12 @@ validate_gauntlet_contract() {
     def rch_command_proof:
       (.details.command_line | contains("rch exec")) and
       rch_remote_proof;
+    def expected_command_log_artifact:
+      "target/fcp-crypto-pq/" + .run_id + "." + .step + ".log";
     def command_record_contract:
       if (.details | has("command_line")) then
         (.details.command_line | nonempty_string) and
-        (.details.log_artifact | nonempty_string) and
+        .details.log_artifact == expected_command_log_artifact and
         (.details.log_hash | sha256_hash) and
         (.details.duration_seconds | nonnegative_number) and
         (.details.retry_count | nonnegative_integer) and

@@ -5,6 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/firebase_connector/${RUN_ID}}"
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+REMOTE_RUNNER="rch:remote-required"
+export RCH_FORCE_REMOTE=1
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
@@ -36,12 +39,18 @@ run_logged() {
   local name="$1"
   shift
   local log_path="${OUT_ROOT}/logs/${name}.log"
+  local rc
 
   echo "[firebase-verification] ${name}: $*"
   (
-    cd "${REPO_ROOT}"
+    cd "${REPO_ROOT}" || exit
     "$@"
   ) >"${log_path}" 2>&1
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && ! require_rch_remote_proof "${name}" "${log_path}"; then
+    return 1
+  fi
+  return "${rc}"
 }
 
 run_capture_stdout() {
@@ -49,12 +58,18 @@ run_capture_stdout() {
   local stdout_path="$2"
   shift 2
   local log_path="${OUT_ROOT}/logs/${name}.log"
+  local rc
 
   echo "[firebase-verification] ${name}: $*"
   (
-    cd "${REPO_ROOT}"
+    cd "${REPO_ROOT}" || exit
     "$@"
   ) >"${stdout_path}" 2>"${log_path}"
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && ! require_rch_remote_proof "${name}" "${log_path}"; then
+    return 1
+  fi
+  return "${rc}"
 }
 
 promote_overall_status() {
@@ -75,46 +90,59 @@ promote_overall_status() {
 
 classify_manifest_failure() {
   local log_path="$1"
-  if grep -Eq 'missing worker system package dbus-1\.pc|The system library `dbus-1` required|pkg-config --libs --cflags dbus-1' "${log_path}"; then
+  # shellcheck disable=SC2016
+  if grep -Eq 'RCH-E|remote required; refusing local fallback|rch command did not produce remote proof|\[RCH\] local|missing worker system package dbus-1\.pc|The system library `dbus-1` required|pkg-config --libs --cflags dbus-1' "${log_path}"; then
     echo "infra_blocked"
   else
     echo "failed"
   fi
 }
 
+classify_step_failure() {
+  local log_path="$1"
+  if grep -Eq 'RCH-E|remote required; refusing local fallback|rch command did not produce remote proof|\[RCH\] local|No space left on device|connection reset by peer|Backend unavailable|unable to update registry|spurious network error|failed to get successful HTTP response|missing worker system package|timeout: failed to execute process' "${log_path}"; then
+    echo "infra_blocked"
+  else
+    echo "failed"
+  fi
+}
+
+require_rch_remote_proof() {
+  local name="$1"
+  local log_path="$2"
+
+  if grep -Fq "[RCH] remote" "${log_path}"; then
+    return 0
+  fi
+
+  echo "[firebase-verification] ${name}: rch command did not produce remote proof" >&2
+  echo "rch command did not produce remote proof" >>"${log_path}"
+  return 1
+}
+
 require_cmd rch
 
-FWC_MANIFEST_BIN="${FWC_MANIFEST_BIN:-fwc}"
-manifest_check_cmd=()
-if command -v "${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
-  manifest_check_runner="local:${FWC_MANIFEST_BIN}"
-  manifest_check_cmd=(
-    "${FWC_MANIFEST_BIN}"
-    manifest
-    fix
-    connectors/firebase/manifest.toml
-    --check
-    --json
-  )
-else
-  manifest_check_runner="rch:cargo-run"
-  manifest_check_cmd=(
-    rch
-    exec
-    --
-    cargo
-    run
-    -q
-    -p
-    fwc
-    --
-    manifest
-    fix
-    connectors/firebase/manifest.toml
-    --check
-    --json
-  )
-fi
+manifest_check_runner="${REMOTE_RUNNER}:cargo-run"
+manifest_check_cmd=(
+  env
+  RCH_VISIBILITY=verbose
+  rch
+  exec
+  --
+  env
+  "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}"
+  cargo
+  run
+  -q
+  -p
+  fwc
+  --
+  manifest
+  fix
+  connectors/firebase/manifest.toml
+  --check
+  --json
+)
 
 if run_capture_stdout \
   manifest_check \
@@ -125,7 +153,11 @@ then
 else
   manifest_status="$(classify_manifest_failure "${OUT_ROOT}/logs/manifest_check.log")"
   if [[ "${manifest_status}" == "infra_blocked" ]]; then
-    manifest_note="rch worker image missing dbus-1.pc while building fwc for manifest validation"
+    if grep -Fq "rch command did not produce remote proof" "${OUT_ROOT}/logs/manifest_check.log"; then
+      manifest_note="rch command did not produce remote proof for manifest validation"
+    else
+      manifest_note="infrastructure blocked manifest validation; inspect logs/manifest_check.log"
+    fi
   else
     manifest_note="manifest validation command failed; inspect logs/manifest_check.log"
   fi
@@ -141,102 +173,102 @@ fi
 
 if run_logged \
   cargo_check \
-  rch exec -- cargo check -p fcp-firebase --all-targets
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo check -p fcp-firebase --all-targets
 then
   cargo_check_status="passed"
 else
-  cargo_check_status="failed"
-  promote_overall_status failed
+  cargo_check_status="$(classify_step_failure "${OUT_ROOT}/logs/cargo_check.log")"
+  promote_overall_status "${cargo_check_status}"
 fi
 
 if run_logged \
   format_check \
-  rch exec -- cargo fmt -p fcp-firebase -- --check
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo fmt -p fcp-firebase -- --check
 then
   format_check_status="passed"
 else
-  format_check_status="failed"
-  promote_overall_status failed
+  format_check_status="$(classify_step_failure "${OUT_ROOT}/logs/format_check.log")"
+  promote_overall_status "${format_check_status}"
 fi
 
 if run_logged \
   health_guidance_evidence \
-  rch exec -- cargo test -p fcp-firebase --test integration health_unconfigured_includes_guidance -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-firebase --test integration health_unconfigured_includes_guidance -- --nocapture
 then
   health_guidance_status="passed"
 else
-  health_guidance_status="failed"
-  promote_overall_status failed
+  health_guidance_status="$(classify_step_failure "${OUT_ROOT}/logs/health_guidance_evidence.log")"
+  promote_overall_status "${health_guidance_status}"
 fi
 
 if run_logged \
   doctor_guidance_evidence \
-  rch exec -- cargo test -p fcp-firebase --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-firebase --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
 then
   doctor_guidance_status="passed"
 else
-  doctor_guidance_status="failed"
-  promote_overall_status failed
+  doctor_guidance_status="$(classify_step_failure "${OUT_ROOT}/logs/doctor_guidance_evidence.log")"
+  promote_overall_status "${doctor_guidance_status}"
 fi
 
 if run_logged \
   doctor_self_check_evidence \
-  rch exec -- cargo test -p fcp-firebase --test integration self_check_ready_with_access_token_and_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-firebase --test integration self_check_ready_with_access_token_and_evidence -- --nocapture
 then
   doctor_self_check_status="passed"
 else
-  doctor_self_check_status="failed"
-  promote_overall_status failed
+  doctor_self_check_status="$(classify_step_failure "${OUT_ROOT}/logs/doctor_self_check_evidence.log")"
+  promote_overall_status "${doctor_self_check_status}"
 fi
 
 if run_logged \
   retryable_self_check_evidence \
-  rch exec -- cargo test -p fcp-firebase --test integration self_check_retryable_firestore_api_failure_reports_degraded -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-firebase --test integration self_check_retryable_firestore_api_failure_reports_degraded -- --nocapture
 then
   retryable_self_check_status="passed"
 else
-  retryable_self_check_status="failed"
-  promote_overall_status failed
+  retryable_self_check_status="$(classify_step_failure "${OUT_ROOT}/logs/retryable_self_check_evidence.log")"
+  promote_overall_status "${retryable_self_check_status}"
 fi
 
 if run_logged \
   risky_mutation_evidence \
-  rch exec -- cargo test -p fcp-firebase --test integration invoke_rtdb_set_preserves_artifact_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-firebase --test integration invoke_rtdb_set_preserves_artifact_evidence -- --nocapture
 then
   risky_mutation_status="passed"
 else
-  risky_mutation_status="failed"
-  promote_overall_status failed
+  risky_mutation_status="$(classify_step_failure "${OUT_ROOT}/logs/risky_mutation_evidence.log")"
+  promote_overall_status "${risky_mutation_status}"
 fi
 
 if run_logged \
   compliance_evidence \
-  rch exec -- cargo test -p fcp-firebase --test integration introspection_emits_v3_compliance_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-firebase --test integration introspection_emits_v3_compliance_evidence -- --nocapture
 then
   compliance_status="passed"
 else
-  compliance_status="failed"
-  promote_overall_status failed
+  compliance_status="$(classify_step_failure "${OUT_ROOT}/logs/compliance_evidence.log")"
+  promote_overall_status "${compliance_status}"
 fi
 
 if run_logged \
   integration_suite \
-  rch exec -- cargo test -p fcp-firebase --test integration -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-firebase --test integration -- --nocapture
 then
   integration_suite_status="passed"
 else
-  integration_suite_status="failed"
-  promote_overall_status failed
+  integration_suite_status="$(classify_step_failure "${OUT_ROOT}/logs/integration_suite.log")"
+  promote_overall_status "${integration_suite_status}"
 fi
 
 if run_logged \
   clippy \
-  rch exec -- cargo clippy -p fcp-firebase --all-targets -- -D warnings
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo clippy -p fcp-firebase --all-targets -- -D warnings
 then
   clippy_status="passed"
 else
-  clippy_status="failed"
-  promote_overall_status failed
+  clippy_status="$(classify_step_failure "${OUT_ROOT}/logs/clippy.log")"
+  promote_overall_status "${clippy_status}"
 fi
 
 cat > "${OUT_ROOT}/environment.json" <<EOF
@@ -246,30 +278,29 @@ cat > "${OUT_ROOT}/environment.json" <<EOF
   "repo_root": "${REPO_ROOT}",
   "verification_script": "scripts/e2e/firebase_connector_verification.sh",
   "artifact_root": "${OUT_ROOT}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
   "manifest_check_runner": "${manifest_check_runner}"
 }
 EOF
 
-cat > "${OUT_ROOT}/replay.sh" <<'EOF'
+cat > "${OUT_ROOT}/replay.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
-FWC_MANIFEST_BIN="${FWC_MANIFEST_BIN:-fwc}"
-if command -v "${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
-  "${FWC_MANIFEST_BIN}" manifest fix connectors/firebase/manifest.toml --check --json
-else
-  rch exec -- cargo run -q -p fwc -- manifest fix connectors/firebase/manifest.toml --check --json
-fi
-rch exec -- cargo check -p fcp-firebase --all-targets
-rch exec -- cargo fmt -p fcp-firebase -- --check
-rch exec -- cargo test -p fcp-firebase --test integration health_unconfigured_includes_guidance -- --nocapture
-rch exec -- cargo test -p fcp-firebase --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
-rch exec -- cargo test -p fcp-firebase --test integration self_check_ready_with_access_token_and_evidence -- --nocapture
-rch exec -- cargo test -p fcp-firebase --test integration self_check_retryable_firestore_api_failure_reports_degraded -- --nocapture
-rch exec -- cargo test -p fcp-firebase --test integration invoke_rtdb_set_preserves_artifact_evidence -- --nocapture
-rch exec -- cargo test -p fcp-firebase --test integration introspection_emits_v3_compliance_evidence -- --nocapture
-rch exec -- cargo test -p fcp-firebase --test integration -- --nocapture
-rch exec -- cargo clippy -p fcp-firebase --all-targets -- -D warnings
+REPO_TOOLCHAIN="\${REPO_TOOLCHAIN:-${REPO_TOOLCHAIN}}"
+export RCH_FORCE_REMOTE=1
+env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" cargo run -q -p fwc -- manifest fix connectors/firebase/manifest.toml --check --json
+env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" cargo check -p fcp-firebase --all-targets
+env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" cargo fmt -p fcp-firebase -- --check
+env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" cargo test -p fcp-firebase --test integration health_unconfigured_includes_guidance -- --nocapture
+env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" cargo test -p fcp-firebase --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
+env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" cargo test -p fcp-firebase --test integration self_check_ready_with_access_token_and_evidence -- --nocapture
+env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" cargo test -p fcp-firebase --test integration self_check_retryable_firestore_api_failure_reports_degraded -- --nocapture
+env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" cargo test -p fcp-firebase --test integration invoke_rtdb_set_preserves_artifact_evidence -- --nocapture
+env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" cargo test -p fcp-firebase --test integration introspection_emits_v3_compliance_evidence -- --nocapture
+env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" cargo test -p fcp-firebase --test integration -- --nocapture
+env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" cargo clippy -p fcp-firebase --all-targets -- -D warnings
 EOF
 chmod +x "${OUT_ROOT}/replay.sh"
 
@@ -278,6 +309,7 @@ cat > "${OUT_ROOT}/summary.json" <<EOF
   "run_id": "${RUN_ID}",
   "connector": "fcp-firebase",
   "overall_status": "${OVERALL_STATUS}",
+  "runner": "${REMOTE_RUNNER}",
   "artifacts_root": "${OUT_ROOT}",
   "steps": {
     "manifest_check": {

@@ -451,7 +451,9 @@ record. The gauntlet self-contract
 requires every command-run record, local or `rch`-backed, to carry a stable log
 artifact, `sha256:<64 lowercase hex>` log hash, duration, retry count, fallback decision,
 worker execution class, cache decision, cleanup result, and the RCH summary
-field. Non-`rch` command records must report `fallback_decision:"not_needed"`,
+field. The duration must be non-negative, and retry count must be a
+non-negative integer. Non-`rch` command records must report
+`fallback_decision:"not_needed"`,
 `worker_execution_class:"not_applicable"`, and `rch_summary:null`. Passing
 `rch exec` records must carry an observed accepted `[RCH] remote` summary;
 unobserved, unclassified, local-fallback, refused-local-fallback, or

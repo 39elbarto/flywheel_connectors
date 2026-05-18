@@ -1097,6 +1097,10 @@ validate_gauntlet_contract() {
       type == "string" and length > 0 and . != "unavailable";
     def positive_test_count:
       type == "string" and test("^[1-9][0-9]*$");
+    def nonnegative_number:
+      type == "number" and . >= 0;
+    def nonnegative_integer:
+      nonnegative_number and floor == .;
     def required_tool_versions:
       any(.[]; .step == "tool_versions" and .result == "pass" and
         (.details.cargo | populated_tool_version) and
@@ -1131,8 +1135,8 @@ validate_gauntlet_contract() {
         (.details.command_line | type == "string") and
         (.details.log_artifact | type == "string") and
         (.details.log_hash | sha256_hash) and
-        (.details.duration_seconds | type == "number") and
-        (.details.retry_count | type == "number") and
+        (.details.duration_seconds | nonnegative_number) and
+        (.details.retry_count | nonnegative_integer) and
         (non_rch_command_proof or rch_command_proof) and
         .details.cache_decision == "cargo_target_dir_hashed" and
         (.details.cleanup_result | type == "string")

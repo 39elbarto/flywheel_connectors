@@ -304,10 +304,7 @@ where
         return Ok(T::default());
     }
     if body.trim().is_empty() {
-        return Err(AmplitudeError::Api {
-            status_code: status.as_u16(),
-            message: "empty response body".into(),
-        });
+        return Ok(T::default());
     }
     Ok(serde_json::from_str(body)?)
 }

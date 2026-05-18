@@ -121,10 +121,7 @@ impl WhisperClient {
         if status.is_success() {
             let body = resp.text().await?;
             if body.trim().is_empty() {
-                return Err(WhisperError::Api {
-                    status_code: status.as_u16(),
-                    message: "empty response body".into(),
-                });
+                return Ok(serde_json::json!({}));
             }
             let parsed: serde_json::Value = serde_json::from_str(&body)?;
             Ok(parsed)

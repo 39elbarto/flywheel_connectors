@@ -144,10 +144,7 @@ impl GrafanaClient {
                 return Ok(serde_json::json!({}));
             }
             if body.trim().is_empty() {
-                return Err(GrafanaError::Api {
-                    status_code: status.as_u16(),
-                    message: "empty response body".into(),
-                });
+                return Ok(serde_json::json!({}));
             }
             Ok(serde_json::from_str(&body)?)
         } else {

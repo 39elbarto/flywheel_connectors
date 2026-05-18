@@ -1013,5 +1013,6 @@ if grep -aEi "$(redaction_pattern)" "${SUMMARY_JSON}" >/dev/null; then
   write_summary_json
 fi
 
-echo "Connector prewarm cold-start artifacts written to ${OUT_ROOT}"
+printf 'Connector prewarm cold-start artifacts written: artifact_root_class=%s artifact_root_hash=sha256:%s summary_json=summary.json\n' \
+  "$(cargo_target_dir_class "${OUT_ROOT}")" "$(hash_text_sha256 "${OUT_ROOT}")"
 exit "${exit_code}"

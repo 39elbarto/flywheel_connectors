@@ -5,6 +5,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/mysql_connector/${RUN_ID}}"
+TARGET_DIR="${FCP_MYSQL_TARGET_DIR:-/tmp/fcp-mysql-e2e}"
+RCH_BIN="${RCH_BIN:-rch}"
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+REMOTE_RUNNER="rch:remote-required"
+export RCH_FORCE_REMOTE=1
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
@@ -19,19 +24,20 @@ run_logged() {
   local name="$1"
   shift
   local log_path="${OUT_ROOT}/logs/${name}.log"
+  local rc
 
   echo "[mysql-verification] ${name}: $*"
-  if (
-    cd "${REPO_ROOT}"
+  (
+    cd "${REPO_ROOT}" || exit
     "$@"
-  ) >"${log_path}" 2>&1; then
-    if command_uses_rch_exec "$@" && ! rch_remote_summary_present "${log_path}"; then
-      echo "[mysql-verification] ${name}: rch command did not produce remote proof" >&2
-      return 1
-    fi
-  else
-    return $?
+  ) >"${log_path}" 2>&1
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && ! rch_remote_summary_present "${log_path}"; then
+    echo "[mysql-verification] ${name}: rch command did not produce remote proof" >&2
+    echo "rch command did not produce remote proof" >>"${log_path}"
+    return 2
   fi
+  return "${rc}"
 }
 
 run_capture_stdout() {
@@ -39,17 +45,24 @@ run_capture_stdout() {
   local stdout_path="$2"
   shift 2
   local log_path="${OUT_ROOT}/logs/${name}.log"
+  local rc
 
   echo "[mysql-verification] ${name}: $*"
   (
-    cd "${REPO_ROOT}"
+    cd "${REPO_ROOT}" || exit
     "$@"
   ) >"${stdout_path}" 2>"${log_path}"
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && ! rch_remote_summary_present "${log_path}"; then
+    echo "[mysql-verification] ${name}: rch command did not produce remote proof" >&2
+    echo "rch command did not produce remote proof" >>"${log_path}"
+    return 2
+  fi
+  return "${rc}"
 }
 
-require_cmd fwc
 require_cmd jq
-require_cmd rch
+require_cmd "${RCH_BIN}"
 
 command_uses_rch_exec() {
   local previous=""
@@ -72,35 +85,35 @@ rch_remote_summary_present() {
 run_capture_stdout \
   manifest_check \
   "${OUT_ROOT}/evidence/manifest_check.json" \
-  fwc manifest fix connectors/mysql/manifest.toml --check --json
+  env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo run -q -p fwc -- manifest fix connectors/mysql/manifest.toml --check --json
 
 run_logged \
   cargo_check \
-  env RCH_VISIBILITY=verbose rch exec -- cargo check -p fcp-mysql --all-targets
+  env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo check -p fcp-mysql --all-targets
 
 run_logged \
   format_check \
-  env RCH_VISIBILITY=verbose rch exec -- cargo fmt -p fcp-mysql -- --check
+  env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo fmt -p fcp-mysql -- --check
 
 run_logged \
   doctor_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-mysql --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
+  env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-mysql --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
 
 run_logged \
   self_check_secretless_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-mysql --test integration self_check_secretless_requires_injection_and_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-mysql --test integration self_check_secretless_requires_injection_and_evidence -- --nocapture
 
 run_logged \
   compliance_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-mysql --test integration introspection_emits_mutation_approval_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-mysql --test integration introspection_emits_mutation_approval_evidence -- --nocapture
 
 run_logged \
   integration_suite \
-  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-mysql --test integration -- --nocapture
+  env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-mysql --test integration -- --nocapture
 
 run_logged \
   clippy \
-  env RCH_VISIBILITY=verbose rch exec -- cargo clippy -p fcp-mysql --all-targets -- -D warnings
+  env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo clippy -p fcp-mysql --all-targets -- -D warnings
 
 jq -n \
   --arg run_id "${RUN_ID}" \
@@ -108,21 +121,30 @@ jq -n \
   --arg repo_root "${REPO_ROOT}" \
   --arg verification_script "scripts/e2e/mysql_connector_verification.sh" \
   --arg artifact_root "${OUT_ROOT}" \
-  '{run_id:$run_id,connector:$connector,repo_root:$repo_root,verification_script:$verification_script,artifact_root:$artifact_root}' \
+  --arg target_dir "${TARGET_DIR}" \
+  --arg rch_bin "${RCH_BIN}" \
+  --arg runner "${REMOTE_RUNNER}" \
+  --arg toolchain "${REPO_TOOLCHAIN}" \
+  '{run_id:$run_id,connector:$connector,repo_root:$repo_root,verification_script:$verification_script,artifact_root:$artifact_root,target_dir:$target_dir,rch_bin:$rch_bin,runner:$runner,toolchain:$toolchain}' \
   > "${OUT_ROOT}/environment.json"
 
+# shellcheck disable=SC2016
 {
   printf '%s\n' '#!/usr/bin/env bash'
   printf '%s\n' 'set -euo pipefail'
   printf '%s\n' ''
-  printf '%s\n' 'fwc manifest fix connectors/mysql/manifest.toml --check --json'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo check -p fcp-mysql --all-targets'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo fmt -p fcp-mysql -- --check'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-mysql --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-mysql --test integration self_check_secretless_requires_injection_and_evidence -- --nocapture'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-mysql --test integration introspection_emits_mutation_approval_evidence -- --nocapture'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-mysql --test integration -- --nocapture'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo clippy -p fcp-mysql --all-targets -- -D warnings'
+  printf '%s\n' 'TARGET_DIR="${FCP_MYSQL_TARGET_DIR:-/tmp/fcp-mysql-e2e}"'
+  printf '%s\n' 'RCH_BIN="${RCH_BIN:-rch}"'
+  printf '%s\n' 'REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"'
+  printf '%s\n' 'export RCH_FORCE_REMOTE=1'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo run -q -p fwc -- manifest fix connectors/mysql/manifest.toml --check --json'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo check -p fcp-mysql --all-targets'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo fmt -p fcp-mysql -- --check'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-mysql --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-mysql --test integration self_check_secretless_requires_injection_and_evidence -- --nocapture'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-mysql --test integration introspection_emits_mutation_approval_evidence -- --nocapture'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo test -p fcp-mysql --test integration -- --nocapture'
+  printf '%s\n' 'env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo clippy -p fcp-mysql --all-targets -- -D warnings'
 } > "${OUT_ROOT}/replay.sh"
 chmod +x "${OUT_ROOT}/replay.sh"
 

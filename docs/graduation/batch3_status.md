@@ -6,17 +6,18 @@ This is a status artifact, not a graduation claim. A connector is PROVEN only af
 
 Summary: `0/4` Batch 3 connectors currently pass the graduation gauntlet.
 
+Pre-promotion status: `4/4` Batch 3 connectors pass every check before `readme_status_match`; none should be called PROVEN until the full proof bundle lands.
+
 | Connector | Status | First failing check | Checks passed before failure | Detail |
 |-----------|--------|---------------------|------------------------------|--------|
 | `connectors/huggingface` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/deepseek` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
-| `connectors/llm-router` | `blocked` | `local_non_mock` | `6` | missing tests/local_non_mock.rs |
+| `connectors/llm-router` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/google-ai` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 
 ## Current Next Actions
 
-- Add or restore connector-local `operations_info` metadata where the gauntlet stops at `operations_info`.
-- Add redaction-safe `scripts/e2e/...` verification-script declarations where the gauntlet stops at `verification_script_declared`.
-- Add connector-local `tests/local_non_mock.rs` acceptance coverage where the gauntlet stops at `local_non_mock`.
-- Fix manifest network constraints where the gauntlet stops at `network_policy`.
-- Do not mark any Batch 3 connector PROVEN until its manifest, README, local non-mock proof, sandbox/network policy, and operator guidance all pass the gauntlet.
+- Batch 3 has completed the pre-promotion metadata/local-non-mock checks, but every connector is still blocked at `readme_status_match`.
+- Run each Batch 3 connector's tracked verifier and cite redaction-safe JSONL artifact paths/hashes before any PROVEN promotion.
+- Promote README and manifest statuses to PROVEN only in the same change that cites the full verifier, conformance, and proof-lane results.
+- After PROVEN markers are present, run `rch exec -- cargo test -p fcp-conformance --test graduation_gauntlet_conformance all_proven_connectors_pass_gauntlet -- --nocapture`.

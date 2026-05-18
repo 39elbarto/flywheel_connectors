@@ -5,6 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/calendly_connector/${RUN_ID}}"
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+REMOTE_RUNNER="rch:remote-required"
+export RCH_FORCE_REMOTE=1
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
@@ -190,39 +193,27 @@ require_rch_remote_proof() {
 require_cmd jq
 require_cmd rch
 
-FWC_MANIFEST_BIN="${FWC_MANIFEST_BIN:-fwc}"
-manifest_check_cmd=()
-if command -v "${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
-  manifest_check_runner="local:${FWC_MANIFEST_BIN}"
-  manifest_check_cmd=(
-    "${FWC_MANIFEST_BIN}"
-    manifest
-    fix
-    connectors/calendly/manifest.toml
-    --check
-    --json
-  )
-else
-  manifest_check_runner="rch:cargo-run"
-  manifest_check_cmd=(
-    env
-    RCH_VISIBILITY=verbose
-    rch
-    exec
-    --
-    cargo
-    run
-    -q
-    -p
-    fwc
-    --
-    manifest
-    fix
-    connectors/calendly/manifest.toml
-    --check
-    --json
-  )
-fi
+manifest_check_runner="${REMOTE_RUNNER}:cargo-run"
+manifest_check_cmd=(
+  env
+  RCH_VISIBILITY=verbose
+  rch
+  exec
+  --
+  env
+  "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}"
+  cargo
+  run
+  -q
+  -p
+  fwc
+  --
+  manifest
+  fix
+  connectors/calendly/manifest.toml
+  --check
+  --json
+)
 
 if run_capture_stdout \
   manifest_check \
@@ -256,7 +247,7 @@ fi
 
 if run_logged \
   cargo_check \
-  env RCH_VISIBILITY=verbose rch exec -- cargo check -p fcp-calendly --all-targets
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo check -p fcp-calendly --all-targets
 then
   cargo_check_status="passed"
 else
@@ -266,7 +257,7 @@ fi
 
 if run_logged \
   format_check \
-  env RCH_VISIBILITY=verbose rch exec -- cargo fmt --manifest-path connectors/calendly/Cargo.toml --check
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo fmt --manifest-path connectors/calendly/Cargo.toml --check
 then
   format_check_status="passed"
 else
@@ -276,7 +267,7 @@ fi
 
 if run_logged \
   health_guidance_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration health_unconfigured_includes_guidance -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-calendly --test integration health_unconfigured_includes_guidance -- --nocapture
 then
   health_guidance_status="passed"
 else
@@ -286,7 +277,7 @@ fi
 
 if run_logged \
   doctor_guidance_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-calendly --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture
 then
   doctor_guidance_status="passed"
 else
@@ -296,7 +287,7 @@ fi
 
 if run_logged \
   self_check_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration self_check_ready_with_user_probe_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-calendly --test integration self_check_ready_with_user_probe_evidence -- --nocapture
 then
   self_check_status="passed"
 else
@@ -306,7 +297,7 @@ fi
 
 if run_logged \
   retryable_self_check_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration self_check_retryable_reports_degraded -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-calendly --test integration self_check_retryable_reports_degraded -- --nocapture
 then
   retryable_self_check_status="passed"
 else
@@ -316,7 +307,7 @@ fi
 
 if run_logged \
   scheduling_link_mutation_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration invoke_scheduling_link_create_emits_mutation_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-calendly --test integration invoke_scheduling_link_create_emits_mutation_evidence -- --nocapture
 then
   scheduling_link_mutation_status="passed"
 else
@@ -326,7 +317,7 @@ fi
 
 if run_logged \
   event_cancel_mutation_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration invoke_cancel_event_emits_mutation_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-calendly --test integration invoke_cancel_event_emits_mutation_evidence -- --nocapture
 then
   event_cancel_mutation_status="passed"
 else
@@ -336,7 +327,7 @@ fi
 
 if run_logged \
   compliance_evidence \
-  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration introspection_emits_v3_compliance_evidence -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-calendly --test integration introspection_emits_v3_compliance_evidence -- --nocapture
 then
   compliance_status="passed"
 else
@@ -346,7 +337,7 @@ fi
 
 if run_logged \
   integration_suite \
-  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-calendly --test integration -- --nocapture
 then
   integration_suite_status="passed"
 else
@@ -356,7 +347,7 @@ fi
 
 if run_logged \
   crate_suite \
-  env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly -- --nocapture
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-calendly -- --nocapture
 then
   crate_suite_status="passed"
 else
@@ -366,7 +357,7 @@ fi
 
 if run_logged \
   clippy \
-  env RCH_VISIBILITY=verbose rch exec -- cargo clippy -p fcp-calendly --all-targets -- -D warnings
+  env RCH_VISIBILITY=verbose rch exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo clippy -p fcp-calendly --all-targets -- -D warnings
 then
   clippy_status="passed"
 else
@@ -380,6 +371,8 @@ jq -n \
   --arg repo_root "${REPO_ROOT}" \
   --arg verification_script "scripts/e2e/calendly_connector_verification.sh" \
   --arg artifact_root "${OUT_ROOT}" \
+  --arg runner "${REMOTE_RUNNER}" \
+  --arg toolchain "${REPO_TOOLCHAIN}" \
   --arg manifest_check_runner "${manifest_check_runner}" \
   --arg scope_note "verification covers readiness, auth probe behavior, provider-scope guidance, and the two risky scheduling mutations against localhost mocks" \
   '{
@@ -388,6 +381,8 @@ jq -n \
     repo_root: $repo_root,
     verification_script: $verification_script,
     artifact_root: $artifact_root,
+    runner: $runner,
+    toolchain: $toolchain,
     manifest_check_runner: $manifest_check_runner,
     scope_note: $scope_note
   }' > "${OUT_ROOT}/environment.json"
@@ -396,24 +391,21 @@ jq -n \
   printf '%s\n' '#!/usr/bin/env bash'
   printf '%s\n' 'set -euo pipefail'
   printf '%s\n' ''
-  printf '%s\n' "FWC_MANIFEST_BIN=\"\${FWC_MANIFEST_BIN:-fwc}\""
-  printf '%s\n' "if command -v \"\${FWC_MANIFEST_BIN}\" >/dev/null 2>&1; then"
-  printf '%s\n' "  \"\${FWC_MANIFEST_BIN}\" manifest fix connectors/calendly/manifest.toml --check --json"
-  printf '%s\n' 'else'
-  printf '%s\n' '  env RCH_VISIBILITY=verbose rch exec -- cargo run -q -p fwc -- manifest fix connectors/calendly/manifest.toml --check --json'
-  printf '%s\n' 'fi'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo fmt --manifest-path connectors/calendly/Cargo.toml --check'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo check -p fcp-calendly --all-targets'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration health_unconfigured_includes_guidance -- --nocapture'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration self_check_ready_with_user_probe_evidence -- --nocapture'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration self_check_retryable_reports_degraded -- --nocapture'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration invoke_scheduling_link_create_emits_mutation_evidence -- --nocapture'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration invoke_cancel_event_emits_mutation_evidence -- --nocapture'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration introspection_emits_v3_compliance_evidence -- --nocapture'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly --test integration -- --nocapture'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo test -p fcp-calendly -- --nocapture'
-  printf '%s\n' 'env RCH_VISIBILITY=verbose rch exec -- cargo clippy -p fcp-calendly --all-targets -- -D warnings'
+  printf '%s\n' "REPO_TOOLCHAIN=\"\${REPO_TOOLCHAIN:-nightly-2026-02-19}\""
+  printf '%s\n' 'export RCH_FORCE_REMOTE=1'
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo run -q -p fwc -- manifest fix connectors/calendly/manifest.toml --check --json"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo fmt --manifest-path connectors/calendly/Cargo.toml --check"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo check -p fcp-calendly --all-targets"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-calendly --test integration health_unconfigured_includes_guidance -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-calendly --test integration doctor_unconfigured_reports_operator_guidance -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-calendly --test integration self_check_ready_with_user_probe_evidence -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-calendly --test integration self_check_retryable_reports_degraded -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-calendly --test integration invoke_scheduling_link_create_emits_mutation_evidence -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-calendly --test integration invoke_cancel_event_emits_mutation_evidence -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-calendly --test integration introspection_emits_v3_compliance_evidence -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-calendly --test integration -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo test -p fcp-calendly -- --nocapture"
+  printf '%s\n' "env RCH_VISIBILITY=verbose rch exec -- env \"RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}\" cargo clippy -p fcp-calendly --all-targets -- -D warnings"
 } > "${OUT_ROOT}/replay.sh"
 chmod +x "${OUT_ROOT}/replay.sh"
 
@@ -422,6 +414,7 @@ jq -n \
   --arg connector "fcp-calendly" \
   --arg overall_status "${OVERALL_STATUS}" \
   --arg artifacts_root "${OUT_ROOT}" \
+  --arg runner "${REMOTE_RUNNER}" \
   --arg manifest_status "${manifest_status}" \
   --arg manifest_note "${manifest_note}" \
   --arg cargo_check "${cargo_check_status}" \
@@ -455,6 +448,7 @@ jq -n \
     run_id: $run_id,
     connector: $connector,
     overall_status: $overall_status,
+    runner: $runner,
     artifacts_root: $artifacts_root,
     steps: {
       manifest_check: {

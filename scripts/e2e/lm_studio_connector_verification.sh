@@ -7,11 +7,15 @@ RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/lm-studio/${RUN_ID}}"
 TARGET_DIR="${FCP_LM_STUDIO_TARGET_DIR:-/tmp/fcp-lm-studio-e2e}"
 RCH_BIN="${RCH_BIN:-rch}"
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+REMOTE_RUNNER="rch:remote-required"
+export RCH_FORCE_REMOTE=1
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
 OVERALL_STATUS="ok"
 EXIT_CODE=0
+LAST_STEP_STATUS="not_run"
 
 manifest_status="pending"
 cargo_check_status="pending"
@@ -41,78 +45,114 @@ promote_overall_status() {
 
 classify_failure() {
   local log_path="$1"
-  if grep -Eq 'timeout: failed to execute process|RCH-E|missing worker|No space left on device|dbus-1\.pc|connection reset by peer' "${log_path}"; then
+  if grep -Eq 'timeout: failed to execute process|RCH-E|remote required; refusing local fallback|rch command did not produce remote proof|\[RCH\] local|missing worker|No space left on device|dbus-1\.pc|connection reset by peer|Backend unavailable|unable to update registry|spurious network error|failed to get successful HTTP response' "${log_path}"; then
     echo "infra_blocked"
   else
     echo "failed"
   fi
 }
 
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required command: $1" >&2
+    exit 1
+  fi
+}
+
+require_rch_remote_proof() {
+  local name="$1"
+  local log_path="$2"
+
+  if grep -Fq "[RCH] remote" "${log_path}"; then
+    return 0
+  fi
+
+  echo "[lm-studio-verification] ${name}: rch command did not produce remote proof" >&2
+  echo "rch command did not produce remote proof" >>"${log_path}"
+  return 1
+}
+
 run_logged() {
   local name="$1"
   shift
   local log_path="${OUT_ROOT}/logs/${name}.log"
+  local rc
 
   echo "[lm-studio-verification] ${name}: $*" >&2
   (
-    cd "${REPO_ROOT}"
+    cd "${REPO_ROOT}" || exit
     "$@"
   ) >"${log_path}" 2>&1
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && ! require_rch_remote_proof "${name}" "${log_path}"; then
+    return 1
+  fi
+  return "${rc}"
+}
+
+run_capture_stdout() {
+  local name="$1"
+  local stdout_path="$2"
+  shift 2
+  local log_path="${OUT_ROOT}/logs/${name}.log"
+  local rc
+
+  echo "[lm-studio-verification] ${name}: $*" >&2
+  (
+    cd "${REPO_ROOT}" || exit
+    "$@"
+  ) >"${stdout_path}" 2>"${log_path}"
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && ! require_rch_remote_proof "${name}" "${log_path}"; then
+    return 1
+  fi
+  return "${rc}"
 }
 
 run_step() {
   local name="$1"
   shift
   if run_logged "${name}" "$@"; then
-    echo "passed"
+    LAST_STEP_STATUS="passed"
   else
     local status
     status="$(classify_failure "${OUT_ROOT}/logs/${name}.log")"
     promote_overall_status "${status}"
-    echo "${status}"
+    LAST_STEP_STATUS="${status}"
   fi
 }
 
 git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
-FWC_MANIFEST_BIN="${FWC_MANIFEST_BIN:-fwc}"
-if command -v "${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
-  manifest_check_runner="local:${FWC_MANIFEST_BIN}"
-  if run_logged \
-    manifest_check \
-    "${FWC_MANIFEST_BIN}" manifest fix connectors/lm-studio/manifest.toml --check --json
-  then
-    manifest_status="passed"
-    cp "${OUT_ROOT}/logs/manifest_check.log" "${OUT_ROOT}/evidence/manifest_check.json"
-  else
-    manifest_status="$(classify_failure "${OUT_ROOT}/logs/manifest_check.log")"
-    promote_overall_status "${manifest_status}"
-    cat >"${OUT_ROOT}/evidence/manifest_check.json" <<EOF
-{"status":"${manifest_status}","log":"${OUT_ROOT}/logs/manifest_check.log"}
-EOF
-  fi
+require_cmd "${RCH_BIN}"
+
+manifest_check_runner="${REMOTE_RUNNER}:cargo-run"
+manifest_stdout_path="${OUT_ROOT}/evidence/manifest_check.command.json"
+if run_capture_stdout \
+  manifest_check \
+  "${manifest_stdout_path}" \
+  env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo run -q -p fwc -- manifest fix connectors/lm-studio/manifest.toml --check --json
+then
+  manifest_status="passed"
+  cp "${manifest_stdout_path}" "${OUT_ROOT}/evidence/manifest_check.json"
 else
-  manifest_check_runner="rch:cargo-run"
-  if run_logged \
-    manifest_check \
-    "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo run -q -p fwc -- manifest fix connectors/lm-studio/manifest.toml --check --json
-  then
-    manifest_status="passed"
-    cp "${OUT_ROOT}/logs/manifest_check.log" "${OUT_ROOT}/evidence/manifest_check.json"
-  else
-    manifest_status="$(classify_failure "${OUT_ROOT}/logs/manifest_check.log")"
-    promote_overall_status "${manifest_status}"
-    cat >"${OUT_ROOT}/evidence/manifest_check.json" <<EOF
-{"status":"${manifest_status}","log":"${OUT_ROOT}/logs/manifest_check.log"}
+  manifest_status="$(classify_failure "${OUT_ROOT}/logs/manifest_check.log")"
+  promote_overall_status "${manifest_status}"
+  cat >"${OUT_ROOT}/evidence/manifest_check.json" <<EOF
+{"status":"${manifest_status}","command_output":"${manifest_stdout_path}","log":"${OUT_ROOT}/logs/manifest_check.log"}
 EOF
-  fi
 fi
 
-cargo_check_status="$(run_step cargo_check "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo check -p fcp-lm-studio --all-targets)"
-format_check_status="$(run_step format_check "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo fmt --package fcp-lm-studio --check)"
-loopback_status="$(run_step loopback_jsonl "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" LM_STUDIO_E2E_GIT_REVISION="${git_revision}" cargo test -p fcp-lm-studio --test integration lm_studio_loopback_e2e_jsonl_matrix -- --nocapture)"
-local_status="$(run_step local_jsonl "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" LM_STUDIO_E2E_GIT_REVISION="${git_revision}" cargo test -p fcp-lm-studio --test integration lm_studio_local_smoke_or_structured_skip_jsonl -- --nocapture)"
-clippy_status="$(run_step clippy "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo clippy -p fcp-lm-studio --all-targets --no-deps -- -D warnings)"
+run_step cargo_check env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo check -p fcp-lm-studio --all-targets
+cargo_check_status="${LAST_STEP_STATUS}"
+run_step format_check env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo fmt --package fcp-lm-studio --check
+format_check_status="${LAST_STEP_STATUS}"
+run_step loopback_jsonl env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" LM_STUDIO_E2E_GIT_REVISION="${git_revision}" cargo test -p fcp-lm-studio --test integration lm_studio_loopback_e2e_jsonl_matrix -- --nocapture
+loopback_status="${LAST_STEP_STATUS}"
+run_step local_jsonl env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" LM_STUDIO_E2E_GIT_REVISION="${git_revision}" cargo test -p fcp-lm-studio --test integration lm_studio_local_smoke_or_structured_skip_jsonl -- --nocapture
+local_status="${LAST_STEP_STATUS}"
+run_step clippy env RCH_VISIBILITY=verbose "${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="${TARGET_DIR}" cargo clippy -p fcp-lm-studio --all-targets --no-deps -- -D warnings
+clippy_status="${LAST_STEP_STATUS}"
 
 if grep -a '^LM_STUDIO_E2E_JSONL ' "${OUT_ROOT}/logs/loopback_jsonl.log" \
   | sed 's/^LM_STUDIO_E2E_JSONL //' \
@@ -169,6 +209,8 @@ cat >"${OUT_ROOT}/environment.json" <<EOF
   "target_dir": "${TARGET_DIR}",
   "manifest_check_runner": "${manifest_check_runner}",
   "rch_bin": "${RCH_BIN}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
   "fixture_mode": "wiremock",
   "local_mode": "LM_STUDIO_E2E_BASE_URL/LM_STUDIO_E2E_MODEL gated with structured skip",
   "redaction": "no bearer token, prompt text, completion text, embedding input, embedding vector, or full base URL is emitted; JSONL carries base_url_class, model hashes, byte counts, status, retry decision, cleanup result, and skip reason"
@@ -181,18 +223,16 @@ set -euo pipefail
 
 TARGET_DIR="\${FCP_LM_STUDIO_TARGET_DIR:-${TARGET_DIR}}"
 RCH_BIN="\${RCH_BIN:-${RCH_BIN}}"
-FWC_MANIFEST_BIN="\${FWC_MANIFEST_BIN:-fwc}"
-if command -v "\${FWC_MANIFEST_BIN}" >/dev/null 2>&1; then
-  "\${FWC_MANIFEST_BIN}" manifest fix connectors/lm-studio/manifest.toml --check --json
-else
-  "\${RCH_BIN}" exec -- env CARGO_TARGET_DIR="\${TARGET_DIR}" cargo run -q -p fwc -- manifest fix connectors/lm-studio/manifest.toml --check --json
-fi
-"\${RCH_BIN}" exec -- env CARGO_TARGET_DIR="\${TARGET_DIR}" cargo check -p fcp-lm-studio --all-targets
-"\${RCH_BIN}" exec -- env CARGO_TARGET_DIR="\${TARGET_DIR}" cargo fmt --package fcp-lm-studio --check
+REPO_TOOLCHAIN="\${REPO_TOOLCHAIN:-${REPO_TOOLCHAIN}}"
+export RCH_FORCE_REMOTE=1
+
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo run -q -p fwc -- manifest fix connectors/lm-studio/manifest.toml --check --json
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo check -p fcp-lm-studio --all-targets
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo fmt --package fcp-lm-studio --check
 git_revision="\$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-"\${RCH_BIN}" exec -- env CARGO_TARGET_DIR="\${TARGET_DIR}" LM_STUDIO_E2E_GIT_REVISION="\${git_revision}" cargo test -p fcp-lm-studio --test integration lm_studio_loopback_e2e_jsonl_matrix -- --nocapture
-"\${RCH_BIN}" exec -- env CARGO_TARGET_DIR="\${TARGET_DIR}" LM_STUDIO_E2E_GIT_REVISION="\${git_revision}" cargo test -p fcp-lm-studio --test integration lm_studio_local_smoke_or_structured_skip_jsonl -- --nocapture
-"\${RCH_BIN}" exec -- env CARGO_TARGET_DIR="\${TARGET_DIR}" cargo clippy -p fcp-lm-studio --all-targets --no-deps -- -D warnings
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" LM_STUDIO_E2E_GIT_REVISION="\${git_revision}" cargo test -p fcp-lm-studio --test integration lm_studio_loopback_e2e_jsonl_matrix -- --nocapture
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" LM_STUDIO_E2E_GIT_REVISION="\${git_revision}" cargo test -p fcp-lm-studio --test integration lm_studio_local_smoke_or_structured_skip_jsonl -- --nocapture
+env RCH_VISIBILITY=verbose "\${RCH_BIN}" exec -- env "RUSTUP_TOOLCHAIN=\${REPO_TOOLCHAIN}" CARGO_TARGET_DIR="\${TARGET_DIR}" cargo clippy -p fcp-lm-studio --all-targets --no-deps -- -D warnings
 EOF
 chmod +x "${OUT_ROOT}/replay.sh"
 
@@ -202,6 +242,8 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
   "connector": "fcp-lm-studio",
   "overall_status": "${OVERALL_STATUS}",
   "artifacts_root": "${OUT_ROOT}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
   "steps": {
     "manifest_check": "${manifest_status}",
     "cargo_check": "${cargo_check_status}",

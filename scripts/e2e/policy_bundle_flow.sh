@@ -7,6 +7,10 @@ OUT_DIR="${OUT_DIR:-${REPO_ROOT}/out/${SCRIPT_NAME}}"
 LOG_JSONL="${LOG_JSONL:-${OUT_DIR}/${SCRIPT_NAME}.jsonl}"
 RAW_OUTPUT="${RAW_OUTPUT:-${OUT_DIR}/${SCRIPT_NAME}.raw.log}"
 DETAIL_JSONL="${DETAIL_JSONL:-${OUT_DIR}/${SCRIPT_NAME}.details.jsonl}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+POLICY_BUNDLE_TARGET_DIR="${POLICY_BUNDLE_TARGET_DIR:-/tmp/fcp-policy-bundle-flow}"
+export RCH_FORCE_REMOTE=1
 
 EXPECTED_FAILURE=""
 ACTUAL_FAILURE=""
@@ -14,10 +18,8 @@ STEP_CONTEXT="null"
 
 if [[ -n "${CARGO_CMD:-}" ]]; then
   read -r -a CARGO_CMD_ARR <<< "${CARGO_CMD}"
-elif command -v rch >/dev/null 2>&1; then
-  CARGO_CMD_ARR=(env TMPDIR=/tmp rch exec -- env FCP_POLICY_BUNDLE_E2E_PRINT_JSONL=1 CARGO_TARGET_DIR=.target-policy-bundle-flow cargo)
 else
-  CARGO_CMD_ARR=(cargo)
+  CARGO_CMD_ARR=(env TMPDIR=/tmp "${RCH_BIN}" exec -- env FCP_POLICY_BUNDLE_E2E_PRINT_JSONL=1 CARGO_TARGET_DIR="${POLICY_BUNDLE_TARGET_DIR}" cargo)
 fi
 
 require_cmd() {
@@ -130,6 +132,26 @@ run_step() {
   fi
 }
 
+rch_remote_summary_present() {
+  local execution_log="$1"
+
+  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
+    return 0
+  fi
+
+  if grep -Eq '^\[RCH\].*(local|refusing local fallback|no admissible workers)' "${execution_log}"; then
+    echo "Missing accepted remote rch summary in ${execution_log}" >&2
+    echo "rch remote proof is required; refusing local fallback" >&2
+    return 2
+  fi
+
+  grep -Eq '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}" && return 0
+
+  echo "Missing accepted remote rch summary in ${execution_log}" >&2
+  echo "rch remote proof is required; refusing local fallback" >&2
+  return 2
+}
+
 step_prepare() {
   mkdir -p "${OUT_DIR}"
   : > "${LOG_JSONL}"
@@ -138,12 +160,23 @@ step_prepare() {
 }
 
 step_run_bundle_flow_test() {
-  (
+  local remote_error=""
+
+  if ! (
     cd "${REPO_ROOT}"
     FCP_POLICY_BUNDLE_E2E_PRINT_JSONL=1 \
       "${CARGO_CMD_ARR[@]}" test -p fcp-cli --test policy_e2e_test \
       e2e_policy_bundle_apply_and_rollback_flow -- --nocapture
-  ) 2>&1 | tee "${RAW_OUTPUT}"
+  ) 2>&1 | tee "${RAW_OUTPUT}"; then
+    return 1
+  fi
+
+  if ! remote_error="$(rch_remote_summary_present "${RAW_OUTPUT}" 2>&1)"; then
+    printf '%s\n' "${remote_error}" >> "${RAW_OUTPUT}"
+    printf '%s\n' "${remote_error}" >&2
+    return 1
+  fi
+
   awk '/^\{.*"test_name":"e2e_policy_bundle_apply_and_rollback_flow"/ { print }' "${RAW_OUTPUT}" > "${DETAIL_JSONL}"
   [[ -s "${DETAIL_JSONL}" ]]
   cat "${DETAIL_JSONL}" >> "${LOG_JSONL}"
@@ -171,11 +204,8 @@ step_verify_bundle_flow_logs() {
   grep -q '"bundle_id":"bundle-before"' "${DETAIL_JSONL}"
 }
 
-require_cmd cargo
+require_cmd "${RCH_BIN}"
 require_cmd awk
-if command -v rch >/dev/null 2>&1 && [[ " ${CARGO_CMD_ARR[*]} " == *" rch "* ]]; then
-  require_cmd rch
-fi
 
 run_step "prepare_output" 1 \
   "[\"${LOG_JSONL}\",\"${RAW_OUTPUT}\",\"${DETAIL_JSONL}\"]" \

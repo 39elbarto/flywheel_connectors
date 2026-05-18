@@ -432,14 +432,20 @@ it requires exact Lean theorem/assumption ID arrays, stable command log hashes,
 an explicit redaction-scan pass record, the expected `SMALL_TEST` and
 `V4_REFERENCE` summary profiles, one consistent run id and git revision, and a
 separate final artifact SHA printed after the validation record is appended.
-For each `rch exec` lane the JSONL records include the observed `[RCH]` summary,
-worker execution class, and fallback decision. Local fallback and remote-worker
-failure summaries are still recorded in the failure artifact when they occur,
-but the gauntlet sets `RCH_REQUIRE_REMOTE=1` and `RCH_FORCE_REMOTE=1` for every
-Cargo-backed lane so local fallback is refused before expensive Cargo work can
-start. They are not reusable gauntlet proof: a command that was requested
-through `rch exec` must finish with `worker_execution_class:"remote"` before
-the script can append a passing command record. The gauntlet self-contract
+Its command records carry the same execution-proof fields as the top-level
+gauntlet: non-`rch` lanes must report `fallback_decision:"not_needed"`,
+`worker_execution_class:"not_applicable"`, and `rch_summary:null`; `rch`-backed
+lanes must report `worker_execution_class:"remote"` with an observed
+`[RCH] remote` summary before the formal correspondence self-contract can pass.
+For each top-level gauntlet `rch exec` lane, the JSONL records include the
+observed `[RCH]` summary, worker execution class, and fallback decision. Local
+fallback and remote-worker failure summaries are still recorded in the failure
+artifact when they occur, but the gauntlet sets `RCH_REQUIRE_REMOTE=1` and
+`RCH_FORCE_REMOTE=1` for every Cargo-backed lane so local fallback is refused
+before expensive Cargo work can start. They are not reusable gauntlet proof: a
+command that was requested through `rch exec` must finish with
+`worker_execution_class:"remote"` before the script can append a passing command
+record. The gauntlet self-contract
 requires every command-run record, local or `rch`-backed, to carry a stable log
 artifact, `sha256:<64 lowercase hex>` log hash, duration, retry count, fallback decision,
 worker execution class, cache decision, cleanup result, and the RCH summary

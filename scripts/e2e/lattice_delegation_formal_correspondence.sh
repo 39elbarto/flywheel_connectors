@@ -8,7 +8,10 @@ ARTIFACT="${ARTIFACT:-${OUT_DIR}/lattice-delegation-formal-correspondence-proof.
 TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-lattice-formal-${RUN_ID}}"
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-verbose}"
+export RCH_REQUIRE_REMOTE
 export RCH_FORCE_REMOTE=1
+export RCH_VISIBILITY
 
 mkdir -p "${OUT_DIR}"
 : > "${ARTIFACT}"
@@ -75,66 +78,116 @@ require_text() {
   fi
 }
 
-rch_remote_summary_present() {
-  local execution_log="$1"
-
-  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
-    return 0
+json_string_or_null() {
+  local value="$1"
+  if [ -n "${value}" ]; then
+    jq -Rn --arg value "${value}" '$value'
+  else
+    printf 'null'
   fi
+}
 
-  if grep -Eq '^\[RCH\].*(local|refusing local fallback|no admissible workers)' "${execution_log}"; then
-    echo "Missing accepted remote rch summary in ${execution_log}" >&2
-    echo "rch remote proof is required; refusing local fallback" >&2
-    return 2
+rch_summary_line() {
+  local log="$1"
+  grep -E '^\[RCH\] (remote|local|failed)' "${log}" | tail -n 1 || true
+}
+
+fallback_decision_for_log() {
+  local log="$1"
+  local summary
+  summary="$(rch_summary_line "${log}")"
+  if [ -z "${summary}" ]; then
+    printf 'rch_summary_unobserved'
+  elif printf '%s' "${summary}" | grep -Fq 'failed'; then
+    printf 'rch_remote_failed'
+  elif printf '%s' "${summary}" | grep -Fq '[RCH] local'; then
+    printf 'rch_local_fallback'
+  elif printf '%s' "${summary}" | grep -Fq '[RCH] remote'; then
+    printf 'not_needed'
+  else
+    printf 'rch_summary_unclassified'
   fi
+}
 
-  grep -Eq '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}" && return 0
-
-  echo "Missing accepted remote rch summary in ${execution_log}" >&2
-  echo "rch remote proof is required; refusing local fallback" >&2
-  return 2
+worker_execution_class_for_log() {
+  local log="$1"
+  local summary
+  summary="$(rch_summary_line "${log}")"
+  if [ -z "${summary}" ]; then
+    printf 'unknown'
+  elif printf '%s' "${summary}" | grep -Fq 'failed'; then
+    printf 'remote_failed'
+  elif printf '%s' "${summary}" | grep -Fq '[RCH] local'; then
+    printf 'local'
+  elif printf '%s' "${summary}" | grep -Fq '[RCH] remote'; then
+    printf 'remote'
+  else
+    printf 'unknown'
+  fi
 }
 
 run_and_capture() {
   local step="$1"
   shift
   local log="${OUT_DIR}/${RUN_ID}.${step}.log"
-  local require_remote_summary=0
+  local require_remote_rch=0
   if [[ "${1:-}" == "${RCH_BIN}" ]]; then
-    require_remote_summary=1
+    require_remote_rch=1
   fi
   assert_stable_revision "stable_revision_before_${step}"
   if "$@" >"${log}" 2>&1; then
-    if (( require_remote_summary )); then
-      local remote_error=""
-      if ! remote_error="$(rch_remote_summary_present "${log}" 2>&1)"; then
-        printf '%s\n' "${remote_error}" >> "${log}"
-        local hash
-        hash="$(shasum -a 256 "${log}" | awk '{print $1}')"
+    local hash fallback_decision worker_execution_class rch_summary rch_summary_json
+    hash="$(shasum -a 256 "${log}" | awk '{print $1}')"
+    if (( require_remote_rch )); then
+      fallback_decision="$(fallback_decision_for_log "${log}")"
+      worker_execution_class="$(worker_execution_class_for_log "${log}")"
+      rch_summary="$(rch_summary_line "${log}")"
+      rch_summary_json="$(json_string_or_null "${rch_summary}")"
+      if [ "${worker_execution_class}" != "remote" ]; then
         fail_step "${step}" "$(jq -cn \
           --arg log_hash "sha256:${hash}" \
           --arg log_artifact_class "relative-target-log" \
-          --arg remote_error "${remote_error}" \
+          --arg fallback_decision "${fallback_decision}" \
+          --arg worker_execution_class "${worker_execution_class}" \
+          --argjson rch_summary "${rch_summary_json}" \
           --arg cleanup_result "not_applicable" \
-          '{log_hash:$log_hash,log_artifact_class:$log_artifact_class,remote_error:$remote_error,cleanup_result:$cleanup_result}')"
+          '{log_hash:$log_hash,log_artifact_class:$log_artifact_class,fallback_decision:$fallback_decision,worker_execution_class:$worker_execution_class,rch_summary:$rch_summary,required_worker_execution_class:"remote",cleanup_result:$cleanup_result}')"
       fi
+    else
+      fallback_decision="not_needed"
+      worker_execution_class="not_applicable"
+      rch_summary_json="null"
     fi
-    local hash
-    hash="$(shasum -a 256 "${log}" | awk '{print $1}')"
     assert_stable_revision "stable_revision_after_${step}"
     append_json "${step}" "pass" "$(jq -cn \
       --arg log_hash "sha256:${hash}" \
       --arg log_artifact_class "relative-target-log" \
+      --arg fallback_decision "${fallback_decision}" \
+      --arg worker_execution_class "${worker_execution_class}" \
+      --argjson rch_summary "${rch_summary_json}" \
       --arg cleanup_result "not_applicable" \
-      '{log_hash:$log_hash,log_artifact_class:$log_artifact_class,cleanup_result:$cleanup_result}')"
+      '{log_hash:$log_hash,log_artifact_class:$log_artifact_class,fallback_decision:$fallback_decision,worker_execution_class:$worker_execution_class,rch_summary:$rch_summary,cleanup_result:$cleanup_result}')"
   else
-    local hash
+    local hash fallback_decision worker_execution_class rch_summary rch_summary_json
     hash="$(shasum -a 256 "${log}" | awk '{print $1}')"
+    if (( require_remote_rch )); then
+      fallback_decision="$(fallback_decision_for_log "${log}")"
+      worker_execution_class="$(worker_execution_class_for_log "${log}")"
+      rch_summary="$(rch_summary_line "${log}")"
+      rch_summary_json="$(json_string_or_null "${rch_summary}")"
+    else
+      fallback_decision="not_needed"
+      worker_execution_class="not_applicable"
+      rch_summary_json="null"
+    fi
     fail_step "${step}" "$(jq -cn \
       --arg log_hash "sha256:${hash}" \
       --arg log_artifact_class "relative-target-log" \
+      --arg fallback_decision "${fallback_decision}" \
+      --arg worker_execution_class "${worker_execution_class}" \
+      --argjson rch_summary "${rch_summary_json}" \
       --arg cleanup_result "not_applicable" \
-      '{log_hash:$log_hash,log_artifact_class:$log_artifact_class,cleanup_result:$cleanup_result}')"
+      '{log_hash:$log_hash,log_artifact_class:$log_artifact_class,fallback_decision:$fallback_decision,worker_execution_class:$worker_execution_class,rch_summary:$rch_summary,cleanup_result:$cleanup_result}')"
   fi
 }
 
@@ -196,10 +249,21 @@ validate_formal_script_contract() {
         "principal:",
         "z:"
       ];
+    def non_rch_command_proof:
+      .details.fallback_decision == "not_needed" and
+      .details.worker_execution_class == "not_applicable" and
+      .details.rch_summary == null;
+    def rch_remote_proof:
+      .details.fallback_decision == "not_needed" and
+      .details.worker_execution_class == "remote" and
+      (.details.rch_summary | type == "string" and contains("[RCH] remote"));
+    def execution_proof_contract:
+      non_rch_command_proof or rch_remote_proof;
     def command_step($step):
       any(.[]; .step == $step and .result == "pass" and
         (.details.log_hash | sha256_hash) and
         .details.log_artifact_class == "relative-target-log" and
+        execution_proof_contract and
         (.details.cleanup_result | type == "string"));
     def lean_lake_step:
       any(.[]; .step == "lean_lake_build" and
@@ -208,6 +272,7 @@ validate_formal_script_contract() {
          (.result == "pass" and
           (.details.log_hash | sha256_hash) and
           .details.log_artifact_class == "relative-target-log" and
+          execution_proof_contract and
           (.details.cleanup_result | type == "string"))));
     def top_level_provenance_consistent:
       ([.[] | .run_id] | unique | length == 1) and

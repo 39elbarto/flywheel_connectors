@@ -205,7 +205,7 @@ redaction_scan() {
     "${LOG_JSONL}"
     "${OUT_ROOT}/logs/cargo_check.log"
     "${OUT_ROOT}/logs/format_check.log"
-    "${OUT_ROOT}/logs/local_loopback_non_mock.log"
+    "${OUT_ROOT}/logs/local_non_mock.log"
     "${OUT_ROOT}/logs/connector_tests.log"
     "${OUT_ROOT}/logs/clippy.log"
   )
@@ -249,7 +249,7 @@ emit_summary() {
       connector_id: $connector_id,
       git_revision: $git_revision,
       status: $status,
-      local_loopback_non_mock: "connectors/synology-chat/tests/integration.rs::send_file_url_loopback_e2e_logs_policy_errors_and_shutdown",
+      local_non_mock: "connectors/synology-chat/tests/local_non_mock.rs",
       host_forwarded_ingress_e2e: "connectors/synology-chat/tests/integration.rs::ingest_outgoing_webhook_host_forwarded_policy_e2e_logs_decisions",
       live_device_prerequisites: "connectors/synology-chat/tests/live_verification.rs",
       fixture_mode: "loopback HTTP Synology Chat incoming-webhook/file-url fixtures plus host-forwarded outgoing-webhook policy normalization",
@@ -279,12 +279,12 @@ run_logged \
     cargo fmt -p fcp-synology-chat -- --check
 
 run_logged \
-  local_loopback_non_mock \
+  local_non_mock \
   "${RCH_BIN}" exec -- env \
     CARGO_TARGET_DIR="${TARGET_DIR}" \
     CARGO_INCREMENTAL=0 \
     CARGO_BUILD_JOBS=2 \
-    cargo test -j 2 -p fcp-synology-chat --locked --test integration send_file_url_loopback_e2e_logs_policy_errors_and_shutdown -- --nocapture
+    cargo test -j 2 -p fcp-synology-chat --locked --test local_non_mock -- --nocapture
 
 run_logged \
   connector_tests \

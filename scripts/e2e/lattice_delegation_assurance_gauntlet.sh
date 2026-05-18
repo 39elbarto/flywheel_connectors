@@ -22,6 +22,10 @@ validate_run_id() {
 
 validate_artifact_path() {
   case "${ARTIFACT}" in
+    target/fcp-crypto-pq/*/*.jsonl)
+      printf 'invalid ARTIFACT: reusable evidence path must be a single JSONL file directly under target/fcp-crypto-pq\n' >&2
+      exit 64
+      ;;
     target/fcp-crypto-pq/*.jsonl) ;;
     *)
       printf 'invalid ARTIFACT: reusable evidence path must be a relative target/fcp-crypto-pq/*.jsonl path\n' >&2
@@ -1163,6 +1167,7 @@ validate_gauntlet_contract() {
       type == "string" and
       test("^[A-Za-z0-9._/-]+[.]jsonl$") and
       startswith("target/fcp-crypto-pq/") and
+      ((sub("^target/fcp-crypto-pq/"; "") | contains("/")) | not) and
       (startswith("/") | not) and
       (contains("..") | not) and
       (contains("//") | not);

@@ -5,6 +5,10 @@ SCRIPT_NAME="e2e_raptorq_partial_symbol_recovery"
 SEED="0xF0UNTAIN"
 OUT_DIR="${OUT_DIR:-./out/${SCRIPT_NAME}}"
 LOG_JSONL="${LOG_JSONL:-${OUT_DIR}/${SCRIPT_NAME}.jsonl}"
+TARGET_DIR="${RAPTORQ_PARTIAL_TARGET_DIR:-/tmp/fcp-raptorq-partial-recovery}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+export RCH_FORCE_REMOTE=1
 STEP_CONTEXT="null"
 
 require_cmd() {
@@ -15,19 +19,30 @@ require_cmd() {
 }
 
 run_cargo() {
-  if command -v rch >/dev/null 2>&1; then
-    rch exec -- cargo "$@"
-    return $?
-  fi
-  cargo "$@"
+  env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose \
+    "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo "$@"
 }
 
-run_fcp_e2e() {
-  if command -v fcp-e2e >/dev/null 2>&1; then
-    fcp-e2e "$@"
-    return $?
+rch_remote_summary_present() {
+  local log_path="$1"
+  local summary
+  summary="$(grep -aE '\[RCH\][[:space:]]+(remote|local|failed)' "${log_path}" | tail -n 1 || true)"
+  [[ "${summary}" =~ \[RCH\][[:space:]]+remote ]]
+}
+
+run_cargo_logged() {
+  local log_path="$1"
+  shift
+  local rc
+
+  run_cargo "$@" > "${log_path}" 2>&1
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]] && ! rch_remote_summary_present "${log_path}"; then
+    echo "${SCRIPT_NAME}: rch command did not produce remote proof; see ${log_path}" >&2
+    echo "rch command did not produce remote proof" >> "${log_path}"
+    return 2
   fi
-  run_cargo run -q -p fcp-e2e --bin fcp-e2e -- "$@"
+  return "${rc}"
 }
 
 now_ms() {
@@ -138,7 +153,7 @@ step_partial_loss_degrades_coverage() {
   local metrics_jsonl="${OUT_DIR}/partial_loss_degrades_coverage.metrics.jsonl"
   local coverage_before_bps coverage_after_bps symbol_count
 
-  run_cargo test -p fcp-store --test store_repair_integration partial_loss_degrades_coverage -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-store --test store_repair_integration partial_loss_degrades_coverage -- --nocapture || return
   capture_json_metrics "${execution_log}" "${metrics_jsonl}"
 
   coverage_before_bps="$(metric_for_test "${metrics_jsonl}" "partial_loss_degrades_coverage" '.details.coverage_before_bps // empty')"
@@ -163,7 +178,7 @@ step_partial_loss_repair_reconstruct() {
   local execution_log="${OUT_DIR}/partial_loss_repair_reconstruct.execution.log"
   local metrics_jsonl="${OUT_DIR}/partial_loss_repair_reconstruct.metrics.jsonl"
 
-  run_cargo test -p fcp-store --test store_repair_integration partial_loss_repair_reconstruct -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-store --test store_repair_integration partial_loss_repair_reconstruct -- --nocapture || return
   capture_json_metrics "${execution_log}" "${metrics_jsonl}"
 
   # Verify test passed (grep for ok marker)
@@ -180,7 +195,7 @@ step_reconstruct_from_repair_only() {
   local execution_log="${OUT_DIR}/reconstruct_from_repair_symbols_only.execution.log"
   local metrics_jsonl="${OUT_DIR}/reconstruct_from_repair_symbols_only.metrics.jsonl"
 
-  run_cargo test -p fcp-store --test store_repair_integration reconstruct_from_repair_symbols_only -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-store --test store_repair_integration reconstruct_from_repair_symbols_only -- --nocapture || return
   capture_json_metrics "${execution_log}" "${metrics_jsonl}"
 
   grep -q "reconstruct_from_repair_symbols_only ... ok" "${execution_log}" || {
@@ -197,7 +212,7 @@ step_repair_convergence() {
   local metrics_jsonl="${OUT_DIR}/repair_convergence.metrics.jsonl"
   local coverage_bps repairs_succeeded initial_queue_depth final_queue_depth
 
-  run_cargo test -p fcp-store --test store_repair_integration repair_controller_drives_convergence -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-store --test store_repair_integration repair_controller_drives_convergence -- --nocapture || return
   capture_json_metrics "${execution_log}" "${metrics_jsonl}"
 
   coverage_bps="$(metric_for_test "${metrics_jsonl}" "repair_controller_drives_convergence" '.coverage_bps // empty')"
@@ -226,7 +241,7 @@ step_repair_convergence() {
 step_encode_decode_roundtrip() {
   local execution_log="${OUT_DIR}/encode_decode_roundtrip.execution.log"
 
-  run_cargo test -p fcp-raptorq encode_decode_roundtrip -- --nocapture > "${execution_log}" 2>&1
+  run_cargo_logged "${execution_log}" test -p fcp-raptorq encode_decode_roundtrip -- --nocapture || return
   grep -q "encode_decode_roundtrip ... ok" "${execution_log}" || {
     echo "Encode/decode roundtrip did not pass in ${execution_log}" >&2
     exit 1
@@ -235,7 +250,7 @@ step_encode_decode_roundtrip() {
   STEP_CONTEXT='{"category":"roundtrip","outcome":"encode_decode_verified"}'
 }
 
-require_cmd cargo
+require_cmd "${RCH_BIN}"
 require_cmd jq
 
 mkdir -p "${OUT_DIR}"
@@ -267,6 +282,6 @@ run_step \
   "[\"${OUT_DIR}/encode_decode_roundtrip.execution.log\"]" \
   step_encode_decode_roundtrip
 
-run_fcp_e2e --validate-log "${LOG_JSONL}"
+run_cargo_logged "${OUT_DIR}/validate_log.execution.log" run -q -p fcp-e2e --bin fcp-e2e -- --validate-log "${LOG_JSONL}"
 
 echo "${SCRIPT_NAME} complete. Logs: ${LOG_JSONL}"

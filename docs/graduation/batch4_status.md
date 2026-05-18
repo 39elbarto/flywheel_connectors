@@ -18,7 +18,7 @@ Summary: `0/23` Batch 4 connectors currently pass the graduation gauntlet.
 | `connectors/telnyx` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/circleci` | `blocked` | `verification_script_declared` | `4` | README does not declare a scripts/e2e verification script |
 | `connectors/package-registry` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
-| `connectors/paypal` | `blocked` | `verification_script_declared` | `4` | README does not declare a scripts/e2e verification script |
+| `connectors/paypal` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/irc` | `blocked` | `verification_script_declared` | `4` | README does not declare a scripts/e2e verification script |
 | `connectors/line` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/qq` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |

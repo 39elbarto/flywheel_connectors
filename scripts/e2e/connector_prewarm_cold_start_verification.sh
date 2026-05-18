@@ -334,6 +334,7 @@ if [[ "${overall_status}" == "passed" ]]; then
         and same("zone")
         and same("strategy")
         and same("pool_state")
+        and same("pool_size")
         and same("admission_decision")
         and same("warm_checkout")
         and same("activation_latency_ms")

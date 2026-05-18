@@ -55,7 +55,9 @@ The nested typed `evidence.latency` and `evidence.baseline_latency` objects must
 still carry the full ordered p50/p95/p99/p999/max/mean shape required by
 `SwarmPrewarmColdStartEvidence::validate()`, and the verifier reports
 `nested_latency_shape_ok=false` when externally supplied evidence omits or
-misorders those fields.
+misorders those fields. The top-level replay row and nested typed `evidence`
+object must also agree on `pool_size`, so provided bundles cannot report one
+configured prewarm pool capacity while embedding another.
 The command line must prove the Cargo lane ran through `rch exec --` instead of
 local Cargo so the artifact is usable as shared-worker evidence.
 The E2E JSONL bundle covers warm hit, empty pool, stale warm entry, crash before

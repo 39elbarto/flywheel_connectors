@@ -18,7 +18,8 @@ Options:
 Runs the QQ gateway projection evidence lane through rch, extracts
 redaction-safe JSONL emitted by the connector e2e test, validates required
 policy/reply/media/replay/shutdown coverage, and writes an operator replay
-bundle.
+bundle. A passing run requires an accepted `[RCH] remote` proof summary; local
+fallback, local fallback refusal, or a missing RCH summary is non-green.
 EOF
 }
 
@@ -57,8 +58,77 @@ require_cmd() {
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+json_string_or_null() {
+  local value="$1"
+  if [[ -n "${value}" ]]; then
+    jq -Rn --arg value "${value}" '$value'
+  else
+    printf 'null'
+  fi
+}
+
+rch_summary_line() {
+  local log_path="$1"
+  grep -aE '^\[RCH\] (remote|local|failed)' "${log_path}" | tail -n 1 || true
+}
+
+fallback_decision_for_log() {
+  local log_path="$1"
+  local summary
+  summary="$(rch_summary_line "${log_path}")"
+  if [[ -z "${summary}" ]]; then
+    printf 'rch_summary_unobserved'
+  elif printf '%s' "${summary}" | grep -Eq 'remote required; refusing local fallback|refus(ed|ing) local fallback'; then
+    printf 'rch_local_fallback_refused'
+  elif printf '%s' "${summary}" | grep -Fq '[RCH] local'; then
+    if grep -aqE 'remote required; refusing local fallback|refus(ed|ing) local fallback' "${log_path}"; then
+      printf 'rch_local_fallback_refused'
+    else
+      printf 'rch_local_fallback'
+    fi
+  elif printf '%s' "${summary}" | grep -Fq 'failed'; then
+    printf 'rch_remote_failed'
+  elif printf '%s' "${summary}" | grep -Eq '^\[RCH\] remote([[:space:]]|$)' &&
+    ! printf '%s' "${summary}" | grep -Eq 'remote required; refusing local fallback|refus(ed|ing) local fallback'; then
+    printf 'not_needed'
+  else
+    printf 'rch_summary_unclassified'
+  fi
+}
+
+worker_execution_class_for_log() {
+  local log_path="$1"
+  local summary
+  summary="$(rch_summary_line "${log_path}")"
+  if [[ -z "${summary}" ]]; then
+    printf 'unknown'
+  elif printf '%s' "${summary}" | grep -Eq 'remote required; refusing local fallback|refus(ed|ing) local fallback'; then
+    printf 'local_fallback_refused'
+  elif printf '%s' "${summary}" | grep -Fq '[RCH] local'; then
+    if grep -aqE 'remote required; refusing local fallback|refus(ed|ing) local fallback' "${log_path}"; then
+      printf 'local_fallback_refused'
+    else
+      printf 'local'
+    fi
+  elif printf '%s' "${summary}" | grep -Fq 'failed'; then
+    printf 'remote_failed'
+  elif printf '%s' "${summary}" | grep -Eq '^\[RCH\] remote([[:space:]]|$)' &&
+    ! printf '%s' "${summary}" | grep -Eq 'remote required; refusing local fallback|refus(ed|ing) local fallback'; then
+    printf 'remote'
+  else
+    printf 'unknown'
+  fi
+}
+
 require_cmd jq
-require_cmd rch
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+RCH_VISIBILITY="${RCH_VISIBILITY:-verbose}"
+export RCH_REQUIRE_REMOTE
+export RCH_FORCE_REMOTE=1
+export RCH_VISIBILITY
+
+require_cmd "${RCH_BIN}"
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
@@ -66,6 +136,7 @@ TEST_LOG="${OUT_ROOT}/logs/qq-gateway-projection-test.log"
 EVIDENCE_JSONL="${OUT_ROOT}/evidence/qq-gateway-projection.jsonl"
 VALIDATION_JSON="${OUT_ROOT}/evidence/validation.json"
 SKIP_JSONL="${OUT_ROOT}/evidence/qq-gateway-projection-skip.jsonl"
+RCH_PROOF_JSON="${OUT_ROOT}/evidence/rch-remote-proof.json"
 SUMMARY_JSON="${OUT_ROOT}/summary.json"
 ENVIRONMENT_JSON="${OUT_ROOT}/environment.json"
 REPLAY_SH="${OUT_ROOT}/replay.sh"
@@ -77,12 +148,16 @@ evidence_status="passed"
 validation_status="passed"
 overall_status="passed"
 skip_reason=""
+rch_proof_status="pending"
+rch_summary=""
+fallback_decision="rch_summary_unobserved"
+worker_execution_class="unknown"
 exit_code=0
 
 echo "[qq-gateway-projection] running fcp-qq gateway projection evidence lane"
 if ! (
   cd "${REPO_ROOT}"
-  env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" rch exec -- env \
+  "${RCH_BIN}" exec -- env \
     RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}" \
     CARGO_TARGET_DIR="${target_dir}" \
     CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}" \
@@ -95,8 +170,26 @@ if ! (
   test_status="failed"
 fi
 
+rch_summary="$(rch_summary_line "${TEST_LOG}")"
+fallback_decision="$(fallback_decision_for_log "${TEST_LOG}")"
+worker_execution_class="$(worker_execution_class_for_log "${TEST_LOG}")"
+if [[ "${test_status}" == "passed" ]]; then
+  if [[ "${worker_execution_class}" == "remote" ]]; then
+    rch_proof_status="passed"
+  else
+    rch_proof_status="failed"
+    test_status="failed"
+    overall_status="failed"
+    validation_status="failed"
+    exit_code=1
+    printf '%s\n' "rch command did not produce accepted remote proof" >>"${TEST_LOG}"
+  fi
+else
+  rch_proof_status="failed"
+fi
+
 if [[ "${test_status}" == "failed" ]]; then
-  if grep -aE '(no workers passed|no worker assigned|all workers failed preflight|failed to execute process|topology preflight|Permission denied|No such file or directory|refus(ed|ing) local fallback)' "${TEST_LOG}" >/dev/null; then
+  if grep -aE '(no admissible workers|no workers passed|no worker assigned|all workers failed preflight|failed to execute process|topology preflight|Permission denied|No such file or directory|remote required; refusing local fallback|refus(ed|ing) local fallback)' "${TEST_LOG}" >/dev/null; then
     overall_status="skipped"
     skip_reason="rch_remote_prerequisite_unavailable"
     test_status="skipped"
@@ -110,6 +203,9 @@ if [[ "${test_status}" == "failed" ]]; then
       --arg target_dir "${target_dir}" \
       --arg skip_reason "${skip_reason}" \
       --arg log_path "${TEST_LOG}" \
+      --arg fallback_decision "${fallback_decision}" \
+      --arg worker_execution_class "${worker_execution_class}" \
+      --argjson rch_summary "$(json_string_or_null "${rch_summary}")" \
       '{
         record_type: $record_type,
         schema_version: $schema_version,
@@ -117,13 +213,40 @@ if [[ "${test_status}" == "failed" ]]; then
         git_revision: $git_revision,
         cargo_target_dir: $target_dir,
         skip_reason: $skip_reason,
-        log_path: $log_path
+        log_path: $log_path,
+        fallback_decision: $fallback_decision,
+        worker_execution_class: $worker_execution_class,
+        rch_summary: $rch_summary
       }' > "${SKIP_JSONL}"
   else
     overall_status="failed"
     exit_code=1
   fi
 fi
+
+jq -n \
+  --arg status "${rch_proof_status}" \
+  --arg fallback_decision "${fallback_decision}" \
+  --arg worker_execution_class "${worker_execution_class}" \
+  --arg required_worker_execution_class "remote" \
+  --argjson rch_summary "$(json_string_or_null "${rch_summary}")" \
+  --arg log_path "${TEST_LOG}" \
+  --arg rch_bin "${RCH_BIN}" \
+  --arg rch_require_remote "${RCH_REQUIRE_REMOTE}" \
+  --arg rch_force_remote "${RCH_FORCE_REMOTE}" \
+  --arg rch_visibility "${RCH_VISIBILITY}" \
+  '{
+    status: $status,
+    fallback_decision: $fallback_decision,
+    worker_execution_class: $worker_execution_class,
+    required_worker_execution_class: $required_worker_execution_class,
+    rch_summary: $rch_summary,
+    log_path: $log_path,
+    rch_bin: $rch_bin,
+    rch_require_remote: $rch_require_remote,
+    rch_force_remote: $rch_force_remote,
+    rch_visibility: $rch_visibility
+  }' > "${RCH_PROOF_JSON}"
 
 if [[ "${overall_status}" == "passed" ]]; then
   if ! grep -a '^QQ_GATEWAY_PROJECTION_JSONL ' "${TEST_LOG}" \
@@ -459,7 +582,10 @@ jq -n \
   --arg artifact_root "${OUT_ROOT}" \
   --arg git_revision "${git_revision}" \
   --arg target_dir "${target_dir}" \
-  --arg rch_require_remote "${RCH_REQUIRE_REMOTE:-1}" \
+  --arg rch_bin "${RCH_BIN}" \
+  --arg rch_require_remote "${RCH_REQUIRE_REMOTE}" \
+  --arg rch_force_remote "${RCH_FORCE_REMOTE}" \
+  --arg rch_visibility "${RCH_VISIBILITY}" \
   --arg generated_at "$(now_iso)" \
   '{
     run_id: $run_id,
@@ -468,7 +594,10 @@ jq -n \
     artifact_root: $artifact_root,
     git_revision: $git_revision,
     cargo_target_dir: $target_dir,
+    rch_bin: $rch_bin,
     rch_require_remote: $rch_require_remote,
+    rch_force_remote: $rch_force_remote,
+    rch_visibility: $rch_visibility,
     generated_at: $generated_at
   }' > "${ENVIRONMENT_JSON}"
 
@@ -483,26 +612,39 @@ jq -n \
   --arg test_status "${test_status}" \
   --arg evidence_status "${evidence_status}" \
   --arg validation_status "${validation_status}" \
+  --arg rch_proof_status "${rch_proof_status}" \
   --arg skip_reason "${skip_reason}" \
   --argjson evidence_count "${evidence_count}" \
   --arg test_log "${TEST_LOG}" \
   --arg evidence_jsonl "${EVIDENCE_JSONL}" \
   --arg validation_json "${VALIDATION_JSON}" \
   --arg skip_jsonl "${SKIP_JSONL}" \
+  --arg rch_proof_json "${RCH_PROOF_JSON}" \
   --arg environment_json "${ENVIRONMENT_JSON}" \
+  --arg fallback_decision "${fallback_decision}" \
+  --arg worker_execution_class "${worker_execution_class}" \
+  --argjson rch_summary "$(json_string_or_null "${rch_summary}")" \
   '{
     run_id: $run_id,
     status: $status,
     test_status: $test_status,
     evidence_status: $evidence_status,
     validation_status: $validation_status,
+    rch_proof_status: $rch_proof_status,
     skip_reason: (if ($skip_reason | length) > 0 then $skip_reason else null end),
     evidence_count: $evidence_count,
+    rch_remote_proof: {
+      fallback_decision: $fallback_decision,
+      worker_execution_class: $worker_execution_class,
+      required_worker_execution_class: "remote",
+      rch_summary: $rch_summary
+    },
     artifacts: {
       test_log: $test_log,
       evidence_jsonl: $evidence_jsonl,
       validation_json: $validation_json,
       skip_jsonl: $skip_jsonl,
+      rch_proof_json: $rch_proof_json,
       environment_json: $environment_json
     }
   }' > "${SUMMARY_JSON}"
@@ -511,7 +653,7 @@ cat > "${REPLAY_SH}" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 cd "${REPO_ROOT}"
-RUN_ID="${RUN_ID}" OUT_ROOT="${OUT_ROOT}" RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" \\
+RUN_ID="${RUN_ID}" OUT_ROOT="${OUT_ROOT}" RCH_BIN="${RCH_BIN}" RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" RCH_FORCE_REMOTE="${RCH_FORCE_REMOTE}" RCH_VISIBILITY="${RCH_VISIBILITY}" \\
   bash scripts/e2e/qq_gateway_projection_verification.sh \\
   --run-id "${RUN_ID}" \\
   --out-root "${OUT_ROOT}"

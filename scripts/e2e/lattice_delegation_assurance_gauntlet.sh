@@ -1181,6 +1181,8 @@ validate_gauntlet_contract() {
       ($final_scan != null) and
       ($summary.artifact_path | type == "string") and
       ($final_scan.index > $summary.index) and
+      ($final_scan.index == ($summary.index + 1)) and
+      ($final_scan.index == (length - 1)) and
       ($final_scan.record.details.scanned_jsonl_artifacts == 1) and
       ($final_scan.record.details.summary_record == "covered") and
       ($final_scan.record.details.scanned_artifact_path == $summary.artifact_path) and

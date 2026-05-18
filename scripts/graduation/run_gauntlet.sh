@@ -61,6 +61,17 @@ Usage:
 EOF
 }
 
+require_option_value() {
+  local option="$1"
+  local value="${2:-}"
+
+  if [[ -z "${value}" || "${value}" == --* ]]; then
+    echo "${option} requires a value" >&2
+    usage >&2
+    exit 1
+  fi
+}
+
 json_escape() {
   local value="$1"
   value="${value//\\/\\\\}"
@@ -135,26 +146,17 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --jsonl)
-      if [[ $# -lt 2 ]]; then
-        echo "missing value for --jsonl" >&2
-        exit 1
-      fi
+      require_option_value "$1" "${2:-}"
       JSONL_PATH="$2"
       shift 2
       ;;
     --batch)
-      if [[ $# -lt 2 ]]; then
-        echo "missing value for --batch" >&2
-        exit 1
-      fi
+      require_option_value "$1" "${2:-}"
       BATCH_ARG="$2"
       shift 2
       ;;
     --status-md)
-      if [[ $# -lt 2 ]]; then
-        echo "missing value for --status-md" >&2
-        exit 1
-      fi
+      require_option_value "$1" "${2:-}"
       STATUS_MD_PATH="$2"
       shift 2
       ;;

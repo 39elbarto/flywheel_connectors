@@ -29,6 +29,9 @@ const QQ_GATEWAY_ACTION_RECONNECT_IDENTIFY: &str = "reconnect_identify";
 const QQ_GATEWAY_ACTION_RECONNECT_RESUME: &str = "reconnect_resume";
 const QQ_GATEWAY_ACTION_STOP_RECONNECT: &str = "stop_reconnect";
 
+const QQ_GATEWAY_EVENT_READY: &str = "READY";
+const QQ_GATEWAY_EVENT_RESUMED: &str = "RESUMED";
+
 const QQ_GATEWAY_EVENT_TYPE_MAX_CHARS: usize = 64;
 const QQ_GATEWAY_ID_MAX_CHARS: usize = 256;
 const QQ_GATEWAY_TEXT_MAX_CHARS: usize = 8_192;
@@ -506,13 +509,12 @@ impl QqGatewayRuntime {
             return Ok(self.dropped_projection(event.s, event_id, "duplicate_event"));
         }
 
-        if let Some(sequence) = event.s {
-            let current = self.session.sequence();
-            if current != 0 && sequence <= current {
-                self.stale_sequence_events = self.stale_sequence_events.saturating_add(1);
-                return Ok(self.dropped_projection(event.s, event_id, "stale_sequence"));
-            }
-            self.session.set_sequence(sequence);
+        if let Some(control_projection) = self.project_session_dispatch(event, event_id.clone())? {
+            return Ok(control_projection);
+        }
+
+        if let Some(stale_projection) = self.record_dispatch_sequence(event.s, event_id.clone()) {
+            return Ok(stale_projection);
         }
 
         let normalized = match normalize_message_event(event) {
@@ -566,6 +568,52 @@ impl QqGatewayRuntime {
             runtime: self.snapshot(),
             lifecycle: self.lifecycle_directive(QQ_GATEWAY_ACTION_DRAIN_EVENTS, "accepted"),
         })
+    }
+
+    fn project_session_dispatch(
+        &mut self,
+        event: &QqGatewayEvent,
+        event_id: Option<String>,
+    ) -> QqResult<Option<QqGatewayEventProjection>> {
+        let Some(event_type) = event.t.as_deref().map(str::trim) else {
+            return Ok(None);
+        };
+
+        let (reason_code, session_id) = match event_type {
+            QQ_GATEWAY_EVENT_READY => ("gateway_ready", Some(required_ready_session_id(event)?)),
+            QQ_GATEWAY_EVENT_RESUMED => ("gateway_resumed", optional_dispatch_session_id(event)?),
+            _ => return Ok(None),
+        };
+
+        if let Some(stale_projection) = self.record_dispatch_sequence(event.s, event_id.clone()) {
+            return Ok(Some(stale_projection));
+        }
+        if let Some(session_id) = session_id {
+            self.session.set_resume_token(session_id);
+        }
+        self.reconnect_attempts = 0;
+        self.remember_event_id(event_id.as_deref());
+        Ok(Some(self.dropped_projection_with_lifecycle(
+            event.s,
+            event_id,
+            reason_code,
+            QQ_GATEWAY_ACTION_NONE,
+        )))
+    }
+
+    fn record_dispatch_sequence(
+        &mut self,
+        sequence: Option<u64>,
+        event_id: Option<String>,
+    ) -> Option<QqGatewayEventProjection> {
+        let sequence = sequence?;
+        let current = self.session.sequence();
+        if current != 0 && sequence <= current {
+            self.stale_sequence_events = self.stale_sequence_events.saturating_add(1);
+            return Some(self.dropped_projection(Some(sequence), event_id, "stale_sequence"));
+        }
+        self.session.set_sequence(sequence);
+        None
     }
 
     fn remember_event_id(&mut self, id: Option<&str>) {
@@ -797,7 +845,47 @@ pub fn validate_gateway_event_envelope(event: &QqGatewayEvent) -> QqResult<()> {
             QQ_GATEWAY_ID_MAX_CHARS,
         )?;
     }
+    if event.op == 0
+        && matches!(
+            event.t.as_deref().map(str::trim),
+            Some(QQ_GATEWAY_EVENT_READY | QQ_GATEWAY_EVENT_RESUMED)
+        )
+        && let Some(session_id) = event
+            .d
+            .as_ref()
+            .and_then(|data| data.get("session_id"))
+            .and_then(Value::as_str)
+    {
+        validate_optional_chars(
+            "gateway session id",
+            Some(session_id),
+            QQ_GATEWAY_ID_MAX_CHARS,
+        )?;
+    }
     Ok(())
+}
+
+fn required_ready_session_id(event: &QqGatewayEvent) -> QqResult<String> {
+    optional_dispatch_session_id(event)?
+        .ok_or_else(|| QqError::InvalidInput("READY dispatch missing gateway session_id".into()))
+}
+
+fn optional_dispatch_session_id(event: &QqGatewayEvent) -> QqResult<Option<String>> {
+    let session_id = event
+        .d
+        .as_ref()
+        .and_then(|data| data.get("session_id"))
+        .and_then(Value::as_str)
+        .and_then(nonblank_trimmed)
+        .map(str::to_owned);
+    if let Some(session_id) = session_id.as_deref() {
+        validate_optional_chars(
+            "gateway session id",
+            Some(session_id),
+            QQ_GATEWAY_ID_MAX_CHARS,
+        )?;
+    }
+    Ok(session_id)
 }
 
 #[must_use]
@@ -2559,6 +2647,121 @@ mod tests {
         );
         assert_eq!(runtime.snapshot().session_id, None);
         assert_eq!(runtime.snapshot().last_sequence, 0);
+
+        let oversized_ready_session_id = "r".repeat(QQ_GATEWAY_ID_MAX_CHARS + 1);
+        let ready_session_error = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some(QQ_GATEWAY_EVENT_READY.into()),
+                d: Some(json!({ "session_id": oversized_ready_session_id })),
+                id: Some("evt-ready-oversized-session".into()),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(ready_session_error, QqError::InvalidInput(ref message) if message.contains("gateway session id exceeds parser bounds")),
+            "unexpected READY session-id error: {ready_session_error:?}"
+        );
+        assert_eq!(runtime.snapshot().session_id, None);
+        assert_eq!(runtime.snapshot().last_sequence, 0);
+
+        let ready_missing_session_error = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some(QQ_GATEWAY_EVENT_READY.into()),
+                d: Some(json!({})),
+                id: Some("evt-ready-missing-session".into()),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(ready_missing_session_error, QqError::InvalidInput(ref message) if message.contains("READY dispatch missing gateway session_id")),
+            "unexpected READY missing-session error: {ready_missing_session_error:?}"
+        );
+        assert_eq!(runtime.snapshot().session_id, None);
+        assert_eq!(runtime.snapshot().last_sequence, 0);
+    }
+
+    #[test]
+    fn gateway_runtime_persists_ready_and_resumed_dispatch_sessions() {
+        let mut runtime = QqGatewayRuntime::new(QqGatewayRuntimeConfig {
+            enabled: true,
+            reconnect_backoff_ms: 50,
+            max_reconnect_backoff_ms: 100,
+            ..Default::default()
+        });
+
+        let reconnect = runtime
+            .project_event(QqGatewayEvent {
+                op: 7,
+                s: None,
+                t: None,
+                d: None,
+                id: Some("evt-before-ready-reconnect".into()),
+            })
+            .unwrap();
+        assert_eq!(reconnect.reason_code, "reconnect_requested");
+        assert_eq!(reconnect.runtime.reconnect_attempts, 1);
+
+        let ready = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some(QQ_GATEWAY_EVENT_READY.into()),
+                d: Some(json!({ "session_id": "session-ready-dispatch" })),
+                id: Some("evt-ready-dispatch".into()),
+            })
+            .unwrap();
+        assert!(!ready.accepted);
+        assert_eq!(ready.reason_code, "gateway_ready");
+        assert_eq!(
+            ready.runtime.session_id.as_deref(),
+            Some("session-ready-dispatch")
+        );
+        assert_eq!(ready.runtime.last_sequence, 1);
+        assert_eq!(ready.runtime.reconnect_attempts, 0);
+        assert_eq!(ready.runtime.dedupe_size, 1);
+        assert_eq!(ready.lifecycle.action, QQ_GATEWAY_ACTION_NONE);
+        assert!(ready.lifecycle.resume_session_id.is_none());
+        assert_eq!(ready.lifecycle.resume_sequence, 1);
+
+        let duplicate_ready = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(2),
+                t: Some(QQ_GATEWAY_EVENT_READY.into()),
+                d: Some(json!({ "session_id": "session-ignored-duplicate-ready" })),
+                id: Some("evt-ready-dispatch".into()),
+            })
+            .unwrap();
+        assert_eq!(duplicate_ready.reason_code, "duplicate_event");
+        assert_eq!(
+            duplicate_ready.runtime.session_id.as_deref(),
+            Some("session-ready-dispatch")
+        );
+        assert_eq!(duplicate_ready.runtime.last_sequence, 1);
+        assert_eq!(duplicate_ready.runtime.duplicate_events, 1);
+
+        let resumed = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(2),
+                t: Some(QQ_GATEWAY_EVENT_RESUMED.into()),
+                d: Some(json!({})),
+                id: Some("evt-resumed-dispatch".into()),
+            })
+            .unwrap();
+        assert!(!resumed.accepted);
+        assert_eq!(resumed.reason_code, "gateway_resumed");
+        assert_eq!(
+            resumed.runtime.session_id.as_deref(),
+            Some("session-ready-dispatch")
+        );
+        assert_eq!(resumed.runtime.last_sequence, 2);
+        assert_eq!(resumed.runtime.reconnect_attempts, 0);
+        assert_eq!(resumed.runtime.dedupe_size, 2);
+        assert_eq!(resumed.lifecycle.action, QQ_GATEWAY_ACTION_NONE);
+        assert_eq!(resumed.lifecycle.resume_sequence, 2);
     }
 
     // ─── Event normalization tests ──────────────────────────────

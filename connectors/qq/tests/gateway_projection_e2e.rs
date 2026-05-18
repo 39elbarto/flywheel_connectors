@@ -1895,6 +1895,96 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         &restored_reconnect,
     );
 
+    let ready_resumed_instance_id = InstanceId::new();
+    let mut ready_resumed_connector = QqConnector::new();
+    ready_resumed_connector
+        .configure(json!({
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999",
+            "app_id": "qq-app",
+            "client_secret": "test-secret",
+            "gateway": {
+                "enabled": true,
+                "reconnect_backoff_ms": 125,
+                "max_reconnect_backoff_ms": 500,
+                "policy": {
+                    "group_require_mention": false
+                }
+            }
+        }))
+        .await
+        .expect("configure ready/resumed QQ connector");
+    ready_resumed_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            ready_resumed_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake ready/resumed QQ connector");
+    let ready_dispatch = invoke_projection(
+        &ready_resumed_connector,
+        &signing_key,
+        &ready_resumed_instance_id,
+        "qq-gateway-ready-dispatch",
+        json!({
+            "op": 0,
+            "s": 1,
+            "t": "READY",
+            "id": "evt-ready-dispatch",
+            "d": {
+                "session_id": "session-ready-dispatch"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(ready_dispatch["accepted"], false);
+    assert_eq!(ready_dispatch["reason_code"], "gateway_ready");
+    assert_eq!(
+        ready_dispatch["runtime"]["session_id"],
+        "session-ready-dispatch"
+    );
+    assert_eq!(ready_dispatch["runtime"]["last_sequence"], 1);
+    assert_eq!(ready_dispatch["runtime"]["reconnect_attempts"], 0);
+    assert_eq!(ready_dispatch["runtime"]["dedupe_size"], 1);
+    assert_eq!(ready_dispatch["lifecycle"]["action"], "none");
+    log_projection_step(
+        &mut logs,
+        "ready_dispatch_session_persisted",
+        "ok",
+        &ready_dispatch,
+    );
+
+    let resumed_dispatch = invoke_projection(
+        &ready_resumed_connector,
+        &signing_key,
+        &ready_resumed_instance_id,
+        "qq-gateway-resumed-dispatch",
+        json!({
+            "op": 0,
+            "s": 2,
+            "t": "RESUMED",
+            "id": "evt-resumed-dispatch",
+            "d": {}
+        }),
+    )
+    .await;
+    assert_eq!(resumed_dispatch["accepted"], false);
+    assert_eq!(resumed_dispatch["reason_code"], "gateway_resumed");
+    assert_eq!(
+        resumed_dispatch["runtime"]["session_id"],
+        "session-ready-dispatch"
+    );
+    assert_eq!(resumed_dispatch["runtime"]["last_sequence"], 2);
+    assert_eq!(resumed_dispatch["runtime"]["reconnect_attempts"], 0);
+    assert_eq!(resumed_dispatch["runtime"]["dedupe_size"], 2);
+    assert_eq!(resumed_dispatch["lifecycle"]["action"], "none");
+    log_projection_step(
+        &mut logs,
+        "resumed_dispatch_replay_complete",
+        "ok",
+        &resumed_dispatch,
+    );
+
     let identify_required_instance_id = InstanceId::new();
     let mut identify_required_connector = QqConnector::new();
     identify_required_connector
@@ -2423,6 +2513,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "test-secret",
         "session-1",
         "restored-session",
+        "session-ready-dispatch",
         "session-should-not-stick",
         "session-after-exhaustion",
         "hello-1",
@@ -2452,6 +2543,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-reconnect-requested",
         "evt-invalid-session",
         "evt-restored-reconnect",
+        "evt-ready-dispatch",
+        "evt-resumed-dispatch",
         "evt-reconnect-cap-first",
         "evt-reconnect-cap-capped",
         "evt-reconnect-exhausted",

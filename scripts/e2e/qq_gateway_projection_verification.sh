@@ -364,6 +364,8 @@ if [[ "${overall_status}" == "passed" ]]; then
           "reconnect_requested",
           "invalid_session_resumable",
           "restored_session_reconnect_resume",
+          "ready_dispatch_session_persisted",
+          "resumed_dispatch_replay_complete",
           "invalid_session_identify_required",
           "reconnect_backoff_capped",
           "reconnect_attempts_exhausted",
@@ -604,6 +606,34 @@ if [[ "${overall_status}" == "passed" ]]; then
           and .details.runtime.reconnect_attempts == 1
           and .details.runtime.terminal_reconnect_failures == 0
         ),
+        ready_resumed_shape_ok: (
+          any(.[];
+            .step == "ready_dispatch_session_persisted"
+            and .details.accepted == false
+            and .details.reason_code == "gateway_ready"
+            and .details.normalized == null
+            and .details.policy == null
+            and .details.lifecycle.action == "none"
+            and (.details.runtime.session_id_hash | type) == "string"
+            and (.details.runtime.session_id_hash | test("^[0-9a-f]{24}$"))
+            and .details.runtime.last_sequence == 1
+            and .details.runtime.reconnect_attempts == 0
+            and .details.runtime.dedupe_size == 1
+          )
+          and any(.[];
+            .step == "resumed_dispatch_replay_complete"
+            and .details.accepted == false
+            and .details.reason_code == "gateway_resumed"
+            and .details.normalized == null
+            and .details.policy == null
+            and .details.lifecycle.action == "none"
+            and (.details.runtime.session_id_hash | type) == "string"
+            and (.details.runtime.session_id_hash | test("^[0-9a-f]{24}$"))
+            and .details.runtime.last_sequence == 2
+            and .details.runtime.reconnect_attempts == 0
+            and .details.runtime.dedupe_size == 2
+          )
+        ),
         drain_shape_ok: (
           any(.[]; .step == "gateway_drain_first_batch" and .details.drained_count == 2 and .details.remaining_count == 1)
           and any(.[]; .step == "gateway_drain_final_batch" and .details.drained_count == 1 and .details.remaining_count == 0 and .details.runtime.queue_depth == 0)
@@ -629,7 +659,7 @@ if [[ "${overall_status}" == "passed" ]]; then
       } as $v
       | $v
       | .status = (
-          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.log_start_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.c2c_shape_ok and $v.queue_shape_ok and $v.group_policy_shape_ok and $v.malformed_control_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.restore_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok and $v.pending_shutdown_shape_ok)
+          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.log_start_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.c2c_shape_ok and $v.queue_shape_ok and $v.group_policy_shape_ok and $v.malformed_control_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.restore_shape_ok and $v.ready_resumed_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok and $v.pending_shutdown_shape_ok)
           then "passed"
           else "failed"
           end
@@ -669,6 +699,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "test-secret" \
     "session-1" \
     "restored-session" \
+    "session-ready-dispatch" \
     "session-should-not-stick" \
     "session-after-exhaustion" \
     "hello-1" \
@@ -701,6 +732,8 @@ if [[ "${overall_status}" == "passed" ]]; then
     "evt-reconnect-requested" \
     "evt-invalid-session" \
     "evt-restored-reconnect" \
+    "evt-ready-dispatch" \
+    "evt-resumed-dispatch" \
     "evt-reconnect-cap-first" \
     "evt-reconnect-cap-capped" \
     "evt-reconnect-exhausted" \

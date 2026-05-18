@@ -22,6 +22,7 @@ integration_status="pending"
 clippy_status="pending"
 live_smoke_status="pending"
 fixture_boundary_status="pending"
+graduation_gauntlet_status="pending"
 manifest_check_runner=""
 manifest_stdout_path="${OUT_ROOT}/evidence/manifest_check.command.json"
 
@@ -172,10 +173,44 @@ run_step() {
   fi
 }
 
+run_graduation_gauntlet() {
+  local connector_path="connectors/deepseek"
+  local jsonl_path="${OUT_ROOT}/evidence/graduation_gauntlet.jsonl"
+  local log_path="${OUT_ROOT}/logs/graduation_gauntlet.log"
+  local rc
+  local status
+
+  : >"${jsonl_path}"
+  echo "[deepseek-verification] graduation_gauntlet: scripts/graduation/run_gauntlet.sh ${connector_path}" >&2
+  (
+    cd "${REPO_ROOT}" || exit
+    scripts/graduation/run_gauntlet.sh --jsonl "${jsonl_path}" "${connector_path}"
+  ) >"${log_path}" 2>&1
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]]; then
+    echo "passed"
+    return
+  fi
+  if [[ "${rc}" -eq 8 && -s "${jsonl_path}" ]] && jq -s -e '
+    map(select(.verdict == "fail")) as $failures
+    | ($failures | length) == 1
+    and $failures[0].check == "readme_status_match"
+  ' "${jsonl_path}" >/dev/null; then
+    echo "pre_promotion_pending"
+    return
+  fi
+
+  status="$(classify_failure "${log_path}")"
+  promote_overall_status "${status}"
+  echo "${status}"
+}
+
 git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 require_cmd jq
 require_cmd "${RCH_BIN}"
+
+graduation_gauntlet_status="$(run_graduation_gauntlet)"
 
 manifest_check_runner="rch:cargo-run"
 if run_capture_stdout \
@@ -311,6 +346,7 @@ jq -n \
   --arg connector "fcp-deepseek" \
   --arg overall_status "${OVERALL_STATUS}" \
   --arg artifacts_root "${OUT_ROOT}" \
+  --arg graduation_gauntlet "${graduation_gauntlet_status}" \
   --arg manifest_check "${manifest_status}" \
   --arg cargo_check "${cargo_check_status}" \
   --arg format_check "${format_check_status}" \
@@ -333,6 +369,7 @@ jq -n \
     overall_status: $overall_status,
     artifacts_root: $artifacts_root,
     steps: {
+      graduation_gauntlet: $graduation_gauntlet,
       manifest_check: $manifest_check,
       cargo_check: $cargo_check,
       format_check: $format_check,
@@ -342,6 +379,8 @@ jq -n \
       live_smoke: $live_smoke
     },
     artifacts: {
+      graduation_gauntlet: ($artifacts_root + "/evidence/graduation_gauntlet.jsonl"),
+      graduation_gauntlet_log: ($artifacts_root + "/logs/graduation_gauntlet.log"),
       manifest_check: $manifest_check_artifact,
       cargo_check_log: $cargo_check_log,
       format_check_log: $format_check_log,

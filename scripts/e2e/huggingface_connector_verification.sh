@@ -22,6 +22,7 @@ format_check_status="pending"
 loopback_status="pending"
 fixture_jsonl_status="pending"
 clippy_status="pending"
+graduation_gauntlet_status="pending"
 manifest_check_runner=""
 
 promote_overall_status() {
@@ -67,6 +68,38 @@ require_rch_remote_proof() {
   echo "[huggingface-verification] ${name}: rch command did not produce remote proof" >&2
   echo "rch command did not produce remote proof" >>"${log_path}"
   return 1
+}
+
+run_graduation_gauntlet() {
+  local connector_path="connectors/huggingface"
+  local jsonl_path="${OUT_ROOT}/evidence/graduation_gauntlet.jsonl"
+  local log_path="${OUT_ROOT}/logs/graduation_gauntlet.log"
+  local rc
+  local status
+
+  : >"${jsonl_path}"
+  echo "[huggingface-verification] graduation_gauntlet: scripts/graduation/run_gauntlet.sh ${connector_path}" >&2
+  (
+    cd "${REPO_ROOT}" || exit
+    scripts/graduation/run_gauntlet.sh --jsonl "${jsonl_path}" "${connector_path}"
+  ) >"${log_path}" 2>&1
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]]; then
+    echo "passed"
+    return
+  fi
+  if [[ "${rc}" -eq 8 && -s "${jsonl_path}" ]] && jq -s -e '
+    map(select(.verdict == "fail")) as $failures
+    | ($failures | length) == 1
+    and $failures[0].check == "readme_status_match"
+  ' "${jsonl_path}" >/dev/null; then
+    echo "pre_promotion_pending"
+    return
+  fi
+
+  status="$(classify_failure "${log_path}")"
+  promote_overall_status "${status}"
+  echo "${status}"
 }
 
 run_logged() {
@@ -122,6 +155,9 @@ run_step() {
 git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 require_cmd rch
+require_cmd jq
+
+graduation_gauntlet_status="$(run_graduation_gauntlet)"
 
 manifest_check_runner="${REMOTE_RUNNER}:cargo-run"
 manifest_stdout_path="${OUT_ROOT}/evidence/manifest_check.command.json"
@@ -217,6 +253,7 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
   "runner": "${REMOTE_RUNNER}",
   "toolchain": "${REPO_TOOLCHAIN}",
   "steps": {
+    "graduation_gauntlet": "${graduation_gauntlet_status}",
     "manifest_check": "${manifest_status}",
     "cargo_check": "${cargo_check_status}",
     "format_check": "${format_check_status}",
@@ -225,6 +262,8 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
     "clippy": "${clippy_status}"
   },
   "artifacts": {
+    "graduation_gauntlet": "${OUT_ROOT}/evidence/graduation_gauntlet.jsonl",
+    "graduation_gauntlet_log": "${OUT_ROOT}/logs/graduation_gauntlet.log",
     "manifest_check": "${OUT_ROOT}/evidence/manifest_check.json",
     "cargo_check_log": "${OUT_ROOT}/logs/cargo_check.log",
     "format_check_log": "${OUT_ROOT}/logs/format_check.log",

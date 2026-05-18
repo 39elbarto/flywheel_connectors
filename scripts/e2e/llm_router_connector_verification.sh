@@ -23,6 +23,7 @@ integration_status="pending"
 local_non_mock_status="pending"
 local_non_mock_jsonl_status="pending"
 clippy_status="pending"
+graduation_gauntlet_status="pending"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -121,10 +122,44 @@ run_step() {
   fi
 }
 
+run_graduation_gauntlet() {
+  local connector_path="connectors/llm-router"
+  local jsonl_path="${OUT_ROOT}/evidence/graduation_gauntlet.jsonl"
+  local log_path="${OUT_ROOT}/logs/graduation_gauntlet.log"
+  local rc
+  local status
+
+  : >"${jsonl_path}"
+  echo "[llm-router-verification] graduation_gauntlet: scripts/graduation/run_gauntlet.sh ${connector_path}" >&2
+  (
+    cd "${REPO_ROOT}" || exit
+    scripts/graduation/run_gauntlet.sh --jsonl "${jsonl_path}" "${connector_path}"
+  ) >"${log_path}" 2>&1
+  rc="$?"
+  if [[ "${rc}" -eq 0 ]]; then
+    echo "passed"
+    return
+  fi
+  if [[ "${rc}" -eq 8 && -s "${jsonl_path}" ]] && jq -s -e '
+    map(select(.verdict == "fail")) as $failures
+    | ($failures | length) == 1
+    and $failures[0].check == "readme_status_match"
+  ' "${jsonl_path}" >/dev/null; then
+    echo "pre_promotion_pending"
+    return
+  fi
+
+  status="$(classify_failure "${log_path}")"
+  promote_overall_status "${status}"
+  echo "${status}"
+}
+
 git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
 require_cmd jq
 require_cmd "${RCH_BIN}"
+
+graduation_gauntlet_status="$(run_graduation_gauntlet)"
 
 manifest_stdout_path="${OUT_ROOT}/evidence/manifest_check.command.json"
 if run_capture_stdout \
@@ -247,6 +282,7 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
     "clippy": "$(observed_runner "${OUT_ROOT}/logs/clippy.log")"
   },
   "steps": {
+    "graduation_gauntlet": "${graduation_gauntlet_status}",
     "manifest_check": "${manifest_status}",
     "cargo_check": "${cargo_check_status}",
     "format_check": "${format_check_status}",
@@ -256,6 +292,8 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
     "clippy": "${clippy_status}"
   },
   "artifacts": {
+    "graduation_gauntlet": "${OUT_ROOT}/evidence/graduation_gauntlet.jsonl",
+    "graduation_gauntlet_log": "${OUT_ROOT}/logs/graduation_gauntlet.log",
     "manifest_check": "${OUT_ROOT}/evidence/manifest_check.json",
     "cargo_check_log": "${OUT_ROOT}/logs/cargo_check.log",
     "format_check_log": "${OUT_ROOT}/logs/format_check.log",

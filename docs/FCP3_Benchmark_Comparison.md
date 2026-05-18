@@ -133,20 +133,23 @@ serialization, so single-row artifacts cannot bypass the same scenario
 allowlist that the bundle verifier enforces. The
 environment metadata records only the selected `RCH_BIN` basename plus a
 `sha256:<64 lowercase hex>` fingerprint of the configured value; private patched
-binary paths are redacted from the evidence JSON. `replay.sh` is self-locating
-inside the artifact bundle, writes rerun output under a local `replay/`
-subdirectory, defaults to `RCH_BIN` from `PATH`, reuses the copied
-provided-evidence JSONL from the bundle when present, and requires
-`FCP_REPO_ROOT` only if it cannot infer the checkout from the default artifact
-layout; it is scanned with the same secret/private-path pattern before exit. The metadata
-artifacts follow the same rule for repository root, artifact root,
+binary paths are redacted from the evidence JSON. `RUN_ID` is rejected before
+artifact directories are created if it contains the same secret or private-path
+markers used by artifact redaction, with stderr reporting only a hash of the
+rejected value. `replay.sh` is self-locating inside the artifact bundle, writes
+rerun output under a local `replay/` subdirectory, defaults to `RCH_BIN` from
+`PATH`, reuses the copied provided-evidence JSONL from the bundle when present,
+and requires `FCP_REPO_ROOT` only if it cannot infer the checkout from the
+default artifact layout; it is scanned with the same secret/private-path pattern
+before exit. The metadata artifacts follow the same rule for repository root, artifact root,
 `CARGO_TARGET_DIR`, and provided-evidence input paths: `environment.json` stores
 classes and `sha256:<64 lowercase hex>` fingerprints instead of absolute paths,
 while separately recording the `sha256:<64 lowercase hex>` content digest of
-the copied evidence JSONL bundle. `summary.json` names bundle artifacts by
-relative path only and repeats the evidence JSONL content digest so reviewers
-can tie validation results to the exact replay input without exposing the
-operator's local source path. In provided-evidence mode, the test log records
+the copied evidence JSONL bundle. `summary.json` is written after `replay.sh`
+has been generated and scanned, names bundle artifacts by relative path only,
+and repeats both the evidence JSONL and replay script content digests so
+reviewers can tie validation results to the exact replay inputs without exposing
+the operator's local source path. In provided-evidence mode, the test log records
 only a `sha256:<64 lowercase hex>` fingerprint for the input path and is scanned
 for the same private-path markers before the verifier exits. Both metadata JSON
 files are scanned for the same secret and private-path markers as the evidence

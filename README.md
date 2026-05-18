@@ -2500,7 +2500,7 @@ Returned by classification layers (`ConnectorErrorMapping::retry_after`, host en
 | `RetryAfter(Duration)` | Retry after the named delay (e.g. provider-supplied `Retry-After` header) |
 | `Terminal` | Do not retry; surface error to caller |
 
-`RetryDirective::parse_retry_after_seconds` handles the RFC 7231 decimal-seconds form of `Retry-After`. Connectors mapping rate-limit responses (HTTP 429, provider-specific 5xx with `Retry-After`) populate this directive so the centralized `RetryLoop` in `fcp-sdk` honors the provider's advice.
+`RetryDirective::parse_retry_after` handles the RFC 7231 decimal-seconds form of `Retry-After` (the private helper `parse_retry_after_duration` does the actual parse). Connectors mapping rate-limit responses (HTTP 429, provider-specific 5xx with `Retry-After`) populate this directive so the centralized `RetryLoop` in `fcp-sdk` honors the provider's advice.
 
 ---
 

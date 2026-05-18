@@ -117,6 +117,13 @@ fn proof_rch_status_cli_classifies_recorded_rch_fixtures() {
             "proof_infra_blocked",
             false,
         ),
+        (
+            "remote-required-local-fallback",
+            json!({"worker_selection": {"worker": null}}),
+            vec!["[RCH] remote required; refusing local fallback (no worker assigned)"],
+            "proof_infra_blocked",
+            false,
+        ),
     ];
 
     for (fixture_id, telemetry, summary_lines, decision, allowed) in fixtures {

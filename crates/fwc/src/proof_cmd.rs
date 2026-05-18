@@ -843,16 +843,16 @@ fn build_rch_capacity_report(
 
     for line in summary_lines {
         let lower = line.to_ascii_lowercase();
-        local_fallback_detected |= lower.contains("[rch] local");
+        let blocker_reason = blocker_reason_from_summary(Some(line));
+        local_fallback_detected |= lower.contains("[rch] local")
+            || blocker_reason == RchRemoteProofBlockerReason::LocalFallbackRefused;
         stale_tooling_detected |= lower.contains("stale");
-        let blocker = blocker_reason_from_summary(Some(line)).as_str().to_owned();
-        if lower.contains("[rch] local")
-            || lower.contains("no admissible")
-            || lower.contains("pressure")
-        {
-            blockers.insert(blocker);
+        if rch_summary_capacity_blocker(blocker_reason) {
+            blockers.insert(blocker_reason.as_str().to_owned());
         }
-        if let Some(summary) = RchRemoteProofSummary::parse_final_summary_line(line) {
+        if blocker_reason != RchRemoteProofBlockerReason::LocalFallbackRefused
+            && let Some(summary) = RchRemoteProofSummary::parse_final_summary_line(line)
+        {
             if summary.location == RchRemoteProofSummaryLocation::Remote {
                 selected_worker = summary.worker_id.or(selected_worker);
                 admissible_workers = admissible_workers.max(1);
@@ -1126,6 +1126,17 @@ fn rch_capacity_next_actions(decision: &str) -> Vec<&'static str> {
         }
         _ => vec!["Inspect RCH telemetry shape and add a fixture before relying on this status."],
     }
+}
+
+fn rch_summary_capacity_blocker(reason: RchRemoteProofBlockerReason) -> bool {
+    matches!(
+        reason,
+        RchRemoteProofBlockerReason::LocalFallbackRefused
+            | RchRemoteProofBlockerReason::ActiveProjectExclusion
+            | RchRemoteProofBlockerReason::NoAdmissibleWorkers
+            | RchRemoteProofBlockerReason::TopologyPreflightFailure
+            | RchRemoteProofBlockerReason::WorkerPressure
+    )
 }
 
 fn max_usize_from_docs(docs: &[Option<&Value>], keys: &[&str]) -> usize {
@@ -2505,10 +2516,14 @@ fn classify_rch_execution(
     finished_at_unix_ms: u64,
 ) -> Result<ExecutedRchProof> {
     let summary_line = final_rch_summary_line(stdout, stderr);
-    let parsed_summary = summary_line
-        .as_deref()
-        .and_then(RchRemoteProofSummary::parse_final_summary_line);
     let blocker_reason = blocker_reason_from_summary(summary_line.as_deref());
+    let parsed_summary = if blocker_reason == RchRemoteProofBlockerReason::LocalFallbackRefused {
+        None
+    } else {
+        summary_line
+            .as_deref()
+            .and_then(RchRemoteProofSummary::parse_final_summary_line)
+    };
     let exit_kind = rch_exit_kind(parsed_summary.as_ref(), status_code, status_success);
     let row_blocker = match exit_kind {
         RchRemoteProofExitKind::Blocked | RchRemoteProofExitKind::Unknown => Some(blocker_reason),
@@ -2624,7 +2639,10 @@ fn blocker_reason_from_summary(summary_line: Option<&str>) -> RchRemoteProofBloc
         RchRemoteProofBlockerReason::TopologyPreflightFailure
     } else if lower.contains("pressure") || lower.contains("all_workers_busy") {
         RchRemoteProofBlockerReason::WorkerPressure
-    } else if lower.contains("[rch] local") {
+    } else if lower.contains("[rch] local")
+        || (lower.contains("remote required") && lower.contains("refusing local fallback"))
+        || (lower.contains("remote-required") && lower.contains("refusing local fallback"))
+    {
         RchRemoteProofBlockerReason::LocalFallbackRefused
     } else if RchRemoteProofSummary::parse_final_summary_line(summary_line).is_none() {
         RchRemoteProofBlockerReason::MalformedRchSummary
@@ -3055,6 +3073,25 @@ mod tests {
                     .to_owned()
             ) || report.blockers.contains(
                 &RchRemoteProofBlockerReason::NoAdmissibleWorkers
+                    .as_str()
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn rch_status_refuses_remote_required_local_fallback_summary() {
+        let summary_lines =
+            vec!["[RCH] remote required; refusing local fallback (no worker assigned)".to_owned()];
+        let report = build_rch_capacity_report(None, None, None, &summary_lines, Vec::new());
+
+        assert_eq!(report.decision, "proof_infra_blocked");
+        assert!(!report.remote_required_allowed);
+        assert!(report.local_fallback_detected);
+        assert_eq!(report.selected_worker, None);
+        assert!(
+            report.blockers.contains(
+                &RchRemoteProofBlockerReason::LocalFallbackRefused
                     .as_str()
                     .to_owned()
             )
@@ -4254,6 +4291,31 @@ related = []
             proof.evidence.selector_reason.as_deref(),
             Some("local_fallback_refused")
         );
+    }
+
+    #[test]
+    fn rch_execution_refuses_remote_required_local_fallback_without_worker_id() {
+        let proof = classify_rch_execution(
+            &remote_rch_plan(),
+            b"",
+            b"[RCH] remote required; refusing local fallback (no worker assigned)\n",
+            Some(1),
+            false,
+            NOW,
+            NOW + 1_000,
+        )
+        .expect("classify remote-required local fallback");
+
+        assert_eq!(
+            proof.classification,
+            RchRemoteProofClassification::RefusedLocalFallback
+        );
+        assert_eq!(proof.evidence.worker_id, None);
+        assert_eq!(
+            proof.evidence.selector_reason.as_deref(),
+            Some("local_fallback_refused")
+        );
+        assert!(!proof.accepted_remote_proof);
     }
 
     #[test]

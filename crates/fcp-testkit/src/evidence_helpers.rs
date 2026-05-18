@@ -3146,9 +3146,30 @@ fn prewarm_sensitive_marker(value: &str) -> Option<&'static str> {
     None
 }
 
+fn normalized_prewarm_target_root(mut cargo_target_dir: &str) -> &str {
+    loop {
+        let without_trailing_slash = cargo_target_dir.trim_end_matches('/');
+        if without_trailing_slash.len() != cargo_target_dir.len() {
+            cargo_target_dir = if without_trailing_slash.is_empty() {
+                "/"
+            } else {
+                without_trailing_slash
+            };
+            continue;
+        }
+
+        if let Some(parent) = cargo_target_dir.strip_suffix("/.") {
+            cargo_target_dir = if parent.is_empty() { "/" } else { parent };
+            continue;
+        }
+
+        return cargo_target_dir;
+    }
+}
+
 fn is_unsafe_prewarm_target_root(cargo_target_dir: &str) -> bool {
     matches!(
-        cargo_target_dir,
+        normalized_prewarm_target_root(cargo_target_dir),
         "/tmp" | "/private/tmp" | "target" | "./target"
     )
 }
@@ -11243,7 +11264,21 @@ mod tests {
             )
         );
 
-        for target_dir in ["/tmp", "/private/tmp", "target", "./target"] {
+        for target_dir in [
+            "/tmp",
+            "/tmp/",
+            "/tmp//",
+            "/tmp/.",
+            "/private/tmp",
+            "/private/tmp/",
+            "/private/tmp//.",
+            "target",
+            "target/",
+            "target/.",
+            "./target",
+            "./target/",
+            "./target//.",
+        ] {
             assert_prewarm_target_root_rejected(target_dir);
         }
 

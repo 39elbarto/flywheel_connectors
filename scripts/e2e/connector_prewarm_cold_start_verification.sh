@@ -189,6 +189,41 @@ cargo_target_dir_class() {
   esac
 }
 
+prewarm_target_root_label() {
+  local path="$1"
+  while true; do
+    case "${path}" in
+      */)
+        path="${path%/}"
+        if [[ -z "${path}" ]]; then
+          path="/"
+        fi
+        ;;
+      */.)
+        path="${path%/.}"
+        if [[ -z "${path}" ]]; then
+          path="/"
+        fi
+        ;;
+      *)
+        printf '%s' "${path}"
+        return 0
+        ;;
+    esac
+  done
+}
+
+is_prewarm_shared_target_root() {
+  case "$(prewarm_target_root_label "$1")" in
+    /tmp|/private/tmp|target|./target)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 redaction_pattern() {
   printf '%s' '(sk-live-|bearer[[:space:]]+|authorization:|token=|access_token|refresh_token|id_token|client_secret|api_key|super-secret-value|secret_seed|private_key|secret_key|password|cookie|credential=|credential:|/users/|/home/|/data/projects/|/private/var/|/var/folders/|/volumes/|c:\\\\users\\\\|operation:|principal:|zone:|z:|provider_body|provider_response_body|provider_payload_body|reviewer_email|reviewer_phone)'
 }
@@ -255,6 +290,10 @@ git_revision="$(
     || echo unknown
 )"
 target_dir="${PREWARM_CARGO_TARGET_DIR:-/tmp/fcp-prewarm-cold-start-${RUN_ID}}"
+if is_prewarm_shared_target_root "${target_dir}"; then
+  echo "PREWARM_CARGO_TARGET_DIR must use a dedicated child directory; target_dir_hash=sha256:$(hash_text_sha256 "${target_dir}")" >&2
+  exit 2
+fi
 test_status="passed"
 evidence_status="passed"
 validation_status="passed"
@@ -390,6 +429,8 @@ if [[ "${overall_status}" == "passed" ]]; then
         type == "string" and test("^[0-9a-f]{7,40}$");
       def worker_id_label:
         type == "string" and test("^[A-Za-z0-9._-]{1,128}$");
+      def shared_target_root:
+        type == "string" and test("^(?:/tmp|/private/tmp|target|\\./target)(?:/+\\.?)*$");
       def execution_mode_label:
         type == "string" and (. == "smoke" or . == "soak");
       def source_kind_label:
@@ -570,6 +611,9 @@ if [[ "${overall_status}" == "passed" ]]; then
         ),
         target_dir_provenance_ok: all(.[];
           target_dir_provenance_ok
+        ),
+        target_dir_isolated_ok: all(.[];
+          (.cargo_target_dir | shared_target_root | not)
         ),
         required_fields_ok: all(.[];
           (.command_line | type) == "array"
@@ -752,6 +796,7 @@ if [[ "${overall_status}" == "passed" ]]; then
             and $v.execution_mode_shape_ok
             and $v.command_provenance_ok
             and $v.target_dir_provenance_ok
+            and $v.target_dir_isolated_ok
             and $v.required_fields_ok
             and $v.git_revision_provenance_ok
             and $v.worker_id_shape_ok

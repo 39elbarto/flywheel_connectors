@@ -180,8 +180,9 @@ key/value markers, macOS/Linux/Windows private-user paths, Linux project
 checkout paths, private-var-path, mounted-volume-path, raw `operation:`,
 `principal:`, or `zone:` labels, raw `z:` zone labels, provider payload
 markers, reviewer private-contact markers, and `private_absolute` target-dir
-evidence before export. Evidence also cannot use the exact shared target roots
-`/tmp`, `/private/tmp`, `target`, or `./target`;
+evidence before export. Evidence also cannot use shared target roots such as
+`/tmp`, `/private/tmp`, `target`, or `./target`, including trailing slash or
+`/.` variants of those roots;
 use a dedicated child directory so the target-dir hash identifies one proof run;
 `cargo_target_dir_class` must be one of the stable export labels `tmp`,
 `absolute`, or `relative`, so novel labels cannot bypass the redaction gate.

@@ -129,6 +129,14 @@ The accepted first slice does not include:
 - Keep `localhost`/`127.0.0.1` overrides test-only and make the production contract point at Twitch’s real hosts.
 - If EventSub is added later, model it as a separate execution shape with webhook secret management and explicit subscription lifecycle operations.
 
+## Verification Bundle
+
+Verification script: `scripts/e2e/twitch_connector_verification.sh`
+
+The verifier runs the local non-mock loopback Twitch OAuth/Helix proof, the
+connector test suite, formatting, check, and clippy through `rch`, and records
+non-green infrastructure blockers instead of treating local fallback as proof.
+
 ## Source Notes
 
 This contract is grounded in the current connector implementation plus Twitch’s official docs:

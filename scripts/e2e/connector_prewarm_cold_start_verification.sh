@@ -102,6 +102,11 @@ validate_run_id() {
     echo "RUN_ID must use only A-Z, a-z, 0-9, '.', '_', and '-' and must not contain '..': ${RUN_ID}" >&2
     exit 2
   fi
+
+  if printf '%s' "${RUN_ID}" | grep -aEi "$(redaction_pattern)" >/dev/null; then
+    echo "RUN_ID must not contain secret or private-path markers; run_id_hash=sha256:$(hash_text_sha256 "${RUN_ID}")" >&2
+    exit 2
+  fi
 }
 
 hash_text_sha256() {

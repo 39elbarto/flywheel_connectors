@@ -133,13 +133,15 @@ serialization, so single-row artifacts cannot bypass the same scenario
 allowlist that the bundle verifier enforces. The
 environment metadata records only the selected `RCH_BIN` basename plus a
 `sha256:<64 lowercase hex>` fingerprint of the configured value; private patched
-binary paths are redacted from the evidence JSON. `replay.sh` is self-locating
-inside the artifact bundle, writes rerun output under a local `replay/`
-subdirectory, defaults to `RCH_BIN` from `PATH`, reuses the copied
-provided-evidence JSONL from the bundle when present, and requires
-`FCP_REPO_ROOT` only if it cannot infer the checkout from the default artifact
-layout; it is scanned with the same secret/private-path pattern before exit. The metadata
-artifacts follow the same rule for repository root, artifact root,
+binary paths are redacted from the evidence JSON. `RUN_ID` is rejected before
+artifact directories are created if it contains the same secret or private-path
+markers used by artifact redaction, with stderr reporting only a hash of the
+rejected value. `replay.sh` is self-locating inside the artifact bundle, writes
+rerun output under a local `replay/` subdirectory, defaults to `RCH_BIN` from
+`PATH`, reuses the copied provided-evidence JSONL from the bundle when present,
+and requires `FCP_REPO_ROOT` only if it cannot infer the checkout from the
+default artifact layout; it is scanned with the same secret/private-path pattern
+before exit. The metadata artifacts follow the same rule for repository root, artifact root,
 `CARGO_TARGET_DIR`, and provided-evidence input paths: `environment.json` stores
 classes and `sha256:<64 lowercase hex>` fingerprints instead of absolute paths,
 while separately recording the `sha256:<64 lowercase hex>` content digest of

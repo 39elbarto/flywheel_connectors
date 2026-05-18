@@ -98,6 +98,8 @@ pub enum FixtureScenarioArg {
     RchTopologyPreflightFailure,
     /// The remote branch mirror does not match the primary branch.
     BranchMirrorMismatch,
+    /// Disk pressure blocks proof and push until scratch storage recovers.
+    DiskPressure,
     /// The shared checkout has unrelated dirty files.
     DirtySharedTree,
 }
@@ -112,6 +114,7 @@ impl From<FixtureScenarioArg> for NoNetworkProbeScenario {
             FixtureScenarioArg::RchLocalFallbackDetected => Self::RchLocalFallbackDetected,
             FixtureScenarioArg::RchTopologyPreflightFailure => Self::RchTopologyPreflightFailure,
             FixtureScenarioArg::BranchMirrorMismatch => Self::BranchMirrorMismatch,
+            FixtureScenarioArg::DiskPressure => Self::DiskPressure,
             FixtureScenarioArg::DirtySharedTree => Self::DirtySharedTree,
         }
     }
@@ -1503,6 +1506,67 @@ mod tests {
         assert_eq!(
             report["probes"]["beads"]["blocked_infra_bead_ids"][0],
             "flywheel_connectors-ylexc"
+        );
+    }
+
+    #[test]
+    fn fixture_command_preserves_disk_pressure_blocker() {
+        let tmp = TempDir::new().expect("tempdir");
+        let result = run(&fixture_args_for_scenario(
+            tmp.path().to_path_buf(),
+            FixtureScenarioArg::DiskPressure,
+        ))
+        .expect("fixture run");
+
+        assert!(result.success);
+        assert_eq!(
+            result.payload["handoff"]["decision"]["mode"],
+            "proof_blocked"
+        );
+        assert_eq!(
+            result.payload["handoff"]["decision"]["primary_reason_code"],
+            "proof-blocked-disk-pressure"
+        );
+        assert_eq!(
+            result.payload["handoff"]["active_blocker_beads"][0],
+            "flywheel_connectors-rfbrc"
+        );
+        assert!(
+            result.payload["handoff"]["refused_next_actions"]
+                .as_array()
+                .expect("refused actions")
+                .iter()
+                .any(|action| {
+                    action
+                        .as_str()
+                        .is_some_and(|action| action.starts_with("cargo_proof:"))
+                })
+        );
+        assert!(
+            result.payload["handoff"]["operator_approval_gates"]
+                .as_array()
+                .expect("approval gates")
+                .iter()
+                .any(|gate| {
+                    gate.as_str()
+                        .is_some_and(|gate| gate.starts_with("disk_cleanup:"))
+                })
+        );
+
+        let report_text =
+            fs::read_to_string(tmp.path().join(REPORT_FILENAME)).expect("report json");
+        let report: Value = serde_json::from_str(&report_text).expect("report parses");
+        assert_eq!(
+            report["probes"]["disk"]["check_result"]["status"],
+            "blocked"
+        );
+        assert_eq!(
+            report["probes"]["disk"]["check_result"]["reason_code"],
+            "disk-pressure"
+        );
+        assert_eq!(
+            report["probes"]["disk"]["external_scratch_available"],
+            Value::Bool(false)
         );
     }
 

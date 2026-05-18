@@ -559,6 +559,8 @@ pub enum NoNetworkProbeScenario {
     RchSourceOnly,
     /// Other projects have active builds, but this project can still admit proof.
     RchUnrelatedActiveBuilds,
+    /// Disk pressure blocks local Git/Cargo scratch state and therefore proof.
+    DiskPressure,
     /// Remote `main` and `master` do not match, so push must be refused.
     BranchMirrorMismatch,
     /// Worktree contains unrelated dirty files.
@@ -596,7 +598,7 @@ impl NoNetworkProbeFixture {
             beads: fixture_beads(&plan, &blocked_infra_bead_ids, self.observed_at_unix_ms)?,
             git: fixture_git(&plan, scenario, self.observed_at_unix_ms)?,
             rch: fixture_rch(&plan, scenario, self.observed_at_unix_ms)?,
-            disk: fixture_disk(&plan, self.observed_at_unix_ms)?,
+            disk: fixture_disk(&plan, scenario, self.observed_at_unix_ms)?,
             worktree: fixture_worktree(
                 &plan,
                 scenario,
@@ -646,6 +648,7 @@ struct FixtureScenarioState {
     rch_remote_build_failure: bool,
     rch_source_only: bool,
     rch_unrelated_active_builds: bool,
+    disk_blocked: bool,
     mirror_blocked: bool,
     dirty_tree: bool,
 }
@@ -678,6 +681,7 @@ impl From<NoNetworkProbeScenario> for FixtureScenarioState {
             rch_source_only: scenario == NoNetworkProbeScenario::RchSourceOnly,
             rch_unrelated_active_builds: scenario
                 == NoNetworkProbeScenario::RchUnrelatedActiveBuilds,
+            disk_blocked: scenario == NoNetworkProbeScenario::DiskPressure,
             mirror_blocked: scenario == NoNetworkProbeScenario::BranchMirrorMismatch,
             dirty_tree: scenario == NoNetworkProbeScenario::DirtySharedTree,
         }
@@ -693,6 +697,9 @@ fn fixture_blocker_bead_ids(scenario: FixtureScenarioState) -> BTreeSet<String> 
     }
     if scenario.agent_mail_blocked {
         blocker_bead_ids.insert("flywheel_connectors-d5yeb".to_owned());
+    }
+    if scenario.disk_blocked {
+        blocker_bead_ids.insert(RCH_PROOF_BLOCKER_BEAD_ID.to_owned());
     }
     blocker_bead_ids
 }
@@ -1101,25 +1108,33 @@ fn fixture_rch(
 
 fn fixture_disk(
     plan: &AgentStartupProbePlan,
+    scenario: FixtureScenarioState,
     observed_at_unix_ms: u64,
 ) -> Result<DiskReadiness, AgentReadinessError> {
+    let blocked = scenario.disk_blocked;
     Ok(DiskReadiness {
         check_result: fixture_probe_by_label(
             plan,
             "disk.capacity",
-            ReadinessStatus::Ok,
-            None,
-            None,
+            fixture_status(blocked, ReadinessStatus::Blocked),
+            blocked.then_some("disk-pressure"),
+            blocked.then_some(
+                "defer proof until scratch storage recovers; do not delete files without approval",
+            ),
             observed_at_unix_ms,
         )?,
         checked_mounts: vec![DiskMountState {
             mount_label: "system-data".to_owned(),
-            free_bytes: 170_000_000_000,
-            capacity_percent: 88,
-            inode_state: Some("ok".to_owned()),
-            threshold_status: ReadinessStatus::Ok,
+            free_bytes: if blocked {
+                115_000_000
+            } else {
+                170_000_000_000
+            },
+            capacity_percent: if blocked { 100 } else { 88 },
+            inode_state: Some(if blocked { "pressure" } else { "ok" }.to_owned()),
+            threshold_status: fixture_status(blocked, ReadinessStatus::Blocked),
         }],
-        external_scratch_available: true,
+        external_scratch_available: !blocked,
     })
 }
 
@@ -1569,6 +1584,43 @@ mod tests {
         assert_eq!(observation.active_same_project_count, 0);
         assert_eq!(observation.active_other_project_count, 2);
         assert!(report.decision.can_run_cargo_proof);
+    }
+
+    #[test]
+    fn disk_pressure_fixture_blocks_proof_without_cleanup() {
+        let fixture = NoNetworkProbeFixture {
+            scenario: NoNetworkProbeScenario::DiskPressure,
+            ..NoNetworkProbeFixture::default()
+        };
+        let report = fixture.build_report().expect("fixture report validates");
+
+        assert_eq!(report.decision.mode, ReadinessOperatingMode::ProofBlocked);
+        assert_eq!(
+            report.decision.primary_reason_code.as_deref(),
+            Some("proof-blocked-disk-pressure")
+        );
+        assert!(!report.decision.can_run_cargo_proof);
+        assert!(!report.decision.can_push);
+        assert!(
+            report
+                .decision
+                .blocker_bead_ids
+                .contains(RCH_PROOF_BLOCKER_BEAD_ID)
+        );
+        assert_eq!(
+            report.probes.disk.check_result.status,
+            ReadinessStatus::Blocked
+        );
+        assert_eq!(
+            report.probes.disk.check_result.reason_code.as_deref(),
+            Some("disk-pressure")
+        );
+        assert!(!report.probes.disk.external_scratch_available);
+        assert_eq!(
+            report.probes.disk.checked_mounts[0].threshold_status,
+            ReadinessStatus::Blocked
+        );
+        assert_eq!(report.probes.disk.checked_mounts[0].capacity_percent, 100);
     }
 
     #[test]

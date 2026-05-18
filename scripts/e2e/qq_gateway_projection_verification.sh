@@ -363,6 +363,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           "invalid_session_resumable",
           "restored_session_reconnect_resume",
           "invalid_session_identify_required",
+          "reconnect_backoff_capped",
           "reconnect_attempts_exhausted",
           "gateway_drain_first_batch",
           "gateway_drain_final_batch",
@@ -528,7 +529,18 @@ if [[ "${overall_status}" == "passed" ]]; then
             and .details.lifecycle.resume_sequence == 12
             and .details.lifecycle.reconnect_after_ms == 300
           )
-          and any(.[]; .step == "reconnect_attempts_exhausted" and .details.reason_code == "reconnect_attempts_exhausted" and .details.runtime.max_reconnect_attempts == 1 and .details.runtime.terminal_reconnect_failures == 1 and .details.lifecycle.action == "stop_reconnect")
+          and any(.[];
+            .step == "reconnect_backoff_capped"
+            and .details.reason_code == "reconnect_requested"
+            and .details.runtime.reconnect_attempts == 2
+            and .details.runtime.max_reconnect_attempts == 2
+            and .details.runtime.terminal_reconnect_failures == 0
+            and .details.runtime.reconnect_backoff_ms == 250
+            and .details.runtime.max_reconnect_backoff_ms == 300
+            and .details.lifecycle.action == "reconnect_identify"
+            and .details.lifecycle.reconnect_after_ms == 300
+          )
+          and any(.[]; .step == "reconnect_attempts_exhausted" and .details.reason_code == "reconnect_attempts_exhausted" and .details.runtime.reconnect_attempts == 3 and .details.runtime.max_reconnect_attempts == 2 and .details.runtime.terminal_reconnect_failures == 1 and .details.lifecycle.action == "stop_reconnect")
         ),
         restore_shape_ok: any(.[];
           .step == "restored_session_reconnect_resume"
@@ -632,6 +644,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "evt-invalid-session" \
     "evt-restored-reconnect" \
     "evt-reconnect-cap-first" \
+    "evt-reconnect-cap-capped" \
     "evt-reconnect-exhausted" \
     "evt-after-shutdown" \
     "msg-accepted" \

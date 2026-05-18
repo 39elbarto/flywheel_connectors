@@ -1891,7 +1891,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
             "client_secret": "test-secret",
             "gateway": {
                 "enabled": true,
-                "max_reconnect_attempts": 1,
+                "max_reconnect_attempts": 2,
                 "reconnect_backoff_ms": 250,
                 "max_reconnect_backoff_ms": 300
             }
@@ -1923,6 +1923,44 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "reconnect_identify"
     );
     assert_eq!(reconnect_cap_first["lifecycle"]["reconnect_after_ms"], 250);
+    let reconnect_backoff_capped = invoke_projection(
+        &reconnect_cap_connector,
+        &signing_key,
+        &reconnect_cap_instance_id,
+        "qq-gateway-reconnect-backoff-capped",
+        json!({
+            "op": 7,
+            "id": "evt-reconnect-cap-capped"
+        }),
+    )
+    .await;
+    assert_eq!(
+        reconnect_backoff_capped["reason_code"],
+        "reconnect_requested"
+    );
+    assert_eq!(reconnect_backoff_capped["runtime"]["reconnect_attempts"], 2);
+    assert_eq!(
+        reconnect_backoff_capped["runtime"]["max_reconnect_attempts"],
+        2
+    );
+    assert_eq!(
+        reconnect_backoff_capped["runtime"]["terminal_reconnect_failures"],
+        0
+    );
+    assert_eq!(
+        reconnect_backoff_capped["lifecycle"]["action"],
+        "reconnect_identify"
+    );
+    assert_eq!(
+        reconnect_backoff_capped["lifecycle"]["reconnect_after_ms"],
+        300
+    );
+    log_projection_step(
+        &mut logs,
+        "reconnect_backoff_capped",
+        "ok",
+        &reconnect_backoff_capped,
+    );
     let reconnect_exhausted = invoke_projection(
         &reconnect_cap_connector,
         &signing_key,
@@ -1939,8 +1977,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         reconnect_exhausted["reason_code"],
         "reconnect_attempts_exhausted"
     );
-    assert_eq!(reconnect_exhausted["runtime"]["reconnect_attempts"], 2);
-    assert_eq!(reconnect_exhausted["runtime"]["max_reconnect_attempts"], 1);
+    assert_eq!(reconnect_exhausted["runtime"]["reconnect_attempts"], 3);
+    assert_eq!(reconnect_exhausted["runtime"]["max_reconnect_attempts"], 2);
     assert_eq!(
         reconnect_exhausted["runtime"]["terminal_reconnect_failures"],
         1
@@ -2157,6 +2195,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-invalid-session",
         "evt-restored-reconnect",
         "evt-reconnect-cap-first",
+        "evt-reconnect-cap-capped",
         "evt-reconnect-exhausted",
         "evt-after-shutdown",
         "msg-accepted",
@@ -2266,6 +2305,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert!(log_contents.contains("stale_sequence_events"));
     assert!(log_contents.contains("reconnect_requested"));
     assert!(log_contents.contains("invalid_session_resumable"));
+    assert!(log_contents.contains("reconnect_backoff_capped"));
     assert!(log_contents.contains("reconnect_attempts_exhausted"));
     assert!(log_contents.contains("terminal_reconnect_failures"));
 }

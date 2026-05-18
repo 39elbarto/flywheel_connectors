@@ -3,7 +3,7 @@
 > **Status**: runtime contract documented; simulation and manifest drift documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/google_ai_connector_verification.sh`
 > **Generate upstream**: https://ai.google.dev/api/generate-content
 > **Embeddings upstream**: https://ai.google.dev/api/embeddings
 > **Tokens upstream**: https://ai.google.dev/api/tokens
@@ -65,7 +65,7 @@ This README documents the runtime truth and keeps current drift visible:
 - Runtime `google-ai.generate_content_stream` calls the provider stream endpoint but parses the full HTTP response as a JSON array or single object, merges chunks, and returns one aggregate JSON response to FCP callers.
 - Runtime `google-ai.tuning.create` and `google-ai.tuning.cancel` require `ApprovalMode::ElevationToken`; the manifest currently labels them as `requires_approval = "interactive"`.
 - Runtime `google-ai.live.create_browser_session` supports `prefix_padding_ms` and `silence_duration_ms` fields in introspection, while the manifest lists other Live VAD fields but omits those two names.
-- There is no dedicated tracked verification shell script for this connector.
+- A dedicated tracked verification shell script now exists at `scripts/e2e/google_ai_connector_verification.sh`.
 
 A follow-up parity bead should align connector IDs, simulate behavior, shutdown semantics, approval metadata, and Live schema field names before describing this connector as policy-complete.
 
@@ -213,7 +213,7 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/google_ai_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The dedicated closeout bundle is `scripts/e2e/google_ai_connector_verification.sh`. It runs the manifest check, focused `rch` check/fmt/integration/local-non-mock/clippy lanes, extracts redaction-safe local non-mock JSONL evidence, and writes a replay script plus summary artifact.
 
 The verification surface captures:
 
@@ -222,6 +222,7 @@ The verification surface captures:
 - realtime loopback WebSocket coverage without live Google API calls
 - auth, endpoint policy, provider error, lifecycle, simulation, and introspection tests
 - formatting, check, test, and clippy proof through `rch`
+- replayable verification artifacts under `artifacts/e2e/google-ai/<run-id>/`
 - UBS on changed files before commit
 
 ## Operator Guidance
@@ -257,6 +258,7 @@ The verification surface captures:
 
 **Rerun commands**:
 
+- `RUN_ID=manual-google-ai OUT_ROOT=artifacts/e2e/google-ai/manual-google-ai scripts/e2e/google_ai_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-ai-readme cargo check -p fcp-google-ai --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-ai-readme cargo test -p fcp-google-ai --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-google-ai-readme cargo clippy -p fcp-google-ai --all-targets --no-deps -- -D warnings`

@@ -174,11 +174,12 @@ baseline p50/p95/p99, minimum per-percentile improvement, and any scenarios
 with no p99 improvement, plus the observed execution/source classes and
 `fcp-host::`/`fcp-sandbox::` boundary names. The typed evidence validator and
 shell verifier both require those production-soak boundary names to begin with
-the exact `fcp-host::` and `fcp-sandbox::` prefixes and to use canonical
-machine-label characters only (`A-Z`, `a-z`, `0-9`, `_`, `-`, `.`, and `:`).
-Wrapper labels or prose suffixes that merely embed those strings are rejected.
-That makes before/after promotion evidence auditable without scraping every
-JSONL row by hand. Synthetic checkout evidence from
+the exact `fcp-host::` and `fcp-sandbox::` prefixes, include at least one
+alphanumeric component after the prefix, and use canonical machine-label
+characters only (`A-Z`, `a-z`, `0-9`, `_`, `-`, `.`, and `:`). Bare namespace
+prefixes, wrapper labels, or prose suffixes that merely embed those strings are
+rejected. That makes before/after promotion evidence auditable without scraping
+every JSONL row by hand. Synthetic checkout evidence from
 `ConnectorPrewarmConfig::decide_checkout` is rejected even when the boundary is
 padded or embedded inside a wrapper label, so fixture-derived smoke records
 cannot be reclassified as production soak input.

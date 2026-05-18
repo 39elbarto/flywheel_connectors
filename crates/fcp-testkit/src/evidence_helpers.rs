@@ -2703,11 +2703,17 @@ fn is_canonical_prewarm_boundary_label(boundary: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'_' | b'-' | b'.'))
 }
 
+fn has_prewarm_boundary_component(boundary: &str, prefix: &str) -> bool {
+    boundary
+        .strip_prefix(prefix)
+        .is_some_and(|component| component.bytes().any(|byte| byte.is_ascii_alphanumeric()))
+}
+
 fn is_production_prewarm_host_boundary(host_boundary: &str) -> bool {
     let trimmed = host_boundary.trim();
     trimmed == host_boundary
         && is_canonical_prewarm_boundary_label(trimmed)
-        && trimmed.starts_with(PRODUCTION_PREWARM_HOST_BOUNDARY_PREFIX)
+        && has_prewarm_boundary_component(trimmed, PRODUCTION_PREWARM_HOST_BOUNDARY_PREFIX)
         && !is_synthetic_prewarm_host_boundary(trimmed)
 }
 
@@ -2715,7 +2721,7 @@ fn is_production_prewarm_sandbox_boundary(sandbox_boundary: &str) -> bool {
     let trimmed = sandbox_boundary.trim();
     trimmed == sandbox_boundary
         && is_canonical_prewarm_boundary_label(trimmed)
-        && trimmed.starts_with(PRODUCTION_PREWARM_SANDBOX_BOUNDARY_PREFIX)
+        && has_prewarm_boundary_component(trimmed, PRODUCTION_PREWARM_SANDBOX_BOUNDARY_PREFIX)
 }
 
 /// Replayable JSONL evidence for connector prewarm cold-start behavior.
@@ -11288,6 +11294,22 @@ mod tests {
             )
         );
 
+        let mut bare_sandbox_boundary = prewarm_cold_start_evidence_fixture();
+        bare_sandbox_boundary.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        bare_sandbox_boundary.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        bare_sandbox_boundary.host_boundary =
+            "fcp-host::supervisor::ConnectorSupervisor::activate_connector".to_string();
+        bare_sandbox_boundary.sandbox_boundary =
+            PRODUCTION_PREWARM_SANDBOX_BOUNDARY_PREFIX.to_string();
+        assert_eq!(
+            bare_sandbox_boundary.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresSandboxBoundary {
+                    sandbox_boundary: PRODUCTION_PREWARM_SANDBOX_BOUNDARY_PREFIX.to_string()
+                }
+            )
+        );
+
         let mut production_soak = prewarm_cold_start_evidence_fixture();
         production_soak.execution_mode = SwarmEvidenceExecutionMode::Soak;
         production_soak.source_kind = SwarmEvidenceSourceKind::HostBacked;
@@ -11432,6 +11454,19 @@ mod tests {
             Err(
                 SwarmPrewarmColdStartEvidenceError::SoakRequiresProductionHostBoundary {
                     host_boundary: suffix_prose_host_soak.host_boundary
+                }
+            )
+        );
+
+        let mut bare_host_soak = prewarm_cold_start_evidence_fixture();
+        bare_host_soak.execution_mode = SwarmEvidenceExecutionMode::Soak;
+        bare_host_soak.source_kind = SwarmEvidenceSourceKind::HostBacked;
+        bare_host_soak.host_boundary = PRODUCTION_PREWARM_HOST_BOUNDARY_PREFIX.to_string();
+        assert_eq!(
+            bare_host_soak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SoakRequiresProductionHostBoundary {
+                    host_boundary: PRODUCTION_PREWARM_HOST_BOUNDARY_PREFIX.to_string()
                 }
             )
         );

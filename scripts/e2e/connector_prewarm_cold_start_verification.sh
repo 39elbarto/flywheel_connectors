@@ -359,6 +359,10 @@ if [[ "${overall_status}" == "passed" ]]; then
         type == "string" and (. == "offline" or . == "host_backed" or . == "live");
       def canonical_boundary_label:
         type == "string" and test("^[-A-Za-z0-9_.:]+$");
+      def production_boundary_label($prefix):
+        canonical_boundary_label
+        and startswith($prefix)
+        and (.[($prefix | length):] | test("[A-Za-z0-9]"));
       def latency_percentile_object_ok:
         type == "object"
         and (.p50_ms | positive_integer_value)
@@ -377,8 +381,7 @@ if [[ "${overall_status}" == "passed" ]]; then
         .[$key] == (.evidence[$key] // null);
       def production_host_boundary_ok:
         (.host_boundary | type) == "string"
-        and (.host_boundary | canonical_boundary_label)
-        and (.host_boundary | startswith("fcp-host::"))
+        and (.host_boundary | production_boundary_label("fcp-host::"))
         and ((.host_boundary | gsub("^\\s+|\\s+$"; "")) != "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout")
         and ((.host_boundary | contains("ConnectorPrewarmConfig::decide_checkout")) | not);
       def nested_latency_shape_ok:
@@ -600,11 +603,9 @@ if [[ "${overall_status}" == "passed" ]]; then
         ),
         boundary_shape_ok: all(.[];
           (.host_boundary | type) == "string"
-          and (.host_boundary | canonical_boundary_label)
-          and (.host_boundary | startswith("fcp-host::"))
+          and (.host_boundary | production_boundary_label("fcp-host::"))
           and (.sandbox_boundary | type) == "string"
-          and (.sandbox_boundary | canonical_boundary_label)
-          and (.sandbox_boundary | startswith("fcp-sandbox::"))
+          and (.sandbox_boundary | production_boundary_label("fcp-sandbox::"))
         ),
         nested_evidence_ok: all(.[];
           nested_evidence_matches
@@ -627,8 +628,7 @@ if [[ "${overall_status}" == "passed" ]]; then
               and (.source_kind == "host_backed" or .source_kind == "live")
               and production_host_boundary_ok
               and (.sandbox_boundary | type) == "string"
-              and (.sandbox_boundary | canonical_boundary_label)
-              and (.sandbox_boundary | startswith("fcp-sandbox::"))
+              and (.sandbox_boundary | production_boundary_label("fcp-sandbox::"))
             )
           else true end
         ),

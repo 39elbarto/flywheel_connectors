@@ -87,7 +87,11 @@ a free-form hostname, prose note, or path wrapper. Remote prerequisite skips
 are acceptable only for the default deterministic smoke lane, and their skip
 JSONL stores only the target-dir class, a `sha256:<64 lowercase hex>`
 target-dir fingerprint, and the relative test-log artifact name. It does not
-write raw target or local log paths into the skip evidence. Final
+write raw target or local log paths into the skip evidence. The shell verifier
+uses the same private absolute target-root classification as the typed evidence
+helper before writing skip metadata; a private user, project, mounted-volume, or
+Windows user target directory fails closed instead of being downgraded to a
+generic absolute target class. Final
 production-soak gating fails closed when host-backed or live evidence cannot be
 collected. Operators can set `RCH_BIN=/path/to/rch` to validate a patched RCH
 binary, while `RCH_FORCE_REMOTE=1` is exported by the script so fallback stays
@@ -169,6 +173,9 @@ evidence before export. Evidence also cannot use the exact shared target roots
 use a dedicated child directory so the target-dir hash identifies one proof run;
 `cargo_target_dir_class` must be one of the stable export labels `tmp`,
 `absolute`, or `relative`, so novel labels cannot bypass the redaction gate.
+`private_absolute` is reserved as an internal reject class for local user,
+project, mounted-volume, and Windows user target roots; it is not valid
+reusable evidence.
 `validation.json` records `redaction_scan_ok=true` when that final scan passes
 or `redaction_scan_ok=false` with a reason when it rejects the bundle. The
 verifier's environment and summary artifacts record `remote_proof_status`, the

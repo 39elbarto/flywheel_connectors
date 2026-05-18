@@ -172,6 +172,9 @@ cargo_target_dir_class() {
     /tmp|/tmp/*|/private/tmp|/private/tmp/*)
       printf 'tmp'
       ;;
+    /Users/*|/home/*|/data/projects/*|/private/var/*|/var/folders/*|/Volumes/*|[A-Za-z]:\\Users\\*|[A-Za-z]:/Users/*)
+      printf 'private_absolute'
+      ;;
     /*)
       printf 'absolute'
       ;;
@@ -194,6 +197,10 @@ mark_validation_redaction_failed() {
       "${VALIDATION_JSON}" > "${validation_redaction_tmp}"; then
       mv "${validation_redaction_tmp}" "${VALIDATION_JSON}"
     fi
+  else
+    jq -n --arg reason "${reason}" \
+      '{status: "failed", redaction_scan_ok: false, redaction_scan_reason: $reason}' \
+      > "${VALIDATION_JSON}"
   fi
 }
 
@@ -804,6 +811,12 @@ if [[ -s "${SKIP_JSONL}" ]]; then
     overall_status="failed"
     validation_status="failed"
     mark_validation_redaction_failed "skip_artifact_secret_or_private_path_marker"
+    exit_code=1
+  elif jq -s -e 'any(.[]; .cargo_target_dir_class == "private_absolute")' "${SKIP_JSONL}" >/dev/null; then
+    redaction_status="failed"
+    overall_status="failed"
+    validation_status="failed"
+    mark_validation_redaction_failed "skip_artifact_private_absolute_target_dir"
     exit_code=1
   elif ! jq -s -e '
     all(.[]; .record_type == "swarm_prewarm_cold_start_skip"

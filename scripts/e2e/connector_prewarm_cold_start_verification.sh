@@ -302,8 +302,12 @@ if [[ "${overall_status}" == "passed" ]]; then
     if ! jq -s --argjson require_production_soak "${require_production_soak_json}" '
       def nonempty_string($key):
         (.[$key] | type) == "string" and (.[$key] | length) > 0;
-      def positive_number($key):
-        (.[$key] | type) == "number" and .[$key] > 0;
+      def positive_integer_value:
+        type == "number" and . == floor and . > 0;
+      def nonnegative_integer_value:
+        type == "number" and . == floor and . >= 0;
+      def positive_integer($key):
+        (.[$key] | positive_integer_value);
       def blake3_hash:
         type == "string" and test("^blake3:[0-9a-f]{64}$");
       def git_object_id:
@@ -318,18 +322,16 @@ if [[ "${overall_status}" == "passed" ]]; then
         type == "string" and test("^[-A-Za-z0-9_.:]+$");
       def latency_percentile_object_ok:
         type == "object"
-        and (.p50_ms | type) == "number"
-        and (.p95_ms | type) == "number"
-        and (.p99_ms | type) == "number"
-        and (.p999_ms | type) == "number"
-        and (.max_ms | type) == "number"
-        and (.mean_ms | type) == "number"
-        and .p50_ms > 0
+        and (.p50_ms | positive_integer_value)
+        and (.p95_ms | positive_integer_value)
+        and (.p99_ms | positive_integer_value)
+        and (.p999_ms | positive_integer_value)
+        and (.max_ms | positive_integer_value)
+        and (.mean_ms | positive_integer_value)
         and .p50_ms <= .p95_ms
         and .p95_ms <= .p99_ms
         and .p99_ms <= .p999_ms
-        and .p999_ms <= .max_ms
-        and .mean_ms > 0;
+        and .p999_ms <= .max_ms;
       def same($key):
         .[$key] == .evidence[$key];
       def same_optional($key):
@@ -422,29 +424,27 @@ if [[ "${overall_status}" == "passed" ]]; then
         promotion_improvement_scenarios
         | map(select(has_positive_improvement($records; .) | not));
       def latency_order_ok:
-        (.p50_activation_latency_ms | type) == "number"
-        and (.p95_activation_latency_ms | type) == "number"
-        and (.p99_activation_latency_ms | type) == "number"
-        and (.baseline_p50_activation_latency_ms | type) == "number"
-        and (.baseline_p95_activation_latency_ms | type) == "number"
-        and (.baseline_p99_activation_latency_ms | type) == "number"
-        and .p50_activation_latency_ms > 0
+        (.p50_activation_latency_ms | positive_integer_value)
+        and (.p95_activation_latency_ms | positive_integer_value)
+        and (.p99_activation_latency_ms | positive_integer_value)
+        and (.baseline_p50_activation_latency_ms | positive_integer_value)
+        and (.baseline_p95_activation_latency_ms | positive_integer_value)
+        and (.baseline_p99_activation_latency_ms | positive_integer_value)
         and .p50_activation_latency_ms <= .p95_activation_latency_ms
         and .p95_activation_latency_ms <= .p99_activation_latency_ms
-        and .baseline_p50_activation_latency_ms > 0
         and .baseline_p50_activation_latency_ms <= .baseline_p95_activation_latency_ms
         and .baseline_p95_activation_latency_ms <= .baseline_p99_activation_latency_ms;
       def latency_regression_ok:
-        (.activation_latency_ms | type) == "number"
-        and (.baseline_on_demand_latency_ms | type) == "number"
+        (.activation_latency_ms | positive_integer_value)
+        and (.baseline_on_demand_latency_ms | positive_integer_value)
         and .activation_latency_ms <= .baseline_on_demand_latency_ms
         and .p50_activation_latency_ms <= .baseline_p50_activation_latency_ms
         and .p95_activation_latency_ms <= .baseline_p95_activation_latency_ms
         and .p99_activation_latency_ms <= .baseline_p99_activation_latency_ms;
       def latency_improvement_consistency_ok:
-        (.p50_activation_latency_improvement_ms | type) == "number"
-        and (.p95_activation_latency_improvement_ms | type) == "number"
-        and (.p99_activation_latency_improvement_ms | type) == "number"
+        (.p50_activation_latency_improvement_ms | nonnegative_integer_value)
+        and (.p95_activation_latency_improvement_ms | nonnegative_integer_value)
+        and (.p99_activation_latency_improvement_ms | nonnegative_integer_value)
         and .p50_activation_latency_improvement_ms == (.baseline_p50_activation_latency_ms - .p50_activation_latency_ms)
         and .p95_activation_latency_improvement_ms == (.baseline_p95_activation_latency_ms - .p95_activation_latency_ms)
         and .p99_activation_latency_improvement_ms == (.baseline_p99_activation_latency_ms - .p99_activation_latency_ms);
@@ -527,12 +527,12 @@ if [[ "${overall_status}" == "passed" ]]; then
           or .cargo_target_dir_class == "relative"
         ),
         resource_fields_ok: all(.[];
-          positive_number("pool_size")
-          and positive_number("activation_latency_ms")
-          and positive_number("baseline_on_demand_latency_ms")
-          and positive_number("rss_bytes")
-          and positive_number("process_count")
-          and positive_number("concurrent_startups")
+          positive_integer("pool_size")
+          and positive_integer("activation_latency_ms")
+          and positive_integer("baseline_on_demand_latency_ms")
+          and positive_integer("rss_bytes")
+          and positive_integer("process_count")
+          and positive_integer("concurrent_startups")
           and (.warm_checkout | type) == "boolean"
         ),
         decision_shape_ok: all(.[];
@@ -611,12 +611,15 @@ if [[ "${overall_status}" == "passed" ]]; then
           else true end
         ),
         percentile_fields_ok: all(.[];
-          (.p50_activation_latency_ms | type) == "number"
-          and (.p95_activation_latency_ms | type) == "number"
-          and (.p99_activation_latency_ms | type) == "number"
-          and (.baseline_p50_activation_latency_ms | type) == "number"
-          and (.baseline_p95_activation_latency_ms | type) == "number"
-          and (.baseline_p99_activation_latency_ms | type) == "number"
+          (.p50_activation_latency_ms | positive_integer_value)
+          and (.p95_activation_latency_ms | positive_integer_value)
+          and (.p99_activation_latency_ms | positive_integer_value)
+          and (.baseline_p50_activation_latency_ms | positive_integer_value)
+          and (.baseline_p95_activation_latency_ms | positive_integer_value)
+          and (.baseline_p99_activation_latency_ms | positive_integer_value)
+          and (.p50_activation_latency_improvement_ms | nonnegative_integer_value)
+          and (.p95_activation_latency_improvement_ms | nonnegative_integer_value)
+          and (.p99_activation_latency_improvement_ms | nonnegative_integer_value)
         ),
         latency_order_ok: all(.[];
           latency_order_ok

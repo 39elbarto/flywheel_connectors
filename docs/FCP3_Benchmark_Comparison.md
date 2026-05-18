@@ -108,9 +108,11 @@ validator and shell verifier also require the replay command to carry the same
 `CARGO_TARGET_DIR=<cargo_target_dir>` value exported in the evidence row, and
 reject unresolved `git_revision="unknown"` provenance, non-hex Git revision
 labels outside the 7-to-40 character short/full object-id range, unredacted live-token,
-bearer, private-key, secret-seed, private-user-path, private-var-path,
-mounted-volume-path, raw `operation:` or `zone:` labels, and
-`private_absolute` target-dir evidence before export. Evidence also cannot use
+bearer, authorization, access-token, refresh-token, private-key, secret-seed,
+macOS/Linux/Windows private-user paths, Linux project checkout paths,
+private-var-path, mounted-volume-path, raw `operation:`, `principal:`, or `zone:`
+labels, provider payload markers, and `private_absolute` target-dir evidence
+before export. Evidence also cannot use
 the exact shared target roots `/tmp`, `/private/tmp`, `target`, or `./target`;
 use a dedicated child directory so the target-dir hash identifies one proof run;
 `cargo_target_dir_class` must be one of the stable export labels `tmp`,

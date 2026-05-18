@@ -2813,17 +2813,27 @@ const SWARM_PREWARM_COLD_START_PROMOTION_IMPROVEMENT_SCENARIOS: [&str; 3] = [
 
 const SWARM_PREWARM_CARGO_TARGET_DIR_CLASSES: [&str; 3] = ["tmp", "absolute", "relative"];
 
-const SWARM_PREWARM_REDACTION_MARKERS: [(&str, &str); 10] = [
+const SWARM_PREWARM_REDACTION_MARKERS: [(&str, &str); 20] = [
     ("sk-live-", "sk-live-"),
-    ("Bearer ", "Bearer token"),
+    ("bearer ", "Bearer token"),
+    ("authorization:", "authorization header"),
+    ("token=", "token assignment"),
+    ("access_token", "access token field"),
+    ("refresh_token", "refresh token field"),
     ("super-secret-value", "super-secret-value"),
     ("secret_seed", "secret_seed"),
     ("private_key", "private_key"),
-    ("/Users/", "private user path"),
+    ("/users/", "private user path"),
+    ("/home/", "private user path"),
+    ("/data/projects/", "private project path"),
     ("/private/var/", "private var path"),
-    ("/Volumes/", "mounted volume path"),
+    ("/var/folders/", "private var path"),
+    ("/volumes/", "mounted volume path"),
+    ("c:\\users\\", "windows private user path"),
     ("operation:", "raw operation label"),
+    ("principal:", "raw principal label"),
     ("zone:", "raw zone label"),
+    ("provider_body", "provider payload"),
 ];
 
 fn validate_prewarm_execution_source(
@@ -3046,13 +3056,17 @@ fn prewarm_redaction_fields(
 }
 
 fn prewarm_sensitive_marker(value: &str) -> Option<&'static str> {
+    let normalized = value.to_ascii_lowercase();
+    if normalized.contains("bearer\t")
+        || normalized.contains("bearer\n")
+        || normalized.contains("bearer\r")
+    {
+        return Some("Bearer token");
+    }
     for (needle, marker) in SWARM_PREWARM_REDACTION_MARKERS {
-        if value.contains(needle) {
+        if normalized.contains(needle) {
             return Some(marker);
         }
-    }
-    if value.contains("Bearer\t") || value.contains("Bearer\n") || value.contains("Bearer\r") {
-        return Some("Bearer token");
     }
     None
 }
@@ -10875,6 +10889,56 @@ mod tests {
             )
         );
 
+        let mut linux_home_leak = prewarm_cold_start_evidence_fixture();
+        linux_home_leak.worker_id = "worker:/home/ubuntu/fcp".to_string();
+        assert_eq!(
+            linux_home_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "worker_id",
+                    marker: "private user path"
+                }
+            )
+        );
+
+        let mut linux_project_leak = prewarm_cold_start_evidence_fixture();
+        linux_project_leak.worker_id = "worker:/data/projects/flywheel_connectors".to_string();
+        assert_eq!(
+            linux_project_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "worker_id",
+                    marker: "private project path"
+                }
+            )
+        );
+
+        let mut windows_user_leak = prewarm_cold_start_evidence_fixture();
+        windows_user_leak.worker_id = r"worker:C:\Users\builder\fcp".to_string();
+        assert_eq!(
+            windows_user_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "worker_id",
+                    marker: "windows private user path"
+                }
+            )
+        );
+
+        let mut auth_header_leak = prewarm_cold_start_evidence_fixture();
+        auth_header_leak
+            .command_line
+            .push("Authorization: Bearer redacted".to_string());
+        assert_eq!(
+            auth_header_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "command_line",
+                    marker: "Bearer token"
+                }
+            )
+        );
+
         let mut raw_operation_leak = prewarm_cold_start_evidence_fixture();
         raw_operation_leak.error_mapping = "operation:prewarm_checkout".to_string();
         assert_eq!(
@@ -10883,6 +10947,18 @@ mod tests {
                 SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
                     field: "error_mapping",
                     marker: "raw operation label"
+                }
+            )
+        );
+
+        let mut raw_principal_leak = prewarm_cold_start_evidence_fixture();
+        raw_principal_leak.skip_reason = Some("principal:agent-alpha".to_string());
+        assert_eq!(
+            raw_principal_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "skip_reason",
+                    marker: "raw principal label"
                 }
             )
         );

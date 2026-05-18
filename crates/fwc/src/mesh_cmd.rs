@@ -788,10 +788,11 @@ pub fn mesh_cutover_gates(args: &MeshCutoverGateArgs) -> Vec<MeshCutoverGate> {
                 args.audit_staleness_seconds
             ),
             json!({
-                "telemetry_state": "unavailable",
+                "telemetry_state": "route_available_artifact_required",
                 "quorum_signed_checkpoints": 0,
                 "quorum_signers": 0,
-                "missing_route": "fwc audit chain status --json",
+                "available_route": "fwc audit chain status --json",
+                "missing_fields": ["live_quorum_checkpoint_snapshot"],
             }),
             json!({
                 "quorum_signed_checkpoints": 1,
@@ -799,7 +800,7 @@ pub fn mesh_cutover_gates(args: &MeshCutoverGateArgs) -> Vec<MeshCutoverGate> {
                 "checkpoint_age_seconds_lte": args.audit_staleness_seconds,
             }),
             vec!["fwc audit chain status --json".to_owned()],
-            "Expose quorum checkpoint status through the audit command; until that route is available this gate remains skipped and cannot count as green.",
+            "Wire live quorum checkpoint telemetry into the audit status route; until that telemetry is available this gate remains skipped and cannot count as green.",
         ),
         MeshCutoverGate::skip(
             "mesh-policy-object-distribution",

@@ -53,6 +53,8 @@ pub struct AuditArgs {
 /// Audit subcommands.
 #[derive(Subcommand, Debug, Clone)]
 pub enum AuditCommands {
+    /// Inspect audit-chain status and quorum checkpoint health.
+    Chain(ChainArgs),
     /// Tail audit events from a zone's audit chain.
     ///
     /// Streams audit events in order (by seq) with optional filtering.
@@ -74,6 +76,44 @@ pub enum AuditCommands {
     /// Lists missing capabilities, incomplete operation metadata, and
     /// other readiness gaps that should be addressed.
     Gaps(GapsArgs),
+}
+
+/// Arguments for the `fwc audit chain` command group.
+#[derive(Args, Debug, Clone)]
+pub struct ChainArgs {
+    #[command(subcommand)]
+    pub command: ChainCommands,
+}
+
+/// Audit-chain status subcommands.
+#[derive(Subcommand, Debug, Clone)]
+pub enum ChainCommands {
+    /// Summarize audit-chain quorum status.
+    Status(ChainStatusArgs),
+}
+
+/// Arguments for `fwc audit chain status`.
+#[derive(Args, Debug, Clone)]
+pub struct ChainStatusArgs {
+    /// Signed audit chain head artifact (JSON object). Omit to report missing live telemetry.
+    #[arg(long)]
+    pub head: Option<PathBuf>,
+
+    /// Audit event records input (JSONL or JSON array) used to compute freshness. Use "-" for stdin.
+    #[arg(long)]
+    pub events: Option<PathBuf>,
+
+    /// Maximum quorum checkpoint age considered fresh.
+    #[arg(long, default_value_t = 60)]
+    pub max_age_seconds: u64,
+
+    /// Override current Unix time for deterministic artifact verification.
+    #[arg(long)]
+    pub now_unix_secs: Option<u64>,
+
+    /// Output JSON instead of human-readable format.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 /// Arguments for the `fcp audit tail` command.
@@ -222,12 +262,19 @@ pub struct GapsArgs {
 /// Returns an error if the audit operation fails.
 pub fn run(args: AuditArgs) -> Result<()> {
     match args.command {
+        AuditCommands::Chain(chain_args) => run_chain(&chain_args),
         AuditCommands::Tail(tail_args) => run_tail(&tail_args),
         AuditCommands::Verify(verify_args) => run_verify(&verify_args),
         AuditCommands::Explain(explain_args) => run_explain(&explain_args),
         AuditCommands::Timeline(timeline_args) => run_timeline(&timeline_args),
         AuditCommands::Matrix(matrix_args) => run_matrix(&matrix_args),
         AuditCommands::Gaps(gaps_args) => run_gaps(&gaps_args),
+    }
+}
+
+fn run_chain(args: &ChainArgs) -> Result<()> {
+    match &args.command {
+        ChainCommands::Status(status_args) => run_chain_status(status_args),
     }
 }
 
@@ -449,6 +496,258 @@ fn run_timeline(args: &TimelineArgs) -> Result<()> {
         output_human(&outputs, &zone_label, &AuditFilter::default());
     }
 
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AuditChainStatusSource {
+    kind: String,
+    live: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    events_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AuditChainStatusReport {
+    schema_version: &'static str,
+    command: &'static str,
+    subcommand: &'static str,
+    status: fcp_audit::FreshnessLevel,
+    telemetry_state: &'static str,
+    source: AuditChainStatusSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    zone_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head_seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head_entry: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_quorum_height: Option<u64>,
+    quorum_signed_checkpoints: u64,
+    quorum_signers: u64,
+    quorum_signer_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    producer_signature_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature_count_consistent: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quorum_freshness_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    quorum_rotation_epoch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_rotation_eta_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hlc_physical_drift_ms: Option<u64>,
+    max_age_seconds: u64,
+    warnings: Vec<String>,
+}
+
+fn run_chain_status(args: &ChainStatusArgs) -> Result<()> {
+    let now_unix_secs = args
+        .now_unix_secs
+        .unwrap_or_else(|| u64::try_from(Utc::now().timestamp()).unwrap_or_default());
+    let report = build_chain_status_report(args, now_unix_secs)?;
+    output_chain_status_report(&report, args.json)
+}
+
+fn build_chain_status_report(
+    args: &ChainStatusArgs,
+    now_unix_secs: u64,
+) -> Result<AuditChainStatusReport> {
+    let Some(ref head_path) = args.head else {
+        return Ok(missing_chain_status_report(args));
+    };
+
+    let head_input = read_input(head_path)?;
+    let head = parse_signed_head(&head_input)?;
+    let events = if let Some(ref events_path) = args.events {
+        let events_input = read_input(events_path)?;
+        parse_signed_entries(&events_input)?
+    } else {
+        Vec::new()
+    };
+    let tip_entry = chain_status_tip_entry(&head, &events);
+    let quorum_freshness_secs =
+        tip_entry.map(|entry| now_unix_secs.saturating_sub(entry.occurred_at));
+    let freshness = classify_chain_status_freshness(
+        head.has_quorum(),
+        quorum_freshness_secs,
+        args.max_age_seconds,
+    );
+    let hlc_physical_drift_ms = tip_entry.map(|entry| {
+        now_unix_secs
+            .saturating_mul(1_000)
+            .abs_diff(entry.hlc.physical_ms)
+    });
+    let mut warnings = Vec::new();
+
+    if !head.signature_count_consistent() {
+        warnings.push(format!(
+            "producer signature_count={} but {} attached signatures were present",
+            head.signature_count,
+            head.signatures.len()
+        ));
+    }
+    if head.signatures.is_empty() {
+        warnings.push("signed head artifact carries no attached quorum signatures".to_string());
+    }
+    if args.events.is_none() {
+        warnings.push(
+            "no --events artifact supplied; quorum freshness and HLC drift cannot be bounded"
+                .to_string(),
+        );
+    } else if tip_entry.is_none() {
+        warnings.push(
+            "events artifact did not contain the signed head entry; freshness is unbounded"
+                .to_string(),
+        );
+    }
+    if let Some(entry) = tip_entry {
+        if entry.occurred_at > now_unix_secs {
+            warnings.push(format!(
+                "head entry timestamp {} is in the future relative to now {}",
+                entry.occurred_at, now_unix_secs
+            ));
+        }
+    }
+
+    Ok(AuditChainStatusReport {
+        schema_version: "fcp.fwc.audit_chain_status.v1",
+        command: "audit",
+        subcommand: "chain status",
+        status: freshness,
+        telemetry_state: "artifact",
+        source: AuditChainStatusSource {
+            kind: "signed-head-artifact".to_string(),
+            live: false,
+            head_path: Some(head_path.display().to_string()),
+            events_path: args
+                .events
+                .as_ref()
+                .map(|events_path| events_path.display().to_string()),
+        },
+        zone_id: Some(head.zone_id.clone()),
+        head_seq: Some(head.head_seq),
+        head_entry: Some(head.head_entry.clone()),
+        last_quorum_height: head.has_quorum().then_some(head.head_seq),
+        quorum_signed_checkpoints: if head.has_quorum() { 1 } else { 0 },
+        quorum_signers: u64::try_from(head.signatures.len()).unwrap_or(u64::MAX),
+        quorum_signer_ids: head
+            .signatures
+            .iter()
+            .map(|signature| signature.issuer_kid.clone())
+            .collect(),
+        producer_signature_count: Some(head.signature_count),
+        signature_count_consistent: Some(head.signature_count_consistent()),
+        coverage: Some(head.coverage),
+        quorum_freshness_secs,
+        quorum_rotation_epoch: Some(head.epoch_id.clone()),
+        next_rotation_eta_secs: None,
+        hlc_physical_drift_ms,
+        max_age_seconds: args.max_age_seconds,
+        warnings,
+    })
+}
+
+fn missing_chain_status_report(args: &ChainStatusArgs) -> AuditChainStatusReport {
+    AuditChainStatusReport {
+        schema_version: "fcp.fwc.audit_chain_status.v1",
+        command: "audit",
+        subcommand: "chain status",
+        status: fcp_audit::FreshnessLevel::Missing,
+        telemetry_state: "missing",
+        source: AuditChainStatusSource {
+            kind: "none".to_string(),
+            live: false,
+            head_path: None,
+            events_path: args
+                .events
+                .as_ref()
+                .map(|events_path| events_path.display().to_string()),
+        },
+        zone_id: None,
+        head_seq: None,
+        head_entry: None,
+        last_quorum_height: None,
+        quorum_signed_checkpoints: 0,
+        quorum_signers: 0,
+        quorum_signer_ids: Vec::new(),
+        producer_signature_count: None,
+        signature_count_consistent: None,
+        coverage: None,
+        quorum_freshness_secs: None,
+        quorum_rotation_epoch: None,
+        next_rotation_eta_secs: None,
+        hlc_physical_drift_ms: None,
+        max_age_seconds: args.max_age_seconds,
+        warnings: vec![
+            "no signed audit chain head artifact or live telemetry was supplied".to_string(),
+        ],
+    }
+}
+
+fn chain_status_tip_entry<'a>(
+    head: &fcp_audit::ChainHead,
+    events: &'a [fcp_audit::AuditEntry],
+) -> Option<&'a fcp_audit::AuditEntry> {
+    events
+        .iter()
+        .find(|entry| entry.id == head.head_entry)
+        .or_else(|| {
+            events.iter().find(|entry| {
+                let same_zone = entry.zone_id == head.zone_id;
+                let same_seq = entry.seq == head.head_seq;
+                same_zone && same_seq
+            })
+        })
+}
+
+const fn classify_chain_status_freshness(
+    has_quorum: bool,
+    quorum_freshness_secs: Option<u64>,
+    max_age_seconds: u64,
+) -> fcp_audit::FreshnessLevel {
+    if !has_quorum {
+        return fcp_audit::FreshnessLevel::Degraded;
+    }
+
+    match quorum_freshness_secs {
+        Some(age) if age <= max_age_seconds => fcp_audit::FreshnessLevel::Fresh,
+        Some(age) if age <= max_age_seconds.saturating_mul(4) => fcp_audit::FreshnessLevel::Stale,
+        Some(_) => fcp_audit::FreshnessLevel::Degraded,
+        None => fcp_audit::FreshnessLevel::Stale,
+    }
+}
+
+fn output_chain_status_report(report: &AuditChainStatusReport, json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(report)
+                .context("failed to serialize audit chain status report")?
+        );
+        return Ok(());
+    }
+
+    println!("audit chain status: {}", report.status);
+    println!("telemetry: {}", report.telemetry_state);
+    if let Some(ref zone_id) = report.zone_id {
+        println!("zone: {zone_id}");
+    }
+    if let Some(head_seq) = report.head_seq {
+        println!("head seq: {head_seq}");
+    }
+    println!("quorum signers: {}", report.quorum_signers);
+    if let Some(age) = report.quorum_freshness_secs {
+        println!("quorum freshness: {age}s");
+    }
+    for warning in &report.warnings {
+        println!("warning: {warning}");
+    }
     Ok(())
 }
 

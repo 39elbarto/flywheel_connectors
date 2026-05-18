@@ -3079,7 +3079,8 @@ fn host_mesh_cutover_gates_payload(catalog_connector_count: usize) -> Value {
                 "quorum_signed_checkpoints": 0,
                 "quorum_signers": 0,
                 "node_count": node_count,
-                "missing_route": "fwc audit chain status --json"
+                "available_route": "fwc audit chain status --json",
+                "missing_fields": ["live_quorum_checkpoint_snapshot"]
             },
             "target": {
                 "quorum_signed_checkpoints": 1,
@@ -3088,7 +3089,7 @@ fn host_mesh_cutover_gates_payload(catalog_connector_count: usize) -> Value {
                 "node_count_gte": 3
             },
             "how_measured": ["GET /rpc/mesh/cutover-gates", "fwc audit chain status --json"],
-            "remediation": "Expose quorum checkpoint status before this gate can turn green."
+            "remediation": "Wire live quorum checkpoint telemetry into the audit status route before this gate can turn green."
         }),
         json!({
             "gate_id": "mesh-policy-object-distribution",

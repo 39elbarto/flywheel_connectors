@@ -112,13 +112,15 @@ latency exactly, and each row must explicitly set
 validator and shell verifier also require the replay command to carry the same
 `CARGO_TARGET_DIR=<cargo_target_dir>` value exported in the evidence row, and
 reject unresolved `git_revision="unknown"` provenance, non-hex Git revision
-labels outside the 7-to-40 character short/full object-id range, unredacted live-token,
-bearer, authorization, access-token, refresh-token, private-key, secret-seed,
-macOS/Linux/Windows private-user paths, Linux project checkout paths,
-private-var-path, mounted-volume-path, raw `operation:`, `principal:`, or `zone:`
-labels, raw `z:` zone labels, provider payload markers, and
-`private_absolute` target-dir evidence before export. Evidence also cannot use
-the exact shared target roots `/tmp`, `/private/tmp`, `target`, or `./target`;
+labels outside the 7-to-40 character short/full object-id range, unredacted
+live-token, bearer, authorization, access-token, refresh-token, ID-token,
+client-secret, API-key, private-key, secret-key, password, cookie, credential
+key/value markers, macOS/Linux/Windows private-user paths, Linux project
+checkout paths, private-var-path, mounted-volume-path, raw `operation:`,
+`principal:`, or `zone:` labels, raw `z:` zone labels, provider payload
+markers, reviewer private-contact markers, and `private_absolute` target-dir
+evidence before export. Evidence also cannot use the exact shared target roots
+`/tmp`, `/private/tmp`, `target`, or `./target`;
 use a dedicated child directory so the target-dir hash identifies one proof run;
 `cargo_target_dir_class` must be one of the stable export labels `tmp`,
 `absolute`, or `relative`, so novel labels cannot bypass the redaction gate.

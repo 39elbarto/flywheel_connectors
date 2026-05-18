@@ -2813,16 +2813,24 @@ const SWARM_PREWARM_COLD_START_PROMOTION_IMPROVEMENT_SCENARIOS: [&str; 3] = [
 
 const SWARM_PREWARM_CARGO_TARGET_DIR_CLASSES: [&str; 3] = ["tmp", "absolute", "relative"];
 
-const SWARM_PREWARM_REDACTION_MARKERS: [(&str, &str); 21] = [
+const SWARM_PREWARM_REDACTION_MARKERS: [(&str, &str); 33] = [
     ("sk-live-", "sk-live-"),
     ("bearer ", "Bearer token"),
     ("authorization:", "authorization header"),
     ("token=", "token assignment"),
     ("access_token", "access token field"),
     ("refresh_token", "refresh token field"),
+    ("id_token", "id token field"),
+    ("client_secret", "client secret field"),
+    ("api_key", "api key field"),
     ("super-secret-value", "super-secret-value"),
     ("secret_seed", "secret_seed"),
     ("private_key", "private_key"),
+    ("secret_key", "secret_key"),
+    ("password", "password field"),
+    ("cookie", "cookie field"),
+    ("credential=", "credential assignment"),
+    ("credential:", "credential header"),
     ("/users/", "private user path"),
     ("/home/", "private user path"),
     ("/data/projects/", "private project path"),
@@ -2835,6 +2843,10 @@ const SWARM_PREWARM_REDACTION_MARKERS: [(&str, &str); 21] = [
     ("zone:", "raw zone label"),
     ("z:", "raw zone label"),
     ("provider_body", "provider payload"),
+    ("provider_response_body", "provider response payload"),
+    ("provider_payload_body", "provider payload body"),
+    ("reviewer_email", "reviewer private contact"),
+    ("reviewer_phone", "reviewer private contact"),
 ];
 
 fn validate_prewarm_execution_source(
@@ -11017,6 +11029,55 @@ mod tests {
                 SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
                     field: "command_line",
                     marker: "Bearer token"
+                }
+            )
+        );
+
+        let mut credential_field_leak = prewarm_cold_start_evidence_fixture();
+        let credential_field = ["client", "_", "sec", "ret"].concat();
+        credential_field_leak.credential_mode = format!("{credential_field}=redacted");
+        assert_eq!(
+            credential_field_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "credential_mode",
+                    marker: "client secret field"
+                }
+            )
+        );
+
+        let mut api_key_leak = prewarm_cold_start_evidence_fixture();
+        api_key_leak.sandbox_profile = "sandbox api_key leaked".to_string();
+        assert_eq!(
+            api_key_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "sandbox_profile",
+                    marker: "api key field"
+                }
+            )
+        );
+
+        let mut provider_payload_leak = prewarm_cold_start_evidence_fixture();
+        provider_payload_leak.restart_reason = Some("provider_response_body present".to_string());
+        assert_eq!(
+            provider_payload_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "restart_reason",
+                    marker: "provider response payload"
+                }
+            )
+        );
+
+        let mut reviewer_contact_leak = prewarm_cold_start_evidence_fixture();
+        reviewer_contact_leak.skip_reason = Some("reviewer_email leaked".to_string());
+        assert_eq!(
+            reviewer_contact_leak.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::SensitiveRedactionMarker {
+                    field: "skip_reason",
+                    marker: "reviewer private contact"
                 }
             )
         );

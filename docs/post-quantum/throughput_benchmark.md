@@ -512,12 +512,23 @@ private paths, raw operation/principal/zone labels, secret material,
 auth/header markers, provider-body markers, reviewer-contact markers, and the
 host-dispatcher fixture literals `send_message`, `agent-alpha`, and
 `agent-beta`.
+The standalone formal script also treats its reusable JSONL record set as a
+closed singleton contract: `validate_lean_ids`, the Lake probe/build lanes, the
+three Rust correspondence lanes, `ubs_touched_files`, `redaction_scan`,
+`summary`, and `final_redaction_scan` must each appear exactly once. Unknown
+passing records fail the self-contract instead of being carried as unreviewed
+supplemental evidence, and the normal `redaction_scan` must precede `summary`
+while the `final_redaction_scan` remains immediately after `summary` as the
+final record.
 Its command records carry the same execution-proof fields as the top-level
 gauntlet: non-`rch` lanes must report `fallback_decision:"not_needed"`,
 `worker_execution_class:"not_applicable"`, and `rch_summary:null`; `rch`-backed
 lanes must report `worker_execution_class:"remote"` with an observed
 accepted `[RCH] remote` summary before the formal correspondence self-contract
-can pass. Summaries such as `[RCH] remote required; refusing local fallback`
+can pass. The self-contract maps that requirement by step: only the Lake
+probe/build records and `ubs_touched_files` may use non-`rch` proof, while the
+three Rust correspondence records must carry remote `rch` proof. Summaries such
+as `[RCH] remote required; refusing local fallback`
 are classified as refused local fallback, not remote execution proof.
 For each top-level gauntlet `rch exec` lane, the JSONL records include the
 observed `[RCH]` summary, worker execution class, and fallback decision. Local

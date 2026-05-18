@@ -379,6 +379,36 @@ validate_formal_script_contract() {
         "FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1",
         "FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"
       ];
+    def required_singleton_steps:
+      [
+        "validate_lean_ids",
+        "lean_lake_workspace_probe",
+        "lean_lake_build",
+        "rust_crypto_correspondence",
+        "rust_policy_correspondence",
+        "rust_crypto_existing_v4",
+        "ubs_touched_files",
+        "redaction_scan",
+        "summary",
+        "final_redaction_scan"
+      ];
+    def critical_steps_singleton:
+      . as $records |
+      all(required_singleton_steps[]; . as $step |
+        ([ $records[] | select(.step == $step) ] | length) == 1);
+    def allowed_steps_only:
+      . as $records |
+      all($records[]; .step as $step |
+        (required_singleton_steps | index($step)) != null);
+    def step_index($step):
+      [range(0; length) as $i | select(.[$i].step == $step) | $i][0] // null;
+    def redaction_scan_before_summary:
+      . as $records |
+      ($records | step_index("redaction_scan")) as $redaction_scan_index |
+      ($records | step_index("summary")) as $summary_index |
+      ($redaction_scan_index != null) and
+      ($summary_index != null) and
+      ($redaction_scan_index < $summary_index);
     def non_rch_command_proof:
       .details.fallback_decision == "not_needed" and
       .details.worker_execution_class == "not_applicable" and
@@ -387,8 +417,27 @@ validate_formal_script_contract() {
       .details.fallback_decision == "not_needed" and
       .details.worker_execution_class == "remote" and
       (.details.rch_summary | type == "string" and contains("[RCH] remote") and (contains("remote required") | not) and (contains("refusing local fallback") | not));
+    def non_rch_command_steps:
+      [
+        "lean_lake_workspace_probe",
+        "lean_lake_build",
+        "ubs_touched_files"
+      ];
+    def rch_remote_command_steps:
+      [
+        "rust_crypto_correspondence",
+        "rust_policy_correspondence",
+        "rust_crypto_existing_v4"
+      ];
     def execution_proof_contract:
-      non_rch_command_proof or rch_remote_proof;
+      .step as $command_step |
+      if (non_rch_command_steps | index($command_step)) != null then
+        non_rch_command_proof
+      elif (rch_remote_command_steps | index($command_step)) != null then
+        rch_remote_proof
+      else
+        false
+      end;
     def expected_command_log_artifact:
       "target/fcp-crypto-pq/" + .run_id + "." + .step + ".log";
     def command_step($step):
@@ -430,6 +479,8 @@ validate_formal_script_contract() {
       ($final_scan.record.details.cleanup_result | type == "string");
     length > 0 and
     top_level_provenance_consistent and
+    allowed_steps_only and
+    critical_steps_singleton and
     all(.[]; type == "object" and
       .schema == "fcp.lattice_delegation.formal_correspondence.v1" and
       .script == "scripts/e2e/lattice_delegation_formal_correspondence.sh" and
@@ -459,6 +510,7 @@ validate_formal_script_contract() {
       .details.provider_payloads == "absent" and
       .details.reviewer_private_data == "absent" and
       (.details.cleanup_result | type == "string")) and
+    redaction_scan_before_summary and
     any(.[]; .step == "summary" and .result == "pass" and
       (.details.artifact_path | safe_relative_jsonl_artifact_path) and
       (.details.pre_summary_artifact_hash | sha256_hash) and

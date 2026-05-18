@@ -530,6 +530,17 @@ pub struct ProviderContract {
     pub import_side_effects: Vec<ProviderImportSideEffectContract>,
 }
 
+const PROVIDER_BUILTIN_SECRET_VALUE_MARKERS: [(&str, &str); 8] = [
+    ("sk-live-", "sk-live-"),
+    ("bearer ", "Bearer token"),
+    ("authorization:", "authorization header"),
+    ("token=", "token assignment"),
+    ("access_token=", "access token assignment"),
+    ("refresh_token=", "refresh token assignment"),
+    ("private_key", "private_key"),
+    ("secret_seed", "secret_seed"),
+];
+
 impl ProviderContract {
     /// Create a provider contract.
     #[must_use]
@@ -964,7 +975,37 @@ fn validate_redaction_payloads(contract: &ProviderContract, report: &mut Provide
                 );
             }
         }
+        if let Some(marker) = provider_builtin_secret_value_marker(&payload.payload) {
+            report.push(
+                format!("redaction_payloads[{payload_index}]"),
+                format!("leaks built-in secret marker '{marker}' in a string value"),
+            );
+        }
     }
+}
+
+fn provider_builtin_secret_value_marker(value: &Value) -> Option<&'static str> {
+    match value {
+        Value::String(value) => provider_builtin_secret_marker(value),
+        Value::Array(values) => values.iter().find_map(provider_builtin_secret_value_marker),
+        Value::Object(values) => values
+            .values()
+            .find_map(provider_builtin_secret_value_marker),
+        Value::Null | Value::Bool(_) | Value::Number(_) => None,
+    }
+}
+
+fn provider_builtin_secret_marker(value: &str) -> Option<&'static str> {
+    let normalized = value.to_ascii_lowercase();
+    if normalized.contains("bearer\t")
+        || normalized.contains("bearer\n")
+        || normalized.contains("bearer\r")
+    {
+        return Some("Bearer token");
+    }
+    PROVIDER_BUILTIN_SECRET_VALUE_MARKERS
+        .iter()
+        .find_map(|(needle, marker)| normalized.contains(*needle).then_some(*marker))
 }
 
 fn validate_import_side_effects(contract: &ProviderContract, report: &mut ProviderContractReport) {
@@ -1346,6 +1387,40 @@ mod tests {
         .expect_err("secret leakage must fail");
 
         assert!(messages(&report).contains("leaks secret marker 'fc-secret'"));
+    }
+
+    #[test]
+    fn redaction_payloads_reject_builtin_secret_values() {
+        let report = validate_provider_contract(
+            &ProviderContract::new("openai", "OpenAI").with_redaction_payload(
+                ProviderRedactionPayload::new(
+                    "doctor",
+                    json!({
+                        "summary": "Authorization: Bearer redacted",
+                        "nested": { "status": "not-safe" }
+                    }),
+                ),
+            ),
+        )
+        .expect_err("built-in secret marker must fail even without provider markers");
+
+        assert!(messages(&report).contains("leaks built-in secret marker 'Bearer token'"));
+    }
+
+    #[test]
+    fn redaction_payload_keys_may_name_redacted_secret_fields() {
+        assert_provider_contract(
+            &ProviderContract::new("openrouter", "OpenRouter").with_redaction_payload(
+                ProviderRedactionPayload::new(
+                    "doctor",
+                    json!({
+                        "authorization": "[REDACTED]",
+                        "access_token": "[REDACTED]",
+                        "refresh_token": "[REDACTED]"
+                    }),
+                ),
+            ),
+        );
     }
 
     #[test]

@@ -74,9 +74,12 @@ provided run ids must be redaction-safe label tokens using only ASCII letters,
 digits, `.`, `_`, and `-`, so artifact paths cannot be shaped with slashes,
 traversal, or private-path fragments. A
 successful embedded run that reports `[RCH] local` or emits no RCH summary fails
-closed instead of being reusable shared-worker evidence. Remote prerequisite
-skips are acceptable only for the default deterministic smoke lane, and their
-skip JSONL stores only the target-dir class, a `sha256:<64 lowercase hex>`
+closed instead of being reusable shared-worker evidence. Worker identity uses
+the same redaction-safe label discipline: `worker_id` must be a stable ASCII
+label, 1 to 128 bytes, using only letters, digits, `.`, `_`, and `-`; it is not
+a free-form hostname, prose note, or path wrapper. Remote prerequisite skips
+are acceptable only for the default deterministic smoke lane, and their skip
+JSONL stores only the target-dir class, a `sha256:<64 lowercase hex>`
 target-dir fingerprint, and the relative test-log artifact name. It does not
 write raw target or local log paths into the skip evidence. Final
 production-soak gating fails closed when host-backed or live evidence cannot be

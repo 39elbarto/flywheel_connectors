@@ -308,6 +308,8 @@ if [[ "${overall_status}" == "passed" ]]; then
         type == "string" and test("^blake3:[0-9a-f]{64}$");
       def git_object_id:
         type == "string" and test("^[0-9a-f]{7,40}$");
+      def worker_id_label:
+        type == "string" and test("^[A-Za-z0-9._-]{1,128}$");
       def canonical_boundary_label:
         type == "string" and test("^[-A-Za-z0-9_.:]+$");
       def latency_percentile_object_ok:
@@ -491,7 +493,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           and (.command_line | length) > 0
           and all(.command_line[]; type == "string" and length > 0)
           and nonempty_string("git_revision")
-          and nonempty_string("worker_id")
+          and (.worker_id | worker_id_label)
           and nonempty_string("cargo_target_dir")
           and nonempty_string("cargo_target_dir_class")
           and (.cargo_target_dir_hash | blake3_hash)
@@ -511,6 +513,9 @@ if [[ "${overall_status}" == "passed" ]]; then
         ),
         git_revision_provenance_ok: all(.[];
           (.git_revision | git_object_id)
+        ),
+        worker_id_shape_ok: all(.[];
+          (.worker_id | worker_id_label)
         ),
         target_dir_class_ok: all(.[];
           .cargo_target_dir_class == "tmp"
@@ -620,7 +625,7 @@ if [[ "${overall_status}" == "passed" ]]; then
         ),
         redaction_shape_ok: all(.[];
           (.connector_id | type) == "string"
-          and (.worker_id | type) == "string"
+          and (.worker_id | worker_id_label)
           and (.credential_mode | type) == "string"
           and (.cleanup_result | type) == "string"
           and (.cargo_target_dir_class | type) == "string"
@@ -666,6 +671,7 @@ if [[ "${overall_status}" == "passed" ]]; then
             and $v.target_dir_provenance_ok
             and $v.required_fields_ok
             and $v.git_revision_provenance_ok
+            and $v.worker_id_shape_ok
             and $v.target_dir_class_ok
             and $v.resource_fields_ok
             and $v.decision_shape_ok

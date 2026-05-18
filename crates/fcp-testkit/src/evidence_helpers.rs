@@ -2946,6 +2946,13 @@ fn is_resolved_git_revision(git_revision: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn is_canonical_prewarm_worker_id(worker_id: &str) -> bool {
+    (1..=128).contains(&worker_id.len())
+        && worker_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
 fn validate_prewarm_required_fields(
     evidence: &SwarmPrewarmColdStartEvidence,
 ) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
@@ -2992,6 +2999,17 @@ fn validate_prewarm_required_fields(
     if !is_resolved_git_revision(&evidence.git_revision) {
         return Err(SwarmPrewarmColdStartEvidenceError::InvalidGitRevision {
             git_revision: evidence.git_revision.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_prewarm_worker_id(
+    evidence: &SwarmPrewarmColdStartEvidence,
+) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+    if !is_canonical_prewarm_worker_id(&evidence.worker_id) {
+        return Err(SwarmPrewarmColdStartEvidenceError::InvalidWorkerId {
+            worker_id: evidence.worker_id.clone(),
         });
     }
     Ok(())
@@ -3619,6 +3637,7 @@ impl SwarmPrewarmColdStartEvidence {
         validate_prewarm_execution_source(self.execution_mode, self.source_kind)?;
         validate_prewarm_required_fields(self)?;
         validate_prewarm_redaction(self)?;
+        validate_prewarm_worker_id(self)?;
         validate_prewarm_soak_boundaries(self)?;
         validate_prewarm_command_and_target(self)?;
         validate_prewarm_latency(self)?;
@@ -3859,6 +3878,11 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         /// Observed git revision label.
         git_revision: String,
     },
+    /// Worker identity was not a stable redaction-safe label.
+    InvalidWorkerId {
+        /// Observed worker identity.
+        worker_id: String,
+    },
     /// Reproduction command line was empty or contained an empty part.
     EmptyCommandLine,
     /// Reproduction command line did not prove Cargo was run through rch.
@@ -4087,6 +4111,10 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
             Self::InvalidGitRevision { git_revision } => write!(
                 f,
                 "swarm prewarm git revision must be a lowercase hex Git object id between 7 and 40 characters, got '{git_revision}'"
+            ),
+            Self::InvalidWorkerId { worker_id } => write!(
+                f,
+                "swarm prewarm worker_id must use only ASCII letters, digits, '.', '_', and '-' and be at most 128 bytes, got '{worker_id}'"
             ),
             Self::EmptyCommandLine => write!(f, "swarm prewarm command line is empty"),
             Self::CommandLineDoesNotUseRch { command_line } => write!(
@@ -10544,6 +10572,42 @@ mod tests {
                 }
             )
         );
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_rejects_noncanonical_worker_ids() {
+        for worker_id in [
+            "worker 1",
+            "worker:1",
+            "worker/1",
+            "worker@1",
+            "worker\t1",
+            "worker\n1",
+        ] {
+            let mut bad_worker = prewarm_cold_start_evidence_fixture();
+            bad_worker.worker_id = worker_id.to_string();
+            assert_eq!(
+                bad_worker.validate(),
+                Err(SwarmPrewarmColdStartEvidenceError::InvalidWorkerId {
+                    worker_id: worker_id.to_string()
+                }),
+                "{worker_id:?} should not be accepted as a worker_id"
+            );
+        }
+
+        let too_long_worker_id = format!("{}x", "w".repeat(128));
+        let mut too_long_worker = prewarm_cold_start_evidence_fixture();
+        too_long_worker.worker_id = too_long_worker_id.clone();
+        assert_eq!(
+            too_long_worker.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidWorkerId {
+                worker_id: too_long_worker_id
+            })
+        );
+
+        let mut max_length_worker = prewarm_cold_start_evidence_fixture();
+        max_length_worker.worker_id = "w".repeat(128);
+        assert_eq!(max_length_worker.validate(), Ok(()));
     }
 
     #[test]

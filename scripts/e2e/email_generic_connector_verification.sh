@@ -6,6 +6,9 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/artifacts/e2e/email_generic_connector/${RUN_ID}}"
 TARGET_DIR="${EMAIL_GENERIC_CARGO_TARGET_DIR:-/tmp/fcp-email-generic-e2e-target}"
+REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
+REMOTE_RUNNER="rch:remote-required"
+export RCH_FORCE_REMOTE=1
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
@@ -35,6 +38,7 @@ classify_failure() {
     echo "infra_blocked"
     return
   fi
+  # shellcheck disable=SC2016
   if grep -Eq 'No space left on device|RCH-E|remote required; refusing local fallback|no workers passed health thresholds|no worker assigned|connection reset by peer|missing worker system package|failed to execute process|failed to get successful HTTP response from `https://index\.crates\.io/|unable to update registry `crates-io`|spurious network error' "${log_path}"; then
     echo "infra_blocked"
   else
@@ -52,6 +56,11 @@ run_logged() {
     cd "${REPO_ROOT}" || exit
     "$@"
   ) >"${log_path}" 2>&1
+}
+
+rch_remote_summary_present() {
+  local log_path="$1"
+  grep -Fq "[RCH] remote" "${log_path}"
 }
 
 run_step() {
@@ -72,16 +81,25 @@ run_rch_cargo_step() {
   shift
   run_step "${name}" env \
     RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" \
+    RCH_FORCE_REMOTE=1 \
     RCH_BUILD_SLOTS="${RCH_BUILD_SLOTS:-2}" \
     RCH_TEST_SLOTS="${RCH_TEST_SLOTS:-2}" \
     RCH_CHECK_SLOTS="${RCH_CHECK_SLOTS:-1}" \
     rch exec -- env \
+    "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" \
     CARGO_TARGET_DIR="${TARGET_DIR}" \
     CARGO_INCREMENTAL=0 \
     "$@"
-  if [[ "${LAST_STEP_STATUS}" == "passed" ]] && grep -Eq 'exec called with non-compilation command|\[RCH\] local' "${OUT_ROOT}/logs/${name}.log"; then
-    promote_status infra_blocked
-    LAST_STEP_STATUS="infra_blocked"
+  if [[ "${LAST_STEP_STATUS}" == "passed" ]]; then
+    if grep -Eq 'exec called with non-compilation command|\[RCH\] local' "${OUT_ROOT}/logs/${name}.log"; then
+      promote_status infra_blocked
+      LAST_STEP_STATUS="infra_blocked"
+    elif ! rch_remote_summary_present "${OUT_ROOT}/logs/${name}.log"; then
+      echo "[email-generic-verification] ${name}: rch command did not produce remote proof" >&2
+      echo "rch command did not produce remote proof" >>"${OUT_ROOT}/logs/${name}.log"
+      promote_status infra_blocked
+      LAST_STEP_STATUS="infra_blocked"
+    fi
   fi
 }
 
@@ -99,15 +117,15 @@ rch_diagnose_clippy_json="${OUT_ROOT}/logs/rch_diagnose_clippy.json"
 ) 2>"${OUT_ROOT}/logs/rch_check.stderr" || true
 (
   cd "${REPO_ROOT}" || exit
-  rch diagnose --json -- cargo fmt --manifest-path connectors/email-generic/Cargo.toml --check >"${rch_diagnose_fmt_json}"
+  rch diagnose --json -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo fmt --manifest-path connectors/email-generic/Cargo.toml --check >"${rch_diagnose_fmt_json}"
 ) 2>"${OUT_ROOT}/logs/rch_diagnose_format_check.stderr" || true
 (
   cd "${REPO_ROOT}" || exit
-  rch diagnose --json -- cargo test -p fcp-email-generic --test integration -- --nocapture >"${rch_diagnose_integration_json}"
+  rch diagnose --json -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo test -p fcp-email-generic --test integration -- --nocapture >"${rch_diagnose_integration_json}"
 ) 2>"${OUT_ROOT}/logs/rch_diagnose_integration_fixture.stderr" || true
 (
   cd "${REPO_ROOT}" || exit
-  rch diagnose --json -- cargo clippy -p fcp-email-generic --all-targets -- -D warnings >"${rch_diagnose_clippy_json}"
+  rch diagnose --json -- env "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" cargo clippy -p fcp-email-generic --all-targets -- -D warnings >"${rch_diagnose_clippy_json}"
 ) 2>"${OUT_ROOT}/logs/rch_diagnose_clippy.stderr" || true
 
 run_rch_cargo_step format_check cargo fmt --manifest-path connectors/email-generic/Cargo.toml --check
@@ -168,6 +186,8 @@ cat >"${OUT_ROOT}/environment.json" <<EOF
   "repo_root": "${REPO_ROOT}",
   "verification_script": "scripts/e2e/email_generic_connector_verification.sh",
   "artifact_root": "${OUT_ROOT}",
+  "runner": "${REMOTE_RUNNER}",
+  "toolchain": "${REPO_TOOLCHAIN}",
   "git_revision": "${git_revision}",
   "target_dir": "${TARGET_DIR}",
   "fixture_mode": "no-live-credential raw TCP IMAP/SMTP loopback through connector-local tests",
@@ -180,6 +200,7 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
   "run_id": "${RUN_ID}",
   "connector": "fcp-email-generic",
   "overall_status": "${OVERALL_STATUS}",
+  "runner": "${REMOTE_RUNNER}",
   "artifacts_root": "${OUT_ROOT}",
   "steps": {
     "format_check": "${format_check_status}",

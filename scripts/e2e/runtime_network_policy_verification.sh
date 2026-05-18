@@ -7,7 +7,10 @@ OUT_ROOT_ENV="${OUT_ROOT:-}"
 OUT_ROOT=""
 TARGET_DIR="${TARGET_DIR:-/tmp/fcp-runtime-network-policy-e2e}"
 USE_RCH="${USE_RCH:-1}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
 DRY_RUN=0
+export RCH_FORCE_REMOTE=1
 
 for arg in "$@"; do
   case "${arg}" in
@@ -29,6 +32,11 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+if [[ "${USE_RCH}" != "1" && ${DRY_RUN} -ne 1 ]]; then
+  echo "--use-rch=0 is disabled; remote rch proof is required" >&2
+  exit 2
+fi
 
 if [[ -z "${OUT_ROOT}" ]]; then
   if [[ -n "${OUT_ROOT_ENV}" ]]; then
@@ -110,6 +118,47 @@ run_logged_step() {
   fi
 }
 
+rch_remote_summary_present() {
+  local execution_log="$1"
+
+  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
+    return 0
+  fi
+
+  if grep -Eq '^\[RCH\].*(local|refusing local fallback|no admissible workers)' "${execution_log}"; then
+    echo "Missing accepted remote rch summary in ${execution_log}" >&2
+    echo "rch remote proof is required; refusing local fallback" >&2
+    return 2
+  fi
+
+  grep -Eq '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}" && return 0
+
+  echo "Missing accepted remote rch summary in ${execution_log}" >&2
+  echo "rch remote proof is required; refusing local fallback" >&2
+  return 2
+}
+
+run_remote_cargo_test() {
+  local log_file="$1"
+  shift
+  local remote_error=""
+
+  if ! "${RCH_BIN}" exec -- env \
+    CARGO_TARGET_DIR="${TARGET_DIR}" \
+    CARGO_INCREMENTAL=0 \
+    cargo "$@" >"${log_file}" 2>&1; then
+    return 1
+  fi
+
+  if remote_error="$(rch_remote_summary_present "${log_file}" 2>&1)"; then
+    return 0
+  fi
+
+  printf '%s\n' "${remote_error}" >>"${log_file}"
+  printf '%s\n' "${remote_error}" >&2
+  return 1
+}
+
 run_policy_test() {
   if [[ ${DRY_RUN} -eq 1 ]]; then
     {
@@ -119,20 +168,9 @@ run_policy_test() {
     return 0
   fi
 
-  if [[ "${USE_RCH}" == "1" ]]; then
-    require_cmd rch
-    rch exec -- env \
-      CARGO_TARGET_DIR="${TARGET_DIR}" \
-      CARGO_INCREMENTAL=0 \
-      cargo test -p fcp-host e2e_jsonl_matrix -- --nocapture \
-      >"${HOST_TEST_LOG}" 2>&1
-  else
-    env \
-      CARGO_TARGET_DIR="${TARGET_DIR}" \
-      CARGO_INCREMENTAL=0 \
-      cargo test -p fcp-host e2e_jsonl_matrix -- --nocapture \
-      >"${HOST_TEST_LOG}" 2>&1
-  fi
+  require_cmd "${RCH_BIN}"
+  run_remote_cargo_test "${HOST_TEST_LOG}" \
+    test -p fcp-host e2e_jsonl_matrix -- --nocapture
 }
 
 run_sdk_proxy_test() {
@@ -144,20 +182,9 @@ run_sdk_proxy_test() {
     return 0
   fi
 
-  if [[ "${USE_RCH}" == "1" ]]; then
-    require_cmd rch
-    rch exec -- env \
-      CARGO_TARGET_DIR="${TARGET_DIR}" \
-      CARGO_INCREMENTAL=0 \
-      cargo test -p fcp-sdk --features connector-http host_egress_proxy -- --nocapture \
-      >"${SDK_TEST_LOG}" 2>&1
-  else
-    env \
-      CARGO_TARGET_DIR="${TARGET_DIR}" \
-      CARGO_INCREMENTAL=0 \
-      cargo test -p fcp-sdk --features connector-http host_egress_proxy -- --nocapture \
-      >"${SDK_TEST_LOG}" 2>&1
-  fi
+  require_cmd "${RCH_BIN}"
+  run_remote_cargo_test "${SDK_TEST_LOG}" \
+    test -p fcp-sdk --features connector-http host_egress_proxy -- --nocapture
 }
 
 run_os_sandbox_test() {
@@ -169,20 +196,10 @@ run_os_sandbox_test() {
     return 0
   fi
 
-  if [[ "${USE_RCH}" == "1" ]]; then
-    require_cmd rch
-    rch exec -- env \
-      CARGO_TARGET_DIR="${TARGET_DIR}" \
-      CARGO_INCREMENTAL=0 \
-      cargo test -p fcp-sandbox --test no_mock_integration wasi_runtime_network_policy_controls_preview2_socket_hostcalls -- --nocapture \
-      >"${SANDBOX_TEST_LOG}" 2>&1
-  else
-    env \
-      CARGO_TARGET_DIR="${TARGET_DIR}" \
-      CARGO_INCREMENTAL=0 \
-      cargo test -p fcp-sandbox --test no_mock_integration wasi_runtime_network_policy_controls_preview2_socket_hostcalls -- --nocapture \
-      >"${SANDBOX_TEST_LOG}" 2>&1
-  fi
+  require_cmd "${RCH_BIN}"
+  run_remote_cargo_test "${SANDBOX_TEST_LOG}" \
+    test -p fcp-sandbox --test no_mock_integration \
+    wasi_runtime_network_policy_controls_preview2_socket_hostcalls -- --nocapture
 }
 
 extract_evidence() {
@@ -353,7 +370,7 @@ write_summary() {
     }' "${EVIDENCE_JSONL}" >"${SUMMARY_JSON}"
 }
 
-require_cmd cargo
+require_cmd "${RCH_BIN}"
 require_cmd jq
 mkdir -p "${OUT_ROOT}"
 : >"${STEPS_JSONL}"

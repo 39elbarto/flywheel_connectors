@@ -40,6 +40,7 @@ fcp-host.workspace = true
 fcp-kernel = { path = "../fcp-kernel" }
 fcp-raptorq.workspace = true
 fcp-manifest.workspace = true
+fcp-migrate.workspace = true
 fcp-mesh.workspace = true
 fcp-policy.workspace = true
 fcp-registry.workspace = true

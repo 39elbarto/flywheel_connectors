@@ -335,6 +335,11 @@ use fcp_mesh::{
     HierarchicalVersionVector, IbltMask, LayeredFilterConfig, LayeredReconciliationFilter,
     MaskedIblt,
 };
+use fcp_migrate::{
+    Bandwidth, DirtyTracker, DirtyTrackerMode, PageFaultSource, PageFetch, PostCopyDecision,
+    PostCopyFallbackDecision, PostCopyForwarder, PostCopyOutcome, PreCopyController,
+    PreCopyOutcome, SoftDirtyProc, StaticSoftDirtyReader, Workload,
+};
 use fcp_prelude::{
     ApprovalToken, CapabilityToken, ConnectorTarget, LeasePurpose as CoreLeasePurpose, ObjectId,
     ZoneId,
@@ -1696,6 +1701,8 @@ struct DoctorSelfTestArgs {
 enum DoctorLocalCheck {
     /// Verify the Lean formal-proof gate and local proof artifacts.
     Lean,
+    /// Verify migration dirty-tracking, pre-copy, and post-copy local thresholds.
+    Migration,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, ValueEnum)]
@@ -1705,6 +1712,8 @@ enum DoctorProbe {
     Hlc,
     /// Verify masked IBLT and layered filter local invariants and warning thresholds.
     Iblt,
+    /// Verify migration dirty-tracking, pre-copy, and post-copy local thresholds.
+    Migration,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -12606,12 +12615,20 @@ fn doctor_dispatch(args: &DoctorArgs, explicit_host: Option<&str>) -> Result<Dis
         return doctor_lean_dispatch();
     }
 
+    if matches!(args.check, Some(DoctorLocalCheck::Migration)) {
+        return doctor_migration_probe_dispatch();
+    }
+
     if matches!(args.probe, Some(DoctorProbe::Hlc)) {
         return doctor_hlc_probe_dispatch();
     }
 
     if matches!(args.probe, Some(DoctorProbe::Iblt)) {
         return doctor_iblt_probe_dispatch();
+    }
+
+    if matches!(args.probe, Some(DoctorProbe::Migration)) {
+        return doctor_migration_probe_dispatch();
     }
 
     if let Some(command) = &args.command {
@@ -13162,6 +13179,221 @@ fn doctor_iblt_probe_warnings(
         warnings.push("fpr_observed_exceeds_2x_configured");
     }
     warnings
+}
+
+const MIGRATION_PROBE_PAGE_COUNT: u64 = 8;
+const MIGRATION_PROBE_PAGE_SIZE_BYTES: u64 = 4096;
+const MIGRATION_PROBE_BANDWIDTH_MIB_PER_SECOND: u64 = 100;
+const MIGRATION_PROBE_DIRTY_RATE_MIB_PER_SECOND: u64 = 85;
+const MIGRATION_PROBE_DIRTY_RATE_STOP_AND_CHECKPOINT_PCT: u8 = 80;
+const MIGRATION_PROBE_MAX_PRECOPY_ROUNDS: u8 = 5;
+const MIGRATION_PROBE_POSTCOPY_TIMEOUT_MS: u64 = 100;
+
+fn doctor_migration_probe_dispatch() -> Result<DispatchOutcome> {
+    let report = doctor_migration_probe_report()?;
+    let healthy = report.warnings.is_empty();
+    let status = if healthy { "ok" } else { "warn" };
+    let message = if healthy {
+        "Migration local dirty-tracking, pre-copy, and post-copy thresholds are within doctor policy."
+    } else {
+        "Migration local probe crossed one or more doctor warning thresholds."
+    };
+    let exit_code = if healthy {
+        CliExitCode::Success
+    } else {
+        CliExitCode::Validation
+    };
+
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "doctor");
+    let mut payload = json!({
+        "status": status,
+        "command": "doctor",
+        "probe": "migration",
+        "source": "local-migration-probe",
+        "message": message,
+        "dirty_tracker_kernel_supports_soft_dirty": report.dirty_tracker_kernel_supports_soft_dirty,
+        "last_precopy_round_count": report.last_precopy_round_count,
+        "last_precopy_outcome": report.last_precopy_outcome,
+        "last_dirty_rate_pct": report.last_dirty_rate_pct,
+        "report": {
+            "schema_version": "fcp.fwc.doctor.migration.v1",
+            "dirty_tracker_kernel_supports_soft_dirty": report.dirty_tracker_kernel_supports_soft_dirty,
+            "dirty_tracker_mode": report.dirty_tracker_mode,
+            "last_precopy_round_count": report.last_precopy_round_count,
+            "last_precopy_outcome": report.last_precopy_outcome,
+            "last_dirty_rate_pct": report.last_dirty_rate_pct,
+            "postcopy_decision": report.postcopy_decision,
+            "postcopy_fallback": report.postcopy_fallback,
+            "metrics": {
+                "dirty_page_count": report.dirty_page_count,
+                "page_count": report.page_count,
+                "page_size_bytes": report.page_size_bytes,
+                "bandwidth_mib_per_second": MIGRATION_PROBE_BANDWIDTH_MIB_PER_SECOND,
+                "dirty_rate_mib_per_second": MIGRATION_PROBE_DIRTY_RATE_MIB_PER_SECOND,
+                "final_dirty_bytes": report.final_dirty_bytes,
+                "postcopy_timeout_ms": report.postcopy_timeout_ms,
+            },
+            "thresholds": {
+                "dirty_rate_stop_and_checkpoint_pct": MIGRATION_PROBE_DIRTY_RATE_STOP_AND_CHECKPOINT_PCT,
+                "postcopy_timeout_ms": MIGRATION_PROBE_POSTCOPY_TIMEOUT_MS,
+                "max_precopy_rounds": MIGRATION_PROBE_MAX_PRECOPY_ROUNDS,
+            },
+            "warnings": report.warnings,
+            "commands": [
+                "fwc doctor --probe migration --json",
+                "fwc doctor --zone <zone> --host <endpoint>",
+            ],
+        },
+        "next_actions": [
+            "fwc doctor --probe migration --json",
+            "fwc doctor --zone <zone> --host <endpoint>",
+        ],
+    });
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome { payload, exit_code })
+}
+
+#[derive(Debug)]
+struct MigrationDoctorProbeReport {
+    dirty_tracker_kernel_supports_soft_dirty: bool,
+    dirty_tracker_mode: &'static str,
+    dirty_page_count: u64,
+    page_count: u64,
+    page_size_bytes: u64,
+    last_precopy_round_count: u8,
+    last_precopy_outcome: &'static str,
+    last_dirty_rate_pct: f64,
+    final_dirty_bytes: u64,
+    postcopy_timeout_ms: u64,
+    postcopy_decision: &'static str,
+    postcopy_fallback: &'static str,
+    warnings: Vec<&'static str>,
+}
+
+fn doctor_migration_probe_report() -> Result<MigrationDoctorProbeReport> {
+    let soft_dirty_probe = SoftDirtyProc::for_self(MIGRATION_PROBE_PAGE_SIZE_BYTES).probe();
+    let tracker = DirtyTracker::from_soft_dirty_probe(
+        MIGRATION_PROBE_PAGE_COUNT,
+        MIGRATION_PROBE_PAGE_SIZE_BYTES,
+        soft_dirty_probe,
+    );
+    let static_reader = StaticSoftDirtyReader::from_dirty_pages([1, 3, 5]);
+    tracker
+        .refresh_from_soft_dirty_reader(&static_reader, 0)
+        .map_err(anyhow::Error::msg)?;
+    let health = tracker.health();
+
+    let controller = PreCopyController::new(
+        Bandwidth::from_mib_per_second(MIGRATION_PROBE_BANDWIDTH_MIB_PER_SECOND),
+        MIGRATION_PROBE_DIRTY_RATE_STOP_AND_CHECKPOINT_PCT,
+        MIGRATION_PROBE_MAX_PRECOPY_ROUNDS,
+    );
+    let precopy_outcome = controller.run_precopy(&Workload::synthetic_mib(
+        256,
+        MIGRATION_PROBE_DIRTY_RATE_MIB_PER_SECOND,
+    ));
+    let precopy_report = precopy_outcome.report();
+
+    let postcopy_forwarder = PostCopyForwarder::new(std::time::Duration::from_millis(
+        MIGRATION_PROBE_POSTCOPY_TIMEOUT_MS,
+    ))
+    .with_source(0x1000, "local-checkpoint");
+    let page_source = DoctorMigrationPageSource {
+        latency: std::time::Duration::from_millis(MIGRATION_PROBE_POSTCOPY_TIMEOUT_MS + 1),
+    };
+    let postcopy_outcome = postcopy_forwarder.resolve_fault(0x1000, &page_source);
+    let postcopy_decision = postcopy_decision_label(postcopy_outcome.decision());
+    let postcopy_fallback = postcopy_fallback_label(&postcopy_outcome);
+    let warnings = doctor_migration_probe_warnings(
+        health.kernel_supports_soft_dirty,
+        &precopy_outcome,
+        postcopy_outcome.decision(),
+        postcopy_fallback,
+    );
+
+    Ok(MigrationDoctorProbeReport {
+        dirty_tracker_kernel_supports_soft_dirty: health.kernel_supports_soft_dirty,
+        dirty_tracker_mode: dirty_tracker_mode_label(health.mode),
+        dirty_page_count: health.dirty_page_count,
+        page_count: health.page_count,
+        page_size_bytes: health.page_size_bytes,
+        last_precopy_round_count: precopy_report.rounds,
+        last_precopy_outcome: precopy_outcome_label(&precopy_outcome),
+        last_dirty_rate_pct: f64::from(precopy_report.dirty_rate_pct_of_bandwidth),
+        final_dirty_bytes: precopy_report.final_dirty_bytes,
+        postcopy_timeout_ms: MIGRATION_PROBE_POSTCOPY_TIMEOUT_MS,
+        postcopy_decision,
+        postcopy_fallback,
+        warnings,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DoctorMigrationPageSource {
+    latency: std::time::Duration,
+}
+
+impl PageFaultSource for DoctorMigrationPageSource {
+    fn fetch_page(&self, _page_addr: u64, _source_peer: &str) -> PageFetch {
+        PageFetch {
+            latency: self.latency,
+            bytes: vec![0; usize::try_from(MIGRATION_PROBE_PAGE_SIZE_BYTES).unwrap_or(4096)],
+        }
+    }
+}
+
+fn doctor_migration_probe_warnings(
+    kernel_supports_soft_dirty: bool,
+    precopy_outcome: &PreCopyOutcome,
+    postcopy_decision: PostCopyDecision,
+    postcopy_fallback: &'static str,
+) -> Vec<&'static str> {
+    let mut warnings = Vec::new();
+    if !kernel_supports_soft_dirty {
+        warnings.push("soft_dirty_unavailable_uses_page_walker_fallback");
+    }
+    if !precopy_outcome.is_stop_and_checkpoint() {
+        warnings.push("precopy_threshold_policy_not_triggered");
+    }
+    if postcopy_decision != PostCopyDecision::Timeout {
+        warnings.push("postcopy_timeout_policy_not_triggered");
+    }
+    if postcopy_fallback != "FullReExecute" {
+        warnings.push("postcopy_timeout_fallback_not_full_reexecute");
+    }
+    warnings
+}
+
+const fn dirty_tracker_mode_label(mode: DirtyTrackerMode) -> &'static str {
+    match mode {
+        DirtyTrackerMode::SoftDirty => "SoftDirty",
+        DirtyTrackerMode::PageWalkerFallback => "PageWalkerFallback",
+    }
+}
+
+const fn precopy_outcome_label(outcome: &PreCopyOutcome) -> &'static str {
+    match outcome {
+        PreCopyOutcome::Converged(_) => "Converged",
+        PreCopyOutcome::StopAndCheckpoint(_) => "StopAndCheckpoint",
+        PreCopyOutcome::Aborted { .. } => "Aborted",
+    }
+}
+
+const fn postcopy_decision_label(decision: PostCopyDecision) -> &'static str {
+    match decision {
+        PostCopyDecision::Forwarded => "Forwarded",
+        PostCopyDecision::Timeout => "Timeout",
+        PostCopyDecision::SourceMissing => "SourceMissing",
+    }
+}
+
+const fn postcopy_fallback_label(outcome: &PostCopyOutcome) -> &'static str {
+    match outcome {
+        PostCopyOutcome::Timeout { fallback, .. } => match fallback {
+            PostCopyFallbackDecision::FullReExecute => "FullReExecute",
+        },
+        PostCopyOutcome::Forwarded { .. } | PostCopyOutcome::SourceMissing { .. } => "None",
+    }
 }
 
 fn doctor_subcommand_dispatch(command: &DoctorCommand) -> Result<DispatchOutcome> {
@@ -29321,10 +29553,10 @@ mod tests {
         HostConnectorCatalog, LiveAuthArgs, LiveTruthKnowledgeState, LiveTruthResolverBranch,
         MetadataField, PACKAGE_OUTPUT_FILENAME, PackageBuildMetadata, PackageOutput,
         PrepareCliError, ResolvedHostConfig, ResolvedHostOperation, catalog,
-        doctor_hlc_probe_warnings, doctor_iblt_probe_warnings, execute, host_discovered_connector,
-        host_discovered_operation, host_mcp_tool_definitions, host_tool_summary_entry,
-        host_tool_when_to_use, live_pipeline_operation_metadata, mcp_tool_invoke_args,
-        normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
+        doctor_hlc_probe_warnings, doctor_iblt_probe_warnings, doctor_migration_probe_warnings,
+        execute, host_discovered_connector, host_discovered_operation, host_mcp_tool_definitions,
+        host_tool_summary_entry, host_tool_when_to_use, live_pipeline_operation_metadata,
+        mcp_tool_invoke_args, normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
         resolve_install_activation_truth, resolve_mesh_live_truth, serve_mcp,
         try_host_mcp_tool_definitions, try_host_tool_operation_info, validate_registry_binary_name,
     };
@@ -33958,6 +34190,30 @@ deny_ptrace = true
     }
 
     #[test]
+    fn doctor_migration_probe_parses_without_live_zone() {
+        let cli = Cli::try_parse_from(["fwc", "--json", "doctor", "--probe", "migration"])
+            .expect("doctor --probe migration should parse without --zone");
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(matches!(args.probe, Some(DoctorProbe::Migration)));
+        assert!(args.zone.is_none());
+    }
+
+    #[test]
+    fn doctor_migration_check_parses_without_live_zone() {
+        let cli = Cli::try_parse_from(["fwc", "doctor", "migration", "--json"])
+            .expect("doctor migration should parse without --zone");
+
+        let Commands::Doctor(args) = cli.command else {
+            panic!("expected doctor command");
+        };
+        assert!(matches!(args.check, Some(DoctorLocalCheck::Migration)));
+        assert!(args.zone.is_none());
+    }
+
+    #[test]
     fn doctor_hlc_probe_reports_required_metrics_and_commands() {
         let (exit_code, payload) = execute_json(&["fwc", "--json", "doctor", "--probe", "hlc"]);
 
@@ -34073,6 +34329,80 @@ deny_ptrace = true
     }
 
     #[test]
+    fn doctor_migration_probe_reports_required_metrics_and_commands() {
+        let (exit_code, payload) = execute_json(&["fwc", "doctor", "migration", "--json"]);
+
+        assert!(
+            matches!(
+                exit_code,
+                code if code == CliExitCode::Success.into() || code == CliExitCode::Validation.into()
+            ),
+            "migration probe may warn on hosts without Linux soft-dirty support"
+        );
+        assert_eq!(payload["command"], "doctor");
+        assert_eq!(payload["probe"], "migration");
+        assert_eq!(payload["source"], "local-migration-probe");
+        assert!(payload["dirty_tracker_kernel_supports_soft_dirty"].is_boolean());
+        assert_eq!(payload["last_precopy_round_count"], 5);
+        assert_eq!(payload["last_precopy_outcome"], "StopAndCheckpoint");
+        assert_eq!(payload["last_dirty_rate_pct"], 85.0);
+        assert_eq!(
+            payload["report"]["schema_version"],
+            "fcp.fwc.doctor.migration.v1"
+        );
+
+        assert!(payload["report"]["dirty_tracker_kernel_supports_soft_dirty"].is_boolean());
+        assert!(
+            matches!(
+                payload["report"]["dirty_tracker_mode"].as_str(),
+                Some("SoftDirty" | "PageWalkerFallback")
+            ),
+            "migration probe should report the active dirty tracker mode"
+        );
+        assert_eq!(payload["report"]["last_precopy_round_count"], 5);
+        assert_eq!(
+            payload["report"]["last_precopy_outcome"],
+            "StopAndCheckpoint"
+        );
+        assert_eq!(payload["report"]["last_dirty_rate_pct"], 85.0);
+        assert_eq!(payload["report"]["postcopy_decision"], "Timeout");
+        assert_eq!(payload["report"]["postcopy_fallback"], "FullReExecute");
+
+        let metrics = &payload["report"]["metrics"];
+        assert_eq!(metrics["dirty_page_count"], 3);
+        assert_eq!(metrics["page_count"], 8);
+        assert_eq!(metrics["page_size_bytes"], 4096);
+        assert_eq!(metrics["bandwidth_mib_per_second"], 100);
+        assert_eq!(metrics["dirty_rate_mib_per_second"], 85);
+        assert_eq!(metrics["postcopy_timeout_ms"], 100);
+        assert!(
+            metrics["final_dirty_bytes"].as_u64().unwrap() > 0,
+            "high-dirty pre-copy should leave bytes for stop-and-checkpoint"
+        );
+
+        assert_eq!(
+            payload["report"]["thresholds"]["dirty_rate_stop_and_checkpoint_pct"],
+            80
+        );
+        assert_eq!(payload["report"]["thresholds"]["postcopy_timeout_ms"], 100);
+        assert_eq!(payload["report"]["thresholds"]["max_precopy_rounds"], 5);
+        assert!(
+            payload["report"]["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "fwc doctor --probe migration --json")
+        );
+        assert!(
+            payload["report"]["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|command| command == "fwc doctor --zone <zone> --host <endpoint>")
+        );
+    }
+
+    #[test]
     fn doctor_hlc_probe_warning_thresholds_classify_anomalies() {
         assert!(doctor_hlc_probe_warnings(1_000, 2_000, 4_096).is_empty());
         assert_eq!(
@@ -34094,6 +34424,53 @@ deny_ptrace = true
                 "last_decode_p99_us_exceeds_20ms",
                 "overflow_count_last_1h_exceeds_5",
                 "fpr_observed_exceeds_2x_configured"
+            ]
+        );
+    }
+
+    #[test]
+    fn doctor_migration_probe_warning_thresholds_classify_anomalies() {
+        use fcp_migrate::{PostCopyDecision, PreCopyDecision, PreCopyOutcome, PreCopyReport};
+
+        let stop_report = PreCopyReport {
+            rounds: 5,
+            final_dirty_bytes: 1,
+            dirty_rate_pct_of_bandwidth: 85,
+            logs: Vec::new(),
+        };
+        let stop = PreCopyOutcome::StopAndCheckpoint(stop_report);
+        assert!(
+            doctor_migration_probe_warnings(
+                true,
+                &stop,
+                PostCopyDecision::Timeout,
+                "FullReExecute"
+            )
+            .is_empty()
+        );
+
+        let converged_report = PreCopyReport {
+            rounds: 1,
+            final_dirty_bytes: 0,
+            dirty_rate_pct_of_bandwidth: 10,
+            logs: vec![fcp_migrate::PreCopyRoundLog {
+                round_idx: 1,
+                dirty_pages_this_round: 0,
+                bandwidth_estimate_bytes_per_second: 100,
+                dirty_rate_bytes_per_second: 10,
+                dirty_rate_pct_of_bandwidth: 10,
+                remaining_dirty_bytes: 0,
+                decision: PreCopyDecision::Converged,
+            }],
+        };
+        let converged = PreCopyOutcome::Converged(converged_report);
+        assert_eq!(
+            doctor_migration_probe_warnings(false, &converged, PostCopyDecision::Forwarded, "None"),
+            vec![
+                "soft_dirty_unavailable_uses_page_walker_fallback",
+                "precopy_threshold_policy_not_triggered",
+                "postcopy_timeout_policy_not_triggered",
+                "postcopy_timeout_fallback_not_full_reexecute"
             ]
         );
     }

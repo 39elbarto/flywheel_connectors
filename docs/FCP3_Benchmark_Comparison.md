@@ -67,7 +67,9 @@ successful embedded run that reports `[RCH] local` or emits no RCH summary fails
 closed instead of being reusable shared-worker evidence. Remote prerequisite
 skips are acceptable only for the default deterministic smoke lane; final
 production-soak gating fails closed when host-backed or live evidence cannot be
-collected. Verifier validation and the typed
+collected. Operators can set `RCH_BIN=/path/to/rch` to validate a patched RCH
+binary, while `RCH_FORCE_REMOTE=1` is exported by the script so fallback stays
+refused. Verifier validation and the typed
 `SwarmPrewarmColdStartEvidence::validate()` contract both require
 `CARGO_TARGET_DIR` provenance and connector manifest identity to carry
 `blake3:<64 lowercase hex>` hashes, not just free-form labels or prefix-only

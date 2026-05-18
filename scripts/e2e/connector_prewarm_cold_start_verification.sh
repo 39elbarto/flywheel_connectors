@@ -7,6 +7,9 @@ RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-}"
 REQUIRE_PRODUCTION_SOAK="${REQUIRE_PRODUCTION_SOAK:-0}"
 EVIDENCE_JSONL_IN="${EVIDENCE_JSONL_IN:-}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+export RCH_FORCE_REMOTE=1
 
 usage() {
   cat <<'EOF'
@@ -33,6 +36,8 @@ Remote prerequisite skips are non-fatal for deterministic smoke evidence but
 fail closed when production-soak evidence is required.
 Use --evidence-jsonl to validate externally collected production-soak records
 through the same fail-closed schema, boundary, scenario, and redaction checks.
+Set RCH_BIN=/path/to/rch to validate a patched rch binary; the emitted evidence
+still must prove the replay command uses the canonical `rch exec --` shape.
 EOF
 }
 
@@ -103,7 +108,7 @@ mark_validation_redaction_passed() {
 
 require_cmd jq
 if [[ -z "${EVIDENCE_JSONL_IN}" ]]; then
-  require_cmd rch
+  require_cmd "${RCH_BIN}"
 fi
 
 case "${REQUIRE_PRODUCTION_SOAK}" in
@@ -159,7 +164,8 @@ else
   echo "[connector-prewarm-cold-start] running fcp-e2e prewarm evidence lane"
   if ! (
     cd "${REPO_ROOT}"
-    env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}" RCH_VISIBILITY=verbose rch exec -- env \
+    env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose \
+      "${RCH_BIN}" exec -- env \
       RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-nightly}" \
       CARGO_TARGET_DIR="${target_dir}" \
       PREWARM_EVIDENCE_CARGO_TARGET_DIR="${target_dir}" \
@@ -650,7 +656,9 @@ jq -n \
   --arg artifact_root "${OUT_ROOT}" \
   --arg git_revision "${git_revision}" \
   --arg target_dir "${target_dir}" \
-  --arg rch_require_remote "${RCH_REQUIRE_REMOTE:-1}" \
+  --arg rch_bin "${RCH_BIN}" \
+  --arg rch_require_remote "${RCH_REQUIRE_REMOTE}" \
+  --arg rch_force_remote "${RCH_FORCE_REMOTE:-1}" \
   --arg remote_proof_status "${remote_proof_status}" \
   --arg remote_proof_reason "${remote_proof_reason}" \
   --arg remote_proof_summary "${remote_proof_summary}" \
@@ -664,7 +672,9 @@ jq -n \
     artifact_root: $artifact_root,
     git_revision: $git_revision,
     cargo_target_dir: $target_dir,
+    rch_bin: $rch_bin,
     rch_require_remote: $rch_require_remote,
+    rch_force_remote: $rch_force_remote,
     remote_proof: {
       status: $remote_proof_status,
       reason: (if ($remote_proof_reason | length) > 0 then $remote_proof_reason else null end),
@@ -724,8 +734,8 @@ jq -n \
   printf '%s\n' '#!/usr/bin/env bash'
   printf '%s\n' 'set -euo pipefail'
   printf 'cd %q\n' "${REPO_ROOT}"
-  printf 'RUN_ID=%q OUT_ROOT=%q RCH_REQUIRE_REMOTE=%q REQUIRE_PRODUCTION_SOAK=%q EVIDENCE_JSONL_IN=%q \\\n' \
-    "${RUN_ID}" "${OUT_ROOT}" "${RCH_REQUIRE_REMOTE:-1}" "${REQUIRE_PRODUCTION_SOAK}" "${EVIDENCE_JSONL_IN}"
+  printf 'RUN_ID=%q OUT_ROOT=%q RCH_BIN=%q RCH_REQUIRE_REMOTE=%q RCH_FORCE_REMOTE=%q REQUIRE_PRODUCTION_SOAK=%q EVIDENCE_JSONL_IN=%q \\\n' \
+    "${RUN_ID}" "${OUT_ROOT}" "${RCH_BIN}" "${RCH_REQUIRE_REMOTE}" "${RCH_FORCE_REMOTE:-1}" "${REQUIRE_PRODUCTION_SOAK}" "${EVIDENCE_JSONL_IN}"
   printf '  bash scripts/e2e/connector_prewarm_cold_start_verification.sh \\\n'
   printf '  --run-id %q \\\n' "${RUN_ID}"
   printf '  --out-root %q\n' "${OUT_ROOT}"

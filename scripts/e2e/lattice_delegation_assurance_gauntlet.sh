@@ -1114,6 +1114,12 @@ validate_gauntlet_contract() {
       nonnegative_number and floor == .;
     def nonempty_string:
       type == "string" and length > 0;
+    def safe_relative_jsonl_artifact_path:
+      type == "string" and
+      test("^[A-Za-z0-9._/-]+[.]jsonl$") and
+      (startswith("/") | not) and
+      (contains("..") | not) and
+      (contains("//") | not);
     def required_tool_versions:
       any(.[]; .step == "tool_versions" and .result == "pass" and
         (.details.cargo | populated_tool_version) and
@@ -1188,7 +1194,7 @@ validate_gauntlet_contract() {
         {index:$i, record:$records[$i]}][-1]) as $final_scan |
       ($summary != null) and
       ($final_scan != null) and
-      ($summary.artifact_path | type == "string") and
+      ($summary.artifact_path | safe_relative_jsonl_artifact_path) and
       ($final_scan.index > $summary.index) and
       ($final_scan.index == ($summary.index + 1)) and
       ($final_scan.index == (length - 1)) and
@@ -1200,7 +1206,7 @@ validate_gauntlet_contract() {
     def redaction_scan_covers_expected_artifacts:
       . as $records |
       ([ $records[] | select(.step == "summary" and .result == "pass") | .details.artifact_path ][0] // null) as $summary_artifact |
-      ($summary_artifact | type == "string") and
+      ($summary_artifact | safe_relative_jsonl_artifact_path) and
       any($records[]; .step == "redaction_scan" and .result == "pass" and
         .details.scanned_jsonl_artifacts == 8 and
         (.details.scanned_artifact_paths | type == "array") and
@@ -1266,6 +1272,7 @@ validate_gauntlet_contract() {
     redaction_scan_covers_expected_artifacts and
     final_redaction_scan_covers_summary_artifact and
     any(.[]; .step == "summary" and .result == "pass" and
+      (.details.artifact_path | safe_relative_jsonl_artifact_path) and
       (.details.pre_summary_artifact_hash | sha256_hash) and
       .details.final_artifact_hash_output == "stdout:LATTICE_ASSURANCE_GAUNTLET_SHA256" and
       (.details.profile_ids | type == "array" and

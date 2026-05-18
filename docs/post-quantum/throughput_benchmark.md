@@ -498,11 +498,14 @@ script scans the finished JSONL again and requires a `final_redaction_scan`
 pass record before printing the artifact path and final hash. The self-contract
 requires the normal redaction scan to cover all eight expected JSONL artifacts
 by exact path, not just by count, and requires the final redaction scan to cover
-the summary-bearing gauntlet artifact by exact path, immediately after the
+the summary-bearing gauntlet artifact by exact path. The summary artifact path
+must be a redaction-safe relative `.jsonl` path, never an absolute local/private
+path or a `..` traversal. The final scan must appear immediately after the
 summary record and as the final JSONL record, with a
 `post_summary_artifact_hash` over the summary-bearing artifact state. This keeps
-omitted component scans, duplicate scan-count padding, and append-only records
-after the final scan from passing the reusable-evidence self-contract.
+omitted component scans, duplicate scan-count padding, absolute-path echoing,
+and append-only records after the final scan from passing the reusable-evidence
+self-contract.
 The script prints both the JSONL path and final JSONL SHA-256 on stdout. The
 summary record's embedded `pre_summary_artifact_hash` intentionally covers only
 the records before the summary, avoiding a misleading self-referential hash.

@@ -197,31 +197,6 @@ fn content_length(headers: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn assert_request(captured: &FixtureObservation, method: &str, target: &str) {
-    let request_line = captured.request_line.as_str();
-    let mut request_parts = request_line.split_whitespace();
-    let actual_method = request_parts
-        .next()
-        .expect("captured request line should include method");
-    let actual_target = request_parts
-        .next()
-        .expect("captured request line should include target");
-    let actual_version = request_parts
-        .next()
-        .expect("captured request line should include HTTP version");
-
-    assert_eq!(actual_method, method, "unexpected request method");
-    assert_eq!(actual_version, "HTTP/1.1", "unexpected HTTP version");
-    assert_eq!(actual_target, target, "unexpected request path in line {request_line:?}");
-
-    let lower_head = captured.headers.to_ascii_lowercase();
-    assert!(
-        lower_head.contains(&format!("authorization: bearer {LOOPBACK_AUTH_VALUE}")),
-        "request should carry redaction-safe bearer auth; head={}",
-        captured.headers
-    );
-}
-
 fn header_seen(headers: &str, expected_name: &str, expected_value: &str) -> bool {
     headers.lines().any(|line| {
         let Some((name, value)) = line.split_once(':') else {
@@ -263,7 +238,10 @@ fn capability_token(
     capability: &str,
     operation: &str,
 ) -> CapabilityToken {
-    let constraints = CapabilityConstraints::default();
+    let constraints = CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
     let mut cbor = Vec::new();
     ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
 
@@ -281,50 +259,6 @@ fn capability_token(
         .sign(signing_key)
         .expect("capability token should sign");
     CapabilityToken::from_raw(raw)
-}
-
-async fn configured_connector(
-    base_url: &str,
-    signing_key: &Ed25519SigningKey,
-) -> (GoogleCalendarConnector, InstanceId) {
-    let mut connector = GoogleCalendarConnector::new();
-    connector
-        .handle_configure(json!({
-            "access_token": LOOPBACK_AUTH_VALUE,
-            "required_scopes": ["https://www.googleapis.com/auth/calendar"],
-            "base_url": base_url
-        }))
-        .await
-        .expect("connector should configure against loopback base URL");
-    let instance_id = setup_handshake(&mut connector, signing_key).await;
-    (connector, instance_id)
-}
-
-async fn setup_handshake(
-    connector: &mut GoogleCalendarConnector,
-    signing_key: &Ed25519SigningKey,
-) -> InstanceId {
-    let instance_id = InstanceId::new();
-    connector
-        .handle_handshake(json!({
-            "protocol_version": "1.0.0",
-            "zone": "z:work",
-            "host_public_key": signing_key.verifying_key().to_bytes(),
-            "nonce": vec![0_u8; 32],
-            "capabilities_requested": ["gcal.read", "gcal.write", "gcal.delete"],
-            "requested_instance_id": instance_id.as_str()
-        }))
-        .await
-        .expect("Google Calendar handshake should complete");
-    instance_id
-}
-
-fn capability_for(operation: &str) -> &'static str {
-    match operation {
-        "gcal.create_event" | "gcal.update_event" | "gcal.quick_add" => "gcal.write",
-        "gcal.delete_event" => "gcal.delete",
-        _ => "gcal.read",
-    }
 }
 
 async fn setup_connector(
@@ -544,9 +478,10 @@ async fn local_non_mock_create_event_posts_calendar_event_body() {
             "instance_bound_token_verified": true
         },
         "body_shape": {
-            "summary": body["summary"],
-            "start": body["start"],
-            "end": body["end"]
+            "summary_present": body["summary"].is_string(),
+            "start_datetime_seen": body["start"]["dateTime"].is_string(),
+            "end_datetime_seen": body["end"]["dateTime"].is_string(),
+            "attendee_count": body["attendees"].as_array().map_or(0, std::vec::Vec::len)
         },
         "cleanup": "fixture_thread_joined",
         "result": "passed"

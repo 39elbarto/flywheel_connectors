@@ -8,6 +8,9 @@ SEED="0xC0FFEE14"
 OUT_DIR="${OUT_DIR:-./out/${SCRIPT_NAME}}"
 LOG_JSONL="${LOG_JSONL:-${OUT_DIR}/${SCRIPT_NAME}.jsonl}"
 TARGET_DIR="${CONNECTOR_ROLLOUT_TARGET_DIR:-/tmp/fcp-connector-rollout-flow}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+export RCH_FORCE_REMOTE=1
 
 BASELINE_VERSION="1.0.0"
 CANARY_VERSION="1.0.1"
@@ -36,19 +39,29 @@ require_cmd() {
 }
 
 run_cargo() {
-  if command -v rch >/dev/null 2>&1; then
-    rch exec -- cargo "$@"
-    return $?
-  fi
-  cargo "$@"
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${TARGET_DIR}" cargo "$@"
 }
 
-run_fcp_e2e() {
-  if command -v fcp-e2e >/dev/null 2>&1; then
-    fcp-e2e "$@"
-    return $?
+rch_remote_summary_present() {
+  local execution_log="$1"
+
+  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
+    return 0
   fi
-  run_cargo run --target-dir "${TARGET_DIR}" -q -p fcp-e2e --bin fcp-e2e -- "$@"
+
+  grep -Eq '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}" && return 0
+
+  echo "Missing accepted remote rch summary in ${execution_log}" >&2
+  echo "rch remote proof is required; refusing local fallback" >&2
+  return 2
+}
+
+run_cargo_logged() {
+  local execution_log="$1"
+  shift
+
+  run_cargo "$@" > "${execution_log}" 2>&1 || return
+  rch_remote_summary_present "${execution_log}"
 }
 
 now_ms() {
@@ -148,7 +161,8 @@ run_host_test() {
   (
     cd "${REPO_ROOT}"
     run_cargo test --target-dir "${TARGET_DIR}" -p fcp-host --test host_connector_integration "${test_name}" -- --nocapture
-  ) > "${log_path}" 2>&1
+  ) > "${log_path}" 2>&1 || return
+  rch_remote_summary_present "${log_path}"
 }
 
 step_pin_baseline_version() {
@@ -254,7 +268,7 @@ step_verify_restore_and_audit_event() {
     }')"
 }
 
-require_cmd cargo
+require_cmd "${RCH_BIN}"
 require_cmd jq
 
 mkdir -p "${OUT_DIR}"
@@ -264,6 +278,7 @@ run_step "set_canary_rollout" 2 "[\"${CANARY_LOG}\"]" step_set_canary_rollout
 run_step "simulate_failure_verify_rollback" 3 "[\"${ROLLBACK_LOG}\"]" step_simulate_failure_verify_rollback
 run_step "verify_restore_and_audit_event" 4 "[\"${VERIFICATION_SUMMARY}\"]" step_verify_restore_and_audit_event
 
-run_fcp_e2e --validate-log "${LOG_JSONL}"
+run_cargo_logged "${OUT_DIR}/validate_log.execution.log" \
+  run --target-dir "${TARGET_DIR}" -q -p fcp-e2e --bin fcp-e2e -- --validate-log "${LOG_JSONL}"
 
 echo "${SCRIPT_NAME} complete. Logs: ${LOG_JSONL}"

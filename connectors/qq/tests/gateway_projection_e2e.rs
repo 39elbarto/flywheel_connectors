@@ -744,6 +744,89 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(channel_allowed["runtime"]["queue_depth"], 1);
     log_projection_step(&mut logs, "channel_policy_allowed", "ok", &channel_allowed);
 
+    let c2c_policy_instance_id = InstanceId::new();
+    let mut c2c_policy_connector = QqConnector::new();
+    c2c_policy_connector
+        .configure(json!({
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999",
+            "app_id": "qq-app",
+            "client_secret": "test-secret",
+            "gateway": {
+                "enabled": true,
+                "policy": {
+                    "dm_policy": "allowlist",
+                    "dm_allow_from": ["member-c2c-allowed"],
+                    "group_require_mention": false
+                }
+            }
+        }))
+        .await
+        .expect("configure C2C policy QQ connector");
+    c2c_policy_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            c2c_policy_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake C2C policy QQ connector");
+    let c2c_denied = invoke_projection(
+        &c2c_policy_connector,
+        &signing_key,
+        &c2c_policy_instance_id,
+        "qq-gateway-c2c-denied",
+        json!({
+            "op": 0,
+            "s": 1,
+            "t": "C2C_MESSAGE_CREATE",
+            "id": "evt-c2c-denied",
+            "d": {
+                "id": "msg-c2c-denied",
+                "content": "c2c allowlist should deny",
+                "author": {"id": "member-c2c-denied"}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(c2c_denied["accepted"], false);
+    assert_eq!(c2c_denied["reason_code"], "c2c_sender_not_allowed");
+    assert_eq!(
+        c2c_denied["policy"]["reason_code"],
+        "c2c_sender_not_allowed"
+    );
+    assert_eq!(c2c_denied["normalized"]["routing"], "c2c");
+    assert_eq!(c2c_denied["runtime"]["accepted_events"], 0);
+    assert_eq!(c2c_denied["runtime"]["queue_depth"], 0);
+    log_projection_step(&mut logs, "c2c_policy_denied", "ok", &c2c_denied);
+
+    let c2c_allowed = invoke_projection(
+        &c2c_policy_connector,
+        &signing_key,
+        &c2c_policy_instance_id,
+        "qq-gateway-c2c-allowed",
+        json!({
+            "op": 0,
+            "s": 2,
+            "t": "C2C_MESSAGE_CREATE",
+            "id": "evt-c2c-allowed",
+            "d": {
+                "id": "msg-c2c-allowed",
+                "content": "c2c allowlist should authorize",
+                "author": {"id": "member-c2c-allowed"}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(c2c_allowed["accepted"], true);
+    assert_eq!(c2c_allowed["topic"], "qq.message.authorized");
+    assert_eq!(c2c_allowed["policy"]["reason_code"], "c2c_allowed");
+    assert_eq!(c2c_allowed["policy"]["target_id"], "member-c2c-allowed");
+    assert_eq!(c2c_allowed["policy"]["mentioned_bot"], true);
+    assert_eq!(c2c_allowed["normalized"]["routing"], "c2c");
+    assert_eq!(c2c_allowed["runtime"]["accepted_events"], 1);
+    assert_eq!(c2c_allowed["runtime"]["queue_depth"], 1);
+    log_projection_step(&mut logs, "c2c_policy_allowed", "ok", &c2c_allowed);
+
     let queue_instance_id = InstanceId::new();
     let mut queue_connector = QqConnector::new();
     queue_connector
@@ -1565,6 +1648,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-missing-binding",
         "evt-missing-message-id",
         "evt-missing-reply-target",
+        "evt-c2c-denied",
+        "evt-c2c-allowed",
         "evt-queue-fill",
         "evt-queue-full",
         "evt-stale-sequence",
@@ -1584,6 +1669,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "msg-disabled",
         "msg-missing-binding",
         "msg-missing-reply-target",
+        "msg-c2c-denied",
+        "msg-c2c-allowed",
         "msg-queue-fill",
         "msg-queue-full",
         "msg-stale-sequence",
@@ -1598,11 +1685,15 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "member-slash",
         "member-disabled",
         "member-queue",
+        "member-c2c-denied",
+        "member-c2c-allowed",
         "Alice",
         "gateway disabled should not authorize",
         "event missing sender binding",
         "event missing message id",
         "blank reply target",
+        "c2c allowlist should deny",
+        "c2c allowlist should authorize",
         "queue fill message",
         "queue backpressure message",
         "stale sequence should drop",

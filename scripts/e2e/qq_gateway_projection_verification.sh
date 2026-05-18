@@ -147,6 +147,8 @@ if [[ "${overall_status}" == "passed" ]]; then
           "missing_reply_target_drop",
           "channel_policy_denied",
           "channel_policy_allowed",
+          "c2c_policy_denied",
+          "c2c_policy_allowed",
           "queue_full_policy_denied",
           "queue_full_backpressure_drop",
           "hello_session_restore",
@@ -186,6 +188,10 @@ if [[ "${overall_status}" == "passed" ]]; then
         channel_shape_ok: (
           any(.[]; .step == "channel_policy_denied" and .details.accepted == false and .details.reason_code == "channel_not_allowed")
           and any(.[]; .step == "channel_policy_allowed" and .details.accepted == true and .details.policy.reason_code == "channel_allowed" and .details.policy.mentioned_bot == true)
+        ),
+        c2c_shape_ok: (
+          any(.[]; .step == "c2c_policy_denied" and .details.accepted == false and .details.reason_code == "c2c_sender_not_allowed" and .details.policy.reason_code == "c2c_sender_not_allowed" and .details.normalized.routing == "c2c" and .details.runtime.accepted_events == 0 and .details.runtime.queue_depth == 0)
+          and any(.[]; .step == "c2c_policy_allowed" and .details.accepted == true and .details.policy.reason_code == "c2c_allowed" and .details.policy.mentioned_bot == true and .details.normalized.routing == "c2c" and .details.runtime.accepted_events == 1 and .details.runtime.queue_depth == 1)
         ),
         queue_shape_ok: (
           any(.[];
@@ -261,7 +267,7 @@ if [[ "${overall_status}" == "passed" ]]; then
       } as $v
       | $v
       | .status = (
-          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.queue_shape_ok and $v.group_policy_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok)
+          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.c2c_shape_ok and $v.queue_shape_ok and $v.group_policy_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok)
           then "passed"
           else "failed"
           end
@@ -295,6 +301,8 @@ if [[ "${overall_status}" == "passed" ]]; then
     "evt-missing-binding" \
     "evt-missing-message-id" \
     "evt-missing-reply-target" \
+    "evt-c2c-denied" \
+    "evt-c2c-allowed" \
     "evt-queue-fill" \
     "evt-queue-full" \
     "evt-stale-sequence" \
@@ -315,6 +323,8 @@ if [[ "${overall_status}" == "passed" ]]; then
     "msg-missing-binding" \
     "msg-missing-message-id" \
     "msg-missing-reply-target" \
+    "msg-c2c-denied" \
+    "msg-c2c-allowed" \
     "msg-queue-fill" \
     "msg-queue-full" \
     "msg-stale-sequence" \
@@ -329,11 +339,15 @@ if [[ "${overall_status}" == "passed" ]]; then
     "member-slash" \
     "member-disabled" \
     "member-queue" \
+    "member-c2c-denied" \
+    "member-c2c-allowed" \
     "Alice" \
     "gateway disabled should not authorize" \
     "event missing sender binding" \
     "event missing message id" \
     "blank reply target" \
+    "c2c allowlist should deny" \
+    "c2c allowlist should authorize" \
     "queue fill message" \
     "queue backpressure message" \
     "stale sequence should drop" \

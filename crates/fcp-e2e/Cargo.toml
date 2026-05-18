@@ -338,6 +338,7 @@ fcp-store = { workspace = true }
 fcp-raptorq = { workspace = true }
 fcp-audit = { workspace = true }
 fcp-mesh = { workspace = true }
+fcp-migrate = { workspace = true }
 fcp-tailscale = { workspace = true }
 fwc = { workspace = true }
 blake3 = { workspace = true }

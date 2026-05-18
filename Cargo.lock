@@ -3768,6 +3768,7 @@ dependencies = [
  "fcp-mesh",
  "fcp-metabase",
  "fcp-microsoft365",
+ "fcp-migrate",
  "fcp-mixpanel",
  "fcp-monday",
  "fcp-mongodb",

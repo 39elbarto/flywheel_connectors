@@ -28,7 +28,7 @@ Summary: `0/23` Batch 4 connectors currently pass the graduation gauntlet.
 | `connectors/wecom` | `blocked` | `verification_script_declared` | `4` | README does not declare a scripts/e2e verification script |
 | `connectors/feishu` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/coda` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
-| `connectors/confluence` | `blocked` | `verification_script_declared` | `4` | README does not declare a scripts/e2e verification script |
+| `connectors/confluence` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/microsoft365` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 | `connectors/roam` | `blocked` | `readme_status_match` | `7` | README and manifest must both declare PROVEN/proven for graduation |
 

@@ -149,6 +149,8 @@ These are excluded on purpose:
 
 ## Live Sandbox Verification
 
+Verification script: `scripts/e2e/confluence_connector_verification.sh`
+
 The gated live suite uses `FCP_LIVE_SANDBOX=1` plus `CONFLUENCE_SANDBOX_BASE_URL`, `CONFLUENCE_SANDBOX_EMAIL`, `CONFLUENCE_SANDBOX_API_TOKEN`, `CONFLUENCE_SANDBOX_SPACE_KEY`, and `FCP_SANDBOX_RUN_NAMESPACE`. It performs read-only space and page listings and emits redaction-safe `CONFLUENCE_LIVE_SANDBOX_JSONL` evidence.
 
 Focused rerun command:

@@ -731,6 +731,15 @@ fn validate_gateway_config(config: &QqGatewayRuntimeConfig) -> QqResult<()> {
             "gateway.max_queue_depth must be <= 10000".into(),
         ));
     }
+    for content_type in &config.policy.allowed_attachment_content_types {
+        if canonical_attachment_content_type(content_type).as_deref() != Some(content_type.as_str())
+        {
+            return Err(QqError::Config(
+                "gateway.policy.allowed_attachment_content_types must contain canonical MIME types"
+                    .into(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1073,30 +1082,65 @@ fn attachment_policy_denial(
     event: &NormalizedQqEvent,
     policy: &QqInboundPolicyConfig,
 ) -> Option<&'static str> {
-    let max_attachment_bytes = policy.max_attachment_bytes?;
     let attachments = event.raw.get("attachments").and_then(Value::as_array)?;
     if attachments.is_empty() {
         return None;
     }
 
-    let mut total_bytes = 0_u64;
-    for attachment in attachments {
-        let Some(size) = attachment.get("size").and_then(Value::as_u64) else {
-            return Some("attachment_size_unknown");
-        };
-        if size > max_attachment_bytes {
-            return Some("attachment_bytes_exceeded");
+    if let Some(max_attachment_bytes) = policy.max_attachment_bytes {
+        let mut total_bytes = 0_u64;
+        for attachment in attachments {
+            let Some(size) = attachment.get("size").and_then(Value::as_u64) else {
+                return Some("attachment_size_unknown");
+            };
+            if size > max_attachment_bytes {
+                return Some("attachment_bytes_exceeded");
+            }
+            let Some(next_total) = total_bytes.checked_add(size) else {
+                return Some("attachment_bytes_exceeded");
+            };
+            if next_total > max_attachment_bytes {
+                return Some("attachment_bytes_exceeded");
+            }
+            total_bytes = next_total;
         }
-        let Some(next_total) = total_bytes.checked_add(size) else {
-            return Some("attachment_bytes_exceeded");
-        };
-        if next_total > max_attachment_bytes {
-            return Some("attachment_bytes_exceeded");
+    }
+
+    if !policy.allowed_attachment_content_types.is_empty() {
+        for attachment in attachments {
+            let Some(content_type) = attachment
+                .get("content_type")
+                .and_then(Value::as_str)
+                .and_then(canonical_attachment_content_type)
+            else {
+                return Some("attachment_content_type_missing");
+            };
+            if !policy
+                .allowed_attachment_content_types
+                .iter()
+                .any(|allowed| allowed == &content_type)
+            {
+                return Some("attachment_content_type_not_allowed");
+            }
         }
-        total_bytes = next_total;
     }
 
     None
+}
+
+fn canonical_attachment_content_type(raw: &str) -> Option<String> {
+    let media_type = raw.split(';').next()?.trim();
+    if media_type.is_empty()
+        || !media_type
+            .split_once('/')
+            .is_some_and(|(kind, subtype)| !kind.is_empty() && !subtype.is_empty())
+        || media_type
+            .chars()
+            .any(|ch| ch.is_ascii_control() || ch.is_ascii_whitespace())
+    {
+        return None;
+    }
+    Some(media_type.to_ascii_lowercase())
 }
 
 fn validate_host(raw: &str, allowed_hosts: &[&str]) -> QqResult<()> {
@@ -1769,6 +1813,36 @@ mod tests {
         assert_eq!(client.config().token_base_url, "http://localhost:9999");
         assert_eq!(client.config().app_id, "test-app");
         assert_eq!(client.config().client_secret, "test-secret");
+    }
+
+    #[test]
+    fn normalizes_attachment_content_type_allowlist() {
+        let mut config = localhost_config();
+        config.gateway.policy.allowed_attachment_content_types =
+            vec![" Image/PNG ".into(), "image/png".into(), "audio/amr".into()];
+        let client = QqClient::new(config).unwrap();
+        assert_eq!(
+            client
+                .config()
+                .gateway
+                .policy
+                .allowed_attachment_content_types,
+            vec!["audio/amr", "image/png"]
+        );
+    }
+
+    #[test]
+    fn rejects_noncanonical_attachment_content_type_allowlist() {
+        let mut config = localhost_config();
+        config.gateway.policy.allowed_attachment_content_types =
+            vec!["image/png; charset=utf-8".into()];
+        let error =
+            QqClient::new(config).expect_err("parameterized content type should fail config");
+        assert!(
+            error
+                .to_string()
+                .contains("allowed_attachment_content_types")
+        );
     }
 
     #[test]
@@ -3363,6 +3437,98 @@ mod tests {
             })
             .unwrap();
         assert!(uncapped.accepted);
+    }
+
+    #[test]
+    fn gateway_runtime_enforces_attachment_content_type_policy() {
+        let mut config = QqGatewayRuntimeConfig {
+            enabled: true,
+            max_queue_depth: 8,
+            ..QqGatewayRuntimeConfig::default()
+        };
+        config.policy.allowed_attachment_content_types = vec!["image/png".into()];
+        let mut runtime = QqGatewayRuntime::new(config);
+
+        let allowed = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-attachment-type-ok",
+                    "content": "bot see png",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1",
+                    "attachments": [
+                        {
+                            "url": "https://example.com/allowed.png",
+                            "content_type": "IMAGE/PNG; charset=binary",
+                            "size": 1024
+                        }
+                    ]
+                })),
+                id: Some("evt-attachment-type-ok".into()),
+            })
+            .unwrap();
+        assert!(allowed.accepted);
+        assert_eq!(
+            allowed.policy.as_ref().map(|policy| policy.reason_code),
+            Some("group_allowed")
+        );
+
+        let disallowed = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(2),
+                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-attachment-type-denied",
+                    "content": "bot see exe",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1",
+                    "attachments": [
+                        {
+                            "url": "https://example.com/denied.exe",
+                            "content_type": "application/x-msdownload",
+                            "size": 1024
+                        }
+                    ]
+                })),
+                id: Some("evt-attachment-type-denied".into()),
+            })
+            .unwrap();
+        assert!(!disallowed.accepted);
+        assert_eq!(
+            disallowed.reason_code,
+            "attachment_content_type_not_allowed"
+        );
+        assert_eq!(
+            disallowed.policy.as_ref().map(|policy| policy.reason_code),
+            Some("attachment_content_type_not_allowed")
+        );
+
+        let missing = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(3),
+                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-attachment-type-missing",
+                    "content": "bot see unknown",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1",
+                    "attachments": [
+                        {
+                            "url": "https://example.com/unknown.bin",
+                            "size": 1024
+                        }
+                    ]
+                })),
+                id: Some("evt-attachment-type-missing".into()),
+            })
+            .unwrap();
+        assert!(!missing.accepted);
+        assert_eq!(missing.reason_code, "attachment_content_type_missing");
     }
 
     #[test]

@@ -1269,6 +1269,118 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         &unknown_size_media,
     );
 
+    let media_type_instance_id = InstanceId::new();
+    let mut media_type_connector = QqConnector::new();
+    media_type_connector
+        .configure(json!({
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999",
+            "app_id": "qq-app",
+            "client_secret": "test-secret",
+            "gateway": {
+                "enabled": true,
+                "policy": {
+                    "group_policy": "open",
+                    "group_require_mention": true,
+                    "bot_user_id": "bot-openid",
+                    "max_attachment_bytes": 4096,
+                    "allowed_attachment_content_types": ["image/png"]
+                }
+            }
+        }))
+        .await
+        .expect("configure media-type QQ connector");
+    media_type_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            media_type_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake media-type QQ connector");
+    let media_type_denied = invoke_projection(
+        &media_type_connector,
+        &signing_key,
+        &media_type_instance_id,
+        "qq-gateway-media-type-denied",
+        json!({
+            "op": 0,
+            "s": 1,
+            "t": "GROUP_AT_MESSAGE_CREATE",
+            "id": "evt-media-type-denied",
+            "d": {
+                "id": "msg-media-type-denied",
+                "content": "bot-openid blocked media type",
+                "group_openid": "group-media-type",
+                "group_member_openid": "member-media-type",
+                "attachments": [
+                    {
+                        "url": "https://cdn.qq.example/private/disallowed.exe",
+                        "filename": "disallowed.exe",
+                        "content_type": "application/x-msdownload",
+                        "size": 512
+                    }
+                ]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(media_type_denied["accepted"], false);
+    assert_eq!(
+        media_type_denied["reason_code"],
+        "attachment_content_type_not_allowed"
+    );
+    assert_eq!(
+        media_type_denied["policy"]["reason_code"],
+        "attachment_content_type_not_allowed"
+    );
+    assert_eq!(media_type_denied["runtime"]["accepted_events"], 0);
+    assert_eq!(media_type_denied["runtime"]["queue_depth"], 0);
+    log_projection_step(
+        &mut logs,
+        "media_content_type_policy_drop",
+        "ok",
+        &media_type_denied,
+    );
+
+    let media_type_allowed = invoke_projection(
+        &media_type_connector,
+        &signing_key,
+        &media_type_instance_id,
+        "qq-gateway-media-type-allowed",
+        json!({
+            "op": 0,
+            "s": 2,
+            "t": "GROUP_AT_MESSAGE_CREATE",
+            "id": "evt-media-type-allowed",
+            "d": {
+                "id": "msg-media-type-allowed",
+                "content": "bot-openid allowed media type",
+                "group_openid": "group-media-type",
+                "group_member_openid": "member-media-type",
+                "attachments": [
+                    {
+                        "url": "https://cdn.qq.example/private/allowed.png",
+                        "filename": "allowed.png",
+                        "content_type": "image/png; charset=binary",
+                        "size": 512
+                    }
+                ]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(media_type_allowed["accepted"], true);
+    assert_eq!(media_type_allowed["policy"]["reason_code"], "group_allowed");
+    assert_eq!(media_type_allowed["normalized"]["has_attachments"], true);
+    assert_eq!(media_type_allowed["runtime"]["accepted_events"], 1);
+    assert_eq!(media_type_allowed["runtime"]["queue_depth"], 1);
+    log_projection_step(
+        &mut logs,
+        "media_content_type_policy_allowed",
+        "ok",
+        &media_type_allowed,
+    );
+
     let reply_media = invoke_projection(
         &connector,
         &signing_key,
@@ -1815,6 +1927,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-slash-approval",
         "evt-oversized-media",
         "evt-unknown-size-media",
+        "evt-media-type-denied",
+        "evt-media-type-allowed",
         "evt-disabled",
         "evt-missing-binding",
         "evt-missing-message-id",
@@ -1840,6 +1954,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "msg-slash-approval",
         "msg-oversized-media",
         "msg-unknown-size-media",
+        "msg-media-type-denied",
+        "msg-media-type-allowed",
         "msg-disabled",
         "msg-missing-binding",
         "msg-missing-message-id",
@@ -1861,6 +1977,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "group-denied",
         "group-queue",
         "group-voice",
+        "group-media-type",
         "channel-denied",
         "channel-allowed",
         "guild-denied",
@@ -1870,6 +1987,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "member-disabled",
         "member-queue",
         "member-voice",
+        "member-media-type",
         "member-c2c-denied",
         "member-c2c-allowed",
         "Alice",
@@ -1890,6 +2008,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "see attached trace",
         "too large",
         "missing size metadata",
+        "blocked media type",
+        "allowed media type",
         "after shutdown should deny",
         "approve deployment from voice",
         "/approve rollout-42",
@@ -1899,6 +2019,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "voice.amr",
         "oversized.bin",
         "missing-size.pdf",
+        "disallowed.exe",
+        "allowed.png",
     ] {
         assert!(
             !log_contents.contains(forbidden),
@@ -1919,6 +2041,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert!(log_contents.contains("attachment_url_hashes"));
     assert!(log_contents.contains("attachment_bytes_exceeded"));
     assert!(log_contents.contains("attachment_size_unknown"));
+    assert!(log_contents.contains("attachment_content_type_not_allowed"));
+    assert!(log_contents.contains("media_content_type_policy_allowed"));
     assert!(log_contents.contains("queue_full_policy_denied"));
     assert!(log_contents.contains("queue_full_backpressure_drop"));
     assert!(log_contents.contains("queue_full"));

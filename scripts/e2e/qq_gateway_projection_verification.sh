@@ -283,6 +283,8 @@ if [[ "${overall_status}" == "passed" ]]; then
           "explicit_text_group_mention",
           "oversized_media_policy_drop",
           "unknown_media_size_policy_drop",
+          "media_content_type_policy_drop",
+          "media_content_type_policy_allowed",
           "reply_media_projection",
           "voice_asr_projection",
           "slash_approval_projection",
@@ -377,6 +379,27 @@ if [[ "${overall_status}" == "passed" ]]; then
         media_shape_ok: (
           any(.[]; .step == "oversized_media_policy_drop" and .details.reason_code == "attachment_bytes_exceeded")
           and any(.[]; .step == "unknown_media_size_policy_drop" and .details.reason_code == "attachment_size_unknown")
+          and any(.[];
+            .step == "media_content_type_policy_drop"
+            and .details.accepted == false
+            and .details.reason_code == "attachment_content_type_not_allowed"
+            and .details.policy.reason_code == "attachment_content_type_not_allowed"
+            and .details.normalized.has_attachments == true
+            and (.details.normalized.attachment_content_types | type) == "array"
+            and (.details.normalized.attachment_content_types | length) == 1
+            and .details.runtime.accepted_events == 0
+            and .details.runtime.queue_depth == 0
+          )
+          and any(.[];
+            .step == "media_content_type_policy_allowed"
+            and .details.accepted == true
+            and .details.policy.reason_code == "group_allowed"
+            and .details.normalized.has_attachments == true
+            and (.details.normalized.attachment_content_types | type) == "array"
+            and (.details.normalized.attachment_content_types | length) == 1
+            and .details.runtime.accepted_events == 1
+            and .details.runtime.queue_depth == 1
+          )
         ),
         voice_shape_ok: any(.[];
           .step == "voice_asr_projection"
@@ -475,6 +498,8 @@ if [[ "${overall_status}" == "passed" ]]; then
     "evt-slash-approval" \
     "evt-oversized-media" \
     "evt-unknown-size-media" \
+    "evt-media-type-denied" \
+    "evt-media-type-allowed" \
     "evt-disabled" \
     "evt-missing-binding" \
     "evt-missing-message-id" \
@@ -502,6 +527,8 @@ if [[ "${overall_status}" == "passed" ]]; then
     "msg-slash-approval" \
     "msg-oversized-media" \
     "msg-unknown-size-media" \
+    "msg-media-type-denied" \
+    "msg-media-type-allowed" \
     "msg-disabled" \
     "msg-missing-binding" \
     "msg-missing-message-id" \
@@ -523,6 +550,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "group-denied" \
     "group-queue" \
     "group-voice" \
+    "group-media-type" \
     "group-text" \
     "channel-denied" \
     "channel-allowed" \
@@ -533,6 +561,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "member-disabled" \
     "member-queue" \
     "member-voice" \
+    "member-media-type" \
     "member-text" \
     "member-c2c-denied" \
     "member-c2c-allowed" \
@@ -556,6 +585,8 @@ if [[ "${overall_status}" == "passed" ]]; then
     "see attached trace" \
     "too large" \
     "missing size metadata" \
+    "blocked media type" \
+    "allowed media type" \
     "after shutdown should deny" \
     "approve deployment from voice" \
     "/approve rollout-42" \
@@ -564,7 +595,9 @@ if [[ "${overall_status}" == "passed" ]]; then
     "trace.png" \
     "voice.amr" \
     "oversized.bin" \
-    "missing-size.pdf"
+    "missing-size.pdf" \
+    "disallowed.exe" \
+    "allowed.png"
   do
     if grep -aF -- "${forbidden}" "${EVIDENCE_JSONL}" >/dev/null; then
       overall_status="failed"

@@ -122,7 +122,8 @@ This slice is intentionally closer to "outbound bot message dispatch plus connec
       "group_allow_from": ["GROUP_OPENID"],
       "group_require_mention": true,
       "bot_user_id": "BOT_OPENID",
-      "max_attachment_bytes": 10485760
+      "max_attachment_bytes": 10485760,
+      "allowed_attachment_content_types": ["image/png", "audio/amr"]
     }
   }
 }
@@ -132,7 +133,7 @@ The projection operation does not log `client_secret`, access tokens, or raw tra
 Channel gateway events apply `policy.channel_policy` before fan-out. `allowlist` may name a `channel_id`, `guild_id`, or sender id; `disabled` drops channel events with `channel_disabled`.
 C2C gateway events apply `policy.dm_policy` before fan-out. `allowlist` names the sender openid and `disabled` drops C2C events with `c2c_disabled`.
 When `policy.group_require_mention` is enabled, gateway projection treats `GROUP_AT_MESSAGE_CREATE` as an explicit bot mention and also recognizes the configured `bot_user_id` only as a standalone or `@`-prefixed text token, or as a structured raw mention in arrays such as `mentions`, `message`, `message_segments`, `segments`, and `content_segments`. Near-miss substrings inside another identifier do not satisfy the mention gate.
-When `policy.max_attachment_bytes` is set, gateway projection denies message events whose declared attachment byte total exceeds the cap or whose attachment size metadata is missing.
+When `policy.max_attachment_bytes` is set, gateway projection denies message events whose declared attachment byte total exceeds the cap or whose attachment size metadata is missing. When `policy.allowed_attachment_content_types` is non-empty, every attachment must carry a MIME content type whose canonical `type/subtype` value is in the allowlist; content-type parameters are ignored for matching, and missing or disallowed values fail closed before fan-out.
 For voice/media gateway messages whose `content` is blank, normalization uses the first non-empty attachment `asr_refer_text` transcript as the event text while evidence logs still emit only redacted text length/hash fields and attachment metadata summaries.
 Gateway normalization also classifies command-like text for supervised routing: slash commands expose `interaction_kind`, a normalized `command_name`, and an `approval_action` for approval verbs such as `/approve`, `/reject`, and `/deny`. Evidence logs hash the command name and keep only the coarse action enum. This is routing metadata, not a moderation or admin-review workflow.
 When `gateway.enabled` is false, `qq.gateway.project_event` fails closed with `gateway_disabled` and does not update session, sequence, heartbeat, policy, or queue state.
@@ -220,7 +221,7 @@ These are excluded on purpose:
 ## Verification
 
 - Gateway projection evidence: `RUN_ID=qq-gateway-projection-<id> RCH_REQUIRE_REMOTE=1 RCH_FORCE_REMOTE=1 bash scripts/e2e/qq_gateway_projection_verification.sh`
-- The verifier runs the connector-boundary `qq_gateway_projection_logs_policy_replay_and_shutdown` e2e lane through `rch`, requires an accepted `[RCH] remote` summary before treating Cargo output as proof, extracts `QQ_GATEWAY_PROJECTION_JSONL` records, checks the `log_start` metadata exposes only typed artifact-path and command-line fingerprints, checks disabled-gateway, route-binding, channel/group/C2C policy, policy-before-queue-full backpressure, reply, redaction-safe attachment filename/URL hashes, media byte/unknown-size policy, voice-ASR, slash/approval, duplicate and stale-sequence replay drops, heartbeat, reconnect-exhaustion/terminal failure, drain, and post-shutdown no-runtime/no-fan-out coverage, rejects raw local/private path and auth markers, and writes a replay bundle under `artifacts/e2e/qq-gateway-projection/<run-id>/`.
+- The verifier runs the connector-boundary `qq_gateway_projection_logs_policy_replay_and_shutdown` e2e lane through `rch`, requires an accepted `[RCH] remote` summary before treating Cargo output as proof, extracts `QQ_GATEWAY_PROJECTION_JSONL` records, checks the `log_start` metadata exposes only typed artifact-path and command-line fingerprints, checks disabled-gateway, route-binding, channel/group/C2C policy, policy-before-queue-full backpressure, reply, redaction-safe attachment filename/URL hashes, media byte/unknown-size/content-type policy, voice-ASR, slash/approval, duplicate and stale-sequence replay drops, heartbeat, reconnect-exhaustion/terminal failure, drain, and post-shutdown no-runtime/no-fan-out coverage, rejects raw local/private path and auth markers, and writes a replay bundle under `artifacts/e2e/qq-gateway-projection/<run-id>/`.
 - The summary includes `rch_remote_proof.worker_execution_class`, `rch_remote_proof.fallback_decision`, and `artifacts.rch_proof_json`; `worker_execution_class:"remote"` is the only green Cargo proof class. Local fallback, local fallback refusal, or a missing RCH summary is non-green.
 - A structured `rch_remote_prerequisite_unavailable` skip means the remote Cargo proof lane did not run; it is not evidence that the full supervised WebSocket runtime is complete.
 

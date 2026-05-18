@@ -154,6 +154,7 @@ pub struct QqInboundPolicyConfig {
     pub group_require_mention: bool,
     pub bot_user_id: Option<String>,
     pub max_attachment_bytes: Option<u64>,
+    pub allowed_attachment_content_types: Vec<String>,
 }
 
 impl Default for QqInboundPolicyConfig {
@@ -168,6 +169,7 @@ impl Default for QqInboundPolicyConfig {
             group_require_mention: true,
             bot_user_id: None,
             max_attachment_bytes: None,
+            allowed_attachment_content_types: Vec::new(),
         }
     }
 }
@@ -178,6 +180,12 @@ impl QqInboundPolicyConfig {
         normalize_string_vec(&mut self.channel_allow_from);
         normalize_string_vec(&mut self.dm_allow_from);
         normalize_string_vec(&mut self.group_allow_from);
+        normalize_string_vec(&mut self.allowed_attachment_content_types);
+        for content_type in &mut self.allowed_attachment_content_types {
+            content_type.make_ascii_lowercase();
+        }
+        self.allowed_attachment_content_types.sort();
+        self.allowed_attachment_content_types.dedup();
         trim_optional_string(&mut self.bot_user_id);
         self
     }

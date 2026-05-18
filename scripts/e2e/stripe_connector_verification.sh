@@ -39,7 +39,7 @@ classify_failure() {
     return
   fi
 
-  if grep -Eqi 'RCH-E|remote required; refusing local fallback|No space left on device|connection reset by peer|Backend unavailable|unable to update registry|spurious network error|failed to get successful HTTP response|missing worker system package|timeout: failed to execute process' "${log_path}"; then
+  if grep -Eqi 'RCH-E|remote required; refusing local fallback|rch command did not produce remote proof|\[RCH\] local|No space left on device|connection reset by peer|Backend unavailable|unable to update registry|spurious network error|failed to get successful HTTP response|missing worker system package|timeout: failed to execute process' "${log_path}"; then
     echo "infra_blocked"
   else
     echo "failed"
@@ -90,7 +90,44 @@ record_step() {
     }' >>"${STATUS_JSONL}"
 }
 
-run_logged() {
+command_uses_rch_exec() {
+  local previous=""
+  for arg in "$@"; do
+    if [[ "${previous}" == "rch" && "${arg}" == "exec" ]]; then
+      return 0
+    fi
+    previous="${arg}"
+  done
+  return 1
+}
+
+rch_remote_summary_present() {
+  local log_path="$1"
+  grep -E '^\[RCH\][[:space:]]+remote[[:space:]]+' "${log_path}" \
+    | grep -Ev '^\[RCH\][[:space:]]+remote[[:space:]]+required([;[:space:]]|$)' >/dev/null
+}
+
+require_rch_remote_proof() {
+  local name="$1"
+  local log_path="$2"
+  shift 2
+
+  if ! command_uses_rch_exec "$@"; then
+    return 0
+  fi
+
+  if rch_remote_summary_present "${log_path}"; then
+    return 0
+  fi
+
+  echo "[stripe-verification] ${name}: rch command did not produce remote proof" >&2
+  echo "rch command did not produce remote proof" >>"${log_path}"
+  return 1
+}
+
+run_logged_with_remote_policy() {
+  local require_remote_proof="$1"
+  shift
   local name="$1"
   shift
   local log_path="${OUT_ROOT}/logs/${name}.log"
@@ -104,6 +141,9 @@ run_logged() {
   ) >"${log_path}" 2>&1
   rc="$?"
   status="passed"
+  if [[ "${rc}" -eq 0 && "${require_remote_proof}" == "1" ]] && ! require_rch_remote_proof "${name}" "${log_path}" "$@"; then
+    rc=1
+  fi
   if [[ "${rc}" -ne 0 ]]; then
     status="$(classify_failure "${log_path}")"
     promote_status "${status}"
@@ -111,6 +151,10 @@ run_logged() {
   end_seconds="$(date -u +%s)"
   duration_ms="$(((end_seconds - start_seconds) * 1000))"
   record_step "${name}" "${status}" "${duration_ms}" "${log_path}" "$@"
+}
+
+run_logged() {
+  run_logged_with_remote_policy 1 "$@"
 }
 
 graduation_gauntlet_pre_promotion_pending() {
@@ -203,6 +247,17 @@ run_rch_cargo_step() {
     "$@"
 }
 
+run_rch_format_step() {
+  local name="$1"
+  shift
+
+  # `cargo fmt --check` validates source state; it is not accepted remote Cargo proof.
+  run_logged_with_remote_policy 0 "${name}" env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" rch exec -- env \
+    CARGO_TARGET_DIR="${TARGET_DIR}" \
+    CARGO_INCREMENTAL=0 \
+    "$@"
+}
+
 record_skipped() {
   local name="$1"
   local reason="$2"
@@ -283,7 +338,7 @@ else
     cargo test -p fcp-stripe --test live_verification -- --nocapture
 fi
 
-run_rch_cargo_step \
+run_rch_format_step \
   format_check \
   cargo fmt -p fcp-stripe -- --check
 

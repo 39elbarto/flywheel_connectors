@@ -443,7 +443,10 @@ unclassified, local-fallback, or remote-failure RCH summaries are not reusable
 evidence. The same self-contract requires every named command lane in the
 gauntlet to be represented by a passing command-run record, including Lean, Rust
 test, Criterion, format, check, clippy, diff-check, and UBS lanes, so a partial
-artifact cannot pass by carrying only a summary and materialized hashes.
+artifact cannot pass by carrying only a summary and materialized hashes. The
+Cargo test command lanes must also carry a positive parsed `passed_tests` count
+before the gauntlet can pass, so a truncated or non-test log cannot satisfy the
+reviewer evidence contract.
 The redaction scan treats raw zone, operation, and principal labels plus
 authorization headers, bearer strings, access or refresh tokens, exact or child
 `/tmp` and `/private/tmp` paths, `/private/var/`, `/var/folders/`, `/Volumes/`,

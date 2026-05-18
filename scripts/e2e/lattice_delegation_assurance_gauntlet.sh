@@ -985,8 +985,17 @@ validate_gauntlet_contract() {
         "git_diff_check",
         "ubs_lattice_surfaces"
       ];
+    def required_test_command_steps:
+      [
+        "crypto_representation_profile_tests",
+        "crypto_v4_unit_tests",
+        "policy_lattice_delegation_tests",
+        "host_lattice_dispatcher_e2e"
+      ];
     def populated_tool_version:
       type == "string" and length > 0 and . != "unavailable";
+    def positive_test_count:
+      type == "string" and test("^[1-9][0-9]*$");
     def required_tool_versions:
       any(.[]; .step == "tool_versions" and .result == "pass" and
         (.details.cargo | populated_tool_version) and
@@ -1033,6 +1042,12 @@ validate_gauntlet_contract() {
         any($records[]; .step == $step and .result == "pass" and
           (.details | has("command_line")) and
           command_record_contract));
+    def required_test_counts_present:
+      . as $records |
+      all(required_test_command_steps[]; . as $step |
+        any($records[]; .step == $step and .result == "pass" and
+          (.details | has("command_line")) and
+          (.details.passed_tests | positive_test_count)));
     def top_level_provenance_consistent:
       ([.[] | .run_id] | unique | length == 1) and
       ([.[] | .git_revision] | unique | length == 1) and
@@ -1057,6 +1072,7 @@ validate_gauntlet_contract() {
       command_record_contract) and
     required_tool_versions and
     required_command_steps_present and
+    required_test_counts_present and
     any(.[]; .step == "validate_lean_ids" and .result == "pass") and
     any(.[]; .step == "jsonl_contract_validation" and .result == "pass") and
     required_artifact_hash("crypto_representation_artifact"; "target/fcp-crypto-pq/representation-profile-evidence.jsonl") and

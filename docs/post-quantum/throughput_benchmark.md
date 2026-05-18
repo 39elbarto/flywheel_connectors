@@ -404,6 +404,10 @@ fixtures, not only an arbitrary JSON object. Public matrix material kinds are
 limited to the serialized Rust enum labels `FixtureSeedOnly` and
 `RouteTailCoefficients`, and representation profile records must prove the
 redaction and policy-bridge compatibility booleans that their fixture emits.
+Trapdoor relation, trapdoor norm-quality, and secret-storage bucket fields are
+likewise limited to their serialized Rust enum labels; route, public-matrix,
+and SamplePre records must also use the stable result, cleanup, reconstruction,
+norm-bucket, and verifier outcome labels emitted by the evidence fixtures.
 The
 representation profile contract requires exactly one `SMALL_TEST` record and
 one `V4_REFERENCE` record. The host dispatcher contract applies the same strict

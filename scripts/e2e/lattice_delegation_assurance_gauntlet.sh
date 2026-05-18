@@ -665,6 +665,42 @@ validate_artifact_contracts() {
         .master_trapdoor_debug_redacted == true and
         .zone_period_trapdoor_debug_redacted == true and
         .preimage_debug_redacted == true;
+      def trapdoor_relation_result:
+        type == "string" and (
+          . == "FixtureOnly" or
+          . == "MetadataConsistent" or
+          . == "MetadataMismatch" or
+          . == "UnsupportedPrimitive"
+        );
+      def trapdoor_norm_quality:
+        type == "string" and (
+          . == "FixtureSeed" or
+          . == "Small" or
+          . == "V4Bounded" or
+          . == "Oversized" or
+          . == "Unknown"
+        );
+      def secret_storage_bucket:
+        type == "string" and (
+          . == "Empty" or
+          . == "UpTo128" or
+          . == "UpTo4KiB" or
+          . == "UpTo64KiB" or
+          . == "UpTo1MiB" or
+          . == "TooLarge"
+        );
+      def relation_check_result_shape:
+        type == "object" and
+        (.root | trapdoor_relation_result) and
+        (.child | trapdoor_relation_result);
+      def trapdoor_norm_quality_shape:
+        type == "object" and
+        (.root | trapdoor_norm_quality) and
+        (.child | trapdoor_norm_quality);
+      def secret_storage_bucket_shape:
+        type == "object" and
+        (.root | secret_storage_bucket) and
+        (.child | secret_storage_bucket);
       length > 0 and
       ((representation_profile_ids | sort) == (required_representation_profiles | sort)) and
       all(.[]; type == "object" and
@@ -679,9 +715,9 @@ validate_artifact_contracts() {
         (.encoded_public_lengths | encoded_public_lengths_shape) and
         (.encoded_lengths | encoded_lengths_shape) and
         (.allocation_estimate | allocation_estimate_shape) and
-        (.relation_check_result | type == "object") and
-        (.trapdoor_norm_quality_bucket | type == "object") and
-        (.secret_storage_len_bucket | type == "object") and
+        (.relation_check_result | relation_check_result_shape) and
+        (.trapdoor_norm_quality_bucket | trapdoor_norm_quality_shape) and
+        (.secret_storage_len_bucket | secret_storage_bucket_shape) and
         (.redaction | representation_redaction_shape) and
         (.deterministic_shake_compatibility | deterministic_shake_compatibility_shape) and
         (.policy_bridge_compatibility | policy_bridge_compatibility_shape) and
@@ -716,6 +752,29 @@ validate_artifact_contracts() {
         (.trap_gen | nonnegative_integer) and
         (.delegate | nonnegative_integer) and
         (.relation_checks | nonnegative_integer);
+      def trapdoor_relation_result:
+        . == null or (
+          type == "string" and (
+            . == "FixtureOnly" or
+            . == "MetadataConsistent" or
+            . == "MetadataMismatch" or
+            . == "UnsupportedPrimitive"
+          )
+        );
+      def trapdoor_norm_quality:
+        . == null or (
+          type == "string" and (
+            . == "FixtureSeed" or
+            . == "Small" or
+            . == "V4Bounded" or
+            . == "Oversized" or
+            . == "Unknown"
+          )
+        );
+      def route_norm_quality_shape:
+        type == "object" and
+        (.root | trapdoor_norm_quality) and
+        (.child | trapdoor_norm_quality);
       def required_route_scenarios:
         [
           "passed:SMALL_TEST",
@@ -752,11 +811,14 @@ validate_artifact_contracts() {
         (.zone_id_hash | hex_hash) and
         (.period_id_hash | hex_hash) and
         (.matrix_dimensions | matrix_dimensions_shape) and
+        (.root_relation_result | trapdoor_relation_result) and
+        (.child_relation_result | trapdoor_relation_result) and
+        (.trapdoor_norm_quality_bucket | route_norm_quality_shape) and
         (.allocation_summary | allocation_estimate_shape) and
         (.primitive_timings_ms | route_timings_shape) and
         (.timing_ms | nonnegative_integer) and
-        (.cleanup | type == "string") and
-        (.result | type == "string") and
+        .cleanup == "not_applicable_no_external_resources" and
+        (.result == "passed" or .result == "denied") and
         has("skip_reason") and
         (.skip_reason == null or (.skip_reason | type == "string")))
     '
@@ -786,6 +848,24 @@ validate_artifact_contracts() {
         (.tail_coefficients_bytes | nonnegative_integer) and
         (.binding_hash_hex | hex_hash) and
         (.material_digest_hex | optional_hex_hash);
+      def trapdoor_relation_result:
+        . == null or (
+          type == "string" and (
+            . == "FixtureOnly" or
+            . == "MetadataConsistent" or
+            . == "MetadataMismatch" or
+            . == "UnsupportedPrimitive"
+          )
+        );
+      def reconstruction_result_label:
+        type == "string" and (
+          . == "passed" or
+          . == "invalid_encoding_length" or
+          . == "binding_mismatch" or
+          . == "public_seed_mismatch" or
+          . == "route_mismatch" or
+          . == "unsupported_profile"
+        );
       def allocation_estimate_shape:
         type == "object" and
         (.public_matrix_expanded_bytes | positive_integer) and
@@ -831,10 +911,11 @@ validate_artifact_contracts() {
         (.period_id_hash | hex_hash) and
         (.public_material_summary | public_material_summary_shape) and
         (.matrix_dimensions | matrix_dimensions_shape) and
-        (.reconstruction_result | type == "string") and
+        (.child_relation_result | trapdoor_relation_result) and
+        (.reconstruction_result | reconstruction_result_label) and
         (.allocation_summary | allocation_estimate_shape) and
         (.timing_ms | nonnegative_integer) and
-        (.result | type == "string") and
+        (.result == "passed" or .result == "denied") and
         has("skip_reason") and
         (.skip_reason == null or (.skip_reason | type == "string")))
     '
@@ -862,6 +943,16 @@ validate_artifact_contracts() {
         (.delegate | nonnegative_integer) and
         (.sample_pre | nonnegative_integer) and
         (.verify | nonnegative_integer);
+      def observed_norm_bucket_label:
+        type == "string" and (
+          . == "zero" or
+          . == "over_bound" or
+          . == "lte_25_percent_bound" or
+          . == "lte_50_percent_bound" or
+          . == "lte_bound"
+        );
+      def verify_outcome_label:
+        type == "string" and (. == "passed" or . == "denied");
       def sample_pre_scenarios($profile):
         [
           "passed:" + $profile + ":success",
@@ -900,13 +991,13 @@ validate_artifact_contracts() {
         (.matrix_dimensions | matrix_dimensions_shape) and
         (.norm_bound_squared | nonnegative_integer) and
         (.observed_norm_squared | nonnegative_integer) and
-        (.observed_norm_bucket | type == "string") and
+        (.observed_norm_bucket | observed_norm_bucket_label) and
         (.primitive_timings_ms | primitive_timings_shape) and
-        (.verify_outcome | type == "string") and
+        (.verify_outcome | verify_outcome_label) and
         has("error_mapping") and
-        (.timeout_cancel_result | type == "string") and
-        (.cleanup | type == "string") and
-        (.result | type == "string") and
+        (.timeout_cancel_result == "not_applicable_sync_arithmetic") and
+        (.cleanup == "artifact_rewritten") and
+        (.result == "passed" or .result == "denied") and
         has("skip_reason") and
         (.skip_reason == null or (.skip_reason | type == "string")))
     '

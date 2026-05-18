@@ -1582,6 +1582,10 @@ struct SchemaArgs {
     /// Read explicit offline workspace-manifest metadata instead of live host inventory.
     #[arg(long, default_value_t = false)]
     offline: bool,
+
+    /// Fail unless the command resolves from at least this truth source.
+    #[arg(long, value_enum)]
+    require_source: Option<RequiredTruthSource>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -7161,11 +7165,9 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
-            return Ok(connector_resolution_dispatch(
-                "schema",
-                &args.connector,
-                &error,
-            ));
+            let mut outcome = connector_resolution_dispatch("schema", &args.connector, &error);
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+            return Ok(outcome);
         }
     };
     let inventory = client.connector(connector.summary.id.as_str())?;
@@ -7176,12 +7178,14 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
         let operation = match resolve_host_tool(&introspection.tools, operation_selector) {
             Ok(operation) => operation,
             Err(error) => {
-                return Ok(host_operation_resolution_dispatch(
+                let mut outcome = host_operation_resolution_dispatch(
                     "schema",
                     &connector.slug,
                     operation_selector,
                     &error,
-                ));
+                );
+                inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::HostBacked);
+                return Ok(outcome);
             }
         };
 
@@ -7203,6 +7207,7 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
                 catalog::DiscoveryDataSource::LiveHostIntrospection,
             );
             envelope.inject_into(&mut payload);
+            inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
             return Ok(DispatchOutcome {
                 payload,
                 exit_code: CliExitCode::Success,
@@ -7268,6 +7273,7 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
             catalog::DiscoveryDataSource::LiveHostIntrospection,
         );
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
@@ -7298,6 +7304,7 @@ fn schema_dispatch_host(args: &SchemaArgs, host: &str) -> Result<DispatchOutcome
         catalog::DiscoveryDataSource::LiveHostIntrospection,
     );
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::HostBacked);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -12321,12 +12328,25 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
     let resolved_host = resolve_host_config(host)?;
     if args.offline {
         if resolved_host.is_some() {
-            return Ok(conflicting_catalog_mode_dispatch("schema"));
+            let mut outcome = conflicting_catalog_mode_dispatch("schema");
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
         }
     } else if let Some(host) = resolved_host {
+        if let Some(outcome) =
+            enforce_required_truth_source("schema", args.require_source, KnowledgeState::HostBacked)
+        {
+            return Ok(outcome);
+        }
         return schema_dispatch_host(args, &host.endpoint);
     } else {
-        return Ok(missing_host_dispatch(
+        if let Some(outcome) =
+            enforce_required_truth_source("schema", args.require_source, KnowledgeState::Offline)
+        {
+            return Ok(outcome);
+        }
+
+        let mut outcome = missing_host_dispatch(
             "schema",
             json!({
                 "connector": &args.connector,
@@ -12335,6 +12355,7 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
                 "required_only": args.required_only,
                 "examples": args.examples,
                 "scaffold": args.scaffold,
+                "require_source": args.require_source.map(RequiredTruthSource::label),
             }),
             vec![
                 format!(
@@ -12343,7 +12364,15 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
                 ),
                 format!("fwc schema {} <operation> --offline", args.connector),
             ],
-        ));
+        );
+        inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+        return Ok(outcome);
+    }
+
+    if let Some(outcome) =
+        enforce_required_truth_source("schema", args.require_source, KnowledgeState::Offline)
+    {
+        return Ok(outcome);
     }
 
     // Try the exact-slug fast path first, but fall back to the full catalog so
@@ -12359,11 +12388,9 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
     let connector = match catalog.resolve_connector(&args.connector) {
         Ok(connector) => connector,
         Err(error) => {
-            return Ok(connector_resolution_dispatch(
-                "schema",
-                &args.connector,
-                &error,
-            ));
+            let mut outcome = connector_resolution_dispatch("schema", &args.connector, &error);
+            inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+            return Ok(outcome);
         }
     };
 
@@ -12371,12 +12398,10 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
         let operation = match connector.resolve_operation(operation_selector) {
             Ok(operation) => operation,
             Err(error) => {
-                return Ok(operation_resolution_dispatch(
-                    "schema",
-                    connector,
-                    operation_selector,
-                    &error,
-                ));
+                let mut outcome =
+                    operation_resolution_dispatch("schema", connector, operation_selector, &error);
+                inject_truth_source_metadata(&mut outcome.payload, KnowledgeState::Offline);
+                return Ok(outcome);
             }
         };
 
@@ -12400,6 +12425,7 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
                 catalog::DiscoveryDataSource::WorkspaceManifest,
             );
             envelope.inject_into(&mut payload);
+            inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
             return Ok(DispatchOutcome {
                 payload,
                 exit_code: CliExitCode::Success,
@@ -12450,6 +12476,7 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
                 catalog::DiscoveryDataSource::WorkspaceManifest,
             );
             envelope.inject_into(&mut payload);
+            inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
             return Ok(DispatchOutcome {
                 payload,
                 exit_code: CliExitCode::Success,
@@ -12501,6 +12528,7 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
             catalog::DiscoveryDataSource::WorkspaceManifest,
         );
         envelope.inject_into(&mut payload);
+        inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::Success,
@@ -12532,6 +12560,7 @@ fn schema_dispatch(args: &SchemaArgs, host: Option<&str>) -> Result<DispatchOutc
         catalog::DiscoveryDataSource::WorkspaceManifest,
     );
     envelope.inject_into(&mut payload);
+    inject_truth_source_metadata(&mut payload, KnowledgeState::Offline);
     Ok(DispatchOutcome {
         payload,
         exit_code: CliExitCode::Success,
@@ -33590,6 +33619,11 @@ deny_ptrace = true
         server.join().expect("mock host thread should complete");
         assert_eq!(schema_exit, CliExitCode::Success.into());
         assert_eq!(schema_payload["source"], "host-admin-api");
+        assert_eq!(
+            schema_payload["schema_version"],
+            TRUTH_SOURCE_SCHEMA_VERSION
+        );
+        assert_eq!(schema_payload["_truth_source"], "host");
         assert_discovery_provenance(
             &schema_payload,
             "live_host_introspection",
@@ -38534,6 +38568,29 @@ deny_ptrace = true
     }
 
     #[test]
+    fn execute_schema_host_require_mesh_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            "http://127.0.0.1:1",
+            "schema",
+            "github",
+            "issues.create",
+            "--require-source",
+            "mesh",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "schema");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "host");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "mesh");
+        assert_eq!(payload["error"]["actual"], "host");
+    }
+
+    #[test]
     fn execute_ops_offline_preserves_prefix_resolution() {
         let (exit_code, payload) = execute_json(&["fwc", "--json", "ops", "gith", "--offline"]);
 
@@ -38556,6 +38613,8 @@ deny_ptrace = true
 
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["command"], "schema");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
         assert_discovery_provenance(&payload, "workspace_manifest", false, "offline-artifact");
         assert_eq!(payload["scope"], "operation");
         assert_eq!(payload["operation"]["requested_selector"], "issues.create");
@@ -38586,6 +38645,47 @@ deny_ptrace = true
         assert_eq!(payload["command"], "schema");
         assert_eq!(payload["connector"]["slug"], "github");
         assert_eq!(payload["operation"]["canonical_id"], "github.create_issue");
+    }
+
+    #[test]
+    fn execute_schema_offline_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "schema",
+            "github",
+            "issues.create",
+            "--offline",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "schema");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+        assert_eq!(payload["error"]["required"], "any-live");
+        assert_eq!(payload["error"]["actual"], "offline");
+    }
+
+    #[test]
+    fn execute_schema_missing_host_require_any_live_fails_truth_source_unavailable() {
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "schema",
+            "github",
+            "issues.create",
+            "--require-source",
+            "any-live",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "schema");
+        assert_eq!(payload["schema_version"], TRUTH_SOURCE_SCHEMA_VERSION);
+        assert_eq!(payload["_truth_source"], "offline");
+        assert_eq!(payload["error"]["type"], "truth-source-unavailable");
     }
 
     #[test]

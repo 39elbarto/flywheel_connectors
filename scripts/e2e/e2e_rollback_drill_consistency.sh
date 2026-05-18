@@ -46,6 +46,10 @@ OUT_ROOT=""
 DRY_RUN=false
 CI_MODE="${CI:-false}"
 ONLY_DRILLS=""
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+ROLLBACK_TARGET_DIR="${ROLLBACK_TARGET_DIR:-${CARGO_TARGET_DIR:-/tmp/fcp-rollback-drill}}"
+export RCH_FORCE_REMOTE=1
 
 declare -i GATE_PASS=0
 declare -i GATE_FAIL=0
@@ -199,6 +203,47 @@ should_run_drill() {
   return 1
 }
 
+rch_remote_summary_present() {
+  local execution_log="$1"
+
+  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
+    return 0
+  fi
+
+  if grep -Eq '^\[RCH\].*(local|refusing local fallback|no admissible workers)' "${execution_log}"; then
+    echo "Missing accepted remote rch summary in ${execution_log}" >&2
+    echo "rch remote proof is required; refusing local fallback" >&2
+    return 2
+  fi
+
+  grep -Eq '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}" && return 0
+
+  echo "Missing accepted remote rch summary in ${execution_log}" >&2
+  echo "rch remote proof is required; refusing local fallback" >&2
+  return 2
+}
+
+run_remote_cargo_test() {
+  local log_file="$1"
+  shift
+  local remote_error=""
+
+  if ! "${RCH_BIN}" exec -- env \
+    CARGO_TARGET_DIR="${ROLLBACK_TARGET_DIR}" \
+    CARGO_INCREMENTAL=0 \
+    cargo "$@" > "${log_file}" 2>&1; then
+    return 1
+  fi
+
+  if remote_error="$(rch_remote_summary_present "${log_file}" 2>&1)"; then
+    return 0
+  fi
+
+  printf '%s\n' "${remote_error}" >> "${log_file}"
+  printf '%s\n' "${remote_error}" >&2
+  return 1
+}
+
 run_cargo_check() {
   local label="$1"
   local crate="$2"
@@ -223,7 +268,8 @@ run_cargo_check() {
   start=$(now_ms)
   local cmd_args=(-p "${crate}" --lib)
   [[ -n "${test_filter}" ]] && cmd_args+=(-- "${test_filter}")
-  if cargo test "${cmd_args[@]}" > "${log_file}" 2>&1; then
+  require_cmd "${RCH_BIN}"
+  if run_remote_cargo_test "${log_file}" test "${cmd_args[@]}"; then
     status="pass"
   else
     status="fail"
@@ -271,7 +317,7 @@ STEPS_FILE="${OUT_ROOT}/steps.jsonl"
 : > "${STEPS_FILE}"
 
 require_cmd jq
-require_cmd cargo
+require_cmd "${RCH_BIN}"
 
 log_step "INIT" "Rollback Drill v1 — run_id=${RUN_ID}"
 log_step "INIT" "Output: ${OUT_ROOT}"
@@ -434,6 +480,7 @@ if should_run_drill "config"; then
   # Read config freeze and validate rollback defaults exist for all params
   PERF_GATE_DIR=""
   if [[ -d "${REPO_ROOT}/artifacts/asupersync/perf-gate" ]]; then
+    # shellcheck disable=SC2012 # newest artifact directory is selected by directory mtime.
     PERF_GATE_DIR="$(ls -td "${REPO_ROOT}/artifacts/asupersync/perf-gate"/*/ 2>/dev/null | head -1)"
   fi
 
@@ -946,4 +993,12 @@ REPORT
 
   record_step "rollback_drill.verdict" "gate_verdict" "${GATE_VERDICT}" 0 \
     "contract.rollback_drill_gate"
+fi
+
+if (( GATE_FAIL > 0 )); then
+  exit 1
+fi
+
+if [[ "${CI_MODE}" == "true" ]] && (( GATE_WARN > 0 )); then
+  exit 1
 fi

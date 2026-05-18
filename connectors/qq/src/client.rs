@@ -973,8 +973,28 @@ fn mentions_bot(event: &NormalizedQqEvent, policy: &QqInboundPolicyConfig) -> bo
     event
         .text
         .as_deref()
-        .is_some_and(|text| text.contains(bot_user_id))
+        .is_some_and(|text| text_mentions_bot(text, bot_user_id))
         || structured_mentions_bot(&event.raw, bot_user_id)
+}
+
+fn text_mentions_bot(text: &str, bot_user_id: &str) -> bool {
+    text.match_indices(bot_user_id)
+        .any(|(start, _)| text_mention_has_boundaries(text, start, bot_user_id.len()))
+}
+
+fn text_mention_has_boundaries(text: &str, start: usize, len: usize) -> bool {
+    let before = text
+        .get(..start)
+        .and_then(|prefix| prefix.chars().next_back());
+    let after = text
+        .get(start + len..)
+        .and_then(|suffix| suffix.chars().next());
+    !before.is_some_and(is_mention_identifier_char)
+        && !after.is_some_and(is_mention_identifier_char)
+}
+
+const fn is_mention_identifier_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_' || character == '-'
 }
 
 fn structured_mentions_bot(raw: &Value, bot_user_id: &str) -> bool {
@@ -2986,6 +3006,72 @@ mod tests {
                 .as_ref()
                 .map(|policy| policy.mentioned_bot),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn gateway_runtime_requires_text_mention_boundaries() {
+        let mut config = QqGatewayRuntimeConfig {
+            enabled: true,
+            max_queue_depth: 4,
+            ..QqGatewayRuntimeConfig::default()
+        };
+        config.policy.bot_user_id = Some("bot-openid".into());
+        config.policy.group_require_mention = true;
+        let mut runtime = QqGatewayRuntime::new(config);
+
+        let substring = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-substring-mention",
+                    "content": "prefix not-bot-openid suffix",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1"
+                })),
+                id: Some("evt-substring-mention".into()),
+            })
+            .unwrap();
+
+        assert!(!substring.accepted);
+        assert_eq!(substring.reason_code, "missing_group_mention");
+        assert_eq!(
+            substring.policy.as_ref().map(|policy| policy.mentioned_bot),
+            Some(false)
+        );
+
+        let explicit_text = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(2),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-explicit-text-mention",
+                    "content": "please @bot-openid check this",
+                    "group_openid": "group-1",
+                    "group_member_openid": "member-1"
+                })),
+                id: Some("evt-explicit-text-mention".into()),
+            })
+            .unwrap();
+
+        assert!(explicit_text.accepted);
+        assert_eq!(explicit_text.reason_code, "accepted");
+        assert_eq!(
+            explicit_text
+                .policy
+                .as_ref()
+                .map(|policy| policy.mentioned_bot),
+            Some(true)
+        );
+        assert_eq!(
+            explicit_text
+                .policy
+                .as_ref()
+                .map(|policy| policy.reason_code),
+            Some("group_allowed")
         );
     }
 

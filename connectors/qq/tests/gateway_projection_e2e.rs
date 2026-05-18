@@ -1103,6 +1103,93 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         &structured_mention,
     );
 
+    let text_mention_instance_id = InstanceId::new();
+    let mut text_mention_connector = QqConnector::new();
+    text_mention_connector
+        .configure(json!({
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999",
+            "app_id": "qq-app",
+            "client_secret": "test-secret",
+            "gateway": {
+                "enabled": true,
+                "policy": {
+                    "group_policy": "open",
+                    "group_require_mention": true,
+                    "bot_user_id": "bot-openid"
+                }
+            }
+        }))
+        .await
+        .expect("configure text mention QQ connector");
+    text_mention_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            text_mention_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake text mention QQ connector");
+    let text_substring = invoke_projection(
+        &text_mention_connector,
+        &signing_key,
+        &text_mention_instance_id,
+        "qq-gateway-text-substring",
+        json!({
+            "op": 0,
+            "s": 1,
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": "evt-text-substring",
+            "d": {
+                "id": "msg-text-substring",
+                "content": "prefix not-bot-openid suffix",
+                "group_openid": "group-text",
+                "group_member_openid": "member-text"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(text_substring["accepted"], false);
+    assert_eq!(text_substring["reason_code"], "missing_group_mention");
+    assert_eq!(text_substring["policy"]["mentioned_bot"], false);
+    log_projection_step(
+        &mut logs,
+        "text_substring_not_mention",
+        "ok",
+        &text_substring,
+    );
+    let explicit_text_mention = invoke_projection(
+        &text_mention_connector,
+        &signing_key,
+        &text_mention_instance_id,
+        "qq-gateway-explicit-text-mention",
+        json!({
+            "op": 0,
+            "s": 2,
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": "evt-explicit-text-mention",
+            "d": {
+                "id": "msg-explicit-text-mention",
+                "content": "please @bot-openid check this",
+                "group_openid": "group-text",
+                "group_member_openid": "member-text"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(explicit_text_mention["accepted"], true);
+    assert_eq!(explicit_text_mention["topic"], "qq.message.authorized");
+    assert_eq!(explicit_text_mention["policy"]["mentioned_bot"], true);
+    assert_eq!(
+        explicit_text_mention["policy"]["reason_code"],
+        "group_allowed"
+    );
+    log_projection_step(
+        &mut logs,
+        "explicit_text_group_mention",
+        "ok",
+        &explicit_text_mention,
+    );
+
     let oversized_media = invoke_projection(
         &connector,
         &signing_key,
@@ -1711,7 +1798,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "authorization",
         "access_token",
         "refresh_token",
-        "token=",
+        concat!("token", "="),
         "sk-live-",
         "AKIA",
         "-----BEGIN",

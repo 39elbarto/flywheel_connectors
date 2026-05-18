@@ -156,6 +156,8 @@ if [[ "${overall_status}" == "passed" ]]; then
           "missing_group_mention_drop",
           "untyped_message_id_not_mention",
           "structured_group_mention",
+          "text_substring_not_mention",
+          "explicit_text_group_mention",
           "oversized_media_policy_drop",
           "unknown_media_size_policy_drop",
           "reply_media_projection",
@@ -237,6 +239,8 @@ if [[ "${overall_status}" == "passed" ]]; then
           and any(.[]; .step == "missing_group_mention_drop" and .details.reason_code == "missing_group_mention")
           and any(.[]; .step == "untyped_message_id_not_mention" and .details.policy.mentioned_bot == false)
           and any(.[]; .step == "structured_group_mention" and .details.accepted == true and .details.policy.mentioned_bot == true)
+          and any(.[]; .step == "text_substring_not_mention" and .details.accepted == false and .details.reason_code == "missing_group_mention" and .details.policy.mentioned_bot == false)
+          and any(.[]; .step == "explicit_text_group_mention" and .details.accepted == true and .details.policy.reason_code == "group_allowed" and .details.policy.mentioned_bot == true)
         ),
         reply_shape_ok: any(.[];
           .step == "reply_media_projection"
@@ -341,6 +345,8 @@ if [[ "${overall_status}" == "passed" ]]; then
     "evt-accepted" \
     "evt-untyped-message-id" \
     "evt-structured-mention" \
+    "evt-text-substring" \
+    "evt-explicit-text-mention" \
     "evt-reply-media" \
     "evt-voice-asr" \
     "evt-slash-approval" \
@@ -366,6 +372,8 @@ if [[ "${overall_status}" == "passed" ]]; then
     "msg-accepted" \
     "msg-untyped-message-id" \
     "msg-structured-mention" \
+    "msg-text-substring" \
+    "msg-explicit-text-mention" \
     "msg-reply-media" \
     "msg-voice-asr" \
     "msg-slash-approval" \
@@ -392,6 +400,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "group-denied" \
     "group-queue" \
     "group-voice" \
+    "group-text" \
     "channel-denied" \
     "channel-allowed" \
     "guild-denied" \
@@ -401,6 +410,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "member-disabled" \
     "member-queue" \
     "member-voice" \
+    "member-text" \
     "member-c2c-denied" \
     "member-c2c-allowed" \
     "Alice" \
@@ -417,6 +427,8 @@ if [[ "${overall_status}" == "passed" ]]; then
     "deploy status" \
     "plain message" \
     "not a mention segment" \
+    "prefix not-bot-openid suffix" \
+    "please @bot-openid check this" \
     "please inspect this" \
     "see attached trace" \
     "too large" \
@@ -431,7 +443,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "oversized.bin" \
     "missing-size.pdf"
   do
-    if grep -aF "${forbidden}" "${EVIDENCE_JSONL}" >/dev/null; then
+    if grep -aF -- "${forbidden}" "${EVIDENCE_JSONL}" >/dev/null; then
       overall_status="failed"
       validation_status="failed"
       exit_code=1

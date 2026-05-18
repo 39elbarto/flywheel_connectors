@@ -12,20 +12,20 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use fcp_evidence::{
     ClaimId, ClaimNode, ClaimStatus, EvidenceKind, EvidenceNode, ObservedProofArtifact,
     ProofBundleRegistry, ProofBundleValidationReport, ProofBundleValidator, ProofGapStatus,
     ProofGraph, ProofGraphCorpus, ProofGraphIndexer, ProofValidationStatus,
-    RchRemoteProofBlockerReason, RchRemoteProofClassification, RchRemoteProofEvidence,
-    RchRemoteProofExitKind, RchRemoteProofRedaction, RchRemoteProofRedactionFlag,
-    RchRemoteProofSummary, RchRemoteProofSummaryLocation, RerunCommand, SupportEdge,
-    SupportRelationship, RCH_REMOTE_PROOF_EVIDENCE_SCHEMA,
+    RCH_REMOTE_PROOF_EVIDENCE_SCHEMA, RchRemoteProofBlockerReason, RchRemoteProofClassification,
+    RchRemoteProofEvidence, RchRemoteProofExitKind, RchRemoteProofRedaction,
+    RchRemoteProofRedactionFlag, RchRemoteProofSummary, RchRemoteProofSummaryLocation,
+    RerunCommand, SupportEdge, SupportRelationship,
 };
 use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, OperationSection};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::readiness::{idempotency_label, risk_level_label, safety_tier_label};
 
@@ -1041,6 +1041,19 @@ fn summarize_text_signal(text: &str, summary: &mut WorkerDocSummary) {
         );
     }
     if lower.contains("topology") || lower.contains("preflight") {
+        summary.blockers.insert(
+            RchRemoteProofBlockerReason::TopologyPreflightFailure
+                .as_str()
+                .to_owned(),
+        );
+    }
+    if lower.contains("connection refused")
+        || lower.contains("connection failure")
+        || lower.contains("could not connect")
+        || lower.contains("unreachable")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+    {
         summary.blockers.insert(
             RchRemoteProofBlockerReason::TopologyPreflightFailure
                 .as_str()
@@ -2419,8 +2432,7 @@ fn build_rerun_plan(target: &str, known: &KnownProofCommand) -> PlannedRerunComm
         argv,
         working_directory: known.command.working_directory.clone(),
         required_env_keys: known.command.required_env_keys.clone(),
-        refusal_boundary:
-            "Only redaction-safe commands already present in the ProofGraph corpus are accepted.",
+        refusal_boundary: "Only redaction-safe commands already present in the ProofGraph corpus are accepted.",
     }
 }
 
@@ -2817,9 +2829,9 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use fcp_evidence::{
-        BeadIssueRecord, BeadProofComment, EvidenceBundleRecord, ReadinessMatrixRow,
-        ReadmeFeatureRow, SourceLocation, TruthSource, VerificationScriptRecord,
-        PROOF_GRAPH_INDEXER_CORPUS_SCHEMA,
+        BeadIssueRecord, BeadProofComment, EvidenceBundleRecord, PROOF_GRAPH_INDEXER_CORPUS_SCHEMA,
+        ReadinessMatrixRow, ReadmeFeatureRow, SourceLocation, TruthSource,
+        VerificationScriptRecord,
     };
     use tempfile::NamedTempFile;
 
@@ -3061,9 +3073,11 @@ mod tests {
         assert_eq!(report.decision, "degraded_stale_tooling");
         assert!(!report.remote_required_allowed);
         assert!(report.stale_tooling_detected);
-        assert!(report
-            .warnings
-            .contains(&"stale_worker_telemetry".to_owned()));
+        assert!(
+            report
+                .warnings
+                .contains(&"stale_worker_telemetry".to_owned())
+        );
     }
 
     #[test]
@@ -3093,11 +3107,32 @@ mod tests {
 
         assert_eq!(report.decision, "proof_infra_blocked");
         assert!(!report.remote_required_allowed);
-        assert!(report.blockers.contains(
-            &RchRemoteProofBlockerReason::WorkerPressure
-                .as_str()
-                .to_owned()
-        ));
+        assert!(
+            report.blockers.contains(
+                &RchRemoteProofBlockerReason::WorkerPressure
+                    .as_str()
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn rch_status_blocks_connection_failure_as_infra() {
+        let diagnose = serde_json::json!({
+            "worker_selection": {"worker": null},
+            "error": "connection refused while probing worker pool"
+        });
+        let report = build_rch_capacity_report(None, Some(&diagnose), None, &[], Vec::new());
+
+        assert_eq!(report.decision, "proof_infra_blocked");
+        assert!(!report.remote_required_allowed);
+        assert!(
+            report.blockers.contains(
+                &RchRemoteProofBlockerReason::TopologyPreflightFailure
+                    .as_str()
+                    .to_owned()
+            )
+        );
     }
 
     #[test]
@@ -3119,13 +3154,17 @@ mod tests {
             result.payload["capacity"]["decision"],
             "telemetry_parse_error"
         );
-        assert!(!result.payload["capacity"]["remote_required_allowed"]
-            .as_bool()
-            .expect("remote required allowed bool"));
-        assert!(!result.payload["capacity"]["telemetry_parse_errors"]
-            .as_array()
-            .expect("parse errors array")
-            .is_empty());
+        assert!(
+            !result.payload["capacity"]["remote_required_allowed"]
+                .as_bool()
+                .expect("remote required allowed bool")
+        );
+        assert!(
+            !result.payload["capacity"]["telemetry_parse_errors"]
+                .as_array()
+                .expect("parse errors array")
+                .is_empty()
+        );
         let serialized =
             serde_json::to_string(&result.payload).expect("serialize malformed status payload");
         assert!(!serialized.contains("SECRET_VALUE"));
@@ -3858,11 +3897,13 @@ related = []
 
         assert!(!result.success);
         assert_eq!(result.payload["error"]["type"], "unknown-claim");
-        assert!(result.payload["error"]["known_claim_ids"]
-            .as_array()
-            .expect("known claims array")
-            .iter()
-            .any(|value| value == "claim:latency-proof"));
+        assert!(
+            result.payload["error"]["known_claim_ids"]
+                .as_array()
+                .expect("known claims array")
+                .iter()
+                .any(|value| value == "claim:latency-proof")
+        );
     }
 
     #[test]
@@ -3910,9 +3951,10 @@ related = []
         assert!(!argv.contains(&"RCH_FORCE_REMOTE=true"));
         assert!(argv.contains(&"rch"));
         assert!(argv.contains(&"CARGO_INCREMENTAL=0"));
-        assert!(argv
-            .iter()
-            .any(|arg| arg.starts_with("CARGO_TARGET_DIR=/tmp/fwc-proof-")));
+        assert!(
+            argv.iter()
+                .any(|arg| arg.starts_with("CARGO_TARGET_DIR=/tmp/fwc-proof-"))
+        );
     }
 
     #[test]
@@ -3962,7 +4004,7 @@ related = []
                 max_output_bytes: DEFAULT_OUTPUT_PREVIEW_BYTES,
                 rch_capacity: ProofRchStatusArgs {
                     summary_lines: vec![
-                        "[RCH] local (no admissible workers: critical_pressure=5)".to_owned()
+                        "[RCH] local (no admissible workers: critical_pressure=5)".to_owned(),
                     ],
                     ..ProofRchStatusArgs::default()
                 },
@@ -4021,10 +4063,12 @@ related = []
 
         assert!(result.success);
         assert_eq!(result.payload["plan"]["requires_remote"], true);
-        assert!(result.payload["plan"]["command_id"]
-            .as_str()
-            .expect("command id")
-            .contains("slack_connector_verification.sh"));
+        assert!(
+            result.payload["plan"]["command_id"]
+                .as_str()
+                .expect("command id")
+                .contains("slack_connector_verification.sh")
+        );
         let argv = result.payload["plan"]["argv"]
             .as_array()
             .expect("argv array")
@@ -4512,19 +4556,23 @@ related = []
 
         assert_eq!(stale_explain.payload["status"], "stale");
         assert_eq!(skipped_explain.payload["status"], "skipped_with_reason");
-        assert!(skipped_explain.payload["claim"]["status"]["reason"]
-            .as_str()
-            .expect("skip reason")
-            .contains("skipped"));
+        assert!(
+            skipped_explain.payload["claim"]["status"]["reason"]
+                .as_str()
+                .expect("skip reason")
+                .contains("skipped")
+        );
         let skipped_text =
             serde_json::to_string(&skipped_explain.payload).expect("skipped explain json");
         assert!(skipped_text.contains("provider sandbox unavailable"));
 
         assert_eq!(blocked_explain.payload["status"], "blocked");
-        assert!(blocked_explain.payload["claim"]["statement"]
-            .as_str()
-            .expect("blocked statement")
-            .contains("Blocked by upstream host route wiring"));
+        assert!(
+            blocked_explain.payload["claim"]["statement"]
+                .as_str()
+                .expect("blocked statement")
+                .contains("Blocked by upstream host route wiring")
+        );
 
         let mesh_text = serde_json::to_string(&mesh_explain.payload).expect("mesh explain json");
         assert!(mesh_text.contains("single-host-downgrade-warning"));
@@ -4759,9 +4807,11 @@ related = []
             assert_eq!(event["cleanup_result"]["deleted_paths"], 0);
             assert!(event["ci_guard"].is_object());
         }
-        assert!(parsed_events
-            .iter()
-            .any(|event| { event["scenario"] == "stale-claim" && event["status"] == "stale" }));
+        assert!(
+            parsed_events
+                .iter()
+                .any(|event| { event["scenario"] == "stale-claim" && event["status"] == "stale" })
+        );
         assert!(parsed_events.iter().any(|event| {
             event["scenario"] == "remote-only-local-refused"
                 && event["ci_guard"]["local_fallback_refused"] == true
@@ -4820,11 +4870,13 @@ related = []
             passport["operations"][0]["ai_hints_state"]["state"],
             "declared"
         );
-        assert!(passport["proof_state"]["matched_claim_ids"]
-            .as_array()
-            .expect("matched claim ids")
-            .iter()
-            .any(|value| value == "claim:github"));
+        assert!(
+            passport["proof_state"]["matched_claim_ids"]
+                .as_array()
+                .expect("matched claim ids")
+                .iter()
+                .any(|value| value == "claim:github")
+        );
         assert_eq!(passport["proof_state"]["state"], "missing");
         assert_eq!(
             passport["proof_state"]["evidence_by_kind"]["host_integration"],
@@ -4978,12 +5030,16 @@ related = []
         assert_eq!(network["host_allow_count"], 1);
         assert_eq!(network["port_allow"][0], 443);
         assert!(network["deny_localhost"].as_bool().expect("deny localhost"));
-        assert!(network["deny_private_ranges"]
-            .as_bool()
-            .expect("deny private ranges"));
-        assert!(network["deny_tailnet_ranges"]
-            .as_bool()
-            .expect("deny tailnet ranges"));
+        assert!(
+            network["deny_private_ranges"]
+                .as_bool()
+                .expect("deny private ranges")
+        );
+        assert!(
+            network["deny_tailnet_ranges"]
+                .as_bool()
+                .expect("deny tailnet ranges")
+        );
         assert!(network["require_sni"].as_bool().expect("require sni"));
         assert_eq!(passport["risk_summary"]["network_posture_gap_count"], 0);
     }

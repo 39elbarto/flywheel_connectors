@@ -469,7 +469,8 @@ script also validates its own JSONL envelope before printing the artifact path:
 it requires exact Lean theorem/assumption ID arrays, stable command log hashes,
 an explicit redaction-scan pass record, the expected `SMALL_TEST` and
 `V4_REFERENCE` summary profiles, one consistent run id and git revision, and a
-separate final artifact SHA printed after the validation record is appended. Its
+separate final artifact SHA printed only after the final self-contract validates
+the finished JSONL envelope. Its
 Git revision probe also applies the checkout root as a per-command
 `safe.directory`, matching the top-level gauntlet on shared or external volumes.
 The standalone formal script also treats Lean/Lake proof as mandatory: a missing
@@ -494,6 +495,15 @@ rejects passing command records whose `log_artifact` does not match the
 record's own run id and step. The older `log_artifact_class` marker remains a
 coarse review label, but it is not enough by itself to make a formal
 correspondence command record reusable evidence.
+The standalone formal script now mirrors the top-level gauntlet's post-summary
+redaction posture: the first `redaction_scan` covers the command and proof
+records before `summary`, then `final_redaction_scan` scans the summary-bearing
+artifact before success output prints the reusable JSONL path and SHA. Passing
+redaction-scan records identify the case-insensitive policy version instead of
+echoing the raw forbidden marker list, so the scan records themselves do not
+make the finished artifact fail its own redaction checks. That policy covers
+private paths, raw operation/principal/zone labels, secret material,
+auth/header markers, provider-body markers, and reviewer-contact markers.
 Its command records carry the same execution-proof fields as the top-level
 gauntlet: non-`rch` lanes must report `fallback_decision:"not_needed"`,
 `worker_execution_class:"not_applicable"`, and `rch_summary:null`; `rch`-backed

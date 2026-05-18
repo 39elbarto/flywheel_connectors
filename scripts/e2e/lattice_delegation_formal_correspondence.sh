@@ -271,6 +271,62 @@ run_and_capture() {
   fi
 }
 
+scan_jsonl_artifact() {
+  local step="$1"
+  local path="$2"
+  local forbidden
+  for forbidden in \
+    "/home/" \
+    "/data/projects/" \
+    "/users/" \
+    "/volumes/" \
+    "/private/var/" \
+    "/var/folders/" \
+    "/tmp" \
+    "/private/tmp" \
+    "c:\\\\users\\\\" \
+    "authorization:" \
+    "bearer" \
+    "agent:" \
+    "op:" \
+    "operation:" \
+    "principal:" \
+    "zone:" \
+    "raw_operation" \
+    "raw_principal" \
+    "raw_zone" \
+    "trapdoor_material" \
+    "trapdoor_coefficients" \
+    "secret_seed" \
+    "expanded_secret_matrix" \
+    "preimage_coefficients" \
+    "preimage_bytes" \
+    "access_token" \
+    "refresh_token" \
+    "id_token" \
+    "client_secret" \
+    "api_key" \
+    "private_key" \
+    "secret_key" \
+    "password" \
+    "cookie" \
+    "token=" \
+    "credential=" \
+    "credential:" \
+    "provider_body" \
+    "provider_response_body" \
+    "provider_payload_body" \
+    "reviewer_contact" \
+    "reviewer_email" \
+    "reviewer_phone" \
+    "z:"; do
+    if grep -Fqi "${forbidden}" "${path}"; then
+      fail_step "${step}" "$(jq -cn --arg forbidden "${forbidden}" \
+        '{forbidden_case_insensitive:$forbidden,cleanup_result:"not_applicable"}')"
+    fi
+  done
+}
+
 validate_jsonl_contract() {
   local step="$1"
   local path="$2"
@@ -285,8 +341,6 @@ validate_jsonl_contract() {
       --arg validation_error "${diagnostic}" \
       '{artifact_path:$artifact,validation_error:$validation_error,cleanup_result:"not_applicable"}')"
   fi
-  append_json "${step}" "pass" "$(jq -cn --arg artifact "${path}" \
-    '{artifact_path:$artifact,cleanup_result:"not_applicable"}')"
 }
 
 validate_formal_script_contract() {
@@ -322,21 +376,6 @@ validate_formal_script_contract() {
         "FCP-POLICY-DISPATCHER-BINDING-CORRESPONDENCE-V1",
         "FCP-POLICY-REPLAY-DENIAL-CORRESPONDENCE-V1"
       ];
-    def required_forbidden_terms:
-      [
-        "/Users/",
-        "/tmp/",
-        "trapdoor_coefficients",
-        "secret_seed",
-        "expanded_secret_matrix",
-        "preimage_coefficients",
-        "preimage_bytes",
-        "bearer",
-        "token=",
-        "op:",
-        "principal:",
-        "z:"
-      ];
     def non_rch_command_proof:
       .details.fallback_decision == "not_needed" and
       .details.worker_execution_class == "not_applicable" and
@@ -367,6 +406,25 @@ validate_formal_script_contract() {
     def top_level_provenance_consistent:
       ([.[] | .run_id] | unique | length == 1) and
       ([.[] | .git_revision] | unique | length == 1);
+    def final_redaction_scan_covers_summary_artifact:
+      . as $records |
+      ([range(0; length) as $i |
+        select($records[$i].step == "summary" and $records[$i].result == "pass") |
+        {index:$i, artifact_path:$records[$i].details.artifact_path}][-1]) as $summary |
+      ([range(0; length) as $i |
+        select($records[$i].step == "final_redaction_scan" and $records[$i].result == "pass") |
+        {index:$i, record:$records[$i]}][-1]) as $final_scan |
+      ($summary != null) and
+      ($final_scan != null) and
+      ($summary.artifact_path | safe_relative_jsonl_artifact_path) and
+      ($final_scan.index > $summary.index) and
+      ($final_scan.index == ($summary.index + 1)) and
+      ($final_scan.index == (length - 1)) and
+      ($final_scan.record.details.scanned_jsonl_artifacts == 1) and
+      ($final_scan.record.details.summary_record == "covered") and
+      ($final_scan.record.details.scanned_artifact_path == $summary.artifact_path) and
+      ($final_scan.record.details.post_summary_artifact_hash | sha256_hash) and
+      ($final_scan.record.details.cleanup_result | type == "string");
     length > 0 and
     top_level_provenance_consistent and
     all(.[]; type == "object" and
@@ -390,12 +448,13 @@ validate_formal_script_contract() {
     command_step("rust_crypto_existing_v4") and
     command_step("ubs_touched_files") and
     any(.[]; .step == "redaction_scan" and .result == "pass" and
-      (.details.forbidden_terms_checked | type == "array" and
-        ((. | sort) == (required_forbidden_terms | sort))) and
+      .details.forbidden_terms_policy == "formal_correspondence_v1_case_insensitive" and
       .details.local_private_paths == "absent" and
       .details.secret_material == "absent" and
       .details.auth_header_values == "absent" and
       .details.request_plaintext == "absent" and
+      .details.provider_payloads == "absent" and
+      .details.reviewer_private_data == "absent" and
       (.details.cleanup_result | type == "string")) and
     any(.[]; .step == "summary" and .result == "pass" and
       (.details.artifact_path | safe_relative_jsonl_artifact_path) and
@@ -404,7 +463,8 @@ validate_formal_script_contract() {
       (.details.profile_ids | type == "array" and
         ((. | sort) == (required_profile_ids | sort))) and
       .details.route_revision == 1 and
-      (.details.cleanup_result | type == "string"))
+      (.details.cleanup_result | type == "string")) and
+    final_redaction_scan_covers_summary_artifact
   '
 }
 
@@ -485,21 +545,23 @@ run_and_capture "ubs_touched_files" \
     crates/fcp-policy/tests/lattice_delegation_proptest.rs \
     scripts/e2e/lattice_delegation_formal_correspondence.sh
 
-for forbidden in "/Users/" "/tmp/" "trapdoor_coefficients" "secret_seed" "expanded_secret_matrix" \
-  "preimage_coefficients" "preimage_bytes" "bearer" "token=" "op:" "principal:" "z:"; do
-  if grep -Fq "${forbidden}" "${ARTIFACT}"; then
-    fail_step "redaction_scan" "$(jq -cn --arg forbidden "${forbidden}" \
-      '{forbidden:$forbidden,cleanup_result:"not_applicable"}')"
-  fi
-done
+scan_jsonl_artifact "redaction_scan" "${ARTIFACT}"
 append_json "redaction_scan" "pass" "$(jq -cn \
-  '{forbidden_terms_checked:["/Users/","/tmp/","trapdoor_coefficients","secret_seed","expanded_secret_matrix","preimage_coefficients","preimage_bytes","bearer","token=","op:","principal:","z:"],local_private_paths:"absent",secret_material:"absent",auth_header_values:"absent",request_plaintext:"absent",cleanup_result:"not_applicable"}')"
+  '{forbidden_terms_policy:"formal_correspondence_v1_case_insensitive",local_private_paths:"absent",secret_material:"absent",auth_header_values:"absent",request_plaintext:"absent",provider_payloads:"absent",reviewer_private_data:"absent",cleanup_result:"not_applicable"}')"
 
 pre_summary_artifact_hash="$(shasum -a 256 "${ARTIFACT}" | awk '{print $1}')"
 append_json "summary" "pass" "$(jq -cn \
   --arg artifact "${ARTIFACT}" \
   --arg pre_summary_artifact_hash "sha256:${pre_summary_artifact_hash}" \
   '{artifact_path:$artifact,pre_summary_artifact_hash:$pre_summary_artifact_hash,final_artifact_hash_output:"stdout:LATTICE_FORMAL_CORRESPONDENCE_SHA256",profile_ids:["SMALL_TEST","V4_REFERENCE"],route_revision:1,cleanup_result:"not_applicable_generated_artifact"}')"
+
+scan_jsonl_artifact "final_redaction_scan" "${ARTIFACT}"
+post_summary_artifact_hash="$(shasum -a 256 "${ARTIFACT}" | awk '{print $1}')"
+append_json "final_redaction_scan" "pass" "$(jq -cn \
+  --arg artifact "${ARTIFACT}" \
+  --arg post_summary_artifact_hash "sha256:${post_summary_artifact_hash}" \
+  '{scanned_jsonl_artifacts:1,summary_record:"covered",scanned_artifact_path:$artifact,post_summary_artifact_hash:$post_summary_artifact_hash,cleanup_result:"not_applicable"}')"
+scan_jsonl_artifact "final_redaction_scan" "${ARTIFACT}"
 
 validate_formal_script_contract
 

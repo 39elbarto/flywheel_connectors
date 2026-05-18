@@ -117,6 +117,10 @@ pub struct ProofRunArgs {
     /// Maximum stdout/stderr preview bytes retained in JSON output.
     #[arg(long, default_value_t = DEFAULT_OUTPUT_PREVIEW_BYTES)]
     pub max_output_bytes: usize,
+
+    /// Optional read-only RCH telemetry used to refuse remote-required execution before spawning.
+    #[command(flatten)]
+    pub rch_capacity: ProofRchStatusArgs,
 }
 
 /// Arguments for `fwc proof passport`.
@@ -151,7 +155,7 @@ pub struct ProofStatusArgs {
 }
 
 /// Arguments for `fwc proof rch-status`.
-#[derive(Args, Debug, Clone, Serialize)]
+#[derive(Args, Debug, Clone, Default, Serialize)]
 pub struct ProofRchStatusArgs {
     /// Read-only JSON captured from `rch status --json`.
     #[arg(long = "status-json", value_name = "PATH")]
@@ -568,12 +572,24 @@ fn run_known_command(args: &ProofRunArgs) -> Result<ProofCommandResult> {
     };
     let mut plan = build_rerun_plan(&args.target, &known);
     plan.dry_run = !args.execute;
+    let capacity_preflight = plan
+        .requires_remote
+        .then(|| rch_capacity_report_from_args(&args.rch_capacity))
+        .filter(|_| rch_capacity_input_present(&args.rch_capacity));
+    let preflight_allows_execution = capacity_preflight
+        .as_ref()
+        .is_none_or(|report| report.remote_required_allowed);
     let execution = if args.execute {
-        Some(execute_plan(&plan, args.max_output_bytes)?)
+        preflight_allows_execution
+            .then(|| execute_plan(&plan, args.max_output_bytes))
+            .transpose()?
     } else {
         None
     };
-    let success = execution.as_ref().map_or(true, |result| result.success);
+    let success = capacity_preflight
+        .as_ref()
+        .is_none_or(|report| report.remote_required_allowed)
+        && execution.as_ref().map_or(true, |result| result.success);
     let source = loaded.source.display().to_string();
     let mut payload = json!({
         "status": if success { "ok" } else { "error" },
@@ -582,8 +598,11 @@ fn run_known_command(args: &ProofRunArgs) -> Result<ProofCommandResult> {
         "source": source,
         "now_unix_ms": loaded.now_unix_ms,
         "plan": plan,
+        "capacity_preflight": capacity_preflight,
         "execution": execution,
-        "message": if args.execute {
+        "message": if args.execute && !preflight_allows_execution {
+            "Remote-required proof execution refused by RCH capacity preflight."
+        } else if args.execute {
             "Executed a known redaction-safe ProofGraph rerun command."
         } else {
             "Dry-run only. Re-run with `--execute` to execute this known command."
@@ -670,29 +689,7 @@ fn status(args: &ProofStatusArgs) -> Result<ProofCommandResult> {
 }
 
 fn rch_status(args: &ProofRchStatusArgs) -> Result<ProofCommandResult> {
-    let mut telemetry_parse_errors = Vec::new();
-    let status_doc = load_optional_rch_json(
-        args.status_json.as_deref(),
-        "rch_status",
-        &mut telemetry_parse_errors,
-    );
-    let diagnose_doc = load_optional_rch_json(
-        args.diagnose_json.as_deref(),
-        "rch_diagnose",
-        &mut telemetry_parse_errors,
-    );
-    let workers_doc = load_optional_rch_json(
-        args.workers_json.as_deref(),
-        "rch_workers",
-        &mut telemetry_parse_errors,
-    );
-    let report = build_rch_capacity_report(
-        status_doc.as_ref(),
-        diagnose_doc.as_ref(),
-        workers_doc.as_ref(),
-        &args.summary_lines,
-        telemetry_parse_errors,
-    );
+    let report = rch_capacity_report_from_args(args);
     let success = report.telemetry_parse_errors.is_empty();
     let mut payload = json!({
         "status": if success { "ok" } else { "error" },
@@ -775,6 +772,39 @@ fn load_optional_rch_json(
             None
         }
     }
+}
+
+fn rch_capacity_report_from_args(args: &ProofRchStatusArgs) -> RchCapacityReport {
+    let mut telemetry_parse_errors = Vec::new();
+    let status_doc = load_optional_rch_json(
+        args.status_json.as_deref(),
+        "rch_status",
+        &mut telemetry_parse_errors,
+    );
+    let diagnose_doc = load_optional_rch_json(
+        args.diagnose_json.as_deref(),
+        "rch_diagnose",
+        &mut telemetry_parse_errors,
+    );
+    let workers_doc = load_optional_rch_json(
+        args.workers_json.as_deref(),
+        "rch_workers",
+        &mut telemetry_parse_errors,
+    );
+    build_rch_capacity_report(
+        status_doc.as_ref(),
+        diagnose_doc.as_ref(),
+        workers_doc.as_ref(),
+        &args.summary_lines,
+        telemetry_parse_errors,
+    )
+}
+
+fn rch_capacity_input_present(args: &ProofRchStatusArgs) -> bool {
+    args.status_json.is_some()
+        || args.diagnose_json.is_some()
+        || args.workers_json.is_some()
+        || !args.summary_lines.is_empty()
 }
 
 fn build_rch_capacity_report(
@@ -3844,6 +3874,7 @@ related = []
                 corpus: corpus_args(file.path()),
                 execute: false,
                 max_output_bytes: DEFAULT_OUTPUT_PREVIEW_BYTES,
+                rch_capacity: ProofRchStatusArgs::default(),
             }),
         })
         .expect("run proof run");
@@ -3861,6 +3892,7 @@ related = []
                 corpus: corpus_args(file.path()),
                 execute: false,
                 max_output_bytes: DEFAULT_OUTPUT_PREVIEW_BYTES,
+                rch_capacity: ProofRchStatusArgs::default(),
             }),
         })
         .expect("run proof run");
@@ -3881,6 +3913,73 @@ related = []
         assert!(argv
             .iter()
             .any(|arg| arg.starts_with("CARGO_TARGET_DIR=/tmp/fwc-proof-")));
+    }
+
+    #[test]
+    fn run_capacity_preflight_refuses_remote_execution_before_rch() {
+        let file = write_corpus(&fixture_corpus());
+        let workers = write_json_value(&serde_json::json!({
+            "workers": [
+                {"id": "worker-a", "healthy": true, "available_slots": 0, "total_slots": 4}
+            ]
+        }));
+        let result = run(&ProofArgs {
+            command: ProofCommand::Run(ProofRunArgs {
+                target: "claim:latency-proof".to_owned(),
+                corpus: corpus_args(file.path()),
+                execute: true,
+                max_output_bytes: DEFAULT_OUTPUT_PREVIEW_BYTES,
+                rch_capacity: ProofRchStatusArgs {
+                    workers_json: Some(workers.path().to_path_buf()),
+                    ..ProofRchStatusArgs::default()
+                },
+            }),
+        })
+        .expect("run proof run with queued capacity");
+
+        assert!(!result.success);
+        assert_eq!(result.payload["plan"]["requires_remote"], true);
+        assert_eq!(result.payload["capacity_preflight"]["decision"], "queued");
+        assert_eq!(
+            result.payload["capacity_preflight"]["remote_required_allowed"],
+            false
+        );
+        assert!(result.payload["execution"].is_null());
+        assert_eq!(
+            result.payload["message"],
+            "Remote-required proof execution refused by RCH capacity preflight."
+        );
+    }
+
+    #[test]
+    fn run_capacity_preflight_rejects_local_fallback_summary() {
+        let file = write_corpus(&fixture_corpus());
+        let result = run(&ProofArgs {
+            command: ProofCommand::Run(ProofRunArgs {
+                target: "claim:latency-proof".to_owned(),
+                corpus: corpus_args(file.path()),
+                execute: true,
+                max_output_bytes: DEFAULT_OUTPUT_PREVIEW_BYTES,
+                rch_capacity: ProofRchStatusArgs {
+                    summary_lines: vec![
+                        "[RCH] local (no admissible workers: critical_pressure=5)".to_owned()
+                    ],
+                    ..ProofRchStatusArgs::default()
+                },
+            }),
+        })
+        .expect("run proof run with local fallback preflight");
+
+        assert!(!result.success);
+        assert_eq!(
+            result.payload["capacity_preflight"]["decision"],
+            "proof_infra_blocked"
+        );
+        assert_eq!(
+            result.payload["capacity_preflight"]["local_fallback_detected"],
+            true
+        );
+        assert!(result.payload["execution"].is_null());
     }
 
     #[test]
@@ -3915,6 +4014,7 @@ related = []
                 corpus: corpus_args(file.path()),
                 execute: false,
                 max_output_bytes: DEFAULT_OUTPUT_PREVIEW_BYTES,
+                rch_capacity: ProofRchStatusArgs::default(),
             }),
         })
         .expect("plan slack verifier proof run");
@@ -4355,6 +4455,7 @@ related = []
                 corpus: corpus_args(corpus.path()),
                 execute: false,
                 max_output_bytes: DEFAULT_OUTPUT_PREVIEW_BYTES,
+                rch_capacity: ProofRchStatusArgs::default(),
             }),
         })
         .expect("dry-run remote-only proof");

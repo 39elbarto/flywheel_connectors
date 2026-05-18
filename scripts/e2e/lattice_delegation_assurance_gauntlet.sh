@@ -578,6 +578,14 @@ scan_jsonl_artifact() {
     "operation:" \
     "principal:" \
     "zone:" \
+    "raw_operation" \
+    "raw_principal" \
+    "raw_zone" \
+    "trapdoor_material" \
+    "trapdoor_coefficients" \
+    "preimage_coefficients" \
+    "preimage_bytes" \
+    "expanded_secret_matrix" \
     "token=" \
     "z:" \
     "access_token" \
@@ -591,8 +599,10 @@ scan_jsonl_artifact() {
     "cookie" \
     "credential=" \
     "credential:" \
+    "provider_body" \
     "provider_response_body" \
     "provider_payload_body" \
+    "reviewer_contact" \
     "reviewer_email" \
     "reviewer_phone"; do
     if grep -Fqi "${forbidden}" "${path}"; then

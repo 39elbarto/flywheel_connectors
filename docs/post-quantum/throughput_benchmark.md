@@ -481,6 +481,13 @@ being emitted, and both run-id-derived and operator-supplied artifact paths are
 limited to a single relative `target/fcp-crypto-pq/*.jsonl` file before the
 script creates or truncates evidence. The standalone formal script applies the
 same redaction-sensitive run-id marker preflight as the top-level gauntlet.
+It also pins `OUT_DIR` to `target/fcp-crypto-pq` before creating log or evidence
+directories, matching the command-record contract that every local log is a
+target-relative evidence artifact rather than a private absolute path.
+Operator-supplied artifact filenames are also rejected if they contain the same
+secret, provider-payload, reviewer-contact, trapdoor, preimage, or credential
+marker names; the failure message reports only a SHA-256 hash of the rejected
+path.
 Its command records carry the same execution-proof fields as the top-level
 gauntlet: non-`rch` lanes must report `fallback_decision:"not_needed"`,
 `worker_execution_class:"not_applicable"`, and `rch_summary:null`; `rch`-backed
@@ -548,8 +555,10 @@ child `/tmp` and `/private/tmp` paths, `/private/var/`, `/var/folders/`,
 Windows `C:\Users\`, provider body payload markers, reviewer private-contact
 markers, and the host dispatcher fixture literals `send_message`,
 `agent-alpha`, and `agent-beta` as failures.
-Private path markers are checked case-insensitively, so normalized lowercase
-macOS or Windows user paths cannot pass as reusable JSONL evidence.
+Private path markers, raw-label markers, secret material markers, provider-body
+markers, and reviewer-contact markers are checked case-insensitively, so
+normalized lowercase macOS or Windows user paths and differently cased payload
+labels cannot pass as reusable JSONL evidence.
 Because the summary record is appended after the normal redaction scan, the
 script scans the finished JSONL again and requires a `final_redaction_scan`
 pass record before printing the artifact path and final hash. The self-contract

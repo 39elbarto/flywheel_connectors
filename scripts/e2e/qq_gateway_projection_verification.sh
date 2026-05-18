@@ -383,10 +383,10 @@ if [[ "${overall_status}" == "passed" ]]; then
         log_start_shape_ok: any(.[];
           .step == "log_start"
           and (.details.artifact_path_hash | type) == "string"
-          and (.details.artifact_path_hash | test("^sha256:[0-9a-f]{24}$"))
+          and (.details.artifact_path_hash | test("^sha256:[0-9a-f]{64}$"))
           and .details.artifact_path_class == "temp_jsonl"
           and (.details.command_line_hash | type) == "string"
-          and (.details.command_line_hash | test("^sha256:[0-9a-f]{24}$"))
+          and (.details.command_line_hash | test("^sha256:[0-9a-f]{64}$"))
           and (.details.command_arg_count | type) == "number"
           and .details.command_arg_count >= 1
           and (.details.git_revision | type) == "string"

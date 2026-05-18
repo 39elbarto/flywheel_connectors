@@ -917,52 +917,49 @@ if [[ -s "${EVIDENCE_JSONL}" ]]; then
   evidence_count="$(wc -l < "${EVIDENCE_JSONL}" | tr -d ' ')"
 fi
 
-jq -n \
-  --arg run_id "${RUN_ID}" \
-  --arg status "${overall_status}" \
-  --arg test_status "${test_status}" \
-  --arg evidence_status "${evidence_status}" \
-  --arg validation_status "${validation_status}" \
-  --arg redaction_status "${redaction_status}" \
-  --arg remote_proof_status "${remote_proof_status}" \
-  --arg remote_proof_reason "${remote_proof_reason}" \
-  --argjson remote_proof_summary_present "$(json_bool_nonempty "${remote_proof_summary}")" \
-  --argjson remote_proof_summary_hash "$(json_null_or_sha256 "${remote_proof_summary}")" \
-  --arg skip_reason "${skip_reason}" \
-  --argjson evidence_count "${evidence_count}" \
-  --argjson require_production_soak "${require_production_soak_json}" \
-  --argjson evidence_jsonl_sha256 "$(json_null_or_file_sha256 "${EVIDENCE_JSONL}")" \
-  '{
-    run_id: $run_id,
-    status: $status,
-    test_status: $test_status,
-    evidence_status: $evidence_status,
-    validation_status: $validation_status,
-    redaction_status: $redaction_status,
-    remote_proof_status: $remote_proof_status,
-    remote_proof_reason: (if ($remote_proof_reason | length) > 0 then $remote_proof_reason else null end),
-    remote_proof_summary_present: $remote_proof_summary_present,
-    remote_proof_summary_hash: $remote_proof_summary_hash,
-    require_production_soak: $require_production_soak,
-    skip_reason: (if ($skip_reason | length) > 0 then $skip_reason else null end),
-    evidence_count: $evidence_count,
-    artifacts: {
-      test_log: "logs/prewarm-cold-start-test.log",
-      evidence_jsonl: "evidence/prewarm-cold-start.jsonl",
-      evidence_jsonl_sha256: $evidence_jsonl_sha256,
-      validation_json: "evidence/validation.json",
-      skip_jsonl: "evidence/prewarm-cold-start-skip.jsonl",
-      environment_json: "environment.json"
-    }
-  }' > "${SUMMARY_JSON}"
-
-if grep -aEi "$(redaction_pattern)" "${SUMMARY_JSON}" >/dev/null; then
-  redaction_status="failed"
-  overall_status="failed"
-  validation_status="failed"
-  mark_validation_redaction_failed "metadata_secret_or_private_path_marker"
-  exit_code=1
-fi
+write_summary_json() {
+  jq -n \
+    --arg run_id "${RUN_ID}" \
+    --arg status "${overall_status}" \
+    --arg test_status "${test_status}" \
+    --arg evidence_status "${evidence_status}" \
+    --arg validation_status "${validation_status}" \
+    --arg redaction_status "${redaction_status}" \
+    --arg remote_proof_status "${remote_proof_status}" \
+    --arg remote_proof_reason "${remote_proof_reason}" \
+    --argjson remote_proof_summary_present "$(json_bool_nonempty "${remote_proof_summary}")" \
+    --argjson remote_proof_summary_hash "$(json_null_or_sha256 "${remote_proof_summary}")" \
+    --arg skip_reason "${skip_reason}" \
+    --argjson evidence_count "${evidence_count}" \
+    --argjson require_production_soak "${require_production_soak_json}" \
+    --argjson evidence_jsonl_sha256 "$(json_null_or_file_sha256 "${EVIDENCE_JSONL}")" \
+    --argjson replay_script_sha256 "$(json_null_or_file_sha256 "${REPLAY_SH}")" \
+    '{
+      run_id: $run_id,
+      status: $status,
+      test_status: $test_status,
+      evidence_status: $evidence_status,
+      validation_status: $validation_status,
+      redaction_status: $redaction_status,
+      remote_proof_status: $remote_proof_status,
+      remote_proof_reason: (if ($remote_proof_reason | length) > 0 then $remote_proof_reason else null end),
+      remote_proof_summary_present: $remote_proof_summary_present,
+      remote_proof_summary_hash: $remote_proof_summary_hash,
+      require_production_soak: $require_production_soak,
+      skip_reason: (if ($skip_reason | length) > 0 then $skip_reason else null end),
+      evidence_count: $evidence_count,
+      artifacts: {
+        test_log: "logs/prewarm-cold-start-test.log",
+        evidence_jsonl: "evidence/prewarm-cold-start.jsonl",
+        evidence_jsonl_sha256: $evidence_jsonl_sha256,
+        validation_json: "evidence/validation.json",
+        skip_jsonl: "evidence/prewarm-cold-start-skip.jsonl",
+        environment_json: "environment.json",
+        replay_script: "replay.sh",
+        replay_script_sha256: $replay_script_sha256
+      }
+    }' > "${SUMMARY_JSON}"
+}
 
 # shellcheck disable=SC2016 # The generated replay script expands these values at replay time.
 {
@@ -999,6 +996,16 @@ if grep -aEi "$(redaction_pattern)" "${REPLAY_SH}" >/dev/null; then
   validation_status="failed"
   mark_validation_redaction_failed "replay_script_secret_or_private_path_marker"
   exit_code=1
+fi
+
+write_summary_json
+if grep -aEi "$(redaction_pattern)" "${SUMMARY_JSON}" >/dev/null; then
+  redaction_status="failed"
+  overall_status="failed"
+  validation_status="failed"
+  mark_validation_redaction_failed "metadata_secret_or_private_path_marker"
+  exit_code=1
+  write_summary_json
 fi
 
 echo "Connector prewarm cold-start artifacts written to ${OUT_ROOT}"

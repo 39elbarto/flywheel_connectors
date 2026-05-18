@@ -143,10 +143,11 @@ artifacts follow the same rule for repository root, artifact root,
 `CARGO_TARGET_DIR`, and provided-evidence input paths: `environment.json` stores
 classes and `sha256:<64 lowercase hex>` fingerprints instead of absolute paths,
 while separately recording the `sha256:<64 lowercase hex>` content digest of
-the copied evidence JSONL bundle. `summary.json` names bundle artifacts by
-relative path only and repeats the evidence JSONL content digest so reviewers
-can tie validation results to the exact replay input without exposing the
-operator's local source path. In provided-evidence mode, the test log records
+the copied evidence JSONL bundle. `summary.json` is written after `replay.sh`
+has been generated and scanned, names bundle artifacts by relative path only,
+and repeats both the evidence JSONL and replay script content digests so
+reviewers can tie validation results to the exact replay inputs without exposing
+the operator's local source path. In provided-evidence mode, the test log records
 only a `sha256:<64 lowercase hex>` fingerprint for the input path and is scanned
 for the same private-path markers before the verifier exits. Both metadata JSON
 files are scanned for the same secret and private-path markers as the evidence

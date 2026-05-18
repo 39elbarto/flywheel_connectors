@@ -44,6 +44,10 @@ DRY_RUN=false
 CI_MODE="${CI:-false}"
 ONLY_MATRICES=""
 FUZZ_TIME=30
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+FUZZ_TARGET_DIR="${FUZZ_TARGET_DIR:-${CARGO_TARGET_DIR:-/tmp/fcp-fuzz-adversarial}}"
+export RCH_FORCE_REMOTE=1
 
 declare -i MATRIX_PASS=0
 declare -i MATRIX_FAIL=0
@@ -184,6 +188,46 @@ should_run_matrix() {
   return 1
 }
 
+rch_remote_summary_present() {
+  local execution_log="$1"
+
+  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
+    return 0
+  fi
+
+  if grep -Eq '^\[RCH\].*(local|refusing local fallback|no admissible workers)' "${execution_log}"; then
+    echo "Missing accepted remote rch summary in ${execution_log}" >&2
+    echo "rch remote proof is required; refusing local fallback" >&2
+    return 2
+  fi
+
+  grep -Eq '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}" && return 0
+
+  echo "Missing accepted remote rch summary in ${execution_log}" >&2
+  echo "rch remote proof is required; refusing local fallback" >&2
+  return 2
+}
+
+run_remote_cargo() {
+  local log_file="$1"
+  shift
+  local remote_error=""
+
+  if ! CARGO_TARGET_DIR="${FUZZ_TARGET_DIR}" \
+    CARGO_INCREMENTAL=0 \
+    "${RCH_BIN}" exec -- cargo "$@" > "${log_file}" 2>&1; then
+    return 1
+  fi
+
+  if remote_error="$(rch_remote_summary_present "${log_file}" 2>&1)"; then
+    return 0
+  fi
+
+  printf '%s\n' "${remote_error}" >> "${log_file}"
+  printf '%s\n' "${remote_error}" >&2
+  return 1
+}
+
 # Run a cargo test with forensics tracking
 run_fuzz_test() {
   local label="$1"
@@ -206,15 +250,16 @@ run_fuzz_test() {
 
   local start end elapsed status
   start=$(now_ms)
-  if command -v rch >/dev/null 2>&1; then
-    if rch exec -- cargo test -p "${package}" ${test_filter} -- --nocapture > "${log_file}" 2>&1; then
-      status="pass"
-    else
-      status="fail"
-    fi
+  local filter_args=()
+  if [[ -n "${test_filter}" ]]; then
+    read -r -a filter_args <<< "${test_filter}"
+  fi
+  require_cmd "${RCH_BIN}"
+  if run_remote_cargo "${log_file}" \
+    test -p "${package}" "${filter_args[@]}" -- --nocapture; then
+    status="pass"
   else
-    CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-fuzz-adversarial}" \
-      cargo test -p "${package}" ${test_filter} -- --nocapture > "${log_file}" 2>&1 && status="pass" || status="fail"
+    status="fail"
   fi
   end=$(now_ms)
   elapsed=$((end - start))
@@ -255,25 +300,11 @@ run_fuzz_compile_check() {
   local start end elapsed status
   start=$(now_ms)
 
-  # Check if cargo-fuzz is available; if not, fall back to cargo build --manifest-path
-  if command -v cargo-fuzz >/dev/null 2>&1; then
-    if (cd "${REPO_ROOT}" && CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-fuzz-compile}" \
-        cargo fuzz check "fuzz_${target_name}" 2>&1) > "${log_file}" 2>&1; then
-      status="pass"
-    else
-      status="fail"
-    fi
+  require_cmd "${RCH_BIN}"
+  if run_remote_cargo "${log_file}" fuzz check "fuzz_${target_name}"; then
+    status="pass"
   else
-    # Fallback: check that the fuzz target source file exists and compiles as syntax check
-    if [[ -f "${REPO_ROOT}/fuzz/fuzz_targets/${target_name}.rs" ]]; then
-      log_step "${label}" "WARN: cargo-fuzz not installed, checking source existence only"
-      echo "cargo-fuzz not available; source file exists: fuzz/fuzz_targets/${target_name}.rs" > "${log_file}"
-      status="pass"
-      MATRIX_WARN=$((MATRIX_WARN + 1))
-    else
-      echo "fuzz target source not found: fuzz/fuzz_targets/${target_name}.rs" > "${log_file}"
-      status="fail"
-    fi
+    status="fail"
   fi
   end=$(now_ms)
   elapsed=$((end - start))
@@ -332,19 +363,12 @@ run_fuzz_corpus_regression() {
   corpus_count=$(find "${corpus_dir}" -type f 2>/dev/null | wc -l | tr -d ' ')
 
   start=$(now_ms)
-  if command -v cargo-fuzz >/dev/null 2>&1; then
-    # Run with -runs=0 to replay existing corpus without new exploration
-    if (cd "${REPO_ROOT}" && CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-fuzz-corpus}" \
-        cargo fuzz run "fuzz_${target_name}" -- -runs=0 -max_total_time="${FUZZ_TIME}" 2>&1) > "${log_file}" 2>&1; then
-      status="pass"
-    else
-      status="fail"
-    fi
-  else
-    log_step "${label}" "WARN: cargo-fuzz not installed, skipping corpus regression"
-    echo "cargo-fuzz not available; corpus has ${corpus_count} files" > "${log_file}"
+  require_cmd "${RCH_BIN}"
+  if run_remote_cargo "${log_file}" \
+    fuzz run "fuzz_${target_name}" -- -runs=0 -max_total_time="${FUZZ_TIME}"; then
     status="pass"
-    MATRIX_WARN=$((MATRIX_WARN + 1))
+  else
+    status="fail"
   fi
   end=$(now_ms)
   elapsed=$((end - start))
@@ -428,7 +452,7 @@ done
 
 # ── Pre-flight ──────────────────────────────────────────────────────────────
 require_cmd jq
-require_cmd cargo
+require_cmd "${RCH_BIN}"
 
 if [[ -z "${OUT_ROOT}" ]]; then
   OUT_ROOT="${REPO_ROOT}/artifacts/asupersync/fuzz-adversarial/${RUN_ID}"
@@ -629,7 +653,7 @@ if should_run_matrix "e2e_stress"; then
 
   for entry in "${STRESS_SCRIPTS[@]}"; do
     IFS=':' read -r script_name contract_id description <<< "${entry}"
-    label="e2e_stress_$(echo "${script_name}" | sed 's/\.sh$//')"
+    label="e2e_stress_${script_name%.sh}"
 
     if [[ -x "${SCRIPT_DIR}/${script_name}" ]]; then
       log_step "E2E_STRESS" "${description}"

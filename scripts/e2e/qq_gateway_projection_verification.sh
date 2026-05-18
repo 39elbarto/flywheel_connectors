@@ -45,6 +45,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+validate_run_id() {
+  if [[ ! "${RUN_ID}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "RUN_ID must use only A-Z, a-z, 0-9, '.', '_', and '-': ${RUN_ID}" >&2
+    exit 2
+  fi
+}
+
+validate_run_id
+
 if [[ -z "${OUT_ROOT}" ]]; then
   OUT_ROOT="${REPO_ROOT}/artifacts/e2e/qq-gateway-projection/${RUN_ID}"
 fi
@@ -65,6 +74,47 @@ json_string_or_null() {
   else
     printf 'null'
   fi
+}
+
+hash_text_sha256() {
+  printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+}
+
+path_class() {
+  local path="$1"
+  case "${path}" in
+    /tmp|/tmp/*|/private/tmp|/private/tmp/*)
+      printf 'tmp'
+      ;;
+    target|target/*|./target|./target/*)
+      printf 'relative'
+      ;;
+    /*)
+      printf 'absolute'
+      ;;
+    *)
+      printf 'relative'
+      ;;
+  esac
+}
+
+path_redacted() {
+  local path="$1"
+  case "${path}" in
+    /*) printf 'true' ;;
+    *) printf 'false' ;;
+  esac
+}
+
+display_rch_bin() {
+  basename "${RCH_BIN}"
+}
+
+rch_bin_path_redacted() {
+  case "${RCH_BIN}" in
+    */*) printf 'true' ;;
+    *) printf 'false' ;;
+  esac
 }
 
 rch_summary_line() {
@@ -132,16 +182,25 @@ require_cmd "${RCH_BIN}"
 
 mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
 
-TEST_LOG="${OUT_ROOT}/logs/qq-gateway-projection-test.log"
-EVIDENCE_JSONL="${OUT_ROOT}/evidence/qq-gateway-projection.jsonl"
-VALIDATION_JSON="${OUT_ROOT}/evidence/validation.json"
-SKIP_JSONL="${OUT_ROOT}/evidence/qq-gateway-projection-skip.jsonl"
-RCH_PROOF_JSON="${OUT_ROOT}/evidence/rch-remote-proof.json"
-SUMMARY_JSON="${OUT_ROOT}/summary.json"
-ENVIRONMENT_JSON="${OUT_ROOT}/environment.json"
-REPLAY_SH="${OUT_ROOT}/replay.sh"
+TEST_LOG_ARTIFACT="logs/qq-gateway-projection-test.log"
+EVIDENCE_JSONL_ARTIFACT="evidence/qq-gateway-projection.jsonl"
+VALIDATION_JSON_ARTIFACT="evidence/validation.json"
+SKIP_JSONL_ARTIFACT="evidence/qq-gateway-projection-skip.jsonl"
+RCH_PROOF_JSON_ARTIFACT="evidence/rch-remote-proof.json"
+SUMMARY_JSON_ARTIFACT="summary.json"
+ENVIRONMENT_JSON_ARTIFACT="environment.json"
+REPLAY_SH_ARTIFACT="replay.sh"
 
-git_revision="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+TEST_LOG="${OUT_ROOT}/${TEST_LOG_ARTIFACT}"
+EVIDENCE_JSONL="${OUT_ROOT}/${EVIDENCE_JSONL_ARTIFACT}"
+VALIDATION_JSON="${OUT_ROOT}/${VALIDATION_JSON_ARTIFACT}"
+SKIP_JSONL="${OUT_ROOT}/${SKIP_JSONL_ARTIFACT}"
+RCH_PROOF_JSON="${OUT_ROOT}/${RCH_PROOF_JSON_ARTIFACT}"
+SUMMARY_JSON="${OUT_ROOT}/${SUMMARY_JSON_ARTIFACT}"
+ENVIRONMENT_JSON="${OUT_ROOT}/${ENVIRONMENT_JSON_ARTIFACT}"
+REPLAY_SH="${OUT_ROOT}/${REPLAY_SH_ARTIFACT}"
+
+git_revision="$(git -c "safe.directory=${REPO_ROOT}" -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 target_dir="${QQ_CARGO_TARGET_DIR:-/tmp/fcp-qq-gateway-projection-${RUN_ID}}"
 test_status="passed"
 evidence_status="passed"
@@ -200,9 +259,10 @@ if [[ "${test_status}" == "failed" ]]; then
       --arg schema_version "qq-gateway-projection/v1" \
       --arg run_id "${RUN_ID}" \
       --arg git_revision "${git_revision}" \
-      --arg target_dir "${target_dir}" \
+      --arg cargo_target_dir_class "$(path_class "${target_dir}")" \
+      --arg cargo_target_dir_hash "sha256:$(hash_text_sha256 "${target_dir}")" \
       --arg skip_reason "${skip_reason}" \
-      --arg log_path "${TEST_LOG}" \
+      --arg log_artifact "${TEST_LOG_ARTIFACT}" \
       --arg fallback_decision "${fallback_decision}" \
       --arg worker_execution_class "${worker_execution_class}" \
       --argjson rch_summary "$(json_string_or_null "${rch_summary}")" \
@@ -211,9 +271,10 @@ if [[ "${test_status}" == "failed" ]]; then
         schema_version: $schema_version,
         run_id: $run_id,
         git_revision: $git_revision,
-        cargo_target_dir: $target_dir,
+        cargo_target_dir_class: $cargo_target_dir_class,
+        cargo_target_dir_hash: $cargo_target_dir_hash,
         skip_reason: $skip_reason,
-        log_path: $log_path,
+        log_artifact: $log_artifact,
         fallback_decision: $fallback_decision,
         worker_execution_class: $worker_execution_class,
         rch_summary: $rch_summary
@@ -230,8 +291,10 @@ jq -n \
   --arg worker_execution_class "${worker_execution_class}" \
   --arg required_worker_execution_class "remote" \
   --argjson rch_summary "$(json_string_or_null "${rch_summary}")" \
-  --arg log_path "${TEST_LOG}" \
-  --arg rch_bin "${RCH_BIN}" \
+  --arg log_artifact "${TEST_LOG_ARTIFACT}" \
+  --arg rch_bin "$(display_rch_bin)" \
+  --arg rch_bin_hash "sha256:$(hash_text_sha256 "${RCH_BIN}")" \
+  --argjson rch_bin_path_redacted "$(rch_bin_path_redacted)" \
   --arg rch_require_remote "${RCH_REQUIRE_REMOTE}" \
   --arg rch_force_remote "${RCH_FORCE_REMOTE}" \
   --arg rch_visibility "${RCH_VISIBILITY}" \
@@ -241,8 +304,10 @@ jq -n \
     worker_execution_class: $worker_execution_class,
     required_worker_execution_class: $required_worker_execution_class,
     rch_summary: $rch_summary,
-    log_path: $log_path,
+    log_artifact: $log_artifact,
     rch_bin: $rch_bin,
+    rch_bin_hash: $rch_bin_hash,
+    rch_bin_path_redacted: $rch_bin_path_redacted,
     rch_require_remote: $rch_require_remote,
     rch_force_remote: $rch_force_remote,
     rch_visibility: $rch_visibility
@@ -651,11 +716,16 @@ fi
 jq -n \
   --arg run_id "${RUN_ID}" \
   --arg script "scripts/e2e/qq_gateway_projection_verification.sh" \
-  --arg repo_root "${REPO_ROOT}" \
-  --arg artifact_root "${OUT_ROOT}" \
+  --arg repo_root_hash "sha256:$(hash_text_sha256 "${REPO_ROOT}")" \
+  --argjson repo_root_path_redacted "$(path_redacted "${REPO_ROOT}")" \
+  --arg artifact_root_class "$(path_class "${OUT_ROOT}")" \
+  --arg artifact_root_hash "sha256:$(hash_text_sha256 "${OUT_ROOT}")" \
   --arg git_revision "${git_revision}" \
-  --arg target_dir "${target_dir}" \
-  --arg rch_bin "${RCH_BIN}" \
+  --arg cargo_target_dir_class "$(path_class "${target_dir}")" \
+  --arg cargo_target_dir_hash "sha256:$(hash_text_sha256 "${target_dir}")" \
+  --arg rch_bin "$(display_rch_bin)" \
+  --arg rch_bin_hash "sha256:$(hash_text_sha256 "${RCH_BIN}")" \
+  --argjson rch_bin_path_redacted "$(rch_bin_path_redacted)" \
   --arg rch_require_remote "${RCH_REQUIRE_REMOTE}" \
   --arg rch_force_remote "${RCH_FORCE_REMOTE}" \
   --arg rch_visibility "${RCH_VISIBILITY}" \
@@ -663,11 +733,16 @@ jq -n \
   '{
     run_id: $run_id,
     script: $script,
-    repo_root: $repo_root,
-    artifact_root: $artifact_root,
+    repo_root_hash: $repo_root_hash,
+    repo_root_path_redacted: $repo_root_path_redacted,
+    artifact_root_class: $artifact_root_class,
+    artifact_root_hash: $artifact_root_hash,
     git_revision: $git_revision,
-    cargo_target_dir: $target_dir,
+    cargo_target_dir_class: $cargo_target_dir_class,
+    cargo_target_dir_hash: $cargo_target_dir_hash,
     rch_bin: $rch_bin,
+    rch_bin_hash: $rch_bin_hash,
+    rch_bin_path_redacted: $rch_bin_path_redacted,
     rch_require_remote: $rch_require_remote,
     rch_force_remote: $rch_force_remote,
     rch_visibility: $rch_visibility,
@@ -688,12 +763,14 @@ jq -n \
   --arg rch_proof_status "${rch_proof_status}" \
   --arg skip_reason "${skip_reason}" \
   --argjson evidence_count "${evidence_count}" \
-  --arg test_log "${TEST_LOG}" \
-  --arg evidence_jsonl "${EVIDENCE_JSONL}" \
-  --arg validation_json "${VALIDATION_JSON}" \
-  --arg skip_jsonl "${SKIP_JSONL}" \
-  --arg rch_proof_json "${RCH_PROOF_JSON}" \
-  --arg environment_json "${ENVIRONMENT_JSON}" \
+  --arg artifact_root_class "$(path_class "${OUT_ROOT}")" \
+  --arg artifact_root_hash "sha256:$(hash_text_sha256 "${OUT_ROOT}")" \
+  --arg test_log "${TEST_LOG_ARTIFACT}" \
+  --arg evidence_jsonl "${EVIDENCE_JSONL_ARTIFACT}" \
+  --arg validation_json "${VALIDATION_JSON_ARTIFACT}" \
+  --arg skip_jsonl "${SKIP_JSONL_ARTIFACT}" \
+  --arg rch_proof_json "${RCH_PROOF_JSON_ARTIFACT}" \
+  --arg environment_json "${ENVIRONMENT_JSON_ARTIFACT}" \
   --arg fallback_decision "${fallback_decision}" \
   --arg worker_execution_class "${worker_execution_class}" \
   --argjson rch_summary "$(json_string_or_null "${rch_summary}")" \
@@ -706,6 +783,10 @@ jq -n \
     rch_proof_status: $rch_proof_status,
     skip_reason: (if ($skip_reason | length) > 0 then $skip_reason else null end),
     evidence_count: $evidence_count,
+    artifact_root: {
+      class: $artifact_root_class,
+      hash: $artifact_root_hash
+    },
     rch_remote_proof: {
       fallback_decision: $fallback_decision,
       worker_execution_class: $worker_execution_class,

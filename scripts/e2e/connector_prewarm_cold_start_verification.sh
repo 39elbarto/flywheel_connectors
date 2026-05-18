@@ -95,6 +95,17 @@ hash_text_sha256() {
   printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
 }
 
+display_rch_bin() {
+  basename "${RCH_BIN}"
+}
+
+rch_bin_path_redacted() {
+  case "${RCH_BIN}" in
+    */*) printf 'true' ;;
+    *) printf 'false' ;;
+  esac
+}
+
 cargo_target_dir_class() {
   local path="$1"
   case "${path}" in
@@ -747,7 +758,9 @@ jq -n \
   --arg artifact_root "${OUT_ROOT}" \
   --arg git_revision "${git_revision}" \
   --arg target_dir "${target_dir}" \
-  --arg rch_bin "${RCH_BIN}" \
+  --arg rch_bin "$(display_rch_bin)" \
+  --arg rch_bin_hash "sha256:$(hash_text_sha256 "${RCH_BIN}")" \
+  --argjson rch_bin_path_redacted "$(rch_bin_path_redacted)" \
   --arg rch_require_remote "${RCH_REQUIRE_REMOTE}" \
   --arg rch_force_remote "${RCH_FORCE_REMOTE:-1}" \
   --arg remote_proof_status "${remote_proof_status}" \
@@ -764,6 +777,8 @@ jq -n \
     git_revision: $git_revision,
     cargo_target_dir: $target_dir,
     rch_bin: $rch_bin,
+    rch_bin_hash: $rch_bin_hash,
+    rch_bin_path_redacted: $rch_bin_path_redacted,
     rch_require_remote: $rch_require_remote,
     rch_force_remote: $rch_force_remote,
     remote_proof: {

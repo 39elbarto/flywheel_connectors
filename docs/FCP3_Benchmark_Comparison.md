@@ -115,6 +115,10 @@ the same scenario coverage, boundary, resource, percentile, nested evidence, and
 redaction checks as the default verifier. The verifier and typed bundle
 validator require exactly one record for each required prewarm scenario so
 evidence bundles cannot be stitched from duplicate scenario records. The
+environment metadata records only the selected `RCH_BIN` basename plus a
+`sha256:<64 lowercase hex>` fingerprint of the configured value; private patched
+binary paths are redacted from the evidence JSON while `replay.sh` keeps the
+local rerun command for the operator who produced the bundle. The
 verifier and typed serializer both require positive p50, p95, and p99
 improvement deltas for production-soak warm-hit, shutdown-cleanup, and
 concurrent-swarm-startup promotion scenarios; fallback and rejection scenarios

@@ -47,7 +47,14 @@ graduation_check_operations_info() {
     return 0
   fi
 
-  echo "missing operations_info source metadata"
+  if grep -R "OperationInfo" "${src_dir}" >/dev/null 2>&1 \
+    && grep -R "Introspection" "${src_dir}" >/dev/null 2>&1 \
+    && grep -RE "op_info\\(|policy_backed_operation_info|operation_catalog" "${src_dir}" >/dev/null 2>&1
+  then
+    return 0
+  fi
+
+  echo "missing operations_info source metadata or equivalent OperationInfo catalog"
   return 1
 }
 

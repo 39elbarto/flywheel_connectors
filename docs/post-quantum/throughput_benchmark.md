@@ -517,6 +517,10 @@ materialized artifact hash lane, `jsonl_contract_validation`, `redaction_scan`,
 self-contract instead of being treated as harmless extra evidence. Unexpected
 top-level gauntlet steps also fail the self-contract, so a passing artifact
 cannot carry unreviewed supplemental records before the summary.
+The normal `redaction_scan` must be ordered after every materialized artifact
+hash lane and after `jsonl_contract_validation`, and it must appear before the
+summary. This prevents a reusable artifact from moving the scan ahead of the
+artifact records it claims to cover.
 Benchmark coverage is also checked from the command records, not just the final
 summary: the Criterion command record must report observed `trap_gen`,
 `delegate`, `sample_pre`, `verify`, and `full_crypto_route` groups from its log,

@@ -1537,6 +1537,18 @@ validate_gauntlet_contract() {
       ($final_scan.record.details.scanned_artifact_path == $summary.artifact_path) and
       ($final_scan.record.details.post_summary_artifact_hash | sha256_hash) and
       ($final_scan.record.details.cleanup_result | type == "string");
+    def step_index($step):
+      [range(0; length) as $i | select(.[$i].step == $step) | $i][0] // null;
+    def redaction_scan_after_artifact_validation:
+      . as $records |
+      ($records | step_index("redaction_scan")) as $redaction_scan_index |
+      ($records | step_index("summary")) as $summary_index |
+      ($redaction_scan_index != null) and
+      ($summary_index != null) and
+      ($redaction_scan_index < $summary_index) and
+      all((required_artifact_hash_steps + ["jsonl_contract_validation"])[]; . as $step |
+        ($records | step_index($step)) as $step_index |
+        ($step_index != null) and ($step_index < $redaction_scan_index));
     def redaction_scan_covers_expected_artifacts:
       . as $records |
       ([ $records[] | select(.step == "summary" and .result == "pass") | .details.artifact_path ][0] // null) as $summary_artifact |
@@ -1603,6 +1615,7 @@ validate_gauntlet_contract() {
     required_artifact_hash("crypto_formal_artifact"; "target/fcp-crypto-pq/lattice-delegation-formal-correspondence-evidence.jsonl") and
     required_artifact_hash("policy_formal_artifact"; "target/fcp-policy/lattice-delegation-policy-correspondence-evidence.jsonl") and
     required_artifact_hash("host_dispatcher_artifact"; "target/fcp-host/lattice-policy-dispatcher-evidence.jsonl") and
+    redaction_scan_after_artifact_validation and
     redaction_scan_covers_expected_artifacts and
     final_redaction_scan_covers_summary_artifact and
     any(.[]; .step == "summary" and .result == "pass" and

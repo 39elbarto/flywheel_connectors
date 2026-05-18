@@ -132,6 +132,8 @@ These are excluded on purpose:
 
 ## Live Verification Bundle
 
+Verification script: `scripts/e2e/circleci_connector_verification.sh`
+
 The live suite is sandbox-required and must gated-skip unless `FCP_LIVE_SANDBOX=1`
 is set with all of these values:
 

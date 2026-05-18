@@ -1,8 +1,8 @@
 use std::{env, error::Error, path::PathBuf};
 
 use br_tools::scheduled_reality_check::{
-    check_monthly_cadence_with_existing, default_issues_jsonl, default_reality_dir,
-    load_existing_beads,
+    check_reality_cadence_with_existing, default_issues_jsonl, default_quarterly_dir,
+    default_reality_dir, load_existing_beads,
 };
 use chrono::{NaiveDate, Utc};
 
@@ -13,13 +13,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         Vec::new()
     };
-    let proposed =
-        check_monthly_cadence_with_existing(config.today, &config.reality_dir, &existing);
+    let proposed = check_reality_cadence_with_existing(
+        config.today,
+        &config.reality_dir,
+        &config.quarterly_dir,
+        &existing,
+    );
 
     if config.json {
         println!("{}", serde_json::to_string_pretty(&proposed)?);
     } else if proposed.is_empty() {
-        println!("monthly reality-check cadence is current");
+        println!("reality-check cadence is current");
     } else {
         for bead in proposed {
             println!("{} [P{}]", bead.title, bead.priority);
@@ -33,6 +37,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 struct Config {
     today: NaiveDate,
     reality_dir: PathBuf,
+    quarterly_dir: PathBuf,
     issues_jsonl: PathBuf,
     json: bool,
 }
@@ -41,6 +46,7 @@ impl Config {
     fn from_env(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
         let mut today = Utc::now().date_naive();
         let mut reality_dir = default_reality_dir();
+        let mut quarterly_dir = default_quarterly_dir();
         let mut issues_jsonl = default_issues_jsonl();
         let mut json = false;
         let mut iter = args.into_iter();
@@ -54,6 +60,9 @@ impl Config {
                 }
                 "--reality-dir" => {
                     reality_dir = PathBuf::from(next_value(&mut iter, "--reality-dir")?);
+                }
+                "--quarterly-dir" => {
+                    quarterly_dir = PathBuf::from(next_value(&mut iter, "--quarterly-dir")?);
                 }
                 "--issues" => {
                     issues_jsonl = PathBuf::from(next_value(&mut iter, "--issues")?);
@@ -70,6 +79,7 @@ impl Config {
         Ok(Self {
             today,
             reality_dir,
+            quarterly_dir,
             issues_jsonl,
             json,
         })
@@ -82,5 +92,5 @@ fn next_value(iter: &mut impl Iterator<Item = String>, flag: &str) -> Result<Str
 }
 
 const fn usage() -> &'static str {
-    "usage: scheduled-reality-check [--today YYYY-MM-DD] [--reality-dir PATH] [--issues PATH] [--json]"
+    "usage: scheduled-reality-check [--today YYYY-MM-DD] [--reality-dir PATH] [--quarterly-dir PATH] [--issues PATH] [--json]"
 }

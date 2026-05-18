@@ -88,7 +88,9 @@ production-soak acceptance must run with
 `--require-production-soak` or
 `REQUIRE_PRODUCTION_SOAK=1`, which rejects offline policy records and requires
 host-backed or live soak evidence through production `fcp-host`/`fcp-sandbox`
-boundaries. Operators can validate an externally collected production-soak
+boundaries. Production-soak records must also omit `skip_reason`; a skipped
+remote-worker prerequisite is acceptable smoke evidence but cannot satisfy final
+promotion. Operators can validate an externally collected production-soak
 JSONL bundle without rerunning the smoke Cargo lane by passing
 `--evidence-jsonl <path>` together with `--require-production-soak`; this uses
 the same scenario coverage, boundary, resource, percentile, nested evidence, and

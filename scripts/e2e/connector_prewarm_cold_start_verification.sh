@@ -499,6 +499,14 @@ if [[ "${overall_status}" == "passed" ]]; then
             )
           else true end
         ),
+        production_skip_reason_ok: (
+          if $require_production_soak then
+            all(.[];
+              ((.skip_reason // "") == "")
+              and ((.evidence.skip_reason // "") == "")
+            )
+          else true end
+        ),
         production_improvement_summary: {
           required_positive_improvement_scenarios: promotion_improvement_scenarios,
           missing_or_nonpositive: promotion_improvement_failures(.)
@@ -581,6 +589,7 @@ if [[ "${overall_status}" == "passed" ]]; then
             and $v.nested_evidence_ok
             and $v.manifest_hash_shape_ok
             and $v.production_soak_ok
+            and $v.production_skip_reason_ok
             and $v.production_improvement_ok
             and $v.percentile_fields_ok
             and $v.latency_order_ok

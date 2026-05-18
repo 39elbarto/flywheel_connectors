@@ -2871,6 +2871,16 @@ fn validate_prewarm_soak_boundaries(
             },
         );
     }
+    if let Some(skip_reason) = evidence
+        .skip_reason
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Err(SwarmPrewarmColdStartEvidenceError::ProductionSoakSkipped {
+            scenario_id: evidence.scenario_id.clone(),
+            skip_reason: skip_reason.to_string(),
+        });
+    }
     Ok(())
 }
 
@@ -3793,6 +3803,13 @@ pub enum SwarmPrewarmColdStartEvidenceError {
         /// Observed sandbox boundary.
         sandbox_boundary: String,
     },
+    /// Production soak records cannot represent skipped proof rows.
+    ProductionSoakSkipped {
+        /// Scenario carrying the skip marker.
+        scenario_id: String,
+        /// Observed skip reason.
+        skip_reason: String,
+    },
     /// A required string field was empty.
     EmptyField {
         /// Field name.
@@ -4013,6 +4030,13 @@ impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
             Self::SoakRequiresSandboxBoundary { sandbox_boundary } => write!(
                 f,
                 "swarm prewarm soak evidence requires fcp-sandbox boundary, got '{sandbox_boundary}'"
+            ),
+            Self::ProductionSoakSkipped {
+                scenario_id,
+                skip_reason,
+            } => write!(
+                f,
+                "swarm prewarm production scenario '{scenario_id}' cannot carry skip_reason '{skip_reason}'"
             ),
             Self::EmptyField { field } => {
                 write!(f, "swarm prewarm field '{field}' is empty")
@@ -11057,6 +11081,17 @@ mod tests {
             "fcp-host::supervisor::ConnectorSupervisor::activate_connector".to_string();
         production_soak.sandbox_boundary = "fcp-sandbox::strict-profile-limits".to_string();
         assert_eq!(production_soak.validate(), Ok(()));
+
+        let mut skipped_production_soak = production_soak;
+        skipped_production_soak.skip_reason =
+            Some("rch_remote_prerequisite_unavailable".to_string());
+        assert_eq!(
+            skipped_production_soak.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::ProductionSoakSkipped {
+                scenario_id: "prewarm_warm_hit".to_string(),
+                skip_reason: "rch_remote_prerequisite_unavailable".to_string()
+            })
+        );
     }
 
     #[test]

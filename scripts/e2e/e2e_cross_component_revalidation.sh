@@ -43,6 +43,10 @@ OUT_ROOT=""
 DRY_RUN=false
 CI_MODE="${CI:-false}"
 ONLY_PATHS=""
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
+CROSS_COMPONENT_TARGET_DIR="${CROSS_COMPONENT_TARGET_DIR:-/tmp/fcp-cross-component}"
+export RCH_FORCE_REMOTE=1
 
 declare -i PATH_PASS=0
 declare -i PATH_FAIL=0
@@ -204,6 +208,24 @@ should_run_path() {
   return 1
 }
 
+run_cargo() {
+  "${RCH_BIN}" exec -- env CARGO_TARGET_DIR="${CROSS_COMPONENT_TARGET_DIR}" cargo "$@"
+}
+
+rch_remote_summary_present() {
+  local execution_log="$1"
+
+  if [[ "${RCH_REQUIRE_REMOTE}" != "1" ]]; then
+    return 0
+  fi
+
+  grep -Eq '^\[RCH\].*(remote|worker|executor|accepted|completed)' "${execution_log}" && return 0
+
+  echo "Missing accepted remote rch summary in ${execution_log}" >&2
+  echo "rch remote proof is required; refusing local fallback" >&2
+  return 2
+}
+
 # Run a cargo test with forensics tracking and drift classification
 run_cross_test() {
   local label="$1"
@@ -227,15 +249,18 @@ run_cross_test() {
 
   local start end elapsed status
   start=$(now_ms)
-  if command -v rch >/dev/null 2>&1; then
-    if rch exec -- cargo test -p "${package}" ${test_filter} -- --nocapture > "${log_file}" 2>&1; then
+  local -a test_filter_args=()
+  read -r -a test_filter_args <<< "${test_filter}"
+  if run_cargo test -p "${package}" "${test_filter_args[@]}" -- --nocapture > "${log_file}" 2>&1; then
+    local remote_error=""
+    if remote_error="$(rch_remote_summary_present "${log_file}" 2>&1)"; then
       status="pass"
     else
+      printf '%s\n' "${remote_error}" >> "${log_file}"
       status="fail"
     fi
   else
-    CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/fcp-cross-component}" \
-      cargo test -p "${package}" ${test_filter} -- --nocapture > "${log_file}" 2>&1 && status="pass" || status="fail"
+    status="fail"
   fi
   end=$(now_ms)
   elapsed=$((end - start))
@@ -318,7 +343,7 @@ done
 
 # ── Pre-flight ──────────────────────────────────────────────────────────────
 require_cmd jq
-require_cmd cargo
+require_cmd "${RCH_BIN}"
 
 if [[ -z "${OUT_ROOT}" ]]; then
   OUT_ROOT="${REPO_ROOT}/artifacts/asupersync/cross-component/${RUN_ID}"
@@ -643,7 +668,7 @@ if should_run_path "failure_recovery"; then
 
   for entry in "${STRESS_SCRIPTS[@]}"; do
     IFS=':' read -r script_name contract_id description <<< "${entry}"
-    label="failure_recovery_$(echo "${script_name}" | sed 's/\.sh$//')"
+    label="failure_recovery_${script_name%.sh}"
 
     if [[ -x "${SCRIPT_DIR}/${script_name}" ]]; then
       log_step "FAILURE_RECOVERY" "${description}"

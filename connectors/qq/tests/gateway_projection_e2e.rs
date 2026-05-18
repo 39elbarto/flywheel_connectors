@@ -2000,6 +2000,79 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         &reconnect_exhausted,
     );
 
+    let hello_after_exhaustion = invoke_projection(
+        &reconnect_cap_connector,
+        &signing_key,
+        &reconnect_cap_instance_id,
+        "qq-gateway-hello-after-exhaustion",
+        json!({
+            "op": 10,
+            "id": "evt-hello-after-exhaustion",
+            "d": { "session_id": "session-after-exhaustion" }
+        }),
+    )
+    .await;
+    assert_eq!(hello_after_exhaustion["accepted"], false);
+    assert_eq!(hello_after_exhaustion["reason_code"], "hello");
+    assert_eq!(hello_after_exhaustion["runtime"]["reconnect_attempts"], 0);
+    assert_eq!(
+        hello_after_exhaustion["runtime"]["terminal_reconnect_failures"],
+        1
+    );
+    assert_eq!(
+        hello_after_exhaustion["runtime"]["session_id"],
+        "session-after-exhaustion"
+    );
+    assert_eq!(hello_after_exhaustion["lifecycle"]["action"], "resume");
+    assert_eq!(
+        hello_after_exhaustion["lifecycle"]["resume_session_id"],
+        "session-after-exhaustion"
+    );
+    assert_eq!(
+        hello_after_exhaustion["lifecycle"]["reconnect_after_ms"],
+        Value::Null
+    );
+    log_projection_step(
+        &mut logs,
+        "hello_after_reconnect_exhaustion",
+        "ok",
+        &hello_after_exhaustion,
+    );
+
+    let post_hello_reconnect = invoke_projection(
+        &reconnect_cap_connector,
+        &signing_key,
+        &reconnect_cap_instance_id,
+        "qq-gateway-post-hello-reconnect",
+        json!({
+            "op": 7,
+            "id": "evt-post-hello-reconnect"
+        }),
+    )
+    .await;
+    assert_eq!(post_hello_reconnect["accepted"], false);
+    assert_eq!(post_hello_reconnect["reason_code"], "reconnect_requested");
+    assert_eq!(post_hello_reconnect["runtime"]["reconnect_attempts"], 1);
+    assert_eq!(
+        post_hello_reconnect["runtime"]["terminal_reconnect_failures"],
+        1
+    );
+    assert_eq!(
+        post_hello_reconnect["lifecycle"]["action"],
+        "reconnect_resume"
+    );
+    assert_eq!(
+        post_hello_reconnect["lifecycle"]["resume_session_id"],
+        "session-after-exhaustion"
+    );
+    assert_eq!(post_hello_reconnect["lifecycle"]["reconnect_after_ms"], 250);
+    log_projection_step(
+        &mut logs,
+        "post_hello_reconnect_resume",
+        "ok",
+        &post_hello_reconnect,
+    );
+
     let first_drain = invoke_drain(
         &connector,
         &signing_key,
@@ -2168,6 +2241,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "session-1",
         "restored-session",
         "session-should-not-stick",
+        "session-after-exhaustion",
         "hello-1",
         "evt-accepted",
         "evt-untyped-message-id",
@@ -2197,6 +2271,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-reconnect-cap-first",
         "evt-reconnect-cap-capped",
         "evt-reconnect-exhausted",
+        "evt-hello-after-exhaustion",
+        "evt-post-hello-reconnect",
         "evt-after-shutdown",
         "msg-accepted",
         "msg-untyped-message-id",

@@ -365,6 +365,8 @@ if [[ "${overall_status}" == "passed" ]]; then
           "invalid_session_identify_required",
           "reconnect_backoff_capped",
           "reconnect_attempts_exhausted",
+          "hello_after_reconnect_exhaustion",
+          "post_hello_reconnect_resume",
           "gateway_drain_first_batch",
           "gateway_drain_final_batch",
           "shutdown"
@@ -517,7 +519,8 @@ if [[ "${overall_status}" == "passed" ]]; then
           any(.[]; .step == "heartbeat_ack" and .details.reason_code == "heartbeat_ack")
           and any(.[]; .step == "heartbeat_request" and .details.reason_code == "heartbeat_request" and .details.lifecycle.action == "send_heartbeat")
         ),
-        reconnect_shape_ok: (any(.[]; .step == "reconnect_requested" and .details.reason_code == "reconnect_requested" and .details.runtime.reconnect_attempts == 1 and .details.runtime.terminal_reconnect_failures == 0)
+        reconnect_shape_ok: (
+          any(.[]; .step == "reconnect_requested" and .details.reason_code == "reconnect_requested" and .details.runtime.reconnect_attempts == 1 and .details.runtime.terminal_reconnect_failures == 0)
           and any(.[]; .step == "invalid_session_resumable" and .details.reason_code == "invalid_session_resumable" and .details.runtime.reconnect_attempts == 2)
           and any(.[];
             .step == "invalid_session_identify_required"
@@ -541,6 +544,28 @@ if [[ "${overall_status}" == "passed" ]]; then
             and .details.lifecycle.reconnect_after_ms == 300
           )
           and any(.[]; .step == "reconnect_attempts_exhausted" and .details.reason_code == "reconnect_attempts_exhausted" and .details.runtime.reconnect_attempts == 3 and .details.runtime.max_reconnect_attempts == 2 and .details.runtime.terminal_reconnect_failures == 1 and .details.lifecycle.action == "stop_reconnect")
+          and any(.[];
+            .step == "hello_after_reconnect_exhaustion"
+            and .details.reason_code == "hello"
+            and .details.runtime.reconnect_attempts == 0
+            and .details.runtime.terminal_reconnect_failures == 1
+            and (.details.runtime.session_id_hash | type) == "string"
+            and (.details.runtime.session_id_hash | test("^[0-9a-f]{24}$"))
+            and .details.lifecycle.action == "resume"
+            and (.details.lifecycle.resume_session_id_hash | type) == "string"
+            and (.details.lifecycle.resume_session_id_hash | test("^[0-9a-f]{24}$"))
+            and .details.lifecycle.reconnect_after_ms == null
+          )
+          and any(.[];
+            .step == "post_hello_reconnect_resume"
+            and .details.reason_code == "reconnect_requested"
+            and .details.runtime.reconnect_attempts == 1
+            and .details.runtime.terminal_reconnect_failures == 1
+            and .details.lifecycle.action == "reconnect_resume"
+            and (.details.lifecycle.resume_session_id_hash | type) == "string"
+            and (.details.lifecycle.resume_session_id_hash | test("^[0-9a-f]{24}$"))
+            and .details.lifecycle.reconnect_after_ms == 250
+          )
         ),
         restore_shape_ok: any(.[];
           .step == "restored_session_reconnect_resume"
@@ -615,6 +640,7 @@ if [[ "${overall_status}" == "passed" ]]; then
     "session-1" \
     "restored-session" \
     "session-should-not-stick" \
+    "session-after-exhaustion" \
     "hello-1" \
     "evt-accepted" \
     "evt-untyped-message-id" \
@@ -646,6 +672,8 @@ if [[ "${overall_status}" == "passed" ]]; then
     "evt-reconnect-cap-first" \
     "evt-reconnect-cap-capped" \
     "evt-reconnect-exhausted" \
+    "evt-hello-after-exhaustion" \
+    "evt-post-hello-reconnect" \
     "evt-after-shutdown" \
     "msg-accepted" \
     "msg-untyped-message-id" \

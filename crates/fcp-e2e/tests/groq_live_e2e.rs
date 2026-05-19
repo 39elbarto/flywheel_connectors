@@ -6,7 +6,7 @@
 //! tool arguments, or bearer tokens.
 
 #![cfg(feature = "groq")]
-#![allow(clippy::too_many_lines)]
+#![allow(clippy::too_many_lines, clippy::assertions_on_constants)]
 
 use std::io::Write as _;
 use std::time::Instant;

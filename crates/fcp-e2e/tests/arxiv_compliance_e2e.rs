@@ -203,7 +203,7 @@ impl FcpConnector for ArxivConnectorAdapter {
             message: "arXiv verifier not initialized; handshake required".into(),
         })?;
         let required_capability = required_capability(req.operation.as_str())?;
-        verifier.verify(
+        verifier.verify_bound(
             req.capability_token.clone(),
             &required_capability,
             &req.operation,
@@ -226,7 +226,7 @@ impl FcpConnector for ArxivConnectorAdapter {
             message: "arXiv verifier not initialized; handshake required".into(),
         })?;
         let required_capability = required_capability(req.operation.as_str())?;
-        verifier.verify(
+        verifier.verify_bound(
             req.capability_token.clone(),
             &required_capability,
             &req.operation,
@@ -370,7 +370,7 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor).expect("valid constraints")
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(token)

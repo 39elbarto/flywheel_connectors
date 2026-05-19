@@ -231,7 +231,7 @@ impl FcpConnector for DocuSignConnectorAdapter {
                 message: "invalid capability id".into(),
             })?;
         if let Some(verifier) = &self.verifier {
-            verifier.verify(req.capability_token.clone(), &cap_id, &req.operation, &[])?;
+            verifier.verify_bound(req.capability_token.clone(), &cap_id, &req.operation, &[])?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -260,7 +260,7 @@ impl FcpConnector for DocuSignConnectorAdapter {
                 message: "invalid capability id".into(),
             })?;
         if let Some(verifier) = &self.verifier {
-            verifier.verify(req.capability_token.clone(), &cap_id, &req.operation, &[])?;
+            verifier.verify_bound(req.capability_token.clone(), &cap_id, &req.operation, &[])?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -335,7 +335,7 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor).expect("valid constraints")
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)

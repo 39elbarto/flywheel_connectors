@@ -5,6 +5,8 @@
 //! mesh gossip summaries, real owner signatures, real policy evaluation,
 //! and the m8j0q revocation-cascade/audit primitives.
 
+#![allow(clippy::unnecessary_literal_unwrap)]
+
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 

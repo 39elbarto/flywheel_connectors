@@ -201,7 +201,7 @@ impl FcpConnector for WhisperConnectorAdapter {
             message: "Whisper verifier not initialized; handshake required".into(),
         })?;
         let cap = required_capability(req.operation.as_str())?;
-        verifier.verify(req.capability_token, &cap, &req.operation, &[])?;
+        verifier.verify_bound(req.capability_token, &cap, &req.operation, &[])?;
 
         let request_id = req.id.clone();
         let value = self
@@ -219,7 +219,7 @@ impl FcpConnector for WhisperConnectorAdapter {
             message: "Whisper verifier not initialized; handshake required".into(),
         })?;
         let cap = required_capability(req.operation.as_str())?;
-        verifier.verify(req.capability_token, &cap, &req.operation, &[])?;
+        verifier.verify_bound(req.capability_token, &cap, &req.operation, &[])?;
 
         let value = self
             .connector
@@ -351,7 +351,7 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor).expect("valid constraints")
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(token)

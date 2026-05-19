@@ -105,9 +105,17 @@ host or policy path.
 
 ## Text Output
 
-The reliable audit surface today is JSON. The A.5 acceptance criteria still
-track text-mode footer work for degraded answers. Until that lands, operators
-should use `--json` whenever the answer source matters.
+Default TOON output appends an answer-source footer when a truth-source stamped
+response is lower confidence than mesh-backed truth:
+
+```text
+(answer source: offline)
+```
+
+JSON, JSONL, NDJSON, tabular, template, and extract output remain structured and
+do not include the text footer. Use `--json` whenever automation needs to read
+`schema_version`, `_truth_source`, `error.required`, or `error.actual`
+directly.
 
 ## Simulate
 
@@ -137,6 +145,9 @@ rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-fwc-truth-source CARGO_INCREMENTAL=0 \
 
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-fwc-truth-source CARGO_INCREMENTAL=0 \
   cargo test -p fwc --bin fwc require_any_live -- --nocapture
+
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-fwc-truth-source CARGO_INCREMENTAL=0 \
+  cargo test -p fwc --bin fwc truth_source_footer -- --nocapture
 
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-fwc-truth-source CARGO_INCREMENTAL=0 \
   cargo test -p fwc --test audit_chain_status_shape -- --nocapture

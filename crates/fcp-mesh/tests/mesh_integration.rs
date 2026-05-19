@@ -15,6 +15,7 @@
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_possible_truncation)]
+#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
@@ -232,7 +233,7 @@ mod meshnode {
     };
     use fcp_store::{
         MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
-        ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo, QuarantineStore,
+        ObjectAdmissionPolicy, ObjectSymbolMeta, QuarantineStore,
         QuarantinedObject, StoredSymbol, SymbolMeta, SymbolStore, SymbolStoreError,
     };
     use fcp_telemetry::trace_capture::{
@@ -511,7 +512,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id: checkpoint_object_id,
             zone_id: checkpoint.zone_id().clone(),
-            oti: ObjectTransmissionInfo::from_oti(transmission_info),
+            oti: fcp_store::ObjectTransmissionInfo::from_oti(transmission_info),
             source_symbols: encoder.source_symbols(),
             first_symbol_at: current_timestamp(),
         };
@@ -611,7 +612,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -703,7 +704,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -747,7 +748,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -818,7 +819,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -878,7 +879,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -940,7 +941,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -1001,7 +1002,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -1061,7 +1062,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -1122,7 +1123,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -1263,7 +1264,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -1353,7 +1354,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -1439,7 +1440,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -1612,7 +1613,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -1778,7 +1779,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -1883,7 +1884,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -2052,7 +2053,7 @@ mod meshnode {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -5542,13 +5543,12 @@ mod real_component_integration {
     use fcp_raptorq::ObjectTransmissionInformation;
     use fcp_store::{
         MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
-        ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo, QuarantineStore,
+        ObjectAdmissionPolicy, ObjectSymbolMeta, QuarantineStore,
         StoredSymbol, SymbolMeta, SymbolStore,
     };
-    use fcp_tailscale::NodeId;
     use semver::Version;
-    use std::collections::HashSet;
-    use std::sync::Arc;
+
+    const MOCK_CONNECTOR: &str = "foo.bar";
 
     fn test_header(zone_id: &ZoneId) -> ObjectHeader {
         ObjectHeader {
@@ -5699,7 +5699,7 @@ mod real_component_integration {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -5829,7 +5829,7 @@ mod real_component_integration {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 8,
             first_symbol_at: 0,
         };
@@ -5944,7 +5944,7 @@ mod real_component_integration {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 8,
             first_symbol_at: 0,
         };
@@ -6153,7 +6153,7 @@ mod real_component_integration {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -6351,7 +6351,7 @@ mod real_component_integration {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 8,
             first_symbol_at: 0,
         };
@@ -6468,7 +6468,7 @@ mod real_component_integration {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -6719,7 +6719,7 @@ mod real_component_integration {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };
@@ -6863,7 +6863,7 @@ mod real_component_integration {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 4,
             first_symbol_at: 0,
         };

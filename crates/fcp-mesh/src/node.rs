@@ -8,6 +8,7 @@
 //! without embedding transport specifics.
 
 #![forbid(unsafe_code)]
+#![allow(clippy::too_many_lines)]
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -3648,30 +3649,19 @@ fn current_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TransportPathKind;
-    use crate::coordinator::{LeaseCoordinator, SignedLeaseIssueOutcome, SignedLeaseIssueRequest};
-    use crate::device::DeviceProfileBuilder;
-    use crate::planner::{LeasePurpose, PlannerContext};
-    use bytes::Bytes;
-    use fcp_cbor::CanonicalSerializer;
     use fcp_crypto::Ed25519SigningKey;
-    use fcp_prelude::{
-        ConnectorId, ConnectorStateChangeKind, ConnectorStateModel, ConnectorStateRoot, EpochId,
-        EvictionPolicy, ObjectHeader, ObjectId, ObjectIdKey, Provenance, StorageMeta, StoredObject,
-        TailscaleNodeId, ZoneId, ZoneKeyId,
-    };
-    use fcp_protocol::session::{
-        MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, TransportLimits,
-    };
-    use fcp_protocol::{
-        DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED, DecodeStatus, SymbolAck, SymbolAckReason,
-        SymbolRequest,
-    };
     use fcp_raptorq::ObjectTransmissionInformation;
     use fcp_store::{
         FcpStoreConnectorStateStore, MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore,
-        MemorySymbolStoreConfig, ObjectAdmissionPolicy, ObjectSymbolMeta, ObjectTransmissionInfo,
-        QuarantineStore, QuarantinedObject, StoredSymbol, SymbolMeta,
+        MemorySymbolStoreConfig, ObjectAdmissionPolicy, ObjectSymbolMeta, QuarantineStore,
+        QuarantinedObject, StoredSymbol, SymbolMeta,
+    };
+    use fcp_core::{ConnectorId, ConnectorStateChangeKind, EpochId, Provenance, ZoneKeyId, ObjectHeader, ConnectorStateRoot, ConnectorStateModel};
+    use fcp_protocol::{SymbolAckReason, MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED, TransportLimits};
+    use bytes::Bytes;
+    use crate::{
+        DeviceProfileBuilder, LeaseCoordinator, SignedLeaseIssueOutcome, SignedLeaseIssueRequest,
+        TransportPathKind,
     };
 
     fn test_node(name: &str) -> MeshNode {
@@ -3773,7 +3763,7 @@ mod tests {
         let schema =
             fcp_cbor::SchemaId::new("fcp.test", "FetchedObject", semver::Version::new(1, 0, 0));
         let header = ObjectHeader {
-            schema: schema,
+            schema,
             zone_id: zone_id.clone(),
             created_at: 1,
             provenance: Provenance::new(zone_id.clone()),
@@ -3838,7 +3828,7 @@ mod tests {
     fn test_core_lease(zone_id: &ZoneId, subject_object_id: ObjectId) -> fcp_prelude::Lease {
         let schema = fcp_cbor::SchemaId::new("fcp.lease", "lease", semver::Version::new(1, 0, 0));
         let header = ObjectHeader {
-            schema: schema,
+            schema,
             zone_id: zone_id.clone(),
             created_at: 10,
             provenance: Provenance::new(zone_id.clone()),
@@ -3919,7 +3909,7 @@ mod tests {
         ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 2,
             first_symbol_at: 0,
         }
@@ -4099,7 +4089,7 @@ mod tests {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 2,
             first_symbol_at: 0,
         };
@@ -4230,7 +4220,7 @@ mod tests {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 2,
             first_symbol_at: 0,
         };
@@ -4291,7 +4281,7 @@ mod tests {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 2,
             first_symbol_at: 0,
         };
@@ -4354,7 +4344,7 @@ mod tests {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 2,
             first_symbol_at: 0,
         };
@@ -4419,7 +4409,7 @@ mod tests {
         let meta = ObjectSymbolMeta {
             object_id,
             zone_id: zone_id.clone(),
-            oti: oti,
+            oti,
             source_symbols: 2,
             first_symbol_at: 0,
         };
@@ -6549,7 +6539,7 @@ mod tests {
 
         let request = GossipRequest {
             from: TailscaleNodeId::new("requester-1"),
-            zone_id: zone_id,
+            zone_id,
             object_ids: vec![fetched_object_id],
             symbols: vec![(symbol_object_id, 7)],
             timestamp: 1_000,
@@ -8778,7 +8768,7 @@ mod tests {
                 .put_object_meta(ObjectSymbolMeta {
                     object_id,
                     zone_id: zone_id.clone(),
-                    oti: oti,
+                    oti,
                     source_symbols: 4,
                     first_symbol_at: 0,
                 })

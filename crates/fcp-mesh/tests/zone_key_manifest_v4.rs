@@ -29,6 +29,8 @@
 //!    real `ZoneKey` to it via the V4 path, embed in a V4 manifest, and
 //!    confirm the receiver opens it cleanly with the V4 secret.
 
+#![allow(clippy::similar_names, clippy::default_trait_access)]
+
 use fcp_core::{
     NodeId, NodeSignature, ObjectHeader, ObjectIdKeyId, Provenance, TailscaleNodeId, WrappedKey,
     WrappedZoneKey, WrappedZoneKeyV4, ZoneId, ZoneKemAlgorithm, ZoneKey, ZoneKeyAlgorithm,

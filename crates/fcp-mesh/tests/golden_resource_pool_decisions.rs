@@ -18,6 +18,9 @@
 //!     each refusal type (verifies summary aggregation arithmetic)
 //!
 //! Each row pins:
+
+#![allow(clippy::default_trait_access, clippy::needless_pass_by_value, clippy::too_many_lines)]
+
 //!   - per-node decision (admitted/rejected + `refusal_reason` class)
 //!   - aggregated summary (evaluated, admitted, rejected, plus refusal
 //!     buckets)

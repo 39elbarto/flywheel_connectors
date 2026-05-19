@@ -24,6 +24,8 @@
 //!
 //! Any other change MUST fail these tests.
 
+#![allow(clippy::doc_overindented_list_items)]
+
 use std::fmt::Write as _;
 
 use fcp_cbor::SchemaId;

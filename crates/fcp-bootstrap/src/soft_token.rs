@@ -2139,6 +2139,7 @@ mod verification_pack {
     // identity's key — defeating the security purpose of rotation.
 
     #[test]
+    #[allow(clippy::too_many_lines, clippy::similar_names)]
     fn scenario_token_rotation_zero_key_reuse() {
         let mut record = VerificationRecord::new("hwtoken-token-rotation-zero-key-reuse");
 

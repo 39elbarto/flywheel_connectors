@@ -3410,10 +3410,10 @@ mod tests {
         }
 
         let key_pair = KeyPair::generate().unwrap();
-        let cert = match signing_issuer {
-            Some(issuer) => params.signed_by(&key_pair, issuer).unwrap(),
-            None => params.self_signed(&key_pair).unwrap(),
-        };
+        let cert = signing_issuer.map_or_else(
+            || params.self_signed(&key_pair).unwrap(),
+            |issuer| params.signed_by(&key_pair, issuer).unwrap(),
+        );
 
         TokenCertificate {
             label: label.to_string(),
@@ -3425,6 +3425,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn test_x509_leaf_signed_by_ca(
         label: &str,
         id: &[u8],

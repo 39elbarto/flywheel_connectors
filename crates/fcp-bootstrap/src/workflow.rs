@@ -1858,7 +1858,7 @@ mod tests {
             .build()
             .unwrap();
 
-        BootstrapWorkflow::new(config)
+        let _ = BootstrapWorkflow::new(config)
             .unwrap()
             .run()
             .unwrap()

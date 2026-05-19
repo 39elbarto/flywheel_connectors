@@ -412,9 +412,25 @@ fn write_canonical_cbor<T: Serialize>(
     value: &T,
     out: &mut Vec<u8>,
 ) -> Result<(), SerializationError> {
+    write_canonical_cbor_with_limit(value, out, MAX_CANONICAL_OBJECT_BYTES)
+}
+
+fn write_canonical_cbor_with_limit<T: Serialize>(
+    value: &T,
+    out: &mut Vec<u8>,
+    byte_limit: usize,
+) -> Result<(), SerializationError> {
+    if out.len() > byte_limit {
+        return Err(SerializationError::PayloadTooLarge {
+            len: out.len(),
+            max: byte_limit,
+        });
+    }
+
     let mut v = Value::serialized(value)?;
     canonicalize_value_in_place(&mut v, 0)?;
-    into_writer(&v, out)?;
+    let mut writer = LimitedVecWriter::new(out, byte_limit);
+    into_writer(&v, &mut writer).map_err(|err| map_capped_writer_error(err, byte_limit))?;
     Ok(())
 }
 
@@ -1303,6 +1319,39 @@ mod tests {
     }
 
     #[test]
+    fn canonical_writer_counts_existing_bytes_against_limit() {
+        let mut out = vec![0xAA; 4];
+        let payload = vec![0_u8; 4];
+
+        let err = write_canonical_cbor_with_limit(&payload, &mut out, 8)
+            .expect_err("existing prefix bytes must count toward the write limit");
+
+        match err {
+            SerializationError::PayloadTooLarge { max, .. } => assert_eq!(max, 8),
+            other => panic!("unexpected serialization error: {other:?}"),
+        }
+        assert!(out.len() <= 8, "writer grew past configured limit");
+    }
+
+    #[test]
+    fn canonical_writer_rejects_already_oversized_output_buffer() {
+        let mut out = vec![0xAA; 9];
+        let payload = vec![0_u8; 1];
+
+        let err = write_canonical_cbor_with_limit(&payload, &mut out, 8)
+            .expect_err("oversized destination buffer must fail before writing");
+
+        match err {
+            SerializationError::PayloadTooLarge { len, max } => {
+                assert_eq!(len, 9);
+                assert_eq!(max, 8);
+            }
+            other => panic!("unexpected serialization error: {other:?}"),
+        }
+        assert_eq!(out, vec![0xAA; 9]);
+    }
+
+    #[test]
     fn deserialize_rejects_oversized_input() {
         let schema = SchemaId::new("fcp.test", "Large", Version::new(0, 1, 0));
 
@@ -1431,10 +1480,7 @@ mod tests {
     #[test]
     fn deserialize_unchecked_rejects_inputs_beyond_canonical_depth_limit() {
         let schema = SchemaId::new("fcp.test", "Deep", Version::new(0, 1, 0));
-        let mut body = Vec::new();
-        for _ in 0..=MAX_CANONICALIZATION_DEPTH {
-            body.push(0x81); // array(1)
-        }
+        let mut body = vec![0x81; MAX_CANONICALIZATION_DEPTH + 1];
         body.push(0x00);
 
         let mut bytes = Vec::new();
@@ -1453,17 +1499,11 @@ mod tests {
 
     #[test]
     fn decoder_limit_matches_canonical_depth_boundary() {
-        let mut at_limit = Vec::new();
-        for _ in 0..MAX_CANONICALIZATION_DEPTH {
-            at_limit.push(0x81); // array(1)
-        }
+        let mut at_limit = vec![0x81; MAX_CANONICALIZATION_DEPTH];
         at_limit.push(0x00);
         decode_cbor_body_as_value(&at_limit).expect("depth at canonical limit must decode");
 
-        let mut over_limit = Vec::new();
-        for _ in 0..=MAX_CANONICALIZATION_DEPTH {
-            over_limit.push(0x81); // array(1)
-        }
+        let mut over_limit = vec![0x81; MAX_CANONICALIZATION_DEPTH + 1];
         over_limit.push(0x00);
 
         let err = decode_cbor_body_as_value(&over_limit).unwrap_err();

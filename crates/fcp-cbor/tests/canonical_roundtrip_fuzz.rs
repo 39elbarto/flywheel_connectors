@@ -333,8 +333,8 @@ proptest! {
         let mut shuffled = entries.clone();
         let mut rng = seed;
         for i in (1..shuffled.len()).rev() {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let j = (rng as usize) % (i + 1);
+            rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            let j = usize::try_from(rng).unwrap_or(0) % (i + 1);
             shuffled.swap(i, j);
         }
         let mut order_b: BTreeMap<String, FuzzScalar> = BTreeMap::new();
@@ -385,6 +385,7 @@ fn canonicalizer_rejects_input_past_depth_limit() {
         to_canonical_cbor(&deeply_nested)
     }));
 
+    #[allow(clippy::match_wild_err_arm)]
     match result {
         Ok(Err(SerializationError::DepthExceeded { .. })) => {
             // ✓ Expected.
@@ -397,7 +398,7 @@ fn canonicalizer_rejects_input_past_depth_limit() {
             "canonicalizer rejected over-depth input but with the wrong error: \
              got {other}, expected DepthExceeded"
         ),
-        Err(_) => panic!(
+        Err(_payload) => panic!(
             "canonicalizer PANICKED on input deeper than MAX_CANONICALIZATION_DEPTH \
              — unbounded recursion regression"
         ),

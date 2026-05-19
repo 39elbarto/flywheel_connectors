@@ -945,6 +945,11 @@ impl CapabilityTokenBuilder {
     /// **Deprecated (br-zp1xx):** forwards to the panic-prone
     /// [`CwtClaims::constraints_cbor`] shim. Migrate to
     /// [`Self::try_constraints_cbor`] for typed error handling.
+    ///
+    /// # Panics
+    ///
+    /// This function may panic if the internal claims builder encounters malformed CBOR
+    /// and a fallback to `try_constraints_cbor` is expected.
     #[must_use]
     #[deprecated(
         since = "0.2.0",

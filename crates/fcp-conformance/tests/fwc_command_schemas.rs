@@ -20,6 +20,7 @@ struct CommandSchemaCase {
     file: &'static str,
     command: &'static str,
     subcommand: Option<&'static str>,
+    command_required_on_success: bool,
     success_schema_version: &'static str,
     error_schema_version: &'static str,
 }
@@ -29,6 +30,7 @@ const CASES: &[CommandSchemaCase] = &[
         file: "list.schema.json",
         command: "list",
         subcommand: None,
+        command_required_on_success: true,
         success_schema_version: "fcp.fwc.truth-source.v1",
         error_schema_version: "fcp.fwc.truth-source.v1",
     },
@@ -36,6 +38,7 @@ const CASES: &[CommandSchemaCase] = &[
         file: "show.schema.json",
         command: "show",
         subcommand: None,
+        command_required_on_success: true,
         success_schema_version: "fcp.fwc.truth-source.v1",
         error_schema_version: "fcp.fwc.truth-source.v1",
     },
@@ -43,6 +46,7 @@ const CASES: &[CommandSchemaCase] = &[
         file: "status.schema.json",
         command: "status",
         subcommand: None,
+        command_required_on_success: true,
         success_schema_version: "fcp.fwc.truth-source.v1",
         error_schema_version: "fcp.fwc.truth-source.v1",
     },
@@ -50,6 +54,7 @@ const CASES: &[CommandSchemaCase] = &[
         file: "doctor.schema.json",
         command: "doctor",
         subcommand: None,
+        command_required_on_success: true,
         success_schema_version: "fcp.fwc.truth-source.v1",
         error_schema_version: "fcp.fwc.truth-source.v1",
     },
@@ -57,6 +62,7 @@ const CASES: &[CommandSchemaCase] = &[
         file: "context_current.schema.json",
         command: "context",
         subcommand: Some("current"),
+        command_required_on_success: true,
         success_schema_version: "fcp.fwc.truth-source.v1",
         error_schema_version: "fcp.fwc.truth-source.v1",
     },
@@ -64,6 +70,7 @@ const CASES: &[CommandSchemaCase] = &[
         file: "schema.schema.json",
         command: "schema",
         subcommand: None,
+        command_required_on_success: true,
         success_schema_version: "fcp.fwc.truth-source.v1",
         error_schema_version: "fcp.fwc.truth-source.v1",
     },
@@ -71,6 +78,7 @@ const CASES: &[CommandSchemaCase] = &[
         file: "history.schema.json",
         command: "history",
         subcommand: None,
+        command_required_on_success: true,
         success_schema_version: "fcp.fwc.truth-source.v1",
         error_schema_version: "fcp.fwc.truth-source.v1",
     },
@@ -78,6 +86,7 @@ const CASES: &[CommandSchemaCase] = &[
         file: "search.schema.json",
         command: "search",
         subcommand: None,
+        command_required_on_success: true,
         success_schema_version: "fcp.fwc.truth-source.v1",
         error_schema_version: "fcp.fwc.truth-source.v1",
     },
@@ -85,6 +94,7 @@ const CASES: &[CommandSchemaCase] = &[
         file: "audit_chain_status.schema.json",
         command: "audit",
         subcommand: Some("chain status"),
+        command_required_on_success: true,
         success_schema_version: "fcp.fwc.audit_chain_status.v1",
         error_schema_version: "fcp.fwc.truth-source.v1",
     },
@@ -92,6 +102,7 @@ const CASES: &[CommandSchemaCase] = &[
         file: "audit_verify.schema.json",
         command: "audit",
         subcommand: Some("verify"),
+        command_required_on_success: false,
         success_schema_version: "fcp.fwc.audit_verify.v1",
         error_schema_version: "fcp.fwc.truth-source.v1",
     },
@@ -123,17 +134,79 @@ fn envelope_payload(
 ) -> Value {
     let mut payload = json!({
         "status": status,
-        "command": case.command,
         "schema_version": schema_version,
         "_truth_source": truth_source,
     });
-    if let Some(subcommand) = case.subcommand {
-        payload["subcommand"] = json!(subcommand);
+    if status == "error" || case.command_required_on_success {
+        payload["command"] = json!(case.command);
+        if let Some(subcommand) = case.subcommand {
+            payload["subcommand"] = json!(subcommand);
+        }
     }
     payload
 }
 
+fn availability(availability: &str) -> Value {
+    json!({
+        "availability": availability,
+        "command": "history",
+        "authoritative": false,
+        "explanation": "History is resolved from local CLI history artifacts.",
+        "recoverable": true,
+        "next_actions": ["fwc history"]
+    })
+}
+
+fn history_success_payload(truth_source: &str) -> Value {
+    json!({
+        "status": "ok",
+        "command": "history",
+        "scope": "list",
+        "schema_version": "fcp.fwc.truth-source.v1",
+        "_truth_source": truth_source,
+        "total_entries": 0,
+        "returned": 0,
+        "filter": {
+            "connector": null,
+            "status": null,
+            "since": null,
+            "limit": 20
+        },
+        "entries": [],
+        "next_actions": ["fwc history <entry_id>"],
+        "availability": availability("offline-artifact")
+    })
+}
+
+fn success_payload(case: CommandSchemaCase, truth_source: &str) -> Value {
+    if case.file == "history.schema.json" {
+        return history_success_payload(truth_source);
+    }
+    envelope_payload(case, "ok", case.success_schema_version, truth_source)
+}
+
 fn error_payload(case: CommandSchemaCase) -> Value {
+    if case.file == "history.schema.json" {
+        return json!({
+            "status": "error",
+            "command": "history",
+            "schema_version": "fcp.fwc.truth-source.v1",
+            "_truth_source": "offline",
+            "error": {
+                "type": "truth-source-unavailable",
+                "required": "any-live",
+                "actual": "offline",
+                "message": "`fwc history` resolved from `offline` truth, which does not satisfy `--require-source any-live`.",
+                "recoverable": true
+            },
+            "next_actions": [
+                "Retry after the required live truth source is reachable.",
+                "Relax the requirement if `offline` truth is acceptable for this workflow."
+            ],
+            "availability": availability("unavailable")
+        });
+    }
+
     let mut payload = envelope_payload(case, "error", case.error_schema_version, "offline");
     payload["error"] = json!({
         "type": "truth-source-unavailable",
@@ -159,7 +232,7 @@ fn fwc_command_truth_source_schemas_compile_and_validate_envelopes() {
     for case in CASES {
         let validator = validator(case.file);
         for truth_source in TRUTH_SOURCES {
-            let payload = envelope_payload(*case, "ok", case.success_schema_version, truth_source);
+            let payload = success_payload(*case, truth_source);
             assert_valid(&validator, &payload, case.file);
         }
 
@@ -171,7 +244,7 @@ fn fwc_command_truth_source_schemas_compile_and_validate_envelopes() {
 fn fwc_command_truth_source_schemas_reject_missing_truth_source() {
     for case in CASES {
         let validator = validator(case.file);
-        let mut payload = envelope_payload(*case, "ok", case.success_schema_version, "offline");
+        let mut payload = success_payload(*case, "offline");
         payload
             .as_object_mut()
             .expect("envelope payload must be an object")
@@ -189,7 +262,7 @@ fn fwc_command_truth_source_schemas_reject_missing_truth_source() {
 fn fwc_command_truth_source_schemas_reject_unknown_truth_source() {
     for case in CASES {
         let validator = validator(case.file);
-        let payload = envelope_payload(*case, "ok", case.success_schema_version, "probably-live");
+        let payload = success_payload(*case, "probably-live");
 
         assert!(
             !validator.is_valid(&payload),
@@ -201,9 +274,9 @@ fn fwc_command_truth_source_schemas_reject_unknown_truth_source() {
 
 #[test]
 fn fwc_command_truth_source_schemas_reject_wrong_command_identity() {
-    for case in CASES {
+    for case in CASES.iter().filter(|case| case.command_required_on_success) {
         let validator = validator(case.file);
-        let mut payload = envelope_payload(*case, "ok", case.success_schema_version, "offline");
+        let mut payload = success_payload(*case, "offline");
         payload["command"] = json!("wrong");
 
         assert!(
@@ -216,9 +289,12 @@ fn fwc_command_truth_source_schemas_reject_wrong_command_identity() {
 
 #[test]
 fn fwc_command_truth_source_schemas_reject_wrong_subcommand_identity() {
-    for case in CASES.iter().filter(|case| case.subcommand.is_some()) {
+    for case in CASES
+        .iter()
+        .filter(|case| case.command_required_on_success && case.subcommand.is_some())
+    {
         let validator = validator(case.file);
-        let mut payload = envelope_payload(*case, "ok", case.success_schema_version, "offline");
+        let mut payload = success_payload(*case, "offline");
         payload["subcommand"] = json!("wrong");
 
         assert!(

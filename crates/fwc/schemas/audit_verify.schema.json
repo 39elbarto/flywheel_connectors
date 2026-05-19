@@ -5,7 +5,7 @@
   "description": "Top-level provenance envelope for `fwc audit verify --json`.",
   "type": "object",
   "additionalProperties": true,
-  "required": ["status", "command", "subcommand", "schema_version", "_truth_source"],
+  "required": ["status", "schema_version", "_truth_source"],
   "properties": {
     "status": { "type": "string", "minLength": 1 },
     "command": { "const": "audit" },

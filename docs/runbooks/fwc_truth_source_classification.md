@@ -13,6 +13,24 @@ surface include a top-level `schema_version` and `_truth_source` field. The
 shared envelope schema is `fcp.fwc.truth-source.v1` unless the command owns a
 more specific payload schema, such as audit-chain status or audit verify.
 
+The current schema files are conservative envelope ratchets. They pin
+truth-source metadata, command identity where the runtime emits it, and the
+typed `truth-source-unavailable` error shape; they are not final
+payload-specific field closure for every command.
+
+| Schema file | Command surface | Success schema version | Notes |
+|-------------|-----------------|------------------------|-------|
+| `list.schema.json` | `fwc list` | `fcp.fwc.truth-source.v1` | Requires `command: "list"`. |
+| `show.schema.json` | `fwc show` | `fcp.fwc.truth-source.v1` | Requires `command: "show"`. |
+| `schema.schema.json` | `fwc schema` | `fcp.fwc.truth-source.v1` | Requires `command: "schema"`. |
+| `search.schema.json` | `fwc search` | `fcp.fwc.truth-source.v1` | Requires `command: "search"`. |
+| `status.schema.json` | `fwc status` | `fcp.fwc.truth-source.v1` | Requires `command: "status"`. |
+| `doctor.schema.json` | `fwc doctor` | `fcp.fwc.truth-source.v1` | Requires `command: "doctor"`. |
+| `context_current.schema.json` | `fwc context current` | `fcp.fwc.truth-source.v1` | Requires `command: "context"` and `subcommand: "current"`. |
+| `history.schema.json` | `fwc history` | `fcp.fwc.truth-source.v1` | Requires `command: "history"`. |
+| `audit_chain_status.schema.json` | `fwc audit chain status` | `fcp.fwc.audit_chain_status.v1` | Requires `command: "audit"` and `subcommand: "chain status"` on the success path; `truth-source-unavailable` errors use the shared schema version. |
+| `audit_verify.schema.json` | `fwc audit verify` | `fcp.fwc.audit_verify.v1` | Success output is the serialized audit report plus `_truth_source`; `truth-source-unavailable` errors use the shared schema version and carry `command: "audit"` plus `subcommand: "verify"`. |
+
 The operator-facing `_truth_source` tags are:
 
 | Tag | Meaning | Typical commands |
@@ -151,6 +169,9 @@ rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-fwc-truth-source CARGO_INCREMENTAL=0 \
 
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-fwc-truth-source CARGO_INCREMENTAL=0 \
   cargo test -p fwc --test audit_chain_status_shape -- --nocapture
+
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-fwc-command-schemas CARGO_INCREMENTAL=0 \
+  cargo test -p fcp-conformance --test fwc_command_schemas -- --nocapture
 ```
 
 Run `git diff --check -- docs/runbooks/fwc_truth_source_classification.md` for

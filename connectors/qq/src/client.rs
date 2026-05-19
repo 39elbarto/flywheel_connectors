@@ -371,6 +371,7 @@ impl QqGatewayRuntime {
 
     #[must_use]
     pub fn snapshot(&self) -> QqGatewayRuntimeSnapshot {
+        let (peer_queue_count, largest_peer_queue_depth) = self.peer_queue_stats();
         QqGatewayRuntimeSnapshot {
             enabled: self.config.enabled,
             session_id: self.session.resume_token(),
@@ -385,6 +386,9 @@ impl QqGatewayRuntime {
             max_reconnect_backoff_ms: self.config.max_reconnect_backoff_ms,
             queue_depth: self.pending_events.len(),
             max_queue_depth: self.config.max_queue_depth,
+            peer_queue_count,
+            largest_peer_queue_depth,
+            max_peer_queue_depth: self.config.max_peer_queue_depth,
             dedupe_size: self.seen_event_ids.len(),
             dedupe_window_size: self.config.dedupe_window_size,
             reply_reference_count: self.reply_references.len(),
@@ -553,6 +557,9 @@ impl QqGatewayRuntime {
         if self.pending_events.len() >= self.config.max_queue_depth {
             return Ok(self.dropped_projection(event.s, event_id, "queue_full"));
         }
+        if self.peer_queue_depth_for_policy(&policy) >= self.config.max_peer_queue_depth {
+            return Ok(self.dropped_projection(event.s, event_id, "peer_queue_full"));
+        }
 
         self.record_reply_reference_status(&normalized);
         self.remember_reply_reference(normalized.message_id.as_deref());
@@ -665,6 +672,44 @@ impl QqGatewayRuntime {
         self.config.max_queue_depth
     }
 
+    fn peer_queue_depth_for_policy(&self, policy: &QqInboundPolicyDecision) -> usize {
+        let Some(target_id) = policy.target_id.as_deref() else {
+            return 0;
+        };
+        self.pending_events
+            .iter()
+            .filter(|event| {
+                event.policy.routing == policy.routing
+                    && event.policy.target_id.as_deref() == Some(target_id)
+            })
+            .count()
+    }
+
+    fn peer_queue_stats(&self) -> (usize, usize) {
+        let mut keys: Vec<(QqRouting, &str)> = Vec::new();
+        let mut largest_depth = 0;
+        for event in &self.pending_events {
+            let Some(target_id) = event.policy.target_id.as_deref() else {
+                continue;
+            };
+            let key = (event.policy.routing, target_id);
+            if keys.contains(&key) {
+                continue;
+            }
+            let depth = self
+                .pending_events
+                .iter()
+                .filter(|queued| {
+                    queued.policy.routing == key.0
+                        && queued.policy.target_id.as_deref() == Some(key.1)
+                })
+                .count();
+            largest_depth = largest_depth.max(depth);
+            keys.push(key);
+        }
+        (keys.len(), largest_depth)
+    }
+
     fn dropped_projection(
         &mut self,
         sequence: Option<u64>,
@@ -775,6 +820,11 @@ fn validate_gateway_config(config: &QqGatewayRuntimeConfig) -> QqResult<()> {
             "gateway.max_queue_depth must be greater than zero".into(),
         ));
     }
+    if config.max_peer_queue_depth == 0 {
+        return Err(QqError::Config(
+            "gateway.max_peer_queue_depth must be greater than zero".into(),
+        ));
+    }
     if config.dedupe_window_size > 10_000 {
         return Err(QqError::Config(
             "gateway.dedupe_window_size must be <= 10000".into(),
@@ -783,6 +833,11 @@ fn validate_gateway_config(config: &QqGatewayRuntimeConfig) -> QqResult<()> {
     if config.max_queue_depth > 10_000 {
         return Err(QqError::Config(
             "gateway.max_queue_depth must be <= 10000".into(),
+        ));
+    }
+    if config.max_peer_queue_depth > 10_000 {
+        return Err(QqError::Config(
+            "gateway.max_peer_queue_depth must be <= 10000".into(),
         ));
     }
     for content_type in &config.policy.allowed_attachment_content_types {
@@ -3330,6 +3385,79 @@ mod tests {
             .unwrap();
         assert!(!overflow.accepted);
         assert_eq!(overflow.reason_code, "queue_full");
+    }
+
+    #[test]
+    fn gateway_runtime_enforces_per_peer_queue_bounds() {
+        let mut config = QqGatewayRuntimeConfig {
+            enabled: true,
+            max_queue_depth: 3,
+            max_peer_queue_depth: 1,
+            ..QqGatewayRuntimeConfig::default()
+        };
+        config.policy.group_require_mention = false;
+        let mut runtime = QqGatewayRuntime::new(config);
+
+        let first_peer_event = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-peer-first",
+                    "content": "first group message",
+                    "group_openid": "group-a",
+                    "group_member_openid": "member-1"
+                })),
+                id: Some("evt-peer-first".into()),
+            })
+            .unwrap();
+        assert!(first_peer_event.accepted);
+        assert_eq!(first_peer_event.runtime.queue_depth, 1);
+        assert_eq!(first_peer_event.runtime.peer_queue_count, 1);
+        assert_eq!(first_peer_event.runtime.largest_peer_queue_depth, 1);
+        assert_eq!(first_peer_event.runtime.max_peer_queue_depth, 1);
+
+        let same_peer_overflow = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(2),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-peer-overflow",
+                    "content": "same group should not starve others",
+                    "group_openid": "group-a",
+                    "group_member_openid": "member-2"
+                })),
+                id: Some("evt-peer-overflow".into()),
+            })
+            .unwrap();
+        assert!(!same_peer_overflow.accepted);
+        assert_eq!(same_peer_overflow.reason_code, "peer_queue_full");
+        assert!(same_peer_overflow.normalized.is_none());
+        assert!(same_peer_overflow.policy.is_none());
+        assert_eq!(same_peer_overflow.runtime.queue_depth, 1);
+        assert_eq!(same_peer_overflow.runtime.peer_queue_count, 1);
+        assert_eq!(same_peer_overflow.runtime.largest_peer_queue_depth, 1);
+
+        let other_peer = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(3),
+                t: Some("GROUP_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-peer-other",
+                    "content": "other group still has capacity",
+                    "group_openid": "group-b",
+                    "group_member_openid": "member-3"
+                })),
+                id: Some("evt-peer-other".into()),
+            })
+            .unwrap();
+        assert!(other_peer.accepted);
+        assert_eq!(other_peer.runtime.queue_depth, 2);
+        assert_eq!(other_peer.runtime.peer_queue_count, 2);
+        assert_eq!(other_peer.runtime.largest_peer_queue_depth, 1);
     }
 
     #[test]

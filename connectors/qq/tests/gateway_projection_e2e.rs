@@ -169,6 +169,9 @@ fn redacted_runtime_snapshot(runtime: &Value) -> Value {
         "max_reconnect_backoff_ms": u64_field(runtime, "max_reconnect_backoff_ms"),
         "queue_depth": u64_field(runtime, "queue_depth"),
         "max_queue_depth": u64_field(runtime, "max_queue_depth"),
+        "peer_queue_count": u64_field(runtime, "peer_queue_count"),
+        "largest_peer_queue_depth": u64_field(runtime, "largest_peer_queue_depth"),
+        "max_peer_queue_depth": u64_field(runtime, "max_peer_queue_depth"),
         "dedupe_size": u64_field(runtime, "dedupe_size"),
         "dedupe_window_size": u64_field(runtime, "dedupe_window_size"),
         "reply_reference_count": u64_field(runtime, "reply_reference_count"),
@@ -964,6 +967,119 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
     assert_eq!(queue_full["runtime"]["dropped_events"], 2);
     assert_eq!(queue_full["lifecycle"]["action"], "none");
     log_projection_step(&mut logs, "queue_full_backpressure_drop", "ok", &queue_full);
+
+    let peer_queue_instance_id = InstanceId::new();
+    let mut peer_queue_connector = QqConnector::new();
+    peer_queue_connector
+        .configure(json!({
+            "base_url": "http://localhost:9999",
+            "token_base_url": "http://localhost:9999",
+            "app_id": "qq-app",
+            "client_secret": "test-secret",
+            "gateway": {
+                "enabled": true,
+                "max_queue_depth": 3,
+                "max_peer_queue_depth": 1,
+                "policy": {
+                    "group_policy": "allowlist",
+                    "group_allow_from": ["group-peer-a", "group-peer-b"],
+                    "group_require_mention": false
+                }
+            }
+        }))
+        .await
+        .expect("configure peer-queue QQ connector");
+    peer_queue_connector
+        .handshake(handshake_request(
+            signing_key.verifying_key().to_bytes(),
+            peer_queue_instance_id.clone(),
+        ))
+        .await
+        .expect("handshake peer-queue QQ connector");
+    let peer_first = invoke_projection(
+        &peer_queue_connector,
+        &signing_key,
+        &peer_queue_instance_id,
+        "qq-gateway-peer-queue-first",
+        json!({
+            "op": 0,
+            "s": 1,
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": "evt-peer-queue-first",
+            "d": {
+                "id": "msg-peer-queue-first",
+                "content": "first peer queue message",
+                "group_openid": "group-peer-a",
+                "group_member_openid": "member-peer-1"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(peer_first["accepted"], true);
+    assert_eq!(peer_first["runtime"]["queue_depth"], 1);
+    assert_eq!(peer_first["runtime"]["peer_queue_count"], 1);
+    assert_eq!(peer_first["runtime"]["largest_peer_queue_depth"], 1);
+    assert_eq!(peer_first["runtime"]["max_peer_queue_depth"], 1);
+    log_projection_step(&mut logs, "peer_queue_first_accepted", "ok", &peer_first);
+
+    let peer_full = invoke_projection(
+        &peer_queue_connector,
+        &signing_key,
+        &peer_queue_instance_id,
+        "qq-gateway-peer-queue-full",
+        json!({
+            "op": 0,
+            "s": 2,
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": "evt-peer-queue-full",
+            "d": {
+                "id": "msg-peer-queue-full",
+                "content": "same peer should hit per-peer cap",
+                "group_openid": "group-peer-a",
+                "group_member_openid": "member-peer-2"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(peer_full["accepted"], false);
+    assert_eq!(peer_full["reason_code"], "peer_queue_full");
+    assert_eq!(peer_full["normalized"], Value::Null);
+    assert_eq!(peer_full["policy"], Value::Null);
+    assert_eq!(peer_full["runtime"]["queue_depth"], 1);
+    assert_eq!(peer_full["runtime"]["peer_queue_count"], 1);
+    assert_eq!(peer_full["runtime"]["largest_peer_queue_depth"], 1);
+    assert_eq!(peer_full["runtime"]["dropped_events"], 1);
+    log_projection_step(&mut logs, "peer_queue_full_drop", "ok", &peer_full);
+
+    let peer_other = invoke_projection(
+        &peer_queue_connector,
+        &signing_key,
+        &peer_queue_instance_id,
+        "qq-gateway-peer-queue-other",
+        json!({
+            "op": 0,
+            "s": 3,
+            "t": "GROUP_MESSAGE_CREATE",
+            "id": "evt-peer-queue-other",
+            "d": {
+                "id": "msg-peer-queue-other",
+                "content": "different peer should still drain later",
+                "group_openid": "group-peer-b",
+                "group_member_openid": "member-peer-3"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(peer_other["accepted"], true);
+    assert_eq!(peer_other["runtime"]["queue_depth"], 2);
+    assert_eq!(peer_other["runtime"]["peer_queue_count"], 2);
+    assert_eq!(peer_other["runtime"]["largest_peer_queue_depth"], 1);
+    log_projection_step(
+        &mut logs,
+        "peer_queue_other_peer_allowed",
+        "ok",
+        &peer_other,
+    );
 
     let hello = invoke_projection(
         &connector,
@@ -2569,6 +2685,9 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "evt-queue-fill",
         "evt-queue-full-policy-denied",
         "evt-queue-full",
+        "evt-peer-queue-first",
+        "evt-peer-queue-full",
+        "evt-peer-queue-other",
         "evt-stale-sequence",
         "evt-reconnect-requested",
         "evt-invalid-session",
@@ -2603,6 +2722,9 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "msg-queue-fill",
         "msg-queue-full-policy-denied",
         "msg-queue-full",
+        "msg-peer-queue-first",
+        "msg-peer-queue-full",
+        "msg-peer-queue-other",
         "msg-stale-sequence",
         "msg-after-shutdown",
         "bot-openid",
@@ -2612,6 +2734,8 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "group-binding",
         "group-denied",
         "group-queue",
+        "group-peer-a",
+        "group-peer-b",
         "group-voice",
         "group-media-type",
         "channel-denied",
@@ -2622,6 +2746,7 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "member-slash",
         "member-disabled",
         "member-queue",
+        "member-peer",
         "member-voice",
         "member-media-type",
         "member-c2c-denied",
@@ -2636,6 +2761,9 @@ async fn qq_gateway_projection_logs_policy_replay_and_shutdown() {
         "queue fill message",
         "queue should not hide denied sender policy",
         "queue backpressure message",
+        "first peer queue message",
+        "same peer should hit per-peer cap",
+        "different peer should still drain later",
         "stale sequence should drop",
         "deploy status",
         "plain message",

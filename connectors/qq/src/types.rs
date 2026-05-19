@@ -203,6 +203,7 @@ pub struct QqGatewayRuntimeConfig {
     pub max_reconnect_attempts: u32,
     pub dedupe_window_size: usize,
     pub max_queue_depth: usize,
+    pub max_peer_queue_depth: usize,
     pub policy: QqInboundPolicyConfig,
 }
 
@@ -218,6 +219,7 @@ impl Default for QqGatewayRuntimeConfig {
             max_reconnect_attempts: 5,
             dedupe_window_size: 1_024,
             max_queue_depth: 128,
+            max_peer_queue_depth: 32,
             policy: QqInboundPolicyConfig::default(),
         }
     }
@@ -257,6 +259,9 @@ pub struct QqGatewayRuntimeSnapshot {
     pub max_reconnect_backoff_ms: u64,
     pub queue_depth: usize,
     pub max_queue_depth: usize,
+    pub peer_queue_count: usize,
+    pub largest_peer_queue_depth: usize,
+    pub max_peer_queue_depth: usize,
     pub dedupe_size: usize,
     pub dedupe_window_size: usize,
     pub reply_reference_count: usize,

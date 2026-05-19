@@ -339,6 +339,9 @@ if [[ "${overall_status}" == "passed" ]]; then
           "c2c_policy_allowed",
           "queue_full_policy_denied",
           "queue_full_backpressure_drop",
+          "peer_queue_first_accepted",
+          "peer_queue_full_drop",
+          "peer_queue_other_peer_allowed",
           "hello_session_restore",
           "malformed_control_envelope_denied",
           "malformed_data_id_envelope_denied",
@@ -435,6 +438,36 @@ if [[ "${overall_status}" == "passed" ]]; then
             and .details.runtime.accepted_events == 1
             and .details.runtime.dropped_events == 1
             and .details.lifecycle.action == "none"
+          )
+        ),
+        peer_queue_shape_ok: (
+          any(.[];
+            .step == "peer_queue_first_accepted"
+            and .details.accepted == true
+            and .details.reason_code == "accepted"
+            and .details.runtime.queue_depth == 1
+            and .details.runtime.peer_queue_count == 1
+            and .details.runtime.largest_peer_queue_depth == 1
+            and .details.runtime.max_peer_queue_depth == 1
+          )
+          and any(.[];
+            .step == "peer_queue_full_drop"
+            and .details.accepted == false
+            and .details.reason_code == "peer_queue_full"
+            and .details.normalized == null
+            and .details.policy == null
+            and .details.runtime.queue_depth == 1
+            and .details.runtime.peer_queue_count == 1
+            and .details.runtime.largest_peer_queue_depth == 1
+            and .details.lifecycle.action == "none"
+          )
+          and any(.[];
+            .step == "peer_queue_other_peer_allowed"
+            and .details.accepted == true
+            and .details.reason_code == "accepted"
+            and .details.runtime.queue_depth == 2
+            and .details.runtime.peer_queue_count == 2
+            and .details.runtime.largest_peer_queue_depth == 1
           )
         ),
         group_policy_shape_ok: (
@@ -661,7 +694,7 @@ if [[ "${overall_status}" == "passed" ]]; then
       } as $v
       | $v
       | .status = (
-          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.log_start_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.c2c_shape_ok and $v.queue_shape_ok and $v.group_policy_shape_ok and $v.malformed_control_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.restore_shape_ok and $v.ready_resumed_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok and $v.pending_shutdown_shape_ok)
+          if (($v.missing_steps | length) == 0 and $v.status_ok and $v.redaction_shape_ok and $v.log_start_shape_ok and $v.disabled_shape_ok and $v.binding_shape_ok and $v.channel_shape_ok and $v.c2c_shape_ok and $v.queue_shape_ok and $v.peer_queue_shape_ok and $v.group_policy_shape_ok and $v.malformed_control_shape_ok and $v.reply_shape_ok and $v.media_shape_ok and $v.voice_shape_ok and $v.slash_shape_ok and $v.replay_shape_ok and $v.heartbeat_shape_ok and $v.reconnect_shape_ok and $v.restore_shape_ok and $v.ready_resumed_shape_ok and $v.drain_shape_ok and $v.shutdown_shape_ok and $v.pending_shutdown_shape_ok)
           then "passed"
           else "failed"
           end

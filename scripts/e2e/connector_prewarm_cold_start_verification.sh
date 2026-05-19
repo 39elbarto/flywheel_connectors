@@ -213,7 +213,23 @@ prewarm_target_root_label() {
   done
 }
 
+prewarm_target_dir_has_parent_segment() {
+  local path="${1//\\//}"
+  case "${path}" in
+    ..|../*|*/..|*/../*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 is_prewarm_shared_target_root() {
+  if prewarm_target_dir_has_parent_segment "$1"; then
+    return 0
+  fi
+
   case "$(prewarm_target_root_label "$1")" in
     /tmp|/private/tmp|target|./target)
       return 0
@@ -431,6 +447,10 @@ if [[ "${overall_status}" == "passed" ]]; then
         type == "string" and test("^[A-Za-z0-9._-]{1,128}$");
       def shared_target_root:
         type == "string" and test("^(?:/tmp|/private/tmp|target|\\./target)(?:/+\\.?)*$");
+      def parent_path_segment:
+        type == "string" and (gsub("\\\\"; "/") | test("(^|/)\\.\\.($|/)"));
+      def unsafe_target_root:
+        shared_target_root or parent_path_segment;
       def execution_mode_label:
         type == "string" and (. == "smoke" or . == "soak");
       def source_kind_label:
@@ -637,7 +657,7 @@ if [[ "${overall_status}" == "passed" ]]; then
           target_dir_provenance_ok
         ),
         target_dir_isolated_ok: all(.[];
-          (.cargo_target_dir | shared_target_root | not)
+          (.cargo_target_dir | unsafe_target_root | not)
         ),
         required_fields_ok: all(.[];
           (.command_line | type) == "array"
@@ -876,7 +896,13 @@ if [[ -s "${EVIDENCE_JSONL}" ]]; then
     validation_status="failed"
     mark_validation_redaction_failed "private_absolute_target_dir"
     exit_code=1
-  elif jq -s -e 'any(.[]; .cargo_target_dir == "/tmp" or .cargo_target_dir == "/private/tmp" or .cargo_target_dir == "target" or .cargo_target_dir == "./target")' "${EVIDENCE_JSONL}" >/dev/null; then
+  elif jq -s -e '
+    def shared_target_root:
+      type == "string" and test("^(?:/tmp|/private/tmp|target|\\./target)(?:/+\\.?)*$");
+    def parent_path_segment:
+      type == "string" and (gsub("\\\\"; "/") | test("(^|/)\\.\\.($|/)"));
+    any(.[]; (.cargo_target_dir | shared_target_root) or (.cargo_target_dir | parent_path_segment))
+  ' "${EVIDENCE_JSONL}" >/dev/null; then
     redaction_status="failed"
     overall_status="failed"
     validation_status="failed"

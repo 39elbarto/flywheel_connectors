@@ -3167,7 +3167,17 @@ fn normalized_prewarm_target_root(mut cargo_target_dir: &str) -> &str {
     }
 }
 
+fn prewarm_target_dir_has_parent_segment(cargo_target_dir: &str) -> bool {
+    cargo_target_dir
+        .split(['/', '\\'])
+        .any(|segment| segment == "..")
+}
+
 fn is_unsafe_prewarm_target_root(cargo_target_dir: &str) -> bool {
+    if prewarm_target_dir_has_parent_segment(cargo_target_dir) {
+        return true;
+    }
+
     matches!(
         normalized_prewarm_target_root(cargo_target_dir),
         "/tmp" | "/private/tmp" | "target" | "./target"
@@ -11422,12 +11432,22 @@ mod tests {
             "/private/tmp",
             "/private/tmp/",
             "/private/tmp//.",
+            "/tmp/../tmp",
+            "/tmp/fcp-prewarm/..",
+            "/private/tmp/../tmp",
             "target",
             "target/",
             "target/.",
+            "target/..",
+            "target/../target",
             "./target",
             "./target/",
             "./target//.",
+            "./target/..",
+            "./target/../target",
+            "../target",
+            "relative/../target",
+            "C:\\tmp\\..\\target",
         ] {
             assert_prewarm_target_root_rejected(target_dir);
         }

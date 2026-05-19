@@ -104,7 +104,11 @@ production artifacts identify the requested zone by a stable redaction-safe
 digest instead of leaking raw `z:project:*` labels. The typed validator also
 recomputes the `CARGO_TARGET_DIR` Blake3 hash from the recorded target
 directory before serialization succeeds, so replay rows cannot spoof target-dir
-provenance with an unrelated valid-looking digest. They also enforce the same
+provenance with an unrelated valid-looking digest. Target directories with
+parent traversal segments such as `..`, whether separated with `/` or `\`, are
+rejected before export so a proof cannot present a stable hash for a path that
+normalizes back to a shared root or outside the intended proof directory. They
+also enforce the same
 admission-decision shape: `admit_warm`
 must carry `warm_checkout=true`, `error_mapping="ok"`, and no fallback or
 unsafe-rejection reason; `fallback_on_demand` must carry
@@ -189,7 +193,8 @@ checkout paths, private-var-path, mounted-volume-path, raw `operation:`,
 markers, reviewer private-contact markers, and `private_absolute` target-dir
 evidence before export. Evidence also cannot use shared target roots such as
 `/tmp`, `/private/tmp`, `target`, or `./target`, including trailing slash or
-`/.` variants of those roots;
+`/.` variants of those roots, nor parent traversal forms that can escape a
+dedicated proof target directory;
 use a dedicated child directory so the target-dir hash identifies one proof run;
 `cargo_target_dir_class` must be one of the stable export labels `tmp`,
 `absolute`, or `relative`, so novel labels cannot bypass the redaction gate.

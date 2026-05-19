@@ -248,6 +248,145 @@ append_tool_versions() {
     '{cargo:$cargo,rustc:$rustc,rustfmt:$rustfmt,clippy:$clippy,rch:$rch,lake:$lake,jq:$jq,git:$git,ubs:$ubs,cleanup_result:"not_applicable"}')"
 }
 
+write_redacted_rch_invalid_log() {
+  local path="$1"
+  local command_name="$2"
+  local command_status="$3"
+  local raw_output="$4"
+  jq -cn \
+    --arg schema "fcp.rch_capacity_preflight.redacted.v1" \
+    --arg command "${command_name}" \
+    --arg command_status "${command_status}" \
+    --arg raw_output_hash "sha256:$(hash_text "${raw_output}")" \
+    '{schema:$schema,command:$command,command_status:$command_status,json_ok:false,raw_output_hash:$raw_output_hash,raw_output:"redacted",cleanup_result:"not_applicable"}' \
+    > "${path}"
+}
+
+write_redacted_rch_diagnose_log() {
+  local path="$1"
+  local raw_output="$2"
+  local command_status="$3"
+  local selected_worker_hash_json="$4"
+
+  if ! printf '%s' "${raw_output}" | jq empty >/dev/null 2>&1; then
+    write_redacted_rch_invalid_log "${path}" "diagnose" "${command_status}" "${raw_output}"
+    return 1
+  fi
+
+  if ! printf '%s' "${raw_output}" | jq -c \
+    --arg command_status "${command_status}" \
+    --argjson selected_worker_hash "${selected_worker_hash_json}" \
+    '{
+      api_version:(.api_version // null),
+      command:(.command // "diagnose"),
+      success:(.success // null),
+      command_status:$command_status,
+      data:{
+        classification:(.data.classification // null),
+        tiers:((.data.tiers // []) | map({
+          tier:(.tier // null),
+          name:(.name // null),
+          decision:(.decision // null),
+          reason:(.reason // null)
+        })),
+        command:(.data.command // null),
+        normalized_command:(.data.normalized_command // null),
+        decision:{
+          would_intercept:(.data.decision.would_intercept // false),
+          reason:(.data.decision.reason // null)
+        },
+        threshold:{
+          value:(.data.threshold.value // null),
+          source:"redacted"
+        },
+        daemon:{
+          socket_exists:(.data.daemon.socket_exists // null),
+          reachable:(.data.daemon.reachable // null),
+          status:(.data.daemon.status // null),
+          version:(.data.daemon.version // null),
+          uptime_seconds:(.data.daemon.uptime_seconds // null)
+        },
+        required_runtime:(.data.required_runtime // null),
+        local_capabilities:(.data.local_capabilities // {}),
+        capabilities_warning_count:((.data.capabilities_warnings // []) | length),
+        worker_selection:{
+          estimated_cores:(.data.worker_selection.estimated_cores // null),
+          worker_hash:$selected_worker_hash,
+          reason:{
+            no_admissible_workers:(.data.worker_selection.reason.no_admissible_workers // null)
+          }
+        },
+        dry_run:{
+          would_offload:(.data.dry_run.would_offload // null),
+          reason:(.data.dry_run.reason // null),
+          pipeline_steps:((.data.dry_run.pipeline_steps // []) | map({
+            step:(.step // null),
+            name:(.name // null),
+            description:(.description // null)
+          }))
+        }
+      },
+      cleanup_result:"not_applicable"
+    }' > "${path}"; then
+    write_redacted_rch_invalid_log "${path}" "diagnose" "${command_status}" "${raw_output}"
+    return 1
+  fi
+}
+
+write_redacted_rch_status_log() {
+  local path="$1"
+  local raw_output="$2"
+  local command_status="$3"
+
+  if ! printf '%s' "${raw_output}" | jq empty >/dev/null 2>&1; then
+    write_redacted_rch_invalid_log "${path}" "status" "${command_status}" "${raw_output}"
+    return 1
+  fi
+
+  if ! printf '%s' "${raw_output}" | jq -c \
+    --arg command_status "${command_status}" \
+    '{
+      api_version:(.api_version // null),
+      command:(.command // "status"),
+      success:(.success // null),
+      command_status:$command_status,
+      data:{
+        schema_version:(.data.schema_version // null),
+        posture:(.data.posture // null),
+        posture_description:(.data.posture_description // null),
+        daemon:{
+          daemon:{
+            version:(.data.daemon.daemon.version // null),
+            uptime_secs:(.data.daemon.daemon.uptime_secs // null),
+            workers_total:(.data.daemon.daemon.workers_total // null),
+            workers_healthy:(.data.daemon.daemon.workers_healthy // null),
+            slots_total:(.data.daemon.daemon.slots_total // null),
+            slots_available:(.data.daemon.daemon.slots_available // null)
+          },
+          workers:((.data.daemon.workers // []) | map({
+            status:(.status // null),
+            circuit_state:(.circuit_state // null),
+            used_slots:(.used_slots // 0),
+            total_slots:(.total_slots // 0),
+            speed_score:(.speed_score // null),
+            consecutive_failures:(.consecutive_failures // 0),
+            recovery_in_secs:(.recovery_in_secs // null),
+            pressure_state:(.pressure_state // null),
+            pressure_confidence:(.pressure_confidence // null)
+          })),
+          jobs_summary:{
+            total:((.data.daemon.jobs // []) | length)
+          }
+        },
+        recommendations_count:((.data.recommendations // []) | length)
+      },
+      cleanup_result:"not_applicable"
+    }' > "${path}"; then
+    write_redacted_rch_invalid_log "${path}" "status" "${command_status}" "${raw_output}"
+    return 1
+  fi
+}
+
 append_rch_capacity_preflight() {
   local step="rch_capacity_preflight"
   local cargo_probe="cargo test --locked -p fcp-crypto-pq --test representation_profile -- --nocapture"
@@ -258,21 +397,37 @@ append_rch_capacity_preflight() {
   local diagnose_json_ok="true"
   local status_json_ok="true"
   local selected_worker
+  local selected_worker_present_json="false"
   local selected_worker_hash_json="null"
+  local diagnose_output=""
+  local status_output=""
   local details
   local decision
 
-  if ! "${RCH_BIN}" --json diagnose --dry-run "${cargo_probe}" >"${diagnose_log}" 2>&1; then
+  if ! diagnose_output="$("${RCH_BIN}" --json diagnose --dry-run "${cargo_probe}" 2>&1)"; then
     diagnose_command_status="failed"
   fi
-  if ! "${RCH_BIN}" --json status --workers --jobs >"${status_log}" 2>&1; then
+  if ! status_output="$("${RCH_BIN}" --json status --workers --jobs 2>&1)"; then
     status_command_status="failed"
   fi
 
-  if ! jq empty "${diagnose_log}" >/dev/null 2>&1; then
+  if printf '%s' "${diagnose_output}" | jq empty >/dev/null 2>&1; then
+    selected_worker="$(printf '%s' "${diagnose_output}" | jq -r '(.data.worker_selection.worker // empty) | if type == "string" then . else tojson end')"
+    if [ -n "${selected_worker}" ]; then
+      selected_worker_present_json="true"
+      selected_worker_hash_json="$(jq -cn --arg hash "sha256:$(hash_text "${selected_worker}")" '$hash')"
+    fi
+  else
     diagnose_json_ok="false"
   fi
-  if ! jq empty "${status_log}" >/dev/null 2>&1; then
+  if ! printf '%s' "${status_output}" | jq empty >/dev/null 2>&1; then
+    status_json_ok="false"
+  fi
+
+  if ! write_redacted_rch_diagnose_log "${diagnose_log}" "${diagnose_output}" "${diagnose_command_status}" "${selected_worker_hash_json}"; then
+    diagnose_json_ok="false"
+  fi
+  if ! write_redacted_rch_status_log "${status_log}" "${status_output}" "${status_command_status}"; then
     status_json_ok="false"
   fi
 
@@ -294,11 +449,6 @@ append_rch_capacity_preflight() {
       '{preflight_command:"rch --json diagnose --dry-run <cargo probe>",cargo_probe:$cargo_probe,remote_required:($remote_required == "1"),decision:"proof_infra_blocked",diagnose_command_status:$diagnose_command_status,status_command_status:$status_command_status,diagnose_json_ok:$diagnose_json_ok,status_json_ok:$status_json_ok,diagnose_log_artifact:$diagnose_log_artifact,diagnose_log_hash:$diagnose_log_hash,status_log_artifact:$status_log_artifact,status_log_hash:$status_log_hash,cleanup_result:"not_applicable"}')"
   fi
 
-  selected_worker="$(jq -r '(.data.worker_selection.worker // empty) | if type == "string" then . else tojson end' "${diagnose_log}")"
-  if [ -n "${selected_worker}" ]; then
-    selected_worker_hash_json="$(jq -cn --arg hash "sha256:$(hash_text "${selected_worker}")" '$hash')"
-  fi
-
   details="$(jq -cn \
     --slurpfile diagnose "${diagnose_log}" \
     --slurpfile status "${status_log}" \
@@ -308,6 +458,7 @@ append_rch_capacity_preflight() {
     --arg diagnose_log_hash "sha256:$(sha256_file "${diagnose_log}")" \
     --arg status_log_artifact "target/fcp-crypto-pq/${RUN_ID}.${step}.status.json" \
     --arg status_log_hash "sha256:$(sha256_file "${status_log}")" \
+    --argjson selected_worker_present "${selected_worker_present_json}" \
     --argjson selected_worker_hash "${selected_worker_hash_json}" \
     '
       def string_or_json:
@@ -317,7 +468,6 @@ append_rch_capacity_preflight() {
         end;
       ($diagnose[0].data // {}) as $d |
       ($status[0].data // {}) as $s |
-      ($d.worker_selection.worker // null) as $worker |
       ($d.worker_selection.reason.no_admissible_workers // $d.worker_selection.reason // null) as $no_admissible |
       ($d.decision.would_intercept // false) as $would_intercept |
       ($s.daemon.workers // []) as $workers |
@@ -325,7 +475,7 @@ append_rch_capacity_preflight() {
         preflight_command:"rch --json diagnose --dry-run <cargo probe>",
         cargo_probe:$cargo_probe,
         remote_required:($remote_required == "1"),
-        decision:(if $would_intercept and ($worker != null) then "admissible" else "proof_infra_blocked" end),
+        decision:(if $would_intercept and $selected_worker_present then "admissible" else "proof_infra_blocked" end),
         would_intercept:$would_intercept,
         selected_worker_hash:$selected_worker_hash,
         no_admissible_reason:($no_admissible | string_or_json),

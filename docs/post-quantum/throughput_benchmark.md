@@ -376,6 +376,11 @@ sanitized capacity counts. A reusable passing gauntlet artifact must have
 `decision:"admissible"`, `would_intercept:true`, a hashed selected worker, and
 remote-required capacity evidence before any command-run proof can satisfy the
 self-contract.
+The sidecar diagnostic/status logs are redacted before they are written under
+`target/fcp-crypto-pq`: local config and socket paths, raw worker identifiers,
+worker hosts/IPs, SSH remediation commands, and free-form worker warning text
+are omitted. The JSONL records cite hashes of those sanitized sidecars, so a
+capacity-blocker artifact can be shared without leaking operator topology.
 
 That script is the highest-level command bundle for the KYOPB lattice proof
 chain. It runs the Lean ID checks, Rust/Lean correspondence fixtures,
@@ -607,6 +612,10 @@ Private path markers, raw-label markers, secret material markers, provider-body
 markers, and reviewer-contact markers are checked case-insensitively, so
 normalized lowercase macOS or Windows user paths and differently cased payload
 labels cannot pass as reusable JSONL evidence.
+RCH capacity sidecars follow the same posture even on early failure: they retain
+only aggregate worker state, pressure counts, selected-worker hashes, status
+labels, and command classification, never raw worker topology or local daemon
+paths.
 Because the summary record is appended after the normal redaction scan, the
 script scans the finished JSONL again and requires a `final_redaction_scan`
 pass record before printing the artifact path and final hash. The self-contract

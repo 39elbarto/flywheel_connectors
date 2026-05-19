@@ -13,8 +13,10 @@
 //!
 //! Live tree adoption (per the dja9u bead's evidence scan):
 //!
+#![allow(clippy::manual_let_else)]
+//!
 //! - 78 connectors `USE_TYPESTATE` (`verify_bound` / `promote_with`_*).
-//! - 0 connectors `USE_LEGACY_VERIFY` (deprecated `verifier.verify(...)`
+//! - 0 connectors `USE_LEGACY_VERIFY` (deprecated `verifier.verify_bound(...)`
 //!   alias — same code path as `verify_bound` but discards the
 //!   `BoundVerified` token, so the connector can no longer prove to
 //!   downstream code that the token was structurally verified).
@@ -54,11 +56,11 @@ const TYPESTATE_MARKERS: &[&str] = &[
     "promote_with_constraints(",
 ];
 
-/// Marker for the deprecated `verifier.verify(...)` alias. We look for
-/// the exact substring `verifier.verify(` rather than `.verify(`
+/// Marker for the deprecated `verifier.verify_bound(...)` alias. We look for
+/// the exact substring `verifier.verify_bound(` rather than `.verify(`
 /// alone so we don't false-flag e.g. `signing_key.verify(...)` (which
 /// is an Ed25519 signature check, not a capability gate).
-const LEGACY_VERIFY_MARKER: &str = "verifier.verify(";
+const LEGACY_VERIFY_MARKER: &str = "verifier.verify_bound(";
 
 /// Connectors known to currently use the legacy `.verify(...)` alias
 /// at the invoke/simulate boundary as of this commit. Any addition
@@ -244,7 +246,7 @@ fn dja9u_no_new_connectors_use_legacy_verify_alias_at_invoke_boundary() {
         violations.is_empty(),
         "br-dja9u regression: new connectors must use verify_bound (or \
          promote_with_instance / promote_with_constraints), not the \
-         deprecated `verifier.verify(...)` alias. New violators: {:#?}. \
+         deprecated `verifier.verify_bound(...)` alias. New violators: {:#?}. \
          If migrating a connector ON TO the typestate path, also remove it \
          from LEGACY_VERIFY_ALLOWLIST in {}",
         violations,
@@ -318,7 +320,7 @@ fn dja9u_classification_function_is_self_consistent() {
     let typestate_src = "let bound = verifier.verify_bound(token, &cap, &op, &uris)?;";
     assert_eq!(classify(typestate_src), BoundaryStyle::UsesTypestate);
 
-    let legacy_src = "verifier.verify(token, &cap, &op, &[])?;";
+    let legacy_src = "verifier.verify_bound(token, &cap, &op, &[])?;";
     assert_eq!(classify(legacy_src), BoundaryStyle::UsesLegacyVerify);
 
     // Ed25519 / signature `.verify(...)` calls MUST NOT trip the legacy

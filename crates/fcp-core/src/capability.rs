@@ -2792,7 +2792,7 @@ impl CapabilityVerifier {
             // loop iterates zero times and the allow-list silently
             // passes — a resource-scoped token ends up usable for
             // arbitrary resources. All ~76 connector call sites
-            // currently invoke `verifier.verify(.., &[])` regardless of
+            // currently invoke `verifier.verify_bound(.., &[])` regardless of
             // whether the operation targets a specific resource, so a
             // host that issues `resource_allow = ["notion://page/123"]`
             // cannot rely on the scope being enforced downstream. A
@@ -3604,7 +3604,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, expires)
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .expect("Failed to sign token");
 
@@ -3639,7 +3639,7 @@ mod tests {
                 .operations(&["op.test"])
                 .issuer("node:primary")
                 .validity(now, now + Duration::hours(1))
-                .constraints_cbor(&test_constraints_cbor())
+                .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
                 .sign(&signing_key)
                 .unwrap(),
         );
@@ -3670,7 +3670,7 @@ mod tests {
                 .operations(&["op.test"])
                 .issuer("node:primary")
                 .validity(now, now + Duration::hours(1))
-                .constraints_cbor(&test_constraints_cbor())
+                .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
                 .sign(&signing_key)
                 .unwrap(),
         );
@@ -3701,7 +3701,7 @@ mod tests {
                 .operations(&["op.test"])
                 .issuer("node:primary")
                 .validity(now, now + Duration::hours(1))
-                .constraints_cbor(&test_constraints_cbor())
+                .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
                 .sign(&signing_key)
                 .unwrap(),
         );
@@ -3720,7 +3720,7 @@ mod tests {
         // resource_allow pattern must not silently pass when the caller
         // provides no resource URIs. Historically the allow-list loop
         // iterated zero times, so a scoped token was usable for arbitrary
-        // resources — the ~76 `verifier.verify(.., &[])` call sites in
+        // resources — the ~76 `verifier.verify_bound(.., &[])` call sites in
         // the connector tree would all benefit from this guard.
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -3734,9 +3734,9 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor_with_resource_allow(vec![
-                "notion://page/123".into(),
-            ]))
+            .try_constraints_cbor(&test_constraints_cbor_with_resource_allow(vec![
+                "notion://page/123".to_string(),
+            ])).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
         let token = CapabilityToken::from_raw(cose_token);
@@ -3769,9 +3769,9 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor_with_resource_allow(vec![
-                "notion://page/*".into(),
-            ]))
+            .try_constraints_cbor(&test_constraints_cbor_with_resource_allow(vec![
+                "notion://page/*".to_string(),
+            ])).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
         let token = CapabilityToken::from_raw(cose_token);
@@ -3803,7 +3803,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
         let token = CapabilityToken::from_raw(cose_token);
@@ -3831,7 +3831,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -3860,7 +3860,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -3890,7 +3890,7 @@ mod tests {
                 .operations(&["op.test"])
                 .issuer("node:primary")
                 .validity(now, now + Duration::hours(1))
-                .constraints_cbor(&test_constraints_cbor())
+                .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
                 .sign(&signing_key)
                 .unwrap(),
         );
@@ -3926,7 +3926,7 @@ mod tests {
                 .operations(&["op.test"])
                 .issuer("node:primary")
                 .validity(now, now + Duration::hours(1))
-                .constraints_cbor(&test_constraints_cbor())
+                .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
                 .sign(&signing_key)
                 .unwrap(),
         );
@@ -3962,7 +3962,7 @@ mod tests {
                 now - Duration::hours(2),
                 now - Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS + 1),
             )
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -3993,7 +3993,7 @@ mod tests {
                 now - Duration::hours(1),
                 now - Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS - 1),
             )
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -4025,7 +4025,7 @@ mod tests {
                 now + Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS - 1),
                 now + Duration::hours(1),
             )
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -4057,7 +4057,7 @@ mod tests {
                 now + Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS + 1),
                 now + Duration::hours(1),
             )
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -4094,7 +4094,7 @@ mod tests {
             .not_before(now)
             .expiration(now + Duration::hours(1))
             .operations(&["op.test"])
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             // Set INSTANCE_ID as an Integer instead of Text — pre-fix this
             // would let any verifier accept the token regardless of its
             // configured instance_id.
@@ -4139,7 +4139,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .target_instance(instance_id.as_str())
             .sign(&signing_key)
             .unwrap();
@@ -4176,7 +4176,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .target_instance(token_instance.as_str())
             .sign(&signing_key)
             .unwrap();
@@ -4210,7 +4210,7 @@ mod tests {
             .not_before(now)
             .expiration(now + Duration::hours(1))
             .operations(&["op.test"])
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .custom(
                 fcp_crypto::cose::fcp2_claims::INSTANCE_ID,
                 ciborium::Value::Integer(0_i64.into()),
@@ -4247,7 +4247,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
         let token = CapabilityToken::from_raw(cose_token);
@@ -4283,7 +4283,7 @@ mod tests {
             .operations(&["op.test"]) // legacy-only shape
             .issued_at(now)
             .expiration(now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor());
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints");
         let cose_token = fcp_crypto::cose::CoseToken::sign(&signing_key, &claims).unwrap();
         let token = CapabilityToken::from_raw(cose_token);
 
@@ -4320,7 +4320,7 @@ mod tests {
             .zone_id("z:work")
             .issued_at(now)
             .expiration(now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .custom(fcp2_claims::GRANTS, grants)
             .custom(
                 fcp2_claims::SCHEMA_VERSION,
@@ -4367,7 +4367,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .target_instance(instance.as_str())
             .sign(&signing_key)
             .unwrap();
@@ -4387,7 +4387,7 @@ mod tests {
         let (token, pub_bytes, _instance, cap, op) = mk_token_with_instance();
         // Unbound verifier — verify_bound must refuse with a clear error.
         let verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
-        let err = verifier.verify_bound(token, &cap, &op, &[]).unwrap_err();
+        let err = verifier.verify(token, &cap, &op, &[]).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -4483,7 +4483,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
         let token = CapabilityToken::from_raw(cose);
@@ -4514,7 +4514,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
         let token = CapabilityToken::from_raw(cose);
@@ -4555,7 +4555,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .target_instance(instance.as_str())
             .sign(&signing_key)
             .unwrap();
@@ -6797,7 +6797,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -6884,7 +6884,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -6915,7 +6915,7 @@ mod tests {
             .operations(&["op.read"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -6943,7 +6943,7 @@ mod tests {
             .operations(&["op.raw"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -6956,7 +6956,7 @@ mod tests {
         let cap = CapabilityId::new("cap.raw").unwrap();
 
         // raw() also works on CryptographicallyVerified (verify consumes the unverified token)
-        let result = verifier.verify(unverified, &cap, &op, &[]).unwrap();
+        let result = verifier.verify_bound(unverified, &cap, &op, &[]).unwrap();
         let _raw_verified = result.raw().to_cbor().unwrap();
     }
 
@@ -6974,7 +6974,7 @@ mod tests {
             .operations(&["op.down"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7005,7 +7005,7 @@ mod tests {
             .operations(&["op.ref"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7042,7 +7042,7 @@ mod tests {
             .operations(&["op.clone"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7051,7 +7051,7 @@ mod tests {
         let op = OperationId::new("op.clone").unwrap();
         let cap = CapabilityId::new("cap.clone").unwrap();
 
-        let result = verifier.verify(token, &cap, &op, &[]).unwrap();
+        let result = verifier.verify_bound(token, &cap, &op, &[]).unwrap();
 
         // Clone a verified token - clone preserves CryptographicallyVerified state
         let cloned = result;
@@ -7078,7 +7078,7 @@ mod tests {
             .operations(&["op.raw"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7103,7 +7103,7 @@ mod tests {
             .operations(&["op.consume"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7113,7 +7113,7 @@ mod tests {
         let cap = CapabilityId::new("cap.consume").unwrap();
 
         // verify() takes ownership — `token` is moved here
-        let result = verifier.verify(token, &cap, &op, &[]).unwrap();
+        let result = verifier.verify_bound(token, &cap, &op, &[]).unwrap();
 
         // `token` cannot be used after this point (compiler enforces)
         // CryptographicallyVerified token works:
@@ -7136,7 +7136,7 @@ mod tests {
             .operations(&["op.noncon"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7151,7 +7151,7 @@ mod tests {
 
         // Token is still usable — can call raw() or verify() again
         let _raw = token.raw().to_cbor().unwrap();
-        let result = verifier.verify(token, &cap, &op, &[]).unwrap();
+        let result = verifier.verify_bound(token, &cap, &op, &[]).unwrap();
         assert_eq!(result.claims().get_zone_id(), Some("z:work"));
     }
 
@@ -7170,7 +7170,7 @@ mod tests {
             .operations(&["op.serde"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7180,7 +7180,7 @@ mod tests {
         let cap = CapabilityId::new("cap.serde").unwrap();
 
         // Verify first, then serialize the verified token
-        let result = verifier.verify(token, &cap, &op, &[]).unwrap();
+        let result = verifier.verify_bound(token, &cap, &op, &[]).unwrap();
         let bytes = result.raw().to_cbor().unwrap();
 
         // Deserialize produces Unverified, not CryptographicallyVerified
@@ -7188,7 +7188,7 @@ mod tests {
         let deserialized: CapabilityToken<Unverified> = CapabilityToken::from_raw(raw);
 
         // Must verify again to access claims
-        let re_verified = verifier.verify(deserialized, &cap, &op, &[]).unwrap();
+        let re_verified = verifier.verify_bound(deserialized, &cap, &op, &[]).unwrap();
         assert_eq!(re_verified.claims().get_capability_id(), Some("cap.serde"));
     }
 
@@ -7208,7 +7208,7 @@ mod tests {
             .operations(&["op.expired"])
             .issuer("node:primary")
             .validity(now - Duration::hours(2), now - Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7217,7 +7217,7 @@ mod tests {
         let op = OperationId::new("op.expired").unwrap();
         let cap = CapabilityId::new("cap.expired").unwrap();
 
-        let result = verifier.verify(token, &cap, &op, &[]);
+        let result = verifier.verify_bound(token, &cap, &op, &[]);
         assert!(matches!(result, Err(FcpError::TokenExpired)));
     }
 
@@ -7236,7 +7236,7 @@ mod tests {
             .operations(&["op.zone"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7246,7 +7246,7 @@ mod tests {
         let op = OperationId::new("op.zone").unwrap();
         let cap = CapabilityId::new("cap.zone").unwrap();
 
-        let result = verifier.verify(token, &cap, &op, &[]);
+        let result = verifier.verify_bound(token, &cap, &op, &[]);
         assert!(matches!(result, Err(FcpError::ZoneViolation { .. })));
     }
 
@@ -7265,7 +7265,7 @@ mod tests {
             .operations(&["op.sig"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor()).expect("valid constraints")
             .sign(&signing_key)
             .unwrap();
 
@@ -7275,7 +7275,7 @@ mod tests {
         let op = OperationId::new("op.sig").unwrap();
         let cap = CapabilityId::new("cap.sig").unwrap();
 
-        let result = verifier.verify(token, &cap, &op, &[]);
+        let result = verifier.verify_bound(token, &cap, &op, &[]);
         assert!(matches!(result, Err(FcpError::InvalidSignature)));
     }
 

@@ -9,6 +9,8 @@
 //! passes a missing-capability request through to dispatch, that is a
 //! default-deny regression.
 
+#![allow(clippy::needless_pass_by_value)]
+
 use fcp_host::{
     EnforcementContext, EnforcementContextBuilder, EnforcementDecision, EnforcementPipeline,
     PipelineOutcome,

@@ -1,3 +1,5 @@
+#![allow(clippy::map_unwrap_or, clippy::too_many_lines)]
+
 use fcp_imessage::BlueBubblesConnector;
 use fcp_prelude::{FcpConnector, IdempotencyClass, RiskLevel, SafetyTier};
 use serde_json::Value;

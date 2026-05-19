@@ -1975,8 +1975,7 @@ mod tests {
                 ..
             } => (object_id, snapshot_object_id),
             ConnectorStateAppendOutcome::Conflict { .. } => {
-                assert!(false, "unexpected conflict");
-                (ObjectId::from_bytes([0; 32]), None)
+                panic!("unexpected conflict");
             }
         }
     }
@@ -2406,7 +2405,7 @@ mod tests {
                 assert_eq!(canonical_seq, Some(0));
             }
             ConnectorStateAppendOutcome::Committed { .. } => {
-                assert!(false, "expected conflict");
+                panic!("expected conflict");
             }
         }
     }

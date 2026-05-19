@@ -459,7 +459,11 @@ mod tests {
     }
 
     fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        bytes.iter().fold(String::new(), |mut acc, byte| {
+            use std::fmt::Write;
+            write!(acc, "{byte:02x}").unwrap();
+            acc
+        })
     }
 
     #[test]

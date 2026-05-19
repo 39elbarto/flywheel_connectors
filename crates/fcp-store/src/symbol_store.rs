@@ -997,6 +997,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn run_symbol_store_concurrency_case(worker_count: usize, ops: Vec<SymbolStoreConcurrencyOp>) {
         let store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig {
             max_bytes: 4 * 1024 * 1024,
@@ -1025,8 +1026,7 @@ mod tests {
                     for op in worker_ops {
                         apply_symbol_store_concurrency_op(&worker_store, op).await;
                     }
-                })
-                .map(|()| ());
+                });
                 worker_done
                     .send((worker, result))
                     .expect("send worker result");

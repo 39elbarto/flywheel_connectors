@@ -222,14 +222,16 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
-The tracked verifier is `scripts/e2e/github_connector_verification.sh`. The closeout surface is the verifier, crate-local test suite, and direct `rch` proof commands.
+The tracked verifier is `scripts/e2e/github_connector_verification.sh`. The closeout surface is the verifier, crate-local test suite, and fail-closed `fwc proof run` evidence for Cargo-backed `rch` lanes.
 
 The verification surface captures:
 
 - runtime operation inventory and policy metadata
 - deterministic WireMock coverage for GitHub API paths
 - auth, endpoint policy, provider error, webhook, lifecycle, simulation, and introspection tests
-- formatting, check, test, and clippy proof through `rch`
+- Cargo check, test, conformance, and clippy proof through `fwc proof run` with accepted remote `rch` evidence
+- formatting as a source-state `rch` check that is not accepted remote Cargo proof
+- proof artifacts under `${OUT_ROOT}/proof/*.proof.json` and `${OUT_ROOT}/proof/*.rch_remote_proof.jsonl`
 - UBS on changed files before commit
 
 Run the tracked verifier first:
@@ -237,6 +239,14 @@ Run the tracked verifier first:
 ```bash
 scripts/e2e/github_connector_verification.sh
 ```
+
+`PROOF_GOVERNOR=1` is the default. If the installed `fwc` is stale or does not support `proof run`, point the verifier at the workspace-built binary:
+
+```bash
+FWC_BIN=/path/to/flywheel_connectors/target/debug/fwc scripts/e2e/github_connector_verification.sh
+```
+
+Only `accepted_remote_proof` is green for Cargo-backed closeout. `refused_local_fallback`, `infra_blocked`, `remote_command_failed`, missing proof, or local-only `rch` output keep the bead open and must not be described as PROVEN evidence.
 
 ## Operator Guidance
 
@@ -269,7 +279,7 @@ scripts/e2e/github_connector_verification.sh
 
 **Rerun commands**:
 
-- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-github-readme cargo check -p fcp-github --all-targets`
-- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-github-readme cargo test -p fcp-github --tests -- --nocapture`
-- `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-github-readme cargo clippy -p fcp-github --all-targets --no-deps -- -D warnings`
+- `PROOF_GOVERNOR=1 scripts/e2e/github_connector_verification.sh`
+- `FWC_BIN=/path/to/flywheel_connectors/target/debug/fwc PROOF_GOVERNOR=1 scripts/e2e/github_connector_verification.sh`
+- `RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-github-readme cargo fmt -p fcp-github -- --check`
 - `ubs connectors/github/README.md`

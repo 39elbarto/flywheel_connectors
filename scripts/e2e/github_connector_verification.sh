@@ -11,9 +11,17 @@ RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
 GITHUB_RUN_LIVE_TESTS="${GITHUB_RUN_LIVE_TESTS:-0}"
 REPO_TOOLCHAIN="${REPO_TOOLCHAIN:-nightly-2026-02-19}"
 REMOTE_RUNNER="rch:remote-required"
+PROOF_GOVERNOR="${PROOF_GOVERNOR:-1}"
+if [[ -z "${FWC_BIN:-}" ]]; then
+  if [[ -x "${REPO_ROOT}/target/debug/fwc" ]]; then
+    FWC_BIN="${REPO_ROOT}/target/debug/fwc"
+  else
+    FWC_BIN="fwc"
+  fi
+fi
 export RCH_FORCE_REMOTE=1
 
-mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence"
+mkdir -p "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence" "${OUT_ROOT}/proof"
 
 OVERALL_STATUS="passed"
 EXIT_CODE=0
@@ -49,12 +57,125 @@ classify_failure() {
   fi
 }
 
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required command: $1" >&2
+    return 1
+  fi
+}
+
 json_array_from_args() {
   if [[ $# -eq 0 ]]; then
     printf '[]'
     return
   fi
   printf '%s\n' "$@" | jq -R . | jq -s .
+}
+
+write_proof_corpus() {
+  local name="$1"
+  local corpus_path="$2"
+  shift 2
+  local claim_key="github-connector-verifier-${name}"
+  local argv_json
+  argv_json="$(json_array_from_args "$@")"
+  jq -n \
+    --arg claim_key "${claim_key}" \
+    --arg purpose "Run GitHub connector verifier step ${name} through the fail-closed rch proof governor." \
+    --argjson rerun_argv "${argv_json}" \
+    '{
+      schema: "fcp.proof-graph-indexer-corpus.v1",
+      verification_scripts: [
+        {
+          claim_key: $claim_key,
+          script_path: "scripts/e2e/github_connector_verification.sh",
+          purpose: $purpose,
+          rerun_argv: $rerun_argv,
+          required_env_keys: [],
+          source: {
+            source_id: "github.connector.verifier",
+            path: "scripts/e2e/github_connector_verification.sh",
+            line: 1
+          }
+        }
+      ]
+    }' >"${corpus_path}"
+}
+
+governor_step_status() {
+  local classification="$1"
+  case "${classification}" in
+    accepted_remote_proof)
+      echo "passed"
+      ;;
+    infra_blocked | refused_local_fallback)
+      echo "infra_blocked"
+      ;;
+    remote_command_failed | not_proof | failed_closed | missing)
+      echo "failed"
+      ;;
+    *)
+      echo "failed"
+      ;;
+  esac
+}
+
+governor_classification_from_proof() {
+  local proof_json="$1"
+  local log_path="$2"
+  local classification rch_summary_line
+
+  if ! jq -e . "${proof_json}" >/dev/null 2>>"${log_path}"; then
+    if grep -Eqi 'unknown command|not a valid fwc command|Missing required command' "${log_path}" "${proof_json}" 2>/dev/null; then
+      echo "infra_blocked"
+    else
+      echo "failed_closed"
+    fi
+    return
+  fi
+
+  classification="$(jq -r '
+    if .status == "error"
+      and (
+        .error.type == "unknown-command"
+        or ((.error.message // "") | test("not a valid fwc command"))
+      )
+    then
+      "infra_blocked"
+    else
+      .execution.rch_remote_proof.classification_label // "missing"
+    end
+  ' "${proof_json}" 2>>"${log_path}" || echo missing)"
+  rch_summary_line="$(jq -r '.execution.rch_remote_proof.evidence.rch_summary_line // ""' "${proof_json}" 2>>"${log_path}" || true)"
+  if [[ "${rch_summary_line}" == *"remote required; refusing local fallback"* ]]; then
+    echo "refused_local_fallback"
+  else
+    echo "${classification}"
+  fi
+}
+
+write_normalized_proof_jsonl() {
+  local classification="$1"
+  local proof_json="$2"
+  local proof_jsonl="$3"
+  local log_path="$4"
+
+  if [[ "${classification}" == "refused_local_fallback" ]]; then
+    jq -c '
+      (.execution.rch_remote_proof.jsonl_record // empty) as $record
+      | if $record == "" then
+          empty
+        else
+          ($record | fromjson)
+          | .worker_id = null
+          | .selector_reason = "local_fallback_refused"
+          | .blocker_reason = "local_fallback_refused"
+          | .exit_kind = {state: "blocked"}
+        end
+    ' "${proof_json}" >"${proof_jsonl}" 2>>"${log_path}" || true
+  else
+    jq -r '.execution.rch_remote_proof.jsonl_record // empty' "${proof_json}" >"${proof_jsonl}" 2>>"${log_path}" || true
+  fi
 }
 
 record_step() {
@@ -93,6 +214,12 @@ record_step() {
     }' >>"${STATUS_JSONL}"
 }
 
+rch_remote_summary_present() {
+  local log_path="$1"
+  grep -E '^\[RCH\][[:space:]]+remote[[:space:]]+' "${log_path}" \
+    | grep -Ev '^\[RCH\][[:space:]]+remote[[:space:]]+required([;[:space:]]|$)' >/dev/null
+}
+
 command_uses_rch_exec() {
   local previous=""
   for arg in "$@"; do
@@ -113,7 +240,7 @@ require_rch_remote_proof() {
     return 0
   fi
 
-  if grep -Fq "[RCH] remote" "${log_path}"; then
+  if rch_remote_summary_present "${log_path}"; then
     return 0
   fi
 
@@ -238,6 +365,11 @@ run_rch_cargo_step() {
   local name="$1"
   shift
 
+  if [[ "${PROOF_GOVERNOR}" == "1" ]]; then
+    run_governed_rch_cargo_step "${name}" "$@"
+    return
+  fi
+
   run_logged "${name}" env \
     RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" \
     RCH_FORCE_REMOTE=1 \
@@ -247,6 +379,53 @@ run_rch_cargo_step() {
     CARGO_TARGET_DIR="${TARGET_DIR}" \
     CARGO_INCREMENTAL=0 \
     "$@"
+}
+
+run_governed_rch_cargo_step() {
+  local name="$1"
+  shift
+  local corpus_path="${OUT_ROOT}/proof/${name}.corpus.json"
+  local proof_json="${OUT_ROOT}/proof/${name}.proof.json"
+  local proof_jsonl="${OUT_ROOT}/proof/${name}.rch_remote_proof.jsonl"
+  local log_path="${OUT_ROOT}/logs/${name}.log"
+  local claim_key="github-connector-verifier-${name}"
+  local start_seconds end_seconds duration_ms rc classification status
+
+  echo "[github-verification] ${name}: fwc proof run ${claim_key} --execute" >&2
+  start_seconds="$(date -u +%s)"
+  rc=0
+  if ! require_cmd jq >"${log_path}" 2>&1; then
+    rc=1
+    classification="infra_blocked"
+  elif ! require_cmd "${FWC_BIN}" >>"${log_path}" 2>&1; then
+    rc=1
+    classification="infra_blocked"
+  else
+    # shellcheck disable=SC2129
+    write_proof_corpus "${name}" "${corpus_path}" "RUSTUP_TOOLCHAIN=${REPO_TOOLCHAIN}" "$@" >>"${log_path}" 2>&1
+    (
+      cd "${REPO_ROOT}" || exit
+      "${FWC_BIN}" --json proof run "${claim_key}" --corpus "${corpus_path}" --execute
+    ) >"${proof_json}" 2>>"${log_path}"
+    rc="$?"
+    cat "${proof_json}" >>"${log_path}"
+    classification="$(governor_classification_from_proof "${proof_json}" "${log_path}")"
+    write_normalized_proof_jsonl "${classification}" "${proof_json}" "${proof_jsonl}" "${log_path}"
+  fi
+
+  status="$(governor_step_status "${classification}")"
+  if [[ "${status}" != "passed" ]]; then
+    promote_status "${status}"
+  fi
+  end_seconds="$(date -u +%s)"
+  duration_ms="$(((end_seconds - start_seconds) * 1000))"
+  record_step \
+    "${name}" \
+    "${status}" \
+    "${duration_ms}" \
+    "${log_path}" \
+    "${FWC_BIN}" --json proof run "${claim_key}" --corpus "${corpus_path}" --execute
+  return "${rc}"
 }
 
 run_rch_format_step() {
@@ -352,7 +531,7 @@ run_rch_cargo_step \
   clippy \
   cargo clippy -p fcp-github --all-targets -- -D warnings
 
-if grep -R -E 'gh[pousr]_[[:alnum:]_]+|github_pat_[[:alnum:]_]+|Authorization: Bearer|X-FCP-Credential-ID|client_secret|webhook_secret|GITHUB_TOKEN' "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence" >/dev/null 2>&1; then
+if grep -R -E 'gh[pousr]_[[:alnum:]_]+|github_pat_[[:alnum:]_]+|Authorization: Bearer|X-FCP-Credential-ID|client_secret|webhook_secret|GITHUB_TOKEN' "${OUT_ROOT}/logs" "${OUT_ROOT}/evidence" "${OUT_ROOT}/proof" >/dev/null 2>&1; then
   echo "[github-verification] redaction scan failed" >&2
   promote_status failed
   record_step redaction_scan failed 0 "${OUT_ROOT}/logs/redaction_scan.log" grep -R -E redaction-patterns "${OUT_ROOT}"
@@ -372,6 +551,10 @@ cat >"${OUT_ROOT}/environment.json" <<EOF
   "runner": "${REMOTE_RUNNER}",
   "toolchain": "${REPO_TOOLCHAIN}",
   "rch_require_remote": "${RCH_REQUIRE_REMOTE}",
+  "proof_governor_enabled": "${PROOF_GOVERNOR}",
+  "proof_governor": "Cargo-backed verifier steps run through fwc proof run; accepted_remote_proof is the only passing rch proof classification. refused_local_fallback and infra_blocked keep the verifier non-green. format_check is a source-state check, not accepted remote Cargo proof.",
+  "fwc_bin": "${FWC_BIN}",
+  "proof_artifacts": "${OUT_ROOT}/proof",
   "github_run_live_tests": "${GITHUB_RUN_LIVE_TESTS}",
   "fixture_mode": "deterministic connector fixtures by default; live GitHub sandbox tests are opt-in",
   "redaction": "logs and JSONL must not contain GitHub tokens, bearer authorization headers, credential IDs, OAuth client secrets, webhook secrets, or provider payload bodies"
@@ -388,6 +571,8 @@ CARGO_TARGET_DIR="${TARGET_DIR}" \\
 RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" \\
 RCH_FORCE_REMOTE=1 \\
 REPO_TOOLCHAIN="${REPO_TOOLCHAIN}" \\
+PROOF_GOVERNOR="${PROOF_GOVERNOR}" \\
+FWC_BIN="${FWC_BIN}" \\
 GITHUB_RUN_LIVE_TESTS="${GITHUB_RUN_LIVE_TESTS}" \\
 scripts/e2e/github_connector_verification.sh
 EOF
@@ -398,12 +583,15 @@ cat >"${OUT_ROOT}/summary.json" <<EOF
   "run_id": "${RUN_ID}",
   "connector": "fcp-github",
   "status": "${OVERALL_STATUS}",
+  "overall_status": "${OVERALL_STATUS}",
   "exit_code": ${EXIT_CODE},
   "runner": "${REMOTE_RUNNER}",
   "artifacts_root": "${OUT_ROOT}",
   "artifacts": {
     "status_jsonl": "${STATUS_JSONL}",
     "graduation_gauntlet": "${OUT_ROOT}/evidence/graduation_gauntlet.jsonl",
+    "proof_governor_json": "${OUT_ROOT}/proof/*.proof.json",
+    "proof_governor_jsonl": "${OUT_ROOT}/proof/*.rch_remote_proof.jsonl",
     "environment": "${OUT_ROOT}/environment.json",
     "replay": "${OUT_ROOT}/replay.sh",
     "logs": "${OUT_ROOT}/logs"

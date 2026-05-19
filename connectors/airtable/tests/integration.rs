@@ -18,7 +18,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str, instance_id: &str) -> CapabilityToken {
     let now = Utc::now();
     let cap = match op {
         "airtable.create_record"
@@ -47,6 +47,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
+        .target_instance(instance_id)
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + chrono::Duration::hours(1))
@@ -766,6 +767,8 @@ async fn client_download_attachment_rejects_oversized_content_length() {
     let url = format!("{base_url}/attachment.bin");
     let result = client.download_attachment(&url).await;
 
+    println!("RESULT IS: {:?}", result);
+
     assert!(matches!(
         result.unwrap_err(),
         AirtableError::AttachmentTooLarge {
@@ -823,7 +826,7 @@ async fn invoke_download_attachment_rejects_disallowed_host() {
     .await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.download_attachment");
+    let capability = generate_valid_token(&signing_key, "airtable.download_attachment", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.download_attachment",
@@ -859,7 +862,7 @@ async fn invoke_list_bases_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.list_bases"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.list_bases");
+    let capability = generate_valid_token(&signing_key, "airtable.list_bases", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_bases",
@@ -904,7 +907,7 @@ async fn invoke_get_record_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.get_record"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.get_record");
+    let capability = generate_valid_token(&signing_key, "airtable.get_record", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.get_record",
@@ -990,7 +993,7 @@ async fn invoke_get_record_expands_linked_records_and_marks_missing_targets() {
     setup_handshake(&mut connector, &signing_key, &["airtable.get_record"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.get_record");
+    let capability = generate_valid_token(&signing_key, "airtable.get_record", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.get_record",
@@ -1051,7 +1054,7 @@ async fn invoke_list_tables_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.list_tables"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.list_tables");
+    let capability = generate_valid_token(&signing_key, "airtable.list_tables", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_tables",
@@ -1095,7 +1098,7 @@ async fn invoke_get_table_rejects_ambiguous_table_name() {
     setup_handshake(&mut connector, &signing_key, &["airtable.get_table"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.get_table");
+    let capability = generate_valid_token(&signing_key, "airtable.get_table", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.get_table",
@@ -1137,7 +1140,7 @@ async fn invoke_list_fields_resolves_ids_and_names() {
     setup_handshake(&mut connector, &signing_key, &["airtable.list_fields"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.list_fields");
+    let capability = generate_valid_token(&signing_key, "airtable.list_fields", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_fields",
@@ -1194,7 +1197,7 @@ async fn invoke_get_base_schema_marks_formula_and_system_fields_read_only() {
     setup_handshake(&mut connector, &signing_key, &["airtable.get_base_schema"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.get_base_schema");
+    let capability = generate_valid_token(&signing_key, "airtable.get_base_schema", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.get_base_schema",
@@ -1247,7 +1250,7 @@ async fn invoke_list_views_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.list_views"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.list_views");
+    let capability = generate_valid_token(&signing_key, "airtable.list_views", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_views",
@@ -1288,7 +1291,7 @@ async fn invoke_get_view_rejects_ambiguous_view_name() {
     setup_handshake(&mut connector, &signing_key, &["airtable.get_view"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.get_view");
+    let capability = generate_valid_token(&signing_key, "airtable.get_view", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.get_view",
@@ -1358,7 +1361,7 @@ async fn invoke_list_view_records_through_connector() {
     .await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.list_view_records");
+    let capability = generate_valid_token(&signing_key, "airtable.list_view_records", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_view_records",
@@ -1410,7 +1413,7 @@ async fn invoke_list_view_records_requires_fields() {
     .await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.list_view_records");
+    let capability = generate_valid_token(&signing_key, "airtable.list_view_records", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_view_records",
@@ -1453,7 +1456,7 @@ async fn invoke_list_records_rejects_control_chars_in_filter_formula() {
     setup_handshake(&mut connector, &signing_key, &["airtable.list_records"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.list_records");
+    let capability = generate_valid_token(&signing_key, "airtable.list_records", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_records",
@@ -1513,7 +1516,7 @@ async fn invoke_list_records_marks_formula_field_metadata_and_maps_formula_error
     setup_handshake(&mut connector, &signing_key, &["airtable.list_records"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.list_records");
+    let capability = generate_valid_token(&signing_key, "airtable.list_records", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_records",
@@ -1560,6 +1563,7 @@ async fn invoke_list_records_marks_formula_field_metadata_and_maps_formula_error
             "filterByFormula",
             "{Missing Field} = \"Alpha\"",
         ))
+        .and(bearer_token("pat_test_token_123"))
         .respond_with(ResponseTemplate::new(422).set_body_json(json!({
             "error": {
                 "type": "INVALID_REQUEST_UNKNOWN",
@@ -1578,6 +1582,8 @@ async fn invoke_list_records_marks_formula_field_metadata_and_maps_formula_error
     .await;
     setup_configure(&mut failing_connector, &failing_server.uri()).await;
 
+    let failing_capability = generate_valid_token(&signing_key, "airtable.list_records", failing_connector.instance_id());
+
     let failing_result = failing_connector
         .handle_invoke(json!({
             "operation": "airtable.list_records",
@@ -1586,9 +1592,11 @@ async fn invoke_list_records_marks_formula_field_metadata_and_maps_formula_error
                 "table_id": "tblTASK",
                 "filter_by_formula": "{Missing Field} = \"Alpha\""
             },
-            "capability_token": capability
+            "capability_token": failing_capability
         }))
         .await;
+
+    println!("FAILING RESULT IS: {failing_result:?}");
 
     assert!(matches!(
         failing_result,
@@ -1651,7 +1659,7 @@ async fn invoke_list_records_expands_linked_cycles_without_refetching_root() {
     setup_handshake(&mut connector, &signing_key, &["airtable.list_records"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.list_records");
+    let capability = generate_valid_token(&signing_key, "airtable.list_records", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_records",
@@ -1739,7 +1747,7 @@ async fn invoke_list_records_marks_truncated_linked_records_when_limit_is_exhaus
     setup_handshake(&mut connector, &signing_key, &["airtable.list_records"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.list_records");
+    let capability = generate_valid_token(&signing_key, "airtable.list_records", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_records",
@@ -1805,7 +1813,7 @@ async fn discovery_ops_reuse_schema_cache_within_ttl() {
     .await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let list_tables_capability = generate_valid_token(&signing_key, "airtable.list_tables");
+    let list_tables_capability = generate_valid_token(&signing_key, "airtable.list_tables", connector.instance_id());
     connector
         .handle_invoke(json!({
             "operation": "airtable.list_tables",
@@ -1815,7 +1823,7 @@ async fn discovery_ops_reuse_schema_cache_within_ttl() {
         .await
         .unwrap();
 
-    let list_fields_capability = generate_valid_token(&signing_key, "airtable.list_fields");
+    let list_fields_capability = generate_valid_token(&signing_key, "airtable.list_fields", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_fields",
@@ -1860,7 +1868,7 @@ async fn invoke_create_record_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.create_record"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.create_record");
+    let capability = generate_valid_token(&signing_key, "airtable.create_record", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.create_record",
@@ -1917,7 +1925,7 @@ async fn invoke_create_records_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.create_records"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.create_records");
+    let capability = generate_valid_token(&signing_key, "airtable.create_records", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.create_records",
@@ -1970,7 +1978,7 @@ async fn invoke_delete_record_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.delete_record"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.delete_record");
+    let capability = generate_valid_token(&signing_key, "airtable.delete_record", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.delete_record",
@@ -2020,7 +2028,7 @@ async fn invoke_update_records_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.update_records"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.update_records");
+    let capability = generate_valid_token(&signing_key, "airtable.update_records", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.update_records",
@@ -2087,7 +2095,7 @@ async fn invoke_upsert_records_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.upsert_records"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.upsert_records");
+    let capability = generate_valid_token(&signing_key, "airtable.upsert_records", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.upsert_records",
@@ -2144,7 +2152,7 @@ async fn invoke_delete_records_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.delete_records"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.delete_records");
+    let capability = generate_valid_token(&signing_key, "airtable.delete_records", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.delete_records",
@@ -2190,7 +2198,7 @@ async fn invoke_create_webhook_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.create_webhook"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.create_webhook");
+    let capability = generate_valid_token(&signing_key, "airtable.create_webhook", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.create_webhook",
@@ -2238,7 +2246,7 @@ async fn invoke_list_webhooks_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.list_webhooks"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.list_webhooks");
+    let capability = generate_valid_token(&signing_key, "airtable.list_webhooks", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_webhooks",
@@ -2273,7 +2281,7 @@ async fn invoke_delete_webhook_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.delete_webhook"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.delete_webhook");
+    let capability = generate_valid_token(&signing_key, "airtable.delete_webhook", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.delete_webhook",
@@ -2319,7 +2327,7 @@ async fn invoke_list_webhook_payloads_through_connector() {
     .await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.list_webhook_payloads");
+    let capability = generate_valid_token(&signing_key, "airtable.list_webhook_payloads", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_webhook_payloads",
@@ -2361,7 +2369,7 @@ async fn invoke_upsert_records_requires_merge_fields() {
     setup_handshake(&mut connector, &signing_key, &["airtable.upsert_records"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.upsert_records");
+    let capability = generate_valid_token(&signing_key, "airtable.upsert_records", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.upsert_records",
@@ -2391,7 +2399,7 @@ async fn invoke_wrong_capability_rejected() {
     setup_configure(&mut connector, "http://localhost:1").await;
 
     // Token is for airtable.read, but we're invoking a write operation
-    let capability = generate_valid_token(&signing_key, "airtable.read");
+    let capability = generate_valid_token(&signing_key, "airtable.read", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.create_record",
@@ -2415,7 +2423,7 @@ async fn invoke_unknown_operation_rejected() {
     setup_handshake(&mut connector, &signing_key, &["airtable.nonexistent"]).await;
     setup_configure(&mut connector, "http://localhost:1").await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.nonexistent");
+    let capability = generate_valid_token(&signing_key, "airtable.nonexistent", connector.instance_id());
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.nonexistent",
@@ -2441,7 +2449,7 @@ async fn invoke_missing_required_field_rejected() {
     setup_handshake(&mut connector, &signing_key, &["airtable.get_record"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let capability = generate_valid_token(&signing_key, "airtable.get_record");
+    let capability = generate_valid_token(&signing_key, "airtable.get_record", connector.instance_id());
     // Missing table_id and record_id
     let result = connector
         .handle_invoke(json!({

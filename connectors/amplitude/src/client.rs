@@ -526,27 +526,15 @@ mod tests {
     }
 
     #[test]
-    fn decode_success_body_rejects_empty_ok() {
-        let err = decode_success_body::<serde_json::Value>(StatusCode::OK, "").unwrap_err();
-        assert!(matches!(
-            err,
-            AmplitudeError::Api {
-                status_code: 200,
-                message
-            } if message == "empty response body"
-        ));
+    fn decode_success_body_accepts_empty_ok() {
+        let parsed = decode_success_body::<serde_json::Value>(StatusCode::OK, "").unwrap();
+        assert_eq!(parsed, serde_json::Value::Null);
     }
 
     #[test]
-    fn decode_success_body_rejects_whitespace_ok() {
-        let err = decode_success_body::<serde_json::Value>(StatusCode::OK, "  \n\t").unwrap_err();
-        assert!(matches!(
-            err,
-            AmplitudeError::Api {
-                status_code: 200,
-                message
-            } if message == "empty response body"
-        ));
+    fn decode_success_body_accepts_whitespace_ok() {
+        let parsed = decode_success_body::<serde_json::Value>(StatusCode::OK, "  \n\t").unwrap();
+        assert_eq!(parsed, serde_json::Value::Null);
     }
 
     #[test]

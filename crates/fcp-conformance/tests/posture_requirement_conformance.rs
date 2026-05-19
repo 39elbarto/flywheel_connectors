@@ -20,6 +20,8 @@
 //! `is_valid` = not-expired AND schema-matches, `is_for_node`, the
 //! attestation's getters).
 
+#![allow(clippy::doc_overindented_list_items)]
+
 use std::collections::HashMap;
 
 use chrono::{Duration as ChronoDuration, Utc};

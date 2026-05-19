@@ -247,6 +247,12 @@ impl AirtableConnector {
         }
     }
 
+    /// Return the generated instance ID for this connector.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
     fn manifest_hash() -> String {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
@@ -3459,6 +3465,7 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         cap: &str,
         op: &str,
+        instance_id: &str,
     ) -> CapabilityToken {
         let constraints = fcp_core::CapabilityConstraints {
             resource_allow: vec!["*".into()],
@@ -3471,6 +3478,7 @@ mod tests {
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
+            .target_instance(instance_id)
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
@@ -3572,7 +3580,12 @@ mod tests {
             .await
             .unwrap();
 
-        let capability = generate_valid_token(&signing_key, "airtable.read", "airtable.list_bases");
+        let capability = generate_valid_token(
+            &signing_key,
+            "airtable.read",
+            "airtable.list_bases",
+            connector.base.instance_id.as_str(),
+        );
 
         let result = connector
             .handle_invoke(json!({
@@ -3611,7 +3624,12 @@ mod tests {
             .await
             .unwrap();
 
-        let capability = generate_valid_token(&signing_key, "airtable.read", "airtable.get_record");
+        let capability = generate_valid_token(
+            &signing_key,
+            "airtable.read",
+            "airtable.get_record",
+            connector.base.instance_id.as_str(),
+        );
 
         let result = connector
             .handle_invoke(json!({
@@ -3620,6 +3638,8 @@ mod tests {
                 "capability_token": capability
             }))
             .await;
+
+        println!("RESULT IS: {result:?}");
 
         assert!(result.is_err());
         assert!(matches!(

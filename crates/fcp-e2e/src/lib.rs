@@ -3562,7 +3562,7 @@ mod openai_e2e_tests {
             .operations(operations)
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
-            .constraints_cbor(&constraints_cbor)
+            .try_constraints_cbor(&constraints_cbor).expect("valid constraints")
             .sign(signing_key)
             .expect("capability token sign");
         CapabilityToken::from_raw(cose)
@@ -4078,7 +4078,7 @@ mod slack_e2e_tests {
             .operations(operations)
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
-            .constraints_cbor(&constraints_cbor)
+            .try_constraints_cbor(&constraints_cbor).expect("valid constraints")
             .sign(signing_key)
             .expect("capability token sign");
         CapabilityToken::from_raw(cose)

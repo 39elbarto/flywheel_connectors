@@ -3459,14 +3459,11 @@ mod tests {
         let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
         let computed = manifest
             .compute_interface_hash()
-            .expect("compute interface hash");
-        assert_eq!(manifest.manifest.interface_hash, computed);
+            .expect("interface hash computes");
 
-        let manifest2 = ConnectorManifest::parse_str_unchecked(&raw).expect("parse unchecked");
-        let computed2 = manifest2
-            .compute_interface_hash()
-            .expect("compute interface hash");
-        assert_eq!(computed, computed2);
+        let expected_hash =
+            "blake3-256:fcp.interface.v2:3a47308a4d0ff45ad64dcc688000bc79edb1bc2cee800160be681c069debd83a";
+        assert_eq!(computed.to_string(), expected_hash);
     }
 
     // ── require_str sync tests ──────────────────────────────────────

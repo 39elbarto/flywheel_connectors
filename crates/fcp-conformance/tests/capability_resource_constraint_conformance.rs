@@ -102,7 +102,7 @@ fn wildcard_allow_accepts_arbitrary_uri() {
 #[test]
 fn wildcard_allow_accepts_empty_resource_uris_slice() {
     // The defense-in-depth check explicitly exempts pure wildcard
-    // allow lists so the existing `verifier.verify(.., &[])` call
+    // allow lists so the existing `verifier.verify_bound(.., &[])` call
     // sites continue to work.
     let signing_key = Ed25519SigningKey::generate();
     let constraints = CapabilityConstraints {

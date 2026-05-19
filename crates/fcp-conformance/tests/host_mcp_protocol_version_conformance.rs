@@ -13,8 +13,7 @@
 //! 1. **`as_str` matches the wire-format negotiation string.** The
 //!    public string is what every MCP client compares against.
 //! 2. **`as_str` matches the serde rename.** Display, JSON
-//!    serialization, and the version-negotiation comparison must
-//!    all agree on the literal string.
+//!    serialization, and wire matching all converge on the same string.
 //! 3. **`latest()` returns `V2025_03`.** Bumping latest is a
 //!    deliberate cross-release coordination step, not a stealth
 //!    change.
@@ -24,6 +23,8 @@
 //! 6. **`Display` equals `as_str`.**
 //! 7. **JSON serde roundtrip preserves the wire string** — both
 //!    serialization and deserialization use the rename consistently.
+
+#![allow(clippy::no_effect_underscore_binding)]
 
 use fcp_host::McpProtocolVersion;
 

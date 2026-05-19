@@ -164,6 +164,7 @@ fn bench_wal_append_throughput(c: &mut Criterion) {
     group.finish();
 }
 
+#[allow(clippy::significant_drop_tightening)]
 fn bench_cursor_walk_latency(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let zone_id = bench_zone();

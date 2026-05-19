@@ -43,7 +43,7 @@ fn decode_payload(
     let mut decoder = RaptorQDecoder::new(encoder.transmission_info(), config);
     for (esi, data) in symbols {
         match decoder.add_symbol(*esi, data.clone()) {
-            Ok(Some(decoded)) => return decoded,
+            Ok(Some(result_payload)) => return result_payload,
             Ok(None) => {}
             Err(err) => panic!("metamorphic decode input should stay valid, got {err:?}"),
         }

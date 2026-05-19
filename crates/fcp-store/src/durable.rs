@@ -298,11 +298,12 @@ impl DurableObjectState {
             // binding on every snapshot entry. A forged snapshot
             // (restored-from-tampered-backup, malicious import) must
             // NOT survive load — the forged record is refused here and
-            // surfaces as a hard `ContentIdMismatch` to the caller of
-            // `DurableObjectStore::open_with_verifier`.
+            // effectively dropped from the recovered state.
             if let Some(verifier) = verifier {
                 verifier.verify(&object)?;
             }
+
+            state.used_bytes += Self::object_size(&object);
             state.insert_loaded(object);
         }
         Ok(state)

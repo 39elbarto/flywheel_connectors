@@ -12,7 +12,7 @@ The focused CI lane is intentionally narrow and avoids the connector feature
 fan-out:
 
 ```bash
-rch exec -- env TMPDIR=/Volumes/trj-data/tmp \
+RCH_REQUIRE_REMOTE=1 rch exec -- env TMPDIR=/Volumes/trj-data/tmp \
   CARGO_INCREMENTAL=0 \
   CARGO_TARGET_DIR=/Volumes/trj-data/tmp/fcp-hr0rr-a4-local-mesh-target \
   cargo test -j 1 -p fcp-e2e --no-default-features --test multi_node_failover -- --nocapture
@@ -21,7 +21,7 @@ rch exec -- env TMPDIR=/Volumes/trj-data/tmp \
 For the reusable testkit harness compile/lint proof:
 
 ```bash
-rch exec -- env TMPDIR=/Volumes/trj-data/tmp \
+RCH_REQUIRE_REMOTE=1 rch exec -- env TMPDIR=/Volumes/trj-data/tmp \
   CARGO_INCREMENTAL=0 \
   CARGO_TARGET_DIR=/Volumes/trj-data/tmp/fcp-hr0rr-a4-local-mesh-target \
   cargo clippy -j 1 -p fcp-testkit --lib --no-deps -- -D warnings
@@ -30,12 +30,18 @@ rch exec -- env TMPDIR=/Volumes/trj-data/tmp \
 For the current host-backed handoff seam:
 
 ```bash
-rch exec -- env TMPDIR=/Volumes/trj-data/tmp \
+RCH_REQUIRE_REMOTE=1 rch exec -- env TMPDIR=/Volumes/trj-data/tmp \
   CARGO_INCREMENTAL=0 \
   CARGO_TARGET_DIR=/Volumes/trj-data/tmp/fcp-hr0rr-a4-host-replay-target \
   cargo test -j 1 -p fcp-host --test lease_handoff_e2e \
     leader_departure_flushes_state_reselects_holder_and_fences_stale_writes -- --nocapture
 ```
+
+`RCH_REQUIRE_REMOTE=1` must be applied to `rch` itself, before `rch exec`.
+Do not move it after `--`, where it would only affect the remote Cargo process.
+An accepted proof transcript must show an `[RCH] remote ...` banner. If `rch`
+prints `[RCH] local ...` or refuses with no admissible worker, stop and record
+that as proof infrastructure blockage instead of counting the Cargo result.
 
 ## Current Proof Surface
 

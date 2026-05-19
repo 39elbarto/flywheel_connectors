@@ -8,8 +8,11 @@
 //! Properties pinned (NORMATIVE):
 //!
 //! 1. **`RestartPolicy::default == OnFailure`** — the documented
-//!    sane default (restart on non-zero exit / signal, ignore clean
+//!    sane default (restart on non-non-zero exit / signal, ignore clean
 //!    code-0 exits).
+
+#![allow(clippy::field_reassign_with_default)]
+
 //! 2. **`RestartPolicy::should_restart` matrix** for every (policy,
 //!    exit) pair across the 4 policies × 3 exit kinds (clean, code,
 //!    signal):

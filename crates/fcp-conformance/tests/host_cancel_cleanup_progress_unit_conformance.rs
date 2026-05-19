@@ -26,6 +26,8 @@
 //! 6. **All three serde forms reject malformed/unknown payloads.**
 //! 7. **Roundtrip identity** for every variant.
 
+#![allow(clippy::many_single_char_names)]
+
 use fcp_host::{CancelReason, CleanupBehavior, ProgressUnit};
 use serde_json::json;
 

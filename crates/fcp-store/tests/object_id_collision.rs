@@ -13,9 +13,10 @@
 //!      `AlreadyExists` and MUST NOT mutate stored state — `get(id)`
 //!      still returns the original.
 //!   3. **Error payload identifies the conflict**: the `AlreadyExists`
-//!      payload carries the conflicting `object_id`, and the Display
-//!      message includes it.
-//!
+
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(clippy::needless_update)]
+
 //! Distinct `object_id`s for distinct content remain insertable in the
 //! same store — the collision check is keyed on `object_id` alone.
 //!

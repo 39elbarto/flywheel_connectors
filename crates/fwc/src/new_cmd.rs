@@ -5222,9 +5222,15 @@ fn check_connector(path: &Path) -> Result<CheckResult> {
     // Check for #![forbid(unsafe_code)] in main.rs and lib.rs
     let main_rs_path = path.join("src/main.rs");
     let lib_rs_path = path.join("src/lib.rs");
+    let main_exists = main_rs_path.exists();
+    let lib_exists = lib_rs_path.exists();
     let mut forbids_unsafe = true;
 
-    if main_rs_path.exists() {
+    if !main_exists && !lib_exists {
+        forbids_unsafe = false;
+    }
+
+    if main_exists {
         let content = fs::read_to_string(&main_rs_path)?;
         if !content.contains("#![forbid(unsafe_code)]") {
             forbids_unsafe = false;
@@ -5234,11 +5240,9 @@ fn check_connector(path: &Path) -> Result<CheckResult> {
                 file: Some("src/main.rs".to_string()),
             });
         }
-    } else {
-        forbids_unsafe = false;
     }
 
-    if lib_rs_path.exists() {
+    if lib_exists {
         let content = fs::read_to_string(&lib_rs_path)?;
         if !content.contains("#![forbid(unsafe_code)]") {
             forbids_unsafe = false;
@@ -5248,8 +5252,6 @@ fn check_connector(path: &Path) -> Result<CheckResult> {
                 file: Some("src/lib.rs".to_string()),
             });
         }
-    } else {
-        forbids_unsafe = false;
     }
 
     checks.push(PrecheckItem {

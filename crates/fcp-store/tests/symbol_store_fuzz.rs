@@ -13,24 +13,8 @@
 //!    across K ∈ {1, 100, `1_024`, `10_000`, `MAX_SOURCE_SYMBOLS`} so
 //!    both pre-cap and post-cap K values exercise the same
 //!    round-trip.
-//!
-//! 2. **Reconstruction predicate correctness** — `can_reconstruct`
-//!    returns `true` iff the put symbol count is at least K.
-//!    Sweeps `(K, put_count)` over the boundary so the cap on
-//!    initial allocation cannot accidentally cause the predicate
-//!    to misreport availability for sparse-high-K objects (which
-//!    is exactly what the cap targets).
-//!
-//! 3. **Storage accounting conservation** — `storage_used` after
-//!    put-symbol-then-delete-symbol returns to the pre-put value
-//!    for any symbol payload. Pre-fix: catches a refactor where
-//!    capacity bookkeeping accidentally double-counts payload
-//!    bytes against the quota.
-//!
-//! 4. **Quota enforcement under sparse-K** — a high-K meta with
-//!    no symbols MUST NOT consume meaningful quota (the eager cap
-//!    means `HashMap` buckets, not symbol bytes, so the quota only
-//!    increments when actual symbols arrive).
+
+#![allow(clippy::cast_possible_truncation)]
 
 use bytes::Bytes;
 use fcp_core::ZoneId;

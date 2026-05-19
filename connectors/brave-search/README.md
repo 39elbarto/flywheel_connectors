@@ -3,7 +3,7 @@
 > **Status**: manifest/runtime contract documented
 > **Bead**: `flywheel_connectors-4kw5f.12`
 > **Parent**: `flywheel_connectors-4kw5f`
-> **Verification script**: none tracked; use the commands below
+> **Verification script**: `scripts/e2e/brave_search_connector_verification.sh`
 > **Primary upstream**: https://api-dashboard.search.brave.com/app/documentation/web-search/get-started
 
 ## Purpose
@@ -150,14 +150,19 @@ The deterministic integration evidence is anchored on WireMock and connector-loc
 
 ## Verification Bundle
 
-There is no dedicated tracked `scripts/e2e/brave_search_connector_verification.sh` bundle in this checkout. The closeout surface is the crate-local test suite plus direct `rch` proof commands.
+The dedicated tracked bundle is `scripts/e2e/brave_search_connector_verification.sh`. It writes a run-scoped artifact tree with logs, extracted JSONL evidence, fail-closed proof-governor rows, environment metadata, replay commands, and a summary status.
 
 The verification surface captures:
 
 - manifest/runtime contract tests
 - deterministic WireMock coverage for web and LLM-context search
+- local loopback HTTP acceptance coverage for request path, query, and auth-header boundaries
+- live read-only Brave Search self-check when `FCP_LIVE_READ=1` and `BRAVE_SEARCH_API_KEY` are present, otherwise a structured skip record
+- cross-connector manifest-operation audit evidence for `fcp.brave-search`
+- `fwc proof run` fail-closed classification for Cargo-backed `rch` lanes; only `accepted_remote_proof` rows count as green proof
+- stale `fwc` local-fallback refusal normalization in the verifier wrapper so refused remote-required lanes remain `infra_blocked` rather than false green or bogus worker evidence
 - auth, base URL, query, count, language, UI-language, date, freshness, error, lifecycle, and introspection tests
-- formatting, check, and clippy proof through `rch`
+- formatting as a non-proof lane plus fail-closed remote-proof evidence for check, tests, and clippy
 - UBS on changed files before commit
 
 ## Operator Guidance
@@ -191,6 +196,8 @@ The verification surface captures:
 
 **Rerun commands**:
 
+- `BRAVE_SEARCH_VERIFIER_SELF_TEST=1 OUT_ROOT=/tmp/fcp-brave-search-verifier-self-test scripts/e2e/brave_search_connector_verification.sh`
+- `OUT_ROOT=/tmp/fcp-brave-search-verification RUN_ID=$(date -u +%Y%m%dT%H%M%SZ) scripts/e2e/brave_search_connector_verification.sh`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-brave-search-e2e cargo check -p fcp-brave-search --all-targets`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-brave-search-e2e cargo test -p fcp-brave-search --tests -- --nocapture`
 - `rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-brave-search-e2e cargo clippy -p fcp-brave-search --all-targets --no-deps -- -D warnings`

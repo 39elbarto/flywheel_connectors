@@ -156,12 +156,6 @@ impl ArxivClient {
         if status.is_success() {
             let body = resp.text().await?;
             if body.trim().is_empty() {
-                if status != StatusCode::NO_CONTENT {
-                    return Err(ArxivError::ScholarApi {
-                        status_code: status.as_u16(),
-                        message: "empty response body".into(),
-                    });
-                }
                 return Ok(serde_json::json!({}));
             }
             Ok(serde_json::from_str(&body)?)

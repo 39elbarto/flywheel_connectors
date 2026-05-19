@@ -21,6 +21,8 @@
 //! consumer of the normative `fcp-manifest` contract; this test is the
 //! provider-side verification that every published manifest satisfies it.
 
+#![allow(clippy::absurd_extreme_comparisons)]
+
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};

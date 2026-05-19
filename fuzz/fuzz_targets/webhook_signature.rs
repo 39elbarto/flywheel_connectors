@@ -128,7 +128,7 @@ fn positive_hmac_round_trip(secret: &[u8], body: &[u8]) {
         let mut tampered = body.to_vec();
         tampered[0] ^= 0x01;
         assert!(
-            verifier.verify(&tampered, &signature).is_err(),
+            verifier.verify_bound(&tampered, &signature).is_err(),
             "tampered payload must fail verification"
         );
     }

@@ -81,6 +81,8 @@ fn build_revocation(zone_id: &ZoneId, revoked_id: ObjectId, effective_at: u64) -
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::cast_possible_truncation)]
 fn e2e_truth_precedence_v1_v2_revocation_invariant() {
     // Initialise tracing with a test-scoped subscriber. The subscriber
     // is local to this test (tracing::subscriber::set_default returns

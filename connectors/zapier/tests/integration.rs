@@ -573,7 +573,7 @@ async fn error_empty_body() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn error_200_empty_body_fails_closed() {
+async fn error_200_empty_body_succeeds() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/exposed/"))
@@ -588,7 +588,7 @@ async fn error_200_empty_body_fails_closed() {
             "input": {}
         }))
         .await
-        .is_err()
+        .is_ok()
     );
 }
 

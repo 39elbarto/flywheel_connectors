@@ -1294,6 +1294,7 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         capability: &'static str,
         op: &'static str,
+        instance_id: &str,
     ) -> CapabilityToken {
         let now = Utc::now();
         let constraints = CapabilityConstraints {
@@ -1306,6 +1307,7 @@ mod tests {
             .capability_id(capability)
             .zone_id("z:work")
             .principal("user:test")
+            .target_instance(instance_id)
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
@@ -1651,7 +1653,7 @@ mod tests {
                 OperationId::from_static(OP_S3_LIST_BUCKETS),
                 ZoneId::work(),
                 json!({}),
-                signed_token(&signing_key, CAP_S3_READ, OP_S3_LIST_BUCKETS),
+                signed_token(&signing_key, CAP_S3_READ, OP_S3_LIST_BUCKETS, c.base.instance_id.as_str()),
             ))
             .await
         })

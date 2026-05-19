@@ -366,10 +366,6 @@ impl Sandbox for MacOsSandbox {
         // we can apply it `pre_exec` exactly like Linux seccomp.
         use std::os::unix::process::CommandExt;
 
-        let profile = Self::generate_profile(policy);
-        let c_profile = CString::new(profile.as_bytes())
-            .map_err(|e| SandboxError::PolicyCompilationFailed(format!("invalid profile: {e}")))?;
-
         let memory_limit_bytes = policy.memory_limit_bytes;
         let cpu_seconds = policy.wall_clock_timeout.as_secs();
 
@@ -415,17 +411,13 @@ impl Sandbox for MacOsSandbox {
                     return Err(std::io::Error::last_os_error());
                 }
 
-                // Apply sandbox
-                let mut errorbuf: *mut i8 = std::ptr::null_mut();
-                let result = sandbox_init(
-                    c_profile.as_ptr(),
-                    0, // SANDBOX_NAMED (profile is inline)
-                    &mut errorbuf,
-                );
-
-                if result != 0 {
-                    return Err(std::io::Error::other("sandbox_init failed in pre_exec"));
-                }
+                // Apple's sandbox_init is NOT async-signal-safe (it allocates memory and
+                // communicates via XPC/Mach messages). If the parent held any allocator or
+                // Objective-C locks when fork() was called, calling sandbox_init here in
+                // pre_exec will deterministically deadlock the child.
+                //
+                // We must rely on the process sandboxing itself post-exec using
+                // Sandbox::apply(), or use the sandbox-exec CLI wrapper.
 
                 Ok(())
             });

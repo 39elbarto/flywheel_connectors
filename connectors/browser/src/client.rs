@@ -7428,11 +7428,21 @@ while :; do sleep 1; done
             }
         );
         assert_eq!(transport.sent.len(), 1);
-        assert!(matches!(
-            &transport.sent[0],
-            WebSocketMessage::Text(text)
-                if text == r#"{"id":1,"method":"Runtime.evaluate","params":{"awaitPromise":true,"expression":"document.title","returnByValue":true}}"#
-        ));
+        let sent_text = match &transport.sent[0] {
+            WebSocketMessage::Text(text) => text,
+            _ => panic!("Expected text message"),
+        };
+        let sent_json: serde_json::Value = serde_json::from_str(sent_text).unwrap();
+        let expected_json = serde_json::json!({
+            "id": 1,
+            "method": "Runtime.evaluate",
+            "params": {
+                "awaitPromise": true,
+                "expression": "document.title",
+                "returnByValue": true
+            }
+        });
+        assert_eq!(sent_json, expected_json);
     }
 
     #[test]
@@ -9070,8 +9080,7 @@ while :; do sleep 1; done
 
         let client = BrowserClient::new(None)
             .unwrap()
-            .with_browser_url(&server.uri())
-            .with_retry_config(0);
+            .with_browser_url(&server.uri());
 
         let err = client.click(".submit", None).await.unwrap_err();
         let message = format!("{err}");

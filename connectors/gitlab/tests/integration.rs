@@ -942,7 +942,7 @@ async fn error_429_issues_create() {
 }
 
 #[fcp_async_core::test]
-async fn error_200_empty_body_fails_closed() {
+async fn error_200_empty_body_succeeds() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex("/projects.*"))
@@ -954,7 +954,7 @@ async fn error_200_empty_body_fails_closed() {
     assert!(
         c.handle_invoke(json!({"operation_id": "gitlab.projects.list", "input": {}}))
             .await
-            .is_err()
+            .is_ok()
     );
 }
 

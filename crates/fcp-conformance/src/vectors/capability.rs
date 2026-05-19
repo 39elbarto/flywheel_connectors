@@ -662,6 +662,7 @@ mod tests {
     /// whenever the canonical encoder changes (e.g. after 6df66c79's RFC
     /// 8949 reordering). Ignored by default so it doesn't run in CI.
     #[test]
+    #[allow(clippy::ignore_without_reason)]
     #[ignore]
     fn regen_dump_golden_bytes() {
         use chrono::DateTime;

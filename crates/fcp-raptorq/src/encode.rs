@@ -1349,17 +1349,17 @@ mod tests {
         let symbols = encoder.into_encode_all();
 
         let mut decoder = RaptorQDecoder::new(oti, &config);
-        let mut decoded: Option<Vec<u8>> = None;
+        let mut result_payload: Option<Vec<u8>> = None;
         for (esi, data) in symbols {
             match decoder.add_symbol(esi, data) {
                 Ok(Some(p)) => {
-                    decoded = Some(p);
+                    result_payload = Some(p);
                     break;
                 }
-                Ok(None) => continue,
+                Ok(None) => {}
                 Err(e) => panic!("into_encode_all round trip decode error: {e:?}"),
             }
         }
-        assert_eq!(decoded.expect("decode must complete"), payload);
+        assert_eq!(result_payload.expect("decode must complete"), payload);
     }
 }

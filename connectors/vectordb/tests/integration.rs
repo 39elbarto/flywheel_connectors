@@ -45,7 +45,7 @@ fn generate_token(signing_key: &Ed25519SigningKey, cap: &str, ops: &[&str]) -> C
         .operations(ops)
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor).expect("valid constraints")
         .sign(signing_key)
         .expect("token sign");
     CapabilityToken::from_raw(cose)

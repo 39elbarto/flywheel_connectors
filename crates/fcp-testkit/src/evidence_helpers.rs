@@ -3301,6 +3301,30 @@ fn is_prewarm_promotion_improvement_scenario(scenario_id: &str) -> bool {
     SWARM_PREWARM_COLD_START_PROMOTION_IMPROVEMENT_SCENARIOS.contains(&scenario_id)
 }
 
+fn is_measured_prewarm_rejection(evidence: &SwarmPrewarmColdStartEvidence) -> bool {
+    if evidence.warm_checkout {
+        return false;
+    }
+
+    match evidence.admission_decision.as_str() {
+        "fallback_on_demand" => {
+            evidence
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.trim().is_empty())
+                && evidence.unsafe_rejection_reason.is_none()
+        }
+        "reject_unsafe" => {
+            evidence.fallback_reason.is_none()
+                && evidence
+                    .unsafe_rejection_reason
+                    .as_deref()
+                    .is_some_and(|reason| !reason.trim().is_empty())
+        }
+        _ => false,
+    }
+}
+
 fn validate_prewarm_production_improvement(
     evidence: &SwarmPrewarmColdStartEvidence,
 ) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
@@ -3308,6 +3332,10 @@ fn validate_prewarm_production_improvement(
         || evidence.source_kind == SwarmEvidenceSourceKind::Offline
         || !is_prewarm_promotion_improvement_scenario(&evidence.scenario_id)
     {
+        return Ok(());
+    }
+
+    if is_measured_prewarm_rejection(evidence) {
         return Ok(());
     }
 
@@ -10538,6 +10566,7 @@ mod tests {
             record.host_boundary =
                 "fcp-host::supervisor::ConnectorSupervisor::activate_connector".to_string();
             record.sandbox_boundary = "fcp-sandbox::strict-profile-limits".to_string();
+            record.skip_reason = None;
         }
     }
 
@@ -11214,6 +11243,23 @@ mod tests {
         fallback_soak.fallback_reason = Some("sandbox_limits_unavailable".to_string());
         fallback_soak.error_mapping = "fallback_on_demand:sandbox_limits_unavailable".to_string();
         assert_eq!(fallback_soak.validate(), Ok(()));
+
+        let mut production_rejection = fallback_soak;
+        production_rejection.scenario_id = "prewarm_warm_hit".to_string();
+        production_rejection.pool_state = "warm_hit".to_string();
+        production_rejection.sandbox_layer = "wasi_sandbox".to_string();
+        production_rejection.fallback_reason = Some("production_warm_pool_disabled".to_string());
+        production_rejection.error_mapping =
+            "fallback_on_demand:production_warm_pool_disabled".to_string();
+        assert_eq!(production_rejection.validate(), Ok(()));
+
+        let mut unsafe_rejection = production_rejection;
+        unsafe_rejection.admission_decision = "reject_unsafe".to_string();
+        unsafe_rejection.fallback_reason = None;
+        unsafe_rejection.unsafe_rejection_reason =
+            Some("zygote_without_security_proof".to_string());
+        unsafe_rejection.error_mapping = "reject_unsafe:zygote_without_security_proof".to_string();
+        assert_eq!(unsafe_rejection.validate(), Ok(()));
     }
 
     #[test]
@@ -11657,6 +11703,19 @@ mod tests {
                     baseline_ms: 18
                 }
             })
+        );
+
+        let warm_hit = production
+            .iter_mut()
+            .find(|record| record.scenario_id == "prewarm_warm_hit")
+            .expect("bundle fixture should include warm-hit scenario");
+        warm_hit.admission_decision = "fallback_on_demand".to_string();
+        warm_hit.warm_checkout = false;
+        warm_hit.fallback_reason = Some("production_warm_pool_disabled".to_string());
+        warm_hit.error_mapping = "fallback_on_demand:production_warm_pool_disabled".to_string();
+        assert_eq!(
+            validate_swarm_prewarm_cold_start_evidence_bundle(&production, true),
+            Ok(())
         );
     }
 

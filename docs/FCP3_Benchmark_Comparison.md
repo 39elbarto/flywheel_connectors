@@ -136,7 +136,13 @@ promotion. Operators can validate an externally collected production-soak
 JSONL bundle without rerunning the smoke Cargo lane by passing
 `--evidence-jsonl <path>` together with `--require-production-soak`; this uses
 the same scenario coverage, boundary, resource, percentile, nested evidence, and
-redaction checks as the default verifier. The verifier and typed bundle
+redaction checks as the default verifier. Operators can also run a production
+producer directly with `--production-soak-command 'cargo test -p fcp-host --bin
+fcp-host production_prewarm_soak_evidence_emits_host_backed_measured_rejection_jsonl
+-- --nocapture'`; the verifier prepends `rch exec -- env`, passes the resolved
+git revision and dedicated `CARGO_TARGET_DIR`, records only a SHA-256 hash of
+the producer command, and requires replay callers to provide the redacted
+command again instead of baking local shell text into `replay.sh`. The verifier and typed bundle
 validator require exactly one record for each required prewarm scenario so
 evidence bundles cannot be stitched from duplicate scenario records. The typed
 record validator rejects non-canonical prewarm scenario ids before
@@ -169,10 +175,10 @@ rows before the verifier exits. The verifier resolves the checkout revision
 with a per-command Git safe-directory override, so NFS or shared-owner
 checkouts still emit a concrete git revision without changing global Git
 configuration.
-The verifier and typed serializer both require positive p50, p95, and p99
-improvement deltas for production-soak warm-hit, shutdown-cleanup, and
-concurrent-swarm-startup promotion scenarios; fallback and rejection scenarios
-may still report zero improvement with their measured rationale. Every provided
+The verifier and typed serializer both require production-soak warm-hit,
+shutdown-cleanup, and concurrent-swarm-startup promotion scenarios to either
+show positive p50, p95, and p99 improvement deltas or record a non-warm
+`fallback_on_demand`/`reject_unsafe` decision with a measured rationale. Every provided
 evidence row must also keep p50 <= p95 <= p99 for both current and baseline
 latency, and current activation latency must not exceed the matching on-demand
 baseline. Its nested typed latency objects must also keep

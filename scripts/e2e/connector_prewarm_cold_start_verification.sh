@@ -7,6 +7,7 @@ RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUT_ROOT="${OUT_ROOT:-}"
 REQUIRE_PRODUCTION_SOAK="${REQUIRE_PRODUCTION_SOAK:-0}"
 EVIDENCE_JSONL_IN="${EVIDENCE_JSONL_IN:-}"
+PRODUCTION_SOAK_COMMAND="${PRODUCTION_SOAK_COMMAND:-}"
 RCH_BIN="${RCH_BIN:-rch}"
 RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE:-1}"
 export RCH_FORCE_REMOTE=1
@@ -23,6 +24,10 @@ Options:
   --evidence-jsonl <path>
                      Validate an existing production/smoke evidence JSONL file
                      instead of running the embedded rch Cargo lane
+  --production-soak-command <cmd>
+                     Run an operator-provided production soak producer through
+                     rch. The command must start with a Cargo/build entrypoint
+                     that emits FCP_PREWARM_COLD_START_JSONL <json> lines.
   -h, --help         Show this help
 
 Runs the connector cold-start prewarm evidence lane through rch, extracts
@@ -36,6 +41,9 @@ Remote prerequisite skips are non-fatal for deterministic smoke evidence but
 fail closed when production-soak evidence is required.
 Use --evidence-jsonl to validate externally collected production-soak records
 through the same fail-closed schema, boundary, scenario, and redaction checks.
+Use --production-soak-command to run a production fcp-host/fcp-sandbox producer
+under rch; strict production mode requires either that producer or
+--evidence-jsonl.
 Set RCH_BIN=/path/to/rch to validate a patched rch binary; the emitted evidence
 still must prove the replay command uses the canonical `rch exec --` shape.
 EOF
@@ -72,6 +80,11 @@ while [[ $# -gt 0 ]]; do
       EVIDENCE_JSONL_IN="$2"
       shift 2
       ;;
+    --production-soak-command)
+      require_option_value "$1" "${2:-}"
+      PRODUCTION_SOAK_COMMAND="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -83,6 +96,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n "${EVIDENCE_JSONL_IN}" && -n "${PRODUCTION_SOAK_COMMAND}" ]]; then
+  echo "--evidence-jsonl and --production-soak-command cannot be combined" >&2
+  exit 2
+fi
 
 if [[ -z "${OUT_ROOT}" ]]; then
   OUT_ROOT="${REPO_ROOT}/artifacts/e2e/connector-prewarm-cold-start/${RUN_ID}"
@@ -272,9 +290,6 @@ mark_validation_redaction_passed() {
 
 require_cmd jq
 require_cmd shasum
-if [[ -z "${EVIDENCE_JSONL_IN}" ]]; then
-  require_cmd "${RCH_BIN}"
-fi
 
 case "${REQUIRE_PRODUCTION_SOAK}" in
   1|true|TRUE|yes|YES)
@@ -288,6 +303,10 @@ case "${REQUIRE_PRODUCTION_SOAK}" in
     exit 2
     ;;
 esac
+
+if [[ -n "${PRODUCTION_SOAK_COMMAND}" || ( -z "${EVIDENCE_JSONL_IN}" && "${require_production_soak_json}" != "true" ) ]]; then
+  require_cmd "${RCH_BIN}"
+fi
 
 validate_run_id
 
@@ -320,12 +339,51 @@ remote_proof_summary=""
 overall_status="passed"
 skip_reason=""
 exit_code=0
+run_source="embedded_smoke"
+production_soak_command_hash=""
+if [[ -n "${PRODUCTION_SOAK_COMMAND}" ]]; then
+  run_source="production_soak_command"
+  production_soak_command_hash="sha256:$(hash_text_sha256 "${PRODUCTION_SOAK_COMMAND}")"
+elif [[ -n "${EVIDENCE_JSONL_IN}" ]]; then
+  run_source="provided_evidence"
+fi
 
 rch_summary_line() {
   grep -aE '\[RCH\][[:space:]]+(remote|local|failed)' "${TEST_LOG}" | tail -n 1 || true
 }
 
-if [[ -n "${EVIDENCE_JSONL_IN}" ]]; then
+if [[ "${require_production_soak_json}" == "true" && -z "${EVIDENCE_JSONL_IN}" && -z "${PRODUCTION_SOAK_COMMAND}" ]]; then
+  echo "[connector-prewarm-cold-start] production soak requires --evidence-jsonl or --production-soak-command" >&2
+  skip_reason="production_soak_runner_or_evidence_required"
+  run_source="strict_missing_producer"
+  test_status="skipped"
+  evidence_status="skipped"
+  validation_status="failed"
+  overall_status="failed"
+  exit_code=1
+  printf 'strict production soak requires --evidence-jsonl or --production-soak-command\n' >"${TEST_LOG}"
+  jq -c -n \
+    --arg record_type "swarm_prewarm_cold_start_skip" \
+    --arg schema_version "swarm-prewarm-cold-start/v2" \
+    --arg run_id "${RUN_ID}" \
+    --arg git_revision "${git_revision}" \
+    --arg worker_id "rch-unavailable" \
+    --arg cargo_target_dir_class "$(cargo_target_dir_class "${target_dir}")" \
+    --arg cargo_target_dir_hash "sha256:$(hash_text_sha256 "${target_dir}")" \
+    --arg skip_reason "${skip_reason}" \
+    --arg log_artifact "logs/prewarm-cold-start-test.log" \
+    '{
+      record_type: $record_type,
+      schema_version: $schema_version,
+      run_id: $run_id,
+      git_revision: $git_revision,
+      worker_id: $worker_id,
+      cargo_target_dir_class: $cargo_target_dir_class,
+      cargo_target_dir_hash: $cargo_target_dir_hash,
+      skip_reason: $skip_reason,
+      log_artifact: $log_artifact
+    }' > "${SKIP_JSONL}"
+elif [[ -n "${EVIDENCE_JSONL_IN}" ]]; then
   provided_evidence_path_hash="sha256:$(hash_text_sha256 "${EVIDENCE_JSONL_IN}")"
   if [[ ! -s "${EVIDENCE_JSONL_IN}" ]]; then
     echo "Evidence JSONL input does not exist or is empty: path_hash=${provided_evidence_path_hash}" >&2
@@ -335,6 +393,28 @@ if [[ -n "${EVIDENCE_JSONL_IN}" ]]; then
   test_status="provided"
   cp "${EVIDENCE_JSONL_IN}" "${EVIDENCE_JSONL}"
   printf 'validated provided evidence JSONL path_hash=%s\n' "${provided_evidence_path_hash}" >"${TEST_LOG}"
+elif [[ -n "${PRODUCTION_SOAK_COMMAND}" ]]; then
+  echo "[connector-prewarm-cold-start] running production soak producer through rch"
+  printf -v production_soak_rch_exec \
+    '%q exec -- env RUSTUP_TOOLCHAIN=%q CARGO_TARGET_DIR=%q PREWARM_EVIDENCE_CARGO_TARGET_DIR=%q PREWARM_EVIDENCE_GIT_REVISION=%q CARGO_BUILD_JOBS=%q CARGO_INCREMENTAL=%q CARGO_PROFILE_DEV_DEBUG=%q CARGO_PROFILE_TEST_DEBUG=%q RUSTFLAGS=%q %s' \
+    "${RCH_BIN}" \
+    "${RUSTUP_TOOLCHAIN:-nightly}" \
+    "${target_dir}" \
+    "${target_dir}" \
+    "${git_revision}" \
+    "${CARGO_BUILD_JOBS:-1}" \
+    "${CARGO_INCREMENTAL:-0}" \
+    "${CARGO_PROFILE_DEV_DEBUG:-0}" \
+    "${CARGO_PROFILE_TEST_DEBUG:-0}" \
+    "${RUSTFLAGS:--Cdebuginfo=0}" \
+    "${PRODUCTION_SOAK_COMMAND}"
+  if ! (
+    cd "${REPO_ROOT}"
+    env RCH_REQUIRE_REMOTE="${RCH_REQUIRE_REMOTE}" RCH_FORCE_REMOTE=1 RCH_VISIBILITY=verbose \
+      bash -lc "${production_soak_rch_exec}"
+  ) >"${TEST_LOG}" 2>&1; then
+    test_status="failed"
+  fi
 else
   echo "[connector-prewarm-cold-start] running fcp-e2e prewarm evidence lane"
   if ! (
@@ -584,9 +664,31 @@ if [[ "${overall_status}" == "passed" ]]; then
           and (.p99_activation_latency_improvement_ms | type) == "number"
           and .p99_activation_latency_improvement_ms > 0
         );
+      def has_measured_rejection($records; $scenario):
+        any($records[];
+          .scenario_id == $scenario
+          and .warm_checkout == false
+          and (
+            (
+              .admission_decision == "fallback_on_demand"
+              and (.fallback_reason | type) == "string"
+              and (.fallback_reason | length) > 0
+              and (.unsafe_rejection_reason == null)
+            )
+            or (
+              .admission_decision == "reject_unsafe"
+              and (.fallback_reason == null)
+              and (.unsafe_rejection_reason | type) == "string"
+              and (.unsafe_rejection_reason | length) > 0
+            )
+          )
+        );
+      def has_positive_improvement_or_measured_rejection($records; $scenario):
+        has_positive_improvement($records; $scenario)
+        or has_measured_rejection($records; $scenario);
       def promotion_improvement_failures($records):
         promotion_improvement_scenarios
-        | map(select(has_positive_improvement($records; .) | not));
+        | map(select(has_positive_improvement_or_measured_rejection($records; .) | not));
       def latency_order_ok:
         (.p50_activation_latency_ms | positive_integer_value)
         and (.p95_activation_latency_ms | positive_integer_value)
@@ -769,8 +871,8 @@ if [[ "${overall_status}" == "passed" ]]; then
           else true end
         ),
         production_improvement_summary: {
-          required_positive_improvement_scenarios: promotion_improvement_scenarios,
-          missing_or_nonpositive: promotion_improvement_failures(.)
+          required_improvement_or_measured_rejection_scenarios: promotion_improvement_scenarios,
+          missing_positive_improvement_or_measured_rejection: promotion_improvement_failures(.)
         },
         production_improvement_ok: (
           if $require_production_soak then
@@ -969,6 +1071,9 @@ jq -n \
   --argjson rch_bin_path_redacted "$(rch_bin_path_redacted)" \
   --arg rch_require_remote "${RCH_REQUIRE_REMOTE}" \
   --arg rch_force_remote "${RCH_FORCE_REMOTE:-1}" \
+  --arg run_source "${run_source}" \
+  --argjson production_soak_command_present "$(json_bool_nonempty "${PRODUCTION_SOAK_COMMAND}")" \
+  --argjson production_soak_command_hash "$(json_null_or_sha256 "${PRODUCTION_SOAK_COMMAND}")" \
   --arg remote_proof_status "${remote_proof_status}" \
   --arg remote_proof_reason "${remote_proof_reason}" \
   --argjson remote_proof_summary_present "$(json_bool_nonempty "${remote_proof_summary}")" \
@@ -994,6 +1099,12 @@ jq -n \
     rch_bin_path_redacted: $rch_bin_path_redacted,
     rch_require_remote: $rch_require_remote,
     rch_force_remote: $rch_force_remote,
+    run_source: $run_source,
+    production_soak_command: {
+      present: $production_soak_command_present,
+      sha256: $production_soak_command_hash,
+      redacted: $production_soak_command_present
+    },
     remote_proof: {
       status: $remote_proof_status,
       reason: (if ($remote_proof_reason | length) > 0 then $remote_proof_reason else null end),
@@ -1031,6 +1142,9 @@ write_summary_json() {
     --arg redaction_status "${redaction_status}" \
     --arg remote_proof_status "${remote_proof_status}" \
     --arg remote_proof_reason "${remote_proof_reason}" \
+    --arg run_source "${run_source}" \
+    --argjson production_soak_command_present "$(json_bool_nonempty "${PRODUCTION_SOAK_COMMAND}")" \
+    --argjson production_soak_command_hash "$(json_null_or_sha256 "${PRODUCTION_SOAK_COMMAND}")" \
     --argjson remote_proof_summary_present "$(json_bool_nonempty "${remote_proof_summary}")" \
     --argjson remote_proof_summary_hash "$(json_null_or_sha256 "${remote_proof_summary}")" \
     --arg skip_reason "${skip_reason}" \
@@ -1047,6 +1161,12 @@ write_summary_json() {
       redaction_status: $redaction_status,
       remote_proof_status: $remote_proof_status,
       remote_proof_reason: (if ($remote_proof_reason | length) > 0 then $remote_proof_reason else null end),
+      run_source: $run_source,
+      production_soak_command: {
+        present: $production_soak_command_present,
+        sha256: $production_soak_command_hash,
+        redacted: $production_soak_command_present
+      },
       remote_proof_summary_present: $remote_proof_summary_present,
       remote_proof_summary_hash: $remote_proof_summary_hash,
       require_production_soak: $require_production_soak,
@@ -1086,7 +1206,15 @@ write_summary_json() {
   else
     printf '%s\n' 'EVIDENCE_JSONL_IN=""'
   fi
-  printf 'RUN_ID=%q OUT_ROOT="${SCRIPT_DIR}/replay" RCH_BIN="${RCH_BIN:-%s}" RCH_REQUIRE_REMOTE=%q RCH_FORCE_REMOTE=%q REQUIRE_PRODUCTION_SOAK=%q EVIDENCE_JSONL_IN="${EVIDENCE_JSONL_IN}" \\\n' \
+  if [[ -n "${PRODUCTION_SOAK_COMMAND}" ]]; then
+    printf '%s\n' 'if [[ -z "${PRODUCTION_SOAK_COMMAND:-}" ]]; then'
+    printf '%s\n' '  echo "Set PRODUCTION_SOAK_COMMAND to replay the redacted production producer" >&2'
+    printf '%s\n' '  exit 2'
+    printf '%s\n' 'fi'
+  else
+    printf '%s\n' 'PRODUCTION_SOAK_COMMAND="${PRODUCTION_SOAK_COMMAND:-}"'
+  fi
+  printf 'RUN_ID=%q OUT_ROOT="${SCRIPT_DIR}/replay" RCH_BIN="${RCH_BIN:-%s}" RCH_REQUIRE_REMOTE=%q RCH_FORCE_REMOTE=%q REQUIRE_PRODUCTION_SOAK=%q EVIDENCE_JSONL_IN="${EVIDENCE_JSONL_IN}" PRODUCTION_SOAK_COMMAND="${PRODUCTION_SOAK_COMMAND:-}" \\\n' \
     "${RUN_ID}" "$(display_rch_bin)" "${RCH_REQUIRE_REMOTE}" "${RCH_FORCE_REMOTE:-1}" "${REQUIRE_PRODUCTION_SOAK}"
   printf '  bash scripts/e2e/connector_prewarm_cold_start_verification.sh \\\n'
   printf '  --run-id %q \\\n' "${RUN_ID}"

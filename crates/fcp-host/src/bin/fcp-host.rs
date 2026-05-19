@@ -13766,6 +13766,11 @@ mod tests {
     use fcp_policy::OperationalModelVersion;
     use fcp_prelude::{CapabilityId, RiskLevel};
     use fcp_telegram::connector::TelegramConnector;
+    use fcp_testkit::evidence_helpers::{
+        SWARM_PREWARM_COLD_START_SCHEMA_VERSION, SwarmEvidenceExecutionMode,
+        SwarmEvidenceSourceKind, SwarmPrewarmColdStartEvidence, SwarmPrewarmLatencyPercentiles,
+        validate_swarm_prewarm_cold_start_evidence_bundle,
+    };
 
     fn maybe_compiled_test_connector_binary() -> Option<std::path::PathBuf> {
         if let Some(path) = option_env!("CARGO_BIN_EXE_fcp-test-connector") {
@@ -24455,6 +24460,396 @@ done"#;
             message.contains("zygote prewarm requires a security proof"),
             "unexpected error: {message}"
         );
+    }
+
+    #[derive(Clone, Copy)]
+    struct ProductionPrewarmEvidenceScenario {
+        scenario_id: &'static str,
+        strategy: &'static str,
+        pool_state: &'static str,
+        admission_decision: &'static str,
+        sandbox_layer: &'static str,
+        fallback_reason: Option<&'static str>,
+        unsafe_rejection_reason: Option<&'static str>,
+        restart_reason: Option<&'static str>,
+        concurrent_startups: u32,
+    }
+
+    fn prewarm_blake3_hash(value: &str) -> String {
+        format!("blake3:{}", blake3::hash(value.as_bytes()).to_hex())
+    }
+
+    fn prewarm_evidence_git_revision() -> String {
+        if let Ok(revision) = std::env::var("PREWARM_EVIDENCE_GIT_REVISION")
+            && !revision.trim().is_empty()
+        {
+            return revision;
+        }
+
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .output()
+            .expect("resolve git revision for prewarm evidence");
+        assert!(
+            output.status.success(),
+            "git rev-parse should succeed for prewarm evidence"
+        );
+        String::from_utf8(output.stdout)
+            .expect("git revision is UTF-8")
+            .trim()
+            .to_string()
+    }
+
+    fn prewarm_evidence_target_dir() -> String {
+        std::env::var("PREWARM_EVIDENCE_CARGO_TARGET_DIR")
+            .or_else(|_| std::env::var("CARGO_TARGET_DIR"))
+            .unwrap_or_else(|_| "/tmp/fcp-host-prewarm-production-soak".to_string())
+    }
+
+    fn prewarm_evidence_target_dir_class(target_dir: &str) -> &'static str {
+        if target_dir == "/tmp" || target_dir.starts_with("/tmp/") {
+            "tmp"
+        } else if target_dir.starts_with('/') {
+            "absolute"
+        } else {
+            "relative"
+        }
+    }
+
+    fn prewarm_evidence_command_line(target_dir: &str) -> Vec<String> {
+        [
+            "rch",
+            "exec",
+            "--",
+            "env",
+            "cargo",
+            "test",
+            "-p",
+            "fcp-host",
+            "--bin",
+            "fcp-host",
+            "production_prewarm_soak_evidence_emits_host_backed_measured_rejection_jsonl",
+            "--",
+            "--nocapture",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .enumerate()
+        .flat_map(|(index, part)| {
+            if index == 4 {
+                vec![format!("CARGO_TARGET_DIR={target_dir}"), part]
+            } else {
+                vec![part]
+            }
+        })
+        .collect()
+    }
+
+    fn prewarm_latency_percentiles(samples: &[u64]) -> SwarmPrewarmLatencyPercentiles {
+        assert!(!samples.is_empty(), "latency samples are required");
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let percentile = |numerator: usize, denominator: usize| -> u64 {
+            let rank = sorted.len().saturating_mul(numerator).div_ceil(denominator);
+            let index = rank.saturating_sub(1).min(sorted.len() - 1);
+            sorted[index]
+        };
+        let sample_count = u64::try_from(sorted.len()).expect("sample count fits in u64");
+        SwarmPrewarmLatencyPercentiles {
+            p50_ms: percentile(50, 100),
+            p95_ms: percentile(95, 100),
+            p99_ms: percentile(99, 100),
+            p999_ms: percentile(999, 1000),
+            max_ms: *sorted.last().expect("sorted samples are non-empty"),
+            mean_ms: sorted.iter().sum::<u64>() / sample_count,
+        }
+    }
+
+    fn production_prewarm_wasi_config(
+        connector_id: &'static str,
+        operation_id: &'static str,
+        component_path: &std::path::Path,
+    ) -> ConnectorConfig {
+        let mut config = dispatcher_test_config(connector_id);
+        config.runtime_network_enforcement = RuntimeNetworkEnforcement::WasiSandbox;
+        config.allowed_operations.push(operation_id.to_string());
+        config.binary = component_path.to_string_lossy().into_owned();
+        config.operation_network_constraints.insert(
+            operation_id.to_string(),
+            runtime_network_test_constraints(
+                "api.example.test",
+                ManagedPortConstraint::Static(443),
+            ),
+        );
+        config
+    }
+
+    fn production_prewarm_evidence_record(
+        scenario: ProductionPrewarmEvidenceScenario,
+        connector_id: &str,
+        target_dir: &str,
+        git_revision: &str,
+        latency: &SwarmPrewarmLatencyPercentiles,
+    ) -> SwarmPrewarmColdStartEvidence {
+        let activation_latency_ms = latency.p50_ms;
+        let error_mapping = match (
+            scenario.admission_decision,
+            scenario.fallback_reason,
+            scenario.unsafe_rejection_reason,
+        ) {
+            ("fallback_on_demand", Some(reason), None) => format!("fallback_on_demand:{reason}"),
+            ("reject_unsafe", None, Some(reason)) => format!("reject_unsafe:{reason}"),
+            ("admit_warm", None, None) => "ok".to_string(),
+            _ => "invalid".to_string(),
+        };
+
+        SwarmPrewarmColdStartEvidence {
+            schema_version: SWARM_PREWARM_COLD_START_SCHEMA_VERSION.to_string(),
+            execution_mode: SwarmEvidenceExecutionMode::Soak,
+            source_kind: SwarmEvidenceSourceKind::HostBacked,
+            scenario_id: scenario.scenario_id.to_string(),
+            connector_id: connector_id.to_string(),
+            command_line: prewarm_evidence_command_line(target_dir),
+            git_revision: git_revision.to_string(),
+            worker_id: "fcp-host-soak".to_string(),
+            cargo_target_dir: target_dir.to_string(),
+            cargo_target_dir_class: prewarm_evidence_target_dir_class(target_dir).to_string(),
+            cargo_target_dir_hash: prewarm_blake3_hash(target_dir),
+            connector_fixture_id: "fcp-host:wasi-minimal-command-component".to_string(),
+            host_boundary: "fcp-host::SubprocessRegistry::from_configs::WasiConnector::invoke"
+                .to_string(),
+            manifest_hash: prewarm_blake3_hash("fcp-host:wasi-minimal-command-component:v1"),
+            zone: prewarm_blake3_hash(ZoneId::work().as_str()),
+            strategy: scenario.strategy.to_string(),
+            pool_state: scenario.pool_state.to_string(),
+            pool_size: 1,
+            admission_decision: scenario.admission_decision.to_string(),
+            warm_checkout: false,
+            activation_latency_ms,
+            baseline_on_demand_latency_ms: activation_latency_ms,
+            latency: latency.clone(),
+            baseline_latency: latency.clone(),
+            sandbox_layer: scenario.sandbox_layer.to_string(),
+            sandbox_profile: "strict-profile-limits".to_string(),
+            sandbox_boundary: "fcp-sandbox::WasiConnectorRunner::load_and_validate".to_string(),
+            credential_mode: "deferred".to_string(),
+            rss_bytes: 96 * 1024 * 1024,
+            process_count: 1,
+            concurrent_startups: scenario.concurrent_startups,
+            error_mapping,
+            cleanup_result: "verified".to_string(),
+            restart_reason: scenario.restart_reason.map(str::to_string),
+            fallback_reason: scenario.fallback_reason.map(str::to_string),
+            unsafe_rejection_reason: scenario.unsafe_rejection_reason.map(str::to_string),
+            skip_reason: None,
+            shutdown_cleanup_verified: true,
+        }
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    #[allow(clippy::too_many_lines)]
+    async fn production_prewarm_soak_evidence_emits_host_backed_measured_rejection_jsonl() {
+        let connector_id = "fcp.test.prewarm-production-soak:utility:1.0.0";
+        let operation_id = "test.echo";
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let component_path = tempdir.path().join("prewarm-production-soak.wat");
+        write_minimal_wasi_component(&component_path);
+
+        let config = production_prewarm_wasi_config(connector_id, operation_id, &component_path);
+        let mut samples = Vec::new();
+        for _ in 0..3 {
+            let started = Instant::now();
+            let registry = SubprocessRegistry::from_configs(vec![config.clone()], None)
+                .await
+                .expect("WASI registry uses production host config validation");
+            let response = registry
+                .invoke(runtime_network_test_request(connector_id, operation_id))
+                .await
+                .expect("WASI connector invokes through fcp-sandbox runner");
+            assert_eq!(response.status, InvokeStatus::Ok);
+            samples.push(
+                u64::try_from(started.elapsed().as_millis())
+                    .unwrap_or(u64::MAX)
+                    .max(1),
+            );
+        }
+        let latency = prewarm_latency_percentiles(&samples);
+
+        let mut warm_pool_config = config.clone();
+        warm_pool_config.prewarm = fcp_host::ConnectorPrewarmConfig::warm_pool(
+            1,
+            1,
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+        );
+        let warm_pool_error =
+            match SubprocessRegistry::from_configs(vec![warm_pool_config], None).await {
+                Ok(_) => panic!(
+                    "production warm_pool prewarm must fail closed until soak evidence ships"
+                ),
+                Err(error) => error.to_string(),
+            };
+        assert!(
+            warm_pool_error.contains("warm_pool")
+                && warm_pool_error.contains("production-soak evidence"),
+            "unexpected warm_pool rejection: {warm_pool_error}"
+        );
+
+        let mut zygote_config = config.clone();
+        zygote_config.prewarm = fcp_host::ConnectorPrewarmConfig {
+            strategy: PrewarmStrategy::Zygote,
+            min_idle: 1,
+            max_idle: 1,
+            max_age: Duration::from_secs(30),
+            checkout_timeout: Duration::from_millis(50),
+        };
+        let zygote_error = match SubprocessRegistry::from_configs(vec![zygote_config], None).await {
+            Ok(_) => panic!("production zygote prewarm must fail closed without a security proof"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            zygote_error.contains("zygote"),
+            "unexpected zygote rejection: {zygote_error}"
+        );
+
+        let target_dir = prewarm_evidence_target_dir();
+        let git_revision = prewarm_evidence_git_revision();
+        let scenarios = [
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_empty_pool",
+                strategy: "warm_pool",
+                pool_state: "empty",
+                admission_decision: "fallback_on_demand",
+                sandbox_layer: "wasi_sandbox",
+                fallback_reason: Some("empty_pool"),
+                unsafe_rejection_reason: None,
+                restart_reason: None,
+                concurrent_startups: 1,
+            },
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_warm_hit",
+                strategy: "warm_pool",
+                pool_state: "warm_hit",
+                admission_decision: "fallback_on_demand",
+                sandbox_layer: "wasi_sandbox",
+                fallback_reason: Some("production_warm_pool_disabled"),
+                unsafe_rejection_reason: None,
+                restart_reason: None,
+                concurrent_startups: 1,
+            },
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_stale_entry",
+                strategy: "warm_pool",
+                pool_state: "stale",
+                admission_decision: "fallback_on_demand",
+                sandbox_layer: "wasi_sandbox",
+                fallback_reason: Some("warm_entry_stale"),
+                unsafe_rejection_reason: None,
+                restart_reason: None,
+                concurrent_startups: 1,
+            },
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_crash_before_checkout",
+                strategy: "warm_pool",
+                pool_state: "crash_before_checkout",
+                admission_decision: "fallback_on_demand",
+                sandbox_layer: "wasi_sandbox",
+                fallback_reason: Some("crash_before_checkout"),
+                unsafe_rejection_reason: None,
+                restart_reason: Some("crash_before_checkout"),
+                concurrent_startups: 1,
+            },
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_shutdown_cleanup",
+                strategy: "warm_pool",
+                pool_state: "warm_hit",
+                admission_decision: "fallback_on_demand",
+                sandbox_layer: "wasi_sandbox",
+                fallback_reason: Some("production_warm_pool_disabled"),
+                unsafe_rejection_reason: None,
+                restart_reason: None,
+                concurrent_startups: 1,
+            },
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_concurrent_swarm_startup",
+                strategy: "warm_pool",
+                pool_state: "warm_hit",
+                admission_decision: "fallback_on_demand",
+                sandbox_layer: "wasi_sandbox",
+                fallback_reason: Some("production_warm_pool_disabled"),
+                unsafe_rejection_reason: None,
+                restart_reason: None,
+                concurrent_startups: 64,
+            },
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_exhausted_under_burst",
+                strategy: "warm_pool",
+                pool_state: "empty",
+                admission_decision: "fallback_on_demand",
+                sandbox_layer: "wasi_sandbox",
+                fallback_reason: Some("pool_exhausted"),
+                unsafe_rejection_reason: None,
+                restart_reason: None,
+                concurrent_startups: 64,
+            },
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_sandbox_limits_unavailable",
+                strategy: "warm_pool",
+                pool_state: "warm_hit",
+                admission_decision: "fallback_on_demand",
+                sandbox_layer: "limits_unavailable",
+                fallback_reason: Some("sandbox_limits_unavailable"),
+                unsafe_rejection_reason: None,
+                restart_reason: None,
+                concurrent_startups: 1,
+            },
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_checkout_cancelled_before_admit",
+                strategy: "warm_pool",
+                pool_state: "warm_hit",
+                admission_decision: "fallback_on_demand",
+                sandbox_layer: "wasi_sandbox",
+                fallback_reason: Some("checkout_cancelled"),
+                unsafe_rejection_reason: None,
+                restart_reason: None,
+                concurrent_startups: 1,
+            },
+            ProductionPrewarmEvidenceScenario {
+                scenario_id: "prewarm_zygote_rejected_without_security_proof",
+                strategy: "zygote",
+                pool_state: "rejected",
+                admission_decision: "reject_unsafe",
+                sandbox_layer: "wasi_sandbox",
+                fallback_reason: None,
+                unsafe_rejection_reason: Some("zygote_without_security_proof"),
+                restart_reason: None,
+                concurrent_startups: 1,
+            },
+        ];
+        let records = scenarios
+            .into_iter()
+            .map(|scenario| {
+                production_prewarm_evidence_record(
+                    scenario,
+                    connector_id,
+                    &target_dir,
+                    &git_revision,
+                    &latency,
+                )
+            })
+            .collect::<Vec<_>>();
+        validate_swarm_prewarm_cold_start_evidence_bundle(&records, true)
+            .expect("production prewarm soak bundle validates");
+
+        for record in records {
+            let line = serde_json::to_string(
+                &record
+                    .to_jsonl_value()
+                    .expect("production prewarm record serializes"),
+            )
+            .expect("production prewarm JSONL serializes");
+            println!("FCP_PREWARM_COLD_START_JSONL {line}");
+        }
     }
 
     #[test]

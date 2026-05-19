@@ -34,6 +34,7 @@ use fcp_crypto::{Ed25519VerifyingKey, KeyId, ed25519::PUBLIC_KEY_SIZE};
 use fcp_kernel::{AuditEvent, AuditHead, ObjectId, ZoneId};
 use hex::encode as hex_encode;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
@@ -41,7 +42,11 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use crate::capability_replay::parse_since_seconds;
+use crate::truth::{KnowledgeState, RequiredTruthSource, TRUTH_SOURCE_SCHEMA_VERSION};
 use types::{AuditEventOutput, AuditFilter, AuditTailError};
+
+const AUDIT_CHAIN_STATUS_SCHEMA_VERSION: &str = "fcp.fwc.audit_chain_status.v1";
+const AUDIT_VERIFY_SCHEMA_VERSION: &str = "fcp.fwc.audit_verify.v1";
 
 /// Arguments for the `fcp audit` command.
 #[derive(Args, Debug, Clone)]
@@ -114,6 +119,10 @@ pub struct ChainStatusArgs {
     /// Output JSON instead of human-readable format.
     #[arg(long, default_value_t = false)]
     pub json: bool,
+
+    /// Require audit-chain status to come from at least this truth source.
+    #[arg(long, value_enum)]
+    pub require_source: Option<RequiredTruthSource>,
 }
 
 /// Arguments for the `fcp audit tail` command.
@@ -188,6 +197,10 @@ pub struct VerifyArgs {
     /// Output JSON instead of human-readable format.
     #[arg(long, default_value_t = false)]
     pub json: bool,
+
+    /// Require audit verification to come from at least this truth source.
+    #[arg(long, value_enum)]
+    pub require_source: Option<RequiredTruthSource>,
 }
 
 /// Arguments for the `fcp audit explain` command.
@@ -437,6 +450,13 @@ struct AuditVerifyReport {
 }
 
 fn run_verify(args: &VerifyArgs) -> Result<()> {
+    enforce_audit_required_truth_source(
+        "audit verify",
+        args.require_source,
+        KnowledgeState::Offline,
+        args.json,
+    );
+
     let events_input = read_input(&args.events)?;
     let head_input = if let Some(ref path) = args.head {
         Some(read_input(path)?)
@@ -547,6 +567,13 @@ struct AuditChainStatusReport {
 }
 
 fn run_chain_status(args: &ChainStatusArgs) -> Result<()> {
+    enforce_audit_required_truth_source(
+        "audit chain status",
+        args.require_source,
+        KnowledgeState::Offline,
+        args.json,
+    );
+
     let now_unix_secs = args
         .now_unix_secs
         .unwrap_or_else(|| u64::try_from(Utc::now().timestamp()).unwrap_or_default());
@@ -616,7 +643,7 @@ fn build_chain_status_report(
     }
 
     Ok(AuditChainStatusReport {
-        schema_version: "fcp.fwc.audit_chain_status.v1",
+        schema_version: AUDIT_CHAIN_STATUS_SCHEMA_VERSION,
         command: "audit",
         subcommand: "chain status",
         status: freshness,
@@ -655,7 +682,7 @@ fn build_chain_status_report(
 
 fn missing_chain_status_report(args: &ChainStatusArgs) -> AuditChainStatusReport {
     AuditChainStatusReport {
-        schema_version: "fcp.fwc.audit_chain_status.v1",
+        schema_version: AUDIT_CHAIN_STATUS_SCHEMA_VERSION,
         command: "audit",
         subcommand: "chain status",
         status: fcp_audit::FreshnessLevel::Missing,
@@ -725,9 +752,10 @@ const fn classify_chain_status_freshness(
 
 fn output_chain_status_report(report: &AuditChainStatusReport, json: bool) -> Result<()> {
     if json {
+        let payload = audit_truth_source_payload(report, AUDIT_CHAIN_STATUS_SCHEMA_VERSION)?;
         println!(
             "{}",
-            serde_json::to_string_pretty(report)
+            serde_json::to_string_pretty(&payload)
                 .context("failed to serialize audit chain status report")?
         );
         return Ok(());
@@ -749,6 +777,77 @@ fn output_chain_status_report(report: &AuditChainStatusReport, json: bool) -> Re
         println!("warning: {warning}");
     }
     Ok(())
+}
+
+fn audit_truth_source_payload<T: Serialize>(
+    report: &T,
+    schema_version: &'static str,
+) -> Result<Value> {
+    let mut payload = serde_json::to_value(report).context("failed to serialize audit report")?;
+    inject_audit_truth_source_metadata(&mut payload, schema_version);
+    Ok(payload)
+}
+
+fn inject_audit_truth_source_metadata(payload: &mut Value, schema_version: &'static str) {
+    if let Some(object) = payload.as_object_mut() {
+        object
+            .entry("schema_version".to_owned())
+            .or_insert_with(|| Value::String(schema_version.to_owned()));
+        object.insert(
+            "_truth_source".to_owned(),
+            Value::String(KnowledgeState::Offline.operator_truth_source().to_owned()),
+        );
+    }
+}
+
+fn enforce_audit_required_truth_source(
+    command: &str,
+    requirement: Option<RequiredTruthSource>,
+    actual: KnowledgeState,
+    json: bool,
+) {
+    let Some(required) = requirement else {
+        return;
+    };
+    let Err(error) = required.validate(actual) else {
+        return;
+    };
+    let actual_source = error.actual.operator_truth_source();
+    let required_label = error.required.label();
+
+    if json {
+        let subcommand = command.strip_prefix("audit ").unwrap_or(command);
+        let payload = serde_json::json!({
+            "status": "error",
+            "command": "audit",
+            "subcommand": subcommand,
+            "schema_version": TRUTH_SOURCE_SCHEMA_VERSION,
+            "_truth_source": actual_source,
+            "error": {
+                "type": "truth-source-unavailable",
+                "required": required_label,
+                "actual": actual_source,
+                "message": format!(
+                    "`fwc {command}` resolved from `{actual_source}` truth, which does not satisfy `--require-source {required_label}`."
+                ),
+                "recoverable": true,
+            },
+            "next_actions": [
+                "Retry after the required live truth source is reachable.".to_owned(),
+                format!("Relax the requirement if `{actual_source}` truth is acceptable for this workflow."),
+            ],
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload)
+                .expect("truth-source-unavailable payload should serialize")
+        );
+    } else {
+        eprintln!(
+            "`fwc {command}` resolved from `{actual_source}` truth, which does not satisfy `--require-source {required_label}`."
+        );
+    }
+    std::process::exit(2);
 }
 
 fn read_input(path: &Path) -> Result<String> {
@@ -1696,8 +1795,9 @@ fn verify_chain(
 
 fn output_verify_report(report: &AuditVerifyReport, json: bool) -> Result<()> {
     if json {
+        let payload = audit_truth_source_payload(report, AUDIT_VERIFY_SCHEMA_VERSION)?;
         let payload =
-            serde_json::to_string_pretty(report).context("failed to serialize verify report")?;
+            serde_json::to_string_pretty(&payload).context("failed to serialize verify report")?;
         println!("{payload}");
         return Ok(());
     }

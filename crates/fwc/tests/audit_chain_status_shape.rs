@@ -41,6 +41,7 @@ fn missing_status_is_fail_closed_and_parseable() {
     );
     let payload = stdout_json(&output);
     assert_eq!(payload["schema_version"], "fcp.fwc.audit_chain_status.v1");
+    assert_eq!(payload["_truth_source"], "offline");
     assert_eq!(payload["command"], "audit");
     assert_eq!(payload["subcommand"], "chain status");
     assert_eq!(payload["status"], "missing");
@@ -121,6 +122,7 @@ fn signed_head_status_derives_quorum_from_attached_signatures() {
         String::from_utf8_lossy(&output.stderr)
     );
     let payload = stdout_json(&output);
+    assert_eq!(payload["_truth_source"], "offline");
     assert_eq!(payload["status"], "fresh");
     assert_eq!(payload["telemetry_state"], "artifact");
     assert_eq!(payload["source"]["kind"], "signed-head-artifact");
@@ -171,6 +173,7 @@ fn bare_signature_count_does_not_create_quorum() {
         String::from_utf8_lossy(&output.stderr)
     );
     let payload = stdout_json(&output);
+    assert_eq!(payload["_truth_source"], "offline");
     assert_eq!(payload["status"], "degraded");
     assert_eq!(payload["quorum_signed_checkpoints"], 0);
     assert_eq!(payload["quorum_signers"], 0);
@@ -183,4 +186,93 @@ fn bare_signature_count_does_not_create_quorum() {
             .as_str()
             .is_some_and(|text| text.contains("attached signatures"))
     }));
+}
+
+#[test]
+fn chain_status_require_any_live_fails_with_truth_source_unavailable() {
+    let output = run_fwc(&[
+        "audit",
+        "chain",
+        "status",
+        "--json",
+        "--require-source",
+        "any-live",
+    ]);
+
+    assert!(
+        !output.status.success(),
+        "fwc unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload = stdout_json(&output);
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "audit");
+    assert_eq!(payload["subcommand"], "chain status");
+    assert_eq!(payload["schema_version"], "fcp.fwc.truth-source.v1");
+    assert_eq!(payload["_truth_source"], "offline");
+    assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+    assert_eq!(payload["error"]["required"], "any-live");
+    assert_eq!(payload["error"]["actual"], "offline");
+}
+
+#[test]
+fn audit_verify_json_reports_offline_truth_source() {
+    let tempdir = tempfile::tempdir().expect("tempdir creates");
+    let events_path = tempdir.path().join("events.jsonl");
+    std::fs::write(&events_path, "").expect("events writes");
+
+    let output = run_fwc(&[
+        "audit",
+        "verify",
+        "--events",
+        events_path.to_str().expect("events path UTF-8"),
+        "--json",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "fwc failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload = stdout_json(&output);
+    assert_eq!(payload["schema_version"], "fcp.fwc.audit_verify.v1");
+    assert_eq!(payload["_truth_source"], "offline");
+    assert_eq!(payload["status"], "warn");
+    assert_eq!(payload["chain_len"], 0);
+    assert_eq!(payload["issues"][0]["code"], "audit.chain.empty");
+}
+
+#[test]
+fn audit_verify_require_any_live_fails_with_truth_source_unavailable() {
+    let tempdir = tempfile::tempdir().expect("tempdir creates");
+    let events_path = tempdir.path().join("events.jsonl");
+    std::fs::write(&events_path, "").expect("events writes");
+
+    let output = run_fwc(&[
+        "audit",
+        "verify",
+        "--events",
+        events_path.to_str().expect("events path UTF-8"),
+        "--json",
+        "--require-source",
+        "any-live",
+    ]);
+
+    assert!(
+        !output.status.success(),
+        "fwc unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload = stdout_json(&output);
+    assert_eq!(payload["status"], "error");
+    assert_eq!(payload["command"], "audit");
+    assert_eq!(payload["subcommand"], "verify");
+    assert_eq!(payload["schema_version"], "fcp.fwc.truth-source.v1");
+    assert_eq!(payload["_truth_source"], "offline");
+    assert_eq!(payload["error"]["type"], "truth-source-unavailable");
+    assert_eq!(payload["error"]["required"], "any-live");
+    assert_eq!(payload["error"]["actual"], "offline");
 }
